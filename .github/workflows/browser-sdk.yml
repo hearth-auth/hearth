@@ -1,0 +1,36 @@
+name: browser-sdk
+
+on:
+  push:
+    paths:
+      - "sdks/browser/**"
+      - ".github/workflows/browser-sdk.yml"
+  pull_request:
+    paths:
+      - "sdks/browser/**"
+      - ".github/workflows/browser-sdk.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/browser
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: sdks/browser/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test with coverage
+        run: npm run test:coverage
