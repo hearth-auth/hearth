@@ -139,6 +139,21 @@ export interface HearthClientConfig {
   accountEndpoints?: Partial<AccountEndpoints>;
   /** Called whenever tokens are refreshed or cleared */
   onTokenChange?: (tokens: TokenSet | null) => void;
+  /**
+   * How the Hearth server delivers tokens from the /token endpoint.
+   *
+   * - `'bearer'` (default): tokens are returned in the JSON response body and
+   *   stored in JS storage for use as Authorization: Bearer headers.
+   * - `'cookie'`: the server delivers access and refresh tokens via HttpOnly
+   *   `Set-Cookie` headers. The SDK cannot read those tokens from JS; it stores
+   *   only session metadata (expiry, id_token claims) and sends all token-
+   *   endpoint and account-API requests with `credentials: 'include'` so the
+   *   browser transmits the cookies automatically.
+   *
+   * Must match the `token_delivery` setting configured for this client in
+   * `hearth.yaml`.
+   */
+  token_delivery?: "bearer" | "cookie";
 
   // -------------------------------------------------------------------------
   // Testability hooks
@@ -177,6 +192,7 @@ function resolveConfig(cfg: HearthClientConfig): ResolvedConfig {
     accountApiBaseUrl: cfg.accountApiBaseUrl ?? cfg.issuer_url.replace(/\/$/, ""),
     accountEndpoints: cfg.accountEndpoints ?? {},
     onTokenChange: cfg.onTokenChange ?? (() => {}),
+    token_delivery: cfg.token_delivery ?? "bearer",
   };
 }
 
@@ -337,6 +353,7 @@ export class HearthClient {
     const codeVerifier = this.cfg.storage.get(this.key("pkce_verifier"));
     if (!codeVerifier) throw new MiddlewareError("Missing PKCE verifier");
 
+    const cookieMode = this.cfg.token_delivery === "cookie";
     const discovery = await this.getDiscovery();
     const body = new URLSearchParams({
       grant_type: "authorization_code",
@@ -349,6 +366,9 @@ export class HearthClient {
     const res = await fetch(discovery.token_endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      // Cookie mode: tokens arrive as HttpOnly Set-Cookie; credentials: include
+      // allows the browser to store and later transmit those cookies.
+      ...(cookieMode ? { credentials: "include" as RequestCredentials } : {}),
       body,
     });
 
@@ -360,7 +380,7 @@ export class HearthClient {
     }
 
     const data = await res.json();
-    const tokens = this.parseTokenResponse(data);
+    const tokens = this.parseTokenResponse(data, cookieMode);
 
     this.cfg.storage.remove(this.key("pkce_verifier"));
     this.cfg.storage.remove(this.key("state"));
@@ -376,8 +396,12 @@ export class HearthClient {
         return new VerifiedToken(payload as Record<string, unknown>, {});
       }
     }
-    // Fall back to access token if no id_token
-    return this.verifyToken(tokens.accessToken);
+    if (!cookieMode) {
+      // Bearer mode: fall back to access token if no id_token
+      return this.verifyToken(tokens.accessToken);
+    }
+    // Cookie mode with no id_token: return a minimal VerifiedToken from expiry
+    return new VerifiedToken({ exp: Math.floor(tokens.expiresAt / 1000) }, {});
   }
 
   /** Silent token refresh — throws TokenExpiredError if no refresh token is available. */
@@ -386,18 +410,26 @@ export class HearthClient {
     if (!raw) throw new TokenExpiredError(new Date(0));
 
     const tokens: TokenSet = JSON.parse(raw);
-    if (!tokens.refreshToken) throw new TokenExpiredError(new Date(tokens.expiresAt));
+    const cookieMode = this.cfg.token_delivery === "cookie";
+
+    // Bearer mode requires the refresh token to be in JS storage.
+    // Cookie mode: the refresh_token HttpOnly cookie (Path=/token) is sent
+    // automatically; no refresh_token parameter is needed in the request body.
+    if (!cookieMode && !tokens.refreshToken) throw new TokenExpiredError(new Date(tokens.expiresAt));
 
     const discovery = await this.getDiscovery();
-    const body = new URLSearchParams({
+    const bodyParams: Record<string, string> = {
       grant_type: "refresh_token",
-      refresh_token: tokens.refreshToken,
       client_id: this.cfg.client_id,
-    });
+    };
+    if (!cookieMode) bodyParams.refresh_token = tokens.refreshToken!;
+
+    const body = new URLSearchParams(bodyParams);
 
     const res = await fetch(discovery.token_endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      ...(cookieMode ? { credentials: "include" as RequestCredentials } : {}),
       body,
     });
 
@@ -408,7 +440,7 @@ export class HearthClient {
     }
 
     const data = await res.json();
-    const newTokens = this.parseTokenResponse(data);
+    const newTokens = this.parseTokenResponse(data, cookieMode);
     this.storeTokens(newTokens, true);
     this.scheduleRefresh(newTokens);
 
@@ -420,7 +452,10 @@ export class HearthClient {
         return new VerifiedToken(payload as Record<string, unknown>, {});
       }
     }
-    return this.verifyToken(newTokens.accessToken);
+    if (!cookieMode) {
+      return this.verifyToken(newTokens.accessToken);
+    }
+    return new VerifiedToken({ exp: Math.floor(newTokens.expiresAt / 1000) }, {});
   }
 
   /** Logout: clears local tokens, broadcasts to other tabs, redirects to end_session_endpoint. */
@@ -563,8 +598,19 @@ export class HearthClient {
   // Private helpers
   // -------------------------------------------------------------------------
 
-  private parseTokenResponse(data: Record<string, unknown>): TokenSet {
+  private parseTokenResponse(data: Record<string, unknown>, cookieMode: boolean): TokenSet {
     const expiresIn = typeof data.expires_in === "number" ? data.expires_in : 3600;
+    if (cookieMode) {
+      // access_token and refresh_token are in HttpOnly cookies — not readable from JS.
+      // Store only session metadata so expiry tracking and auto-refresh still work.
+      return {
+        accessToken: "",
+        refreshToken: undefined,
+        idToken: data.id_token as string | undefined,
+        expiresAt: Date.now() + expiresIn * 1000,
+        scope: data.scope as string | undefined,
+      };
+    }
     return {
       accessToken: data.access_token as string,
       refreshToken: data.refresh_token as string | undefined,
@@ -588,7 +634,9 @@ export class HearthClient {
 
   private scheduleRefresh(tokens: TokenSet): void {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
-    if (!tokens.refreshToken) return;
+    // Cookie mode: refresh_token is in an HttpOnly cookie so it is not stored
+    // in tokens.refreshToken; still schedule a proactive refresh.
+    if (!tokens.refreshToken && this.cfg.token_delivery !== "cookie") return;
     const delay = Math.max(tokens.expiresAt - Date.now() - 60_000, 0);
     this.refreshTimer = setTimeout(() => {
       this.silentRefresh().catch(() => undefined);
@@ -620,16 +668,25 @@ export class HearthClient {
       rawResponse?: boolean;
     },
   ): Promise<T> {
+    const cookieMode = this.cfg.token_delivery === "cookie";
     const tokens = await this.getTokens();
-    if (!tokens?.accessToken) throw new MiddlewareError("Authentication required");
+
+    // Cookie mode: access token is in an HttpOnly cookie — no JS-accessible value.
+    // Bearer mode: require a non-empty access token from JS storage.
+    if (cookieMode ? !tokens : !tokens?.accessToken) {
+      throw new MiddlewareError("Authentication required");
+    }
 
     const url = this.resolveAccountEndpoint(key, options.pathParams);
+    const fetchHeaders: Record<string, string> = { ...options.headers };
+    if (!cookieMode) {
+      fetchHeaders.Authorization = `Bearer ${tokens!.accessToken}`;
+    }
+
     const response = await fetch(url, {
       method: options.method,
-      headers: {
-        Authorization: `Bearer ${tokens.accessToken}`,
-        ...options.headers,
-      },
+      headers: fetchHeaders,
+      ...(cookieMode ? { credentials: "include" as RequestCredentials } : {}),
       body: options.body,
     });
 

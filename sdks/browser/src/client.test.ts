@@ -398,6 +398,120 @@ describe("HearthClient", () => {
     // @ts-expect-error accessing private
     expect(client.key("tokens")).toBe("myapp:tokens");
   });
+
+  // -------------------------------------------------------------------------
+  // §HEA-591 — cookie delivery mode
+  // -------------------------------------------------------------------------
+
+  describe("token_delivery: cookie", () => {
+    const cookieStorage = memoryStorageAdapter();
+    const cookieConfig = {
+      ...baseConfig,
+      storage: cookieStorage,
+      token_delivery: "cookie" as const,
+    };
+
+    beforeEach(() => {
+      cookieStorage.remove("hearth:tokens");
+      cookieStorage.remove("hearth:pkce_verifier");
+      cookieStorage.remove("hearth:state");
+      fetchMock.mockReset();
+    });
+
+    it("handleCallback sends credentials: include and stores no access_token", async () => {
+      // Server returns id_token only; access_token+refresh_token are in Set-Cookie headers.
+      const now = Math.floor(Date.now() / 1000);
+      const idPayload = { sub: "u1", iss: "https://auth.example.com", aud: "app", iat: now, exp: now + 3600 };
+      const idToken = `eyJhbGciOiJub25lIn0.${btoa(JSON.stringify(idPayload)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "")}.`;
+      const cookieTokenResponse = { id_token: idToken, expires_in: 3600 };
+
+      fetchMock
+        .mockResolvedValueOnce({ ok: true, json: async () => discovery })
+        .mockResolvedValueOnce({ ok: true, json: async () => cookieTokenResponse });
+
+      cookieStorage.set("hearth:pkce_verifier", "verifier");
+      cookieStorage.set("hearth:state", "test-state");
+
+      const client = new HearthClient({
+        ...cookieConfig,
+        _jwkSetFactory: () => { throw new Error("no jwks"); },
+      });
+
+      const result = await client.handleCallback(
+        "https://app.example.com/callback?code=auth-code&state=test-state",
+      );
+
+      expect(result).toBeInstanceOf(VerifiedToken);
+
+      // Token exchange fetch must use credentials: include
+      const tokenFetchCall = fetchMock.mock.calls[1];
+      expect(tokenFetchCall[1]).toMatchObject({ credentials: "include" });
+
+      // No access_token or refresh_token in JS storage
+      const stored = JSON.parse(cookieStorage.get("hearth:tokens")!);
+      expect(stored.accessToken).toBe("");
+      expect(stored.refreshToken).toBeUndefined();
+      expect(stored.expiresAt).toBeGreaterThan(Date.now());
+    });
+
+    it("silentRefresh sends credentials: include and omits refresh_token param", async () => {
+      cookieStorage.set(
+        "hearth:tokens",
+        JSON.stringify({ accessToken: "", expiresAt: Date.now() - 1 }),
+      );
+
+      const cookieRefreshResponse = { expires_in: 3600 };
+      fetchMock
+        .mockResolvedValueOnce({ ok: true, json: async () => discovery })
+        .mockResolvedValueOnce({ ok: true, json: async () => cookieRefreshResponse });
+
+      const client = new HearthClient({
+        ...cookieConfig,
+        _jwkSetFactory: () => { throw new Error("no jwks"); },
+      });
+
+      await client.silentRefresh();
+
+      const refreshCall = fetchMock.mock.calls[1];
+      expect(refreshCall[1]).toMatchObject({ credentials: "include" });
+
+      // Request body must NOT contain refresh_token parameter
+      const bodyStr: string = refreshCall[1].body.toString();
+      expect(bodyStr).toContain("grant_type=refresh_token");
+      expect(bodyStr).not.toContain("refresh_token=");
+    });
+
+    it("silentRefresh throws TokenExpiredError when no session metadata stored", async () => {
+      const client = new HearthClient(cookieConfig);
+      await expect(client.silentRefresh()).rejects.toThrow(TokenExpiredError);
+    });
+
+    it("getProfile uses credentials: include and no Authorization header in cookie mode", async () => {
+      cookieStorage.set(
+        "hearth:tokens",
+        JSON.stringify({ accessToken: "", expiresAt: Date.now() + 3_600_000 }),
+      );
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ sub: "u1", email: "u1@example.com" }),
+      });
+
+      const client = new HearthClient(cookieConfig);
+      const profile = await client.getProfile();
+
+      expect(profile.sub).toBe("u1");
+
+      const profileCall = fetchMock.mock.calls[0];
+      expect(profileCall[1]).toMatchObject({ credentials: "include" });
+      expect(profileCall[1].headers?.Authorization).toBeUndefined();
+    });
+
+    it("getProfile throws when no session metadata stored in cookie mode", async () => {
+      const client = new HearthClient(cookieConfig);
+      await expect(client.getProfile()).rejects.toThrow("Authentication required");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
