@@ -1,10 +1,11 @@
+use std::collections::BTreeSet;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::Duration;
 
-use openraft::{Config, Raft};
+use openraft::{BasicNode, ChangeMembers, Config, Raft};
 use tokio::sync::mpsc;
 
 use crate::cluster::router::{MemNetworkFactory, MemRouter, NodeRpc};
@@ -15,6 +16,14 @@ use crate::storage::EmbeddedStorageEngine;
 /// Concrete Raft type used throughout the Hearth codebase.
 pub type HearthRaft = Raft<TypeConfig>;
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/// Point-in-time snapshot of the cluster's voter membership.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MembershipView {
+    pub voters: BTreeSet<NodeId>,
+}
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +33,13 @@ pub enum ClusterError {
 
     #[error("replication lag exceeded threshold; redirect to {leader_addr}")]
     ReplicationLagExceeded { leader_addr: String },
+
+    #[error("quorum violation: removing a voter from {current} voters would leave {remaining}, minimum required is {minimum}")]
+    QuorumViolation {
+        current: usize,
+        remaining: usize,
+        minimum: usize,
+    },
 
     #[error("raft error: {0}")]
     Raft(#[from] anyhow::Error),
@@ -124,6 +140,77 @@ impl ClusterNode {
     pub async fn shutdown(&self) {
         let _ = self.raft.shutdown().await;
     }
+
+    // ── Membership changes ────────────────────────────────────────────────────
+
+    /// Current voter set, read from Raft metrics.
+    fn current_voters(&self) -> BTreeSet<NodeId> {
+        let metrics = self.raft.metrics();
+        let m = metrics.borrow();
+        m.membership_config.membership().voter_ids().collect()
+    }
+
+    /// Snapshot of the current cluster voter membership.
+    pub fn current_membership(&self) -> MembershipView {
+        MembershipView { voters: self.current_voters() }
+    }
+
+    /// Add `node_id` as a non-voting learner.
+    ///
+    /// Blocks (`blocking = true`) until the learner has replicated up to the
+    /// current commit index.  Call `add_voter` afterward to promote it.
+    pub async fn add_learner(
+        &self,
+        node_id: NodeId,
+        node: BasicNode,
+    ) -> Result<MembershipView, ClusterError> {
+        let voters = self.current_voters();
+        tracing::info!(node_id = %node_id, ?voters, "membership change: adding learner");
+        self.raft
+            .add_learner(node_id, node, true)
+            .await
+            .map_err(|e| ClusterError::Raft(anyhow::anyhow!("{e}")))?;
+        tracing::info!(node_id = %node_id, "membership change: learner added");
+        Ok(MembershipView { voters })
+    }
+
+    /// Promote `node_id` from learner to voter via joint consensus.
+    ///
+    /// The node must be a learner that has already caught up before this call.
+    pub async fn add_voter(&self, node_id: NodeId) -> Result<MembershipView, ClusterError> {
+        let before = self.current_voters();
+        let mut after = before.clone();
+        after.insert(node_id);
+        tracing::info!(node_id = %node_id, ?before, ?after, "membership change: promoting to voter");
+        self.raft
+            .change_membership(ChangeMembers::ReplaceAllVoters(after.clone()), true)
+            .await
+            .map_err(|e| ClusterError::Raft(anyhow::anyhow!("{e}")))?;
+        tracing::info!(node_id = %node_id, ?after, "membership change: voter promoted");
+        Ok(MembershipView { voters: after })
+    }
+
+    /// Remove `node_id` from the voter set via joint consensus.
+    ///
+    /// Returns `ClusterError::QuorumViolation` when the removal would drop the
+    /// cluster below the minimum quorum (`⌊n/2⌋ + 1` voters).
+    pub async fn remove_voter(&self, node_id: NodeId) -> Result<MembershipView, ClusterError> {
+        let before = self.current_voters();
+        let n = before.len();
+        let minimum = n / 2 + 1;
+        let remaining = n.saturating_sub(1);
+        if remaining < minimum {
+            return Err(ClusterError::QuorumViolation { current: n, remaining, minimum });
+        }
+        let after: BTreeSet<NodeId> = before.iter().copied().filter(|&id| id != node_id).collect();
+        tracing::info!(node_id = %node_id, ?before, ?after, "membership change: removing voter");
+        self.raft
+            .change_membership(ChangeMembers::ReplaceAllVoters(after.clone()), false)
+            .await
+            .map_err(|e| ClusterError::Raft(anyhow::anyhow!("{e}")))?;
+        tracing::info!(node_id = %node_id, ?after, "membership change: voter removed");
+        Ok(MembershipView { voters: after })
+    }
 }
 
 // ── RPC dispatch loop ─────────────────────────────────────────────────────────
@@ -191,7 +278,7 @@ async fn lag_monitor(
 pub mod test_harness {
     use super::*;
     use std::collections::BTreeMap;
-    use openraft::BasicNode;
+    use openraft::{BasicNode, SnapshotPolicy};
 
     pub struct TestCluster {
         pub nodes: BTreeMap<NodeId, ClusterNode>,
@@ -201,13 +288,31 @@ pub mod test_harness {
     }
 
     impl TestCluster {
+        /// Spin up an n-node cluster with default config.
         pub async fn new(n: u64) -> Self {
+            Self::new_with_options(n, None).await
+        }
+
+        /// Spin up an n-node cluster that triggers a snapshot after every
+        /// `snapshot_threshold` new log entries.  Setting this low forces
+        /// restarted nodes to install a snapshot rather than replay the log.
+        pub async fn new_with_snapshot_threshold(n: u64, snapshot_threshold: u64) -> Self {
+            Self::new_with_options(n, Some(snapshot_threshold)).await
+        }
+
+        async fn new_with_options(n: u64, snapshot_threshold: Option<u64>) -> Self {
             let router = MemRouter::new();
+            let snapshot_policy = snapshot_threshold
+                .map(SnapshotPolicy::LogsSinceLast)
+                .unwrap_or(SnapshotPolicy::LogsSinceLast(5000));
+            let max_in_snapshot_log_to_keep = snapshot_threshold.unwrap_or(1000);
             let config = Arc::new(
                 Config {
                     election_timeout_min: 100,
                     election_timeout_max: 300,
                     heartbeat_interval: 50,
+                    snapshot_policy,
+                    max_in_snapshot_log_to_keep,
                     ..Default::default()
                 }
                 .validate()
@@ -370,6 +475,27 @@ pub mod test_harness {
             if let Some(node) = self.nodes.get(&node_id) {
                 node.apply_delay_ms.store(delay_ms, std::sync::atomic::Ordering::Relaxed);
             }
+        }
+
+        /// Spin up a new node and register it with the router without changing
+        /// Raft membership.  Call `ClusterNode::add_learner` then `add_voter`
+        /// on the leader to bring it into the consensus group.
+        pub async fn spin_up_node(&mut self, id: NodeId) {
+            let (node, rpc_tx) = ClusterNode::new(
+                id,
+                self.config.clone(),
+                self.router.clone(),
+                self.read_lag_threshold_ms,
+            )
+            .await;
+            self.router.add_node(id, rpc_tx);
+            self.nodes.insert(id, node);
+        }
+
+        /// Returns `(leader_id, &leader_node)` for the current leader, or `None`.
+        pub fn leader_node(&self) -> Option<(NodeId, &ClusterNode)> {
+            let id = self.current_leader()?;
+            Some((id, self.nodes.get(&id)?))
         }
     }
 }

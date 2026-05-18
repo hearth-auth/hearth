@@ -1,14 +1,15 @@
-/// 3-node localhost smoke tests — HEA-604
+/// Smoke tests — HEA-604 (cluster primitives) and HEA-606 (online membership).
 ///
 /// Covers: leader election, log replication, leader failover,
-/// follower staleness, and single-node bypass mode.
+/// follower staleness, single-node bypass, add voter, remove voter,
+/// and quorum-violation safeguard.
 ///
 /// All tests use in-process Raft with channel-based network simulation
 /// (no real sockets, no fsync) so the suite stays well under 30 s.
 use std::time::Duration;
 
 use hearth::cluster::{
-    engine::{test_harness::TestCluster, ClusterNode},
+    engine::{test_harness::TestCluster, ClusterError, ClusterNode},
     router::MemRouter,
 };
 use openraft::{BasicNode, Config};
@@ -253,4 +254,121 @@ async fn test_single_node_mode() {
     );
 
     node.shutdown().await;
+}
+
+// ── Scenario 6: Add voter online — HEA-606 ───────────────────────────────────
+
+/// Start a 3-node cluster, spin up a 4th node, add it as learner then promote
+/// it to voter, and verify writes continue uninterrupted throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_add_voter_online() {
+    let mut cluster = TestCluster::new(3).await;
+    let leader = cluster.wait_for_leader_timeout(Duration::from_secs(5)).await;
+
+    for i in 0..5u32 {
+        cluster.write(format!("pre-{i}"), format!("v{i}")).await.unwrap();
+    }
+
+    // Register node 4 with the in-process router BEFORE telling the leader
+    // about it — the leader must be able to reach it the moment it tries.
+    cluster.spin_up_node(4).await;
+
+    // Step 1: Add as non-voting learner (blocks until catch-up completes).
+    cluster.nodes[&leader]
+        .add_learner(4, BasicNode::default())
+        .await
+        .expect("add_learner(4) failed");
+
+    // Writes must continue during the learner phase.
+    for i in 5..10u32 {
+        cluster.write(format!("mid-{i}"), format!("v{i}")).await.unwrap();
+    }
+
+    // Step 2: Promote to voter via joint consensus.
+    let leader = cluster.wait_for_leader_timeout(Duration::from_secs(2)).await;
+    let view = cluster.nodes[&leader]
+        .add_voter(4)
+        .await
+        .expect("add_voter(4) failed");
+
+    assert!(view.voters.contains(&4), "node 4 must be in voter set after promotion");
+    assert_eq!(view.voters.len(), 4, "cluster should have 4 voters");
+
+    // Writes must continue with the new 4-voter configuration.
+    for i in 10..15u32 {
+        cluster.write(format!("post-{i}"), format!("v{i}")).await.unwrap();
+    }
+
+    // Allow time for node 4 to replicate pre-join entries via snapshot/log.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    for i in 0..5u32 {
+        let got = cluster.read(4, &format!("pre-{i}"));
+        assert_eq!(
+            got.as_deref(),
+            Some(format!("v{i}").as_str()),
+            "node 4 missing pre-join entry pre-{i}"
+        );
+    }
+
+    cluster.shutdown().await;
+}
+
+// ── Scenario 7: Remove voter online — HEA-606 ────────────────────────────────
+
+/// Start a 4-node cluster, remove one non-leader voter, and verify the
+/// remaining 3-node cluster continues to serve writes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_remove_voter_online() {
+    let cluster = TestCluster::new(4).await;
+    let leader = cluster.wait_for_leader_timeout(Duration::from_secs(5)).await;
+
+    for i in 0..10u32 {
+        cluster.write(format!("pre-{i}"), format!("v{i}")).await.unwrap();
+    }
+
+    let victim: u64 = (1..=4).find(|&id| id != leader).unwrap();
+    let view = cluster.nodes[&leader]
+        .remove_voter(victim)
+        .await
+        .expect("remove_voter failed");
+
+    assert_eq!(view.voters.len(), 3, "should have 3 voters after removal");
+    assert!(!view.voters.contains(&victim), "removed node must not be in voter set");
+
+    // Writes must continue with the reduced configuration.
+    for i in 10..20u32 {
+        cluster
+            .write(format!("post-{i}"), format!("v{i}"))
+            .await
+            .unwrap_or_else(|e| panic!("post-removal write post-{i} failed: {e}"));
+    }
+
+    cluster.shutdown().await;
+}
+
+// ── Scenario 8: Quorum violation rejected — HEA-606 ──────────────────────────
+
+/// A 2-node cluster must reject the removal of any voter because it would
+/// leave only 1 voter (quorum for 2 is 2; 1 < 2 → violation).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_quorum_violation_rejected() {
+    let cluster = TestCluster::new(2).await;
+    let leader = cluster.wait_for_leader_timeout(Duration::from_secs(5)).await;
+
+    let non_leader: u64 = (1..=2).find(|&id| id != leader).unwrap();
+
+    // Removing one voter from a 2-node cluster would leave 1 voter.
+    // Minimum quorum for n=2 is ⌊2/2⌋+1 = 2; remaining 1 < 2 → rejected.
+    let err = cluster.nodes[&leader]
+        .remove_voter(non_leader)
+        .await
+        .expect_err("remove_voter should have been rejected");
+
+    assert!(
+        matches!(err, ClusterError::QuorumViolation { current: 2, remaining: 1, minimum: 2 }),
+        "expected QuorumViolation(current=2, remaining=1, minimum=2), got: {err}"
+    );
+
+    cluster.shutdown().await;
 }

@@ -1,3 +1,3 @@
 [workspace]
-members = ["hearth"]
+members = ["hearth", "examples/rust-axum"]
 resolver = "2"

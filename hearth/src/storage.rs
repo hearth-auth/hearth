@@ -29,4 +29,24 @@ impl EmbeddedStorageEngine {
     pub fn restore(&self, data: HashMap<String, String>) {
         *self.data.lock().unwrap() = data;
     }
+
+    /// Return all key-value pairs whose keys start with `prefix`.
+    /// Pass `""` to scan the entire store.
+    pub fn scan(&self, prefix: &str) -> Vec<(String, String)> {
+        self.data
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k.starts_with(prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.lock().unwrap().is_empty()
+    }
 }

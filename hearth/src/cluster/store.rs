@@ -148,18 +148,24 @@ impl RaftLogStorage<TypeConfig> for MemLogStore {
 
 // ── State machine ─────────────────────────────────────────────────────────────
 
+/// Shared snapshot store.  Held by both `MemStateMachine` and every
+/// `MemSnapshotBuilder` it creates.  When `build_snapshot` finishes it writes
+/// the payload here so that `get_current_snapshot` can serve it to followers.
+pub type SnapshotStore =
+    Arc<Mutex<Option<(SnapshotMeta<NodeId, BasicNode>, Vec<u8>)>>>;
+
 struct SmInner {
     last_applied: Option<LogId<NodeId>>,
     last_membership: StoredMembership<NodeId, BasicNode>,
-    snapshot_data: Option<(SnapshotMeta<NodeId, BasicNode>, Vec<u8>)>,
     kv: EmbeddedStorageEngine,
 }
 
 pub struct MemStateMachine {
     inner: SmInner,
+    /// Shared with every `MemSnapshotBuilder` this SM spawns so that a built
+    /// snapshot is immediately visible via `get_current_snapshot`.
+    snapshot_data: SnapshotStore,
     /// Per-entry delay injected inside apply() to simulate a slow follower.
-    /// Setting this > 0 causes last_applied to lag behind last_log_index,
-    /// which the lag monitor detects as replication lag.
     pub apply_delay_ms: Arc<AtomicU64>,
 }
 
@@ -170,9 +176,9 @@ impl MemStateMachine {
             inner: SmInner {
                 last_applied: None,
                 last_membership: StoredMembership::default(),
-                snapshot_data: None,
                 kv,
             },
+            snapshot_data: Arc::new(Mutex::new(None)),
             apply_delay_ms: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -181,22 +187,44 @@ impl MemStateMachine {
 // ── Snapshot builder ─────────────────────────────────────────────────────────
 
 pub struct MemSnapshotBuilder {
-    last_applied: Option<LogId<NodeId>>,
-    last_membership: StoredMembership<NodeId, BasicNode>,
-    data: HashMap<String, String>,
+    pub last_applied: Option<LogId<NodeId>>,
+    pub last_membership: StoredMembership<NodeId, BasicNode>,
+    pub data: HashMap<String, String>,
+    /// Shared store: written here so the owning SM's `get_current_snapshot`
+    /// picks up the newly-built snapshot without extra coordination.
+    pub snapshot_store: SnapshotStore,
 }
+
+/// Magic prefix written at the start of every compressed snapshot.
+/// Lets `install_snapshot` detect whether data is zstd-compressed.
+const SNAP_MAGIC: &[u8; 4] = b"ZST1";
 
 impl RaftSnapshotBuilder<TypeConfig> for MemSnapshotBuilder {
     async fn build_snapshot(
         &mut self,
     ) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
-        let bytes = serde_json::to_vec(&self.data).map_err(|e| {
+        let json_bytes = serde_json::to_vec(&self.data).map_err(|e| {
             StorageError::from_io_error(
                 openraft::ErrorSubject::StateMachine,
                 openraft::ErrorVerb::Write,
                 std::io::Error::new(std::io::ErrorKind::Other, e),
             )
         })?;
+
+        // Compress at level 3 (fast preset; good ratio for KV data).
+        let compressed = zstd::encode_all(json_bytes.as_slice(), 3).map_err(|e| {
+            StorageError::from_io_error(
+                openraft::ErrorSubject::StateMachine,
+                openraft::ErrorVerb::Write,
+                e,
+            )
+        })?;
+
+        // Prepend magic so install_snapshot knows to decompress.
+        let mut payload = Vec::with_capacity(SNAP_MAGIC.len() + compressed.len());
+        payload.extend_from_slice(SNAP_MAGIC);
+        payload.extend_from_slice(&compressed);
+
         let meta = SnapshotMeta {
             snapshot_id: format!(
                 "snap-{}",
@@ -205,9 +233,14 @@ impl RaftSnapshotBuilder<TypeConfig> for MemSnapshotBuilder {
             last_log_id: self.last_applied,
             last_membership: self.last_membership.clone(),
         };
+
+        // Persist in the shared store so get_current_snapshot() returns this
+        // snapshot for followers that need to catch up.
+        *self.snapshot_store.lock().unwrap() = Some((meta.clone(), payload.clone()));
+
         Ok(Snapshot {
             meta,
-            snapshot: Box::new(Cursor::new(bytes)),
+            snapshot: Box::new(Cursor::new(payload)),
         })
     }
 }
@@ -266,6 +299,7 @@ impl RaftStateMachine<TypeConfig> for MemStateMachine {
             last_applied: self.inner.last_applied,
             last_membership: self.inner.last_membership.clone(),
             data: self.inner.kv.snapshot(),
+            snapshot_store: self.snapshot_data.clone(),
         }
     }
 
@@ -280,9 +314,23 @@ impl RaftStateMachine<TypeConfig> for MemStateMachine {
         meta: &SnapshotMeta<NodeId, BasicNode>,
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<NodeId>> {
-        let bytes = snapshot.into_inner();
+        let raw = snapshot.into_inner();
+
+        // Decompress if the payload starts with our magic prefix.
+        let json_bytes: Vec<u8> = if raw.starts_with(SNAP_MAGIC) {
+            zstd::decode_all(&raw[SNAP_MAGIC.len()..]).map_err(|e| {
+                StorageError::from_io_error(
+                    openraft::ErrorSubject::StateMachine,
+                    openraft::ErrorVerb::Read,
+                    e,
+                )
+            })?
+        } else {
+            raw.clone()
+        };
+
         let data: HashMap<String, String> =
-            serde_json::from_slice(&bytes).map_err(|e| {
+            serde_json::from_slice(&json_bytes).map_err(|e| {
                 StorageError::from_io_error(
                     openraft::ErrorSubject::StateMachine,
                     openraft::ErrorVerb::Read,
@@ -292,7 +340,7 @@ impl RaftStateMachine<TypeConfig> for MemStateMachine {
         self.inner.kv.restore(data);
         self.inner.last_applied = meta.last_log_id;
         self.inner.last_membership = meta.last_membership.clone();
-        self.inner.snapshot_data = Some((meta.clone(), bytes));
+        *self.snapshot_data.lock().unwrap() = Some((meta.clone(), raw));
         Ok(())
     }
 
@@ -300,8 +348,9 @@ impl RaftStateMachine<TypeConfig> for MemStateMachine {
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
         Ok(
-            self.inner
-                .snapshot_data
+            self.snapshot_data
+                .lock()
+                .unwrap()
                 .as_ref()
                 .map(|(meta, bytes)| Snapshot {
                     meta: meta.clone(),
