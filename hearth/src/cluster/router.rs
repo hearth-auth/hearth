@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,6 +41,9 @@ pub struct MemRouter {
     nodes: Arc<Mutex<HashMap<NodeId, mpsc::Sender<NodeRpc>>>>,
     /// Per-node artificial delay injected before delivering AppendEntries.
     delays: Arc<Mutex<HashMap<NodeId, Duration>>>,
+    /// Set of (from, to) pairs whose messages are silently dropped.
+    /// Simulates a directed network partition without crashing either node.
+    partitions: Arc<Mutex<HashSet<(NodeId, NodeId)>>>,
 }
 
 impl MemRouter {
@@ -48,6 +51,7 @@ impl MemRouter {
         Self {
             nodes: Arc::new(Mutex::new(HashMap::new())),
             delays: Arc::new(Mutex::new(HashMap::new())),
+            partitions: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -68,6 +72,37 @@ impl MemRouter {
         }
     }
 
+    /// Block all messages between `a` and `b` in both directions.
+    pub fn partition_between(&self, a: NodeId, b: NodeId) {
+        let mut p = self.partitions.lock().unwrap();
+        p.insert((a, b));
+        p.insert((b, a));
+    }
+
+    /// Restore bidirectional communication between `a` and `b`.
+    pub fn heal_partition(&self, a: NodeId, b: NodeId) {
+        let mut p = self.partitions.lock().unwrap();
+        p.remove(&(a, b));
+        p.remove(&(b, a));
+    }
+
+    /// Block all messages to and from `id` (vs. every other registered node).
+    pub fn isolate_node(&self, id: NodeId, all_node_ids: &[NodeId]) {
+        let mut p = self.partitions.lock().unwrap();
+        for &other in all_node_ids {
+            if other != id {
+                p.insert((id, other));
+                p.insert((other, id));
+            }
+        }
+    }
+
+    /// Restore all channels to and from `id`.
+    pub fn reconnect_node(&self, id: NodeId) {
+        let mut p = self.partitions.lock().unwrap();
+        p.retain(|&(a, b)| a != id && b != id);
+    }
+
     fn get_sender(&self, id: NodeId) -> Option<mpsc::Sender<NodeRpc>> {
         self.nodes.lock().unwrap().get(&id).cloned()
     }
@@ -75,12 +110,18 @@ impl MemRouter {
     fn get_delay(&self, id: NodeId) -> Option<Duration> {
         self.delays.lock().unwrap().get(&id).copied()
     }
+
+    fn is_partitioned(&self, from: NodeId, to: NodeId) -> bool {
+        self.partitions.lock().unwrap().contains(&(from, to))
+    }
 }
 
 // ── NetworkFactory ────────────────────────────────────────────────────────────
 
 pub struct MemNetworkFactory {
     pub router: MemRouter,
+    /// The node ID that owns this factory (the sender side of every connection).
+    pub source: NodeId,
 }
 
 // openraft 0.9 uses native async fn in traits (requires rustc ≥ 1.75).
@@ -90,6 +131,7 @@ impl RaftNetworkFactory<TypeConfig> for MemNetworkFactory {
 
     async fn new_client(&mut self, target: NodeId, _node: &BasicNode) -> Self::Network {
         MemNetwork {
+            source: self.source,
             target,
             router: self.router.clone(),
         }
@@ -99,6 +141,8 @@ impl RaftNetworkFactory<TypeConfig> for MemNetworkFactory {
 // ── Per-connection network handle ────────────────────────────────────────────
 
 pub struct MemNetwork {
+    /// The local node ID — used for partition checks.
+    source: NodeId,
     target: NodeId,
     router: MemRouter,
 }
@@ -113,6 +157,10 @@ impl RaftNetwork<TypeConfig> for MemNetwork {
         rpc: AppendEntriesRequest<TypeConfig>,
         _opt: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
+        if self.router.is_partitioned(self.source, self.target) {
+            return Err(RPCError::Unreachable(Unreachable::new(&io_err("partitioned"))));
+        }
+
         // Inject per-node delay before delivering to the target.
         if let Some(d) = self.router.get_delay(self.target) {
             tokio::time::sleep(d).await;
@@ -138,6 +186,10 @@ impl RaftNetwork<TypeConfig> for MemNetwork {
         rpc: VoteRequest<NodeId>,
         _opt: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
+        if self.router.is_partitioned(self.source, self.target) {
+            return Err(RPCError::Unreachable(Unreachable::new(&io_err("partitioned"))));
+        }
+
         let tx = self.router.get_sender(self.target).ok_or_else(|| {
             RPCError::Unreachable(Unreachable::new(&io_err("node removed from router")))
         })?;
@@ -163,6 +215,10 @@ impl RaftNetwork<TypeConfig> for MemNetwork {
         InstallSnapshotResponse<NodeId>,
         RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>,
     > {
+        if self.router.is_partitioned(self.source, self.target) {
+            return Err(RPCError::Unreachable(Unreachable::new(&io_err("partitioned"))));
+        }
+
         let tx = self.router.get_sender(self.target).ok_or_else(|| {
             RPCError::Unreachable(Unreachable::new(&io_err("node removed from router")))
         })?;

@@ -77,6 +77,7 @@ impl ClusterNode {
 
         let network_factory = MemNetworkFactory {
             router: router.clone(),
+            source: id,
         };
 
         let raft = Arc::new(
@@ -386,7 +387,11 @@ pub mod test_harness {
             None
         }
 
-        /// Write to the cluster, retrying on `NotLeader`.
+        /// Write to the cluster, retrying on transient leadership errors.
+        ///
+        /// openraft maps "not leader / forward to X" into a raw Raft error
+        /// (not ClusterError::NotLeader), so we retry on ALL errors here
+        /// to handle leadership transitions gracefully in tests.
         pub async fn write(
             &self,
             key: impl Into<String>,
@@ -394,7 +399,7 @@ pub mod test_harness {
         ) -> Result<(), ClusterError> {
             let key = key.into();
             let value = value.into();
-            for _ in 0..10 {
+            for _ in 0..20 {
                 let leader_id = match self.current_leader() {
                     Some(l) => l,
                     None => {
@@ -406,16 +411,39 @@ pub mod test_harness {
                 if let Some(node) = self.nodes.get(&leader_id) {
                     match node.write(key.clone(), value.clone()).await {
                         Ok(()) => return Ok(()),
-                        Err(ClusterError::NotLeader { .. }) => {
+                        Err(_) => {
                             tokio::time::sleep(Duration::from_millis(50)).await;
                         }
-                        Err(e) => return Err(e),
                     }
                 } else {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             }
             Err(ClusterError::Raft(anyhow::anyhow!("no leader after retries")))
+        }
+
+        /// Write directly to a specific node, bypassing leader detection.
+        /// Use this during partitions when `current_leader()` may return
+        /// a partitioned node that still thinks it is leader.
+        pub async fn write_to_node(
+            &self,
+            node_id: NodeId,
+            key: impl Into<String>,
+            value: impl Into<String>,
+        ) -> Result<(), ClusterError> {
+            let key = key.into();
+            let value = value.into();
+            for _ in 0..20 {
+                if let Some(node) = self.nodes.get(&node_id) {
+                    match node.write(key.clone(), value.clone()).await {
+                        Ok(()) => return Ok(()),
+                        Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                    }
+                } else {
+                    return Err(ClusterError::Raft(anyhow::anyhow!("node {node_id} not found")));
+                }
+            }
+            Err(ClusterError::Raft(anyhow::anyhow!("write_to_node {node_id}: no success after retries")))
         }
 
         pub fn read(&self, node_id: NodeId, key: &str) -> Option<String> {
@@ -496,6 +524,33 @@ pub mod test_harness {
         pub fn leader_node(&self) -> Option<(NodeId, &ClusterNode)> {
             let id = self.current_leader()?;
             Some((id, self.nodes.get(&id)?))
+        }
+
+        /// Block all messages between `a` and `b` (simulates a network partition).
+        /// Unlike `kill_node`, both nodes stay running and can communicate with others.
+        pub fn partition_between(&self, a: NodeId, b: NodeId) {
+            self.router.partition_between(a, b);
+        }
+
+        /// Restore bidirectional communication between `a` and `b`.
+        pub fn heal_partition(&self, a: NodeId, b: NodeId) {
+            self.router.heal_partition(a, b);
+        }
+
+        /// Cut `id` off from every other live node in the cluster.
+        pub fn isolate_node(&self, id: NodeId) {
+            let all: Vec<NodeId> = self.nodes.keys().copied().collect();
+            self.router.isolate_node(id, &all);
+        }
+
+        /// Restore all network links to/from `id`.
+        pub fn reconnect_node(&self, id: NodeId) {
+            self.router.reconnect_node(id);
+        }
+
+        /// All live node IDs.
+        pub fn node_ids(&self) -> Vec<NodeId> {
+            self.nodes.keys().copied().collect()
         }
     }
 }

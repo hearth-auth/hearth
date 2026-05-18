@@ -11,6 +11,10 @@ path = "tests/cluster_smoke.rs"
 name = "snapshot_join"
 path = "tests/snapshot_join.rs"
 
+[[test]]
+name = "chaos"
+path = "tests/chaos.rs"
+
 [dependencies]
 openraft = { version = "0.9", features = ["serde", "storage-v2", "loosen-follower-log-revert"] }
 tokio = { version = "1", features = ["full"] }
