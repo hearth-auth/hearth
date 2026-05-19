@@ -44,9 +44,13 @@
 //! ```
 
 mod error;
+mod export;
+mod import;
 mod types;
 
 pub use error::BackupError;
+pub use export::{decrypt_bytes, BackupExporter, ExportOptions};
+pub use import::{BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode};
 pub use types::{BackupManifest, BackupRecord, RecordCounts, RealmManifest, MANIFEST_VERSION};
 
 use std::collections::HashMap;
@@ -166,6 +170,53 @@ impl ArchiveReader {
         &self.manifest.realms
     }
 
+    /// Reads the raw bytes of a single file from the archive by its archive-relative path.
+    ///
+    /// Returns `None` when no entry with that path exists. Opens a fresh
+    /// decoder on every call — use [`read_all_realm_files`](Self::read_all_realm_files)
+    /// when reading multiple files for the same realm.
+    pub fn read_file(&self, archive_path: &str) -> Result<Option<Vec<u8>>, BackupError> {
+        let file = std::fs::File::open(&self.path)?;
+        let decoder = zstd::Decoder::new(file)?;
+        let mut archive = tar::Archive::new(decoder);
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let entry_path = entry.path()?.to_string_lossy().into_owned();
+            if entry_path == archive_path {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes)?;
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Reads all files for a realm in a single archive pass.
+    ///
+    /// Returns a map from archive-relative path to raw bytes for every entry
+    /// under `realms/<slug>/`. More efficient than calling [`read_file`](Self::read_file)
+    /// multiple times when restoring a full realm.
+    pub fn read_all_realm_files(
+        &self,
+        slug: &str,
+    ) -> Result<HashMap<String, Vec<u8>>, BackupError> {
+        let prefix = format!("realms/{slug}/");
+        let file = std::fs::File::open(&self.path)?;
+        let decoder = zstd::Decoder::new(file)?;
+        let mut archive = tar::Archive::new(decoder);
+        let mut out = HashMap::new();
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let entry_path = entry.path()?.to_string_lossy().into_owned();
+            if entry_path.starts_with(&prefix) {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes)?;
+                out.insert(entry_path, bytes);
+            }
+        }
+        Ok(out)
+    }
+
     /// Reads every non-manifest entry from the archive and validates its
     /// SHA-256 checksum against the manifest.
     ///
@@ -241,6 +292,7 @@ mod tests {
                 record_counts: RecordCounts { users: 2, ..Default::default() },
             }],
             checksums: HashMap::new(),
+            signing_key_dek_b64: None,
         }
     }
 
