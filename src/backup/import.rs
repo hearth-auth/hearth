@@ -578,6 +578,7 @@ mod tests {
             }],
             checksums: std::collections::HashMap::new(),
             signing_key_dek_b64: None,
+            dek_wrapping_params: None,
         };
 
         let mut writer = BackupArchive::create(&archive_path).expect("create archive");

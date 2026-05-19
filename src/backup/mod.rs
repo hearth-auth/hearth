@@ -51,7 +51,9 @@ mod types;
 pub use error::BackupError;
 pub use export::{decrypt_bytes, BackupExporter, ExportOptions};
 pub use import::{BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode};
-pub use types::{BackupManifest, BackupRecord, RecordCounts, RealmManifest, MANIFEST_VERSION};
+pub use types::{
+    BackupManifest, BackupRecord, DekWrappingParams, RecordCounts, RealmManifest, MANIFEST_VERSION,
+};
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -293,6 +295,7 @@ mod tests {
             }],
             checksums: HashMap::new(),
             signing_key_dek_b64: None,
+            dek_wrapping_params: None,
         }
     }
 

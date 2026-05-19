@@ -90,6 +90,11 @@ enum Commands {
         #[command(subcommand)]
         action: RbacAction,
     },
+    /// Create, restore, and inspect backup archives.
+    Backup {
+        #[command(subcommand)]
+        action: BackupAction,
+    },
     /// Print a shell completion script to stdout.
     ///
     /// Pipe the output to your shell's completions directory.
@@ -97,6 +102,86 @@ enum Commands {
     Completions {
         /// Shell to generate completions for.
         shell: clap_complete::Shell,
+    },
+}
+
+/// Backup subcommands.
+#[derive(Subcommand)]
+enum BackupAction {
+    /// Export all realm data to a `.hearth-backup` archive.
+    Create {
+        /// Output path for the archive.
+        ///
+        /// Defaults to `./hearth-backup-<timestamp>.hearth-backup` in the
+        /// current directory.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+
+        /// Restrict export to this realm (by name or UUID).
+        ///
+        /// When omitted, all realms are exported.
+        #[arg(long)]
+        realm: Option<String>,
+
+        /// Include audit events in the export (may be very large).
+        #[arg(long)]
+        include_audit: bool,
+
+        /// Protect the signing-key DEK with a passphrase (prompted interactively).
+        ///
+        /// When set, the DEK stored in `manifest.json` is AES-256-GCM encrypted
+        /// with a key derived from the passphrase via Argon2id. Without the
+        /// passphrase the signing keys inside the archive cannot be decrypted.
+        #[arg(long)]
+        encrypt: bool,
+
+        /// Path to the data directory.
+        #[arg(long, default_value = "data")]
+        data_dir: PathBuf,
+    },
+    /// Restore realm data from a `.hearth-backup` archive.
+    Restore {
+        /// Path to the archive to restore.
+        #[arg(long, short)]
+        input: PathBuf,
+
+        /// Restore only this realm (by archive slug).
+        ///
+        /// When omitted, all realms in the archive are restored.
+        #[arg(long)]
+        realm: Option<String>,
+
+        /// Conflict resolution strategy.
+        ///
+        /// `skip` (default) — keep existing records unchanged.
+        /// `overwrite` — delete and re-import conflicting records.
+        /// `merge` — equivalent to `skip` in this version.
+        #[arg(long, default_value = "skip")]
+        mode: String,
+
+        /// Parse and report without writing any data.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Path to the data directory.
+        #[arg(long, default_value = "data")]
+        data_dir: PathBuf,
+    },
+    /// Verify archive integrity by recomputing SHA-256 checksums.
+    ///
+    /// Exits 0 on success, 3 if any checksum does not match.
+    Verify {
+        /// Path to the archive to verify.
+        #[arg(long, short)]
+        input: PathBuf,
+    },
+    /// Print the archive manifest as a human-readable table.
+    ///
+    /// Does not decompress entity files.
+    Inspect {
+        /// Path to the archive to inspect.
+        #[arg(long, short)]
+        input: PathBuf,
     },
 }
 
@@ -370,6 +455,53 @@ async fn main() {
                 }
             }
         },
+        Commands::Backup { action } => {
+            let code = match action {
+                BackupAction::Create { output, realm, include_audit, encrypt, data_dir } => {
+                    match run_backup_create(
+                        output.as_deref(),
+                        realm.as_deref(),
+                        include_audit,
+                        encrypt,
+                        &data_dir,
+                    ) {
+                        Ok(()) => 0,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            2
+                        }
+                    }
+                }
+                BackupAction::Restore { input, realm, mode, dry_run, data_dir } => {
+                    match run_backup_restore(&input, realm.as_deref(), &mode, dry_run, &data_dir) {
+                        Ok(had_errors) => {
+                            if had_errors { 1 } else { 0 }
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            2
+                        }
+                    }
+                }
+                BackupAction::Verify { input } => match run_backup_verify(&input) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("integrity failure: {e}");
+                        3
+                    }
+                },
+                BackupAction::Inspect { input } => match run_backup_inspect(&input) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        2
+                    }
+                },
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "hearth", &mut std::io::stdout());
         }
@@ -2192,11 +2324,349 @@ fn run_migrate_auth0(
     Ok(())
 }
 
+// ── Backup commands ───────────────────────────────────────────────────────────
+
+/// Runs `hearth backup create`.
+///
+/// Opens the storage engine, exports all (or a filtered) set of realms into a
+/// zstd-compressed `.hearth-backup` archive, and prints a per-realm entity count
+/// summary.  Exit code 0 on full success, 2 on any fatal error.
+fn run_backup_create(
+    output: Option<&std::path::Path>,
+    realm_filter: Option<&str>,
+    include_audit: bool,
+    encrypt: bool,
+    data_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use base64::Engine as _;
+    use hearth::backup::{BackupArchive, BackupExporter, BackupManifest, DekWrappingParams, ExportOptions};
+    use hearth::core::RealmId;
+    use uuid::Uuid;
+
+    std::fs::create_dir_all(data_dir)?;
+    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
+    let (identity, audit, rbac) = build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
+
+    // Resolve output path — default: `./hearth-backup-<unix_secs>.hearth-backup`
+    let out_path = match output {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            std::path::PathBuf::from(format!("hearth-backup-{ts}.hearth-backup"))
+        }
+    };
+
+    // Resolve optional realm filter.
+    let filter_id: Option<RealmId> = realm_filter
+        .map(|s| {
+            // Try UUID first, then fall back to name lookup.
+            if let Ok(uuid) = Uuid::parse_str(s) {
+                return Ok(RealmId::new(uuid));
+            }
+            // Name lookup: list all realms and match.
+            let mut cursor = None;
+            loop {
+                let page = identity.list_realms(cursor.as_deref(), 200)
+                    .map_err(|e| format!("list_realms: {e}"))?;
+                for realm in &page.items {
+                    if realm.name() == s {
+                        return Ok(realm.id().clone());
+                    }
+                }
+                if page.next_cursor.is_none() { break; }
+                cursor = page.next_cursor;
+            }
+            Err(format!("realm '{s}' not found"))
+        })
+        .transpose()
+        .map_err(|e: String| e)?;
+
+    let exporter = BackupExporter::new(Arc::clone(&identity), Arc::clone(&audit), Arc::clone(&rbac));
+    let dek = BackupExporter::generate_dek()?;
+    let opts = ExportOptions {
+        include_audit,
+        realm_filter: filter_id.as_ref().map(|id| vec![id.clone()]),
+    };
+
+    let mut writer = BackupArchive::create(&out_path)?;
+    let mut realm_manifests = Vec::new();
+
+    // Enumerate realms to export.
+    let realms_to_export: Vec<RealmId> = if let Some(id) = filter_id {
+        vec![id]
+    } else {
+        let mut ids = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = identity.list_realms(cursor.as_deref(), 200)
+                .map_err(|e| format!("list_realms: {e}"))?;
+            for realm in &page.items {
+                ids.push(realm.id().clone());
+            }
+            if page.next_cursor.is_none() { break; }
+            cursor = page.next_cursor;
+        }
+        ids
+    };
+
+    if realms_to_export.is_empty() {
+        eprintln!("warning: no realms found to export");
+    }
+
+    for realm_id in &realms_to_export {
+        let realm_manifest = exporter.export_realm(realm_id, &mut writer, &opts, &dek)?;
+        eprintln!(
+            "  exported '{}': {} users, {} clients",
+            realm_manifest.slug,
+            realm_manifest.record_counts.users,
+            realm_manifest.record_counts.clients,
+        );
+        realm_manifests.push(realm_manifest);
+    }
+
+    // Optionally wrap the DEK with a passphrase-derived key.
+    let (stored_dek_b64, wrapping_params) = if encrypt {
+        let passphrase = rpassword::prompt_password("Enter backup passphrase: ")?;
+        let confirm = rpassword::prompt_password("Confirm passphrase: ")?;
+        if passphrase != confirm {
+            return Err("passphrases do not match".into());
+        }
+        if passphrase.is_empty() {
+            return Err("passphrase must not be empty".into());
+        }
+
+        // Random 16-byte Argon2id salt.
+        let mut salt_bytes = [0u8; 16];
+        {
+            use ring::rand::SecureRandom as _;
+            ring::rand::SystemRandom::new()
+                .fill(&mut salt_bytes)
+                .map_err(|_| "salt generation failed")?;
+        }
+
+        // Derive 32-byte wrapping key (OWASP-recommended Argon2id parameters).
+        const M_COST: u32 = 65536;
+        const T_COST: u32 = 3;
+        const P_COST: u32 = 4;
+        let mut wk = [0u8; 32];
+        let params = argon2::Params::new(M_COST, T_COST, P_COST, Some(32))
+            .map_err(|e| format!("argon2 params: {e}"))?;
+        let argon2 =
+            argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+        argon2
+            .hash_password_into(passphrase.as_bytes(), &salt_bytes, &mut wk)
+            .map_err(|e| format!("argon2 hash: {e}"))?;
+
+        // AES-256-GCM wrap: output is 12-byte nonce || ciphertext+tag.
+        let mut nonce_bytes = [0u8; 12];
+        {
+            use ring::rand::SecureRandom as _;
+            ring::rand::SystemRandom::new()
+                .fill(&mut nonce_bytes)
+                .map_err(|_| "nonce generation failed")?;
+        }
+        let unbound = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &wk)
+            .map_err(|_| "aes-gcm key init")?;
+        let aes_key = ring::aead::LessSafeKey::new(unbound);
+        let aes_nonce = ring::aead::Nonce::assume_unique_for_key(nonce_bytes);
+        let mut wrapped = dek.to_vec();
+        aes_key
+            .seal_in_place_append_tag(aes_nonce, ring::aead::Aad::empty(), &mut wrapped)
+            .map_err(|_| "dek wrap failed")?;
+        let mut blob = nonce_bytes.to_vec();
+        blob.extend(wrapped);
+
+        let blob_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
+        let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt_bytes);
+        let wp = DekWrappingParams { salt_b64, m_cost: M_COST, t_cost: T_COST, p_cost: P_COST };
+        (blob_b64, Some(wp))
+    } else {
+        (base64::engine::general_purpose::STANDARD.encode(dek), None)
+    };
+
+    let mut manifest = BackupManifest::new(realm_manifests);
+    manifest.signing_key_dek_b64 = Some(stored_dek_b64);
+    manifest.dek_wrapping_params = wrapping_params;
+    writer.finish(manifest)?;
+
+    eprintln!("Backup written to: {}", out_path.display());
+    Ok(())
+}
+
+/// Runs `hearth backup restore`.
+///
+/// Returns `Ok(true)` when some records were skipped or errored (exit code 1),
+/// `Ok(false)` on full success (exit code 0), `Err` on fatal error (exit code 2).
+fn run_backup_restore(
+    input: &std::path::Path,
+    realm_slug: Option<&str>,
+    mode_str: &str,
+    dry_run: bool,
+    data_dir: &std::path::Path,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use hearth::backup::{BackupArchive, BackupImporter, ImportOptions, RestoreMode};
+
+    let mode = match mode_str {
+        "overwrite" => RestoreMode::Overwrite,
+        "merge" => RestoreMode::Merge,
+        _ => RestoreMode::Skip,
+    };
+
+    let reader = BackupArchive::open(input)?;
+
+    std::fs::create_dir_all(data_dir)?;
+    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
+    let (identity, _audit, rbac) = build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
+
+    let importer = BackupImporter::new(identity, rbac);
+    let opts = ImportOptions { mode, dry_run, realm_target: None };
+
+    let slugs: Vec<String> = if let Some(slug) = realm_slug {
+        vec![slug.to_string()]
+    } else {
+        reader.realms().iter().map(|r| r.slug.clone()).collect()
+    };
+
+    if dry_run {
+        eprintln!("(dry-run: no data will be written)");
+    }
+
+    let mut had_errors = false;
+    for slug in &slugs {
+        let report = importer.import_realm(slug, &reader, &opts)?;
+        print_import_report(slug, &report);
+        if report.users.errored > 0 || report.clients.errored > 0 || report.realms.errored > 0 {
+            had_errors = true;
+        }
+    }
+    Ok(had_errors)
+}
+
+/// Runs `hearth backup verify`.
+///
+/// Recomputes SHA-256 checksums for every file in the archive and compares
+/// them against the manifest.  Returns `Ok(())` on success or a
+/// [`BackupError::ChecksumMismatch`](hearth::backup::BackupError) on failure.
+fn run_backup_verify(input: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use hearth::backup::BackupArchive;
+
+    let reader = BackupArchive::open(input)?;
+    reader.verify_checksums()?;
+    println!("OK — all checksums match ({} files verified)", reader.manifest.checksums.len());
+    Ok(())
+}
+
+/// Runs `hearth backup inspect`.
+///
+/// Prints the manifest as a human-readable table without decompressing any
+/// entity files.
+fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use hearth::backup::BackupArchive;
+
+    let reader = BackupArchive::open(input)?;
+    let m = &reader.manifest;
+    let dek_status = match (&m.signing_key_dek_b64, &m.dek_wrapping_params) {
+        (Some(_), Some(_)) => "present (passphrase-protected)",
+        (Some(_), None) => "present (unprotected)",
+        _ => "absent",
+    };
+    let created_at_display = time::OffsetDateTime::from_unix_timestamp_nanos(
+        m.created_at.as_micros() as i128 * 1000,
+    )
+    .ok()
+    .and_then(|dt| {
+        dt.format(&time::format_description::well_known::Rfc3339).ok()
+    })
+    .unwrap_or_else(|| format!("{}µs (unix)", m.created_at.as_micros()));
+    println!("Archive:           {}", input.display());
+    println!("  format version : {}", m.format_version);
+    println!("  hearth version : {}", m.hearth_version);
+    println!("  created at     : {created_at_display}");
+    println!("  signing key DEK: {dek_status}");
+    println!("  checksummed files: {}", m.checksums.len());
+    println!("  realms ({}):", m.realms.len());
+    for r in &m.realms {
+        let rc = &r.record_counts;
+        println!(
+            "    {slug:<24}  id={id}",
+            slug = r.slug,
+            id = r.realm_id
+        );
+        println!(
+            "      users={u}  credentials={c}  clients={cl}  roles={ro}  groups={g}  orgs={o}  audit={a}",
+            u = rc.users,
+            c = rc.credentials,
+            cl = rc.clients,
+            ro = rc.roles,
+            g = rc.groups,
+            o = rc.organizations,
+            a = rc.audit_events,
+        );
+    }
+    Ok(())
+}
+
+/// Prints an [`ImportReport`](hearth::backup::ImportReport) as a human-readable summary.
+fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
+    println!("Realm '{slug}':");
+    println!("  realms   — created: {}, skipped: {}, overwritten: {}, errored: {}",
+        report.realms.created, report.realms.skipped, report.realms.overwritten, report.realms.errored);
+    println!("  users    — created: {}, skipped: {}, overwritten: {}, errored: {}",
+        report.users.created, report.users.skipped, report.users.overwritten, report.users.errored);
+    println!("  clients  — created: {}, skipped: {}, overwritten: {}, errored: {}",
+        report.clients.created, report.clients.skipped, report.clients.overwritten, report.clients.errored);
+    if !report.conflicts.is_empty() {
+        println!("  conflicts ({}):", report.conflicts.len());
+        for c in &report.conflicts {
+            println!("    [{:?}] {:?} — {}", c.entity_type, c.identifier, c.reason);
+        }
+    }
+}
+
+// ── Engine helpers ────────────────────────────────────────────────────────────
+
 /// Identity + RBAC pair returned by [`build_engines`].
 type AdminEngines = (
     Arc<dyn hearth::identity::IdentityEngine>,
     Arc<dyn hearth::rbac::RbacEngine>,
 );
+
+/// Identity + Audit + RBAC triple returned by [`build_all_engines`].
+type AllEngines = (
+    Arc<dyn hearth::identity::IdentityEngine>,
+    Arc<dyn hearth::audit::AuditEngine>,
+    Arc<dyn hearth::rbac::RbacEngine>,
+);
+
+/// Builds all three engine types (identity, audit, RBAC) for backup commands.
+///
+/// Uses production-mode credential settings since backup operates on live data.
+fn build_all_engines(
+    storage: Arc<dyn StorageEngine>,
+) -> Result<AllEngines, Box<dyn std::error::Error>> {
+    let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
+    let rbac = Arc::new(EmbeddedRbacEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock),
+    )) as Arc<dyn hearth::rbac::RbacEngine>;
+    let audit = Arc::new(EmbeddedAuditEngine::new(
+        Arc::clone(&storage),
+        Arc::clone(&clock),
+    )) as Arc<dyn hearth::audit::AuditEngine>;
+    let identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
+        Arc::clone(&storage),
+        clock,
+        IdentityConfig::default(),
+        Arc::clone(&rbac),
+        Arc::clone(&audit),
+    )?) as Arc<dyn hearth::identity::IdentityEngine>;
+    Ok((identity, Arc::clone(&audit), rbac))
+}
 
 /// Builds the identity + RBAC engine pair used by one-shot admin
 /// commands (migrations, etc.). Keeps the wiring in one place.

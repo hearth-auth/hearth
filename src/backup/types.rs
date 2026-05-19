@@ -45,6 +45,23 @@ pub struct RealmManifest {
     pub record_counts: RecordCounts,
 }
 
+/// Argon2id parameters used to derive a passphrase-based wrapping key for the DEK.
+///
+/// When present in [`BackupManifest`], the `signing_key_dek_b64` field stores the
+/// DEK encrypted (AES-256-GCM) with a key derived from a passphrase using these
+/// parameters. The nonce is prepended to the ciphertext (12 bytes || ciphertext+tag).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DekWrappingParams {
+    /// Base64-encoded 16-byte Argon2id salt.
+    pub salt_b64: String,
+    /// Argon2id memory cost in KiB.
+    pub m_cost: u32,
+    /// Argon2id time cost (iterations).
+    pub t_cost: u32,
+    /// Argon2id parallelism factor.
+    pub p_cost: u32,
+}
+
 /// Root manifest written as `manifest.json` inside the archive.
 ///
 /// SHA-256 checksums (lowercase hex) are keyed by archive-relative path
@@ -65,8 +82,16 @@ pub struct BackupManifest {
     pub checksums: HashMap<String, String>,
     /// Base64-encoded 32-byte DEK used to AES-256-GCM-encrypt the realm signing
     /// keys stored in this archive. `None` for archives without signing key export.
+    /// When [`dek_wrapping_params`](Self::dek_wrapping_params) is set, this field
+    /// holds the passphrase-wrapped DEK (nonce || ciphertext+tag, base64-encoded).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub signing_key_dek_b64: Option<String>,
+    /// When set, the DEK in `signing_key_dek_b64` is protected with a passphrase.
+    /// Derive the unwrapping key with Argon2id using these parameters, then
+    /// AES-256-GCM-decrypt `signing_key_dek_b64` (nonce || ciphertext+tag) to
+    /// recover the 32-byte DEK.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub dek_wrapping_params: Option<DekWrappingParams>,
 }
 
 impl BackupManifest {
@@ -82,6 +107,7 @@ impl BackupManifest {
             realms,
             checksums: HashMap::new(),
             signing_key_dek_b64: None,
+            dek_wrapping_params: None,
         }
     }
 }
@@ -149,6 +175,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             signing_key_dek_b64: None,
+            dek_wrapping_params: None,
         };
 
         let json = serde_json::to_string(&manifest).expect("serialize");

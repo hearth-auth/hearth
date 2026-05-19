@@ -9,6 +9,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Backup CLI** — four subcommands under `hearth backup` for offline archive management (HEA-622):
+  - `hearth backup create [--output <path>] [--realm <slug>] [--include-audit] [--encrypt] [--data-dir <dir>]` — exports all (or a single filtered) realm to a `.hearth-backup` archive. `--encrypt` prompts interactively for a passphrase and wraps the signing-key DEK with Argon2id + AES-256-GCM so the signing keys cannot be decrypted without the passphrase.
+  - `hearth backup restore --input <path> [--realm <slug>] [--mode skip|overwrite|merge] [--dry-run] [--data-dir <dir>]` — restores realms from an archive; exit 0 (success), 1 (partial/conflicts), 2 (fatal).
+  - `hearth backup verify --input <path>` — recomputes SHA-256 checksums and compares against `manifest.json`; exit 0 on pass, 3 on integrity failure.
+  - `hearth backup inspect --input <path>` — prints manifest metadata and per-realm record counts as a human-readable table without decompressing entity files.
+
+- **Backup restore engine** — `BackupImporter` reads a `.hearth-backup` archive produced by
+  `BackupExporter` and drives the existing engine `import_*` methods to restore realms, users,
+  credentials, and OAuth clients. Supports `Skip`, `Overwrite`, and `Merge` conflict modes plus
+  `dry_run` for validation without writes. Returns a structured `ImportReport` with per-entity-type
+  outcome counts and a `Vec<Conflict>` describing any skipped or overwritten records (HEA-620).
+
 - **Backup export engine** — `BackupExporter` serialises all realm entities (users, credentials,
   clients, roles, permissions, groups, scopes, assignments, organizations, audit events) to NDJSON
   streams inside a `.hearth-backup` archive. Realm signing keys are AES-256-GCM encrypted with a

@@ -94,6 +94,7 @@ prometheus = { version = "0.14", default-features = false, features = ["process"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tar = "0.4"
 zstd = "0.13"
+rpassword = "7"
 
 [features]
 # Exposes internal test probes for use by the simulation crate. Never enable in production.
