@@ -9,6 +9,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Attribute filtering on admin user list** — `GET /admin/users?attr=key:value` filters results
+  to users whose custom attributes contain an exact match for the given key and value. Values may
+  contain colons (e.g. ISO timestamps). Malformed `attr` (no colon separator) returns `400` (HEA-578).
+
 - **Audit log retention policy and NDJSON export** — per-realm configurable `retention_days`
   (default 90, `0` = unlimited) with automatic daily pruning of expired events. New REST endpoints:
   `GET/PUT /admin/api/realms/{realm}/audit/config` (read/update retention) and

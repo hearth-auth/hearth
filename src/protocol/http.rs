@@ -2295,6 +2295,9 @@ struct PaginationParams {
     username: Option<String>,
     /// Status filter: accepts `"active"`, `"disabled"`, or `"pending_verification"`.
     status: Option<String>,
+    /// Attribute filter in `key:value` form. Matches users whose custom attributes
+    /// contain an entry where `attributes[key] == value` (exact, case-sensitive).
+    attr: Option<String>,
 }
 
 impl PaginationParams {
@@ -2344,8 +2347,10 @@ async fn admin_list_users(
         };
     }
 
-    let has_field_filters =
-        params.email.is_some() || params.username.is_some() || params.status.is_some();
+    let has_field_filters = params.email.is_some()
+        || params.username.is_some()
+        || params.status.is_some()
+        || params.attr.is_some();
 
     if has_field_filters {
         // Parse the status filter value if provided.
@@ -2381,6 +2386,23 @@ async fn admin_list_users(
         let email_norm = params.email.as_deref().map(|e| e.to_lowercase());
         let username_lower = params.username.as_deref().map(|u| u.to_lowercase());
 
+        // Parse `?attr=key:value` — split on the first colon only so values may
+        // contain colons (e.g. ISO timestamps or URLs).
+        let attr_filter: Option<(String, String)> = params.attr.as_deref().and_then(|s| {
+            let (k, v) = s.split_once(':')?;
+            Some((k.to_owned(), v.to_owned()))
+        });
+
+        if params.attr.is_some() && attr_filter.is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid attr filter; expected key:value format"
+                })),
+            )
+                .into_response();
+        }
+
         let items: Vec<serde_json::Value> = all_users
             .iter()
             .filter(|u| {
@@ -2396,6 +2418,11 @@ async fn admin_list_users(
                 }
                 if let Some(sf) = status_filter {
                     if u.status() != sf {
+                        return false;
+                    }
+                }
+                if let Some((ref ak, ref av)) = attr_filter {
+                    if u.attributes().get(ak.as_str()).map(String::as_str) != Some(av.as_str()) {
                         return false;
                     }
                 }
