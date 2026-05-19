@@ -139,7 +139,7 @@ Hearth's `/oauth/token` endpoint delivers all tokens (access, refresh, ID) in a 
 }
 ```
 
-No `Set-Cookie` header is emitted by the `/oauth/token` endpoint. This is intentional — the OAuth spec does not prescribe cookie delivery, and Hearth keeps the token endpoint framework-agnostic.
+By default Hearth uses JSON delivery. Optionally, you can configure a client to use **native cookie delivery** — Hearth then sets the access and refresh tokens as HttpOnly cookies directly on the `/oauth/token` response, so the tokens never touch JavaScript memory.
 
 ### Where to store tokens in a browser SPA
 
@@ -149,8 +149,9 @@ Choosing a storage location is a security decision with real tradeoffs:
 |---------|----------|-----------|-------------|-------|
 | `localStorage` | **High** — any script on the page can read it | None | Tab + across sessions | Not recommended for access tokens |
 | `sessionStorage` | **High** — same as above | None | Tab only | Slightly better than localStorage; still JS-accessible |
-| In-memory (closure/variable) | **Low** — lost on page refresh; not readable from injected iframes | None | Current page load only | **Recommended for access tokens** |
-| HttpOnly cookie (via BFF) | **None** — inaccessible to JavaScript | Low (mitigated by `SameSite`) | Configurable | **Recommended for longest-lived sessions** |
+| In-memory (closure/variable) | **Low** — lost on page refresh | None | Current page load only | **Recommended** for bearer-mode SPAs |
+| HttpOnly cookie (native, `token_delivery: cookie`) | **None** — inaccessible to JavaScript | Low (mitigated by `SameSite=Strict`) | Configurable | **Recommended** for highest XSS protection |
+| HttpOnly cookie (via BFF) | **None** | Low (mitigated by `SameSite`) | Configurable | Alternative: own server proxies token exchange |
 
 ### Recommended pattern for SPAs: PKCE + in-memory
 
@@ -216,9 +217,73 @@ The Hearth admin UI (`/ui/*`) uses its own session cookies for the built-in admi
 
 These cookies are scoped to the admin console only and are **not available to OAuth clients or third-party SPAs**. The `SameSite=Lax` setting (rather than `Strict`) is intentional — it allows the admin console to receive cookies after a top-level navigation redirect from Hearth's own OAuth flow, which `Strict` would block.
 
-### Implementation status
+### Native HttpOnly cookie delivery (`token_delivery: cookie`)
 
-Native `token_delivery: cookie` support (where Hearth's token endpoint directly sets HttpOnly cookies on OAuth clients) is tracked in [HEA-591](/HEA/issues/HEA-591). Until that ships, use the in-memory pattern via `@hearth/browser` or implement the BFF pattern at your application layer.
+Hearth supports delivering access and refresh tokens as HttpOnly cookies directly from the `/oauth/token` endpoint. The cookie name is `hearth_access_token`. This eliminates JavaScript token storage entirely without requiring a BFF proxy.
+
+**1. Server configuration** — set `token_delivery: cookie` on the OAuth client in `hearth.yaml`:
+
+```yaml
+clients:
+  - client_id: my-spa
+    client_type: public
+    token_delivery: cookie   # 'bearer' (default) or 'cookie'
+    token_cookie_flags:
+      secure: true
+      same_site: Strict
+      max_age: 3600
+```
+
+**2. Browser SDK** — pass `token_delivery: "cookie"` to `createHearthClient`. The SDK stores only session metadata (expiry and ID token claims) — no access or refresh token is held in JS:
+
+```ts
+import { createHearthClient } from "@hearth/browser";
+
+const hearth = createHearthClient({
+    issuer_url: "https://auth.example.com",
+    client_id: "my-spa",
+    redirect_uri: `${location.origin}/callback`,
+    token_delivery: "cookie",   // tokens arrive as HttpOnly cookies
+});
+
+await hearth.loginWithRedirect();
+// Silent refresh works without a JS-accessible refresh token —
+// the browser sends the HttpOnly refresh cookie automatically.
+const token = await hearth.getAccessToken();
+```
+
+**3. Resource server (Node.js)** — enable `acceptCookieToken` so the middleware accepts the `hearth_access_token` cookie when no `Authorization: Bearer` header is present:
+
+```ts
+import { hearthMiddleware } from "@hearth/node";
+
+app.use(hearthMiddleware({
+    issuer: "https://auth.example.com",
+    audience: "my-api",
+    acceptCookieToken: true,  // fallback to hearth_access_token cookie
+}));
+```
+
+**3. Resource server (Go)** — use `MiddlewareWithOptions` with `AcceptCookieToken: true`:
+
+```go
+mux.Handle("GET /api/me", client.MiddlewareWithOptions(
+    http.HandlerFunc(myHandler),
+    hearth.MiddlewareOptions{AcceptCookieToken: true},
+))
+```
+
+`Authorization: Bearer` always takes priority over the cookie, so server-to-server calls using bearer tokens continue to work without any change.
+
+**Cookie flags set by Hearth in cookie mode:**
+
+| Flag | Value | Purpose |
+|------|-------|---------|
+| `HttpOnly` | always | Blocks JavaScript access |
+| `Secure` | configurable (default: `true`) | HTTPS only |
+| `SameSite` | configurable (default: `Strict`) | CSRF protection |
+| `Path` | `/` | Scoped to entire origin |
+| `Max-Age` | configurable | Session lifetime |
 
 ## 8. Webhook verification
 
