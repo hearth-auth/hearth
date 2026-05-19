@@ -5,6 +5,7 @@
 //! storage engine.
 
 pub mod audit;
+pub mod backup;
 pub mod cluster;
 pub mod config;
 pub mod core;
