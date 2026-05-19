@@ -32,4 +32,12 @@ pub enum BackupError {
     /// The archive was produced by a newer, incompatible format version.
     #[error("unsupported archive format version: {0}")]
     UnsupportedVersion(u32),
+
+    /// An identity, RBAC, or audit engine returned an error during export.
+    #[error("export engine error: {0}")]
+    Engine(String),
+
+    /// A cryptographic operation failed (key generation, encryption, decryption).
+    #[error("crypto error: {0}")]
+    Crypto(String),
 }

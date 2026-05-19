@@ -9606,6 +9606,39 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage.get(&probe_realm, b"health:probe").is_ok()
     }
 
+    fn export_all_credentials(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::CredentialExport>, IdentityError> {
+        use crate::identity::credentials::StoredCredential;
+        let prefix = keys::credential_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self.storage.scan(realm_id, &prefix, &end).map_err(Self::storage_err)?;
+        let mut out = Vec::new();
+        for entry in entries {
+            let Ok(stored) = serde_json::from_slice::<StoredCredential>(&entry.value) else {
+                continue;
+            };
+            let uuid_bytes = &entry.key[prefix.len()..];
+            let Ok(uuid_str) = std::str::from_utf8(uuid_bytes) else { continue; };
+            let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) else { continue; };
+            out.push(crate::identity::CredentialExport {
+                user_id: UserId::new(uuid),
+                phc_string: stored.hash.clone(),
+                created_at_micros: stored.created_at,
+            });
+        }
+        Ok(out)
+    }
+
+    fn export_realm_signing_key_pkcs8(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<u8>, IdentityError> {
+        let key = self.get_or_load_realm_signing_key(realm_id)?;
+        Ok(key.pkcs8_bytes().to_vec())
+    }
+
     fn initiate_logout(
         &self,
         realm_id: &RealmId,

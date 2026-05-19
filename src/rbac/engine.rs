@@ -24,8 +24,8 @@ use super::types::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, CycleKind, Group,
     GroupId, GroupMember, GroupMembership, Page, Permission, PermissionRecord, PermissionStatus,
     ProtectedResource, ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec, RoleStatus,
-    RoleSubject, Scope, ScopeSpec, Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest,
-    UserPermissionGrant,
+    RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, TraversalKind, UpdateGroupRequest,
+    UpdateRoleRequest, UserPermissionGrant,
 };
 use super::RbacEngine;
 
@@ -1500,6 +1500,48 @@ impl RbacEngine for EmbeddedRbacEngine {
             }
         }
         Ok(())
+    }
+
+    fn export_all_permissions(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<PermissionRecord>, RbacError> {
+        let prefix = keys::permission_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        let entries = self.storage.scan(realm_id, &prefix, &end)?;
+        let mut out = Vec::new();
+        for entry in entries {
+            let Ok(record) = Self::de::<PermissionRecord>(&entry.value) else { continue; };
+            out.push(record);
+        }
+        Ok(out)
+    }
+
+    fn export_all_scopes(&self, realm_id: &RealmId) -> Result<Vec<ScopeExport>, RbacError> {
+        let prefix = keys::scope_scan_prefix(realm_id);
+        let end = keys::prefix_end(&prefix);
+        let entries = self.storage.scan(realm_id, &prefix, &end)?;
+        let mut out = Vec::new();
+        for entry in entries {
+            let Ok(stored) = Self::de::<StoredScope>(&entry.value) else { continue; };
+            out.push(ScopeExport { name: stored.name, permissions: stored.permissions });
+        }
+        Ok(out)
+    }
+
+    fn export_all_assignments(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RoleAssignment>, RbacError> {
+        let prefix = keys::ASSIGN_PRI_PREFIX.as_bytes().to_vec();
+        let end = keys::prefix_end(&prefix);
+        let entries = self.storage.scan(realm_id, &prefix, &end)?;
+        let mut out = Vec::new();
+        for entry in entries {
+            let Ok(assignment) = Self::de::<RoleAssignment>(&entry.value) else { continue; };
+            out.push(assignment);
+        }
+        Ok(out)
     }
 }
 

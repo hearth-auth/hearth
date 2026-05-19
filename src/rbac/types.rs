@@ -201,6 +201,15 @@ pub struct PermissionDefinition {
     pub category: Option<String>,
 }
 
+/// A scope record exported from a realm for backup purposes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopeExport {
+    /// The scope name (e.g. `"openid"`, `"admin"`).
+    pub name: String,
+    /// `None` → no permission narrowing; `Some(list)` → intersection list.
+    pub permissions: Option<Vec<Permission>>,
+}
+
 /// Optional coarse-grained consent bundle.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScopeBundle {

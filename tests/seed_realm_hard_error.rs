@@ -22,8 +22,9 @@ use hearth::protocol::proto::identity::v1::{
 use hearth::rbac::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, Group, GroupId,
     GroupMember, GroupMembership, Page, Permission, ProtectedResource, RbacEngine, RbacError,
-    ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec, RoleSubject, Scope, ScopeSpec,
-    Subject, UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
+    PermissionRecord, ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec, RoleSubject,
+    Scope, ScopeExport, ScopeSpec, Subject, UpdateGroupRequest, UpdateRoleRequest,
+    UserPermissionGrant,
 };
 use tonic::Request;
 
@@ -317,6 +318,24 @@ impl RbacEngine for FailSeedRbac {
         yaml_names: &HashSet<String>,
     ) -> Result<(), RbacError> {
         self.inner.archive_removed_roles(realm_id, yaml_names)
+    }
+
+    fn export_all_permissions(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<PermissionRecord>, RbacError> {
+        self.inner.export_all_permissions(realm_id)
+    }
+
+    fn export_all_scopes(&self, realm_id: &RealmId) -> Result<Vec<ScopeExport>, RbacError> {
+        self.inner.export_all_scopes(realm_id)
+    }
+
+    fn export_all_assignments(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<RoleAssignment>, RbacError> {
+        self.inner.export_all_assignments(realm_id)
     }
 }
 

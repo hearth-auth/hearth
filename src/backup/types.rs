@@ -63,6 +63,10 @@ pub struct BackupManifest {
     pub realms: Vec<RealmManifest>,
     /// Lowercase-hex SHA-256 checksums keyed by archive-relative path.
     pub checksums: HashMap<String, String>,
+    /// Base64-encoded 32-byte DEK used to AES-256-GCM-encrypt the realm signing
+    /// keys stored in this archive. `None` for archives without signing key export.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub signing_key_dek_b64: Option<String>,
 }
 
 impl BackupManifest {
@@ -77,6 +81,7 @@ impl BackupManifest {
             created_at: Timestamp::now(),
             realms,
             checksums: HashMap::new(),
+            signing_key_dek_b64: None,
         }
     }
 }
@@ -143,6 +148,7 @@ mod tests {
             checksums: [("realms/acme/users.ndjson".to_string(), "abc123".to_string())]
                 .into_iter()
                 .collect(),
+            signing_key_dek_b64: None,
         };
 
         let json = serde_json::to_string(&manifest).expect("serialize");

@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Backup export engine** — `BackupExporter` serialises all realm entities (users, credentials,
+  clients, roles, permissions, groups, scopes, assignments, organizations, audit events) to NDJSON
+  streams inside a `.hearth-backup` archive. Realm signing keys are AES-256-GCM encrypted with a
+  per-archive DEK stored in `manifest.json`. Usage: construct `BackupExporter::new(identity, audit,
+  rbac)`, call `generate_dek()` once per archive, then `export_realm(realm_id, &mut writer, &opts,
+  &dek)` per realm (HEA-619).
+
 - **Attribute filtering on admin user list** — `GET /admin/users?attr=key:value` filters results
   to users whose custom attributes contain an exact match for the given key and value. Values may
   contain colons (e.g. ISO timestamps). Malformed `attr` (no colon separator) returns `400` (HEA-578).

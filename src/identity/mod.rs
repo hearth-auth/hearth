@@ -51,7 +51,7 @@ pub use types::{
     canonicalize_scopes, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
     CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
     CreateWebhookRequest, DcrPolicy, ImportClientRequest, ImportUserRequest, InvitationStatus,
-    MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
+    CredentialExport, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, Session, SessionContext,
@@ -1483,4 +1483,25 @@ pub trait IdentityEngine: Send + Sync {
     fn is_storage_healthy(&self) -> bool {
         true
     }
+
+    // ===== Backup export helpers =====
+
+    /// Returns all stored credentials in a realm for backup export.
+    ///
+    /// Each entry pairs a `UserId` with the PHC-formatted hash and its
+    /// creation timestamp. Credentials are stored per-user, so this method
+    /// performs a prefix scan across all `cred:user:*` keys.
+    fn export_all_credentials(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<CredentialExport>, IdentityError>;
+
+    /// Returns the raw PKCS#8 DER bytes for a realm's Ed25519 signing key.
+    ///
+    /// The caller is responsible for encrypting the bytes before writing
+    /// them to an archive. Used exclusively by the backup exporter.
+    fn export_realm_signing_key_pkcs8(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<u8>, IdentityError>;
 }
