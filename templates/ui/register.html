@@ -7,13 +7,13 @@
   </div>
 
   {% if disabled %}
-    <h1 class="mb-2 text-center text-lg font-semibold text-ht-content-primary">Registration unavailable</h1>
+    <h1 class="mb-2 text-center font-display text-xl font-medium text-ht-content-primary">Registration unavailable</h1>
     <p class="mb-4 text-center text-sm text-ht-content-secondary">Self-service registration is not enabled for this realm. Contact an administrator to request an account.</p>
     <div class="mt-6 text-center">
       <a href="{{ login_url }}" class="text-sm font-medium text-ht-content-brand hover:text-ht-brand-deep">Back to sign in</a>
     </div>
   {% else %}
-    <h1 class="mb-2 text-center text-lg font-semibold text-ht-content-primary">Create your account</h1>
+    <h1 class="mb-2 text-center font-display text-xl font-medium text-ht-content-primary">Create your account</h1>
     <p class="mb-6 text-center text-sm text-ht-content-secondary">We'll send a verification link to the email address you provide.</p>
 
     {% match error %}

@@ -37,6 +37,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 - **Heading colour inheritance** — a `@layer base` rule pins `h1–h6` to `var(--ht-content-primary)`
   (`graphite-50`), preventing UA stylesheets from resetting headings to white on dark surfaces (HEA-633).
 
+### Fixed
+
+- **H1 typography unified across `/ui`** — every admin and pre-login H1 now renders in
+  Fraunces (display serif) at one of two canonical sizes (`text-2xl` for the admin
+  shell, `text-xl` for compact pre-login modals). Previously the admin list pages
+  (Users, Realms, Applications, Webhooks, Organizations, Groups, Sessions, Audit,
+  Migration History) and the pre-login pages (login, register, forgot/reset
+  password, MFA challenge/recovery/enroll, verify-email, setup, realm-required)
+  rendered H1s in Manrope at mixed sizes because they omitted `font-display`. A
+  safety-net rule in `@layer base` now also defaults every `h1`–`h6` to Fraunces
+  so future undecorated headings cannot regress (HEA-629).
+
 - **New-user form validation** — the admin "Create user" form now shows required-field
   markers and `aria-required` on Email and Initial Password, performs inline email
   regex validation, and displays a real-time 0–4 password strength meter with

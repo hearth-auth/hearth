@@ -21,7 +21,7 @@
 {% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}
 
 <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-  <h1 class="text-2xl font-semibold text-ht-content-primary">Users in this realm</h1>
+  <h1 class="font-display text-2xl font-medium text-ht-content-primary">Users in this realm</h1>
   <div class="flex items-center gap-2">
     <a href="{{ list_url }}/import"
        class="inline-flex items-center gap-1.5 rounded border border-strong bg-ht-surface-elevated px-3 py-1.5 text-sm font-medium text-ht-content-secondary hover-bg-divider">

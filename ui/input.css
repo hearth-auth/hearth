@@ -94,9 +94,18 @@
   }
 
   /* Headings inherit body colour; this prevents UA style-sheets from
-     resetting to #000 or #fff on dark surfaces. */
+     resetting to #000 or #fff on dark surfaces. They also default to
+     the brand display serif so undecorated <h1>..<h6> in any template
+     land in Fraunces, not Manrope. Utility classes on the element still
+     win, so existing decorated headings are unaffected. */
   h1, h2, h3, h4, h5, h6 {
     color: var(--ht-content-primary);
+    font-family: Fraunces, Georgia, serif;
+    font-weight: 500;
+  }
+  h1 {
+    font-size: 1.5rem;
+    line-height: 2rem;
   }
 
   /* Global focus ring — ember outline for all interactive elements.
