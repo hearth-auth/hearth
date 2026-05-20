@@ -9,6 +9,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`HEARTH_DEV_DATA_DIR` env var** — when set, `--dev` mode uses that path as the data
+  directory instead of a random tempdir, so storage survives restarts. Unset preserves the
+  existing ephemeral behaviour. Two new Makefile targets wrap this:
+  - `make dev-data` — starts the server with `HEARTH_DEV_DATA_DIR=./data/dev` (persistent)
+  - `make dev-reset` — wipes `./data/dev` for a clean slate (HEA-626).
+
 - **Backup HTTP admin endpoints** — two new admin API endpoints for backup and restore without SSH
   access (HEA-623):
   - `POST /admin/backup` — creates a `.hearth-backup` archive and streams it as an
