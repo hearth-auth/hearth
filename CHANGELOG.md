@@ -39,6 +39,23 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Fixed
 
+- **Realm navigation de-duplicated** — the per-realm tab bar that lived above
+  every realm sub-page (Users / Organizations / Groups / Applications / …) has
+  been removed; the same links were already in the sidebar's per-realm subtree
+  and the duplication caused mismatched active-state and crowded headers. The
+  realm overview page now lists every sub-page as a Quick access tile so it
+  also works as a navigation hub when the sidebar is collapsed or on mobile
+  (HEA-629).
+- **Sidebar active-state highlights consistently** — Groups, Organizations,
+  Applications detail, Users detail, Identity Providers, and Webhooks pages
+  now keep the correct sidebar entry highlighted. Previously these handlers
+  passed `active: "realm-workspace"` as a placeholder, which no sidebar key
+  matched, leaving the realm expanded with nothing highlighted (HEA-629).
+- **Identity Providers and Webhooks reachable from sidebar + overview** —
+  added the two missing realm sub-pages to the sidebar's per-realm subtree
+  and to the realm overview Quick access tiles. Both were previously
+  reachable only via the now-removed topbar tab strip (HEA-629).
+
 - **H1 typography unified across `/ui`** — every admin and pre-login H1 now renders in
   Fraunces (display serif) at one of two canonical sizes (`text-2xl` for the admin
   shell, `text-xl` for compact pre-login modals). Previously the admin list pages

@@ -17,19 +17,9 @@
   </a>
 </div>
 
-{# Workspace tabs — all resources in this realm are reachable from here. #}
-<nav class="mb-6 flex flex-wrap gap-1 border-b border-divider" aria-label="Realm workspace">
-  <a href="/ui/admin/realms/{{ realm.name() }}" aria-current="page"
-     class="border-b-2 border-brand px-3 py-2 text-sm font-medium text-ht-content-primary">Overview</a>
-  <a href="/ui/admin/realms/{{ realm.name() }}/users"
-     class="border-b-2 border-transparent px-3 py-2 text-sm font-medium text-ht-content-secondary hover:text-ht-content-primary">Users</a>
-  <a href="/ui/admin/realms/{{ realm.name() }}/organizations"
-     class="border-b-2 border-transparent px-3 py-2 text-sm font-medium text-ht-content-secondary hover:text-ht-content-primary">Organizations</a>
-  <a href="/ui/admin/realms/{{ realm.name() }}/applications"
-     class="border-b-2 border-transparent px-3 py-2 text-sm font-medium text-ht-content-secondary hover:text-ht-content-primary">Applications</a>
-  <a href="/ui/admin/realms/{{ realm.name() }}/sessions"
-     class="border-b-2 border-transparent px-3 py-2 text-sm font-medium text-ht-content-secondary hover:text-ht-content-primary">Sessions</a>
-</nav>
+{# Sub-page navigation is in the sidebar (per-realm tree). On this overview
+   page we surface the full set of sub-pages as Quick access tiles below so
+   it doubles as a hub when the sidebar is collapsed / on mobile. #}
 
 <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
   <dl class="grid gap-4 sm:grid-cols-2">
@@ -304,16 +294,32 @@
   </div>
 </div>
 
-{# Quick access — icon tiles matching the global dashboard pattern. #}
+{# Quick access — every realm sub-page is reachable from here so this
+   overview doubles as the navigation hub when the sidebar is collapsed
+   or on mobile. Mirrors the sidebar's per-realm subtree (HEA-629). #}
 <div class="mt-6">
   <h2 class="mb-3 text-sm font-semibold text-ht-content-muted uppercase tracking-[0.12em] font-mono">Quick access</h2>
-  <div class="grid gap-3 grid-cols-2 sm:grid-cols-4">
+  <div class="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
     <a href="/ui/admin/realms/{{ realm.name() }}/users"
        class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
       <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-steel-bg text-steel-fg">
         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
       </div>
       <p class="text-sm font-medium text-ht-content-primary">Users</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/organizations"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-violet-bg text-violet-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V7l8-4v18"/><path d="M19 21V11l-6-4"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Organizations</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/groups"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-teal-bg text-teal-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><circle cx="17" cy="7" r="3"/><path d="M21 21v-2a3 3 0 0 0-3-3"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Groups</p>
     </a>
     <a href="/ui/admin/realms/{{ realm.name() }}/applications"
        class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
@@ -322,12 +328,26 @@
       </div>
       <p class="text-sm font-medium text-ht-content-primary">Applications</p>
     </a>
-    <a href="/ui/admin/realms/{{ realm.name() }}/rbac/roles"
+    <a href="/ui/admin/realms/{{ realm.name() }}/identity-providers"
        class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
-      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-teal-bg text-teal-fg">
-        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-violet-bg text-violet-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
       </div>
-      <p class="text-sm font-medium text-ht-content-primary">Roles</p>
+      <p class="text-sm font-medium text-ht-content-primary">Identity Providers</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/sessions"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-steel-bg text-steel-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Sessions</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/webhooks"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-violet-bg text-violet-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Webhooks</p>
     </a>
     <a href="/ui/admin/realms/{{ realm.name() }}/audit"
        class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
@@ -335,6 +355,34 @@
         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
       </div>
       <p class="text-sm font-medium text-ht-content-primary">Audit log</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/rbac/permissions"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-teal-bg text-teal-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Permissions</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/rbac/roles"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-teal-bg text-teal-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Roles</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/rbac/scopes"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-brand-subtle text-ht-content-brand">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Scopes</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/rbac/debug"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-rose-bg text-rose-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Permission Check</p>
     </a>
   </div>
 </div>

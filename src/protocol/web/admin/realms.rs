@@ -136,7 +136,7 @@ pub async fn admin_realm_detail(
                 password_memory_cost_display,
                 admins,
                 chrome: true,
-                active: "realms",
+                active: "overview",
                 user_email: Some(session.user_email.clone()),
                 is_admin: true,
                 flash: None,
