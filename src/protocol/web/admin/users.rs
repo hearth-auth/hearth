@@ -1490,7 +1490,7 @@ pub async fn admin_sessions_list(
                 count_expired,
                 realm_query_suffix: String::new(),
                 chrome: true,
-                active: "users",
+                active: "sessions",
                 user_email: Some(session.user_email.clone()),
                 is_admin: true,
                 flash: None,

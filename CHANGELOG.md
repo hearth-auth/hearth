@@ -47,10 +47,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   also works as a navigation hub when the sidebar is collapsed or on mobile
   (HEA-629).
 - **Sidebar active-state highlights consistently** — Groups, Organizations,
-  Applications detail, Users detail, Identity Providers, and Webhooks pages
-  now keep the correct sidebar entry highlighted. Previously these handlers
-  passed `active: "realm-workspace"` as a placeholder, which no sidebar key
-  matched, leaving the realm expanded with nothing highlighted (HEA-629).
+  Applications detail, Users detail, Identity Providers, Webhooks, and the
+  realm Sessions list pages now keep the correct sidebar entry highlighted.
+  Previously most of these handlers passed `active: "realm-workspace"` as a
+  placeholder (which no sidebar key matched), and the Sessions list still
+  passed `active: "users"` (a legacy from when sessions were nested under
+  the user-detail page), so the wrong sub-item lit up (HEA-629).
 - **Identity Providers and Webhooks reachable from sidebar + overview** —
   added the two missing realm sub-pages to the sidebar's per-realm subtree
   and to the realm overview Quick access tiles. Both were previously
