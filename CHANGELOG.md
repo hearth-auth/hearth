@@ -16,6 +16,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **Audit log: clickable resource links** — the resource column in the
+  admin audit table now wraps the display name in an `<a>` tag pointing
+  to the affected user / organization / application / realm / group
+  detail page when the resource is still present. Deleted or
+  unresolvable resources continue to render as plain text so operators
+  don't navigate to a 404. Sessions link to the realm sessions list
+  (HEA-645).
 - **Self-hosted fonts** — Fraunces, Manrope, and JetBrains Mono `.woff2` files are
   now embedded in the binary and served from `'self'`. The `<link>` to
   `fonts.googleapis.com` has been removed; `@font-face` rules in `app.css` load

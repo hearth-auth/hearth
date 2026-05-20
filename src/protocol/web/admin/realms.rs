@@ -259,14 +259,22 @@ pub struct AuditRow {
     /// short id (first 8 hex chars) when the resource cannot be resolved
     /// (deleted, cross-realm, unknown type).
     pub resource_display: String,
+    /// Admin URL pointing to the resource's detail page. `Some` only when
+    /// the resource was successfully resolved against the identity / RBAC
+    /// engine — deleted or unresolvable resources still render the display
+    /// name but without a link, so operators don't navigate to a 404.
+    pub resource_url: Option<String>,
     /// Pretty-printed JSON representation of `event.metadata` for display.
     /// Empty string when there is no metadata.
     pub metadata_json: String,
-    /// Compact pills for the metadata column — at most 2 entries from the
-    /// metadata object rendered as `key: value` chips. The third element is
-    /// the count of remaining keys not shown inline (0 when all fit).
+    /// Compact pills for the metadata column — up to 3 entries from the
+    /// metadata object rendered as `key: value` chips. Action-specific
+    /// priority keys (e.g. `ip` for `SessionCreated`, `client_id`+`scopes`
+    /// for `ClientConsentGranted`) are always rendered first so the
+    /// overflow chip never hides operationally important context.
     pub metadata_pills: Vec<(String, String)>,
     /// Number of metadata keys hidden behind "+N more" overflow indicator.
+    /// Only non-priority keys ever land in this overflow bucket.
     pub metadata_extra: usize,
     /// The `integrity_hash` of the preceding event in the chain, or empty
     /// string for the genesis event. Derived from the ordered query result.
@@ -278,39 +286,85 @@ pub struct AuditRow {
     pub chain_valid: Option<bool>,
 }
 
-/// Extracts at most 2 key-value pill entries from a metadata JSON object.
+/// Extracts up to 3 key-value pill entries from a metadata JSON object,
+/// preferring the keys most informative for the given [`crate::audit::AuditAction`].
 ///
 /// Returns `(pills, extra)` where `pills` contains `(key, truncated_value)`
-/// pairs (max 2) and `extra` is the count of remaining keys not shown inline.
+/// pairs (max 3) and `extra` is the count of remaining keys not shown inline.
 /// Non-object metadata yields an empty pill list.
-fn build_metadata_pills(metadata: Option<&serde_json::Value>) -> (Vec<(String, String)>, usize) {
+///
+/// Priority keys for an action are always rendered first when present, so
+/// the `+N more` overflow chip never hides a priority key. Remaining slots
+/// fill in `serde_json::Map` iteration order (alphabetic) for stable output.
+fn build_metadata_pills(
+    action: &crate::audit::AuditAction,
+    metadata: Option<&serde_json::Value>,
+) -> (Vec<(String, String)>, usize) {
+    use crate::audit::AuditAction as A;
+    const LIMIT: usize = 3;
+
     let obj = match metadata.and_then(|v| v.as_object()) {
         Some(o) => o,
         None => return (Vec::new(), 0),
     };
-    let mut pills = Vec::new();
-    for (k, v) in obj.iter().take(2) {
-        let val = match v {
-            serde_json::Value::String(s) => {
-                if s.len() > 24 {
-                    format!("{}…", &s[..24])
-                } else {
-                    s.clone()
-                }
-            }
-            other => {
-                let s = other.to_string();
-                if s.len() > 20 {
-                    format!("{}…", &s[..20])
-                } else {
-                    s
-                }
-            }
-        };
-        pills.push((k.clone(), val));
+
+    // Action-specific priority keys. Per HEA-646, surface the most
+    // operationally useful metadata (IP for sessions, client_id+scopes
+    // for consent, etc.) instead of the first-N-alphabetic default.
+    let priority: &[&str] = match action {
+        A::SessionCreated => &["ip", "user_agent"],
+        A::ClientConsentGranted | A::ClientConsentRevoked => &["client_id", "scopes"],
+        A::CredentialChanged => &["method"],
+        A::FederationLoginCompleted => &["provider", "external_id"],
+        _ => &[],
+    };
+
+    let mut pills: Vec<(String, String)> = Vec::with_capacity(LIMIT);
+    let mut used: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for &key in priority {
+        if pills.len() == LIMIT {
+            break;
+        }
+        if let Some(v) = obj.get(key) {
+            pills.push((key.to_string(), truncate_pill_value(v)));
+            used.insert(key);
+        }
     }
-    let extra = obj.len().saturating_sub(2);
+    for (k, v) in obj.iter() {
+        if pills.len() == LIMIT {
+            break;
+        }
+        if used.contains(k.as_str()) {
+            continue;
+        }
+        pills.push((k.clone(), truncate_pill_value(v)));
+    }
+
+    let extra = obj.len().saturating_sub(pills.len());
     (pills, extra)
+}
+
+/// Truncates a metadata value for inline pill rendering — strings cap at
+/// 24 chars, other types stringify and cap at 20 chars.
+fn truncate_pill_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => {
+            if s.len() > 24 {
+                format!("{}…", &s[..24])
+            } else {
+                s.clone()
+            }
+        }
+        other => {
+            let s = other.to_string();
+            if s.len() > 20 {
+                format!("{}…", &s[..20])
+            } else {
+                s
+            }
+        }
+    }
 }
 
 /// Resolves an audit-event actor string (typically a user UUID) to a
@@ -363,28 +417,42 @@ fn resolve_audit_actor(
     resolved
 }
 
-/// Resolves an audit-event resource (`type`, `id`) to a display name.
-/// Hits the identity engine on misses; cached per request to avoid
-/// quadratic lookups on tightly-clustered events.
+/// Resolves an audit-event resource (`type`, `id`) to a display name plus
+/// an optional admin-UI deep link. Hits the identity / RBAC engine on
+/// misses; cached per request to avoid quadratic lookups on tightly-
+/// clustered events.
+///
+/// The URL is `Some` only when the resource was successfully resolved —
+/// deleted, cross-realm, or unknown-type rows still get a display string
+/// (short-id fallback) but no link, so operators don't click into a 404.
+/// `realm_name` is the URL slug for the realm under which the audit row
+/// is being rendered; it forms the `{realm}` segment of admin links.
 fn resolve_audit_resource(
     state: &Arc<WebState>,
     realm_id: &RealmId,
+    realm_name: &str,
     resource_type: &str,
     resource_id: &str,
-    cache: &mut std::collections::HashMap<(String, String), String>,
-) -> String {
+    cache: &mut std::collections::HashMap<(String, String), (String, Option<String>)>,
+) -> (String, Option<String>) {
     let key = (resource_type.to_string(), resource_id.to_string());
     if let Some(hit) = cache.get(&key) {
         return hit.clone();
     }
-    let resolved = match resource_type {
+    let resolved: Option<(String, Option<String>)> = match resource_type {
         "user" => uuid::Uuid::parse_str(resource_id).ok().and_then(|u| {
             state
                 .identity
                 .get_user(realm_id, &crate::core::UserId::new(u))
                 .ok()
                 .flatten()
-                .map(|user| user.email().to_string())
+                .map(|user| {
+                    let url = format!(
+                        "/ui/admin/realms/{realm_name}/users/{}",
+                        user.id().as_uuid()
+                    );
+                    (user.email().to_string(), Some(url))
+                })
         }),
         "realm" => uuid::Uuid::parse_str(resource_id).ok().and_then(|u| {
             state
@@ -392,7 +460,13 @@ fn resolve_audit_resource(
                 .get_realm(&RealmId::new(u))
                 .ok()
                 .flatten()
-                .map(|r| r.name().to_string())
+                .map(|r| {
+                    // Admin realm routes are keyed by the realm slug, not
+                    // the UUID — addressable URL = `/ui/admin/realms/{name}`.
+                    let name = r.name().to_string();
+                    let url = format!("/ui/admin/realms/{name}");
+                    (name, Some(url))
+                })
         }),
         "organization" => uuid::Uuid::parse_str(resource_id).ok().and_then(|u| {
             state
@@ -400,17 +474,58 @@ fn resolve_audit_resource(
                 .get_organization(realm_id, &crate::core::OrganizationId::new(u))
                 .ok()
                 .flatten()
-                .map(|o| o.name().to_string())
+                .map(|o| {
+                    let url = format!(
+                        "/ui/admin/realms/{realm_name}/organizations/{}",
+                        o.id().as_uuid()
+                    );
+                    (o.name().to_string(), Some(url))
+                })
         }),
+        // Audit code writes "client" today; "application" reserved for the
+        // UI-facing rename so future events under either tag still link.
+        "client" | "application" => uuid::Uuid::parse_str(resource_id).ok().and_then(|u| {
+            state
+                .identity
+                .get_client(realm_id, &crate::core::ClientId::new(u))
+                .ok()
+                .flatten()
+                .map(|c| {
+                    let url = format!(
+                        "/ui/admin/realms/{realm_name}/applications/{}",
+                        c.client_id().as_uuid()
+                    );
+                    (c.client_name().to_string(), Some(url))
+                })
+        }),
+        "group" => uuid::Uuid::parse_str(resource_id).ok().and_then(|u| {
+            state
+                .rbac
+                .get_group(realm_id, &crate::rbac::GroupId::new(u))
+                .ok()
+                .flatten()
+                .map(|g| {
+                    let url = format!("/ui/admin/realms/{realm_name}/groups/{}", g.id.as_uuid());
+                    (g.name, Some(url))
+                })
+        }),
+        // Sessions don't have a per-id detail page — link to the list view
+        // so operators can still pivot from an audit row into session admin.
+        // No presence check needed: the URL doesn't embed the resource id.
+        "session" => {
+            let short = resource_id.get(..8).unwrap_or(resource_id);
+            let url = format!("/ui/admin/realms/{realm_name}/sessions");
+            Some((format!("{short}…"), Some(url)))
+        }
         _ => None,
     };
-    let display = resolved.unwrap_or_else(|| {
+    let entry = resolved.unwrap_or_else(|| {
         // Fallback: show short id so the row stays compact and scannable.
         let short = resource_id.get(..8).unwrap_or(resource_id);
-        format!("{short}…")
+        (format!("{short}…"), None)
     });
-    cache.insert(key, display.clone());
-    display
+    cache.insert(key, entry.clone());
+    entry
 }
 
 /// Query params for the UI audit page.
@@ -546,17 +661,21 @@ pub async fn admin_audit_list(
             // touches one user repeatedly (the typical pattern).
             let mut actor_cache: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
-            let mut resource_cache: std::collections::HashMap<(String, String), String> =
-                std::collections::HashMap::new();
+            let mut resource_cache: std::collections::HashMap<
+                (String, String),
+                (String, Option<String>),
+            > = std::collections::HashMap::new();
             let mut prev_hash = String::new();
+            let realm_name = target.0.name().to_string();
             let rows: Vec<AuditRow> = events
                 .into_iter()
                 .map(|e| {
                     let actor_display =
                         resolve_audit_actor(&state, target.id(), &e.actor, &mut actor_cache);
-                    let resource_display = resolve_audit_resource(
+                    let (resource_display, resource_url) = resolve_audit_resource(
                         &state,
                         target.id(),
+                        &realm_name,
                         &e.resource_type,
                         &e.resource_id,
                         &mut resource_cache,
@@ -567,13 +686,14 @@ pub async fn admin_audit_list(
                         .and_then(|m| serde_json::to_string_pretty(m).ok())
                         .unwrap_or_default();
                     let (metadata_pills, metadata_extra) =
-                        build_metadata_pills(e.metadata.as_ref());
+                        build_metadata_pills(&e.action, e.metadata.as_ref());
                     let hash = e.integrity_hash.clone();
                     let previous_hash = std::mem::replace(&mut prev_hash, hash.clone());
                     AuditRow {
                         timestamp_display: format_ts(e.timestamp),
                         actor_display,
                         resource_display,
+                        resource_url,
                         metadata_json,
                         metadata_pills,
                         metadata_extra,
@@ -1879,4 +1999,133 @@ pub async fn admin_realm_admin_revoke(
         "admin",
     );
     Redirect::to(&format!("/ui/admin/realms/{}", target.0.name())).into_response()
+}
+
+#[cfg(test)]
+mod metadata_pill_tests {
+    use super::build_metadata_pills;
+    use crate::audit::AuditAction;
+    use serde_json::json;
+
+    fn keys(pills: &[(String, String)]) -> Vec<&str> {
+        pills.iter().map(|(k, _)| k.as_str()).collect()
+    }
+
+    #[test]
+    fn session_created_surfaces_ip_inline() {
+        // Alphabetically `auth_method` < `ip` < `user_agent` — the old
+        // first-N-alphabetic strategy would hide `ip` behind "+N". The
+        // priority list for `SessionCreated` must lift it back inline.
+        let meta = json!({
+            "auth_method": "password",
+            "ip": "203.0.113.4",
+            "user_agent": "Mozilla/5.0",
+            "session_id": "sess_abc",
+        });
+        let (pills, extra) = build_metadata_pills(&AuditAction::SessionCreated, Some(&meta));
+        let k = keys(&pills);
+        assert_eq!(k[0], "ip");
+        assert_eq!(k[1], "user_agent");
+        assert_eq!(pills.len(), 3);
+        assert_eq!(extra, 1);
+        assert!(k[2] == "auth_method" || k[2] == "session_id");
+    }
+
+    #[test]
+    fn consent_granted_surfaces_client_and_scopes() {
+        let meta = json!({
+            "actor": "self",
+            "client_id": "web-app",
+            "scopes": "openid email profile",
+            "tenant": "acme",
+        });
+        let (pills, extra) =
+            build_metadata_pills(&AuditAction::ClientConsentGranted, Some(&meta));
+        let k = keys(&pills);
+        assert_eq!(k[0], "client_id");
+        assert_eq!(k[1], "scopes");
+        assert_eq!(pills.len(), 3);
+        assert_eq!(extra, 1);
+    }
+
+    #[test]
+    fn consent_revoked_uses_same_priority_as_granted() {
+        let meta = json!({"client_id": "cli", "scopes": "openid", "by": "admin"});
+        let (pills, _) =
+            build_metadata_pills(&AuditAction::ClientConsentRevoked, Some(&meta));
+        let k = keys(&pills);
+        assert_eq!(&k[..2], &["client_id", "scopes"]);
+    }
+
+    #[test]
+    fn credential_changed_lifts_method_first() {
+        let meta = json!({"actor": "admin", "method": "password_reset"});
+        let (pills, extra) =
+            build_metadata_pills(&AuditAction::CredentialChanged, Some(&meta));
+        assert_eq!(keys(&pills)[0], "method");
+        assert_eq!(extra, 0);
+    }
+
+    #[test]
+    fn federation_login_completed_lifts_provider_and_external_id() {
+        let meta = json!({
+            "mode": "jit",
+            "provider": "google",
+            "external_id": "1109283749",
+            "email": "ada@example.com",
+        });
+        let (pills, _) =
+            build_metadata_pills(&AuditAction::FederationLoginCompleted, Some(&meta));
+        let k = keys(&pills);
+        assert_eq!(k[0], "provider");
+        assert_eq!(k[1], "external_id");
+    }
+
+    #[test]
+    fn default_falls_back_to_alphabetic_first_three() {
+        let meta = json!({"zebra": 1, "apple": 2, "mango": 3, "kiwi": 4});
+        let (pills, extra) = build_metadata_pills(&AuditAction::UserCreated, Some(&meta));
+        assert_eq!(keys(&pills), vec!["apple", "kiwi", "mango"]);
+        assert_eq!(extra, 1);
+    }
+
+    #[test]
+    fn missing_priority_keys_fall_through_to_defaults() {
+        // `SessionCreated` without `ip`/`user_agent` should still surface
+        // whatever metadata exists rather than rendering empty pills.
+        let meta = json!({"trust": "high", "channel": "browser"});
+        let (pills, extra) = build_metadata_pills(&AuditAction::SessionCreated, Some(&meta));
+        assert_eq!(pills.len(), 2);
+        assert_eq!(extra, 0);
+        let k = keys(&pills);
+        assert!(k.contains(&"trust") && k.contains(&"channel"));
+    }
+
+    #[test]
+    fn non_object_metadata_returns_empty() {
+        let meta = json!("scalar string");
+        let (pills, extra) = build_metadata_pills(&AuditAction::SessionCreated, Some(&meta));
+        assert!(pills.is_empty());
+        assert_eq!(extra, 0);
+    }
+
+    #[test]
+    fn none_metadata_returns_empty() {
+        let (pills, extra) = build_metadata_pills(&AuditAction::UserCreated, None);
+        assert!(pills.is_empty());
+        assert_eq!(extra, 0);
+    }
+
+    #[test]
+    fn priority_key_value_is_truncated() {
+        let long_ua = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
+        let meta = json!({"ip": "10.0.0.1", "user_agent": long_ua});
+        let (pills, _) = build_metadata_pills(&AuditAction::SessionCreated, Some(&meta));
+        let ua = pills
+            .iter()
+            .find(|(k, _)| k == "user_agent")
+            .map(|(_, v)| v.as_str())
+            .expect("user_agent pill present");
+        assert!(ua.ends_with('…'), "long values must be truncated: {ua}");
+    }
 }
