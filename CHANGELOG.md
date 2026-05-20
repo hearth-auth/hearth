@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Backup passphrase encryption** — `encrypt_archive`/`decrypt_archive` in `src/backup/encryption.rs`
+  wrap an entire `.hearth-backup` archive in an AES-256-GCM envelope keyed with Argon2id
+  (m=65536, t=3, p=4). The binary envelope prepends a `HEARTH-BAK-ENC` magic header, the KDF
+  parameters, a random 16-byte salt, and a random 12-byte nonce before the authenticated
+  ciphertext. Passphrases are held in `SecretString` (zeroize-on-drop); the derived key is zeroized
+  immediately after the AES context consumes it (HEA-621).
+
 - **Backup CLI** — four subcommands under `hearth backup` for offline archive management (HEA-622):
   - `hearth backup create [--output <path>] [--realm <slug>] [--include-audit] [--encrypt] [--data-dir <dir>]` — exports all (or a single filtered) realm to a `.hearth-backup` archive. `--encrypt` prompts interactively for a passphrase and wraps the signing-key DEK with Argon2id + AES-256-GCM so the signing keys cannot be decrypted without the passphrase.
   - `hearth backup restore --input <path> [--realm <slug>] [--mode skip|overwrite|merge] [--dry-run] [--data-dir <dir>]` — restores realms from an archive; exit 0 (success), 1 (partial/conflicts), 2 (fatal).
