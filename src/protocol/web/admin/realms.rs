@@ -283,9 +283,7 @@ pub struct AuditRow {
 /// Returns `(pills, extra)` where `pills` contains `(key, truncated_value)`
 /// pairs (max 2) and `extra` is the count of remaining keys not shown inline.
 /// Non-object metadata yields an empty pill list.
-fn build_metadata_pills(
-    metadata: Option<&serde_json::Value>,
-) -> (Vec<(String, String)>, usize) {
+fn build_metadata_pills(metadata: Option<&serde_json::Value>) -> (Vec<(String, String)>, usize) {
     let obj = match metadata.and_then(|v| v.as_object()) {
         Some(o) => o,
         None => return (Vec::new(), 0),
@@ -302,7 +300,11 @@ fn build_metadata_pills(
             }
             other => {
                 let s = other.to_string();
-                if s.len() > 20 { format!("{}…", &s[..20]) } else { s }
+                if s.len() > 20 {
+                    format!("{}…", &s[..20])
+                } else {
+                    s
+                }
             }
         };
         pills.push((k.clone(), val));
