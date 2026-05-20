@@ -43,11 +43,13 @@
 //! println!("{} realms", reader.realms().len());
 //! ```
 
+mod encryption;
 mod error;
 mod export;
 mod import;
 mod types;
 
+pub use encryption::{decrypt_archive, encrypt_archive};
 pub use error::BackupError;
 pub use export::{decrypt_bytes, BackupExporter, ExportOptions};
 pub use import::{BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode};

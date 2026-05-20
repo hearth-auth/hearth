@@ -95,6 +95,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tar = "0.4"
 zstd = "0.13"
 rpassword = "7"
+secrecy = { version = "0.8", features = ["alloc"] }
 
 [features]
 # Exposes internal test probes for use by the simulation crate. Never enable in production.
