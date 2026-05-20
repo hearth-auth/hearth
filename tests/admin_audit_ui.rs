@@ -227,7 +227,7 @@ async fn audit_list_renders_200() {
 // Audit export — JSON
 // ---------------------------------------------------------------------------
 
-/// `GET /ui/admin/realms/{realm}/audit/export` returns JSON array.
+/// `GET /ui/admin/realms/{realm}/audit/export` returns NDJSON (one object per line).
 #[tokio::test]
 async fn audit_export_json() {
     let rig = build_rig();
@@ -254,12 +254,17 @@ async fn audit_export_json() {
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert!(ct.contains("application/json"), "should be JSON");
+    assert!(ct.contains("application/x-ndjson"), "should be NDJSON");
     let body = to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("test invariant");
-    let events: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
-    assert!(events.is_array(), "should be a JSON array");
+    let text = std::str::from_utf8(&body).expect("UTF-8 body");
+    // Each non-empty line must be a valid JSON object.
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let obj: serde_json::Value =
+            serde_json::from_str(line).expect("each line must be valid JSON");
+        assert!(obj.is_object(), "each NDJSON line must be a JSON object");
+    }
 }
 
 // ---------------------------------------------------------------------------

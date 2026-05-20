@@ -81,7 +81,9 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         | domain::AuditAction::GroupMemberRoleChanged
         | domain::AuditAction::LoginFailed
         | domain::AuditAction::LoginLocked
-        | domain::AuditAction::IpLoginLimitExceeded => pb::AuditAction::Unspecified,
+        | domain::AuditAction::IpLoginLimitExceeded
+        | domain::AuditAction::BackupCreated
+        | domain::AuditAction::BackupRestored => pb::AuditAction::Unspecified,
     }
 }
 

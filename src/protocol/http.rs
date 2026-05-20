@@ -483,6 +483,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/webhooks/{id}/deliveries",
             axum::routing::get(admin_list_webhook_deliveries),
+        )
+        .route("/backup", axum::routing::post(admin_backup_create))
+        .route(
+            "/backup/restore",
+            axum::routing::post(admin_backup_restore).route_layer(DefaultBodyLimit::disable()),
         );
 
     Router::new()
@@ -2295,6 +2300,9 @@ struct PaginationParams {
     username: Option<String>,
     /// Status filter: accepts `"active"`, `"disabled"`, or `"pending_verification"`.
     status: Option<String>,
+    /// Attribute filter in `key:value` form. Matches users whose custom attributes
+    /// contain an entry where `attributes[key] == value` (exact, case-sensitive).
+    attr: Option<String>,
 }
 
 impl PaginationParams {
@@ -2344,8 +2352,10 @@ async fn admin_list_users(
         };
     }
 
-    let has_field_filters =
-        params.email.is_some() || params.username.is_some() || params.status.is_some();
+    let has_field_filters = params.email.is_some()
+        || params.username.is_some()
+        || params.status.is_some()
+        || params.attr.is_some();
 
     if has_field_filters {
         // Parse the status filter value if provided.
@@ -2381,6 +2391,23 @@ async fn admin_list_users(
         let email_norm = params.email.as_deref().map(|e| e.to_lowercase());
         let username_lower = params.username.as_deref().map(|u| u.to_lowercase());
 
+        // Parse `?attr=key:value` — split on the first colon only so values may
+        // contain colons (e.g. ISO timestamps or URLs).
+        let attr_filter: Option<(String, String)> = params.attr.as_deref().and_then(|s| {
+            let (k, v) = s.split_once(':')?;
+            Some((k.to_owned(), v.to_owned()))
+        });
+
+        if params.attr.is_some() && attr_filter.is_none() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid attr filter; expected key:value format"
+                })),
+            )
+                .into_response();
+        }
+
         let items: Vec<serde_json::Value> = all_users
             .iter()
             .filter(|u| {
@@ -2396,6 +2423,11 @@ async fn admin_list_users(
                 }
                 if let Some(sf) = status_filter {
                     if u.status() != sf {
+                        return false;
+                    }
+                }
+                if let Some((ref ak, ref av)) = attr_filter {
+                    if u.attributes().get(ak.as_str()).map(String::as_str) != Some(av.as_str()) {
                         return false;
                     }
                 }
@@ -5991,6 +6023,417 @@ fn parse_webhook_id(s: &str) -> Result<WebhookId, (StatusCode, Json<serde_json::
                 Json(serde_json::json!({"error": "invalid webhook id"})),
             )
         })
+}
+
+// === Backup / Restore (admin) ===
+
+/// Query parameters for `POST /admin/backup`.
+#[derive(Debug, Deserialize)]
+struct BackupCreateParams {
+    /// Optional realm slug to restrict the export to a single realm.
+    realm: Option<String>,
+    /// Include audit events in the archive (default: false).
+    #[serde(default)]
+    include_audit: bool,
+}
+
+/// Query parameters for `POST /admin/backup/restore`.
+#[derive(Debug, Deserialize)]
+struct BackupRestoreParams {
+    /// Conflict resolution strategy: `skip` (default), `overwrite`, or `merge`.
+    mode: Option<String>,
+    /// Restore only the named realm from the archive.
+    realm: Option<String>,
+    /// Parse and validate without writing anything.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `POST /admin/backup` — export a backup archive and stream it as a download.
+///
+/// Optional query params:
+/// - `realm=<slug>` — restrict to a single realm
+/// - `include_audit=true` — include audit events
+///
+/// Response: `application/octet-stream` with `Content-Disposition: attachment`.
+/// No passphrase encryption — TLS provides transport security; encryption is
+/// CLI-only (`--encrypt` flag on `hearth backup create`).
+async fn admin_backup_create(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BackupCreateParams>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+
+    let identity = Arc::clone(&state.identity);
+    let audit_engine = Arc::clone(&state.audit);
+    let rbac = Arc::clone(&state.rbac);
+    let realm_filter_slug = params.realm.clone();
+    let include_audit = params.include_audit;
+    let auth_realm_id = auth.realm_id.clone();
+    let actor = auth.user_id.as_uuid().to_string();
+
+    let result = tokio::task::spawn_blocking(move || {
+        use crate::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
+        use base64::Engine as _;
+
+        // Resolve optional realm slug to a RealmId.
+        let filter_id: Option<crate::core::RealmId> = if let Some(slug) = &realm_filter_slug {
+            let mut found = None;
+            let mut cursor = None;
+            loop {
+                let page = identity
+                    .list_realms(cursor.as_deref(), 200)
+                    .map_err(|e| format!("list_realms: {e}"))?;
+                for realm in &page.items {
+                    if realm.name() == slug {
+                        found = Some(realm.id().clone());
+                        break;
+                    }
+                }
+                if found.is_some() || page.next_cursor.is_none() {
+                    break;
+                }
+                cursor = page.next_cursor;
+            }
+            Some(found.ok_or_else(|| format!("realm '{slug}' not found"))?)
+        } else {
+            None
+        };
+
+        // Write the archive to a temporary file; read it back as bytes.
+        let tmp = tempfile::NamedTempFile::new().map_err(|e| format!("tempfile: {e}"))?;
+        let tmp_path = tmp.path().to_path_buf();
+
+        let exporter = BackupExporter::new(
+            Arc::clone(&identity),
+            Arc::clone(&audit_engine),
+            Arc::clone(&rbac),
+        );
+        let dek = BackupExporter::generate_dek().map_err(|e| format!("generate_dek: {e}"))?;
+        let opts = ExportOptions {
+            include_audit,
+            realm_filter: filter_id.as_ref().map(|id| vec![id.clone()]),
+        };
+
+        let realms_to_export: Vec<crate::core::RealmId> = if let Some(id) = filter_id {
+            vec![id]
+        } else {
+            let mut ids = Vec::new();
+            let mut cursor = None;
+            loop {
+                let page = identity
+                    .list_realms(cursor.as_deref(), 200)
+                    .map_err(|e| format!("list_realms: {e}"))?;
+                for realm in &page.items {
+                    ids.push(realm.id().clone());
+                }
+                if page.next_cursor.is_none() {
+                    break;
+                }
+                cursor = page.next_cursor;
+            }
+            ids
+        };
+
+        let mut writer =
+            BackupArchive::create(&tmp_path).map_err(|e| format!("create archive: {e}"))?;
+        let mut realm_manifests = Vec::new();
+        for realm_id in &realms_to_export {
+            let rm = exporter
+                .export_realm(realm_id, &mut writer, &opts, &dek)
+                .map_err(|e| format!("export_realm: {e}"))?;
+            realm_manifests.push(rm);
+        }
+
+        // No passphrase wrapping for the HTTP endpoint.
+        let mut manifest = BackupManifest::new(realm_manifests);
+        manifest.signing_key_dek_b64 = Some(base64::engine::general_purpose::STANDARD.encode(dek));
+
+        writer
+            .finish(manifest)
+            .map_err(|e| format!("finish archive: {e}"))?;
+
+        let bytes = std::fs::read(&tmp_path).map_err(|e| format!("read archive: {e}"))?;
+        Ok::<Vec<u8>, String>(bytes)
+    })
+    .await;
+
+    match result {
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("backup task panicked: {e}")})),
+        )
+            .into_response(),
+        Ok(Err(msg)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response(),
+        Ok(Ok(bytes)) => {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let filename = format!("hearth-backup-{ts}.hearth-backup");
+
+            let _ = state.audit.append(&CreateAuditEvent {
+                realm_id: auth_realm_id,
+                actor,
+                action: crate::audit::AuditAction::BackupCreated,
+                resource_type: "backup".to_string(),
+                resource_id: filename.clone(),
+                metadata: params.realm.map(|s| serde_json::json!({"realm_slug": s})),
+            });
+
+            axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+                .header(
+                    axum::http::header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{filename}\""),
+                )
+                .body(axum::body::Body::from(bytes))
+                .unwrap_or_else(|_| {
+                    axum::http::Response::new(axum::body::Body::from(
+                        b"internal error building response" as &[u8],
+                    ))
+                })
+        }
+    }
+}
+
+/// `POST /admin/backup/restore` — restore from a `.hearth-backup` archive.
+///
+/// Body: `multipart/form-data`, field `file` = `.hearth-backup` archive.
+///
+/// Optional query params:
+/// - `mode=skip|overwrite|merge` (default: `skip`)
+/// - `realm=<slug>` — restore only the named realm from the archive
+/// - `dry_run=true` — validate without writing
+///
+/// Response: JSON `ImportReport` with per-realm counts and any conflicts.
+async fn admin_backup_restore(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<BackupRestoreParams>,
+    mut multipart: axum::extract::Multipart,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+
+    let mode_str = params.mode.as_deref().unwrap_or("skip").to_string();
+    let realm_filter = params.realm.clone();
+    let dry_run = params.dry_run;
+
+    // Stream the `file` multipart field to a tempfile to avoid holding the
+    // entire archive in memory while parsing.
+    let tmp = match tempfile::NamedTempFile::new() {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("tempfile: {e}")})),
+            )
+                .into_response()
+        }
+    };
+    let tmp_path = tmp.path().to_path_buf();
+
+    let mut file_found = false;
+    'fields: while let Ok(Some(field)) = multipart.next_field().await {
+        if field.name().unwrap_or("") != "file" {
+            continue;
+        }
+        file_found = true;
+
+        use tokio::io::AsyncWriteExt as _;
+        let mut async_tmp = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp_path)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("open tempfile: {e}")})),
+                )
+                    .into_response()
+            }
+        };
+
+        // Chunk the field into the tempfile.
+        let mut field = field;
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    if let Err(e) = async_tmp.write_all(&chunk).await {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": format!("write tempfile: {e}")})),
+                        )
+                            .into_response();
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("read upload: {e}")})),
+                    )
+                        .into_response();
+                }
+            }
+        }
+
+        if let Err(e) = async_tmp.flush().await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("flush tempfile: {e}")})),
+            )
+                .into_response();
+        }
+
+        break 'fields;
+    }
+
+    if !file_found {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing 'file' field in multipart body"})),
+        )
+            .into_response();
+    }
+
+    let identity = Arc::clone(&state.identity);
+    let rbac = Arc::clone(&state.rbac);
+
+    let result = tokio::task::spawn_blocking(move || {
+        use crate::backup::{
+            BackupArchive, BackupImporter, ImportOptions, ImportReport, RestoreMode,
+        };
+
+        let mode = match mode_str.as_str() {
+            "overwrite" => RestoreMode::Overwrite,
+            "merge" => RestoreMode::Merge,
+            "skip" | "" => RestoreMode::Skip,
+            other => {
+                return Err(format!(
+                    "unknown mode '{other}'; expected skip | overwrite | merge"
+                ))
+            }
+        };
+
+        let reader = BackupArchive::open(&tmp_path).map_err(|e| format!("open archive: {e}"))?;
+
+        let importer = BackupImporter::new(identity, rbac);
+        let opts = ImportOptions {
+            mode,
+            dry_run,
+            realm_target: None,
+        };
+
+        let slugs: Vec<String> = if let Some(slug) = &realm_filter {
+            if reader.realms().iter().any(|r| &r.slug == slug) {
+                vec![slug.clone()]
+            } else {
+                return Err(format!("realm '{slug}' not found in archive"));
+            }
+        } else {
+            reader.realms().iter().map(|r| r.slug.clone()).collect()
+        };
+
+        let mut reports: std::collections::HashMap<String, ImportReport> =
+            std::collections::HashMap::new();
+        for slug in &slugs {
+            let report = importer
+                .import_realm(slug, &reader, &opts)
+                .map_err(|e| format!("import_realm '{slug}': {e}"))?;
+            reports.insert(slug.clone(), report);
+        }
+
+        Ok::<_, String>(reports)
+    })
+    .await;
+
+    match result {
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("restore task panicked: {e}")})),
+        )
+            .into_response(),
+        Ok(Err(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response(),
+        Ok(Ok(reports)) => {
+            let mut realms_restored = 0u64;
+            let mut counts = serde_json::Map::new();
+            let mut errors: Vec<serde_json::Value> = Vec::new();
+
+            for (slug, report) in &reports {
+                if report.realms.created > 0 || report.realms.overwritten > 0 {
+                    realms_restored += 1;
+                }
+                counts.insert(
+                    slug.clone(),
+                    serde_json::json!({
+                        "users": {
+                            "created": report.users.created,
+                            "skipped": report.users.skipped,
+                            "overwritten": report.users.overwritten,
+                            "errored": report.users.errored,
+                        },
+                        "clients": {
+                            "created": report.clients.created,
+                            "skipped": report.clients.skipped,
+                            "overwritten": report.clients.overwritten,
+                            "errored": report.clients.errored,
+                        },
+                    }),
+                );
+                for conflict in &report.conflicts {
+                    errors.push(serde_json::json!({
+                        "realm": slug,
+                        "entity_type": conflict.entity_type,
+                        "identifier": conflict.identifier,
+                        "reason": conflict.reason,
+                    }));
+                }
+            }
+
+            let restored_slugs: Vec<String> = reports.keys().cloned().collect();
+            let _ = state.audit.append(&CreateAuditEvent {
+                realm_id: auth.realm_id,
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::BackupRestored,
+                resource_type: "backup".to_string(),
+                resource_id: "restore".to_string(),
+                metadata: Some(serde_json::json!({
+                    "dry_run": dry_run,
+                    "realms": restored_slugs.join(","),
+                })),
+            });
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "realms_restored": realms_restored,
+                    "counts": counts,
+                    "errors": errors,
+                    "dry_run": dry_run,
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 // === RP-Initiated Logout (OIDC RPL §2 + OIDC BCL §2.5) ===

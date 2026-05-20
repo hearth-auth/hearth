@@ -1057,6 +1057,17 @@ pub struct CreateInvitationRequest {
 
 // ===== Migration / import request types (Phase 1 Step 30) =====
 
+/// A credential record exported from a realm for backup purposes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CredentialExport {
+    /// The user this credential belongs to.
+    pub user_id: UserId,
+    /// PHC-formatted hash string (e.g. `$argon2id$...`).
+    pub phc_string: String,
+    /// Creation timestamp in Unix microseconds.
+    pub created_at_micros: i64,
+}
+
 /// A pre-hashed credential to attach to an imported user.
 ///
 /// Unlike `CreateUserRequest` + `set_password`, imports preserve the

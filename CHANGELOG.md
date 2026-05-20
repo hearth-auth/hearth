@@ -9,6 +9,60 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Persistent dev storage** — `make dev` now uses `./data/dev` as the data directory so
+  storage survives restarts. `make dev-reset` wipes `./data/dev` for a clean slate.
+  The underlying `HEARTH_DEV_DATA_DIR` env var can override the path when invoking the
+  binary directly (HEA-626).
+
+- **Backup HTTP admin endpoints** — two new admin API endpoints for backup and restore without SSH
+  access (HEA-623):
+  - `POST /admin/backup` — creates a `.hearth-backup` archive and streams it as an
+    `application/octet-stream` download. Optional query params: `realm=<slug>` (restrict to one
+    realm), `include_audit=true` (embed audit events). No passphrase encryption — TLS provides
+    transport security. Emits a `backup_created` audit event.
+  - `POST /admin/backup/restore` — accepts a `multipart/form-data` upload with a `file` field
+    containing a `.hearth-backup` archive. The archive is streamed to a tempfile before parsing to
+    avoid memory pressure. Query params: `mode=skip|overwrite|merge` (default: `skip`),
+    `realm=<slug>`, `dry_run=true`. Returns JSON with `realms_restored`, per-realm `counts`, and any
+    `errors`. Emits a `backup_restored` audit event. Body size limit is disabled for this endpoint.
+
+- **Backup passphrase encryption** — `encrypt_archive`/`decrypt_archive` in `src/backup/encryption.rs`
+  wrap an entire `.hearth-backup` archive in an AES-256-GCM envelope keyed with Argon2id
+  (m=65536, t=3, p=4). The binary envelope prepends a `HEARTH-BAK-ENC` magic header, the KDF
+  parameters, a random 16-byte salt, and a random 12-byte nonce before the authenticated
+  ciphertext. Passphrases are held in `SecretString` (zeroize-on-drop); the derived key is zeroized
+  immediately after the AES context consumes it (HEA-621).
+
+- **Backup CLI** — four subcommands under `hearth backup` for offline archive management (HEA-622):
+  - `hearth backup create [--output <path>] [--realm <slug>] [--include-audit] [--encrypt] [--data-dir <dir>]` — exports all (or a single filtered) realm to a `.hearth-backup` archive. `--encrypt` prompts interactively for a passphrase and wraps the signing-key DEK with Argon2id + AES-256-GCM so the signing keys cannot be decrypted without the passphrase.
+  - `hearth backup restore --input <path> [--realm <slug>] [--mode skip|overwrite|merge] [--dry-run] [--data-dir <dir>]` — restores realms from an archive; exit 0 (success), 1 (partial/conflicts), 2 (fatal).
+  - `hearth backup verify --input <path>` — recomputes SHA-256 checksums and compares against `manifest.json`; exit 0 on pass, 3 on integrity failure.
+  - `hearth backup inspect --input <path>` — prints manifest metadata and per-realm record counts as a human-readable table without decompressing entity files.
+
+- **Backup restore engine** — `BackupImporter` reads a `.hearth-backup` archive produced by
+  `BackupExporter` and drives the existing engine `import_*` methods to restore realms, users,
+  credentials, and OAuth clients. Supports `Skip`, `Overwrite`, and `Merge` conflict modes plus
+  `dry_run` for validation without writes. Returns a structured `ImportReport` with per-entity-type
+  outcome counts and a `Vec<Conflict>` describing any skipped or overwritten records (HEA-620).
+
+- **Backup export engine** — `BackupExporter` serialises all realm entities (users, credentials,
+  clients, roles, permissions, groups, scopes, assignments, organizations, audit events) to NDJSON
+  streams inside a `.hearth-backup` archive. Realm signing keys are AES-256-GCM encrypted with a
+  per-archive DEK stored in `manifest.json`. Usage: construct `BackupExporter::new(identity, audit,
+  rbac)`, call `generate_dek()` once per archive, then `export_realm(realm_id, &mut writer, &opts,
+  &dek)` per realm (HEA-619).
+
+- **Attribute filtering on admin user list** — `GET /admin/users?attr=key:value` filters results
+  to users whose custom attributes contain an exact match for the given key and value. Values may
+  contain colons (e.g. ISO timestamps). Malformed `attr` (no colon separator) returns `400` (HEA-578).
+
+- **Audit log retention policy and NDJSON export** — per-realm configurable `retention_days`
+  (default 90, `0` = unlimited) with automatic daily pruning of expired events. New REST endpoints:
+  `GET/PUT /admin/api/realms/{realm}/audit/config` (read/update retention) and
+  `POST /admin/api/realms/{realm}/audit/prune` (manual trigger). The audit export endpoint
+  (`GET /admin/realms/{realm}/audit/export`) now returns NDJSON (`application/x-ndjson`, one JSON
+  object per line) by default instead of a JSON array, with `?format=csv` unchanged (HEA-590).
+
 - **Raft clustering foundation (Phase 2)** — adds a `cluster:` section to `hearth.yaml` that enables
   multi-node Raft consensus via `openraft`. When configured, Hearth starts a Raft peer gRPC server
   (`peer_address`) secured by mutual TLS. The implementation includes durable log storage (`redb`),

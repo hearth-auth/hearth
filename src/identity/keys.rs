@@ -276,6 +276,11 @@ pub(crate) fn encode_credential_key(user_id: &UserId) -> Vec<u8> {
     format!("{CREDENTIAL_PREFIX}{}", user_id.as_uuid()).into_bytes()
 }
 
+/// Scan prefix for all credential records in a realm.
+pub(crate) fn credential_scan_prefix() -> Vec<u8> {
+    CREDENTIAL_PREFIX.as_bytes().to_vec()
+}
+
 /// Encodes the credential history key for a user.
 ///
 /// Format: `cred:history:{uuid}`

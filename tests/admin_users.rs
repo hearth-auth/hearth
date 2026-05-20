@@ -1136,3 +1136,149 @@ async fn filter_users_invalid_status_returns_400() {
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn filter_users_by_attr_returns_matching_users() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    let mut central_attrs = std::collections::BTreeMap::new();
+    central_attrs.insert("isCentralUser".into(), "true".into());
+    h.identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "attr-central@example.com".into(),
+                display_name: "Central User".into(),
+                first_name: "Central".into(),
+                last_name: "User".into(),
+                attributes: central_attrs,
+            },
+        )
+        .expect("create central user");
+
+    h.identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "attr-normal@example.com".into(),
+                display_name: "Normal User".into(),
+                first_name: "Normal".into(),
+                last_name: "User".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create normal user");
+
+    let app = build_app(&h).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/users?attr=isCentralUser:true")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp_json(resp).await;
+    let items = body["items"].as_array().expect("items array");
+    assert_eq!(items.len(), 1, "only the central user should match");
+    assert_eq!(items[0]["email"], "attr-central@example.com");
+}
+
+#[tokio::test]
+async fn filter_users_by_attr_excludes_non_matching() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    let mut gold_attrs = std::collections::BTreeMap::new();
+    gold_attrs.insert("tier".into(), "gold".into());
+    h.identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "attr-gold@example.com".into(),
+                display_name: "Gold User".into(),
+                first_name: "Gold".into(),
+                last_name: "User".into(),
+                attributes: gold_attrs,
+            },
+        )
+        .expect("create gold user");
+
+    let mut silver_attrs = std::collections::BTreeMap::new();
+    silver_attrs.insert("tier".into(), "silver".into());
+    h.identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "attr-silver@example.com".into(),
+                display_name: "Silver User".into(),
+                first_name: "Silver".into(),
+                last_name: "User".into(),
+                attributes: silver_attrs,
+            },
+        )
+        .expect("create silver user");
+
+    let app = build_app(&h).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/users?attr=tier:gold")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp_json(resp).await;
+    let items = body["items"].as_array().expect("items array");
+    assert!(
+        items
+            .iter()
+            .all(|u| u["email"] != "attr-silver@example.com"),
+        "silver user must not appear in gold tier results"
+    );
+    assert!(
+        items.iter().any(|u| u["email"] == "attr-gold@example.com"),
+        "gold user must appear in results"
+    );
+}
+
+#[tokio::test]
+async fn filter_users_by_attr_missing_colon_returns_400() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+
+    let app = build_app(&h).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/admin/users?attr=nocolon")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

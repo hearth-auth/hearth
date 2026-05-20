@@ -31,7 +31,8 @@ pub use types::{
     GroupId, GroupMember, GroupMembership, Page, Permission, PermissionDefinition,
     PermissionRecord, PermissionStatus, ProtectedResource, ResolvedPermissions, Role,
     RoleAssignment, RoleId, RoleScopeKind, RoleSpec, RoleStatus, RoleSubject, Scope, ScopeBundle,
-    ScopeSpec, Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest, UserPermissionGrant,
+    ScopeExport, ScopeSpec, Subject, TraversalKind, UpdateGroupRequest, UpdateRoleRequest,
+    UserPermissionGrant,
 };
 
 use crate::core::{OrganizationId, RealmId, Uri, UserId};
@@ -338,4 +339,18 @@ pub trait RbacEngine: Send + Sync {
         realm_id: &RealmId,
         yaml_names: &std::collections::HashSet<String>,
     ) -> Result<(), RbacError>;
+
+    // ------- Backup export helpers -------
+
+    /// Returns all registered permissions in a realm for backup export.
+    fn export_all_permissions(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<PermissionRecord>, RbacError>;
+
+    /// Returns all scope definitions in a realm for backup export.
+    fn export_all_scopes(&self, realm_id: &RealmId) -> Result<Vec<ScopeExport>, RbacError>;
+
+    /// Returns all role-assignment records in a realm for backup export.
+    fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError>;
 }

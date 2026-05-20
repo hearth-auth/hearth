@@ -392,6 +392,107 @@ oidc:
 #         slug: platform
 #         description: "Platform infrastructure engineers."
 
+# ── Config Migration / Data Inheritance ──────────────────────────────────────
+#
+# Hearth tracks a secrets-stripped snapshot of this file in the WAL after each
+# successful startup. On the next boot it diffs the new config against that
+# snapshot and automatically performs any required data operations — no manual
+# admin steps, no CLI flags, no downtime.
+#
+# ── Soft-delete model ────────────────────────────────────────────────────────
+#
+# Removing a realm slug from this file does NOT hard-delete it. Hearth sets its
+# status to `Archived` and preserves all data. Re-adding the same slug later
+# restores the realm exactly as it was (slug is the permanent identity).
+#
+# To permanently discard an archived realm's data, add `archive_drop: true`
+# to its YAML entry before removing it, OR use "Delete permanently" in the
+# Admin UI after it is archived.
+#
+# ── Cross-realm user migration ───────────────────────────────────────────────
+#
+# Declare `migrate_from` on the *destination* realm to move users on next boot:
+#
+# realms:
+#   new-portal:                      # destination realm
+#     migrate_from: legacy-portal    # source slug — move semantics
+#     migrate:
+#       users: true                  # move users (default: true)
+#       orgs: true                   # move organizations (default: true)
+#       applications: false          # skip OAuth clients (default: true)
+#       on_conflict: skip            # "error" (default) | "skip"
+#                                    # error = abort startup; skip = keep existing
+#
+# After a successful migration the source realm is automatically archived.
+# Migration is idempotent — a crash mid-run resumes from the last completed
+# user on the next boot.
+#
+# To copy users without archiving the source realm, use `copy_from` instead:
+#
+# realms:
+#   new-portal:
+#     copy_from: legacy-portal       # copy semantics — source stays Active
+#     migrate:
+#       users: true
+#       orgs: false
+#       on_conflict: skip
+#
+# ── Signing key rotation ─────────────────────────────────────────────────────
+#
+# Setting `rotate_signing_key: true` on a realm triggers a new Ed25519 key to
+# be generated at next startup. The old key is kept in JWKS during a grace
+# period so existing tokens remain valid. The flag is automatically cleared
+# from the stored config snapshot once rotation completes.
+#
+# realms:
+#   production:
+#     rotate_signing_key: true       # auto-cleared after rotation
+#
+# ── Host-key (master key) rotation ──────────────────────────────────────────
+#
+# Hearth uses envelope encryption: HEARTH_MASTER_KEY encrypts per-realm KEKs,
+# which in turn encrypt per-file DEKs. To rotate the master key:
+#
+#   1. Set HEARTH_MASTER_KEY to the *new* key.
+#   2. Set HEARTH_PREVIOUS_MASTER_KEY to the *old* key.
+#   3. Start Hearth — it re-encrypts all realm KEKs under the new key and
+#      then clears HEARTH_PREVIOUS_MASTER_KEY from its memory.
+#   4. Remove HEARTH_PREVIOUS_MASTER_KEY from the environment after the boot
+#      succeeds (it is no longer needed).
+#
+# ── Argon2id cost changes ────────────────────────────────────────────────────
+#
+# Changing `password_memory_cost` or `password_time_cost` (globally or per-
+# realm) takes effect lazily: credentials are rehashed at the new cost on each
+# user's next successful login. No bulk migration, no downtime.
+#
+# ── Orphaned realms ──────────────────────────────────────────────────────────
+#
+# If a realm is archived while it still contains users and no `migrate_from`
+# destination is configured, Hearth emits a structured warning at startup and
+# continues. The orphaned realm is surfaced in the Admin UI with a recovery
+# banner so an operator can migrate or drop it explicitly.
+#
+# ── Full example (commented out) ─────────────────────────────────────────────
+#
+# realms:
+#   # Active destination realm — pulls users from the legacy realm on boot.
+#   customer-portal:
+#     display_name: "Customer Portal"
+#     migrate_from: legacy           # move users from "legacy" realm
+#     migrate:
+#       users: true
+#       orgs: true
+#       applications: false
+#       on_conflict: skip
+#     rotate_signing_key: true       # rotate JWT signing key this boot
+#
+#   # Source realm — will be archived automatically after migration succeeds.
+#   # archive_drop: true would permanently destroy it instead of archiving.
+#   legacy:
+#     display_name: "Legacy (migrating out)"
+#     archive_drop: false            # keep data after archiving (default)
+
 onboarding:
   # enabled: true  # set to false to permanently disable the /ui/setup flow
   # base_url: "https://auth.example.com"  # used in the setup URL logged at startup

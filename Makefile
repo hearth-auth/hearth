@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate ci-standard dev
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate ci-standard dev dev-reset
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -146,8 +146,14 @@ bench-gate:
 ## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate (merge).
 ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate
 
-## Run Hearth in local dev mode.
+## Run Hearth in local dev mode with persistent storage (./data/dev).
+## Data survives restarts. Use `make dev-reset` to wipe it.
 ## Emails are captured in-process — mailcatcher inbox at http://127.0.0.1:8420/dev/mail
 ## No Docker required.
 dev:
-	cargo run -- serve --dev
+	HEARTH_DEV_DATA_DIR=./data/dev cargo run -- serve --dev
+
+## Wipe the persistent dev data directory (irreversible).
+dev-reset:
+	rm -rf ./data/dev
+	@echo "Dev data wiped. Run make dev for a fresh start."

@@ -92,6 +92,10 @@ zeroize = { version = "1", features = ["derive"] }
 form_urlencoded = "1.2.2"
 prometheus = { version = "0.14", default-features = false, features = ["process"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tar = "0.4"
+zstd = "0.13"
+rpassword = "7"
+secrecy = { version = "0.8", features = ["alloc"] }
 
 [features]
 # Exposes internal test probes for use by the simulation crate. Never enable in production.
