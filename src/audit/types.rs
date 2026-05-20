@@ -185,6 +185,16 @@ pub enum AuditAction {
     /// A per-IP login rate limit was exceeded. Metadata carries `ip`
     /// and `attempt_count`.
     IpLoginLimitExceeded,
+    /// An admin-triggered backup archive was created and downloaded.
+    ///
+    /// Metadata carries `filename` and, when a realm filter was applied,
+    /// `realm_slug`.
+    BackupCreated,
+    /// An admin-triggered restore from a backup archive completed.
+    ///
+    /// Metadata carries `dry_run` (`"true"` / `"false"`) and the list of
+    /// restored realm slugs.
+    BackupRestored,
 }
 
 impl AuditAction {
@@ -260,6 +270,8 @@ impl AuditAction {
             Self::LoginFailed,
             Self::LoginLocked,
             Self::IpLoginLimitExceeded,
+            Self::BackupCreated,
+            Self::BackupRestored,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -333,6 +345,8 @@ impl AuditAction {
             Self::LoginFailed => "login_failed",
             Self::LoginLocked => "login_locked",
             Self::IpLoginLimitExceeded => "ip_login_limit_exceeded",
+            Self::BackupCreated => "backup_created",
+            Self::BackupRestored => "backup_restored",
         }
     }
 }
@@ -407,6 +421,8 @@ impl std::str::FromStr for AuditAction {
             "login_failed" => Ok(Self::LoginFailed),
             "login_locked" => Ok(Self::LoginLocked),
             "ip_login_limit_exceeded" => Ok(Self::IpLoginLimitExceeded),
+            "backup_created" => Ok(Self::BackupCreated),
+            "backup_restored" => Ok(Self::BackupRestored),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -489,7 +505,9 @@ impl AuditAction {
             | Self::ConsentRequiredOnRefresh
             | Self::Cleanup
             | Self::LoginFailed
-            | Self::IpLoginLimitExceeded => LogOnly,
+            | Self::IpLoginLimitExceeded
+            | Self::BackupCreated
+            | Self::BackupRestored => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
