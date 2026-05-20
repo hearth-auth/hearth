@@ -8,7 +8,7 @@
     :class="open ? 'bg-ht-surface-overlay' : ''">
   <td class="w-8 px-3 py-3">
     <button type="button"
-            @click="open = !open"
+            @click="open = !open; $el.closest('tr').nextElementSibling.style.display = open ? '' : 'none'"
             :aria-expanded="open"
             :aria-label="open ? 'Collapse event detail' : 'Expand event detail'"
             class="flex h-5 w-5 items-center justify-center rounded text-ht-content-muted transition-transform hover:text-ht-content-secondary focus:outline-none focus:ring-1 focus:ring-ht-content-brand"
@@ -62,7 +62,7 @@
     {% endif %}
   </td>
 </tr>
-<tr x-show="open" x-cloak class="border-b border-divider-subtle bg-ht-surface-overlay">
+<tr style="display:none" class="border-b border-divider-subtle bg-ht-surface-overlay">
   <td colspan="6" class="px-6 py-4">
     {% include "ui/admin/audit/_detail.html" %}
   </td>
