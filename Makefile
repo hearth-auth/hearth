@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate ci-standard dev
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate ci-standard dev dev-data dev-reset
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -151,3 +151,13 @@ ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate
 ## No Docker required.
 dev:
 	cargo run -- serve --dev
+
+## Run Hearth in dev mode with PERSISTENT local storage (./data/dev).
+## Data survives restarts. Use `make dev-reset` to wipe it.
+dev-data:
+	HEARTH_DEV_DATA_DIR=./data/dev cargo run -- serve --dev
+
+## Wipe the persistent dev data directory (irreversible).
+dev-reset:
+	rm -rf ./data/dev
+	@echo "Dev data wiped. Run make dev-data for a fresh start."

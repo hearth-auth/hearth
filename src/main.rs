@@ -620,10 +620,13 @@ async fn run_serve(
     // commit; in single-node mode it is a zero-overhead passthrough.
     let (inner_storage, app_storage_config): (Arc<EmbeddedStorageEngine>, StorageConfig) =
         if config.dev_mode {
-            let temp_dir = tempfile::tempdir()?;
-            info!(path = %temp_dir.path().display(), "using temporary data directory (dev mode)");
-            // Convert to owned path so it outlives the tempdir handle
-            let data_path = temp_dir.keep();
+            let data_path = if let Ok(dir) = std::env::var("HEARTH_DEV_DATA_DIR") {
+                PathBuf::from(dir)
+            } else {
+                let temp_dir = tempfile::tempdir()?;
+                temp_dir.keep()
+            };
+            info!(path = %data_path.display(), "using data directory (dev mode)");
             let mut storage_config = StorageConfig::dev(data_path);
             storage_config.compaction = CompactionConfig {
                 enabled: config.storage.compaction.enabled,
@@ -942,7 +945,11 @@ async fn run_serve(
     // make is_first_run() return false and prevent the setup URL from being
     // logged on a truly fresh instance.
     let data_dir: PathBuf = if config.dev_mode {
-        std::env::temp_dir().join("hearth-dev-onboarding")
+        if let Ok(dir) = std::env::var("HEARTH_DEV_DATA_DIR") {
+            PathBuf::from(dir)
+        } else {
+            std::env::temp_dir().join("hearth-dev-onboarding")
+        }
     } else {
         PathBuf::from(&config.storage.data_dir)
     };
