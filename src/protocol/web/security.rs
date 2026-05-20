@@ -84,19 +84,20 @@ where
                 "referrer-policy",
                 "strict-origin-when-cross-origin",
             );
-            // Alpine.js v3 uses new Function() for expression evaluation,
-            // which requires 'unsafe-eval'. No inline scripts remain after
-            // extracting them to layout.js, so 'unsafe-inline' is omitted.
+            // Alpine.js v3 needs 'unsafe-eval' for directive expressions
+            // (:class="…", x-show="…"). All scripts are self-hosted; no
+            // third-party origins remain. Fonts are self-hosted (HEA-630).
             insert(
                 headers,
                 "content-security-policy",
                 "default-src 'self'; \
-                 script-src 'self' 'unsafe-eval' cdn.jsdelivr.net; \
-                 style-src 'self' 'unsafe-inline'; \
+                 script-src 'self' 'unsafe-eval'; \
+                 style-src 'self'; \
+                 font-src 'self'; \
                  img-src 'self' data:; \
                  connect-src 'self'; \
-                 font-src 'self'; \
-                 frame-ancestors 'none'",
+                 frame-ancestors 'none'; \
+                 base-uri 'self'",
             );
             if hsts_enabled {
                 insert(

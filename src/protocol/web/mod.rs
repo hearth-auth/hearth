@@ -4,8 +4,8 @@
 //! state change flows through the identity, authorization, or audit
 //! engines. Templates live under `templates/ui/`, compiled into the
 //! binary by the askama derive macro; static assets (`htmx.min.js`,
-//! `app.css`) are embedded via `include_bytes!`. Alpine.js is loaded
-//! from a CDN with an SRI integrity hash.
+//! `alpine.min.js`, `admin.js`, fonts, `app.css`) are embedded via
+//! `include_bytes!`. No third-party script/font origins needed (HEA-630).
 //!
 //! # Submodules
 //!
@@ -487,6 +487,39 @@ impl WebState {
         let id = realm_id.as_uuid().to_string();
         self.realm_themes.get(&id).cloned()
     }
+}
+
+/// Formats a [`crate::core::Timestamp`] (Unix microseconds) as
+/// `YYYY-MM-DD HH:MM UTC` for display in admin and account UI pages.
+///
+/// This is the single canonical timestamp formatter for the web layer.
+/// All sub-modules (`account`, `account_consents`, `admin/*`) delegate
+/// here so the format stays consistent across every page.
+pub(super) fn format_ts(ts: crate::core::Timestamp) -> String {
+    let secs = ts.as_micros() / 1_000_000;
+    let rem = secs.rem_euclid(86_400);
+    let days = secs.div_euclid(86_400);
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let (y, mo, d) = web_civil_from_days(days);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
+}
+
+/// Converts a Unix day count to `(year, month 1–12, day 1–31)` using
+/// Howard Hinnant's `civil_from_days` algorithm (proleptic Gregorian,
+/// public domain).
+#[allow(clippy::similar_names)]
+fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// Builds the `/ui/*` axum router.
@@ -1352,9 +1385,22 @@ fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
 
 /// HTMX v1.9.12 — pinned, checksum recorded in `assets/CHECKSUMS.txt`.
 const HTMX_JS: &[u8] = include_bytes!("assets/htmx.min.js");
+/// Alpine.js v3 — vendored so CSP can drop `cdn.jsdelivr.net` (HEA-630).
+const ALPINE_JS: &[u8] = include_bytes!("assets/alpine.min.js");
+/// Alpine component registrations for every `/ui/**` template (HEA-630).
+/// Extracting them here lets CSP use `script-src 'self'` without `unsafe-inline`.
+const ADMIN_JS: &[u8] = include_bytes!("assets/admin.js");
 /// Global Alpine.js component registrations and keyboard shortcuts, extracted
 /// from inline `<script>` tags so the CSP can omit `unsafe-inline`.
 const LAYOUT_JS: &[u8] = include_bytes!("assets/layout.js");
+/// Self-hosted Fraunces upright woff2 (HEA-630).
+const FONT_FRAUNCES: &[u8] = include_bytes!("assets/fonts/fraunces-latin.woff2");
+/// Self-hosted Fraunces italic woff2 (HEA-630).
+const FONT_FRAUNCES_ITALIC: &[u8] = include_bytes!("assets/fonts/fraunces-italic-latin.woff2");
+/// Self-hosted Manrope woff2 (HEA-630).
+const FONT_MANROPE: &[u8] = include_bytes!("assets/fonts/manrope-latin.woff2");
+/// Self-hosted JetBrains Mono woff2 (HEA-630).
+const FONT_JETBRAINS_MONO: &[u8] = include_bytes!("assets/fonts/jetbrains-mono-latin.woff2");
 /// Tailwind-generated CSS for the admin UI, embedded at compile time.
 ///
 /// Used as the fallback when `server.assets_dir` is unset or the runtime
@@ -1537,10 +1583,16 @@ async fn serve_static(
     // Other embedded assets are immutable for the life of this binary.
     let embedded: Option<(&[u8], &str)> = match file.as_str() {
         "htmx.min.js" => Some((HTMX_JS, "application/javascript; charset=utf-8")),
+        "alpine.min.js" => Some((ALPINE_JS, "application/javascript; charset=utf-8")),
+        "admin.js" => Some((ADMIN_JS, "application/javascript; charset=utf-8")),
         "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
         "favicon.svg" => Some((FAVICON_SVG, "image/svg+xml")),
         "img/hearth-wide-web.svg" => Some((HEARTH_WIDE_SVG, "image/svg+xml")),
         "img/hearth-icon.svg" => Some((HEARTH_ICON_SVG, "image/svg+xml")),
+        "fonts/fraunces-latin.woff2" => Some((FONT_FRAUNCES, "font/woff2")),
+        "fonts/fraunces-italic-latin.woff2" => Some((FONT_FRAUNCES_ITALIC, "font/woff2")),
+        "fonts/manrope-latin.woff2" => Some((FONT_MANROPE, "font/woff2")),
+        "fonts/jetbrains-mono-latin.woff2" => Some((FONT_JETBRAINS_MONO, "font/woff2")),
         _ => None,
     };
 

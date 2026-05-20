@@ -7,6 +7,24 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **CSP hardened** — `Content-Security-Policy` for all `/ui/**` routes now enforces
+  `script-src 'self' 'unsafe-eval'` (no `'unsafe-inline'`), `style-src 'self'`,
+  `font-src 'self'`, and `base-uri 'self'`. No third-party origins remain in any
+  directive (HEA-630).
+
+### Changed
+
+- **Self-hosted fonts** — Fraunces, Manrope, and JetBrains Mono `.woff2` files are
+  now embedded in the binary and served from `'self'`. The `<link>` to
+  `fonts.googleapis.com` has been removed; `@font-face` rules in `app.css` load
+  fonts directly from `/ui/static/fonts/` (HEA-630).
+- **Alpine.js vendored** — Alpine.js is no longer loaded from `cdn.jsdelivr.net`.
+  The file is embedded at compile time and served from `/ui/static/alpine.min.js`
+  with an SRI hash, making air-gapped installs work and eliminating the CDN
+  supply-chain pivot (HEA-630).
+
 ### Added
 
 - **Persistent dev storage** — `make dev` now uses `./data/dev` as the data directory so

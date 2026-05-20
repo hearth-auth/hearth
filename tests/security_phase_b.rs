@@ -208,9 +208,10 @@ async fn hsts_header_present_when_tls_enabled() {
     );
 }
 
-/// CSP must reference 'unsafe-eval' (required by Alpine.js) but NOT 'unsafe-inline'.
+/// CSP must allow 'unsafe-eval' (Alpine.js) but contain no 'unsafe-inline'
+/// anywhere and no third-party origins (HEA-630).
 #[tokio::test]
-async fn csp_allows_eval_but_not_inline_scripts() {
+async fn csp_allows_eval_no_inline_no_third_party() {
     let app = web::router(make_web_state());
     let resp = app
         .oneshot(
@@ -230,11 +231,27 @@ async fn csp_allows_eval_but_not_inline_scripts() {
 
     assert!(
         csp.contains("'unsafe-eval'"),
-        "CSP must allow unsafe-eval for Alpine.js"
+        "CSP must allow unsafe-eval for Alpine.js directive expressions"
     );
     assert!(
-        !csp.contains("'unsafe-inline'") || csp.contains("style-src"),
-        "CSP must not allow unsafe-inline for scripts"
+        !csp.contains("'unsafe-inline'"),
+        "CSP must not contain unsafe-inline anywhere: {csp}"
+    );
+    assert!(
+        !csp.contains("cdn.jsdelivr.net"),
+        "CSP must not reference cdn.jsdelivr.net: {csp}"
+    );
+    assert!(
+        !csp.contains("fonts.googleapis.com"),
+        "CSP must not reference fonts.googleapis.com: {csp}"
+    );
+    assert!(
+        !csp.contains("fonts.gstatic.com"),
+        "CSP must not reference fonts.gstatic.com: {csp}"
+    );
+    assert!(
+        csp.contains("base-uri 'self'"),
+        "CSP must restrict base-uri to self: {csp}"
     );
 }
 
