@@ -81,7 +81,11 @@ impl BackupExporter {
         audit: Arc<dyn AuditEngine>,
         rbac: Arc<dyn RbacEngine>,
     ) -> Self {
-        Self { identity, audit, rbac }
+        Self {
+            identity,
+            audit,
+            rbac,
+        }
     }
 
     /// Generates a fresh random 32-byte Data Encryption Key.
@@ -379,7 +383,9 @@ pub fn decrypt_bytes(encrypted_json: &[u8], dek: &[u8; 32]) -> Result<Vec<u8>, B
         .map_err(|e| BackupError::Crypto(format!("ciphertext decode: {e}")))?;
     let plaintext = key
         .open_in_place(nonce, Aad::empty(), &mut ciphertext)
-        .map_err(|_| BackupError::Crypto("decryption failed — wrong DEK or corrupted data".into()))?;
+        .map_err(|_| {
+            BackupError::Crypto("decryption failed — wrong DEK or corrupted data".into())
+        })?;
     Ok(plaintext.to_vec())
 }
 
@@ -395,19 +401,23 @@ mod tests {
             serde_json::json!({"id": "c", "name": "Carol"}),
         ];
         let ndjson = to_ndjson(&items).expect("serialize");
-        let line_count = ndjson.iter().filter(|&&b| b == b'\n').count();
-        assert_eq!(line_count, items.len(), "each item must produce exactly one line");
+        // Split on newlines; NDJSON ends with a trailing '\n', so split produces
+        // one extra empty element which we subtract.
+        let line_count = ndjson.split(|&b| b == b'\n').count().saturating_sub(1);
+        assert_eq!(
+            line_count,
+            items.len(),
+            "each item must produce exactly one line"
+        );
     }
 
     #[test]
     fn to_ndjson_each_line_is_valid_json() {
-        let items = vec![
-            serde_json::json!({"x": 1}),
-            serde_json::json!({"x": 2}),
-        ];
+        let items = vec![serde_json::json!({"x": 1}), serde_json::json!({"x": 2})];
         let ndjson = to_ndjson(&items).expect("serialize");
         for line in ndjson.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
-            let parsed: serde_json::Value = serde_json::from_slice(line).expect("valid JSON per line");
+            let parsed: serde_json::Value =
+                serde_json::from_slice(line).expect("valid JSON per line");
             assert!(parsed.is_object());
         }
     }

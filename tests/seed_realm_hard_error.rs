@@ -21,9 +21,9 @@ use hearth::protocol::proto::identity::v1::{
 };
 use hearth::rbac::{
     AssignRoleRequest, AssignmentId, CreateGroupRequest, CreateRoleRequest, Group, GroupId,
-    GroupMember, GroupMembership, Page, Permission, ProtectedResource, RbacEngine, RbacError,
-    PermissionRecord, ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec, RoleSubject,
-    Scope, ScopeExport, ScopeSpec, Subject, UpdateGroupRequest, UpdateRoleRequest,
+    GroupMember, GroupMembership, Page, Permission, PermissionRecord, ProtectedResource,
+    RbacEngine, RbacError, ResolvedPermissions, Role, RoleAssignment, RoleId, RoleSpec,
+    RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, UpdateGroupRequest, UpdateRoleRequest,
     UserPermissionGrant,
 };
 use tonic::Request;
@@ -331,10 +331,7 @@ impl RbacEngine for FailSeedRbac {
         self.inner.export_all_scopes(realm_id)
     }
 
-    fn export_all_assignments(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<RoleAssignment>, RbacError> {
+    fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError> {
         self.inner.export_all_assignments(realm_id)
     }
 }

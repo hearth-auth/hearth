@@ -50,14 +50,12 @@ const HEADER_LEN: usize = 14 + 4 + 4 + 4 + 16 + 12;
 ///
 /// Returns [`BackupError::Crypto`] if random number generation fails or if the
 /// AES-GCM operation fails.
-pub fn encrypt_archive(
-    passphrase: &SecretString,
-    input: &[u8],
-) -> Result<Vec<u8>, BackupError> {
+pub fn encrypt_archive(passphrase: &SecretString, input: &[u8]) -> Result<Vec<u8>, BackupError> {
     let rng = SystemRandom::new();
 
     let mut salt = [0u8; 16];
-    rng.fill(&mut salt).map_err(|_| BackupError::Crypto("salt generation failed".into()))?;
+    rng.fill(&mut salt)
+        .map_err(|_| BackupError::Crypto("salt generation failed".into()))?;
 
     let mut nonce_bytes = [0u8; 12];
     rng.fill(&mut nonce_bytes)
@@ -98,10 +96,7 @@ pub fn encrypt_archive(
 /// - the magic bytes are absent,
 /// - the passphrase is wrong (GCM authentication failure), or
 /// - the ciphertext is truncated or corrupted.
-pub fn decrypt_archive(
-    passphrase: &SecretString,
-    data: &[u8],
-) -> Result<Vec<u8>, BackupError> {
+pub fn decrypt_archive(passphrase: &SecretString, data: &[u8]) -> Result<Vec<u8>, BackupError> {
     if data.len() < HEADER_LEN {
         return Err(BackupError::Crypto(
             "data too short to be a valid encrypted archive".into(),
@@ -109,7 +104,9 @@ pub fn decrypt_archive(
     }
 
     if &data[..14] != MAGIC {
-        return Err(BackupError::Crypto("missing HEARTH-BAK-ENC magic bytes".into()));
+        return Err(BackupError::Crypto(
+            "missing HEARTH-BAK-ENC magic bytes".into(),
+        ));
     }
 
     // Parse KDF parameters stored in the envelope (may differ from build-time
@@ -148,9 +145,7 @@ pub fn decrypt_archive(
     let plaintext = key
         .open_in_place(nonce, Aad::empty(), &mut buf)
         .map_err(|_| {
-            BackupError::Crypto(
-                "decryption failed — wrong passphrase or corrupted archive".into(),
-            )
+            BackupError::Crypto("decryption failed — wrong passphrase or corrupted archive".into())
         })?;
     Ok(plaintext.to_vec())
 }
@@ -192,10 +187,10 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let plaintext = b"fake tar.zstd archive bytes for roundtrip test";
-        let encrypted = encrypt_archive(&pp("correct-horse-battery-staple"), plaintext)
-            .expect("encrypt");
-        let decrypted = decrypt_archive(&pp("correct-horse-battery-staple"), &encrypted)
-            .expect("decrypt");
+        let encrypted =
+            encrypt_archive(&pp("correct-horse-battery-staple"), plaintext).expect("encrypt");
+        let decrypted =
+            decrypt_archive(&pp("correct-horse-battery-staple"), &encrypted).expect("decrypt");
         assert_eq!(decrypted, plaintext);
     }
 
@@ -205,7 +200,10 @@ mod tests {
         let encrypted = encrypt_archive(&pp("the-right-passphrase"), plaintext).expect("encrypt");
         let err = decrypt_archive(&pp("the-wrong-passphrase"), &encrypted)
             .expect_err("should fail with wrong passphrase");
-        assert!(matches!(err, BackupError::Crypto(_)), "expected Crypto error, got {err}");
+        assert!(
+            matches!(err, BackupError::Crypto(_)),
+            "expected Crypto error, got {err}"
+        );
     }
 
     #[test]
@@ -216,13 +214,16 @@ mod tests {
         encrypted.truncate(HEADER_LEN + 4);
         let err = decrypt_archive(&pp("passphrase"), &encrypted)
             .expect_err("should fail on truncated ciphertext");
-        assert!(matches!(err, BackupError::Crypto(_)), "expected Crypto error, got {err}");
+        assert!(
+            matches!(err, BackupError::Crypto(_)),
+            "expected Crypto error, got {err}"
+        );
     }
 
     #[test]
     fn data_too_short_returns_crypto_error() {
-        let err = decrypt_archive(&pp("any"), b"too-short")
-            .expect_err("should fail on too-short input");
+        let err =
+            decrypt_archive(&pp("any"), b"too-short").expect_err("should fail on too-short input");
         assert!(matches!(err, BackupError::Crypto(_)));
     }
 
@@ -230,8 +231,7 @@ mod tests {
     fn wrong_magic_returns_crypto_error() {
         let mut data = vec![0u8; HEADER_LEN + 20];
         data[..14].copy_from_slice(b"NOT-THE-MAGIC!");
-        let err = decrypt_archive(&pp("any"), &data)
-            .expect_err("should fail with wrong magic");
+        let err = decrypt_archive(&pp("any"), &data).expect_err("should fail with wrong magic");
         assert!(matches!(err, BackupError::Crypto(_)));
     }
 
@@ -242,9 +242,18 @@ mod tests {
         // Magic
         assert_eq!(&encrypted[..14], MAGIC);
         // Params (little-endian)
-        assert_eq!(u32::from_le_bytes(encrypted[14..18].try_into().unwrap()), M_COST);
-        assert_eq!(u32::from_le_bytes(encrypted[18..22].try_into().unwrap()), T_COST);
-        assert_eq!(u32::from_le_bytes(encrypted[22..26].try_into().unwrap()), P_COST);
+        assert_eq!(
+            u32::from_le_bytes(encrypted[14..18].try_into().expect("4 bytes")),
+            M_COST
+        );
+        assert_eq!(
+            u32::from_le_bytes(encrypted[18..22].try_into().expect("4 bytes")),
+            T_COST
+        );
+        assert_eq!(
+            u32::from_le_bytes(encrypted[22..26].try_into().expect("4 bytes")),
+            P_COST
+        );
         // Total length: header + plaintext + 16-byte GCM tag
         assert_eq!(encrypted.len(), HEADER_LEN + plaintext.len() + 16);
     }

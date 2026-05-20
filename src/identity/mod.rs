@@ -50,8 +50,8 @@ pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
     canonicalize_scopes, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
     CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    CreateWebhookRequest, DcrPolicy, ImportClientRequest, ImportUserRequest, InvitationStatus,
-    CredentialExport, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
+    CreateWebhookRequest, CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest,
+    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, Session, SessionContext,
@@ -1500,8 +1500,5 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// The caller is responsible for encrypting the bytes before writing
     /// them to an archive. Used exclusively by the backup exporter.
-    fn export_realm_signing_key_pkcs8(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<u8>, IdentityError>;
+    fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError>;
 }

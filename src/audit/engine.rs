@@ -302,8 +302,7 @@ impl AuditEngine for EmbeddedAuditEngine {
             // Delete primary key
             self.storage.delete(realm_id, &entry.key)?;
             // Delete actor index
-            let actor_key =
-                keys::encode_actor_index(&event.actor, event.timestamp, &event.id);
+            let actor_key = keys::encode_actor_index(&event.actor, event.timestamp, &event.id);
             self.storage.delete(realm_id, &actor_key)?;
             // Delete action index
             let action_key =

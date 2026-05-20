@@ -9,6 +9,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Backup HTTP admin endpoints** — two new admin API endpoints for backup and restore without SSH
+  access (HEA-623):
+  - `POST /admin/backup` — creates a `.hearth-backup` archive and streams it as an
+    `application/octet-stream` download. Optional query params: `realm=<slug>` (restrict to one
+    realm), `include_audit=true` (embed audit events). No passphrase encryption — TLS provides
+    transport security. Emits a `backup_created` audit event.
+  - `POST /admin/backup/restore` — accepts a `multipart/form-data` upload with a `file` field
+    containing a `.hearth-backup` archive. The archive is streamed to a tempfile before parsing to
+    avoid memory pressure. Query params: `mode=skip|overwrite|merge` (default: `skip`),
+    `realm=<slug>`, `dry_run=true`. Returns JSON with `realms_restored`, per-realm `counts`, and any
+    `errors`. Emits a `backup_restored` audit event. Body size limit is disabled for this endpoint.
+
 - **Backup passphrase encryption** — `encrypt_archive`/`decrypt_archive` in `src/backup/encryption.rs`
   wrap an entire `.hearth-backup` archive in an AES-256-GCM envelope keyed with Argon2id
   (m=65536, t=3, p=4). The binary envelope prepends a `HEARTH-BAK-ENC` magic header, the KDF

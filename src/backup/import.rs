@@ -179,10 +179,7 @@ impl BackupImporter {
         };
 
         // ── Realm ──────────────────────────────────────────────────────────
-        let target_name = opts
-            .realm_target
-            .as_deref()
-            .unwrap_or_else(|| realm.name());
+        let target_name = opts.realm_target.as_deref().unwrap_or_else(|| realm.name());
 
         let realm_id = realm.id().clone();
         let create_req = CreateRealmRequest {
@@ -373,7 +370,11 @@ impl BackupImporter {
                 redirect_uris: client.redirect_uris,
                 client_secret: None, // secrets are not restored (hashed in archive)
                 grant_types: client.grant_types,
-                slug: if client.slug.is_empty() { None } else { Some(client.slug) },
+                slug: if client.slug.is_empty() {
+                    None
+                } else {
+                    Some(client.slug)
+                },
                 trust_level: client.trust_level,
                 declared_scopes: client.declared_scopes,
                 consent_spans_orgs: client.consent_spans_orgs,
@@ -386,7 +387,9 @@ impl BackupImporter {
 
             match self.identity.import_client(realm_id, &req) {
                 Ok(_) => report.clients.created += 1,
-                Err(IdentityError::InvalidInput { reason }) if reason.contains("already exists") => {
+                Err(IdentityError::InvalidInput { reason })
+                    if reason.contains("already exists") =>
+                {
                     match opts.mode {
                         RestoreMode::Skip | RestoreMode::Merge => {
                             report.clients.skipped += 1;
@@ -459,14 +462,25 @@ fn parse_credentials(
 
 /// Converts an [`IdentityError`] into a [`BackupError::Io`] for propagation.
 fn identity_to_backup_err(e: IdentityError) -> BackupError {
-    BackupError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    BackupError::Io(std::io::Error::other(e.to_string()))
 }
 
 /// Trims leading/trailing ASCII whitespace from a byte slice.
 fn trim_bytes(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| !b.is_ascii_whitespace()).unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| !b.is_ascii_whitespace()).map(|i| i + 1).unwrap_or(0);
-    if start >= end { &[] } else { &s[start..end] }
+    let start = s
+        .iter()
+        .position(|&b| !b.is_ascii_whitespace())
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|&b| !b.is_ascii_whitespace())
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if start >= end {
+        &[]
+    } else {
+        &s[start..end]
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -477,7 +491,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::audit::EmbeddedAuditEngine;
-    use crate::backup::{BackupArchive, BackupManifest, RecordCounts, RealmManifest};
+    use crate::backup::{BackupArchive, BackupManifest, RealmManifest, RecordCounts};
     use crate::core::{Clock, FakeClock, Timestamp};
     use crate::identity::{EmbeddedIdentityEngine, IdentityConfig};
     use crate::rbac::EmbeddedRbacEngine;
@@ -498,8 +512,8 @@ mod tests {
             EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
                 .expect("storage"),
         ) as Arc<dyn StorageEngine>;
-        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000_000)))
-            as Arc<dyn Clock>;
+        let clock =
+            Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000_000))) as Arc<dyn Clock>;
         let audit = Arc::new(EmbeddedAuditEngine::new(
             Arc::clone(&storage),
             Arc::clone(&clock),
@@ -513,9 +527,15 @@ mod tests {
             )
             .expect("identity engine"),
         ) as Arc<dyn IdentityEngine>;
-        let rbac = Arc::new(EmbeddedRbacEngine::new(Arc::clone(&storage), Arc::clone(&clock)))
-            as Arc<dyn RbacEngine>;
-        TestRig { identity, rbac, _dir: dir }
+        let rbac = Arc::new(EmbeddedRbacEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        )) as Arc<dyn RbacEngine>;
+        TestRig {
+            identity,
+            rbac,
+            _dir: dir,
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -558,11 +578,11 @@ mod tests {
         });
         let users_ndjson = format!(
             "{}\n{}\n",
-            serde_json::to_string(&user1_json).unwrap(),
-            serde_json::to_string(&user2_json).unwrap()
+            serde_json::to_string(&user1_json).expect("serialize user1"),
+            serde_json::to_string(&user2_json).expect("serialize user2")
         );
 
-        let realm_bytes = serde_json::to_vec(&realm_json).unwrap();
+        let realm_bytes = serde_json::to_vec(&realm_json).expect("serialize realm");
         let users_bytes = users_ndjson.into_bytes();
 
         // RealmManifest.realm_id is a plain String, so the prefixed form is fine.
@@ -574,7 +594,10 @@ mod tests {
             realms: vec![RealmManifest {
                 realm_id: realm_id_str,
                 slug: slug.to_string(),
-                record_counts: RecordCounts { users: 2, ..Default::default() },
+                record_counts: RecordCounts {
+                    users: 2,
+                    ..Default::default()
+                },
             }],
             checksums: std::collections::HashMap::new(),
             signing_key_dek_b64: None,
@@ -628,15 +651,22 @@ mod tests {
 
         let reader = BackupArchive::open(&archive_path).expect("open");
         let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
-        let opts = ImportOptions { mode: RestoreMode::Skip, ..Default::default() };
+        let opts = ImportOptions {
+            mode: RestoreMode::Skip,
+            ..Default::default()
+        };
 
         // First import — everything should be created.
-        let r1 = importer.import_realm(slug, &reader, &opts).expect("first import");
+        let r1 = importer
+            .import_realm(slug, &reader, &opts)
+            .expect("first import");
         assert_eq!(r1.realms.created, 1);
         assert_eq!(r1.users.created, 2);
 
         // Second import with same archive — realm and users already exist.
-        let r2 = importer.import_realm(slug, &reader, &opts).expect("second import");
+        let r2 = importer
+            .import_realm(slug, &reader, &opts)
+            .expect("second import");
         assert_eq!(r2.realms.skipped, 1, "realm should be skipped");
         // Users may be skipped (DuplicateEmail) or re-imported under a new realm.
         // Because the realm was skipped, the same realm_id is used → duplicate emails.
@@ -662,12 +692,20 @@ mod tests {
             .expect("first import");
 
         // Second import with Overwrite.
-        let opts = ImportOptions { mode: RestoreMode::Overwrite, ..Default::default() };
-        let r2 = importer.import_realm(slug, &reader, &opts).expect("overwrite import");
+        let opts = ImportOptions {
+            mode: RestoreMode::Overwrite,
+            ..Default::default()
+        };
+        let r2 = importer
+            .import_realm(slug, &reader, &opts)
+            .expect("overwrite import");
         assert_eq!(r2.realms.overwritten, 1, "realm should be overwritten");
         // Realm overwrite cascades: delete_realm removes all child users, so
         // users are then imported fresh (created) rather than individually overwritten.
-        assert_eq!(r2.users.created, 2, "users re-created after realm cascade delete");
+        assert_eq!(
+            r2.users.created, 2,
+            "users re-created after realm cascade delete"
+        );
         assert_eq!(r2.users.overwritten, 0);
         assert_eq!(r2.users.errored, 0);
     }
@@ -683,9 +721,14 @@ mod tests {
 
         let reader = BackupArchive::open(&archive_path).expect("open");
         let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
-        let opts = ImportOptions { dry_run: true, ..Default::default() };
+        let opts = ImportOptions {
+            dry_run: true,
+            ..Default::default()
+        };
 
-        let report = importer.import_realm(slug, &reader, &opts).expect("dry run");
+        let report = importer
+            .import_realm(slug, &reader, &opts)
+            .expect("dry run");
         assert_eq!(report.realms.created, 1);
         assert_eq!(report.users.created, 2);
 
@@ -693,7 +736,10 @@ mod tests {
         let r2 = importer
             .import_realm(slug, &reader, &ImportOptions::default())
             .expect("real import after dry run");
-        assert_eq!(r2.realms.created, 1, "dry run must not have written the realm");
+        assert_eq!(
+            r2.realms.created, 1,
+            "dry run must not have written the realm"
+        );
         assert_eq!(r2.users.created, 2, "dry run must not have written users");
     }
 }

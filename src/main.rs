@@ -457,7 +457,13 @@ async fn main() {
         },
         Commands::Backup { action } => {
             let code = match action {
-                BackupAction::Create { output, realm, include_audit, encrypt, data_dir } => {
+                BackupAction::Create {
+                    output,
+                    realm,
+                    include_audit,
+                    encrypt,
+                    data_dir,
+                } => {
                     match run_backup_create(
                         output.as_deref(),
                         realm.as_deref(),
@@ -472,11 +478,15 @@ async fn main() {
                         }
                     }
                 }
-                BackupAction::Restore { input, realm, mode, dry_run, data_dir } => {
+                BackupAction::Restore {
+                    input,
+                    realm,
+                    mode,
+                    dry_run,
+                    data_dir,
+                } => {
                     match run_backup_restore(&input, realm.as_deref(), &mode, dry_run, &data_dir) {
-                        Ok(had_errors) => {
-                            if had_errors { 1 } else { 0 }
-                        }
+                        Ok(had_errors) => i32::from(had_errors),
                         Err(e) => {
                             eprintln!("error: {e}");
                             2
@@ -1287,8 +1297,7 @@ async fn run_serve(
         let prune_identity = Arc::clone(&identity_engine);
         tokio::spawn(async move {
             // 24-hour interval; first tick fires at startup + 24h.
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+            let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
             interval.tick().await; // skip first immediate tick
             loop {
                 interval.tick().await;
@@ -1313,8 +1322,7 @@ async fn run_serve(
                             continue; // unlimited
                         }
                         let now_micros = hearth::core::Timestamp::now().as_micros();
-                        let window_micros =
-                            (config.retention_days as i64) * 86_400 * 1_000_000;
+                        let window_micros = (config.retention_days as i64) * 86_400 * 1_000_000;
                         let cutoff = hearth::core::Timestamp::from_micros(
                             now_micros.saturating_sub(window_micros),
                         );
@@ -2339,14 +2347,17 @@ fn run_backup_create(
     data_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use base64::Engine as _;
-    use hearth::backup::{BackupArchive, BackupExporter, BackupManifest, DekWrappingParams, ExportOptions};
+    use hearth::backup::{
+        BackupArchive, BackupExporter, BackupManifest, DekWrappingParams, ExportOptions,
+    };
     use hearth::core::RealmId;
     use uuid::Uuid;
 
     std::fs::create_dir_all(data_dir)?;
     let storage_config = StorageConfig::dev(data_dir.to_path_buf());
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
-    let (identity, audit, rbac) = build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
+    let (identity, audit, rbac) =
+        build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
 
     // Resolve output path — default: `./hearth-backup-<unix_secs>.hearth-backup`
     let out_path = match output {
@@ -2370,14 +2381,17 @@ fn run_backup_create(
             // Name lookup: list all realms and match.
             let mut cursor = None;
             loop {
-                let page = identity.list_realms(cursor.as_deref(), 200)
+                let page = identity
+                    .list_realms(cursor.as_deref(), 200)
                     .map_err(|e| format!("list_realms: {e}"))?;
                 for realm in &page.items {
                     if realm.name() == s {
                         return Ok(realm.id().clone());
                     }
                 }
-                if page.next_cursor.is_none() { break; }
+                if page.next_cursor.is_none() {
+                    break;
+                }
                 cursor = page.next_cursor;
             }
             Err(format!("realm '{s}' not found"))
@@ -2385,7 +2399,8 @@ fn run_backup_create(
         .transpose()
         .map_err(|e: String| e)?;
 
-    let exporter = BackupExporter::new(Arc::clone(&identity), Arc::clone(&audit), Arc::clone(&rbac));
+    let exporter =
+        BackupExporter::new(Arc::clone(&identity), Arc::clone(&audit), Arc::clone(&rbac));
     let dek = BackupExporter::generate_dek()?;
     let opts = ExportOptions {
         include_audit,
@@ -2402,12 +2417,15 @@ fn run_backup_create(
         let mut ids = Vec::new();
         let mut cursor = None;
         loop {
-            let page = identity.list_realms(cursor.as_deref(), 200)
+            let page = identity
+                .list_realms(cursor.as_deref(), 200)
                 .map_err(|e| format!("list_realms: {e}"))?;
             for realm in &page.items {
                 ids.push(realm.id().clone());
             }
-            if page.next_cursor.is_none() { break; }
+            if page.next_cursor.is_none() {
+                break;
+            }
             cursor = page.next_cursor;
         }
         ids
@@ -2482,7 +2500,12 @@ fn run_backup_create(
 
         let blob_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
         let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt_bytes);
-        let wp = DekWrappingParams { salt_b64, m_cost: M_COST, t_cost: T_COST, p_cost: P_COST };
+        let wp = DekWrappingParams {
+            salt_b64,
+            m_cost: M_COST,
+            t_cost: T_COST,
+            p_cost: P_COST,
+        };
         (blob_b64, Some(wp))
     } else {
         (base64::engine::general_purpose::STANDARD.encode(dek), None)
@@ -2521,10 +2544,15 @@ fn run_backup_restore(
     std::fs::create_dir_all(data_dir)?;
     let storage_config = StorageConfig::dev(data_dir.to_path_buf());
     let storage = Arc::new(EmbeddedStorageEngine::open(storage_config)?);
-    let (identity, _audit, rbac) = build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
+    let (identity, _audit, rbac) =
+        build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
 
     let importer = BackupImporter::new(identity, rbac);
-    let opts = ImportOptions { mode, dry_run, realm_target: None };
+    let opts = ImportOptions {
+        mode,
+        dry_run,
+        realm_target: None,
+    };
 
     let slugs: Vec<String> = if let Some(slug) = realm_slug {
         vec![slug.to_string()]
@@ -2557,7 +2585,10 @@ fn run_backup_verify(input: &std::path::Path) -> Result<(), Box<dyn std::error::
 
     let reader = BackupArchive::open(input)?;
     reader.verify_checksums()?;
-    println!("OK — all checksums match ({} files verified)", reader.manifest.checksums.len());
+    println!(
+        "OK — all checksums match ({} files verified)",
+        reader.manifest.checksums.len()
+    );
     Ok(())
 }
 
@@ -2575,14 +2606,14 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
         (Some(_), None) => "present (unprotected)",
         _ => "absent",
     };
-    let created_at_display = time::OffsetDateTime::from_unix_timestamp_nanos(
-        m.created_at.as_micros() as i128 * 1000,
-    )
-    .ok()
-    .and_then(|dt| {
-        dt.format(&time::format_description::well_known::Rfc3339).ok()
-    })
-    .unwrap_or_else(|| format!("{}µs (unix)", m.created_at.as_micros()));
+    let created_at_display =
+        time::OffsetDateTime::from_unix_timestamp_nanos(m.created_at.as_micros() as i128 * 1000)
+            .ok()
+            .and_then(|dt| {
+                dt.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .unwrap_or_else(|| format!("{}µs (unix)", m.created_at.as_micros()));
     println!("Archive:           {}", input.display());
     println!("  format version : {}", m.format_version);
     println!("  hearth version : {}", m.hearth_version);
@@ -2592,11 +2623,7 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
     println!("  realms ({}):", m.realms.len());
     for r in &m.realms {
         let rc = &r.record_counts;
-        println!(
-            "    {slug:<24}  id={id}",
-            slug = r.slug,
-            id = r.realm_id
-        );
+        println!("    {slug:<24}  id={id}", slug = r.slug, id = r.realm_id);
         println!(
             "      users={u}  credentials={c}  clients={cl}  roles={ro}  groups={g}  orgs={o}  audit={a}",
             u = rc.users,
@@ -2614,16 +2641,31 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 /// Prints an [`ImportReport`](hearth::backup::ImportReport) as a human-readable summary.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
     println!("Realm '{slug}':");
-    println!("  realms   — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.realms.created, report.realms.skipped, report.realms.overwritten, report.realms.errored);
-    println!("  users    — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.users.created, report.users.skipped, report.users.overwritten, report.users.errored);
-    println!("  clients  — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.clients.created, report.clients.skipped, report.clients.overwritten, report.clients.errored);
+    println!(
+        "  realms   — created: {}, skipped: {}, overwritten: {}, errored: {}",
+        report.realms.created,
+        report.realms.skipped,
+        report.realms.overwritten,
+        report.realms.errored
+    );
+    println!(
+        "  users    — created: {}, skipped: {}, overwritten: {}, errored: {}",
+        report.users.created, report.users.skipped, report.users.overwritten, report.users.errored
+    );
+    println!(
+        "  clients  — created: {}, skipped: {}, overwritten: {}, errored: {}",
+        report.clients.created,
+        report.clients.skipped,
+        report.clients.overwritten,
+        report.clients.errored
+    );
     if !report.conflicts.is_empty() {
         println!("  conflicts ({}):", report.conflicts.len());
         for c in &report.conflicts {
-            println!("    [{:?}] {:?} — {}", c.entity_type, c.identifier, c.reason);
+            println!(
+                "    [{:?}] {:?} — {}",
+                c.entity_type, c.identifier, c.reason
+            );
         }
     }
 }

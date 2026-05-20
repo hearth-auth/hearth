@@ -1511,7 +1511,9 @@ impl RbacEngine for EmbeddedRbacEngine {
         let entries = self.storage.scan(realm_id, &prefix, &end)?;
         let mut out = Vec::new();
         for entry in entries {
-            let Ok(record) = Self::de::<PermissionRecord>(&entry.value) else { continue; };
+            let Ok(record) = Self::de::<PermissionRecord>(&entry.value) else {
+                continue;
+            };
             out.push(record);
         }
         Ok(out)
@@ -1523,22 +1525,26 @@ impl RbacEngine for EmbeddedRbacEngine {
         let entries = self.storage.scan(realm_id, &prefix, &end)?;
         let mut out = Vec::new();
         for entry in entries {
-            let Ok(stored) = Self::de::<StoredScope>(&entry.value) else { continue; };
-            out.push(ScopeExport { name: stored.name, permissions: stored.permissions });
+            let Ok(stored) = Self::de::<StoredScope>(&entry.value) else {
+                continue;
+            };
+            out.push(ScopeExport {
+                name: stored.name,
+                permissions: stored.permissions,
+            });
         }
         Ok(out)
     }
 
-    fn export_all_assignments(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<RoleAssignment>, RbacError> {
+    fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError> {
         let prefix = keys::ASSIGN_PRI_PREFIX.as_bytes().to_vec();
         let end = keys::prefix_end(&prefix);
         let entries = self.storage.scan(realm_id, &prefix, &end)?;
         let mut out = Vec::new();
         for entry in entries {
-            let Ok(assignment) = Self::de::<RoleAssignment>(&entry.value) else { continue; };
+            let Ok(assignment) = Self::de::<RoleAssignment>(&entry.value) else {
+                continue;
+            };
             out.push(assignment);
         }
         Ok(out)

@@ -410,8 +410,8 @@ async fn retention_config_roundtrip() {
 
 #[tokio::test]
 async fn prune_before_removes_old_events_only() {
-    use hearth::core::{FakeClock, Timestamp};
     use hearth::audit::EmbeddedAuditEngine;
+    use hearth::core::{FakeClock, Timestamp};
     use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
     use std::sync::Arc;
 
@@ -428,34 +428,40 @@ async fn prune_before_removes_old_events_only() {
     let realm_id = RealmId::generate();
 
     // Three events at t=1s, t=2s, t=3s
-    engine.append(&CreateAuditEvent {
-        realm_id: realm_id.clone(),
-        actor: "a".into(),
-        action: AuditAction::UserCreated,
-        resource_type: "user".into(),
-        resource_id: "u1".into(),
-        metadata: None,
-    }).expect("append 1");
+    engine
+        .append(&CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: "a".into(),
+            action: AuditAction::UserCreated,
+            resource_type: "user".into(),
+            resource_id: "u1".into(),
+            metadata: None,
+        })
+        .expect("append 1");
 
     clock.advance(1_000_000); // t=2s
-    engine.append(&CreateAuditEvent {
-        realm_id: realm_id.clone(),
-        actor: "b".into(),
-        action: AuditAction::SessionCreated,
-        resource_type: "session".into(),
-        resource_id: "s1".into(),
-        metadata: None,
-    }).expect("append 2");
+    engine
+        .append(&CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: "b".into(),
+            action: AuditAction::SessionCreated,
+            resource_type: "session".into(),
+            resource_id: "s1".into(),
+            metadata: None,
+        })
+        .expect("append 2");
 
     clock.advance(1_000_000); // t=3s
-    engine.append(&CreateAuditEvent {
-        realm_id: realm_id.clone(),
-        actor: "c".into(),
-        action: AuditAction::TokenIssued,
-        resource_type: "token".into(),
-        resource_id: "t1".into(),
-        metadata: None,
-    }).expect("append 3");
+    engine
+        .append(&CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: "c".into(),
+            action: AuditAction::TokenIssued,
+            resource_type: "token".into(),
+            resource_id: "t1".into(),
+            metadata: None,
+        })
+        .expect("append 3");
 
     // Prune everything strictly before t=2.5s (should remove events at t=1s and t=2s)
     let cutoff = Timestamp::from_micros(2_500_000);
@@ -478,13 +484,16 @@ async fn prune_before_removes_old_events_only() {
             ..AuditQuery::for_realm(realm_id.clone())
         })
         .expect("query actor a");
-    assert!(by_actor_a.is_empty(), "actor index for pruned event must be gone");
+    assert!(
+        by_actor_a.is_empty(),
+        "actor index for pruned event must be gone"
+    );
 }
 
 #[tokio::test]
 async fn prune_before_cutoff_all_leaves_empty() {
-    use hearth::core::{FakeClock, Timestamp};
     use hearth::audit::EmbeddedAuditEngine;
+    use hearth::core::{FakeClock, Timestamp};
     use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
     use std::sync::Arc;
 
@@ -500,14 +509,16 @@ async fn prune_before_cutoff_all_leaves_empty() {
     );
     let realm_id = RealmId::generate();
 
-    engine.append(&CreateAuditEvent {
-        realm_id: realm_id.clone(),
-        actor: "x".into(),
-        action: AuditAction::UserCreated,
-        resource_type: "user".into(),
-        resource_id: "u1".into(),
-        metadata: None,
-    }).expect("append");
+    engine
+        .append(&CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: "x".into(),
+            action: AuditAction::UserCreated,
+            resource_type: "user".into(),
+            resource_id: "u1".into(),
+            metadata: None,
+        })
+        .expect("append");
 
     // Prune with a future cutoff — everything should be deleted
     let deleted = engine
@@ -554,6 +565,9 @@ fn audit_export_ndjson_format_matches_spec() {
     assert_eq!(lines.len(), 1, "NDJSON must have one line per event");
     let parsed: serde_json::Value =
         serde_json::from_str(lines[0]).expect("each line must be valid JSON");
-    assert!(parsed.is_object(), "each line must be a JSON object, not array");
+    assert!(
+        parsed.is_object(),
+        "each line must be a JSON object, not array"
+    );
     assert_eq!(parsed["actor"], "admin");
 }

@@ -169,7 +169,10 @@ mod tests {
             realms: vec![RealmManifest {
                 realm_id: "realm_00000000-0000-0000-0000-000000000001".to_string(),
                 slug: "acme".to_string(),
-                record_counts: RecordCounts { users: 5, ..Default::default() },
+                record_counts: RecordCounts {
+                    users: 5,
+                    ..Default::default()
+                },
             }],
             checksums: [("realms/acme/users.ndjson".to_string(), "abc123".to_string())]
                 .into_iter()

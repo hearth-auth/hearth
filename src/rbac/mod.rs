@@ -349,14 +349,8 @@ pub trait RbacEngine: Send + Sync {
     ) -> Result<Vec<PermissionRecord>, RbacError>;
 
     /// Returns all scope definitions in a realm for backup export.
-    fn export_all_scopes(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<ScopeExport>, RbacError>;
+    fn export_all_scopes(&self, realm_id: &RealmId) -> Result<Vec<ScopeExport>, RbacError>;
 
     /// Returns all role-assignment records in a realm for backup export.
-    fn export_all_assignments(
-        &self,
-        realm_id: &RealmId,
-    ) -> Result<Vec<RoleAssignment>, RbacError>;
+    fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError>;
 }

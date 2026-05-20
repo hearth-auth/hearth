@@ -52,9 +52,11 @@ mod types;
 pub use encryption::{decrypt_archive, encrypt_archive};
 pub use error::BackupError;
 pub use export::{decrypt_bytes, BackupExporter, ExportOptions};
-pub use import::{BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode};
+pub use import::{
+    BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode,
+};
 pub use types::{
-    BackupManifest, BackupRecord, DekWrappingParams, RecordCounts, RealmManifest, MANIFEST_VERSION,
+    BackupManifest, BackupRecord, DekWrappingParams, RealmManifest, RecordCounts, MANIFEST_VERSION,
 };
 
 use std::collections::HashMap;
@@ -80,7 +82,10 @@ impl BackupArchive {
         let file = std::fs::File::create(path)?;
         let encoder = zstd::Encoder::new(file, 0)?;
         let builder = tar::Builder::new(encoder);
-        Ok(ArchiveWriter { builder, checksums: HashMap::new() })
+        Ok(ArchiveWriter {
+            builder,
+            checksums: HashMap::new(),
+        })
     }
 
     /// Opens an existing archive at `path` and reads its `manifest.json`.
@@ -96,7 +101,10 @@ impl BackupArchive {
         if manifest.format_version != MANIFEST_VERSION {
             return Err(BackupError::UnsupportedVersion(manifest.format_version));
         }
-        Ok(ArchiveReader { manifest, path: path.to_path_buf() })
+        Ok(ArchiveReader {
+            manifest,
+            path: path.to_path_buf(),
+        })
     }
 }
 
@@ -148,7 +156,8 @@ impl ArchiveWriter {
         header.set_mtime(0);
         header.set_cksum();
 
-        self.builder.append_data(&mut header, "manifest.json", manifest_bytes.as_slice())?;
+        self.builder
+            .append_data(&mut header, "manifest.json", manifest_bytes.as_slice())?;
 
         // Finalise tar (writes EOF blocks), then flush the zstd frame.
         let encoder = self.builder.into_inner()?;
@@ -293,7 +302,10 @@ mod tests {
             realms: vec![RealmManifest {
                 realm_id: "realm_00000000-0000-0000-0000-000000000001".to_string(),
                 slug: "test-realm".to_string(),
-                record_counts: RecordCounts { users: 2, ..Default::default() },
+                record_counts: RecordCounts {
+                    users: 2,
+                    ..Default::default()
+                },
             }],
             checksums: HashMap::new(),
             signing_key_dek_b64: None,
@@ -310,8 +322,12 @@ mod tests {
         let users_ndjson = b"{\"id\":\"user_1\"}\n{\"id\":\"user_2\"}\n";
 
         let mut writer = BackupArchive::create(path).expect("create");
-        writer.add_file("realms/test-realm/realm.json", realm_json).expect("add realm");
-        writer.add_file("realms/test-realm/users.ndjson", users_ndjson).expect("add users");
+        writer
+            .add_file("realms/test-realm/realm.json", realm_json)
+            .expect("add realm");
+        writer
+            .add_file("realms/test-realm/users.ndjson", users_ndjson)
+            .expect("add users");
         writer.finish(sample_manifest()).expect("finish");
 
         let reader = BackupArchive::open(path).expect("open");
@@ -319,8 +335,14 @@ mod tests {
         assert_eq!(reader.realms().len(), 1);
         assert_eq!(reader.realms()[0].slug, "test-realm");
         assert_eq!(reader.manifest.checksums.len(), 2);
-        assert!(reader.manifest.checksums.contains_key("realms/test-realm/realm.json"));
-        assert!(reader.manifest.checksums.contains_key("realms/test-realm/users.ndjson"));
+        assert!(reader
+            .manifest
+            .checksums
+            .contains_key("realms/test-realm/realm.json"));
+        assert!(reader
+            .manifest
+            .checksums
+            .contains_key("realms/test-realm/users.ndjson"));
     }
 
     #[test]
@@ -329,7 +351,9 @@ mod tests {
         let path = tmp.path();
 
         let mut writer = BackupArchive::create(path).expect("create");
-        writer.add_file("realms/test-realm/users.ndjson", b"hello\n").expect("add");
+        writer
+            .add_file("realms/test-realm/users.ndjson", b"hello\n")
+            .expect("add");
         writer.finish(sample_manifest()).expect("finish");
 
         let reader = BackupArchive::open(path).expect("open");
@@ -340,7 +364,10 @@ mod tests {
     fn sha256_hex_is_stable() {
         // SHA-256 of the empty string is well-known.
         let digest = sha256_hex(b"");
-        assert_eq!(digest, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            digest,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
