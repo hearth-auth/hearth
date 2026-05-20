@@ -195,17 +195,10 @@ fn set_user_admin(
 }
 
 /// Formats a `Timestamp` (Unix micros) as `YYYY-MM-DD HH:MM UTC`.
+///
+/// Delegates to the single canonical implementation in [`super::format_ts`].
 fn format_ts(ts: crate::core::Timestamp) -> String {
-    let secs = ts.as_micros() / 1_000_000;
-    let rem = secs % 86400;
-    let days = secs / 86400;
-    // Simple UTC calendar math (good enough for display).
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-
-    // Civil date from Unix day — naive Gregorian.
-    let (y, mo, d) = civil_from_days(days);
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
+    super::format_ts(ts)
 }
 
 /// Formats a duration in microseconds as a human-readable string.
@@ -257,24 +250,6 @@ fn format_kib_human(kib: u32) -> String {
     }
 }
 
-/// Converts a Unix day number to (year, month 1–12, day 1–31).
-///
-/// Algorithm from Howard Hinnant's chrono-compatible
-/// `civil_from_days` — public domain.
-#[allow(clippy::similar_names)]
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
-}
 
 /// Resolves a user's email from their `UserId`. Returns "(unknown)"
 /// when the user has been deleted.

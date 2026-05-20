@@ -20,6 +20,9 @@
   </div>
 </div>
 
+{% if applications.is_empty() %}
+{% include "ui/admin/applications/_empty.html" %}
+{% else %}
 <div class="overflow-hidden rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
   <table class="w-full">
     <thead>
@@ -35,6 +38,7 @@
     </tbody>
   </table>
 </div>
+{% endif %}
 
 {% match next_cursor %}
   {% when Some with (cursor) %}

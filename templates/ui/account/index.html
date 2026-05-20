@@ -107,7 +107,7 @@
   </div>
 
   {# ── Passkeys card ── #}
-  <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle" x-data="passkeyManager()">
+  <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle" x-data="passkeyManager">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-base font-semibold text-ht-content-primary">Passkeys</h2>
       <button @click="registerPasskey()" type="button"
@@ -184,92 +184,4 @@
     </table>
   </div>
 </div>
-
-<script>
-function passkeyManager() {
-  return {
-    registering: false,
-    error: null,
-    async registerPasskey() {
-      this.error = null;
-      this.registering = true;
-      try {
-        const resp = await fetch('/ui/account/passkeys/register-begin');
-        if (!resp.ok) throw new Error('Failed to start registration');
-        const opts = await resp.json();
-
-        // Decode base64url fields for the WebAuthn API
-        opts.challenge = Uint8Array.from(atob(opts.challenge.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0));
-        opts.user.id = Uint8Array.from(atob(opts.user.id.replace(/-/g,'+').replace(/_/g,'/')), c => c.charCodeAt(0));
-
-        const cred = await navigator.credentials.create({ publicKey: opts });
-        if (!cred) throw new Error('Registration cancelled');
-
-        // Prompt for a friendly name (optional — user can skip).
-        const credName = prompt('Give this passkey a name (optional):', '') || '';
-
-        // Encode response as base64url
-        const toB64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-
-        const completeResp = await fetch('/ui/account/passkeys/register-complete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            client_data_json: toB64url(cred.response.clientDataJSON),
-            attestation_object: toB64url(cred.response.attestationObject),
-            name: credName.trim() || null,
-          }),
-        });
-        if (!completeResp.ok) throw new Error('Registration failed');
-        window.location.reload();
-      } catch (e) {
-        if (e.name !== 'NotAllowedError') {
-          this.error = e.message || 'Registration failed';
-        }
-      } finally {
-        this.registering = false;
-      }
-    }
-  };
-}
-
-function passkeyRow(credId) {
-  return {
-    credId,
-    displayName: '',
-    editing: false,
-    draftName: '',
-    _name: null,
-    init() {
-      // Read name from data attribute — Askama HTML-encodes it, browser decodes via dataset.
-      const raw = this.$el.dataset.initialName || '';
-      this._name = raw || null;
-      this.displayName = raw || credId.substring(0, 16) + '…';
-    },
-    startEdit() {
-      this.draftName = this._name || '';
-      this.editing = true;
-    },
-    cancelEdit() {
-      this.editing = false;
-    },
-    async saveEdit() {
-      const name = this.draftName.trim();
-      try {
-        const resp = await fetch(`/ui/account/passkeys/${this.credId}/rename`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name }),
-        });
-        if (!resp.ok) throw new Error('Rename failed');
-        this._name = name || null;
-        this.displayName = name || this.credId.substring(0, 16) + '…';
-        this.editing = false;
-      } catch (e) {
-        alert(e.message || 'Rename failed');
-      }
-    },
-  };
-}
-</script>
 {% endblock %}

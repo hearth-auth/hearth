@@ -27,13 +27,29 @@
     <span class="text-ht-content-muted">{{ row.event.resource_type }}</span>
     <span class="ml-1">{{ row.resource_display }}</span>
   </td>
+  <td class="px-4 py-3">
+    {% if row.metadata_pills.is_empty() %}
+      <span class="text-xs text-ht-content-muted">—</span>
+    {% else %}
+      <div class="flex flex-wrap items-center gap-1">
+        {% for (key, val) in row.metadata_pills %}
+          <span class="inline-flex items-center gap-1 rounded-full bg-ht-surface-base px-2 py-0.5 font-mono text-[11px] ring-1 ring-divider-subtle">
+            <span class="text-ht-content-muted">{{ key }}</span><span class="text-ht-content-secondary truncate max-w-[80px]">{{ val }}</span>
+          </span>
+        {% endfor %}
+        {% if row.metadata_extra > 0 %}
+          <span class="rounded-full bg-ht-surface-base px-1.5 py-0.5 text-[11px] text-ht-content-muted ring-1 ring-divider-subtle">+{{ row.metadata_extra }}</span>
+        {% endif %}
+      </div>
+    {% endif %}
+  </td>
 </tr>
 <tr x-show="open" x-cloak class="border-b border-divider-subtle bg-ht-surface-overlay">
-  <td colspan="5" class="px-6 py-4">
+  <td colspan="6" class="px-6 py-4">
     {% include "ui/admin/audit/_detail.html" %}
   </td>
 </tr>
 {% endfor %}
 {% if events.is_empty() %}
-<tr><td colspan="5" class="px-4 py-8 text-center text-sm text-ht-content-muted">No audit events found.</td></tr>
+<tr><td colspan="6" class="px-4 py-8 text-center text-sm text-ht-content-muted">No audit events found.</td></tr>
 {% endif %}

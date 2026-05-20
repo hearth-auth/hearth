@@ -1,14 +1,59 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Config Editor{% endblock %}
 {% block breadcrumb %}
-  <span class="text-ht-content-muted">Admin</span>
-  <span class="mx-1 text-ht-content-muted">/</span>
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <a href="/ui/admin" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
+  <span class="text-ht-content-muted">›</span>
   <a href="/ui/admin/settings" class="text-ht-content-secondary hover:text-ht-content-primary">Settings</a>
-  <span class="mx-1 text-ht-content-muted">/</span>
-  <span class="text-ht-content-secondary">Editor</span>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary">Config Editor</span>
+</nav>
 {% endblock %}
 {% block body %}
-<div x-data="configEditor()" x-cloak>
+{# SSR default view — always painted on first load, no JS required.
+   Gives operators a readable config even when JS is blocked (e.g. CSP issues).
+   Alpine removes this element in x-init so JS-enabled users see the
+   full interactive editor without a flash of duplicate content. #}
+<div id="ssr-editor-fallback">
+  <div class="mb-6">
+    <h1 class="font-display text-2xl font-medium text-ht-content-primary">Config Editor</h1>
+    <p class="mt-1 text-sm text-ht-content-muted">
+      Raw <code class="rounded-sm bg-ht-surface-elevated px-1 py-0.5 font-mono text-xs">hearth.yaml</code> view.
+      {% if read_only %}
+        <span class="font-medium text-warning-fg">Read-only — no config file path available.</span>
+      {% else %}
+        <span class="text-ht-content-muted">Enable JavaScript for the interactive visual and raw editors.</span>
+      {% endif %}
+    </p>
+  </div>
+  {% match flash %}
+    {% when Some with (f) %}
+      <div class="mb-4 rounded-lg px-4 py-3 text-sm font-medium {% if f.kind == "error" %}bg-danger/[0.12] text-danger-fg{% else %}bg-success/[0.12] text-success-fg{% endif %}" role="alert">{{ f.message }}</div>
+    {% when None %}
+  {% endmatch %}
+  <div class="overflow-hidden rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
+    <div class="flex items-center gap-2 border-b border-divider px-6 py-3">
+      <svg class="h-3.5 w-3.5 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      <span class="font-mono text-xs font-medium text-ht-content-muted">hearth.yaml</span>
+    </div>
+    <pre class="overflow-x-auto p-6 font-mono text-xs leading-relaxed text-ht-content-secondary whitespace-pre">{{ yaml_content }}</pre>
+    {% if !read_only %}
+    <div class="border-t border-divider px-6 py-3">
+      <form method="post" action="/ui/admin/settings/editor/apply" class="flex items-center gap-3">
+        {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
+        <textarea name="yaml" class="hidden">{{ yaml_content }}</textarea>
+        <p class="flex-1 text-xs text-ht-content-muted">JavaScript required for the diff preview and visual editor. Raw apply still works without JS.</p>
+        <button type="submit"
+                class="btn-ember rounded px-3 py-1.5 text-xs font-semibold">
+          Apply Changes
+        </button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div x-data="configEditor()" x-cloak x-init="$nextTick(function(){ var f = document.getElementById('ssr-editor-fallback'); if (f) f.style.display = 'none'; })">
   {# Header with mode tabs #}
   <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
     <div>

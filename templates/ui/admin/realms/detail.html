@@ -304,6 +304,41 @@
   </div>
 </div>
 
+{# Quick access — icon tiles matching the global dashboard pattern. #}
+<div class="mt-6">
+  <h2 class="mb-3 text-sm font-semibold text-ht-content-muted uppercase tracking-[0.12em] font-mono">Quick access</h2>
+  <div class="grid gap-3 grid-cols-2 sm:grid-cols-4">
+    <a href="/ui/admin/realms/{{ realm.name() }}/users"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-steel-bg text-steel-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Users</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/applications"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-brand-subtle text-ht-content-brand">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Applications</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/rbac/roles"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-teal-bg text-teal-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Roles</p>
+    </a>
+    <a href="/ui/admin/realms/{{ realm.name() }}/audit"
+       class="group rounded-lg bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover:-translate-y-0.5 hover-ring-divider">
+      <div class="mb-2 flex h-8 w-8 items-center justify-center rounded-lg bg-rose-bg text-rose-fg">
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      </div>
+      <p class="text-sm font-medium text-ht-content-primary">Audit log</p>
+    </a>
+  </div>
+</div>
+
 {# Administrators — users with realm-wide admin role. #}
 <div class="mt-6 rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
   <div class="mb-4 flex items-center justify-between">

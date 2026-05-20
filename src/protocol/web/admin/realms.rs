@@ -262,6 +262,12 @@ pub struct AuditRow {
     /// Pretty-printed JSON representation of `event.metadata` for display.
     /// Empty string when there is no metadata.
     pub metadata_json: String,
+    /// Compact pills for the metadata column — at most 2 entries from the
+    /// metadata object rendered as `key: value` chips. The third element is
+    /// the count of remaining keys not shown inline (0 when all fit).
+    pub metadata_pills: Vec<(String, String)>,
+    /// Number of metadata keys hidden behind "+N more" overflow indicator.
+    pub metadata_extra: usize,
     /// The `integrity_hash` of the preceding event in the chain, or empty
     /// string for the genesis event. Derived from the ordered query result.
     pub previous_hash: String,
@@ -270,6 +276,39 @@ pub struct AuditRow {
     /// Whether the hash chain was verified for this event.
     /// `None` means verification was not requested for this query.
     pub chain_valid: Option<bool>,
+}
+
+/// Extracts at most 2 key-value pill entries from a metadata JSON object.
+///
+/// Returns `(pills, extra)` where `pills` contains `(key, truncated_value)`
+/// pairs (max 2) and `extra` is the count of remaining keys not shown inline.
+/// Non-object metadata yields an empty pill list.
+fn build_metadata_pills(
+    metadata: Option<&serde_json::Value>,
+) -> (Vec<(String, String)>, usize) {
+    let obj = match metadata.and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return (Vec::new(), 0),
+    };
+    let mut pills = Vec::new();
+    for (k, v) in obj.iter().take(2) {
+        let val = match v {
+            serde_json::Value::String(s) => {
+                if s.len() > 24 {
+                    format!("{}…", &s[..24])
+                } else {
+                    s.clone()
+                }
+            }
+            other => {
+                let s = other.to_string();
+                if s.len() > 20 { format!("{}…", &s[..20]) } else { s }
+            }
+        };
+        pills.push((k.clone(), val));
+    }
+    let extra = obj.len().saturating_sub(2);
+    (pills, extra)
 }
 
 /// Resolves an audit-event actor string (typically a user UUID) to a
@@ -525,6 +564,8 @@ pub async fn admin_audit_list(
                         .as_ref()
                         .and_then(|m| serde_json::to_string_pretty(m).ok())
                         .unwrap_or_default();
+                    let (metadata_pills, metadata_extra) =
+                        build_metadata_pills(e.metadata.as_ref());
                     let hash = e.integrity_hash.clone();
                     let previous_hash = std::mem::replace(&mut prev_hash, hash.clone());
                     AuditRow {
@@ -532,6 +573,8 @@ pub async fn admin_audit_list(
                         actor_display,
                         resource_display,
                         metadata_json,
+                        metadata_pills,
+                        metadata_extra,
                         previous_hash,
                         hash,
                         chain_valid: None,

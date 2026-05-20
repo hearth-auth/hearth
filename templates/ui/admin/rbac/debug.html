@@ -105,7 +105,8 @@
   </div>
 
   {# ── Token Preview tab ── #}
-  <div x-show="tab === 'token'" x-data="tokenPreview()">
+  <div x-show="tab === 'token'" x-data="tokenPreview"
+       data-preview-url="/ui/admin/realms/{{ realm_name }}/rbac/token-preview">
     <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <label class="block">
@@ -137,37 +138,4 @@
   </div>
 
 </div>
-{% endblock %}
-{% block scripts %}
-<script>
-  function tokenPreview() {
-    return {
-      userId: '',
-      result: null,
-      loading: false,
-      async preview() {
-        if (!this.userId.trim()) return;
-        this.loading = true;
-        this.result = null;
-        try {
-          const csrf = document.querySelector('meta[name="csrf"]')?.getAttribute('content') || '';
-          const body = new URLSearchParams({ user_id: this.userId.trim() });
-          const resp = await fetch('/ui/admin/realms/{{ realm_name }}/rbac/token-preview', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'X-CSRF-Token': csrf,
-            },
-            body: body.toString(),
-          });
-          this.result = await resp.text();
-        } catch (e) {
-          this.result = JSON.stringify({ error: String(e) }, null, 2);
-        } finally {
-          this.loading = false;
-        }
-      },
-    };
-  }
-</script>
 {% endblock %}

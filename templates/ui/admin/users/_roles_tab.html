@@ -1,17 +1,13 @@
-<script>
-  function rolesTabData() {
-    return {
-      assignOpen: false,
-      scopeType: 'realm',
-      selectedOrg: '',
-      selectedRoleId: {% if let Some(first) = available_roles.first() %}'{{ first.id }}'{% else %}''{% endif %},
-      rolePerms: {{ role_perms_json|safe }},
-      get inheritedPerms() { return this.rolePerms[this.selectedRoleId] || []; }
-    };
-  }
+{# Server-rendered bootstrap data — `type="application/json"` is parsed
+   as data, not executed as script, so CSP `script-src 'self'` allows
+   it. admin.js reads this in `Alpine.data('rolesTabData')` via the
+   `data-bootstrap-id` attribute on the host element. #}
+<script id="roles-tab-bootstrap" type="application/json">
+{ "selectedRoleId": {% if let Some(first) = available_roles.first() %}"{{ first.id }}"{% else %}""{% endif %},
+  "rolePerms": {{ role_perms_json|safe }} }
 </script>
 
-<div x-data="rolesTabData()">
+<div x-data="rolesTabData" data-bootstrap-id="roles-tab-bootstrap">
 
   {# Current assignments #}
   {% if role_assignments.is_empty() %}

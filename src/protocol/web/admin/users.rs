@@ -221,6 +221,9 @@ struct UserNewTemplate {
     form_display_name: String,
     form_first_name: String,
     form_last_name: String,
+    /// Human-readable summary of the realm's password policy, shown as helper
+    /// text below the password input. Empty string when no policy is configured.
+    password_policy_hint: String,
     // Chrome fields.
     chrome: bool,
     active: &'static str,
@@ -241,6 +244,15 @@ pub async fn admin_user_create_form(
     RequireAdmin(session): RequireAdmin,
     AxumPath(realm_name): AxumPath<String>,
 ) -> Response {
+    let password_policy_hint = state
+        .identity
+        .get_realm_by_name(&realm_name)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().password_policy.clone())
+        .map(build_password_policy_hint)
+        .unwrap_or_default();
+
     render(&UserNewTemplate {
         error: None,
         realm_name,
@@ -248,6 +260,7 @@ pub async fn admin_user_create_form(
         form_display_name: String::new(),
         form_first_name: String::new(),
         form_last_name: String::new(),
+        password_policy_hint,
         chrome: true,
         active: "users",
         user_email: Some(session.user_email.clone()),
@@ -260,6 +273,30 @@ pub async fn admin_user_create_form(
         theme_css: state.theme_css.clone(),
         realm_theme_css: state.realm_theme_css(),
     })
+}
+
+/// Formats a [`crate::identity::PasswordPolicy`] into a concise helper-text
+/// string shown below the password input on the create-user form.
+fn build_password_policy_hint(p: crate::identity::PasswordPolicy) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(len) = p.min_length {
+        parts.push(format!("at least {len} characters"));
+    } else {
+        parts.push("at least 12 characters".to_string());
+    }
+    if p.require_uppercase == Some(true) {
+        parts.push("one uppercase letter".to_string());
+    }
+    if p.require_number == Some(true) {
+        parts.push("one number".to_string());
+    }
+    if p.require_special == Some(true) {
+        parts.push("one special character".to_string());
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("Requires {}", parts.join(", "))
 }
 
 /// `application/x-www-form-urlencoded` body for creating a user.
@@ -291,12 +328,43 @@ pub async fn admin_user_create_submit(
         return resp;
     }
 
+    let password_policy_hint = target
+        .0
+        .config()
+        .password_policy
+        .clone()
+        .map(build_password_policy_hint)
+        .unwrap_or_default();
+
     let req = CreateUserRequest {
         email: form.email.clone(),
         display_name: form.display_name.clone(),
         first_name: form.first_name.clone(),
         last_name: form.last_name.clone(),
         attributes: Default::default(),
+    };
+
+    let render_error = |error: String| {
+        render(&UserNewTemplate {
+            error: Some(error),
+            realm_name: target.0.name().to_string(),
+            form_email: form.email.clone(),
+            form_display_name: form.display_name.clone(),
+            form_first_name: form.first_name.clone(),
+            form_last_name: form.last_name.clone(),
+            password_policy_hint: password_policy_hint.clone(),
+            chrome: true,
+            active: "users",
+            user_email: Some(session.user_email.clone()),
+            is_admin: true,
+            flash: None,
+            csrf: session.csrf.clone(),
+            narrow: false,
+            product_name: state.product_name.clone(),
+            logo_url: state.logo_url.clone(),
+            theme_css: state.theme_css.clone(),
+            realm_theme_css: state.realm_theme_css(),
+        })
     };
 
     match state.identity.create_user(target.id(), &req) {
@@ -328,65 +396,13 @@ pub async fn admin_user_create_submit(
             ))
             .into_response()
         }
-        Err(IdentityError::DuplicateEmail) => render(&UserNewTemplate {
-            error: Some("A user with that email already exists.".to_string()),
-            realm_name: target.0.name().to_string(),
-            form_email: form.email.clone(),
-            form_display_name: form.display_name.clone(),
-            form_first_name: form.first_name.clone(),
-            form_last_name: form.last_name.clone(),
-            chrome: true,
-            active: "users",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
-        }),
-        Err(IdentityError::InvalidInput { reason }) => render(&UserNewTemplate {
-            error: Some(reason),
-            realm_name: target.0.name().to_string(),
-            form_email: form.email.clone(),
-            form_display_name: form.display_name.clone(),
-            form_first_name: form.first_name.clone(),
-            form_last_name: form.last_name.clone(),
-            chrome: true,
-            active: "users",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
-        }),
+        Err(IdentityError::DuplicateEmail) => {
+            render_error("A user with that email already exists.".to_string())
+        }
+        Err(IdentityError::InvalidInput { reason }) => render_error(reason),
         Err(e) => {
             tracing::warn!(error = %e, "create_user failed");
-            render(&UserNewTemplate {
-                error: Some("Unable to create user right now.".to_string()),
-                realm_name: target.0.name().to_string(),
-                form_email: form.email.clone(),
-                form_display_name: form.display_name.clone(),
-                form_first_name: form.first_name.clone(),
-                form_last_name: form.last_name.clone(),
-                chrome: true,
-                active: "users",
-                user_email: Some(session.user_email.clone()),
-                is_admin: true,
-                flash: None,
-                csrf: session.csrf.clone(),
-                narrow: false,
-                product_name: state.product_name.clone(),
-                logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
-            })
+            render_error("Unable to create user right now.".to_string())
         }
     }
 }
@@ -1746,30 +1762,8 @@ pub struct CsrfOnlyForm {
     pub csrf: String,
 }
 
-#[allow(
-    clippy::many_single_char_names,
-    clippy::similar_names,
-    clippy::min_ident_chars
-)]
 fn format_ts_admin(ts: crate::core::Timestamp) -> String {
-    let secs = ts.as_micros() / 1_000_000;
-    let rem = secs.rem_euclid(86_400);
-    let days = secs.div_euclid(86_400);
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-    let (y, mo, d) = {
-        let z = days + 719_468;
-        let era = z.div_euclid(146_097);
-        let doe = z - era * 146_097;
-        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-        let y = yoe + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let d = doy - (153 * mp + 2) / 5 + 1;
-        let m = if mp < 10 { mp + 3 } else { mp - 9 };
-        (if m <= 2 { y + 1 } else { y }, m, d)
-    };
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
+    format_ts(ts)
 }
 
 // ---------------------------------------------------------------------------

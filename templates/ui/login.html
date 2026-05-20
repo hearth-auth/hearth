@@ -1,7 +1,13 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Sign in{% endblock %}
 {% block body %}
-<div x-data="passkeyLogin()" class="rounded-md bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle">
+<div x-data="passkeyLogin"
+     data-begin-url="{{ passkey_begin_url }}"
+     data-complete-url="{{ passkey_complete_url }}"
+     data-unavailable-msg="{{ passkey_unavailable_error }}"
+     data-cancelled-msg="{{ passkey_cancelled_error }}"
+     data-failed-msg="{{ passkey_failed_error }}"
+     class="rounded-md bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle">
   <div class="mb-6 flex items-center justify-center">
     <a href="/ui" class="flex items-center" aria-label="Home">
       <img src="{{ logo_url }}" alt="{{ product_name }}" class="w-24">
@@ -196,124 +202,4 @@
   {% endif %}
   {% endif %}
 </div>
-
-<script>
-function passkeyLogin() {
-  return {
-    passkeyAvailable: false,
-    authenticating: false,
-    passkeyError: null,
-
-    init() {
-      if (window.PublicKeyCredential) {
-        this.passkeyAvailable = true;
-        this.tryConditionalMediation();
-      }
-    },
-
-    async tryConditionalMediation() {
-      try {
-        if (!PublicKeyCredential.isConditionalMediationAvailable ||
-            !(await PublicKeyCredential.isConditionalMediationAvailable())) {
-          return;
-        }
-        const opts = await this.fetchBeginOptions();
-        if (!opts) return;
-
-        const assertion = await navigator.credentials.get({
-          publicKey: opts,
-          mediation: 'conditional',
-        });
-        if (assertion) {
-          await this.completeAuthentication(assertion);
-        }
-      } catch (e) {
-        if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') {
-          console.debug('Conditional mediation unavailable:', e);
-        }
-      }
-    },
-
-    async authenticatePasskey() {
-      this.passkeyError = null;
-      this.authenticating = true;
-      try {
-        const opts = await this.fetchBeginOptions();
-        if (!opts) {
-          this.passkeyError = '{{ passkey_unavailable_error }}';
-          return;
-        }
-
-        const assertion = await navigator.credentials.get({ publicKey: opts });
-        if (!assertion) {
-          this.passkeyError = '{{ passkey_cancelled_error }}';
-          return;
-        }
-        await this.completeAuthentication(assertion);
-      } catch (e) {
-        if (e.name !== 'NotAllowedError') {
-          this.passkeyError = e.message || '{{ passkey_failed_error }}';
-        }
-      } finally {
-        this.authenticating = false;
-      }
-    },
-
-    async fetchBeginOptions() {
-      const resp = await fetch('{{ passkey_begin_url }}');
-      if (!resp.ok) return null;
-      const data = await resp.json();
-      data.challenge = this.b64urlDecode(data.challenge);
-      return {
-        challenge: data.challenge,
-        rpId: data.rpId,
-        userVerification: data.userVerification || 'preferred',
-        timeout: data.timeout || 300000,
-      };
-    },
-
-    async completeAuthentication(assertion) {
-      const body = {
-        credential_id: this.b64urlEncode(assertion.rawId),
-        client_data_json: this.b64urlEncode(assertion.response.clientDataJSON),
-        authenticator_data: this.b64urlEncode(assertion.response.authenticatorData),
-        signature: this.b64urlEncode(assertion.response.signature),
-      };
-      if (assertion.response.userHandle && assertion.response.userHandle.byteLength > 0) {
-        body.user_handle = this.b64urlEncode(assertion.response.userHandle);
-      }
-
-      const resp = await fetch('{{ passkey_complete_url }}', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text || 'Authentication failed');
-      }
-
-      const result = await resp.json();
-      if (result.error) {
-        this.passkeyError = result.error;
-        return;
-      }
-      if (result.redirect) {
-        window.location.href = result.redirect;
-      }
-    },
-
-    b64urlEncode(buf) {
-      return btoa(String.fromCharCode(...new Uint8Array(buf)))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    },
-
-    b64urlDecode(str) {
-      const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-      return Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-    },
-  };
-}
-</script>
 {% endblock %}

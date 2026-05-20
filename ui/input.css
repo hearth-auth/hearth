@@ -2,6 +2,42 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Self-hosted theme fonts (HEA-630) ───────────────────────────────────
+   Fraunces (display), Manrope (body/UI), and JetBrains Mono (code) are
+   shipped from `src/protocol/web/assets/fonts/` so no request leaves the
+   origin. Each file is the latin subset Google Fonts serves for modern
+   browsers (woff2, variable-axis). `font-display: swap` keeps the first
+   paint readable in the fallback stack until the woff2 lands.
+   ──────────────────────────────────────────────────────────────────────── */
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/ui/static/fonts/manrope-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fraunces';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('/ui/static/fonts/fraunces-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fraunces';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/ui/static/fonts/fraunces-italic-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('/ui/static/fonts/jetbrains-mono-latin.woff2') format('woff2');
+}
+
 /* ── Semantic CSS custom properties (theme contract) ──────────────────────
    Default values match the "ember" dark theme. Named themes shipped in
    src/protocol/web/themes.rs override only the vars they need.

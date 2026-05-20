@@ -4,9 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ product_name }}{% endblock %}</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;1,9..144,400&family=JetBrains+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  {# Theme fonts (Fraunces, Manrope, JetBrains Mono) are self-hosted under
+     /ui/static/fonts/ via @font-face in app.css — see HEA-630. #}
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="stylesheet" href="/ui/static/app.css">
@@ -131,7 +130,8 @@
                     <li>
                       <a :href="link.href.replace('{realm}', encodeURIComponent(r.name))"
                          class="flex items-center gap-2 rounded-md px-2 py-1 text-sm"
-                         :class="(r.name === currentRealm && link.key === activePage) ? 'bg-divider text-ht-content-primary font-medium' : 'text-ht-content-secondary hover:text-ht-content-primary hover-bg-divider'"
+                         :class="(r.name === currentRealm && link.key === activePage) ? 'bg-divider text-ht-content-primary font-medium border-l-2 border-brand' : 'text-ht-content-secondary hover:text-ht-content-primary hover-bg-divider'"
+                         :aria-current="(r.name === currentRealm && link.key === activePage) ? 'page' : undefined"
                          x-text="link.label"></a>
                     </li>
                   </template>
@@ -180,8 +180,16 @@
         </button>
 
         {# Breadcrumb area #}
-        <div class="flex-1 text-sm text-ht-content-muted">
+        <div class="flex min-w-0 flex-1 items-center gap-3 text-sm text-ht-content-muted">
           {% block breadcrumb %}{% endblock %}
+          {# Realm pill: visible on any /ui/admin/realms/{realm}/* route.
+             Alpine extracts the slug from the URL path — no server changes needed. #}
+          <div x-data="{ get realm() { const m = location.pathname.match(/\/ui\/admin\/realms\/([^/]+)/); return m ? decodeURIComponent(m[1]) : ''; } }"
+               x-show="realm" x-cloak
+               class="ml-auto flex shrink-0 items-center gap-1.5 rounded-full bg-ht-surface-elevated px-2.5 py-1 text-xs font-medium text-ht-content-secondary ring-1 ring-divider-subtle">
+            <svg class="h-3 w-3 shrink-0 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+            <span x-text="realm"></span>
+          </div>
         </div>
       </header>
 
@@ -231,9 +239,16 @@
   </div>
   {% endif %}
 
-  <script src="/ui/static/layout.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js" integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F" crossorigin="anonymous" defer></script>
-  <script src="/ui/static/htmx.min.js"></script>
+  {# admin.js registers every Alpine.data() the templates use, so the
+     `alpine:init` listener picks them up before Alpine starts walking
+     the DOM. SRI is recorded against the vendored bytes (HEA-630). #}
+  <script src="/ui/static/admin.js"
+          integrity="sha384-SPLA/w+FWU88JlVtBdCOKrfvPs8XfZOZxKRWHwmLwnhBJ/eeP+o5B0eiqP8vnJUf"></script>
+  <script src="/ui/static/alpine.min.js"
+          integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
+          defer></script>
+  <script src="/ui/static/htmx.min.js"
+          integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"></script>
 
   {# Keyboard-shortcut overlay (global). Bound to `?` via the listener
      above; ESC closes. Uses x-cloak so it doesn't flash on first paint. #}
