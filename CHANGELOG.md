@@ -27,6 +27,30 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **New-user form validation** — the admin "Create user" form now shows required-field
+  markers and `aria-required` on Email and Initial Password, performs inline email
+  regex validation, and displays a real-time 0–4 password strength meter with
+  colour-coded bars. The configured password policy appears as helper text below
+  the password field (HEA-632).
+- **Audit log metadata drawer** — audit event rows now render metadata as compact
+  key/value pills (max 2 visible + "+N more") instead of raw JSON. Clicking the
+  chevron expands an inline detail panel that pretty-prints the full event JSON
+  and shows the SHA-256 hash-chain proof (HEA-632).
+- **Config editor SSR fallback** — the admin Config Editor page now renders the raw
+  `hearth.yaml` immediately on first paint without JavaScript. When Alpine.js
+  attaches the SSR view is replaced by the full interactive tabbed editor; the page
+  remains usable (read-only view or direct apply) with JS disabled or CSP-blocked
+  (HEA-632).
+
+### Changed
+
+- **Audit filters use HTMX partial swap** — changing actor, action, date range, or
+  limit in the audit log no longer triggers a full-page reload. HTMX swaps only
+  the `<tbody>` and shows a spinner in the filter bar during the request (HEA-632).
+- **Centralised timestamp format** — all admin and account pages render timestamps
+  via a single `format_ts()` helper producing `YYYY-MM-DD HH:MM UTC`. Ad-hoc
+  `strftime` / `to_rfc3339` calls removed from templates (HEA-632).
+
 - **Persistent dev storage** — `make dev` now uses `./data/dev` as the data directory so
   storage survives restarts. `make dev-reset` wipes `./data/dev` for a clean slate.
   The underlying `HEARTH_DEV_DATA_DIR` env var can override the path when invoking the

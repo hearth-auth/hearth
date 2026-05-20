@@ -17,7 +17,9 @@ use axum::http::{Request, StatusCode};
 use hearth::audit::EmbeddedAuditEngine;
 use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::onboarding::OnboardingService;
-use hearth::identity::{CreateRealmRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig};
+use hearth::identity::{
+    CreateRealmRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig,
+};
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::EmbeddedRbacEngine;
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig};
@@ -78,7 +80,14 @@ fn make_web_state() -> WebState {
         null_email_service(),
         data_dir,
     ));
-    WebState::new(identity, rbac, audit, onboarding, CookieSecret::random(), None)
+    WebState::new(
+        identity,
+        rbac,
+        audit,
+        onboarding,
+        CookieSecret::random(),
+        None,
+    )
 }
 
 // ---------------------------------------------------------------------------

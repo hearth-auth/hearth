@@ -250,7 +250,6 @@ fn format_kib_human(kib: u32) -> String {
     }
 }
 
-
 /// Resolves a user's email from their `UserId`. Returns "(unknown)"
 /// when the user has been deleted.
 fn audit_user_event(
