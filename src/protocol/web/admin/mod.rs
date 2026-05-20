@@ -201,6 +201,16 @@ fn format_ts(ts: crate::core::Timestamp) -> String {
     super::format_ts(ts)
 }
 
+/// Formats a `Timestamp` as a human-friendly relative time string
+/// (`just now`, `Nm ago`, `Nh ago`, `Mon DD`).
+///
+/// Delegates to [`super::format_ts_relative`]. Used by the audit log
+/// where scanning recent events is easier with relative times than
+/// with absolute UTC. The absolute UTC is still rendered as a tooltip.
+fn format_ts_relative(ts: crate::core::Timestamp) -> String {
+    super::format_ts_relative(ts)
+}
+
 /// Formats a duration in microseconds as a human-readable string.
 ///
 /// Examples: `900_000_000` → "15m", `86_400_000_000` → "24h", `3_600_000_000` → "1h".

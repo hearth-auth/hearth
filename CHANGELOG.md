@@ -16,6 +16,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **Audit log: relative timestamps** — the admin audit table now renders
+  timestamps as relative strings (`just now`, `5m ago`, `3h ago`, `May 18`)
+  so operators can scan recent activity without mentally converting UTC.
+  The absolute UTC timestamp is preserved as a `title=""` tooltip on
+  every row, one hover away (HEA-644).
 - **Audit log: clickable resource links** — the resource column in the
   admin audit table now wraps the display name in an `<a>` tag pointing
   to the affected user / organization / application / realm / group
@@ -23,6 +28,32 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   unresolvable resources continue to render as plain text so operators
   don't navigate to a 404. Sessions link to the realm sessions list
   (HEA-645).
+- **Audit log: friendly action labels** — the admin audit table now renders
+  title-case English phrases ("User Created", "Consent Revoked", "SAML
+  Login Failed") in place of raw `snake_case` tags. The raw identifier
+  is preserved as a `title=""` tooltip so operators can still correlate
+  rows with API filter values, and the Action filter `<select>` shows
+  the friendly label as display text while submitting the raw tag
+  (HEA-643).
+- **Audit log: contextual metadata highlights** — the metadata column
+  now lifts the most operationally useful keys inline per action
+  instead of taking the first-N alphabetically: `ip`/`user_agent` for
+  session creation, `client_id`/`scopes` for OAuth consent grant/revoke,
+  `method` for credential changes, and `provider`/`external_id` for
+  completed federation logins. The inline pill cap rose from 2 to 3
+  and the "+N more" overflow chip only ever hides non-priority keys,
+  so the IP behind a new session is visible without expanding the row
+  (HEA-646).
+- **Audit log: category + severity indicators** — every row in the admin
+  audit table now renders a colored category dot before the action label
+  (one of Identity / Session / OAuth / Security / Organization / System)
+  and a subtle amber left-border on destructive or security-sensitive
+  events — deletions, credential changes, consent revocations, role
+  revokes, bulk disables, and anything else whose
+  `AuditAction::failure_policy()` is `FailOperation`. Routine updates
+  (e.g. `UserUpdated`) stay visually quiet while destructive events
+  (e.g. `UserDeleted`) stand out, so operators can triage high-impact
+  activity at a glance (HEA-647).
 - **Self-hosted fonts** — Fraunces, Manrope, and JetBrains Mono `.woff2` files are
   now embedded in the binary and served from `'self'`. The `<link>` to
   `fonts.googleapis.com` has been removed; `@font-face` rules in `app.css` load

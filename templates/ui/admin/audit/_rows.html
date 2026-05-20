@@ -3,7 +3,7 @@
    The detail row below is a sibling <tr> rendered immediately after,
    hidden until the toggle is clicked — no HTMX round-trip needed since
    the full event payload is embedded in the server render. #}
-<tr class="border-b border-divider-subtle hover-bg-divider"
+<tr class="border-b border-divider-subtle hover-bg-divider{% if row.action_high_severity %} border-l-2 border-l-amber-400/60{% endif %}"
     x-data="{ open: false }"
     :class="open ? 'bg-ht-surface-overlay' : ''">
   <td class="w-8 px-3 py-3">
@@ -16,9 +16,22 @@
       <svg class="h-3.5 w-3.5 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
     </button>
   </td>
-  <td class="whitespace-nowrap px-4 py-3 text-sm text-ht-content-muted">{{ row.timestamp_display }}</td>
+  <td class="whitespace-nowrap px-4 py-3 text-sm text-ht-content-muted">
+    <span title="{{ row.timestamp_display }}">{{ row.timestamp_relative }}</span>
+  </td>
   <td class="px-4 py-3">
-    <code class="rounded-sm bg-ht-surface-elevated px-1.5 py-0.5 font-mono text-xs text-ht-content-secondary">{{ row.event.action }}</code>
+    <span class="inline-flex items-center gap-1.5 rounded-full bg-ht-surface-base px-2 py-0.5 text-xs text-ht-content-secondary ring-1 ring-divider-subtle"
+          title="{{ row.event.action }} — {{ row.action_category }}{% if row.action_high_severity %} (high-severity){% endif %}">
+      {# Category indicator dot — color is theme-aware via the *-fg tokens. #}
+      <span aria-hidden="true" class="inline-block h-2 w-2 rounded-full
+        {% if row.action_category == "Identity" %}bg-info-fg{% endif %}
+        {% if row.action_category == "Session" %}bg-teal-fg{% endif %}
+        {% if row.action_category == "OAuth" %}bg-violet-fg{% endif %}
+        {% if row.action_category == "Security" %}bg-rose-fg{% endif %}
+        {% if row.action_category == "Organization" %}bg-steel-fg{% endif %}
+        {% if row.action_category == "System" %}bg-ht-content-muted{% endif %}"></span>
+      <span>{{ row.action_label }}</span>
+    </span>
   </td>
   <td class="px-4 py-3 text-sm text-ht-content-secondary" title="{{ row.event.actor }}">
     {{ row.actor_display }}

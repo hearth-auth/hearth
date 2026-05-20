@@ -555,3 +555,79 @@ async fn audit_list_links_resolved_resources() {
         "expected deleted/unknown user resource to NOT be linked, but found {bogus_href}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Audit category + severity indicators (HEA-647)
+// ---------------------------------------------------------------------------
+
+/// The audit list renders a colored category dot and a high-severity
+/// amber left-border on rows whose action's failure policy is
+/// `FailOperation`. Verifies that:
+/// - A routine `UserCreated` row carries the `Identity` category dot
+///   (`bg-info-fg`) and does NOT have the amber left-border.
+/// - A destructive `UserDeleted` row carries the `Identity` category dot
+///   AND the amber left-border (`border-l-2 border-l-amber-400/60`).
+#[tokio::test]
+async fn audit_list_renders_category_and_severity_indicators() {
+    let rig = build_rig();
+    let csrf = "csrf-cat";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    // Seed a destructive `UserDeleted` event in addition to the rig's
+    // pre-seeded routine `UserCreated`. Both have category "Identity";
+    // only `UserDeleted` is high-severity.
+    rig.audit
+        .append(&CreateAuditEvent {
+            realm_id: rig.tenant_realm_id.clone(),
+            actor: "system".to_string(),
+            action: AuditAction::UserDeleted,
+            resource_type: "user".to_string(),
+            resource_id: "00000000-0000-0000-0000-000000000002".to_string(),
+            metadata: None,
+        })
+        .expect("audit event");
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ui/admin/realms/{realm}/audit"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("test invariant");
+    let html = String::from_utf8_lossy(&bytes);
+
+    // Category indicator dot is present (Identity uses bg-info-fg).
+    assert!(
+        html.contains("bg-info-fg"),
+        "expected Identity category dot class `bg-info-fg` on audit row",
+    );
+
+    // The destructive `UserDeleted` row must have the high-severity
+    // amber left-border applied.
+    assert!(
+        html.contains("border-l-amber-400/60"),
+        "expected destructive `UserDeleted` row to carry the amber severity border",
+    );
+    assert!(
+        html.contains("border-l-2"),
+        "expected destructive `UserDeleted` row to carry `border-l-2`",
+    );
+
+    // The category name surfaces in the title attribute so operators see
+    // the classification on hover even without color.
+    assert!(
+        html.contains("— Identity"),
+        "expected category name to appear in row title attribute",
+    );
+}

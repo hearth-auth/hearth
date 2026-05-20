@@ -43,9 +43,9 @@
               hx-trigger="change"
               class="mt-1 input rounded py-1.5">
         <option value=""{% if form_action.is_empty() %} selected{% endif %}>All actions</option>
-        {% for tag in available_actions %}
+        {% for (tag, label) in available_actions %}
           {% let is_selected = form_action == tag.to_string() %}
-          <option value="{{ tag }}"{% if is_selected %} selected{% endif %}>{{ tag }}</option>
+          <option value="{{ tag }}"{% if is_selected %} selected{% endif %}>{{ label }}</option>
         {% endfor %}
       </select>
     </div>

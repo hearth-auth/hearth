@@ -505,6 +505,54 @@ pub(super) fn format_ts(ts: crate::core::Timestamp) -> String {
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
 }
 
+/// Formats a [`crate::core::Timestamp`] as a human-friendly relative
+/// time string, using `now` as the reference point. Used on the audit
+/// log where scanning recent activity is easier with "5m ago" than with
+/// a UTC timestamp.
+///
+/// - Differences under 60 seconds render as `just now`.
+/// - Differences under 1 hour render as `Nm ago`.
+/// - Differences under 24 hours render as `Nh ago`.
+/// - Differences of 24 hours or more render as `Mon DD` (e.g. `May 18`).
+///
+/// Future timestamps (when `ts > now`, possible with clock skew) render
+/// as `just now` while within the first minute and then degrade into
+/// the absolute-date branch. Audit events should never be in the
+/// future in practice.
+pub(super) fn format_ts_relative_at(
+    ts: crate::core::Timestamp,
+    now: crate::core::Timestamp,
+) -> String {
+    let diff_secs = (now.as_micros() - ts.as_micros()) / 1_000_000;
+    if diff_secs < 60 {
+        return "just now".to_string();
+    }
+    if diff_secs < 3_600 {
+        let mins = diff_secs / 60;
+        return format!("{mins}m ago");
+    }
+    if diff_secs < 86_400 {
+        let hours = diff_secs / 3_600;
+        return format!("{hours}h ago");
+    }
+    let secs = ts.as_micros() / 1_000_000;
+    let days = secs.div_euclid(86_400);
+    let (_, mo, d) = web_civil_from_days(days);
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mo_idx = (mo as usize).saturating_sub(1).min(11);
+    format!("{} {d}", MONTHS[mo_idx])
+}
+
+/// Convenience wrapper around [`format_ts_relative_at`] that uses the
+/// current system clock as the reference point. Hot paths that need
+/// deterministic time should call the `_at` variant directly.
+pub(super) fn format_ts_relative(ts: crate::core::Timestamp) -> String {
+    format_ts_relative_at(ts, crate::core::Timestamp::now())
+}
+
 /// Converts a Unix day count to `(year, month 1–12, day 1–31)` using
 /// Howard Hinnant's `civil_from_days` algorithm (proleptic Gregorian,
 /// public domain).
@@ -1710,6 +1758,71 @@ mod tests {
     fn etag_for_is_deterministic_and_distinct() {
         assert_eq!(etag_for("a"), etag_for("a"));
         assert_ne!(etag_for("a"), etag_for("b"));
+    }
+
+    #[test]
+    fn format_ts_relative_just_now_under_60s() {
+        let now = crate::core::Timestamp::from_micros(1_700_000_000_000_000);
+        // 30 seconds earlier
+        let ts = crate::core::Timestamp::from_micros(1_700_000_000_000_000 - 30_000_000);
+        assert_eq!(format_ts_relative_at(ts, now), "just now");
+    }
+
+    #[test]
+    fn format_ts_relative_just_now_boundary_exactly_59s() {
+        let now = crate::core::Timestamp::from_micros(1_700_000_000_000_000);
+        let ts = crate::core::Timestamp::from_micros(1_700_000_000_000_000 - 59_000_000);
+        assert_eq!(format_ts_relative_at(ts, now), "just now");
+    }
+
+    #[test]
+    fn format_ts_relative_minutes_ago() {
+        let now = crate::core::Timestamp::from_micros(1_700_000_000_000_000);
+        // 5 minutes earlier
+        let ts = crate::core::Timestamp::from_micros(1_700_000_000_000_000 - 5 * 60_000_000);
+        assert_eq!(format_ts_relative_at(ts, now), "5m ago");
+    }
+
+    #[test]
+    fn format_ts_relative_minutes_boundary_60s_is_1m() {
+        let now = crate::core::Timestamp::from_micros(1_700_000_000_000_000);
+        let ts = crate::core::Timestamp::from_micros(1_700_000_000_000_000 - 60_000_000);
+        assert_eq!(format_ts_relative_at(ts, now), "1m ago");
+    }
+
+    #[test]
+    fn format_ts_relative_hours_ago() {
+        let now = crate::core::Timestamp::from_micros(1_700_000_000_000_000);
+        // 3 hours earlier
+        let ts = crate::core::Timestamp::from_micros(1_700_000_000_000_000 - 3 * 3_600_000_000);
+        assert_eq!(format_ts_relative_at(ts, now), "3h ago");
+    }
+
+    #[test]
+    fn format_ts_relative_hours_boundary_3600s_is_1h() {
+        let now = crate::core::Timestamp::from_micros(1_700_000_000_000_000);
+        let ts = crate::core::Timestamp::from_micros(1_700_000_000_000_000 - 3_600_000_000);
+        assert_eq!(format_ts_relative_at(ts, now), "1h ago");
+    }
+
+    #[test]
+    fn format_ts_relative_short_date_at_24h() {
+        // 2026-05-18 00:00:00 UTC = 1_779_062_400 seconds since epoch
+        let ts_secs: i64 = 1_779_062_400;
+        let ts = crate::core::Timestamp::from_micros(ts_secs * 1_000_000);
+        // "now" is exactly 24h later → should render as short date
+        let now = crate::core::Timestamp::from_micros((ts_secs + 86_400) * 1_000_000);
+        assert_eq!(format_ts_relative_at(ts, now), "May 18");
+    }
+
+    #[test]
+    fn format_ts_relative_short_date_far_past() {
+        // 2026-01-05 00:00:00 UTC = 1_767_571_200
+        let ts_secs: i64 = 1_767_571_200;
+        let ts = crate::core::Timestamp::from_micros(ts_secs * 1_000_000);
+        // 30 days later
+        let now = crate::core::Timestamp::from_micros((ts_secs + 30 * 86_400) * 1_000_000);
+        assert_eq!(format_ts_relative_at(ts, now), "Jan 5");
     }
 
     #[test]
