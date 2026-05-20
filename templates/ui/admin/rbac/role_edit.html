@@ -33,13 +33,13 @@
       <label for="name" class="block text-sm font-medium text-ht-content-secondary">Role name <span class="text-danger-fg">*</span></label>
       <input type="text" id="name" name="name" required autofocus maxlength="128"
              value="{{ form_name }}"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input font-mono">
     </div>
 
     <div>
       <label for="description" class="block text-sm font-medium text-ht-content-secondary">Description <span class="text-ht-content-muted">(optional)</span></label>
       <textarea id="description" name="description" rows="2" maxlength="500"
-                class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">{{ form_description }}</textarea>
+                class="mt-1 input">{{ form_description }}</textarea>
     </div>
 
     <div>
@@ -67,7 +67,7 @@
       <label for="permissions" class="block text-sm font-medium text-ht-content-secondary">Permissions</label>
       <p class="mb-1.5 text-xs text-ht-content-muted">One permission per line. This replaces the current permission set.</p>
       <textarea id="permissions" name="permissions" rows="5"
-                class="block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">{{ form_permissions }}</textarea>
+                class="input font-mono">{{ form_permissions }}</textarea>
     </div>
 
     <div class="flex items-center gap-3 pt-2">

@@ -18,6 +18,12 @@
   {% endmatch %}
 </head>
 <body{% match csrf %}{% when Some with (token) %} hx-headers='{"X-CSRF-Token": "{{ token }}"}'{% when None %}{% endmatch %}>
+  {# Skip-to-content: first focusable element — screen readers and keyboard
+     users skip the sidebar chrome and land directly on page content. #}
+  <a href="#main"
+     class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded focus:px-4 focus:py-2 focus:bg-ht-surface-elevated focus:text-ht-content-primary focus:ring-2 focus:ring-ht-brand-from focus:outline-none">
+    Skip to content
+  </a>
   {% if chrome %}
   {# ── Authenticated layout: sidebar + main content ── #}
   <div class="flex h-screen overflow-hidden bg-ht-surface-base" x-data="{ sidebarOpen: false }">
@@ -42,7 +48,7 @@
       </div>
 
       {# Navigation #}
-      <nav class="flex-1 overflow-y-auto px-3 py-4 space-y-6" aria-label="Primary">
+      <nav class="flex-1 overflow-y-auto px-3 py-4 space-y-6" aria-label="Admin">
         <div>
           <p class="mb-2 px-2 font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-ht-content-muted">Main</p>
           <ul class="space-y-0.5">
@@ -194,7 +200,7 @@
       </header>
 
       {# Page content #}
-      <main class="min-h-0 flex-1 overflow-y-auto p-6">
+      <main id="main" class="min-h-0 flex-1 overflow-y-auto p-6">
         <div class="{% if narrow %}mx-auto max-w-lg{% endif %}">
           {% match flash %}
             {% when Some with (f) %}

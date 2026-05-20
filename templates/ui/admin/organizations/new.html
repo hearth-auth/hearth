@@ -41,7 +41,7 @@
              maxlength="80"
              x-model="name"
              @input="if (!slugTouched) slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63)"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div>
@@ -54,21 +54,21 @@
              maxlength="63"
              x-model="slug"
              @input="slugTouched = true"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input font-mono">
       <p class="mt-1 text-xs text-ht-content-muted">3–63 characters, lowercase letters, digits, and hyphens. Auto-fills from the name until you edit it.</p>
     </div>
 
     <div>
       <label for="description" class="block text-sm font-medium text-ht-content-secondary">Description <span class="text-ht-content-muted">(optional)</span></label>
       <textarea id="description" name="description" rows="3" maxlength="500"
-                class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">{{ form_description }}</textarea>
+                class="mt-1 input">{{ form_description }}</textarea>
     </div>
 
     <div>
       <label for="max_members" class="block text-sm font-medium text-ht-content-secondary">Member limit <span class="text-ht-content-muted">(optional)</span></label>
       <input type="number" id="max_members" name="max_members" min="1" placeholder="Unlimited"
              {% match form_max_members %}{% when Some with (v) %}value="{{ v }}"{% when None %}{% endmatch %}
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
       <p class="mt-1 text-xs text-ht-content-muted">Leave empty for unlimited members.</p>
     </div>
 

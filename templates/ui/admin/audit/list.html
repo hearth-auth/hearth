@@ -33,7 +33,7 @@
              hx-get="/ui/admin/realms/{{ realm_name }}/audit" hx-target="#table-body" hx-swap="innerHTML"
              hx-indicator="#audit-spinner" hx-include="closest form"
              hx-trigger="input changed delay:200ms, change delay:200ms"
-             class="mt-1 block w-full rounded border border-strong bg-ht-surface-base px-3 py-1.5 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input rounded py-1.5">
     </div>
     <div class="min-w-0 flex-1">
       <label for="action" class="block text-xs font-medium text-ht-content-muted">Action</label>
@@ -41,7 +41,7 @@
               hx-get="/ui/admin/realms/{{ realm_name }}/audit" hx-target="#table-body" hx-swap="innerHTML"
               hx-indicator="#audit-spinner" hx-include="closest form"
               hx-trigger="change"
-              class="mt-1 block w-full rounded border border-strong bg-ht-surface-base px-3 py-1.5 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+              class="mt-1 input rounded py-1.5">
         <option value=""{% if form_action.is_empty() %} selected{% endif %}>All actions</option>
         {% for tag in available_actions %}
           {% let is_selected = form_action == tag.to_string() %}
@@ -55,7 +55,7 @@
              hx-get="/ui/admin/realms/{{ realm_name }}/audit" hx-target="#table-body" hx-swap="innerHTML"
              hx-indicator="#audit-spinner" hx-include="closest form"
              hx-trigger="change"
-             class="mt-1 block w-full rounded border border-strong bg-ht-surface-base px-3 py-1.5 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input rounded py-1.5">
     </div>
     <div class="min-w-0 w-36">
       <label for="end_date" class="block text-xs font-medium text-ht-content-muted">End date</label>
@@ -63,7 +63,7 @@
              hx-get="/ui/admin/realms/{{ realm_name }}/audit" hx-target="#table-body" hx-swap="innerHTML"
              hx-indicator="#audit-spinner" hx-include="closest form"
              hx-trigger="change"
-             class="mt-1 block w-full rounded border border-strong bg-ht-surface-base px-3 py-1.5 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input rounded py-1.5">
     </div>
     <div class="w-24">
       <label for="limit" class="block text-xs font-medium text-ht-content-muted">Limit</label>
@@ -71,7 +71,7 @@
              hx-get="/ui/admin/realms/{{ realm_name }}/audit" hx-target="#table-body" hx-swap="innerHTML"
              hx-indicator="#audit-spinner" hx-include="closest form"
              hx-trigger="change delay:200ms"
-             class="mt-1 block w-full rounded border border-strong bg-ht-surface-base px-3 py-1.5 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input rounded py-1.5">
     </div>
     <div class="flex items-center gap-2">
       <button type="submit"

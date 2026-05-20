@@ -32,14 +32,14 @@
       <input type="text" id="name" name="name" required autofocus maxlength="128"
              value="{{ form_name }}"
              placeholder="e.g. viewer, editor, billing-admin"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input font-mono">
       <p class="mt-1 text-xs text-ht-content-muted">Unique within this realm. Dot-delimited namespacing is conventional: <code class="font-mono">app.viewer</code>.</p>
     </div>
 
     <div>
       <label for="description" class="block text-sm font-medium text-ht-content-secondary">Description <span class="text-ht-content-muted">(optional)</span></label>
       <textarea id="description" name="description" rows="2" maxlength="500"
-                class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">{{ form_description }}</textarea>
+                class="mt-1 input">{{ form_description }}</textarea>
     </div>
 
     <div>
@@ -78,7 +78,7 @@
       <p class="mb-1.5 text-xs text-ht-content-muted">One permission per line. Format: <code class="font-mono">namespace.action</code> (e.g. <code class="font-mono">docs.read</code>).</p>
       <textarea id="permissions" name="permissions" rows="5"
                 placeholder="docs.read&#10;docs.write&#10;admin.users.view"
-                class="block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">{{ form_permissions }}</textarea>
+                class="input font-mono">{{ form_permissions }}</textarea>
     </div>
 
     <div class="flex items-center gap-3 pt-2">

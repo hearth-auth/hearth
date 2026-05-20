@@ -92,6 +92,20 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+
+  /* Headings inherit body colour; this prevents UA style-sheets from
+     resetting to #000 or #fff on dark surfaces. */
+  h1, h2, h3, h4, h5, h6 {
+    color: var(--ht-content-primary);
+  }
+
+  /* Global focus ring — ember outline for all interactive elements.
+     Component-specific rules (.btn-ember, .btn-danger, .input) override
+     this via higher cascade specificity without needing !important. */
+  :focus-visible {
+    outline: 2px solid var(--ht-brand-from);
+    outline-offset: 2px;
+  }
 }
 
 @layer components {
@@ -111,6 +125,30 @@
   .btn-ember:focus-visible {
     outline: none;
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--ht-brand-from) 15%, transparent);
+  }
+
+  /* Themed text input — add to any input[type=text|email|password|url|search]
+     or textarea. Layout utilities (mt-1, block, w-full) go alongside. */
+  .input {
+    display: block;
+    width: 100%;
+    border-radius: 0.125rem;
+    border: 1px solid color-mix(in srgb, var(--ht-divider) 6%, transparent);
+    background-color: var(--ht-surface-input);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    color: var(--ht-content-primary);
+    outline: none;
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+  }
+  .input::placeholder {
+    color: var(--ht-content-muted);
+  }
+  .input:focus-visible {
+    outline: none;
+    border-color: color-mix(in srgb, var(--ht-divider) 18%, transparent);
+    box-shadow: 0 0 0 2px var(--ht-surface-base), 0 0 0 4px var(--ht-brand-from);
   }
 
   /* Danger button — muted coral */

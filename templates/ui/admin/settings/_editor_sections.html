@@ -84,7 +84,7 @@
     <input type="text" :value="getVal('server.default_realm', '')"
            @input="setVal('server.default_realm', $el.value || null)"
            placeholder="(none)"
-           class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+           class="mt-1.5 input">
   </div>
 </div>
 
@@ -240,7 +240,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Custom CSS Path</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Path to a custom CSS file appended after the theme.</p>
       <input type="text" :value="getVal('branding.custom_css', '')" @input="setVal('branding.custom_css', $el.value)"
-             class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+             class="mt-1.5 input">
     </div>
   </div>
 </div>
@@ -256,7 +256,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Transport</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Email delivery provider.</p>
       <select :value="getVal('email.transport', 'log')" @change="setVal('email.transport', $el.value)"
-              class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+              class="mt-1.5 input">
         <option value="log">log (dev only)</option>
         <option value="smtp">smtp</option>
         <option value="sendgrid">sendgrid</option>
@@ -325,7 +325,7 @@
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">API Key</label>
         <input type="text" :value="getVal('email.sendgrid.api_key', '')" @input="ensure('email.sendgrid'); setVal('email.sendgrid.api_key', $el.value)"
-               class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+               class="mt-1.5 input">
       </div>
     </div>
   </template>
@@ -337,7 +337,7 @@
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Server Token</label>
         <input type="text" :value="getVal('email.postmark.server_token', '')" @input="ensure('email.postmark'); setVal('email.postmark.server_token', $el.value)"
-               class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+               class="mt-1.5 input">
       </div>
     </div>
   </template>
@@ -350,17 +350,17 @@
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">API Key</label>
           <input type="text" :value="getVal('email.mailgun.api_key', '')" @input="ensure('email.mailgun'); setVal('email.mailgun.api_key', $el.value)"
-                 class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                 class="mt-1.5 input">
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Domain</label>
           <input type="text" :value="getVal('email.mailgun.domain', '')" @input="ensure('email.mailgun'); setVal('email.mailgun.domain', $el.value)"
-                 class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                 class="mt-1.5 input">
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Region</label>
           <select :value="getVal('email.mailgun.region', 'us')" @change="ensure('email.mailgun'); setVal('email.mailgun.region', $el.value)"
-                  class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                  class="mt-1.5 input">
             <option value="us">US</option>
             <option value="eu">EU</option>
           </select>
@@ -399,22 +399,22 @@
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Company Name</label>
         <input type="text" :value="getVal('email.branding.company_name', '')" @input="ensure('email.branding'); setVal('email.branding.company_name', $el.value)"
-               class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+               class="mt-1.5 input">
       </div>
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Support Email</label>
         <input type="text" :value="getVal('email.branding.support_email', '')" @input="ensure('email.branding'); setVal('email.branding.support_email', $el.value)"
-               class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+               class="mt-1.5 input">
       </div>
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Logo URL</label>
         <input type="text" :value="getVal('email.branding.logo_url', '')" @input="ensure('email.branding'); setVal('email.branding.logo_url', $el.value)"
-               class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+               class="mt-1.5 input">
       </div>
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Primary Color</label>
         <input type="text" :value="getVal('email.branding.primary_color', '')" @input="ensure('email.branding'); setVal('email.branding.primary_color', $el.value)"
-               class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+               class="mt-1.5 input">
       </div>
     </div>
   </div>
@@ -422,7 +422,7 @@
     <label class="block text-sm font-medium text-ht-content-secondary">Templates Directory</label>
     <p class="mt-0.5 text-xs text-ht-content-muted">Custom Tera email template directory (optional).</p>
     <input type="text" :value="getVal('email.templates_dir', '')" @input="setVal('email.templates_dir', $el.value)"
-           class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+           class="mt-1.5 input">
   </div>
 </div>
 
@@ -437,19 +437,19 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Issuer</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">URL for discovery docs and ID tokens (e.g. https://auth.example.com).</p>
       <input type="text" :value="getVal('oidc.issuer', '')" @input="setVal('oidc.issuer', $el.value)"
-             class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+             class="mt-1.5 input">
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Auth Code TTL</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Authorization code lifetime (e.g. 10m). Default: 10m.</p>
       <input type="text" :value="getVal('oidc.authorization_code_ttl', '')" @input="setVal('oidc.authorization_code_ttl', $el.value)"
-             class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+             class="mt-1.5 input">
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Enforce Nonces</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Require nonce uniqueness in authorization requests.</p>
       <select @change="setVal('oidc.enforce_nonces', $el.value === 'true' ? true : $el.value === 'false' ? false : null)"
-              class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+              class="mt-1.5 input">
         <option value="" :selected="getVal('oidc.enforce_nonces', null) === null">— not set —</option>
         <option value="true" :selected="getVal('oidc.enforce_nonces', null) === true">Enabled</option>
         <option value="false" :selected="getVal('oidc.enforce_nonces', null) === false">Disabled</option>
@@ -644,21 +644,21 @@
       <p class="mt-0.5 text-xs text-ht-content-muted">Override for this realm (e.g. 12h).</p>
       <input type="text" :value="config.realms?.[activeRealm]?.session_ttl || ''"
              @input="ensure('realms.' + activeRealm); config.realms[activeRealm].session_ttl = $el.value || undefined"
-             class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+             class="mt-1.5 input">
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Password Memory Cost</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Argon2id memory cost override (KiB).</p>
       <input type="text" :value="config.realms?.[activeRealm]?.password_memory_cost || ''"
              @input="ensure('realms.' + activeRealm); config.realms[activeRealm].password_memory_cost = $el.value ? Number($el.value) || $el.value : undefined"
-             class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+             class="mt-1.5 input">
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Password Time Cost</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Argon2id time cost override (iterations).</p>
       <input type="text" :value="config.realms?.[activeRealm]?.password_time_cost || ''"
              @input="ensure('realms.' + activeRealm); config.realms[activeRealm].password_time_cost = $el.value ? Number($el.value) || $el.value : undefined"
-             class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+             class="mt-1.5 input">
     </div>
   </div>
 
@@ -671,7 +671,7 @@
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">MFA Required</label>
         <select @change="ensure('realms.' + activeRealm + '.auth'); config.realms[activeRealm].auth.mfa_required = $el.value === 'true' ? true : $el.value === 'false' ? false : undefined"
-                class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                class="mt-1.5 input">
           <option value="" :selected="config.realms?.[activeRealm]?.auth?.mfa_required == null">— inherit —</option>
           <option value="true" :selected="config.realms?.[activeRealm]?.auth?.mfa_required === true">Enabled</option>
           <option value="false" :selected="config.realms?.[activeRealm]?.auth?.mfa_required === false">Disabled</option>
@@ -680,7 +680,7 @@
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Passkey Requires MFA</label>
         <select @change="ensure('realms.' + activeRealm + '.auth'); config.realms[activeRealm].auth.passkey_requires_mfa = $el.value === 'true' ? true : $el.value === 'false' ? false : undefined"
-                class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                class="mt-1.5 input">
           <option value="" :selected="config.realms?.[activeRealm]?.auth?.passkey_requires_mfa == null">— inherit —</option>
           <option value="true" :selected="config.realms?.[activeRealm]?.auth?.passkey_requires_mfa === true">Enabled</option>
           <option value="false" :selected="config.realms?.[activeRealm]?.auth?.passkey_requires_mfa === false">Disabled</option>
@@ -690,7 +690,7 @@
         <label class="block text-sm font-medium text-ht-content-secondary">Passkey Required</label>
         <p class="mt-0.5 text-xs text-ht-content-muted">Require all users to have a passkey.</p>
         <select @change="ensure('realms.' + activeRealm + '.auth'); config.realms[activeRealm].auth.webauthn_required = $el.value === 'true' ? true : $el.value === 'false' ? false : undefined"
-                class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                class="mt-1.5 input">
           <option value="" :selected="config.realms?.[activeRealm]?.auth?.webauthn_required == null">— inherit —</option>
           <option value="true" :selected="config.realms?.[activeRealm]?.auth?.webauthn_required === true">Required</option>
           <option value="false" :selected="config.realms?.[activeRealm]?.auth?.webauthn_required === false">Optional</option>
@@ -700,7 +700,7 @@
         <label class="block text-sm font-medium text-ht-content-secondary">Resident Key</label>
         <p class="mt-0.5 text-xs text-ht-content-muted">Controls discoverable credential storage on the authenticator.</p>
         <select @change="ensure('realms.' + activeRealm + '.auth'); config.realms[activeRealm].auth.webauthn_resident_key = $el.value || undefined"
-                class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                class="mt-1.5 input">
           <option value="" :selected="!config.realms?.[activeRealm]?.auth?.webauthn_resident_key">— inherit —</option>
           <option value="required" :selected="config.realms?.[activeRealm]?.auth?.webauthn_resident_key === 'required'">Required</option>
           <option value="preferred" :selected="config.realms?.[activeRealm]?.auth?.webauthn_resident_key === 'preferred'">Preferred</option>
@@ -711,7 +711,7 @@
         <label class="block text-sm font-medium text-ht-content-secondary">User Verification</label>
         <p class="mt-0.5 text-xs text-ht-content-muted">Controls biometric/PIN enforcement during ceremonies.</p>
         <select @change="ensure('realms.' + activeRealm + '.auth'); config.realms[activeRealm].auth.webauthn_user_verification = $el.value || undefined"
-                class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                class="mt-1.5 input">
           <option value="" :selected="!config.realms?.[activeRealm]?.auth?.webauthn_user_verification">— inherit —</option>
           <option value="required" :selected="config.realms?.[activeRealm]?.auth?.webauthn_user_verification === 'required'">Required</option>
           <option value="preferred" :selected="config.realms?.[activeRealm]?.auth?.webauthn_user_verification === 'preferred'">Preferred</option>
@@ -727,14 +727,14 @@
           <label class="block text-sm font-medium text-ht-content-secondary">Access Token TTL</label>
           <input type="text" :value="config.realms?.[activeRealm]?.auth?.token?.access_token_ttl || ''"
                  @input="ensure('realms.' + activeRealm + '.auth.token'); config.realms[activeRealm].auth.token.access_token_ttl = $el.value || undefined"
-                 class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember"
+                 class="mt-1.5 input"
                  placeholder="e.g. 15m">
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Refresh Token TTL</label>
           <input type="text" :value="config.realms?.[activeRealm]?.auth?.token?.refresh_token_ttl || ''"
                  @input="ensure('realms.' + activeRealm + '.auth.token'); config.realms[activeRealm].auth.token.refresh_token_ttl = $el.value || undefined"
-                 class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember"
+                 class="mt-1.5 input"
                  placeholder="e.g. 7d">
         </div>
       </div>
@@ -747,13 +747,13 @@
           <label class="block text-sm font-medium text-ht-content-secondary">Max Failed Logins</label>
           <input type="text" :value="config.realms?.[activeRealm]?.auth?.rate_limit?.max_failed_logins || ''"
                  @input="ensure('realms.' + activeRealm + '.auth.rate_limit'); config.realms[activeRealm].auth.rate_limit.max_failed_logins = $el.value ? Number($el.value) || undefined : undefined"
-                 class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                 class="mt-1.5 input">
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Lockout Duration</label>
           <input type="text" :value="config.realms?.[activeRealm]?.auth?.rate_limit?.lockout_duration || ''"
                  @input="ensure('realms.' + activeRealm + '.auth.rate_limit'); config.realms[activeRealm].auth.rate_limit.lockout_duration = $el.value || undefined"
-                 class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember"
+                 class="mt-1.5 input"
                  placeholder="e.g. 15m">
         </div>
       </div>
@@ -765,7 +765,7 @@
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Registration Mode</label>
           <select @change="ensure('realms.' + activeRealm + '.auth.registration'); config.realms[activeRealm].auth.registration.mode = $el.value || undefined"
-                  class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember">
+                  class="mt-1.5 input">
             <option value="" :selected="config.realms?.[activeRealm]?.auth?.registration?.mode == null">— inherit —</option>
             <option value="disabled" :selected="config.realms?.[activeRealm]?.auth?.registration?.mode === 'disabled'">Disabled — admin-only user creation</option>
             <option value="open" :selected="config.realms?.[activeRealm]?.auth?.registration?.mode === 'open'">Open — anyone may register</option>
@@ -779,7 +779,7 @@
           <input type="text"
                  :value="(config.realms?.[activeRealm]?.auth?.registration?.allowed_domains || []).join(', ')"
                  @input="ensure('realms.' + activeRealm + '.auth.registration'); config.realms[activeRealm].auth.registration.allowed_domains = $el.value.split(',').map(s => s.trim()).filter(s => s) || undefined"
-                 class="mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember"
+                 class="mt-1.5 input"
                  placeholder="example.com, corp.example.com">
           <p class="mt-1 text-xs text-ht-content-muted">Comma-separated list. Required when mode is domain-restricted.</p>
         </div>

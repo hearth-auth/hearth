@@ -27,6 +27,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Skip-to-content link** — all admin pages now include a `<a href="#main">Skip to content</a>` as
+  the first focusable element, allowing keyboard and screen-reader users to bypass the sidebar (HEA-633).
+- **`.input` utility class** — unified form field style (border, background, placeholder colour,
+  ember focus ring) applied across all `/ui/**` text, email, password, search, and textarea inputs;
+  eliminates the previous inconsistent ad-hoc class chains (HEA-633).
+- **Global focus ring** — every interactive element now shows a visible 2 px ember outline on
+  `:focus-visible`, ensuring keyboard navigation is legible on dark backgrounds (HEA-633).
+- **Heading colour inheritance** — a `@layer base` rule pins `h1–h6` to `var(--ht-content-primary)`
+  (`graphite-50`), preventing UA stylesheets from resetting headings to white on dark surfaces (HEA-633).
+
 - **New-user form validation** — the admin "Create user" form now shows required-field
   markers and `aria-required` on Email and Initial Password, performs inline email
   regex validation, and displays a real-time 0–4 password strength meter with

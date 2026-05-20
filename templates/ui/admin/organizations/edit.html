@@ -35,19 +35,19 @@
     <div>
       <label for="name" class="block text-sm font-medium text-ht-content-secondary">Organization name</label>
       <input type="text" id="name" name="name" required autofocus maxlength="80" value="{{ form_name }}"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div>
       <label for="description" class="block text-sm font-medium text-ht-content-secondary">Description</label>
       <textarea id="description" name="description" rows="3" maxlength="500"
-                class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">{{ form_description }}</textarea>
+                class="mt-1 input">{{ form_description }}</textarea>
     </div>
 
     <div>
       <label for="status" class="block text-sm font-medium text-ht-content-secondary">Status</label>
       <select id="status" name="status"
-              class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+              class="mt-1 input">
         <option value="Active" {% if form_status == "Active" %}selected{% endif %}>Active — members can sign in and the org accepts invitations.</option>
         <option value="Suspended" {% if form_status == "Suspended" %}selected{% endif %}>Suspended — members are blocked from signing in via this org.</option>
       </select>
@@ -57,7 +57,7 @@
       <label for="max_members" class="block text-sm font-medium text-ht-content-secondary">Member limit <span class="text-ht-content-muted">(optional)</span></label>
       <input type="number" id="max_members" name="max_members" min="1" placeholder="Unlimited"
              {% match form_max_members %}{% when Some with (v) %}value="{{ v }}"{% when None %}{% endmatch %}
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
       <p class="mt-1 text-xs text-ht-content-muted">Leave empty for unlimited members.</p>
     </div>
 
