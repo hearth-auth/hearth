@@ -11,12 +11,12 @@ use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{RealmId, SessionId};
+use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
+use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
     CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
     EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, UpdateUserRequest, UserStatus,
 };
-use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
-use hearth::identity::onboarding::OnboardingService;
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{AssignRoleRequest, EmbeddedRbacEngine, RbacEngine, Scope, Subject};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
@@ -232,9 +232,7 @@ async fn token_preview_valid_user_returns_json() {
         .unwrap_or("");
     assert!(ct.contains("application/json"), "should be JSON, got: {ct}");
 
-    let bytes = to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
     let obj: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
     assert!(obj.get("sub").is_some(), "response should have 'sub'");
     assert!(obj.get("roles").is_some(), "response should have 'roles'");
@@ -270,9 +268,7 @@ async fn token_preview_invalid_uuid_returns_json_error() {
         .expect("test invariant");
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body");
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
     let obj: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
     assert!(
         obj.get("error").is_some(),

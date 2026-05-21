@@ -61,13 +61,20 @@ impl From<pb::CreateUserRequest> for domain::CreateUserRequest {
 
 impl From<pb::UpdateUserRequest> for domain::UpdateUserRequest {
     fn from(r: pb::UpdateUserRequest) -> Self {
+        let attributes = if r.clear_attributes {
+            Some(std::collections::BTreeMap::new())
+        } else if !r.attributes.is_empty() {
+            Some(r.attributes.into_iter().collect())
+        } else {
+            None
+        };
         Self {
             email: r.email,
             display_name: r.display_name,
             first_name: r.first_name,
             last_name: r.last_name,
             status: r.status.and_then(proto_user_status_to_domain),
-            attributes: None,
+            attributes,
         }
     }
 }

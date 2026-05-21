@@ -72,6 +72,43 @@
       <p class="mt-1 text-xs text-ht-content-muted">Leave empty for unlimited members.</p>
     </div>
 
+    {# ── Attributes ── #}
+    {% if !attr_definitions.is_empty() %}
+    <div class="space-y-3">
+      <h3 class="text-sm font-semibold text-ht-content-secondary">Attributes</h3>
+      {% for def in attr_definitions %}
+        <div>
+          <label class="block text-sm font-medium text-ht-content-secondary">
+            {{ def.display_label() }}
+            {% if def.required %}<span class="ml-0.5 text-danger-fg">*</span>{% endif %}
+          </label>
+          {% if let Some(desc) = def.description_str() %}
+            <p class="mt-0.5 text-xs text-ht-content-muted">{{ desc }}</p>
+          {% endif %}
+          <input type="hidden" name="attr_key" value="{{ def.key }}">
+          {% if def.is_boolean() %}
+              <select name="attr_val" class="mt-1 input">
+                <option value=""></option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            {% else if def.is_enum() %}
+              <select name="attr_val" class="mt-1 input">
+                <option value=""></option>
+                {% for ev in def.enum_values %}
+                  <option value="{{ ev }}">{{ ev }}</option>
+                {% endfor %}
+              </select>
+            {% else if def.is_number() %}
+              <input type="number" name="attr_val" class="mt-1 input">
+            {% else %}
+              <input type="text" name="attr_val" class="mt-1 input">
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
     <div class="flex items-center gap-3 pt-2">
       <button type="submit"
               class="btn-ember rounded px-4 py-2 text-sm font-semibold">

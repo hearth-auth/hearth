@@ -163,6 +163,7 @@ fn build_rig() -> Rig {
                 slug: "customer-one".to_string(),
                 description: None,
                 config: None,
+                attributes: std::collections::BTreeMap::new(),
             },
         )
         .expect("create org");

@@ -161,6 +161,8 @@ struct OrgNewTemplate {
     form_slug: String,
     form_description: String,
     form_max_members: Option<u32>,
+    /// Realm-level org attribute definitions (empty = free-form mode).
+    attr_definitions: Vec<crate::identity::AttributeDefinition>,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -181,6 +183,13 @@ pub async fn admin_org_create_form(
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
 ) -> Response {
+    let attr_definitions = target
+        .0
+        .config()
+        .attribute_definitions
+        .as_ref()
+        .map(|d| d.organizations.clone())
+        .unwrap_or_default();
     render(&OrgNewTemplate {
         error: None,
         realm_name: target.0.name().to_string(),
@@ -188,6 +197,7 @@ pub async fn admin_org_create_form(
         form_slug: String::new(),
         form_description: String::new(),
         form_max_members: None,
+        attr_definitions,
         chrome: true,
         active: "organizations",
         user_email: Some(session.user_email.clone()),
@@ -216,6 +226,12 @@ pub struct CreateOrgForm {
         deserialize_with = "super::handlers_common::empty_string_as_none"
     )]
     pub max_members: Option<u32>,
+    /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(default, rename = "attr_key")]
+    pub attr_keys: Vec<String>,
+    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
+    #[serde(default, rename = "attr_val")]
+    pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -244,6 +260,22 @@ pub async fn admin_org_create_submit(
 
     let realm_name = target.0.name().to_string();
 
+    let attr_definitions = target
+        .0
+        .config()
+        .attribute_definitions
+        .as_ref()
+        .map(|d| d.organizations.clone())
+        .unwrap_or_default();
+
+    let attributes: std::collections::BTreeMap<String, String> = form
+        .attr_keys
+        .iter()
+        .zip(form.attr_vals.iter())
+        .filter(|(k, _)| !k.is_empty())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     match state.identity.create_organization(
         target.id(),
         &CreateOrganizationRequest {
@@ -251,6 +283,7 @@ pub async fn admin_org_create_submit(
             slug: form.slug.clone(),
             description,
             config,
+            attributes,
         },
     ) {
         Ok(org) => {
@@ -300,6 +333,7 @@ pub async fn admin_org_create_submit(
             form_slug: form.slug,
             form_description: form.description,
             form_max_members: form.max_members,
+            attr_definitions: attr_definitions.clone(),
             chrome: true,
             active: "organizations",
             user_email: Some(session.user_email.clone()),
@@ -321,6 +355,7 @@ pub async fn admin_org_create_submit(
                 form_slug: form.slug,
                 form_description: form.description,
                 form_max_members: form.max_members,
+                attr_definitions,
                 chrome: true,
                 active: "organizations",
                 user_email: Some(session.user_email.clone()),
@@ -543,6 +578,10 @@ struct OrgEditTemplate {
     form_description: String,
     form_status: String,
     form_max_members: Option<u32>,
+    /// Current attribute values as sorted (key, value) pairs — used in free-form mode.
+    form_attributes: Vec<(String, String)>,
+    /// Schema-defined attributes paired with their current values (empty = free-form mode).
+    attr_fields: Vec<(crate::identity::AttributeDefinition, String)>,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -569,26 +608,53 @@ pub async fn admin_org_edit_form(
     };
 
     match state.identity.get_organization(target.id(), &org_id) {
-        Ok(Some(org)) => render(&OrgEditTemplate {
-            form_name: org.name().to_string(),
-            form_description: org.description().to_string(),
-            form_status: format!("{:?}", org.status()),
-            form_max_members: org.config().max_members,
-            org,
-            realm_name: target.0.name().to_string(),
-            error: None,
-            chrome: true,
-            active: "organizations",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
-        }),
+        Ok(Some(org)) => {
+            let form_attributes: Vec<(String, String)> = org
+                .attributes()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let attr_defs = target
+                .0
+                .config()
+                .attribute_definitions
+                .as_ref()
+                .map(|d| d.organizations.clone())
+                .unwrap_or_default();
+            let attr_fields: Vec<(crate::identity::AttributeDefinition, String)> = attr_defs
+                .into_iter()
+                .map(|def| {
+                    let val = form_attributes
+                        .iter()
+                        .find(|(k, _)| k == &def.key)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default();
+                    (def, val)
+                })
+                .collect();
+            render(&OrgEditTemplate {
+                form_name: org.name().to_string(),
+                form_description: org.description().to_string(),
+                form_status: format!("{:?}", org.status()),
+                form_max_members: org.config().max_members,
+                org,
+                realm_name: target.0.name().to_string(),
+                error: None,
+                form_attributes,
+                attr_fields,
+                chrome: true,
+                active: "organizations",
+                user_email: Some(session.user_email.clone()),
+                is_admin: true,
+                flash: None,
+                csrf: session.csrf.clone(),
+                narrow: false,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                theme_css: state.theme_css.clone(),
+                realm_theme_css: state.realm_theme_css(),
+            })
+        }
         Ok(None) => super::handlers_common::not_found("Organization not found"),
         Err(e) => {
             tracing::warn!(error = %e, "get_organization failed");
@@ -611,6 +677,12 @@ pub struct EditOrgForm {
         deserialize_with = "super::handlers_common::empty_string_as_none"
     )]
     pub max_members: Option<u32>,
+    /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(default, rename = "attr_key")]
+    pub attr_keys: Vec<String>,
+    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
+    #[serde(default, rename = "attr_val")]
+    pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -650,6 +722,14 @@ pub async fn admin_org_edit_submit(
 
     let realm_name = target.0.name().to_string();
 
+    let attributes: std::collections::BTreeMap<String, String> = form
+        .attr_keys
+        .iter()
+        .zip(form.attr_vals.iter())
+        .filter(|(k, _)| !k.is_empty())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     match state.identity.update_organization(
         target.id(),
         &org_id,
@@ -658,6 +738,7 @@ pub async fn admin_org_edit_submit(
             description,
             status,
             config: org_config,
+            attributes: Some(attributes),
         },
     ) {
         Ok(_) => {
@@ -1422,6 +1503,7 @@ pub async fn admin_org_status_toggle(
             description: None,
             status: Some(new_status),
             config: None,
+            attributes: None,
         },
     ) {
         Ok(_) => {

@@ -947,6 +947,64 @@ pub struct RateLimitYaml {
     pub lockout_duration: Option<String>,
 }
 
+/// Data type hint for a custom attribute value.
+///
+/// All values are stored as UTF-8 strings. The type is used by the admin UI
+/// to render appropriate inputs and perform lightweight format validation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributeTypeYaml {
+    /// Stored and returned as a UTF-8 string (default).
+    #[default]
+    String,
+    /// Stored as a UTF-8 string; the admin UI renders a number input.
+    Number,
+    /// Stored as `"true"` or `"false"`; the admin UI renders a checkbox.
+    Boolean,
+    /// One of a fixed set of values declared in `enum_values`; the admin UI
+    /// renders a `<select>`.
+    Enum,
+}
+
+/// A single custom attribute definition declared in YAML.
+///
+/// Attribute definitions are declared under
+/// `realms.<name>.attribute_definitions.users` or
+/// `realms.<name>.attribute_definitions.organizations`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AttributeDefinitionYaml {
+    /// Machine-readable key used as the storage key in the attribute map.
+    pub key: String,
+    /// Human-readable label shown in the admin UI. Defaults to `key`.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Data type hint for the admin UI and basic format validation.
+    #[serde(default, rename = "type")]
+    pub type_: AttributeTypeYaml,
+    /// When `true`, the attribute must be present on record creation.
+    #[serde(default)]
+    pub required: bool,
+    /// Short description shown as a placeholder or tooltip in the admin UI.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Allowed values when `type: enum`. Ignored for other types.
+    #[serde(default)]
+    pub enum_values: Vec<String>,
+}
+
+/// Per-entity attribute definition groups declared in YAML.
+///
+/// Declared under `realms.<name>.attribute_definitions:`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AttributeDefinitionsYaml {
+    /// Attribute definitions for user records.
+    #[serde(default)]
+    pub users: Vec<AttributeDefinitionYaml>,
+    /// Attribute definitions for organization records.
+    #[serde(default)]
+    pub organizations: Vec<AttributeDefinitionYaml>,
+}
+
 /// YAML declaration for an organization within a realm.
 ///
 /// Organizations declared under `realms.<name>.organizations:` are reconciled
@@ -1221,6 +1279,12 @@ pub struct RealmYamlConfig {
     /// `copy_from` is set. Defaults apply when the block is absent.
     #[serde(default)]
     pub migrate: Option<RealmMigrateYaml>,
+    /// Custom attribute definitions for users and organizations in this realm.
+    ///
+    /// When set, only the declared keys are accepted on create/update; unknown
+    /// keys are rejected. When absent, any key is accepted (free-form mode).
+    #[serde(default)]
+    pub attribute_definitions: Option<AttributeDefinitionsYaml>,
     /// When `true` and the realm slug is re-added to the `realms:` map, the
     /// reconciler skips unarchiving it and the orphan-detection pass treats
     /// the slug as intentionally discarded (suppresses the warning banner).
@@ -1817,6 +1881,48 @@ impl RealmYamlConfig {
             // Email template overrides are managed via the admin API, not
             // via hearth.yaml; start empty and let the API populate them.
             email_templates: std::collections::HashMap::new(),
+            attribute_definitions: self.attribute_definitions.as_ref().map(|defs| {
+                crate::identity::AttributeDefinitions {
+                    users: defs
+                        .users
+                        .iter()
+                        .map(|d| crate::identity::AttributeDefinition {
+                            key: d.key.clone(),
+                            label: d.label.clone(),
+                            type_: match d.type_ {
+                                AttributeTypeYaml::String => crate::identity::AttributeType::String,
+                                AttributeTypeYaml::Number => crate::identity::AttributeType::Number,
+                                AttributeTypeYaml::Boolean => {
+                                    crate::identity::AttributeType::Boolean
+                                }
+                                AttributeTypeYaml::Enum => crate::identity::AttributeType::Enum,
+                            },
+                            required: d.required,
+                            description: d.description.clone(),
+                            enum_values: d.enum_values.clone(),
+                        })
+                        .collect(),
+                    organizations: defs
+                        .organizations
+                        .iter()
+                        .map(|d| crate::identity::AttributeDefinition {
+                            key: d.key.clone(),
+                            label: d.label.clone(),
+                            type_: match d.type_ {
+                                AttributeTypeYaml::String => crate::identity::AttributeType::String,
+                                AttributeTypeYaml::Number => crate::identity::AttributeType::Number,
+                                AttributeTypeYaml::Boolean => {
+                                    crate::identity::AttributeType::Boolean
+                                }
+                                AttributeTypeYaml::Enum => crate::identity::AttributeType::Enum,
+                            },
+                            required: d.required,
+                            description: d.description.clone(),
+                            enum_values: d.enum_values.clone(),
+                        })
+                        .collect(),
+                }
+            }),
         })
     }
 }

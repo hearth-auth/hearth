@@ -195,6 +195,7 @@ async fn update_organization_rejects_system_realm() {
             description: None,
             status: None,
             config: None,
+            attributes: None,
         },
     );
     assert!(
@@ -214,6 +215,7 @@ async fn create_organization_rejects_system_realm() {
             slug: "sneaky".to_string(),
             description: None,
             config: Some(OrganizationConfig { max_members: None }),
+            attributes: std::collections::BTreeMap::new(),
         },
     );
     assert!(

@@ -1013,6 +1013,10 @@ struct UserEditTemplate {
     is_user_admin: bool,
     /// Organizations this user belongs to (read-only display).
     org_memberships: Vec<UserOrgView>,
+    /// Current attribute values as sorted (key, value) pairs — used in free-form mode.
+    form_attributes: Vec<(String, String)>,
+    /// Schema-defined attributes paired with their current values (empty = free-form mode).
+    attr_fields: Vec<(crate::identity::AttributeDefinition, String)>,
     // Chrome fields.
     chrome: bool,
     active: &'static str,
@@ -1053,6 +1057,29 @@ pub async fn admin_user_edit_form(
         Ok(Some(user)) => {
             let is_user_admin = check_user_admin(&state, target.id(), &uid);
             let org_memberships = resolve_user_org_memberships(&state, target.id(), &uid);
+            let form_attributes: Vec<(String, String)> = user
+                .attributes()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let attr_defs = target
+                .0
+                .config()
+                .attribute_definitions
+                .as_ref()
+                .map(|d| d.users.clone())
+                .unwrap_or_default();
+            let attr_fields: Vec<(crate::identity::AttributeDefinition, String)> = attr_defs
+                .into_iter()
+                .map(|def| {
+                    let val = form_attributes
+                        .iter()
+                        .find(|(k, _)| k == &def.key)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default();
+                    (def, val)
+                })
+                .collect();
             render(&UserEditTemplate {
                 form_email: user.email().to_string(),
                 form_display_name: user.display_name().to_string(),
@@ -1064,6 +1091,8 @@ pub async fn admin_user_edit_form(
                 error: None,
                 is_user_admin,
                 org_memberships,
+                form_attributes,
+                attr_fields,
                 chrome: true,
                 active: "users",
                 user_email: Some(session.user_email.clone()),
@@ -1101,6 +1130,12 @@ pub struct EditUserForm {
     /// If present (checkbox checked), the user should have the admin role.
     #[serde(default)]
     pub admin: Option<String>,
+    /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(default, rename = "attr_key")]
+    pub attr_keys: Vec<String>,
+    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
+    #[serde(default, rename = "attr_val")]
+    pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -1123,13 +1158,20 @@ pub async fn admin_user_edit_submit(
     };
 
     let status = parse_user_status(&form.status);
+    let attributes: std::collections::BTreeMap<String, String> = form
+        .attr_keys
+        .iter()
+        .zip(form.attr_vals.iter())
+        .filter(|(k, _)| !k.is_empty())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let req = UpdateUserRequest {
         email: Some(form.email.clone()),
         display_name: Some(form.display_name.clone()),
         first_name: Some(form.first_name.clone()),
         last_name: Some(form.last_name.clone()),
         status,
-        attributes: None,
+        attributes: Some(attributes),
     };
 
     match state.identity.update_user(target.id(), &uid, &req) {
@@ -1261,6 +1303,30 @@ fn render_edit_error(
         Some(ref user) => {
             let is_user_admin = check_user_admin(state, target.id(), uid);
             let org_memberships = resolve_user_org_memberships(state, target.id(), uid);
+            let form_attributes: Vec<(String, String)> = form
+                .attr_keys
+                .iter()
+                .zip(form.attr_vals.iter())
+                .filter(|(k, _)| !k.is_empty())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let attr_defs = target
+                .config()
+                .attribute_definitions
+                .as_ref()
+                .map(|d| d.users.clone())
+                .unwrap_or_default();
+            let attr_fields: Vec<(crate::identity::AttributeDefinition, String)> = attr_defs
+                .into_iter()
+                .map(|def| {
+                    let val = form_attributes
+                        .iter()
+                        .find(|(k, _)| k == &def.key)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default();
+                    (def, val)
+                })
+                .collect();
             render(&UserEditTemplate {
                 user: user.clone(),
                 realm_name: target.name().to_string(),
@@ -1272,6 +1338,8 @@ fn render_edit_error(
                 form_status: form.status.clone(),
                 is_user_admin,
                 org_memberships,
+                form_attributes,
+                attr_fields,
                 chrome: true,
                 active: "users",
                 user_email: Some(session.user_email.clone()),

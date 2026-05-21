@@ -73,6 +73,11 @@ message UpdateUserRequest {
   optional UserStatus status = 3;
   optional string first_name = 4;
   optional string last_name = 5;
+  // When non-empty, replaces the user's entire custom attribute map.
+  // An empty map is treated as "no change"; use clear_attributes to remove all.
+  map<string, string> attributes = 6;
+  // When true and attributes is empty, clears all custom attributes.
+  bool clear_attributes = 7;
 }
 
 // Request to create a new realm.
@@ -136,6 +141,7 @@ message Organization {
   int64 created_at = 6;
   int64 updated_at = 7;
   optional uint32 member_limit = 8;
+  map<string, string> attributes = 9;
 }
 
 // Request to create a new organization.
@@ -143,6 +149,7 @@ message CreateOrganizationRequest {
   string slug = 1;
   string display_name = 2;
   optional uint32 member_limit = 3;
+  map<string, string> attributes = 4;
 }
 
 // Request to update an existing organization.
@@ -151,6 +158,11 @@ message UpdateOrganizationRequest {
   optional string display_name = 2;
   optional OrganizationStatus status = 3;
   optional uint32 member_limit = 4;
+  // When non-empty, replaces the organization's entire custom attribute map.
+  // An empty map is treated as "no change"; use clear_attributes to remove all.
+  map<string, string> attributes = 5;
+  // When true and attributes is empty, clears all custom attributes.
+  bool clear_attributes = 6;
 }
 
 // A cursor-based page of organizations.

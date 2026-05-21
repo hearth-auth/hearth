@@ -318,6 +318,7 @@ async fn dashboard_counts_aggregate_across_realms() {
                 slug: "cross-realm-org".to_string(),
                 description: None,
                 config: None,
+                attributes: std::collections::BTreeMap::new(),
             },
         )
         .expect("create org in OtherCorp");

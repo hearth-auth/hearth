@@ -112,6 +112,19 @@
       <dd class="mt-1 text-sm text-ht-content-secondary">{% match max_members %}{% when Some with (n) %}{{ n }}{% when None %}Unlimited{% endmatch %}</dd>
     </div>
   </dl>
+  {% if !org.attributes().is_empty() %}
+  <div class="mt-4 border-t border-divider-subtle pt-4">
+    <h3 class="mb-2 font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Attributes</h3>
+    <dl class="space-y-2">
+      {% for (key, val) in org.attributes() %}
+      <div class="flex gap-4">
+        <dt class="w-40 shrink-0 text-sm font-medium text-ht-content-secondary">{{ key }}</dt>
+        <dd class="text-sm text-ht-content-primary">{{ val }}</dd>
+      </div>
+      {% endfor %}
+    </dl>
+  </div>
+  {% endif %}
 </div>
 
 {% endif %}

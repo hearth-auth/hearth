@@ -611,6 +611,7 @@ async fn suspended_realm_blocks_create_organization() {
                 slug: "test-org".to_string(),
                 description: None,
                 config: None,
+                attributes: std::collections::BTreeMap::new(),
             },
         )
         .expect_err("create org on suspended realm");
@@ -642,6 +643,7 @@ async fn archived_realm_blocks_create_organization() {
                 slug: "test-org-archived".to_string(),
                 description: None,
                 config: None,
+                attributes: std::collections::BTreeMap::new(),
             },
         )
         .expect_err("create org on archived realm");

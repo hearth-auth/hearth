@@ -48,10 +48,11 @@ pub use tokens::{
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
-    canonicalize_scopes, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
-    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    CreateWebhookRequest, CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
+    canonicalize_scopes, AttributeDefinition, AttributeDefinitions, AttributeType, BulkResult,
+    ConsentDecision, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
+    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, CreateWebhookRequest,
+    CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest, InvitationStatus,
+    MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, Session, SessionContext,

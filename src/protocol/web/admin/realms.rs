@@ -277,6 +277,11 @@ pub struct AuditRow {
     /// audit caught audit logs rendering nothing but UUIDs, leaving
     /// administrators unable to scan for who did what.
     pub actor_display: String,
+    /// Admin URL pointing to the actor user's detail page. `Some` only when
+    /// the actor parses as a user UUID and resolves inside the audit event's
+    /// realm — system actors and cross-realm fallbacks stay unlinked so we
+    /// never point operators at a realm-mismatched detail page.
+    pub actor_url: Option<String>,
     /// Friendly resource label — display name of the user / org / client /
     /// realm referenced by `resource_type` + `resource_id`. Falls back to a
     /// short id (first 8 hex chars) when the resource cannot be resolved
@@ -558,34 +563,45 @@ fn truncate_pill_value(v: &serde_json::Value) -> String {
 }
 
 /// Resolves an audit-event actor string (typically a user UUID) to a
-/// human-friendly display value. Returns "system" verbatim, looks up users
-/// by id, and falls back to the original string when no lookup applies.
+/// human-friendly display value plus an optional admin-UI deep link.
+/// Returns `("system", None)` verbatim, looks up users by id, and falls
+/// back to the original string when no lookup applies.
+///
+/// The URL is `Some` only when the actor resolves inside the *event's* own
+/// realm — a super-admin acting cross-realm renders with their email but
+/// without a link, since the realm-scoped user detail page wouldn't find
+/// them. `realm_name` is the URL slug for the event realm.
 fn resolve_audit_actor(
     state: &Arc<WebState>,
     realm_id: &RealmId,
+    realm_name: &str,
     actor: &str,
-    cache: &mut std::collections::HashMap<String, String>,
-) -> String {
+    cache: &mut std::collections::HashMap<String, (String, Option<String>)>,
+) -> (String, Option<String>) {
     if actor == "system" {
-        return "system".to_string();
+        return ("system".to_string(), None);
     }
     if let Some(hit) = cache.get(actor) {
         return hit.clone();
     }
-    let resolved = match uuid::Uuid::parse_str(actor) {
+    let resolved: (String, Option<String>) = match uuid::Uuid::parse_str(actor) {
         Ok(uuid) => {
             let user_id = crate::core::UserId::new(uuid);
             // Audit actors can be cross-realm: a system-realm admin acting
             // on a tenant realm shows up with their system-realm user id
             // but the audit row is scoped to the tenant realm. Try the
-            // event realm first; fall through to the system realm so the
-            // common case (super-admin acting on tenants) resolves.
+            // event realm first (and link); fall through to the system
+            // realm so the common case still gets a friendly email, but
+            // skip the link to avoid pointing operators at a 404.
             let from_event_realm = state
                 .identity
                 .get_user(realm_id, &user_id)
                 .ok()
                 .flatten()
-                .map(|u| u.email().to_string());
+                .map(|u| {
+                    let url = format!("/ui/admin/realms/{realm_name}/users/{}", u.id().as_uuid());
+                    (u.email().to_string(), Some(url))
+                });
             from_event_realm
                 .or_else(|| {
                     let system = crate::identity::keys::system_realm_id();
@@ -597,11 +613,11 @@ fn resolve_audit_actor(
                         .get_user(&system, &user_id)
                         .ok()
                         .flatten()
-                        .map(|u| u.email().to_string())
+                        .map(|u| (u.email().to_string(), None))
                 })
-                .unwrap_or_else(|| actor.to_string())
+                .unwrap_or_else(|| (actor.to_string(), None))
         }
-        Err(_) => actor.to_string(),
+        Err(_) => (actor.to_string(), None),
     };
     cache.insert(actor.to_string(), resolved.clone());
     resolved
@@ -851,7 +867,7 @@ pub async fn admin_audit_list(
             // Per-request resolution caches so the same actor / resource
             // doesn't hit the identity engine N times when an event burst
             // touches one user repeatedly (the typical pattern).
-            let mut actor_cache: std::collections::HashMap<String, String> =
+            let mut actor_cache: std::collections::HashMap<String, (String, Option<String>)> =
                 std::collections::HashMap::new();
             let mut resource_cache: std::collections::HashMap<
                 (String, String),
@@ -862,8 +878,13 @@ pub async fn admin_audit_list(
             let rows: Vec<AuditRow> = events
                 .into_iter()
                 .map(|e| {
-                    let actor_display =
-                        resolve_audit_actor(&state, target.id(), &e.actor, &mut actor_cache);
+                    let (actor_display, actor_url) = resolve_audit_actor(
+                        &state,
+                        target.id(),
+                        &realm_name,
+                        &e.actor,
+                        &mut actor_cache,
+                    );
                     let (resource_display, resource_url) = resolve_audit_resource(
                         &state,
                         target.id(),
@@ -892,6 +913,7 @@ pub async fn admin_audit_list(
                         action_category,
                         action_high_severity,
                         actor_display,
+                        actor_url,
                         resource_display,
                         resource_url,
                         metadata_json,

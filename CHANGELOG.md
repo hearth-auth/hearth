@@ -65,6 +65,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Custom attribute support for users and organizations** — Realms may now declare per-entity
+  attribute schemas in YAML under `realms.<name>.attribute_definitions.users` / `.organizations`.
+  Each definition specifies `key`, `label`, `type` (`string | number | boolean | enum`), `required`,
+  and (for enums) `enum_values`. When definitions are present, unknown keys are rejected with 400
+  and required keys are enforced on create. Without definitions, free-form key-value pairs (max
+  50 keys, 64-byte keys, 1024-byte values) are accepted. Organization attributes are now fully
+  wired through the domain layer, REST admin API, admin UI edit/create/detail forms, gRPC create
+  and update RPCs, and SCIM import. The gRPC `UpdateUserRequest` converter no longer drops
+  attributes; the proto gains `attributes` + `clear_attributes` on `UpdateUserRequest`,
+  `Organization`, `CreateOrganizationRequest`, and `UpdateOrganizationRequest` (HEA-654/655).
+
 - **Skip-to-content link** — all admin pages now include a `<a href="#main">Skip to content</a>` as
   the first focusable element, allowing keyboard and screen-reader users to bypass the sidebar (HEA-633).
 - **`.input` utility class** — unified form field style (border, background, placeholder colour,
