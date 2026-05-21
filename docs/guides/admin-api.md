@@ -146,20 +146,190 @@ Downloads all users as NDJSON (`Content-Disposition: attachment`). Accepts the s
 
 ---
 
-## Custom user attributes
+---
 
-Custom attributes are arbitrary key-value pairs stored on each user record. They can be used for tenant-specific metadata (department, employee ID, cost center, plan tier, etc.) that your application needs but that Hearth's standard user schema does not cover.
+## Organizations
+
+### List organizations
+
+`GET /admin/orgs`
+
+Returns a paginated list of organizations.
+
+**Query parameters:**
+
+| Parameter | Description |
+|---|---|
+| `cursor` | Opaque pagination cursor from a previous response |
+| `limit` | Page size, 1–100 (default 20) |
+
+**Response:**
+
+```json
+{
+  "items": [
+    {
+      "id": "<uuid>",
+      "slug": "acme-corp",
+      "name": "Acme Corporation",
+      "description": "Main enterprise customer",
+      "status": "active",
+      "config": { "max_members": 500 },
+      "attributes": { "crm_id": "SF-00123", "contract_tier": "enterprise" }
+    }
+  ],
+  "next_cursor": "<opaque-string-or-null>"
+}
+```
+
+---
+
+### Get organization
+
+`GET /admin/orgs/{id}`
+
+Returns a single organization by UUID.
+
+---
+
+### Create organization
+
+`POST /admin/orgs`
+
+Body fields:
+
+| Field | Required | Description |
+|---|---|---|
+| `slug` | ✅ | URL-safe identifier, 3–63 lowercase alphanumeric/hyphen chars |
+| `name` | ✅ | Human-readable display name |
+| `description` | — | Optional description |
+| `config.max_members` | — | Member limit (omit for unlimited) |
+| `attributes` | — | Key-value metadata map |
+
+```json
+{
+  "slug": "acme-corp",
+  "name": "Acme Corporation",
+  "attributes": {
+    "crm_id": "SF-00123",
+    "contract_tier": "enterprise"
+  }
+}
+```
+
+Returns the created organization object.
+
+---
+
+### Update organization
+
+`PATCH /admin/orgs/{id}`
+
+Partially updates an organization. All fields are optional; omitted fields are unchanged.
+
+To replace the attribute map:
+
+```json
+{
+  "attributes": {
+    "crm_id": "SF-00456",
+    "contract_tier": "growth"
+  }
+}
+```
+
+Attributes are replaced atomically — the entire map is overwritten. To clear all attributes, pass `"attributes": {}`.
+
+---
+
+### Delete organization
+
+`DELETE /admin/orgs/{id}`
+
+Permanently deletes the organization and cascades to all membership records, pending invitations, and SCIM `externalId` mappings. Members themselves are not deleted.
+
+---
+
+## Custom attributes
+
+Custom attributes are arbitrary key-value string pairs stored on user and organization records. Use them for tenant-specific metadata (department, employee ID, CRM ID, contract tier, etc.) that Hearth's standard schema does not cover.
 
 ### Free-form mode (default)
 
-When no `attribute_definitions` are configured for the realm, any key-value pair is accepted. Constraints:
+When no `attribute_definitions` are configured for the realm, any well-formed key-value pair is accepted. Constraints apply to both users and organizations:
 
-- Max 50 attributes per user
-- Keys: max 128 bytes, non-empty
-- Values: max 1 024 bytes
+| Constraint | Limit |
+|---|---|
+| Keys per record | max 50 |
+| Key length | max 64 bytes, non-empty |
+| Key characters | ASCII alphanumeric, `.`, `_`, `-` only |
+| Value length | max 1 024 bytes |
+| Total map size | max 16 KiB (sum of all keys + values) |
 
 ### Schema-enforced mode
 
-When `attribute_definitions.users` is configured in the realm, only declared keys are accepted; unknown keys are rejected. Required attributes must be present on create. Enum-typed attributes validate the value against an allowed list.
+When `attribute_definitions.users` or `attribute_definitions.organizations` is declared in the realm YAML, the identity engine enforces additional rules:
 
-See the [Configuration reference](../specs/CONFIGURATION.md) for how to define attribute schemas.
+- **Unknown keys rejected** — any key not listed in `attribute_definitions` returns `400 Invalid attribute`.
+- **Required keys enforced on create** — attributes with `required: true` must be present when creating the record; omitting them returns `400`.
+- **Enum values validated** — `type: enum` attributes reject values not in `enum_values`.
+- **Update semantics** — on update, omitting a required key leaves the existing value unchanged (required enforcement only applies at create time).
+
+### Configuring attribute schemas
+
+Declare schemas in `hearth.yaml` under each realm:
+
+```yaml
+realms:
+  my-realm:
+    attribute_definitions:
+      users:
+        - key: department
+          label: Department
+          type: string             # string | number | boolean | enum
+          required: false
+          description: "User's business unit"
+
+        - key: employee_id
+          label: Employee ID
+          type: string
+          required: true           # must be present on user create
+
+        - key: tier
+          label: Subscription Tier
+          type: enum
+          required: false
+          enum_values:
+            - free
+            - pro
+            - enterprise
+
+      organizations:
+        - key: crm_id
+          label: CRM ID
+          type: string
+          required: false
+          description: "Salesforce account ID"
+
+        - key: contract_tier
+          label: Contract Tier
+          type: enum
+          required: false
+          enum_values:
+            - starter
+            - growth
+            - enterprise
+```
+
+See `hearth.example.yaml` for a commented full example with all four type variants.
+
+### Type hints
+
+All values are stored as UTF-8 strings. The `type` field controls how the Admin UI renders the input and performs lightweight validation:
+
+| Type | Admin UI input | Extra validation |
+|---|---|---|
+| `string` | `<input type="text">` | None beyond length limit |
+| `number` | `<input type="number">` | None (value stored as string) |
+| `boolean` | Checkbox | None (stored as `"true"` or `"false"`) |
+| `enum` | `<select>` | Value must be in `enum_values` |

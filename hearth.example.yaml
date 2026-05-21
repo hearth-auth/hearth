@@ -311,6 +311,76 @@ oidc:
 #       beta-testers:
 #         name: "Beta Testers"
 #         description: "Early access program"
+#
+#     # --- Custom attribute definitions ------------------------------------
+#     # Declare the allowed attribute keys for user and organization records
+#     # in this realm. When defined, the identity engine enforces:
+#     #   • Only keys listed here are accepted (unknown keys → 400)
+#     #   • Keys with required: true must be present on record creation
+#     #   • Enum keys reject values not in enum_values (→ 400)
+#     #
+#     # When attribute_definitions is omitted, free-form key-value pairs
+#     # are accepted (any ASCII alphanumeric / '.' / '_' / '-' key, up to
+#     # 50 keys per record, 64-byte keys, 1024-byte values).
+#     #
+#     # All values are stored as UTF-8 strings regardless of declared type.
+#     # The type field is a UI hint (drives input type in the admin UI) and
+#     # a lightweight format validator — it is not enforced on raw string input.
+#     #
+#     attribute_definitions:
+#       users:
+#         - key: department          # machine-readable storage key
+#           label: Department        # human-readable label in the admin UI
+#           type: string             # string | number | boolean | enum
+#           required: false
+#           description: "User's business department (e.g. Engineering, Sales)"
+#
+#         - key: employee_id
+#           label: Employee ID
+#           type: string
+#           required: true           # must be present when creating a user
+#           description: "HR system employee identifier"
+#
+#         - key: office_count        # rendered as <input type="number"> in the UI
+#           label: Office Count
+#           type: number
+#           required: false
+#
+#         - key: is_contractor       # rendered as a checkbox in the admin UI
+#           label: Is Contractor
+#           type: boolean
+#           required: false
+#
+#         - key: tier                # rendered as <select> with the listed options
+#           label: Subscription Tier
+#           type: enum
+#           required: false
+#           enum_values:             # allowed values; other values are rejected
+#             - free
+#             - pro
+#             - enterprise
+#
+#       organizations:
+#         - key: crm_id
+#           label: CRM ID
+#           type: string
+#           required: false
+#           description: "Identifier in your CRM system (e.g. Salesforce account ID)"
+#
+#         - key: contract_tier
+#           label: Contract Tier
+#           type: enum
+#           required: false
+#           enum_values:
+#             - starter
+#             - growth
+#             - enterprise
+#
+#         - key: max_seats           # purely informational; Hearth does not enforce it
+#           label: Licensed Seats
+#           type: number
+#           required: false
+#
 #     applications:
 #       dashboard:
 #         name: "Internal Dashboard"
