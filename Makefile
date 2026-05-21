@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate ci-standard dev dev-reset
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate ci-standard dev dev-reset ui-test-smoke ui-coverage-check
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -157,3 +157,22 @@ dev:
 dev-reset:
 	rm -rf ./data/dev
 	@echo "Dev data wiped. Run make dev for a fresh start."
+
+# ── UI Tests ──────────────────────────────────────────
+
+## Run the Playwright crawler smoke suite against a running dev server.
+## Waits up to 30 s for the server, then crawls all nav-reachable pages.
+## HTML report: tests/ui/reports/html/   Manifest: tests/ui/reports/crawl-manifest.json
+ui-test-smoke:
+	@command -v node >/dev/null 2>&1 || (echo "ERROR: node not found — install Node.js 20+" && exit 1)
+	cd tests/ui && npm install
+	cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 30000
+	cd tests/ui && npx playwright install chromium
+	cd tests/ui && npx playwright test smoke/
+
+## Diff crawl-manifest.json vs declared GET routes in web/mod.rs.
+## Emits reports/coverage-gaps.txt (non-blocking — exits 0 even when gaps exist).
+## Requires ui-test-smoke to have run first.
+ui-coverage-check:
+	cd tests/ui && npx tsx scripts/extract-routes.ts
+	cd tests/ui && npx tsx scripts/coverage-check.ts || true

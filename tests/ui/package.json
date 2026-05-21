@@ -1,0 +1,16 @@
+{
+  "name": "hearth-ui-tests",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test:smoke": "playwright test smoke/",
+    "extract-routes": "tsx scripts/extract-routes.ts",
+    "coverage-check": "tsx scripts/coverage-check.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@axe-core/playwright": "^4.10.0",
+    "wait-on": "^8.0.0",
+    "tsx": "^4.19.0"
+  }
+}
