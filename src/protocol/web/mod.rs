@@ -1247,6 +1247,10 @@ pub fn router(state: WebState) -> Router {
             "/admin/realms/{realm}/identity-providers",
             axum::routing::get(admin::admin_idp_list),
         )
+        .route(
+            "/admin/realms/{realm}/identity-providers/{id}",
+            axum::routing::get(admin::admin_idp_detail),
+        )
         // --- Realm-scoped: sessions ---
         .route(
             "/admin/realms/{realm}/sessions",
