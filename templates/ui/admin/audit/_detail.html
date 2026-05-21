@@ -1,57 +1,148 @@
 {# Inline detail panel for a single audit event row.
-   Rendered inside a colspan=5 <td> controlled by Alpine x-show.
-   Variables available: `row` (AuditRow) with fields:
-     row.event.id, row.event.action, row.event.actor, row.event.resource_type,
-     row.event.resource_id, row.metadata_json, row.previous_hash,
-     row.hash, row.timestamp_display
+   Rendered inside a colspan=6 <td> controlled by Alpine x-show in _rows.html.
+
+   Layout (HEA-648):
+     Left column  — structured event fields in plain English.
+     Right column — collapsible "Additional context" (metadata JSON) and
+                    "Hash chain proof", plus the integrity badge.
+
+   Variables: `row` (AuditRow) — see src/protocol/web/admin/realms.rs.
 #}
-<div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+<div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
 
-  {# Left: full event JSON #}
-  <div>
-    <div class="mb-1.5 flex items-center justify-between">
-      <span class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Event payload</span>
-      <button type="button"
-              title="Copy JSON"
-              @click="
-                navigator.clipboard.writeText($el.closest('.grid').querySelector('pre').textContent);
-                $el.textContent = 'Copied';
-                setTimeout(() => $el.textContent = 'Copy', 1500);"
-              class="rounded border border-strong bg-ht-surface-elevated px-2 py-0.5 font-mono text-xs text-ht-content-muted hover-bg-divider hover:text-ht-content-secondary transition-colors">
-        Copy
-      </button>
+  {# ====================================================================
+     Left: event fields (plain English)
+     ==================================================================== #}
+  <dl class="space-y-3 text-sm">
+
+    {# Event ID — opaque, only useful for support/forensics, but it's the
+       most stable identifier so we keep it at the top. #}
+    <div class="flex flex-col gap-0.5">
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Event ID</dt>
+      <dd><code class="break-all font-mono text-xs text-ht-content-secondary">{{ row.event.id }}</code></dd>
     </div>
-    <pre class="overflow-x-auto rounded-sm bg-ht-surface-base p-3 font-mono text-xs leading-relaxed text-ht-content-secondary ring-1 ring-divider-subtle">{{ row.metadata_json }}</pre>
-  </div>
 
-  {# Right: hash chain proof #}
+    {# Timestamp — absolute UTC (precise) + relative (human-scannable). #}
+    <div class="flex flex-col gap-0.5">
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Timestamp</dt>
+      <dd class="text-ht-content-secondary">
+        <span>{{ row.timestamp_display }}</span>
+        <span class="text-ht-content-muted">· {{ row.timestamp_relative }}</span>
+      </dd>
+    </div>
+
+    {# Action — category-dot badge mirrors the table row, with the raw
+       action tag as a tooltip for API/filter correlation. #}
+    <div class="flex flex-col gap-0.5">
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Action</dt>
+      <dd>
+        <span class="inline-flex items-center gap-1.5 rounded-full bg-ht-surface-base px-2 py-0.5 text-xs text-ht-content-secondary ring-1 ring-divider-subtle"
+              title="{{ row.event.action }} — {{ row.action_category }}{% if row.action_high_severity %} (high-severity){% endif %}">
+          <span aria-hidden="true" class="inline-block h-2 w-2 rounded-full
+            {% if row.action_category == "Identity" %}bg-info-fg{% endif %}
+            {% if row.action_category == "Session" %}bg-teal-fg{% endif %}
+            {% if row.action_category == "OAuth" %}bg-violet-fg{% endif %}
+            {% if row.action_category == "Security" %}bg-rose-fg{% endif %}
+            {% if row.action_category == "Organization" %}bg-steel-fg{% endif %}
+            {% if row.action_category == "System" %}bg-ht-content-muted{% endif %}"></span>
+          <span>{{ row.action_label }}</span>
+        </span>
+        <span class="ml-1 font-mono text-[11px] text-ht-content-muted">{{ row.event.action }}</span>
+      </dd>
+    </div>
+
+    {# Actor — friendly display + link to user detail when actor is a
+       resolvable user UUID in this realm. Raw actor string is the tooltip
+       so support can copy the underlying UUID if needed. #}
+    <div class="flex flex-col gap-0.5">
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Actor</dt>
+      <dd class="text-ht-content-secondary" title="{{ row.event.actor }}">
+        {% match row.actor_url %}
+          {% when Some with (url) %}
+            <a href="{{ url }}" class="text-ht-content-secondary underline decoration-divider-subtle decoration-1 underline-offset-2 transition-colors hover:text-ht-content-brand hover:decoration-ht-content-brand">{{ row.actor_display }}</a>
+          {% when None %}
+            <span>{{ row.actor_display }}</span>
+        {% endmatch %}
+      </dd>
+    </div>
+
+    {# Resource — type + friendly display, linked when resolved. #}
+    <div class="flex flex-col gap-0.5">
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Resource</dt>
+      <dd class="text-ht-content-secondary" title="{{ row.event.resource_id }}">
+        <span class="text-ht-content-muted">{{ row.event.resource_type }}</span>
+        {% match row.resource_url %}
+          {% when Some with (url) %}
+            <a href="{{ url }}" class="ml-1 text-ht-content-secondary underline decoration-divider-subtle decoration-1 underline-offset-2 transition-colors hover:text-ht-content-brand hover:decoration-ht-content-brand">{{ row.resource_display }}</a>
+          {% when None %}
+            <span class="ml-1">{{ row.resource_display }}</span>
+        {% endmatch %}
+      </dd>
+    </div>
+
+  </dl>
+
+  {# ====================================================================
+     Right: collapsible additional context + hash chain proof, plus the
+     persistent integrity badge.
+     ==================================================================== #}
   <div class="space-y-3">
-    <div>
-      <span class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Hash chain proof</span>
-    </div>
 
-    <div class="rounded-sm bg-ht-surface-base p-3 ring-1 ring-divider-subtle space-y-2">
-      <div class="flex flex-col gap-0.5">
-        <span class="text-xs text-ht-content-muted">Event ID</span>
-        <code class="break-all font-mono text-xs text-ht-content-secondary">{{ row.event.id }}</code>
+    {# Additional context — collapsed by default since most events either
+       have no metadata or only routine fields already pilled in the table. #}
+    <details class="group rounded-sm bg-ht-surface-base ring-1 ring-divider-subtle">
+      <summary class="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 text-xs font-medium text-ht-content-secondary hover:text-ht-content-primary">
+        <span class="font-mono uppercase tracking-[0.12em] text-ht-content-muted group-hover:text-ht-content-secondary">Additional context</span>
+        <svg class="h-3.5 w-3.5 text-ht-content-muted transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+      </summary>
+      <div class="border-t border-divider-faint p-3">
+        {% if row.metadata_json.is_empty() %}
+          <p class="text-xs italic text-ht-content-muted">No additional context recorded.</p>
+        {% else %}
+          <div class="flex items-center justify-end pb-2">
+            <button type="button"
+                    title="Copy JSON"
+                    @click="
+                      navigator.clipboard.writeText($el.parentElement.nextElementSibling.textContent);
+                      $el.textContent = 'Copied';
+                      setTimeout(() => $el.textContent = 'Copy', 1500);"
+                    class="rounded border border-strong bg-ht-surface-elevated px-2 py-0.5 font-mono text-xs text-ht-content-muted hover-bg-divider hover:text-ht-content-secondary transition-colors">
+              Copy
+            </button>
+          </div>
+          <pre class="overflow-x-auto font-mono text-xs leading-relaxed text-ht-content-secondary">{{ row.metadata_json }}</pre>
+        {% endif %}
       </div>
-      <div class="flex flex-col gap-0.5">
-        <span class="text-xs text-ht-content-muted">Previous hash</span>
-        <code class="break-all font-mono text-xs text-ht-content-secondary">
-          {% if row.previous_hash.is_empty() %}
-            <span class="italic text-ht-content-muted">genesis (first event in realm)</span>
-          {% else %}
-            {{ row.previous_hash }}
-          {% endif %}
-        </code>
-      </div>
-      <div class="border-t border-divider-faint pt-2 flex flex-col gap-0.5">
-        <span class="text-xs text-ht-content-muted">This event hash</span>
-        <code class="break-all font-mono text-xs text-ht-content-primary font-medium">{{ row.hash }}</code>
-      </div>
-    </div>
+    </details>
 
-    {# Chain integrity badge — set by the handler as row.chain_valid: Option<bool> #}
+    {# Hash chain proof — collapsed by default. Useful for forensics but
+       not for the routine "who did what" lookup that drives most expands. #}
+    <details class="group rounded-sm bg-ht-surface-base ring-1 ring-divider-subtle">
+      <summary class="flex cursor-pointer items-center justify-between gap-2 px-3 py-2 text-xs font-medium text-ht-content-secondary hover:text-ht-content-primary">
+        <span class="font-mono uppercase tracking-[0.12em] text-ht-content-muted group-hover:text-ht-content-secondary">Hash chain proof</span>
+        <svg class="h-3.5 w-3.5 text-ht-content-muted transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+      </summary>
+      <div class="border-t border-divider-faint p-3 space-y-2">
+        <div class="flex flex-col gap-0.5">
+          <span class="text-xs text-ht-content-muted">Previous hash</span>
+          <code class="break-all font-mono text-xs text-ht-content-secondary">
+            {% if row.previous_hash.is_empty() %}
+              <span class="italic text-ht-content-muted">genesis (first event in realm)</span>
+            {% else %}
+              {{ row.previous_hash }}
+            {% endif %}
+          </code>
+        </div>
+        <div class="border-t border-divider-faint pt-2 flex flex-col gap-0.5">
+          <span class="text-xs text-ht-content-muted">This event hash</span>
+          <code class="break-all font-mono text-xs text-ht-content-primary font-medium">{{ row.hash }}</code>
+        </div>
+      </div>
+    </details>
+
+    {# Chain integrity badge — kept visible outside the collapsed sections
+       so operators see the verification result at a glance, set only when
+       the "Verify integrity" button in the filter bar has been used. #}
     {% match row.chain_valid %}
       {% when Some with (true) %}
         <div class="inline-flex items-center gap-1.5 rounded-full bg-success/[0.12] px-2.5 py-1 text-xs font-medium text-success-fg">
@@ -66,6 +157,6 @@
       {% when None %}
         {# Not yet verified — verify via the "Verify integrity" button in the filter bar #}
     {% endmatch %}
-  </div>
 
+  </div>
 </div>

@@ -29,7 +29,6 @@ impl From<IdpConfig> for IdpRow {
 struct IdpListTemplate {
     providers: Vec<IdpRow>,
     realm_name: String,
-    active_tab: &'static str,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -54,9 +53,8 @@ pub async fn admin_idp_list(
         Ok(idps) => render(&IdpListTemplate {
             providers: idps.into_iter().map(IdpRow::from).collect(),
             realm_name: target.0.name().to_string(),
-            active_tab: "identity_providers",
             chrome: true,
-            active: "realm-workspace",
+            active: "identity_providers",
             user_email: Some(session.user_email.clone()),
             is_admin: true,
             flash: None,

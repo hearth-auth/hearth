@@ -492,6 +492,118 @@ pub fn fuzz_validate_redirect_uri(data: &[u8]) {
     let _ = validate_scope_tokens(&input);
 }
 
+/// Maximum number of custom attribute key-value pairs per record.
+const MAX_ATTRIBUTE_COUNT: usize = 50;
+
+/// Maximum byte length for an attribute key.
+const MAX_ATTRIBUTE_KEY_LENGTH: usize = 64;
+
+/// Maximum byte length for an attribute value.
+const MAX_ATTRIBUTE_VALUE_LENGTH: usize = 1024;
+
+/// Maximum total byte size (keys + values) for the entire attribute map.
+const MAX_ATTRIBUTE_TOTAL_BYTES: usize = 16 * 1024;
+
+/// Validates a custom attribute map against optional realm-level definitions.
+///
+/// Two modes:
+/// - **Schema-defined** (`definitions` is `Some`): only keys declared in the
+///   definition list are accepted; unknown keys are rejected with
+///   [`IdentityError::InvalidAttribute`]. Required keys must be present.
+/// - **Free-form** (`definitions` is `None`): any non-empty key is accepted;
+///   only size and character limits are enforced.
+///
+/// In both modes the map must not exceed [`MAX_ATTRIBUTE_COUNT`] entries,
+/// keys must not exceed [`MAX_ATTRIBUTE_KEY_LENGTH`] bytes, contain only ASCII
+/// alphanumeric or `._-` characters, and values must not exceed
+/// [`MAX_ATTRIBUTE_VALUE_LENGTH`] bytes.
+pub(crate) fn validate_attributes(
+    attrs: &std::collections::BTreeMap<String, String>,
+    definitions: Option<&[crate::identity::types::AttributeDefinition]>,
+) -> Result<(), crate::identity::error::IdentityError> {
+    use crate::identity::error::IdentityError;
+
+    if attrs.len() > MAX_ATTRIBUTE_COUNT {
+        return Err(IdentityError::InvalidAttribute {
+            reason: format!("attribute map exceeds maximum of {MAX_ATTRIBUTE_COUNT} entries"),
+        });
+    }
+
+    let total_bytes: usize = attrs.iter().map(|(k, v)| k.len() + v.len()).sum();
+    if total_bytes > MAX_ATTRIBUTE_TOTAL_BYTES {
+        return Err(IdentityError::InvalidAttribute {
+            reason: format!(
+                "attribute map total size {total_bytes} bytes exceeds maximum of \
+                 {MAX_ATTRIBUTE_TOTAL_BYTES} bytes"
+            ),
+        });
+    }
+
+    for (key, value) in attrs {
+        if key.is_empty() {
+            return Err(IdentityError::InvalidAttribute {
+                reason: "attribute key must not be empty".to_string(),
+            });
+        }
+        if key.len() > MAX_ATTRIBUTE_KEY_LENGTH {
+            return Err(IdentityError::InvalidAttribute {
+                reason: format!(
+                    "attribute key '{key}' exceeds maximum length of {MAX_ATTRIBUTE_KEY_LENGTH} bytes"
+                ),
+            });
+        }
+        if !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return Err(IdentityError::InvalidAttribute {
+                reason: format!(
+                    "attribute key '{key}' contains invalid characters \
+                     (only ASCII alphanumeric, '.', '_', '-' are allowed)"
+                ),
+            });
+        }
+        if value.len() > MAX_ATTRIBUTE_VALUE_LENGTH {
+            return Err(IdentityError::InvalidAttribute {
+                reason: format!(
+                    "attribute value for key '{key}' exceeds maximum length of \
+                     {MAX_ATTRIBUTE_VALUE_LENGTH} bytes"
+                ),
+            });
+        }
+        if let Some(defs) = definitions {
+            let def = defs.iter().find(|d| d.key == *key).ok_or_else(|| {
+                IdentityError::InvalidAttribute {
+                    reason: format!("attribute key '{key}' is not defined for this realm"),
+                }
+            })?;
+            if matches!(def.type_, crate::identity::types::AttributeType::Enum)
+                && !def.enum_values.is_empty()
+                && !def.enum_values.contains(value)
+            {
+                return Err(IdentityError::InvalidAttribute {
+                    reason: format!(
+                        "attribute '{key}' value '{value}' is not in the allowed enum values"
+                    ),
+                });
+            }
+        }
+    }
+
+    // Check required fields when definitions are present.
+    if let Some(defs) = definitions {
+        for def in defs.iter().filter(|d| d.required) {
+            if !attrs.contains_key(&def.key) {
+                return Err(IdentityError::InvalidAttribute {
+                    reason: format!("required attribute '{}' is missing", def.key),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,5 +835,116 @@ mod tests {
     fn slug_special_chars_rejected() {
         let err = validate_slug("acme_corp").expect_err("should fail");
         assert!(matches!(err, IdentityError::InvalidInput { .. }));
+    }
+
+    // ===== Attribute validation =====
+
+    use crate::identity::error::IdentityError;
+    use crate::identity::types::{AttributeDefinition, AttributeType};
+    use std::collections::BTreeMap;
+
+    fn make_def(
+        key: &str,
+        required: bool,
+        type_: AttributeType,
+        enum_values: Vec<String>,
+    ) -> AttributeDefinition {
+        AttributeDefinition {
+            key: key.to_string(),
+            label: None,
+            type_,
+            required,
+            description: None,
+            enum_values,
+        }
+    }
+
+    #[test]
+    fn attributes_free_form_accepted() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("department".to_string(), "engineering".to_string());
+        attrs.insert("employee_id".to_string(), "E-1234".to_string());
+        validate_attributes(&attrs, None).expect("free-form should be accepted");
+    }
+
+    #[test]
+    fn attributes_empty_map_accepted() {
+        validate_attributes(&BTreeMap::new(), None).expect("empty map is valid");
+    }
+
+    #[test]
+    fn attributes_schema_defined_known_key_accepted() {
+        let defs = vec![make_def("dept", false, AttributeType::String, vec![])];
+        let mut attrs = BTreeMap::new();
+        attrs.insert("dept".to_string(), "eng".to_string());
+        validate_attributes(&attrs, Some(&defs)).expect("known key accepted");
+    }
+
+    #[test]
+    fn attributes_schema_defined_unknown_key_rejected() {
+        let defs = vec![make_def("dept", false, AttributeType::String, vec![])];
+        let mut attrs = BTreeMap::new();
+        attrs.insert("unknown_key".to_string(), "value".to_string());
+        let err = validate_attributes(&attrs, Some(&defs)).expect_err("unknown key rejected");
+        assert!(matches!(err, IdentityError::InvalidAttribute { .. }));
+    }
+
+    #[test]
+    fn attributes_required_key_missing_rejected() {
+        let defs = vec![make_def("employee_id", true, AttributeType::String, vec![])];
+        let err = validate_attributes(&BTreeMap::new(), Some(&defs)).expect_err("missing required");
+        assert!(matches!(err, IdentityError::InvalidAttribute { .. }));
+    }
+
+    #[test]
+    fn attributes_required_key_present_accepted() {
+        let defs = vec![make_def("employee_id", true, AttributeType::String, vec![])];
+        let mut attrs = BTreeMap::new();
+        attrs.insert("employee_id".to_string(), "E-001".to_string());
+        validate_attributes(&attrs, Some(&defs)).expect("required key present");
+    }
+
+    #[test]
+    fn attributes_enum_valid_value_accepted() {
+        let defs = vec![make_def(
+            "tier",
+            false,
+            AttributeType::Enum,
+            vec!["free".to_string(), "pro".to_string()],
+        )];
+        let mut attrs = BTreeMap::new();
+        attrs.insert("tier".to_string(), "pro".to_string());
+        validate_attributes(&attrs, Some(&defs)).expect("valid enum value");
+    }
+
+    #[test]
+    fn attributes_enum_invalid_value_rejected() {
+        let defs = vec![make_def(
+            "tier",
+            false,
+            AttributeType::Enum,
+            vec!["free".to_string(), "pro".to_string()],
+        )];
+        let mut attrs = BTreeMap::new();
+        attrs.insert("tier".to_string(), "enterprise".to_string());
+        let err = validate_attributes(&attrs, Some(&defs)).expect_err("invalid enum value");
+        assert!(matches!(err, IdentityError::InvalidAttribute { .. }));
+    }
+
+    #[test]
+    fn attributes_value_too_long_rejected() {
+        let long_value = "x".repeat(MAX_ATTRIBUTE_VALUE_LENGTH + 1);
+        let mut attrs = BTreeMap::new();
+        attrs.insert("key".to_string(), long_value);
+        let err = validate_attributes(&attrs, None).expect_err("value too long");
+        assert!(matches!(err, IdentityError::InvalidAttribute { .. }));
+    }
+
+    #[test]
+    fn attributes_empty_key_rejected() {
+        let mut attrs = BTreeMap::new();
+        attrs.insert(String::new(), "value".to_string());
+        let err = validate_attributes(&attrs, None).expect_err("empty key rejected");
+        assert!(matches!(err, IdentityError::InvalidAttribute { .. }));
     }
 }

@@ -35,20 +35,20 @@
     <div>
       <label for="name" class="block text-sm font-medium text-ht-content-secondary">Group name</label>
       <input type="text" id="name" name="name" required autofocus maxlength="80" value="{{ form_name }}"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div>
       <label for="slug" class="block text-sm font-medium text-ht-content-secondary">Slug</label>
       <input type="text" id="slug" name="slug" required maxlength="128" pattern="[a-z0-9_-]+" value="{{ form_slug }}"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input font-mono">
       <p class="mt-1 text-xs text-ht-content-muted">Renaming a slug invalidates any external references that resolve groups by slug.</p>
     </div>
 
     <div>
       <label for="description" class="block text-sm font-medium text-ht-content-secondary">Description</label>
       <textarea id="description" name="description" rows="3" maxlength="500"
-                class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">{{ form_description }}</textarea>
+                class="mt-1 input">{{ form_description }}</textarea>
     </div>
 
     <div class="flex items-center gap-3 pt-2">

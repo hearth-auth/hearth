@@ -75,6 +75,11 @@ fn org_to_proto(o: &domain::Organization) -> pb::Organization {
         created_at: o.created_at().as_micros(),
         updated_at: o.updated_at().as_micros(),
         member_limit: o.config().max_members,
+        attributes: o
+            .attributes()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
     }
 }
 
@@ -306,6 +311,7 @@ impl IdentityAdminService for IdentityAdminSvc {
             config: body.member_limit.map(|m| domain::OrganizationConfig {
                 max_members: Some(m),
             }),
+            attributes: body.attributes.into_iter().collect(),
         };
         let org = self
             .state
@@ -325,6 +331,13 @@ impl IdentityAdminService for IdentityAdminSvc {
         let body = call
             .body
             .ok_or_else(|| Status::invalid_argument("body required"))?;
+        let attributes = if body.clear_attributes {
+            Some(std::collections::BTreeMap::new())
+        } else if !body.attributes.is_empty() {
+            Some(body.attributes.into_iter().collect())
+        } else {
+            None
+        };
         let update = UpdateOrganizationRequest {
             name: body.display_name,
             description: None,
@@ -332,6 +345,7 @@ impl IdentityAdminService for IdentityAdminSvc {
             config: body.member_limit.map(|m| domain::OrganizationConfig {
                 max_members: Some(m),
             }),
+            attributes,
         };
         let org = self
             .state

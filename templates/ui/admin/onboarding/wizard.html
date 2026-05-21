@@ -69,7 +69,7 @@
                x-model="displayName"
                @input="if (!nameTouched) realmName = displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63)"
                value="{{ form_display_name }}"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary placeholder:text-ht-content-muted focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input">
         <p class="mt-1 text-xs text-ht-content-muted">Shown in the login UI and emails.</p>
       </div>
 
@@ -100,7 +100,7 @@
                x-model="realmName"
                @input="nameTouched = true"
                value="{{ form_realm_name }}"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input font-mono">
         <p class="mt-1 text-xs text-ht-content-muted">3–63 chars · lowercase, digits, hyphens · auto-fills from display name</p>
       </div>
 

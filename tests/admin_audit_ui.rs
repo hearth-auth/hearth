@@ -47,6 +47,15 @@ struct Rig {
     admin_session_id: SessionId,
     system_realm_id: RealmId,
     tenant_realm_name: String,
+    /// Identity engine handle — kept so tests can seed users / orgs and
+    /// then verify the audit UI links to their detail pages.
+    identity: Arc<dyn IdentityEngine>,
+    /// Audit engine handle — kept so tests can append targeted events
+    /// after the rig is built (e.g. for a specific known user).
+    audit: Arc<dyn AuditEngine>,
+    /// Tenant realm ID — needed when seeding audit rows scoped to the
+    /// tenant rather than the system realm.
+    tenant_realm_id: RealmId,
 }
 
 fn build_rig() -> Rig {
@@ -170,6 +179,9 @@ fn build_rig() -> Rig {
         admin_session_id: admin_session.id().clone(),
         system_realm_id,
         tenant_realm_name: "auditco".to_string(),
+        identity: Arc::clone(&identity),
+        audit: Arc::clone(&audit),
+        tenant_realm_id: tenant.id().clone(),
     }
 }
 
@@ -460,5 +472,162 @@ async fn webhook_create_blank_url_shows_error() {
     assert!(
         html.contains("Endpoint URL is required"),
         "should show validation error"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit resource links (HEA-645)
+// ---------------------------------------------------------------------------
+
+/// The audit list links each resource row to its admin detail page when the
+/// referenced resource still exists, and renders deleted / unresolvable
+/// resources as plain text. Verifies the round trip for a real user (link
+/// present, points at the right URL) and the pre-seeded synthetic user
+/// uuid (no link — that uuid was never created in the tenant).
+#[tokio::test]
+async fn audit_list_links_resolved_resources() {
+    let rig = build_rig();
+    let csrf = "csrf-resolve";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    // Seed a real user in the tenant realm and an audit event scoped to
+    // that user. The pre-existing rig event references a uuid that was
+    // never created — that row must remain plain text.
+    let tenant_user = rig
+        .identity
+        .create_user(
+            &rig.tenant_realm_id,
+            &CreateUserRequest {
+                email: "real.user@auditco.test".to_string(),
+                display_name: "Real User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create tenant user");
+    rig.audit
+        .append(&CreateAuditEvent {
+            realm_id: rig.tenant_realm_id.clone(),
+            actor: "system".to_string(),
+            action: AuditAction::UserCreated,
+            resource_type: "user".to_string(),
+            resource_id: tenant_user.id().as_uuid().to_string(),
+            metadata: None,
+        })
+        .expect("seed event for real user");
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ui/admin/realms/{realm}/audit"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("test invariant");
+    let html = String::from_utf8_lossy(&bytes);
+
+    // Resolved user → linked.
+    let expected_href = format!(
+        "/ui/admin/realms/{realm}/users/{}",
+        tenant_user.id().as_uuid()
+    );
+    assert!(
+        html.contains(&expected_href),
+        "expected real-user audit row to link to {expected_href} but page was:\n{html}"
+    );
+
+    // Synthetic uuid `...0001` was never created — must not be linked.
+    // (The fallback render uses a `<span>` with the short id `00000000…`.)
+    let bogus_href = format!("/ui/admin/realms/{realm}/users/00000000-0000-0000-0000-000000000001");
+    assert!(
+        !html.contains(&bogus_href),
+        "expected deleted/unknown user resource to NOT be linked, but found {bogus_href}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Audit category + severity indicators (HEA-647)
+// ---------------------------------------------------------------------------
+
+/// The audit list renders a colored category dot and a high-severity
+/// amber left-border on rows whose action's failure policy is
+/// `FailOperation`. Verifies that:
+/// - A routine `UserCreated` row carries the `Identity` category dot
+///   (`bg-info-fg`) and does NOT have the amber left-border.
+/// - A destructive `UserDeleted` row carries the `Identity` category dot
+///   AND the amber left-border (`border-l-2 border-l-amber-400/60`).
+#[tokio::test]
+async fn audit_list_renders_category_and_severity_indicators() {
+    let rig = build_rig();
+    let csrf = "csrf-cat";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    // Seed a destructive `UserDeleted` event in addition to the rig's
+    // pre-seeded routine `UserCreated`. Both have category "Identity";
+    // only `UserDeleted` is high-severity.
+    rig.audit
+        .append(&CreateAuditEvent {
+            realm_id: rig.tenant_realm_id.clone(),
+            actor: "system".to_string(),
+            action: AuditAction::UserDeleted,
+            resource_type: "user".to_string(),
+            resource_id: "00000000-0000-0000-0000-000000000002".to_string(),
+            metadata: None,
+        })
+        .expect("audit event");
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ui/admin/realms/{realm}/audit"))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("test invariant");
+    let html = String::from_utf8_lossy(&bytes);
+
+    // Category indicator dot is present (Identity uses bg-info-fg).
+    assert!(
+        html.contains("bg-info-fg"),
+        "expected Identity category dot class `bg-info-fg` on audit row",
+    );
+
+    // The destructive `UserDeleted` row must have the high-severity
+    // amber left-border applied.
+    assert!(
+        html.contains("border-l-amber-400/60"),
+        "expected destructive `UserDeleted` row to carry the amber severity border",
+    );
+    assert!(
+        html.contains("border-l-2"),
+        "expected destructive `UserDeleted` row to carry `border-l-2`",
+    );
+
+    // The category name surfaces in the title attribute so operators see
+    // the classification on hover even without color.
+    assert!(
+        html.contains("— Identity"),
+        "expected category name to appear in row title attribute",
     );
 }

@@ -29,7 +29,6 @@ struct UserListTemplate {
     /// tenant realms, `/ui/admin/admin-users` for the system-realm
     /// operator surface.
     list_url: String,
-    active_tab: &'static str,
     /// See `UserRowsTemplate::user_base_url`.
     user_base_url: String,
     /// See `UserRowsTemplate::user_detail_qs`.
@@ -105,12 +104,11 @@ pub async fn admin_users_list(
                 next_cursor: page.next_cursor,
                 search_query,
                 list_url: format!("/ui/admin/realms/{realm_name}/users"),
-                active_tab: "users",
                 user_base_url,
                 user_detail_qs: String::new(),
                 realm_name,
                 chrome: true,
-                active: "realm-workspace",
+                active: "users",
                 user_email: Some(session.user_email.clone()),
                 is_admin: true,
                 flash: None,
@@ -184,7 +182,6 @@ pub async fn admin_admin_users_list(
                 search_query,
                 realm_name: String::new(),
                 list_url: "/ui/admin/admin-users".to_string(),
-                active_tab: "",
                 user_base_url: "/ui/admin/realms/system/users".to_string(),
                 user_detail_qs: "?admin_target=system".to_string(),
                 chrome: true,
@@ -221,6 +218,9 @@ struct UserNewTemplate {
     form_display_name: String,
     form_first_name: String,
     form_last_name: String,
+    /// Human-readable summary of the realm's password policy, shown as helper
+    /// text below the password input. Empty string when no policy is configured.
+    password_policy_hint: String,
     // Chrome fields.
     chrome: bool,
     active: &'static str,
@@ -241,6 +241,15 @@ pub async fn admin_user_create_form(
     RequireAdmin(session): RequireAdmin,
     AxumPath(realm_name): AxumPath<String>,
 ) -> Response {
+    let password_policy_hint = state
+        .identity
+        .get_realm_by_name(&realm_name)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().password_policy.clone())
+        .map(build_password_policy_hint)
+        .unwrap_or_default();
+
     render(&UserNewTemplate {
         error: None,
         realm_name,
@@ -248,6 +257,7 @@ pub async fn admin_user_create_form(
         form_display_name: String::new(),
         form_first_name: String::new(),
         form_last_name: String::new(),
+        password_policy_hint,
         chrome: true,
         active: "users",
         user_email: Some(session.user_email.clone()),
@@ -260,6 +270,30 @@ pub async fn admin_user_create_form(
         theme_css: state.theme_css.clone(),
         realm_theme_css: state.realm_theme_css(),
     })
+}
+
+/// Formats a [`crate::identity::PasswordPolicy`] into a concise helper-text
+/// string shown below the password input on the create-user form.
+fn build_password_policy_hint(p: crate::identity::PasswordPolicy) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(len) = p.min_length {
+        parts.push(format!("at least {len} characters"));
+    } else {
+        parts.push("at least 12 characters".to_string());
+    }
+    if p.require_uppercase == Some(true) {
+        parts.push("one uppercase letter".to_string());
+    }
+    if p.require_number == Some(true) {
+        parts.push("one number".to_string());
+    }
+    if p.require_special == Some(true) {
+        parts.push("one special character".to_string());
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("Requires {}", parts.join(", "))
 }
 
 /// `application/x-www-form-urlencoded` body for creating a user.
@@ -291,12 +325,43 @@ pub async fn admin_user_create_submit(
         return resp;
     }
 
+    let password_policy_hint = target
+        .0
+        .config()
+        .password_policy
+        .clone()
+        .map(build_password_policy_hint)
+        .unwrap_or_default();
+
     let req = CreateUserRequest {
         email: form.email.clone(),
         display_name: form.display_name.clone(),
         first_name: form.first_name.clone(),
         last_name: form.last_name.clone(),
         attributes: Default::default(),
+    };
+
+    let render_error = |error: String| {
+        render(&UserNewTemplate {
+            error: Some(error),
+            realm_name: target.0.name().to_string(),
+            form_email: form.email.clone(),
+            form_display_name: form.display_name.clone(),
+            form_first_name: form.first_name.clone(),
+            form_last_name: form.last_name.clone(),
+            password_policy_hint: password_policy_hint.clone(),
+            chrome: true,
+            active: "users",
+            user_email: Some(session.user_email.clone()),
+            is_admin: true,
+            flash: None,
+            csrf: session.csrf.clone(),
+            narrow: false,
+            product_name: state.product_name.clone(),
+            logo_url: state.logo_url.clone(),
+            theme_css: state.theme_css.clone(),
+            realm_theme_css: state.realm_theme_css(),
+        })
     };
 
     match state.identity.create_user(target.id(), &req) {
@@ -328,65 +393,13 @@ pub async fn admin_user_create_submit(
             ))
             .into_response()
         }
-        Err(IdentityError::DuplicateEmail) => render(&UserNewTemplate {
-            error: Some("A user with that email already exists.".to_string()),
-            realm_name: target.0.name().to_string(),
-            form_email: form.email.clone(),
-            form_display_name: form.display_name.clone(),
-            form_first_name: form.first_name.clone(),
-            form_last_name: form.last_name.clone(),
-            chrome: true,
-            active: "users",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
-        }),
-        Err(IdentityError::InvalidInput { reason }) => render(&UserNewTemplate {
-            error: Some(reason),
-            realm_name: target.0.name().to_string(),
-            form_email: form.email.clone(),
-            form_display_name: form.display_name.clone(),
-            form_first_name: form.first_name.clone(),
-            form_last_name: form.last_name.clone(),
-            chrome: true,
-            active: "users",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
-        }),
+        Err(IdentityError::DuplicateEmail) => {
+            render_error("A user with that email already exists.".to_string())
+        }
+        Err(IdentityError::InvalidInput { reason }) => render_error(reason),
         Err(e) => {
             tracing::warn!(error = %e, "create_user failed");
-            render(&UserNewTemplate {
-                error: Some("Unable to create user right now.".to_string()),
-                realm_name: target.0.name().to_string(),
-                form_email: form.email.clone(),
-                form_display_name: form.display_name.clone(),
-                form_first_name: form.first_name.clone(),
-                form_last_name: form.last_name.clone(),
-                chrome: true,
-                active: "users",
-                user_email: Some(session.user_email.clone()),
-                is_admin: true,
-                flash: None,
-                csrf: session.csrf.clone(),
-                narrow: false,
-                product_name: state.product_name.clone(),
-                logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
-            })
+            render_error("Unable to create user right now.".to_string())
         }
     }
 }
@@ -1000,6 +1013,10 @@ struct UserEditTemplate {
     is_user_admin: bool,
     /// Organizations this user belongs to (read-only display).
     org_memberships: Vec<UserOrgView>,
+    /// Current attribute values as sorted (key, value) pairs — used in free-form mode.
+    form_attributes: Vec<(String, String)>,
+    /// Schema-defined attributes paired with their current values (empty = free-form mode).
+    attr_fields: Vec<(crate::identity::AttributeDefinition, String)>,
     // Chrome fields.
     chrome: bool,
     active: &'static str,
@@ -1040,6 +1057,29 @@ pub async fn admin_user_edit_form(
         Ok(Some(user)) => {
             let is_user_admin = check_user_admin(&state, target.id(), &uid);
             let org_memberships = resolve_user_org_memberships(&state, target.id(), &uid);
+            let form_attributes: Vec<(String, String)> = user
+                .attributes()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let attr_defs = target
+                .0
+                .config()
+                .attribute_definitions
+                .as_ref()
+                .map(|d| d.users.clone())
+                .unwrap_or_default();
+            let attr_fields: Vec<(crate::identity::AttributeDefinition, String)> = attr_defs
+                .into_iter()
+                .map(|def| {
+                    let val = form_attributes
+                        .iter()
+                        .find(|(k, _)| k == &def.key)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default();
+                    (def, val)
+                })
+                .collect();
             render(&UserEditTemplate {
                 form_email: user.email().to_string(),
                 form_display_name: user.display_name().to_string(),
@@ -1051,6 +1091,8 @@ pub async fn admin_user_edit_form(
                 error: None,
                 is_user_admin,
                 org_memberships,
+                form_attributes,
+                attr_fields,
                 chrome: true,
                 active: "users",
                 user_email: Some(session.user_email.clone()),
@@ -1088,6 +1130,12 @@ pub struct EditUserForm {
     /// If present (checkbox checked), the user should have the admin role.
     #[serde(default)]
     pub admin: Option<String>,
+    /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(default, rename = "attr_key")]
+    pub attr_keys: Vec<String>,
+    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
+    #[serde(default, rename = "attr_val")]
+    pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -1110,13 +1158,20 @@ pub async fn admin_user_edit_submit(
     };
 
     let status = parse_user_status(&form.status);
+    let attributes: std::collections::BTreeMap<String, String> = form
+        .attr_keys
+        .iter()
+        .zip(form.attr_vals.iter())
+        .filter(|(k, _)| !k.is_empty())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let req = UpdateUserRequest {
         email: Some(form.email.clone()),
         display_name: Some(form.display_name.clone()),
         first_name: Some(form.first_name.clone()),
         last_name: Some(form.last_name.clone()),
         status,
-        attributes: None,
+        attributes: Some(attributes),
     };
 
     match state.identity.update_user(target.id(), &uid, &req) {
@@ -1248,6 +1303,30 @@ fn render_edit_error(
         Some(ref user) => {
             let is_user_admin = check_user_admin(state, target.id(), uid);
             let org_memberships = resolve_user_org_memberships(state, target.id(), uid);
+            let form_attributes: Vec<(String, String)> = form
+                .attr_keys
+                .iter()
+                .zip(form.attr_vals.iter())
+                .filter(|(k, _)| !k.is_empty())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let attr_defs = target
+                .config()
+                .attribute_definitions
+                .as_ref()
+                .map(|d| d.users.clone())
+                .unwrap_or_default();
+            let attr_fields: Vec<(crate::identity::AttributeDefinition, String)> = attr_defs
+                .into_iter()
+                .map(|def| {
+                    let val = form_attributes
+                        .iter()
+                        .find(|(k, _)| k == &def.key)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default();
+                    (def, val)
+                })
+                .collect();
             render(&UserEditTemplate {
                 user: user.clone(),
                 realm_name: target.name().to_string(),
@@ -1259,6 +1338,8 @@ fn render_edit_error(
                 form_status: form.status.clone(),
                 is_user_admin,
                 org_memberships,
+                form_attributes,
+                attr_fields,
                 chrome: true,
                 active: "users",
                 user_email: Some(session.user_email.clone()),
@@ -1334,7 +1415,6 @@ struct SessionListTemplate {
     /// to keep the page in its current realm scope when switching status.
     #[allow(dead_code)]
     realm_query_suffix: String,
-    active_tab: &'static str,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -1477,9 +1557,8 @@ pub async fn admin_sessions_list(
                 count_active,
                 count_expired,
                 realm_query_suffix: String::new(),
-                active_tab: "sessions",
                 chrome: true,
-                active: "realm-workspace",
+                active: "sessions",
                 user_email: Some(session.user_email.clone()),
                 is_admin: true,
                 flash: None,
@@ -1746,30 +1825,8 @@ pub struct CsrfOnlyForm {
     pub csrf: String,
 }
 
-#[allow(
-    clippy::many_single_char_names,
-    clippy::similar_names,
-    clippy::min_ident_chars
-)]
 fn format_ts_admin(ts: crate::core::Timestamp) -> String {
-    let secs = ts.as_micros() / 1_000_000;
-    let rem = secs.rem_euclid(86_400);
-    let days = secs.div_euclid(86_400);
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-    let (y, mo, d) = {
-        let z = days + 719_468;
-        let era = z.div_euclid(146_097);
-        let doe = z - era * 146_097;
-        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-        let y = yoe + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let d = doy - (153 * mp + 2) / 5 + 1;
-        let m = if mp < 10 { mp + 3 } else { mp - 9 };
-        (if m <= 2 { y + 1 } else { y }, m, d)
-    };
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
+    format_ts(ts)
 }
 
 // ---------------------------------------------------------------------------
@@ -2365,7 +2422,6 @@ struct UserImportTemplate {
     error: Option<String>,
     realm_name: String,
     list_url: String,
-    active_tab: &'static str,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -2390,9 +2446,8 @@ pub async fn admin_users_import_form(
         error: None,
         realm_name: realm_name.clone(),
         list_url: format!("/ui/admin/realms/{realm_name}/users"),
-        active_tab: "users",
         chrome: true,
-        active: "realm-workspace",
+        active: "users",
         user_email: Some(session.user_email.clone()),
         is_admin: true,
         flash: None,
@@ -2477,9 +2532,8 @@ pub async fn admin_users_import_submit(
                 error: Some("No file uploaded.".to_string()),
                 realm_name: realm_name.clone(),
                 list_url: format!("/ui/admin/realms/{realm_name}/users"),
-                active_tab: "users",
                 chrome: true,
-                active: "realm-workspace",
+                active: "users",
                 user_email: Some(session.user_email.clone()),
                 is_admin: true,
                 flash: None,
@@ -2500,9 +2554,8 @@ pub async fn admin_users_import_submit(
                 error: Some("File is not valid UTF-8.".to_string()),
                 realm_name: realm_name.clone(),
                 list_url: format!("/ui/admin/realms/{realm_name}/users"),
-                active_tab: "users",
                 chrome: true,
-                active: "realm-workspace",
+                active: "users",
                 user_email: Some(session.user_email.clone()),
                 is_admin: true,
                 flash: None,
@@ -2521,9 +2574,8 @@ pub async fn admin_users_import_submit(
             error: Some("Email column mapping is required.".to_string()),
             realm_name: realm_name.clone(),
             list_url: format!("/ui/admin/realms/{realm_name}/users"),
-            active_tab: "users",
             chrome: true,
-            active: "realm-workspace",
+            active: "users",
             user_email: Some(session.user_email.clone()),
             is_admin: true,
             flash: None,

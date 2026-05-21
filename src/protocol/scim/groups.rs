@@ -227,6 +227,7 @@ pub async fn create_group(
         slug,
         description: None,
         config: None,
+        attributes: std::collections::BTreeMap::new(),
     };
     let org = match state.identity.create_organization(&auth.realm_id, &req) {
         Ok(o) => o,
@@ -390,6 +391,7 @@ pub async fn replace_group(
         description: None,
         status: None,
         config: None,
+        attributes: None,
     };
     if let Err(e) = state
         .identity
@@ -480,6 +482,7 @@ pub async fn patch_group(
             description: None,
             status: None,
             config: None,
+            attributes: None,
         };
         if let Err(e) = state
             .identity

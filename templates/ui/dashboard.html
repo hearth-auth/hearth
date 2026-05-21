@@ -66,26 +66,28 @@
 
 {% if is_admin %}
 <div class="mb-6 grid gap-4 grid-cols-2 sm:grid-cols-4">
-  {# These tiles point at the realm picker — there is no realm context on the
-     global dashboard, so the operator chooses a realm before drilling in
-     (UI_ROUTING.md R-1: every realm-scoped page lives under
-     /ui/admin/realms/{name}/...). #}
-  <a href="/ui/admin/realms" class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover-ring-divider hover:-translate-y-0.5">
+  {# Stat tiles are read-only counters — realm-scoped data has no global
+     deep-link. Navigation to realm-scoped surfaces lives in the tiles below. #}
+  <div class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
     <p class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Users</p>
     <p class="mt-1 text-2xl font-semibold text-ht-content-primary">{{ user_count }}</p>
-  </a>
+    <p class="mt-1 text-xs text-ht-content-muted">across all realms</p>
+  </div>
   <a href="/ui/admin/realms" class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover-ring-divider hover:-translate-y-0.5">
     <p class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Realms</p>
     <p class="mt-1 text-2xl font-semibold text-ht-content-primary">{{ realm_count }}</p>
+    <p class="mt-1 text-xs text-ht-content-muted">managed here</p>
   </a>
-  <a href="/ui/admin/realms" class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover-ring-divider hover:-translate-y-0.5">
+  <div class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
     <p class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Applications</p>
     <p class="mt-1 text-2xl font-semibold text-ht-content-primary">{{ app_count }}</p>
-  </a>
-  <a href="/ui/admin/realms" class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle transition hover-ring-divider hover:-translate-y-0.5">
+    <p class="mt-1 text-xs text-ht-content-muted">across all realms</p>
+  </div>
+  <div class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
     <p class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Organizations</p>
     <p class="mt-1 text-2xl font-semibold text-ht-content-primary">{{ org_count }}</p>
-  </a>
+    <p class="mt-1 text-xs text-ht-content-muted">across all realms</p>
+  </div>
 </div>
 {% endif %}
 

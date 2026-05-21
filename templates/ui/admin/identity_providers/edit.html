@@ -62,7 +62,7 @@
                value="{{ form_name }}"
                pattern="[a-z0-9_-]+"
                placeholder="google"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input font-mono">
         <p class="mt-1 text-xs text-ht-content-muted">URL-safe identifier (lowercase, digits, hyphens, underscores).</p>
       </div>
       <div>
@@ -70,7 +70,7 @@
         <input type="text" id="display_name" name="display_name" required
                value="{{ form_display_name }}"
                placeholder="Sign in with Google"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input">
         <p class="mt-1 text-xs text-ht-content-muted">Shown on the login button.</p>
       </div>
     </div>
@@ -80,7 +80,7 @@
       <input type="url" id="issuer" name="issuer" required
              value="{{ form_issuer }}"
              placeholder="https://accounts.google.com"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div>
@@ -88,7 +88,7 @@
       <input type="url" id="authorization_endpoint" name="authorization_endpoint" required
              value="{{ form_authorization_endpoint }}"
              placeholder="https://accounts.google.com/o/oauth2/v2/auth"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div>
@@ -96,7 +96,7 @@
       <input type="url" id="token_endpoint" name="token_endpoint" required
              value="{{ form_token_endpoint }}"
              placeholder="https://oauth2.googleapis.com/token"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div class="grid grid-cols-2 gap-4">
@@ -105,14 +105,14 @@
         <input type="url" id="userinfo_endpoint" name="userinfo_endpoint"
                value="{{ form_userinfo_endpoint }}"
                placeholder="https://openidconnect.googleapis.com/v1/userinfo"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input">
       </div>
       <div>
         <label for="jwks_uri" class="block text-sm font-medium text-ht-content-secondary">JWKS URI <span class="text-ht-content-muted">(optional)</span></label>
         <input type="url" id="jwks_uri" name="jwks_uri"
                value="{{ form_jwks_uri }}"
                placeholder="https://www.googleapis.com/oauth2/v3/certs"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input">
       </div>
     </div>
 
@@ -121,13 +121,13 @@
         <label for="client_id" class="block text-sm font-medium text-ht-content-secondary">Client ID <span class="text-danger-fg">*</span></label>
         <input type="text" id="client_id" name="client_id" required
                value="{{ form_client_id }}"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input font-mono">
       </div>
       <div>
         <label for="client_secret" class="block text-sm font-medium text-ht-content-secondary">Client secret <span class="text-ht-content-muted">(leave blank to keep current)</span></label>
         <input type="password" id="client_secret" name="client_secret"
                autocomplete="new-password"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input font-mono">
       </div>
     </div>
 
@@ -136,7 +136,7 @@
       <input type="text" id="scopes" name="scopes"
              value="{{ form_scopes }}"
              placeholder="openid email profile"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
       <p class="mt-1 text-xs text-ht-content-muted">Space-separated list. Defaults: <code class="font-mono">openid email profile</code>.</p>
     </div>
 

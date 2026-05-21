@@ -161,3 +161,51 @@ The following webhook event types are emitted for organization lifecycle changes
 | `org_deleted` | Organization deleted |
 
 Subscribe to these events via the [Webhooks guide](webhooks.md).
+
+## Custom attributes
+
+Organizations support the same custom attribute system as users — arbitrary key-value string pairs for metadata your application needs (CRM IDs, contract tiers, licensed seat counts, etc.).
+
+### Writing attributes
+
+Pass `attributes` on create or update:
+
+```bash
+# Create with attributes
+POST /admin/orgs
+{
+  "slug": "acme-corp",
+  "name": "Acme Corporation",
+  "attributes": {
+    "crm_id": "SF-00123",
+    "contract_tier": "enterprise"
+  }
+}
+
+# Update attributes (full replacement)
+PATCH /admin/orgs/{id}
+{
+  "attributes": { "crm_id": "SF-00456" }
+}
+```
+
+Updating `attributes` replaces the entire map atomically. To clear all attributes, pass `"attributes": {}`. Omitting `attributes` on a PATCH leaves the existing map unchanged.
+
+### Reading attributes
+
+Attributes are included in every organization response:
+
+```json
+{
+  "id": "<uuid>",
+  "slug": "acme-corp",
+  "name": "Acme Corporation",
+  "attributes": { "crm_id": "SF-00123", "contract_tier": "enterprise" }
+}
+```
+
+### Schema enforcement
+
+When `attribute_definitions.organizations` is declared in the realm YAML, only listed keys are accepted (unknown keys → 400), required keys must be present on create, and enum-typed attributes validate their value against `enum_values`.
+
+See the [Admin API guide](admin-api.md#custom-attributes) for the full schema reference and configuration example.

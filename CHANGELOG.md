@@ -7,7 +7,139 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **CSP hardened** — `Content-Security-Policy` for all `/ui/**` routes now enforces
+  `script-src 'self' 'unsafe-eval'` (no `'unsafe-inline'`), `style-src 'self'`,
+  `font-src 'self'`, and `base-uri 'self'`. No third-party origins remain in any
+  directive (HEA-630).
+
+### Changed
+
+- **Audit log: relative timestamps** — the admin audit table now renders
+  timestamps as relative strings (`just now`, `5m ago`, `3h ago`, `May 18`)
+  so operators can scan recent activity without mentally converting UTC.
+  The absolute UTC timestamp is preserved as a `title=""` tooltip on
+  every row, one hover away (HEA-644).
+- **Audit log: clickable resource links** — the resource column in the
+  admin audit table now wraps the display name in an `<a>` tag pointing
+  to the affected user / organization / application / realm / group
+  detail page when the resource is still present. Deleted or
+  unresolvable resources continue to render as plain text so operators
+  don't navigate to a 404. Sessions link to the realm sessions list
+  (HEA-645).
+- **Audit log: friendly action labels** — the admin audit table now renders
+  title-case English phrases ("User Created", "Consent Revoked", "SAML
+  Login Failed") in place of raw `snake_case` tags. The raw identifier
+  is preserved as a `title=""` tooltip so operators can still correlate
+  rows with API filter values, and the Action filter `<select>` shows
+  the friendly label as display text while submitting the raw tag
+  (HEA-643).
+- **Audit log: contextual metadata highlights** — the metadata column
+  now lifts the most operationally useful keys inline per action
+  instead of taking the first-N alphabetically: `ip`/`user_agent` for
+  session creation, `client_id`/`scopes` for OAuth consent grant/revoke,
+  `method` for credential changes, and `provider`/`external_id` for
+  completed federation logins. The inline pill cap rose from 2 to 3
+  and the "+N more" overflow chip only ever hides non-priority keys,
+  so the IP behind a new session is visible without expanding the row
+  (HEA-646).
+- **Audit log: category + severity indicators** — every row in the admin
+  audit table now renders a colored category dot before the action label
+  (one of Identity / Session / OAuth / Security / Organization / System)
+  and a subtle amber left-border on destructive or security-sensitive
+  events — deletions, credential changes, consent revocations, role
+  revokes, bulk disables, and anything else whose
+  `AuditAction::failure_policy()` is `FailOperation`. Routine updates
+  (e.g. `UserUpdated`) stay visually quiet while destructive events
+  (e.g. `UserDeleted`) stand out, so operators can triage high-impact
+  activity at a glance (HEA-647).
+- **Self-hosted fonts** — Fraunces, Manrope, and JetBrains Mono `.woff2` files are
+  now embedded in the binary and served from `'self'`. The `<link>` to
+  `fonts.googleapis.com` has been removed; `@font-face` rules in `app.css` load
+  fonts directly from `/ui/static/fonts/` (HEA-630).
+- **Alpine.js vendored** — Alpine.js is no longer loaded from `cdn.jsdelivr.net`.
+  The file is embedded at compile time and served from `/ui/static/alpine.min.js`
+  with an SRI hash, making air-gapped installs work and eliminating the CDN
+  supply-chain pivot (HEA-630).
+
 ### Added
+
+- **Custom attribute support for users and organizations** — Realms may now declare per-entity
+  attribute schemas in YAML under `realms.<name>.attribute_definitions.users` / `.organizations`.
+  Each definition specifies `key`, `label`, `type` (`string | number | boolean | enum`), `required`,
+  and (for enums) `enum_values`. When definitions are present, unknown keys are rejected with 400
+  and required keys are enforced on create. Without definitions, free-form key-value pairs (max
+  50 keys, 64-byte keys, 1024-byte values) are accepted. Organization attributes are now fully
+  wired through the domain layer, REST admin API, admin UI edit/create/detail forms, gRPC create
+  and update RPCs, and SCIM import. The gRPC `UpdateUserRequest` converter no longer drops
+  attributes; the proto gains `attributes` + `clear_attributes` on `UpdateUserRequest`,
+  `Organization`, `CreateOrganizationRequest`, and `UpdateOrganizationRequest` (HEA-654/655).
+
+- **Skip-to-content link** — all admin pages now include a `<a href="#main">Skip to content</a>` as
+  the first focusable element, allowing keyboard and screen-reader users to bypass the sidebar (HEA-633).
+- **`.input` utility class** — unified form field style (border, background, placeholder colour,
+  ember focus ring) applied across all `/ui/**` text, email, password, search, and textarea inputs;
+  eliminates the previous inconsistent ad-hoc class chains (HEA-633).
+- **Global focus ring** — every interactive element now shows a visible 2 px ember outline on
+  `:focus-visible`, ensuring keyboard navigation is legible on dark backgrounds (HEA-633).
+- **Heading colour inheritance** — a `@layer base` rule pins `h1–h6` to `var(--ht-content-primary)`
+  (`graphite-50`), preventing UA stylesheets from resetting headings to white on dark surfaces (HEA-633).
+
+### Fixed
+
+- **Realm navigation de-duplicated** — the per-realm tab bar that lived above
+  every realm sub-page (Users / Organizations / Groups / Applications / …) has
+  been removed; the same links were already in the sidebar's per-realm subtree
+  and the duplication caused mismatched active-state and crowded headers. The
+  realm overview page now lists every sub-page as a Quick access tile so it
+  also works as a navigation hub when the sidebar is collapsed or on mobile
+  (HEA-629).
+- **Sidebar active-state highlights consistently** — Groups, Organizations,
+  Applications detail, Users detail, Identity Providers, Webhooks, and the
+  realm Sessions list pages now keep the correct sidebar entry highlighted.
+  Previously most of these handlers passed `active: "realm-workspace"` as a
+  placeholder (which no sidebar key matched), and the Sessions list still
+  passed `active: "users"` (a legacy from when sessions were nested under
+  the user-detail page), so the wrong sub-item lit up (HEA-629).
+- **Identity Providers and Webhooks reachable from sidebar + overview** —
+  added the two missing realm sub-pages to the sidebar's per-realm subtree
+  and to the realm overview Quick access tiles. Both were previously
+  reachable only via the now-removed topbar tab strip (HEA-629).
+
+- **H1 typography unified across `/ui`** — every admin and pre-login H1 now renders in
+  Fraunces (display serif) at one of two canonical sizes (`text-2xl` for the admin
+  shell, `text-xl` for compact pre-login modals). Previously the admin list pages
+  (Users, Realms, Applications, Webhooks, Organizations, Groups, Sessions, Audit,
+  Migration History) and the pre-login pages (login, register, forgot/reset
+  password, MFA challenge/recovery/enroll, verify-email, setup, realm-required)
+  rendered H1s in Manrope at mixed sizes because they omitted `font-display`. A
+  safety-net rule in `@layer base` now also defaults every `h1`–`h6` to Fraunces
+  so future undecorated headings cannot regress (HEA-629).
+
+- **New-user form validation** — the admin "Create user" form now shows required-field
+  markers and `aria-required` on Email and Initial Password, performs inline email
+  regex validation, and displays a real-time 0–4 password strength meter with
+  colour-coded bars. The configured password policy appears as helper text below
+  the password field (HEA-632).
+- **Audit log metadata drawer** — audit event rows now render metadata as compact
+  key/value pills (max 2 visible + "+N more") instead of raw JSON. Clicking the
+  chevron expands an inline detail panel that pretty-prints the full event JSON
+  and shows the SHA-256 hash-chain proof (HEA-632).
+- **Config editor SSR fallback** — the admin Config Editor page now renders the raw
+  `hearth.yaml` immediately on first paint without JavaScript. When Alpine.js
+  attaches the SSR view is replaced by the full interactive tabbed editor; the page
+  remains usable (read-only view or direct apply) with JS disabled or CSP-blocked
+  (HEA-632).
+
+### Changed
+
+- **Audit filters use HTMX partial swap** — changing actor, action, date range, or
+  limit in the audit log no longer triggers a full-page reload. HTMX swaps only
+  the `<tbody>` and shows a spinner in the filter bar during the request (HEA-632).
+- **Centralised timestamp format** — all admin and account pages render timestamps
+  via a single `format_ts()` helper producing `YYYY-MM-DD HH:MM UTC`. Ad-hoc
+  `strftime` / `to_rfc3339` calls removed from templates (HEA-632).
 
 - **Persistent dev storage** — `make dev` now uses `./data/dev` as the data directory so
   storage survives restarts. `make dev-reset` wipes `./data/dev` for a clean slate.

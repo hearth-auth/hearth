@@ -40,21 +40,21 @@
       <label for="client_name" class="block text-sm font-medium text-ht-content-secondary">Application name <span class="text-danger-fg">*</span></label>
       <input type="text" id="client_name" name="client_name" required autofocus maxlength="128"
              value="{{ form_client_name }}"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div>
       <label for="slug" class="block text-sm font-medium text-ht-content-secondary">Slug <span class="text-ht-content-muted">(optional)</span></label>
       <input type="text" id="slug" name="slug" maxlength="64" pattern="[a-z0-9_-]*"
              value="{{ form_slug }}"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input font-mono">
     </div>
 
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Redirect URIs <span class="text-danger-fg">*</span></label>
       <p class="mb-1.5 text-xs text-ht-content-muted">One URI per line.</p>
       <textarea id="redirect_uris" name="redirect_uris" rows="4" required
-                class="block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">{{ form_redirect_uris }}</textarea>
+                class="input font-mono">{{ form_redirect_uris }}</textarea>
     </div>
 
     <div>
@@ -117,7 +117,7 @@
       <input type="text" id="declared_scopes" name="declared_scopes"
              value="{{ form_declared_scopes }}"
              placeholder="openid profile email"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div>
@@ -125,7 +125,7 @@
       <input type="url" id="client_logo_url" name="client_logo_url"
              value="{{ form_client_logo_url }}"
              placeholder="https://app.example.com/logo.png"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div class="flex items-center gap-3 pt-2">

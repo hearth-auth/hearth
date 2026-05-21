@@ -43,7 +43,7 @@
                    hx-vals='js:{"q": event.target.value}'
                    @focus="showDropdown = true"
                    @input="showDropdown = true"
-                   class="mt-1 block w-full rounded-sm bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary ring-1 ring-divider-subtle focus:ring-ht-accent focus:outline-none font-mono" />
+                   class="mt-1 input font-mono" />
             <div x-show="showDropdown" x-cloak
                  id="user-id-options"
                  class="absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-y-auto rounded-md border border-divider-subtle bg-ht-surface-elevated shadow-lg empty:hidden"></div>
@@ -51,12 +51,12 @@
           <label class="block">
             <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">Org ID (optional)</span>
             <input type="text" name="org_id" value="{{ org_id_input }}"
-                   class="mt-1 block w-full rounded-sm bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary ring-1 ring-divider-subtle focus:ring-ht-accent focus:outline-none font-mono" />
+                   class="mt-1 input font-mono" />
           </label>
           <label class="block">
             <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">OAuth scope (optional)</span>
             <input type="text" name="scope" value="{{ scope_input }}"
-                   class="mt-1 block w-full rounded-sm bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary ring-1 ring-divider-subtle focus:ring-ht-accent focus:outline-none" />
+                   class="mt-1 input" />
           </label>
         </div>
         <div class="flex items-center gap-3">
@@ -105,13 +105,14 @@
   </div>
 
   {# ── Token Preview tab ── #}
-  <div x-show="tab === 'token'" x-data="tokenPreview()">
+  <div x-show="tab === 'token'" x-data="tokenPreview"
+       data-preview-url="/ui/admin/realms/{{ realm_name }}/rbac/token-preview">
     <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <label class="block">
           <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">User ID (UUID or user_&lt;uuid&gt;)</span>
           <input type="text" x-model="userId"
-                 class="mt-1 block w-full rounded-sm bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary ring-1 ring-divider-subtle focus:outline-none font-mono"
+                 class="mt-1 input"
                  placeholder="user_00000000-…" />
         </label>
       </div>
@@ -137,37 +138,4 @@
   </div>
 
 </div>
-{% endblock %}
-{% block scripts %}
-<script>
-  function tokenPreview() {
-    return {
-      userId: '',
-      result: null,
-      loading: false,
-      async preview() {
-        if (!this.userId.trim()) return;
-        this.loading = true;
-        this.result = null;
-        try {
-          const csrf = document.querySelector('meta[name="csrf"]')?.getAttribute('content') || '';
-          const body = new URLSearchParams({ user_id: this.userId.trim() });
-          const resp = await fetch('/ui/admin/realms/{{ realm_name }}/rbac/token-preview', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'X-CSRF-Token': csrf,
-            },
-            body: body.toString(),
-          });
-          this.result = await resp.text();
-        } catch (e) {
-          this.result = JSON.stringify({ error: String(e) }, null, 2);
-        } finally {
-          this.loading = false;
-        }
-      },
-    };
-  }
-</script>
 {% endblock %}

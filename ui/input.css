@@ -2,6 +2,42 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Self-hosted theme fonts (HEA-630) ───────────────────────────────────
+   Fraunces (display), Manrope (body/UI), and JetBrains Mono (code) are
+   shipped from `src/protocol/web/assets/fonts/` so no request leaves the
+   origin. Each file is the latin subset Google Fonts serves for modern
+   browsers (woff2, variable-axis). `font-display: swap` keeps the first
+   paint readable in the fallback stack until the woff2 lands.
+   ──────────────────────────────────────────────────────────────────────── */
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/ui/static/fonts/manrope-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fraunces';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('/ui/static/fonts/fraunces-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Fraunces';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/ui/static/fonts/fraunces-italic-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('/ui/static/fonts/jetbrains-mono-latin.woff2') format('woff2');
+}
+
 /* ── Semantic CSS custom properties (theme contract) ──────────────────────
    Default values match the "ember" dark theme. Named themes shipped in
    src/protocol/web/themes.rs override only the vars they need.
@@ -56,6 +92,29 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+
+  /* Headings inherit body colour; this prevents UA style-sheets from
+     resetting to #000 or #fff on dark surfaces. They also default to
+     the brand display serif so undecorated <h1>..<h6> in any template
+     land in Fraunces, not Manrope. Utility classes on the element still
+     win, so existing decorated headings are unaffected. */
+  h1, h2, h3, h4, h5, h6 {
+    color: var(--ht-content-primary);
+    font-family: Fraunces, Georgia, serif;
+    font-weight: 500;
+  }
+  h1 {
+    font-size: 1.5rem;
+    line-height: 2rem;
+  }
+
+  /* Global focus ring — ember outline for all interactive elements.
+     Component-specific rules (.btn-ember, .btn-danger, .input) override
+     this via higher cascade specificity without needing !important. */
+  :focus-visible {
+    outline: 2px solid var(--ht-brand-from);
+    outline-offset: 2px;
+  }
 }
 
 @layer components {
@@ -75,6 +134,30 @@
   .btn-ember:focus-visible {
     outline: none;
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--ht-brand-from) 15%, transparent);
+  }
+
+  /* Themed text input — add to any input[type=text|email|password|url|search]
+     or textarea. Layout utilities (mt-1, block, w-full) go alongside. */
+  .input {
+    display: block;
+    width: 100%;
+    border-radius: 0.125rem;
+    border: 1px solid color-mix(in srgb, var(--ht-divider) 6%, transparent);
+    background-color: var(--ht-surface-input);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    color: var(--ht-content-primary);
+    outline: none;
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+  }
+  .input::placeholder {
+    color: var(--ht-content-muted);
+  }
+  .input:focus-visible {
+    outline: none;
+    border-color: color-mix(in srgb, var(--ht-divider) 18%, transparent);
+    box-shadow: 0 0 0 2px var(--ht-surface-base), 0 0 0 4px var(--ht-brand-from);
   }
 
   /* Danger button — muted coral */

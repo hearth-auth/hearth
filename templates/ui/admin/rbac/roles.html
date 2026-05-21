@@ -22,9 +22,28 @@
 
 <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle overflow-hidden">
   {% if roles.is_empty() %}
-  <p class="px-6 py-10 text-center text-sm text-ht-content-muted">
-    No roles defined. Click <strong>New role</strong> to create one, or add them via the Config Editor.
-  </p>
+  <div class="flex flex-col items-center justify-center py-16 text-center">
+    <div class="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-ht-surface-elevated ring-1 ring-divider-subtle">
+      <svg class="h-7 w-7 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+      </svg>
+    </div>
+    <h3 class="font-display text-lg font-medium text-ht-content-primary">No roles defined</h3>
+    <p class="mt-2 max-w-sm text-sm text-ht-content-muted">
+      Roles bundle permissions and are assigned to users. Create your first role to start controlling access within this realm.
+    </p>
+    <div class="mt-6 flex flex-wrap items-center justify-center gap-3">
+      <a href="/ui/admin/realms/{{ realm_name }}/rbac/roles/new"
+         class="btn-ember rounded px-4 py-2 text-sm font-semibold">
+        <svg class="mr-1.5 inline-block h-4 w-4 align-[-2px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Create your first role
+      </a>
+      <a href="/ui/admin/settings/editor?section=auth"
+         class="inline-flex items-center gap-1.5 rounded border border-divider bg-ht-surface-elevated px-3 py-1.5 text-sm font-medium text-ht-content-secondary hover-bg-divider">
+        Edit in Config Editor
+      </a>
+    </div>
+  </div>
   {% else %}
   <table class="w-full text-sm">
     <thead>

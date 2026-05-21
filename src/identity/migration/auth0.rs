@@ -470,6 +470,7 @@ impl Auth0Importer {
             slug: slug.clone(),
             description: None,
             config: None,
+            attributes: std::collections::BTreeMap::new(),
         };
         let org = self.identity.create_organization(realm_id, &request)?;
         let org_id: OrganizationId = org.id().clone();

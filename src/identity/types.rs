@@ -462,6 +462,96 @@ pub struct PasswordPolicy {
     pub max_age_days: Option<u32>,
 }
 
+/// Data type hint for a custom attribute value.
+///
+/// Values are always stored as UTF-8 strings. The type drives admin UI
+/// rendering and lightweight format validation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributeType {
+    /// Plain text (default).
+    #[default]
+    String,
+    /// Numeric string; the admin UI renders a number input.
+    Number,
+    /// `"true"` or `"false"`; the admin UI renders a checkbox.
+    Boolean,
+    /// One of a fixed set of values; the admin UI renders a `<select>`.
+    Enum,
+}
+
+/// A single runtime attribute definition derived from YAML config.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttributeDefinition {
+    /// Machine-readable key used as the storage key in the attribute map.
+    pub key: String,
+    /// Human-readable label shown in the admin UI. Defaults to `key` when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Data type hint for the admin UI and basic format validation.
+    #[serde(default)]
+    pub type_: AttributeType,
+    /// When `true`, the attribute must be present on record creation.
+    #[serde(default)]
+    pub required: bool,
+    /// Short description shown as a placeholder or tooltip in the admin UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Allowed values when `type_: Enum`. Ignored for other types.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_values: Vec<String>,
+}
+
+impl AttributeDefinition {
+    /// Returns the display label, falling back to `key` when no label is set.
+    pub fn display_label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.key)
+    }
+
+    /// Returns `true` when this attribute is a boolean type.
+    pub fn is_boolean(&self) -> bool {
+        matches!(self.type_, AttributeType::Boolean)
+    }
+
+    /// Returns `true` when this attribute is an enum type.
+    pub fn is_enum(&self) -> bool {
+        matches!(self.type_, AttributeType::Enum)
+    }
+
+    /// Returns `true` when this attribute is a number type.
+    pub fn is_number(&self) -> bool {
+        matches!(self.type_, AttributeType::Number)
+    }
+
+    /// Looks up the current value for this attribute key in a flat `(key, value)` slice.
+    ///
+    /// Returns the first matching value, or `""` if not found. Used by templates
+    /// to avoid closure syntax that Askama's expression parser cannot handle.
+    pub fn find_value<'a>(&self, attrs: &'a [(String, String)]) -> &'a str {
+        attrs
+            .iter()
+            .find(|(k, _)| k == &self.key)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("")
+    }
+
+    /// Returns the description as a `&str` option, avoiding reference syntax in templates.
+    pub fn description_str(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+}
+
+/// Runtime attribute definitions scoped per entity type.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttributeDefinitions {
+    /// Definitions that apply to user records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<AttributeDefinition>,
+    /// Definitions that apply to organization records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub organizations: Vec<AttributeDefinition>,
+}
+
 /// Per-realm configuration overrides.
 ///
 /// Fields are optional — when `None`, the engine-level default is used.
@@ -567,6 +657,12 @@ pub struct RealmConfig {
     /// only; persisted realm records store just the hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scim_bearer_token_hash: Option<String>,
+    /// Custom attribute definitions for users and organizations in this realm.
+    ///
+    /// `None` means free-form mode (any key accepted). When set, only declared
+    /// keys are accepted; unknown keys are rejected with `InvalidAttribute`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribute_definitions: Option<AttributeDefinitions>,
 }
 
 /// A realm record.
@@ -713,6 +809,8 @@ pub struct Organization {
     name: String,
     slug: String,
     description: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    attributes: BTreeMap<String, String>,
     status: OrganizationStatus,
     config: OrganizationConfig,
     created_at: Timestamp,
@@ -737,6 +835,7 @@ impl Organization {
             name,
             slug,
             description,
+            attributes: BTreeMap::new(),
             status,
             config,
             created_at,
@@ -762,6 +861,11 @@ impl Organization {
     /// Returns the organization's description.
     pub fn description(&self) -> &str {
         &self.description
+    }
+
+    /// Returns the organization's custom attribute map.
+    pub fn attributes(&self) -> &BTreeMap<String, String> {
+        &self.attributes
     }
 
     /// Returns the organization's lifecycle status.
@@ -792,6 +896,11 @@ impl Organization {
     /// Updates the description. Used internally during organization updates.
     pub(crate) fn set_description(&mut self, description: String) {
         self.description = description;
+    }
+
+    /// Replaces the attributes map. Used internally during organization updates.
+    pub(crate) fn set_attributes(&mut self, attributes: BTreeMap<String, String>) {
+        self.attributes = attributes;
     }
 
     /// Updates the status. Used internally during organization updates.
@@ -1015,7 +1124,7 @@ impl OrganizationInvitation {
 }
 
 /// Request to create a new organization.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CreateOrganizationRequest {
     /// Display name for the organization.
     pub name: String,
@@ -1025,6 +1134,8 @@ pub struct CreateOrganizationRequest {
     pub description: Option<String>,
     /// Optional configuration overrides.
     pub config: Option<OrganizationConfig>,
+    /// Custom attribute key-value pairs.
+    pub attributes: BTreeMap<String, String>,
 }
 
 /// Request to update an existing organization.
@@ -1040,6 +1151,8 @@ pub struct UpdateOrganizationRequest {
     pub status: Option<OrganizationStatus>,
     /// New configuration overrides.
     pub config: Option<OrganizationConfig>,
+    /// Replace the custom attribute map. `None` leaves existing attributes unchanged.
+    pub attributes: Option<BTreeMap<String, String>>,
 }
 
 /// Request to create an invitation to join an organization.

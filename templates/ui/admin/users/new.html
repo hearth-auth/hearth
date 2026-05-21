@@ -12,7 +12,30 @@
     {% when None %}
   {% endmatch %}
 
-  <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/new" class="space-y-4">
+  <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/new" class="space-y-4"
+        x-data="{
+          email: '{{ form_email }}',
+          password: '',
+          emailDirty: false,
+          passwordDirty: false,
+          get emailValid() { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.email); },
+          get passwordStrength() {
+            const p = this.password;
+            let s = 0;
+            if (p.length >= 8)  s++;
+            if (p.length >= 12) s++;
+            if (/[A-Z]/.test(p)) s++;
+            if (/[0-9]/.test(p)) s++;
+            if (/[^A-Za-z0-9]/.test(p)) s++;
+            return Math.min(s, 4);
+          },
+          get strengthLabel() {
+            return ['Very weak','Weak','Fair','Strong','Very strong'][this.passwordStrength];
+          },
+          get strengthColor() {
+            return ['bg-danger','bg-warning','bg-warning','bg-teal-500','bg-success'][this.passwordStrength];
+          }
+        }">
     {% match csrf %}
       {% when Some with (token) %}
         <input type="hidden" name="_csrf" value="{{ token }}">
@@ -20,10 +43,17 @@
     {% endmatch %}
 
     <div>
-      <label for="email" class="block text-sm font-medium text-ht-content-secondary">Email</label>
-      <input type="email" id="email" name="email" required value="{{ form_email }}"
+      <label for="email" class="block text-sm font-medium text-ht-content-secondary">
+        Email <span class="text-danger-fg" aria-hidden="true">*</span>
+      </label>
+      <input type="email" id="email" name="email" required aria-required="true"
+             x-model="email" @blur="emailDirty = true"
+             value="{{ form_email }}"
              autocomplete="off"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input"
+             :class="emailDirty && !emailValid ? 'border-danger-fg' : ''">
+      <p x-show="emailDirty && !emailValid" x-cloak
+         class="mt-1 text-xs text-danger-fg">Enter a valid email address.</p>
     </div>
 
     <div class="grid grid-cols-2 gap-4">
@@ -31,13 +61,13 @@
         <label for="first_name" class="block text-sm font-medium text-ht-content-secondary">First name</label>
         <input type="text" id="first_name" name="first_name" value="{{ form_first_name }}"
                autocomplete="off"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input">
       </div>
       <div>
         <label for="last_name" class="block text-sm font-medium text-ht-content-secondary">Last name</label>
         <input type="text" id="last_name" name="last_name" value="{{ form_last_name }}"
                autocomplete="off"
-               class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+               class="mt-1 input">
       </div>
     </div>
 
@@ -45,18 +75,50 @@
       <label for="display_name" class="block text-sm font-medium text-ht-content-secondary">Display name <span class="text-ht-content-muted">(optional — synthesized from first + last if blank)</span></label>
       <input type="text" id="display_name" name="display_name" value="{{ form_display_name }}"
              autocomplete="off"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+             class="mt-1 input">
     </div>
 
     <div>
-      <label for="password" class="block text-sm font-medium text-ht-content-secondary">Initial password</label>
-      <input type="password" id="password" name="password" required minlength="12" autocomplete="new-password"
-             class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
+      <label for="password" class="block text-sm font-medium text-ht-content-secondary">
+        Initial password <span class="text-danger-fg" aria-hidden="true">*</span>
+      </label>
+      <input type="password" id="password" name="password" required aria-required="true"
+             minlength="12" autocomplete="new-password"
+             x-model="password" @blur="passwordDirty = true"
+             class="mt-1 input">
+
+      {# Strength meter — visible once the operator has started typing #}
+      <div x-show="password.length > 0" x-cloak class="mt-2 space-y-1">
+        <div class="flex h-1.5 gap-0.5 rounded-full overflow-hidden">
+          <template x-for="i in [1,2,3,4]" :key="i">
+            <div class="h-full flex-1 rounded-full transition-colors duration-200"
+                 :class="i <= passwordStrength ? strengthColor : 'bg-divider-strong'"></div>
+          </template>
+        </div>
+        <p class="text-xs text-ht-content-muted">
+          Strength: <span :class="{
+            'text-danger-fg': passwordStrength <= 1,
+            'text-warning-fg': passwordStrength === 2,
+            'text-success-fg': passwordStrength >= 3
+          }" x-text="strengthLabel"></span>
+        </p>
+      </div>
+
+      {# Policy hint — rendered server-side, always visible #}
+      {% if !password_policy_hint.is_empty() %}
+      <p class="mt-1.5 text-xs text-ht-content-muted">{{ password_policy_hint }}</p>
+      {% else %}
+      <p class="mt-1.5 text-xs text-ht-content-muted">Requires at least 12 characters.</p>
+      {% endif %}
+
+      <p x-show="passwordDirty && password.length === 0" x-cloak
+         class="mt-1 text-xs text-danger-fg">Password is required.</p>
     </div>
 
     <div class="flex items-center gap-3 pt-2">
       <button type="submit"
-              class="btn-ember rounded px-4 py-2 text-sm font-semibold">
+              :disabled="emailDirty && !emailValid"
+              class="btn-ember rounded px-4 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
         Create user
       </button>
       <a href="/ui/admin/realms/{{ realm_name }}/users" class="text-sm font-medium text-ht-content-muted hover:text-ht-content-secondary">Cancel</a>

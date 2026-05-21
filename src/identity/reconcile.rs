@@ -944,6 +944,7 @@ pub(crate) fn reconcile_organizations(
                         } else {
                             None
                         },
+                        attributes: None,
                     },
                 )?;
                 if was_archived {
@@ -979,6 +980,7 @@ pub(crate) fn reconcile_organizations(
                     slug: slug.clone(),
                     description: Some(description),
                     config: Some(yaml_config),
+                    attributes: std::collections::BTreeMap::new(),
                 },
             )?;
             info!(

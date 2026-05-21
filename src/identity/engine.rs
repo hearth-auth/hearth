@@ -1400,9 +1400,15 @@ impl EmbeddedIdentityEngine {
             now,
         );
 
-        if !request.attributes.is_empty() {
-            Self::validate_user_attributes(&request.attributes)?;
-            user.set_attributes(request.attributes.clone());
+        {
+            let user_attr_defs = self
+                .get_realm(realm_id)?
+                .and_then(|r| r.config().attribute_definitions.clone())
+                .map(|d| d.users);
+            validation::validate_attributes(&request.attributes, user_attr_defs.as_deref())?;
+            if !request.attributes.is_empty() {
+                user.set_attributes(request.attributes.clone());
+            }
         }
 
         let user_bytes = Self::serialize_user(&user)?;
@@ -3047,7 +3053,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // 4a. Replace attributes map if requested.
         if let Some(attributes) = &request.attributes {
-            Self::validate_user_attributes(attributes)?;
+            let user_attr_defs = self
+                .get_realm(realm_id)?
+                .and_then(|r| r.config().attribute_definitions.clone())
+                .map(|d| d.users);
+            validation::validate_attributes(attributes, user_attr_defs.as_deref())?;
             user.set_attributes(attributes.clone());
         }
 
@@ -7721,12 +7731,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::DuplicateOrgSlug);
         }
 
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        let org_attr_defs = realm
+            .config()
+            .attribute_definitions
+            .as_ref()
+            .map(|d| d.organizations.as_slice());
+        validation::validate_attributes(&request.attributes, org_attr_defs)?;
+
         let now = self.clock.now();
         let org_id = OrganizationId::generate();
         let description = request.description.clone().unwrap_or_default();
         let config = request.config.clone().unwrap_or_default();
 
-        let org = Organization::new(
+        let mut org = Organization::new(
             org_id.clone(),
             name,
             slug.clone(),
@@ -7736,6 +7756,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             now,
             now,
         );
+        org.set_attributes(request.attributes.clone());
 
         // Write primary record
         let id_key = keys::encode_org_id(&org_id);
@@ -7834,6 +7855,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         if let Some(ref config) = request.config {
             org.set_config(config.clone());
+        }
+        if let Some(ref attrs) = request.attributes {
+            let realm = self
+                .get_realm(realm_id)?
+                .ok_or(IdentityError::RealmNotFound)?;
+            let org_attr_defs = realm
+                .config()
+                .attribute_definitions
+                .as_ref()
+                .map(|d| d.organizations.as_slice());
+            validation::validate_attributes(attrs, org_attr_defs)?;
+            org.set_attributes(attrs.clone());
         }
 
         let now = self.clock.now();

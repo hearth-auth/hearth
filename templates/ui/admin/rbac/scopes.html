@@ -15,11 +15,25 @@
 
 <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle overflow-hidden">
   {% if scopes.is_empty() %}
-  <p class="px-6 py-10 text-center text-sm text-ht-content-muted">
-    No scope bundles registered. Add them under
-    <code class="rounded-sm bg-ht-surface-base px-1.5 py-0.5 font-mono text-xs">realms.&lt;id&gt;.scopes</code>
-    in <code class="rounded-sm bg-ht-surface-base px-1.5 py-0.5 font-mono text-xs">hearth.yaml</code>.
-  </p>
+  <div class="flex flex-col items-center justify-center py-16 text-center">
+    <div class="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-ht-surface-elevated ring-1 ring-divider-subtle">
+      <svg class="h-7 w-7 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="16"/>
+        <line x1="8" y1="12" x2="16" y2="12"/>
+      </svg>
+    </div>
+    <h3 class="font-display text-lg font-medium text-ht-content-primary">No scope bundles registered</h3>
+    <p class="mt-2 max-w-sm text-sm text-ht-content-muted">
+      Declare scope bundles under <code class="rounded-sm bg-ht-surface-base px-1 py-0.5 font-mono text-xs">realms.&lt;id&gt;.scopes</code> in <code class="rounded-sm bg-ht-surface-base px-1 py-0.5 font-mono text-xs">hearth.yaml</code> to group permissions for OAuth token requests.
+    </p>
+    <div class="mt-6">
+      <a href="/ui/admin/settings/editor?section=auth"
+         class="btn-ember rounded px-4 py-2 text-sm font-semibold">
+        Open Config Editor
+      </a>
+    </div>
+  </div>
   {% else %}
   <table class="w-full text-sm">
     <thead>

@@ -43,6 +43,7 @@ async fn full_organization_lifecycle() {
                 config: Some(OrganizationConfig {
                     max_members: Some(100),
                 }),
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -128,6 +129,7 @@ async fn membership_lifecycle() {
                 slug: "membership-org".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -235,6 +237,7 @@ async fn invitation_e2e_flow() {
                 slug: "invitation-org".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -324,6 +327,7 @@ async fn cascading_delete_org_cleans_memberships_and_invitations() {
                 slug: "cascade-org".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -396,6 +400,7 @@ async fn last_owner_cannot_be_removed_or_downgraded() {
                 slug: "owner-org".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -478,6 +483,7 @@ async fn duplicate_slug_rejected() {
                 slug: "unique-slug".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create first org");
@@ -489,6 +495,7 @@ async fn duplicate_slug_rejected() {
             slug: "unique-slug".to_string(),
             description: None,
             config: None,
+            ..Default::default()
         },
     );
 
@@ -519,6 +526,7 @@ async fn member_limit_enforced() {
                 config: Some(OrganizationConfig {
                     max_members: Some(1),
                 }),
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -581,6 +589,7 @@ async fn delete_user_cascades_org_memberships() {
                 slug: "user-cascade".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -652,6 +661,7 @@ async fn invitation_revocation() {
                 slug: "revoke-org".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -764,6 +774,7 @@ mod proptests {
                     slug: slug.clone(),
                     description: None,
                     config: None,
+                    ..Default::default()
                 },
             );
 
@@ -795,6 +806,7 @@ mod proptests {
                         slug: format!("sym-org-{member_count}"),
                         description: None,
                         config: None,
+                        ..Default::default()
                     },
                 )
                 .expect("create org");
@@ -860,6 +872,7 @@ mod proptests {
                             slug: format!("count-org-{i}-{create_count}"),
                             description: None,
                             config: None,
+                            ..Default::default()
                         },
                     )
                     .expect("create org");
@@ -953,6 +966,7 @@ async fn role_escalation_prevention() {
                 slug: "escalation-org".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -1023,6 +1037,7 @@ async fn slug_injection_rejected() {
                 slug: (*slug).to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         );
         assert!(
@@ -1049,6 +1064,7 @@ async fn org_archived_blocks_and_restore_allows_add_member() {
                 slug: "soft-delete-org".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create org");
@@ -1114,6 +1130,7 @@ async fn org_archived_blocks_and_restore_allows_invitation() {
                 slug: "invite-test-org".to_string(),
                 description: None,
                 config: None,
+                ..Default::default()
             },
         )
         .expect("create org");
