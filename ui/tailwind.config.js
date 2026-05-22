@@ -106,7 +106,7 @@ module.exports = {
           700: "#2d2d38",  // heavy borders, surface dividers
           600: "#3a3a46",  // default dividers
           500: "#5c5c68",  // disabled text and controls
-          400: "#7a7a85",  // tertiary text (hints, microcopy labels)
+          400: "#8a8a94",  // tertiary text (hints, microcopy labels) — WCAG AA compliant
           300: "#a8a39a",  // secondary text (body copy on dark surfaces)
           200: "#d2cec5",  // muted cream
           100: "#e8e3d8",  // cream secondary

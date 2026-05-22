@@ -920,7 +920,8 @@ async fn run_serve(
     // so the same Arc is shared between the sender and the HTTP routes.
     let mailcatcher_state: Option<Arc<MailcatcherState>> =
         if config.email.transport == EmailTransport::Mailcatcher {
-            let password = generate_password();
+            let password = std::env::var("HEARTH_MAILCATCHER_PASSWORD")
+                .unwrap_or_else(|_| generate_password());
             let state = Arc::new(MailcatcherState::new(password));
             // Print prominent startup banner.
             println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");

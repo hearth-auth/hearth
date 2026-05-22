@@ -417,7 +417,7 @@
       {% for a in admins %}
       <tr class="border-b border-divider-faint">
         <td class="px-3 py-2">
-          <a href="{% if a.is_system_admin %}/ui/admin/users/{{ a.user_id }}?admin_target=system{% else %}/ui/admin/realms/{{ realm.name() }}/users/{{ a.user_id }}{% endif %}" class="group">
+          <a href="/ui/admin/realms/{% if a.is_system_admin %}system{% else %}{{ realm.name() }}{% endif %}/users/{{ a.user_id }}{% if a.is_system_admin %}?admin_target=system{% endif %}" class="group">
             <div class="flex items-center gap-2">
               <span class="text-sm font-medium text-ht-content-brand group-hover:text-ht-brand-deep">{{ a.display_name }}</span>
               {% if a.is_system_admin %}

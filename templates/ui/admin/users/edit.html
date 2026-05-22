@@ -103,26 +103,25 @@
       {% endfor %}
     </div>
     {% else %}
-    <div>
+    <div x-data="attrRows()">
       <h3 class="mb-2 text-sm font-semibold text-ht-content-secondary">Attributes</h3>
       <div id="attr-rows" class="space-y-2">
         {% for (k, v) in form_attributes %}
         <div class="flex gap-2 items-center attr-row">
           <input type="text" name="attr_key" value="{{ k }}" placeholder="key" class="input flex-1">
           <input type="text" name="attr_val" value="{{ v }}" placeholder="value" class="input flex-1">
-          <button type="button" onclick="this.closest('.attr-row').remove()" class="text-ht-content-muted hover:text-danger-fg text-sm px-2">✕</button>
+          <button type="button" @click="removeRow($el)" class="text-ht-content-muted hover:text-danger-fg text-sm px-2">✕</button>
         </div>
         {% endfor %}
+        <template x-for="row in rows" :key="row.id">
+          <div class="flex gap-2 items-center attr-row">
+            <input type="text" name="attr_key" placeholder="key" class="input flex-1">
+            <input type="text" name="attr_val" placeholder="value" class="input flex-1">
+            <button type="button" @click="removeRow($el)" class="text-ht-content-muted hover:text-danger-fg text-sm px-2">✕</button>
+          </div>
+        </template>
       </div>
-      <button type="button" onclick="addAttrRow()" class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
-      <script>
-        function addAttrRow() {
-          const row = document.createElement('div');
-          row.className = 'flex gap-2 items-center attr-row';
-          row.innerHTML = '<input type="text" name="attr_key" placeholder="key" class="input flex-1"><input type="text" name="attr_val" placeholder="value" class="input flex-1"><button type="button" onclick="this.closest(\'.attr-row\').remove()" class="text-ht-content-muted hover:text-danger-fg text-sm px-2">✕</button>';
-          document.getElementById('attr-rows').appendChild(row);
-        }
-      </script>
+      <button type="button" @click="addRow()" class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
     </div>
     {% endif %}
 
@@ -131,7 +130,7 @@
               class="btn-ember rounded px-4 py-2 text-sm font-semibold">
         Save changes
       </button>
-      <a href="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}" class="text-sm font-medium text-ht-content-muted hover:text-ht-content-secondary">Cancel</a>
+      <a href="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}{% if realm_name == "system" %}?admin_target=system{% endif %}" class="text-sm font-medium text-ht-content-muted hover:text-ht-content-secondary">Cancel</a>
     </div>
   </form>
 </div>

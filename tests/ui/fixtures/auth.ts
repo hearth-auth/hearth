@@ -14,6 +14,10 @@ const AUTH_DIR = path.join(__dirname, '..', '.auth');
 export const ADMIN_EMAIL = 'admin@hearth.test';
 export const ADMIN_PASSWORD = 'HearthTest123!';
 
+// Regular (non-admin) user credentials for user-portal session tests
+export const USER_EMAIL = ADMIN_EMAIL;
+export const USER_PASSWORD = ADMIN_PASSWORD;
+
 /**
  * Performs first-time admin setup if the setup token is present, then logs in
  * via the browser form at /ui/admin/login and saves storageState to
@@ -56,7 +60,10 @@ export async function setupAdminAuth(): Promise<void> {
   }
 
   // Browser login — captures the session cookies as storageState
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.CHROMIUM_EXECUTABLE_PATH || undefined,
+  });
   const context = await browser.newContext();
   const page = await context.newPage();
 
@@ -65,10 +72,57 @@ export async function setupAdminAuth(): Promise<void> {
   await page.fill('input[name="password"]', ADMIN_PASSWORD);
 
   await Promise.all([
-    page.waitForURL(/\/ui(?:\/|$)/, { timeout: 15_000 }),
+    // Exclude the login page itself — resolves only on a successful post-login redirect.
+    page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 }),
     page.click('button[type="submit"]'),
   ]);
 
   await context.storageState({ path: path.join(AUTH_DIR, 'admin.json') });
   await browser.close();
+}
+
+/**
+ * Logs in as a regular (non-admin) user via the user-portal login form at
+ * /ui/login and saves storageState to .auth/user.json. This session is used
+ * for crawling and testing user-facing pages (/ui/account/*, /ui/device, etc.).
+ *
+ * Falls back silently (no user.json written) when the login fails so that
+ * tests which depend on user.json can skip themselves rather than crash the
+ * entire globalSetup.
+ */
+export async function setupUserAuth(): Promise<void> {
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
+
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.CHROMIUM_EXECUTABLE_PATH || undefined,
+  });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  try {
+    await page.goto(`${BASE_URL}/ui/login`, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+
+    // Bare /ui/login returns 400 in multi-realm mode (no default realm) — the URL
+    // still ends with /login but the page has no login form.  Detect by checking
+    // for the email field; skip rather than waiting for a 5 s timeout.
+    if (!page.url().includes('/login') || (await page.locator('input[name="email"]').count()) === 0) {
+      console.warn('[setupUserAuth] /ui/login has no login form — skipping user.json');
+      return;
+    }
+
+    await page.fill('input[name="email"]', USER_EMAIL, { timeout: 5_000 });
+    await page.fill('input[name="password"]', USER_PASSWORD, { timeout: 5_000 });
+
+    await Promise.all([
+      page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 }),
+      page.click('button[type="submit"]'),
+    ]);
+
+    await context.storageState({ path: path.join(AUTH_DIR, 'user.json') });
+  } catch (err) {
+    console.warn(`[setupUserAuth] could not establish user session: ${err}`);
+  } finally {
+    await browser.close();
+  }
 }

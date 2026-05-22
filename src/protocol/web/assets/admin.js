@@ -346,6 +346,22 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // -----------------------------------------------------------------------
+  // Admin → Users → Edit — dynamic custom-attributes rows
+  // -----------------------------------------------------------------------
+
+  Alpine.data('attrRows', () => ({
+    rows: [],
+    _nextId: 0,
+    addRow() {
+      this.rows.push({ id: this._nextId++ });
+    },
+    removeRow(el) {
+      const row = el.closest('.attr-row');
+      if (row) row.remove();
+    },
+  }));
+
+  // -----------------------------------------------------------------------
   // Admin → Settings → Config Editor
   // -----------------------------------------------------------------------
 

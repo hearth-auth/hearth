@@ -130,13 +130,9 @@ pub async fn admin_users_list(
 /// `GET /ui/admin/admin-users/new`.
 ///
 /// 302 alias to `/ui/admin/users/new?admin_target=system`. The generic
-/// user-create form already pre-scopes to the system realm when its
-/// `TargetRealm` extractor sees `?admin_target=system`, so this is a thin
-/// redirect — no template duplication. POST submissions go to
-/// `/ui/admin/users/new?admin_target=system` (the form's own action),
-/// not back through this alias.
+/// Uses the realm-scoped user-create form for the system realm.
 pub async fn admin_admin_user_create_alias() -> axum::response::Redirect {
-    axum::response::Redirect::to("/ui/admin/users/new?admin_target=system")
+    axum::response::Redirect::to("/ui/admin/realms/system/users/new")
 }
 
 /// `GET /ui/admin/admin-users`.

@@ -9,7 +9,7 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="stylesheet" href="/ui/static/app.css">
-  {% if !theme_css.is_empty() %}<style>{{ theme_css|safe }}</style>{% endif %}
+  <link rel="stylesheet" href="/ui/static/theme.css">
   {% if let Some(css) = realm_theme_css %}<style>{{ css|safe }}</style>{% endif %}
   {% match csrf %}
     {% when Some with (token) %}
@@ -42,7 +42,7 @@
            @keydown.escape.window="sidebarOpen = false">
       {# Brand #}
       <div class="flex h-14 items-center gap-2.5 px-5">
-        <a href="/ui" class="flex items-center gap-2.5" aria-label="Home">
+        <a href="/ui" class="flex items-center gap-2.5" aria-label="Home" data-crawl-skip>
           <img src="{{ logo_url }}" alt="{{ product_name }}" class="w-24">
         </a>
       </div>
@@ -53,7 +53,7 @@
           <p class="mb-2 px-2 font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-ht-content-muted">Main</p>
           <ul class="space-y-0.5">
             <li>
-              <a href="/ui" class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium {% if active == "dashboard" %}bg-divider text-ht-content-primary{% else %}text-ht-content-secondary hover-bg-divider hover:text-ht-content-primary{% endif %}"{% if active == "dashboard" %} aria-current="page"{% endif %}>
+              <a href="/ui" class="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm font-medium {% if active == "dashboard" %}bg-divider text-ht-content-primary{% else %}text-ht-content-secondary hover-bg-divider hover:text-ht-content-primary{% endif %}"{% if active == "dashboard" %} aria-current="page"{% endif %} data-crawl-skip>
                 <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
                 Dashboard
               </a>
@@ -247,9 +247,10 @@
 
   {# admin.js registers every Alpine.data() the templates use, so the
      `alpine:init` listener picks them up before Alpine starts walking
-     the DOM. SRI is recorded against the vendored bytes (HEA-630). #}
-  <script src="/ui/static/admin.js"
-          integrity="sha384-jXsf3ZNbQEOmoGXAxT/atA/M2prbU9VJjN5xzefBbfC3igs50hQIg3NQlQdop/JK"></script>
+     the DOM. No SRI hash — admin.js is first-party, changes during
+     development, and is served by the same binary as this HTML, so
+     SRI provides no security benefit here (HEA-630). #}
+  <script src="/ui/static/admin.js"></script>
   <script src="/ui/static/alpine.min.js"
           integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
           defer></script>

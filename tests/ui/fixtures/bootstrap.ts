@@ -21,6 +21,8 @@ export interface Credentials {
 export async function bootstrap(): Promise<Credentials> {
   fs.mkdirSync(path.dirname(CREDENTIALS_PATH), { recursive: true });
 
+  // Always call bootstrap first — on servers that have the idempotent fix
+  // (http.rs DuplicateRealmName path) this returns 200 with fresh tokens.
   const resp = await fetch(`${BASE_URL}/admin/bootstrap`, { method: 'POST' });
 
   if (resp.ok) {
@@ -29,8 +31,14 @@ export async function bootstrap(): Promise<Credentials> {
     return creds;
   }
 
-  // 409 means the dev-realm already exists from a previous run — re-use stored creds
+  // 409: realm already exists and the server does not yet have the idempotent
+  // bootstrap fix. Fall back to cached credentials — the token may be stale,
+  // but seed.ts handles 401 gracefully (writes empty seed and warns).
   if (resp.status === 409 && fs.existsSync(CREDENTIALS_PATH)) {
+    console.warn(
+      '[bootstrap] server returned 409 (pre-idempotent build). ' +
+      'Using cached credentials — seed may fail. Restart `make dev` after rebuilding to get fresh tokens.',
+    );
     return JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf-8')) as Credentials;
   }
 

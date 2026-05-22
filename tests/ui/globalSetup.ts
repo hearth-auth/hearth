@@ -1,5 +1,5 @@
 import { bootstrap } from './fixtures/bootstrap';
-import { setupAdminAuth } from './fixtures/auth';
+import { setupAdminAuth, setupUserAuth } from './fixtures/auth';
 import { seedTestData } from './fixtures/seed';
 
 export default async function globalSetup(): Promise<void> {
@@ -8,6 +8,9 @@ export default async function globalSetup(): Promise<void> {
 
   console.log('[globalSetup] setting up admin UI auth...');
   await setupAdminAuth();
+
+  console.log('[globalSetup] setting up user portal auth...');
+  await setupUserAuth();
 
   console.log('[globalSetup] seeding test data...');
   await seedTestData(creds);

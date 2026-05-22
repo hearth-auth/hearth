@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate ci-standard dev dev-reset ui-test-smoke ui-coverage-check
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate ci-standard dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -159,6 +159,24 @@ dev-reset:
 	@echo "Dev data wiped. Run make dev for a fresh start."
 
 # ── UI Tests ──────────────────────────────────────────
+#
+# All ui-test-* targets delegate browser setup to tests/ui/pw-run.sh.
+# That script handles cross-platform detection automatically:
+#   NixOS   → re-invokes itself inside nix-shell (transparent, no pre-step needed)
+#   Debian  → npx playwright install --with-deps chromium
+#   macOS   → npx playwright install chromium
+# Just run the target — no manual nix-shell entry required.
+
+## Run the full UI test suite: smoke + regression + components + destructive.
+## Requires a running dev server (make dev).
+## HTML report: tests/ui/reports/html/
+ui-test:
+	@command -v node >/dev/null 2>&1 || (echo "ERROR: node not found — install Node.js 20+" && exit 1)
+	cd tests/ui && npm install
+	cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 30000
+	bash tests/ui/pw-run.sh test \
+		--project=smoke --project=flows --project=regression \
+		--project=components --project=destructive --project=accessibility
 
 ## Run the Playwright crawler smoke suite against a running dev server.
 ## Waits up to 30 s for the server, then crawls all nav-reachable pages.
@@ -167,8 +185,7 @@ ui-test-smoke:
 	@command -v node >/dev/null 2>&1 || (echo "ERROR: node not found — install Node.js 20+" && exit 1)
 	cd tests/ui && npm install
 	cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 30000
-	cd tests/ui && npx playwright install chromium
-	cd tests/ui && npx playwright test smoke/
+	bash tests/ui/pw-run.sh test --project=smoke
 
 ## Diff crawl-manifest.json vs declared GET routes in web/mod.rs.
 ## Emits reports/coverage-gaps.txt (non-blocking — exits 0 even when gaps exist).
@@ -176,3 +193,48 @@ ui-test-smoke:
 ui-coverage-check:
 	cd tests/ui && npx tsx scripts/extract-routes.ts
 	cd tests/ui && npx tsx scripts/coverage-check.ts || true
+
+## Run axe-core accessibility audit against a running dev server.
+## Critical/serious violations fail the run; minor/moderate are logged as warnings.
+## HTML report: tests/ui/reports/html/   Axe JSONs: tests/ui/reports/axe-*.json
+ui-test-accessibility:
+	@command -v node >/dev/null 2>&1 || (echo "ERROR: node not found — install Node.js 20+" && exit 1)
+	cd tests/ui && npm install
+	cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 30000
+	bash tests/ui/pw-run.sh test --project=accessibility
+
+## Run the exploratory deep crawl (non-blocking) against a running dev server.
+## Discovers forms and pagination links; writes reports/deep-crawl-gaps.txt.
+ui-test-exploratory:
+	@command -v node >/dev/null 2>&1 || (echo "ERROR: node not found — install Node.js 20+" && exit 1)
+	cd tests/ui && npm install
+	cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 30000
+	bash tests/ui/pw-run.sh test --project=exploratory || true
+
+## Run visual regression baselines against a running dev server.
+## First run generates snapshots/; subsequent runs diff against them.
+## To lock/update baselines: make ui-test-visual UPDATE=1
+## HTML report: tests/ui/reports/html/
+ui-test-visual:
+	@command -v node >/dev/null 2>&1 || (echo "ERROR: node not found — install Node.js 20+" && exit 1)
+	cd tests/ui && npm install
+	cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 30000
+	@if [ "$(UPDATE)" = "1" ]; then \
+		bash tests/ui/pw-run.sh test --project=visual --update-snapshots; \
+	else \
+		bash tests/ui/pw-run.sh test --project=visual; \
+	fi
+
+## Run smoke + flows + regression suite against Firefox and WebKit browsers.
+## Requires a running dev server. pw-run.sh installs all three browsers platform-aware.
+## Note: Firefox/WebKit on NixOS require additional nixpkgs packages beyond shell.nix defaults.
+ui-test-cross-browser:
+	@command -v node >/dev/null 2>&1 || (echo "ERROR: node not found — install Node.js 20+" && exit 1)
+	cd tests/ui && npm install
+	cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 30000
+	@if command -v apt-get >/dev/null 2>&1; then \
+		cd tests/ui && npx playwright install --with-deps chromium firefox webkit; \
+	else \
+		cd tests/ui && npx playwright install chromium firefox webkit; \
+	fi
+	bash tests/ui/pw-run.sh test --project=smoke --project=flows --project=regression

@@ -684,16 +684,34 @@ fn path_realm_segment(path: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-/// Resolves a realm by name for the `TargetRealm` extractor. Rejects
-/// the reserved system-realm name so an admin cannot accidentally
-/// target the admin realm with `?realm=system`.
+/// Resolves a realm by name for the `TargetRealm` extractor.
+///
+/// "system" is handled specially: the system realm has no name-index entry
+/// (so it stays out of `list_realms()`) but the admin UI generates URLs like
+/// `/ui/admin/realms/system/users/*` by passing the resolved `Realm::name()`
+/// into templates. Rather than rejecting "system" here, we look it up directly
+/// by nil UUID so those URLs round-trip correctly.
 #[allow(clippy::result_large_err)] // Response is inherently ~128B; boxing on the rare failure path isn't worth the extra heap alloc on each successful call.
 fn resolve_named_realm(web_state: &Arc<WebState>, name: &str) -> Result<TargetRealm, Response> {
     if name == crate::identity::keys::SYSTEM_REALM_NAME {
-        return Err(render_status(
-            &super::handlers_common::NotFoundTemplate::new("Realm not found.".to_string()),
-            StatusCode::NOT_FOUND,
-        ));
+        let system_id = crate::identity::keys::system_realm_id();
+        return match web_state.identity.get_realm(&system_id) {
+            Ok(Some(realm)) => Ok(TargetRealm(realm)),
+            Ok(None) => {
+                tracing::warn!("resolve_named_realm: system realm not found in storage");
+                Err(render_status(
+                    &super::handlers_common::ServerErrorTemplate::new(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "resolve_named_realm: system realm lookup failed");
+                Err(render_status(
+                    &super::handlers_common::ServerErrorTemplate::new(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ))
+            }
+        };
     }
     match web_state.identity.get_realm_by_name(name) {
         Ok(Some(realm)) => Ok(TargetRealm(realm)),

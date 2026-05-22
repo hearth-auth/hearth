@@ -12,6 +12,8 @@ export interface SeedFixtures {
   userId: string;
   appClientId: string;
   groupId: string;
+  /** Custom RBAC role ID (name: "test-role") for regression tests. */
+  roleId: string;
 }
 
 /**
@@ -58,7 +60,24 @@ export async function seedTestData(creds: Credentials): Promise<SeedFixtures> {
   const groupId = await createOrSkip(
     `${BASE_URL}/admin/groups`,
     headers,
-    { name: 'test-group', description: 'Smoke-test group' },
+    { name: 'test-group', slug: 'test-group', description: 'Smoke-test group' },
+    (body: Record<string, unknown>) => body['id'] as string,
+  );
+
+  // Add test user to group (ignore 409 = already a member)
+  if (groupId && userId) {
+    await fetch(`${BASE_URL}/admin/groups/${groupId}/members`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ user_id: userId }),
+    });
+  }
+
+  // Create custom RBAC role for regression tests
+  const roleId = await createOrSkip(
+    `${BASE_URL}/admin/roles`,
+    headers,
+    { name: 'test-role', description: 'Regression-test role' },
     (body: Record<string, unknown>) => body['id'] as string,
   );
 
@@ -68,6 +87,7 @@ export async function seedTestData(creds: Credentials): Promise<SeedFixtures> {
     userId,
     appClientId,
     groupId,
+    roleId,
   };
 
   fs.writeFileSync(SEED_PATH, JSON.stringify(fixtures, null, 2));
@@ -91,6 +111,11 @@ async function createOrSkip<T>(
   }
   if (resp.status === 409) {
     // Already exists — return empty string; crawl will still visit the list page
+    return '' as unknown as T;
+  }
+  if (resp.status === 401) {
+    // Stale bootstrap token — warn and degrade gracefully; smoke suite list pages still work
+    console.warn(`[seed] 401 on POST ${url} — bootstrap token is stale. Restart 'make dev' to get fresh tokens.`);
     return '' as unknown as T;
   }
   throw new Error(`Seed POST ${url} failed: HTTP ${resp.status} — ${await resp.text()}`);
