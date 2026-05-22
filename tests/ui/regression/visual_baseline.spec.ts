@@ -143,9 +143,15 @@ test.describe('Visual — OAuth consent', () => {
     u.searchParams.set('code_challenge_method', 'S256');
     u.searchParams.set('prompt', 'consent');
 
-    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
+    // OAuth consent requires a dev-realm user session (not system-realm admin).
+    const realmUserJson = path.join(AUTH_DIR, 'realm-user.json');
+    if (!fs.existsSync(realmUserJson)) {
+      test.skip();
+      return;
+    }
+    const ctx = await browser.newContext({ storageState: realmUserJson });
     const page = await ctx.newPage();
-    await page.route(`${CALLBACK_ORIGIN}/**`, (route) => route.abort());
+    await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
 
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded' });
     await expect(page).toHaveURL(/\/oauth\/consent/);

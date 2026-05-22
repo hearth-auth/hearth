@@ -1,36 +1,58 @@
-import { test, expect } from '@playwright/test';
-import { AUTH_DIR, loadCredentials } from '../helpers/actions';
+import { test, expect, type Browser } from '@playwright/test';
+import { AUTH_DIR } from '../helpers/actions';
 import * as path from 'path';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
 
 test.use({ storageState: path.join(AUTH_DIR, 'admin.json') });
 
-/** Creates a fresh realm via API and returns its name. The realm starts empty
- *  (no users, apps, or groups), making it ideal for empty-state verification. */
-async function createEmptyRealm(suffix: string): Promise<string> {
-  const creds = loadCredentials();
-  const name = `ui-empty-${suffix}`;
-  const resp = await fetch(`${BASE_URL}/admin/realms`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${creds.access_token}`,
-      'X-Realm-ID': creds.realm_id,
-      'Content-Type': 'application/json',
+/**
+ * Creates a fresh realm via the onboarding wizard UI and returns its name.
+ *
+ * POST /admin/realms is intentionally disabled (realms are managed via
+ * hearth.yaml in production). The wizard form at /ui/admin/onboarding/realm
+ * is the correct runtime path for realm creation and works regardless of
+ * whether other realms already exist.
+ */
+async function createEmptyRealm(browser: Browser, suffix: string): Promise<string> {
+  const realmName = `ui-empty-${suffix}`;
+  const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
+  const page = await ctx.newPage();
+
+  // Fetch CSRF token from an authenticated page (it's session-bound).
+  await page.goto(`${BASE_URL}/ui/admin/realms`, { waitUntil: 'domcontentloaded' });
+  const csrf = await page.$eval(
+    'meta[name="csrf"]',
+    (el: Element) => (el as HTMLMetaElement).content ?? '',
+  );
+
+  // Submit the realm creation wizard form. The server creates the realm and
+  // redirects to step 2 (/ui/admin/onboarding/app?realm=...).
+  // ctx.request shares the browser context cookies, so the session is intact.
+  const resp = await ctx.request.post(`${BASE_URL}/ui/admin/onboarding/realm`, {
+    form: {
+      _csrf: csrf,
+      realm_name: realmName,
+      display_name: realmName,
+      theme: 'ember',
     },
-    body: JSON.stringify({ name }),
   });
-  if (!resp.ok && resp.status !== 409) {
-    throw new Error(`Failed to create realm ${name}: HTTP ${resp.status}`);
+
+  await ctx.close();
+
+  if (!resp.ok()) {
+    const body = await resp.text();
+    throw new Error(`Failed to create realm ${realmName}: HTTP ${resp.status()} — ${body.slice(0, 200)}`);
   }
-  return name;
+
+  return realmName;
 }
 
 test.describe('Empty state partials', () => {
   let emptyRealm: string;
 
-  test.beforeAll(async () => {
-    emptyRealm = await createEmptyRealm(Date.now().toString());
+  test.beforeAll(async ({ browser }) => {
+    emptyRealm = await createEmptyRealm(browser, Date.now().toString());
   });
 
   test('users list shows _empty.html partial when realm has no users', async ({ page }) => {

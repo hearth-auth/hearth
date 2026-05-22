@@ -34,7 +34,7 @@ test.describe('Admin applications', () => {
     await expect(page.locator('input[name="grant_authorization_code"]')).toBeVisible();
     await expect(page.locator('input[name="grant_client_credentials"]')).toBeVisible();
     // Submit
-    await expect(page.locator('button[type="submit"]')).toBeVisible();
+    await expect(page.locator('#main button[type="submit"]')).toBeVisible();
   });
 
   test('application detail page loads for seeded app', async ({ page }) => {

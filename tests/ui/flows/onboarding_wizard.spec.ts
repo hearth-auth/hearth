@@ -81,7 +81,7 @@ test.describe('Onboarding wizard — step 2: app registration', () => {
 
     await Promise.all([
       page.waitForURL(/\/onboarding\/invite/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     expect(page.url()).toContain('/onboarding/invite');
@@ -127,7 +127,7 @@ test.describe('Onboarding wizard — step 3: invite', () => {
 
     await Promise.all([
       page.waitForURL(/\/onboarding\/email/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     expect(page.url()).toContain('/onboarding/email');
@@ -210,7 +210,7 @@ test.describe('Email flow — invite via mailcatcher', () => {
 
     await Promise.all([
       page.waitForURL(/\/onboarding\/email/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     // Wait for the invite email to appear in mailcatcher

@@ -44,7 +44,7 @@ test.describe('Admin groups', () => {
 
     await expect(page.locator('input[name="name"]')).toBeVisible();
     await expect(page.locator('textarea[name="description"], input[name="description"]')).toBeVisible();
-    await expect(page.locator('button[type="submit"]')).toBeVisible();
+    await expect(page.locator('#main button[type="submit"]')).toBeVisible();
   });
 
   test('creating a group redirects to the group detail page', async ({ page }) => {
@@ -60,7 +60,7 @@ test.describe('Admin groups', () => {
     await Promise.all([
       // Successful create redirects to the detail page
       page.waitForURL(/\/groups\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     const body = await page.evaluate(() => document.body.innerText);
@@ -92,11 +92,12 @@ test.describe('Admin groups', () => {
     await expect(page.locator('input[name="name"]')).toBeVisible();
   });
 
-  test('group members page renders', async ({ page }) => {
+  test('group detail page shows member section', async ({ page }) => {
     const seed = loadSeed();
     if (!seed.groupId) test.skip();
 
-    await page.goto(groupsUrl(seed.realmName, `/${seed.groupId}/members`), {
+    // /members is POST-only (HTMX add-member); members are shown on the detail page.
+    await page.goto(groupsUrl(seed.realmName, `/${seed.groupId}`), {
       waitUntil: 'domcontentloaded',
     });
 

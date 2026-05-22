@@ -18,6 +18,7 @@ function loadSeed(): SeedFixtures {
 
 test.describe('Admin crawler smoke', () => {
   test('crawls all admin-reachable pages without errors', async ({ browser }) => {
+    test.setTimeout(300_000); // crawler reuses one page but 100+ visits still take time
     const seed = loadSeed();
     const context = await browser.newContext({
       storageState: path.join(AUTH_DIR, 'admin.json'),

@@ -41,7 +41,7 @@ test.describe('Admin organizations', () => {
 
     await expect(page.locator('input[name="name"]')).toBeVisible();
     await expect(page.locator('input[name="slug"]')).toBeVisible();
-    await expect(page.locator('button[type="submit"]')).toBeVisible();
+    await expect(page.locator('#main button[type="submit"]')).toBeVisible();
   });
 
   test('creating an org redirects to org detail and shows the org name', async ({ page }) => {
@@ -56,7 +56,7 @@ test.describe('Admin organizations', () => {
 
     await Promise.all([
       page.waitForURL(/\/organizations\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     const body = await page.evaluate(() => document.body.innerText);
@@ -75,7 +75,7 @@ test.describe('Admin organizations', () => {
 
     await Promise.all([
       page.waitForURL(/\/organizations\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     // The detail page should have a link to /members
@@ -83,7 +83,7 @@ test.describe('Admin organizations', () => {
     await expect(membersLink.first()).toBeVisible();
   });
 
-  test('org members page is reachable from detail', async ({ page }) => {
+  test('org detail page shows members section', async ({ page }) => {
     const seed = loadSeed();
 
     await page.goto(orgsUrl(seed.realmName, '/new'), { waitUntil: 'domcontentloaded' });
@@ -93,14 +93,10 @@ test.describe('Admin organizations', () => {
 
     await Promise.all([
       page.waitForURL(/\/organizations\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
-    // Navigate to members sub-page via URL manipulation
-    const orgUrl = page.url();
-    await page.goto(`${orgUrl}/members`, { waitUntil: 'domcontentloaded' });
-
-    expect(page.url()).toContain('/members');
+    // /members is POST-only (HTMX add-member); member list is shown on the detail page.
     const body = await page.evaluate(() => document.body.innerText.trim());
     expect(body.length).toBeGreaterThan(10);
   });
@@ -117,7 +113,7 @@ test.describe('Admin organizations', () => {
 
     await Promise.all([
       page.waitForURL(/\/organizations\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     const detailUrl = page.url();
@@ -131,7 +127,7 @@ test.describe('Admin organizations', () => {
 
     await Promise.all([
       page.waitForURL(/\/organizations\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     const body = await page.evaluate(() => document.body.innerText);

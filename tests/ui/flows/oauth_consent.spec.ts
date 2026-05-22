@@ -17,6 +17,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { test, expect } from '@playwright/test';
 import type { SeedFixtures } from '../fixtures/seed';
+import { loadCredentials } from '../helpers/actions';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
 const AUTH_DIR = path.join(__dirname, '..', '.auth');
@@ -27,6 +28,19 @@ function loadSeed(): SeedFixtures {
   const p = path.join(AUTH_DIR, 'seed.json');
   if (!fs.existsSync(p)) throw new Error(`seed.json not found at ${p}. Run globalSetup first.`);
   return JSON.parse(fs.readFileSync(p, 'utf-8')) as SeedFixtures;
+}
+
+/** Revoke stored consent for the realm-user so the next authorize always shows the consent page.
+ *  Hearth does not implement prompt=consent, so we must clear the record via the admin API. */
+async function revokeConsent(clientId: string): Promise<void> {
+  const creds = loadCredentials();
+  await fetch(`${BASE_URL}/admin/users/${creds.user_id}/consents/${clientId}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${creds.access_token}`,
+      'X-Realm-ID': creds.realm_id,
+    },
+  });
 }
 
 /** Generate a PKCE code_verifier + S256 code_challenge pair. */
@@ -52,24 +66,28 @@ function buildAuthorizeUrl(clientId: string, challenge: string, state: string): 
 // Consent page renders
 // ---------------------------------------------------------------------------
 
-test.describe('OAuth consent — page renders', () => {
+// Run consent tests serially to prevent parallel consent-state races.
+test.describe.serial('OAuth consent — page renders', () => {
+  test.beforeEach(async () => {
+    const seed = loadSeed();
+    await revokeConsent(seed.appClientId);
+  });
+
   test('authorize redirects to consent page with client name visible', async ({ browser }) => {
     const seed = loadSeed();
     const { challenge } = pkce();
     const state = crypto.randomBytes(8).toString('hex');
 
-    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
+    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'realm-user.json') });
     const page = await ctx.newPage();
 
     // Intercept the callback so the external redirect never fires
-    await page.route(`${CALLBACK_ORIGIN}/**`, (route) => route.abort());
+    await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
 
     await page.goto(buildAuthorizeUrl(seed.appClientId, challenge, state).toString(), {
       waitUntil: 'domcontentloaded',
     });
 
-    // Must end up on the consent interstitial (server may skip it if a consent
-    // record already exists; use prompt=consent to force the page on repeat runs)
     await expect(page).toHaveURL(/\/oauth\/consent/);
 
     // Application name must be visible on the consent page
@@ -90,9 +108,9 @@ test.describe('OAuth consent — page renders', () => {
     const u = buildAuthorizeUrl(seed.appClientId, challenge, state);
     u.searchParams.set('prompt', 'consent');
 
-    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
+    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'realm-user.json') });
     const page = await ctx.newPage();
-    await page.route(`${CALLBACK_ORIGIN}/**`, (route) => route.abort());
+    await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
 
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded' });
     await expect(page).toHaveURL(/\/oauth\/consent/);
@@ -108,7 +126,12 @@ test.describe('OAuth consent — page renders', () => {
 // Approve → authorization code returned
 // ---------------------------------------------------------------------------
 
-test.describe('OAuth consent — approve', () => {
+test.describe.serial('OAuth consent — approve', () => {
+  test.beforeEach(async () => {
+    const seed = loadSeed();
+    await revokeConsent(seed.appClientId);
+  });
+
   test('approve redirects to redirect_uri with authorization code and correct state', async ({
     browser,
   }) => {
@@ -119,32 +142,36 @@ test.describe('OAuth consent — approve', () => {
     const u = buildAuthorizeUrl(seed.appClientId, challenge, state);
     u.searchParams.set('prompt', 'consent');
 
-    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
+    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'realm-user.json') });
     const page = await ctx.newPage();
 
-    // Capture the callback URL before the browser tries to navigate there
-    let capturedCallbackUrl: URL | null = null;
-    await page.route(`${CALLBACK_ORIGIN}/**`, (route) => {
-      capturedCallbackUrl = new URL(route.request().url());
-      route.abort();
-    });
+    // Abort navigation to callback so the browser stays on a local page
+    await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
+
+    // Capture the redirect Location from the server's consent POST response.
+    // This fires before the browser follows the redirect, giving us the full
+    // callback URL including code and state without needing to intercept the
+    // navigation to the external domain.
+    const consentResponsePromise = page.waitForResponse(
+      (resp) => resp.url().includes('/oauth/consent') && resp.request().method() === 'POST',
+      { timeout: 30000 },
+    );
 
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded' });
     await expect(page).toHaveURL(/\/oauth\/consent/);
 
-    // Submit approval and wait for the intercept to fire
-    const [callbackRequest] = await Promise.all([
-      page.waitForRequest((req) => req.url().startsWith(CALLBACK_ORIGIN)),
-      page.click('[data-testid="approve-button"]'),
-    ]);
+    await page.click('[data-testid="approve-button"]');
+    const consentResponse = await consentResponsePromise;
+    const location = consentResponse.headers()['location'];
+    expect(location, 'Expected redirect Location header on consent POST response').toBeTruthy();
+    const capturedCallbackUrl = new URL(location);
 
-    expect(capturedCallbackUrl, 'Redirect to callback URI was not intercepted').not.toBeNull();
     expect(
-      capturedCallbackUrl!.searchParams.get('code'),
+      capturedCallbackUrl.searchParams.get('code'),
       'Expected authorization code in redirect',
     ).toBeTruthy();
-    expect(capturedCallbackUrl!.searchParams.get('state')).toBe(state);
-    expect(capturedCallbackUrl!.searchParams.get('error')).toBeNull();
+    expect(capturedCallbackUrl.searchParams.get('state')).toBe(state);
+    expect(capturedCallbackUrl.searchParams.get('error')).toBeNull();
 
     await ctx.close();
   });
@@ -154,7 +181,12 @@ test.describe('OAuth consent — approve', () => {
 // Deny → access_denied error
 // ---------------------------------------------------------------------------
 
-test.describe('OAuth consent — deny', () => {
+test.describe.serial('OAuth consent — deny', () => {
+  test.beforeEach(async () => {
+    const seed = loadSeed();
+    await revokeConsent(seed.appClientId);
+  });
+
   test('deny redirects to redirect_uri with error=access_denied', async ({ browser }) => {
     const seed = loadSeed();
     const { challenge } = pkce();
@@ -163,27 +195,28 @@ test.describe('OAuth consent — deny', () => {
     const u = buildAuthorizeUrl(seed.appClientId, challenge, state);
     u.searchParams.set('prompt', 'consent');
 
-    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
+    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'realm-user.json') });
     const page = await ctx.newPage();
 
-    let capturedCallbackUrl: URL | null = null;
-    await page.route(`${CALLBACK_ORIGIN}/**`, (route) => {
-      capturedCallbackUrl = new URL(route.request().url());
-      route.abort();
-    });
+    await page.route((url) => url.href.startsWith(CALLBACK_ORIGIN), async (route) => { await route.abort(); });
+
+    const consentResponsePromise = page.waitForResponse(
+      (resp) => resp.url().includes('/oauth/consent') && resp.request().method() === 'POST',
+      { timeout: 30000 },
+    );
 
     await page.goto(u.toString(), { waitUntil: 'domcontentloaded' });
     await expect(page).toHaveURL(/\/oauth\/consent/);
 
-    await Promise.all([
-      page.waitForRequest((req) => req.url().startsWith(CALLBACK_ORIGIN)),
-      page.click('[data-testid="deny-button"]'),
-    ]);
+    await page.click('[data-testid="deny-button"]');
+    const consentResponse = await consentResponsePromise;
+    const location = consentResponse.headers()['location'];
+    expect(location, 'Expected redirect Location header on consent POST response').toBeTruthy();
+    const capturedCallbackUrl = new URL(location);
 
-    expect(capturedCallbackUrl, 'Redirect to callback URI was not intercepted').not.toBeNull();
-    expect(capturedCallbackUrl!.searchParams.get('error')).toBe('access_denied');
-    expect(capturedCallbackUrl!.searchParams.get('state')).toBe(state);
-    expect(capturedCallbackUrl!.searchParams.get('code')).toBeNull();
+    expect(capturedCallbackUrl.searchParams.get('error')).toBe('access_denied');
+    expect(capturedCallbackUrl.searchParams.get('state')).toBe(state);
+    expect(capturedCallbackUrl.searchParams.get('code')).toBeNull();
 
     await ctx.close();
   });

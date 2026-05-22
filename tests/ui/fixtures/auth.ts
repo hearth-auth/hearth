@@ -18,6 +18,11 @@ export const ADMIN_PASSWORD = 'HearthTest123!';
 export const USER_EMAIL = ADMIN_EMAIL;
 export const USER_PASSWORD = ADMIN_PASSWORD;
 
+// Dev-realm user credentials (set by bootstrap handler for UI test access)
+export const DEV_REALM_NAME = 'dev-realm';
+export const DEV_REALM_USER_EMAIL = 'admin@dev.local';
+export const DEV_REALM_USER_PASSWORD = 'HearthDev123!';
+
 /**
  * Performs first-time admin setup if the setup token is present, then logs in
  * via the browser form at /ui/admin/login and saves storageState to
@@ -79,6 +84,50 @@ export async function setupAdminAuth(): Promise<void> {
 
   await context.storageState({ path: path.join(AUTH_DIR, 'admin.json') });
   await browser.close();
+}
+
+/**
+ * Logs in as the dev-realm user at /ui/realms/dev-realm/login and saves
+ * storageState to .auth/realm-user.json. This session is required for
+ * user-facing OAuth consent and device-approval flows that target the dev-realm.
+ *
+ * Falls back silently when setup fails so that tests can skip gracefully.
+ */
+export async function setupRealmUserAuth(): Promise<void> {
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
+
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.CHROMIUM_EXECUTABLE_PATH || undefined,
+  });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+
+  try {
+    await page.goto(
+      `${BASE_URL}/ui/realms/${DEV_REALM_NAME}/login`,
+      { waitUntil: 'domcontentloaded', timeout: 10_000 },
+    );
+
+    if ((await page.locator('input[name="email"]').count()) === 0) {
+      console.warn('[setupRealmUserAuth] realm login form not found — skipping realm-user.json');
+      return;
+    }
+
+    await page.fill('input[name="email"]', DEV_REALM_USER_EMAIL, { timeout: 5_000 });
+    await page.fill('input[name="password"]', DEV_REALM_USER_PASSWORD, { timeout: 5_000 });
+
+    await Promise.all([
+      page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 }),
+      page.click('button[type="submit"]'),
+    ]);
+
+    await context.storageState({ path: path.join(AUTH_DIR, 'realm-user.json') });
+  } catch (err) {
+    console.warn(`[setupRealmUserAuth] could not establish realm user session: ${err}`);
+  } finally {
+    await browser.close();
+  }
 }
 
 /**

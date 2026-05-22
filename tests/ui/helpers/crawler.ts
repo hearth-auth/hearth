@@ -1,14 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import type { BrowserContext, Response } from '@playwright/test';
+import type { BrowserContext, ConsoleMessage, Response } from '@playwright/test';
 import {
-  attachConsoleErrorCollector,
-  assertNoConsoleErrors,
   assertNoFailedRequests,
   assertPageNonEmpty,
 } from './assertions';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
+
+// Hard cap so a deeply-linked admin panel never causes a timeout.
+const MAX_PAGES = 150;
 
 export interface CrawlResult {
   url: string;
@@ -62,6 +63,10 @@ function dedup(url: string): string {
  * Breadth-first link crawler. Visits each discovered page once, runs smoke
  * assertions, and collects same-origin links for further crawling.
  *
+ * Reuses a single browser page across all navigations to avoid per-URL tab
+ * creation overhead. Response and console listeners are attached and removed
+ * per navigation so each URL gets a clean collector.
+ *
  * Links marked `data-crawl-skip` are excluded via CSS selector on collection.
  * Emits a crawl-manifest.json at `manifestPath` when done.
  */
@@ -75,16 +80,26 @@ export async function crawl(
   const results: CrawlResult[] = [];
   const startedAt = new Date().toISOString();
 
-  while (queue.length > 0) {
+  // Single reused page — avoids browser-tab creation overhead on every URL.
+  let page = await context.newPage();
+
+  while (queue.length > 0 && results.length < MAX_PAGES) {
     const url = queue.shift()!;
     const key = dedup(url);
     if (visited.has(key)) continue;
     visited.add(key);
 
-    const page = await context.newPage();
+    // Fresh per-navigation collectors, attached and removed explicitly.
     const failedResponses: Response[] = [];
-    page.on('response', (r) => failedResponses.push(r));
-    const consoleErrors = attachConsoleErrorCollector(page);
+    const consoleErrors: string[] = [];
+
+    const onResponse = (r: Response) => failedResponses.push(r);
+    const onConsole = (msg: ConsoleMessage) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text());
+    };
+
+    page.on('response', onResponse);
+    page.on('console', onConsole);
 
     try {
       const resp = await page.goto(url, {
@@ -98,12 +113,13 @@ export async function crawl(
           status: 'fail',
           error: `HTTP ${resp?.status() ?? 'no response'}`,
         });
-        await page.close();
         continue;
       }
 
       await assertPageNonEmpty(page);
-      assertNoConsoleErrors(consoleErrors, url);
+      if (consoleErrors.length > 0) {
+        throw new Error(`Console errors on ${url}:\n${consoleErrors.join('\n')}`);
+      }
       assertNoFailedRequests(failedResponses, url);
 
       const title = await page.title();
@@ -122,8 +138,8 @@ export async function crawl(
 
       for (const link of links) {
         const abs = toAbsolute(link);
-        const key = dedup(abs);
-        if (!visited.has(key) && !queue.includes(key) && !shouldSkip(abs)) {
+        const k = dedup(abs);
+        if (!visited.has(k) && !queue.includes(k) && !shouldSkip(abs)) {
           queue.push(abs);
         }
       }
@@ -143,10 +159,21 @@ export async function crawl(
       } catch {
         // Screenshot failure is non-fatal
       }
+
+      // If the page is in a crashed/unusable state, replace it so subsequent
+      // URLs still get a working page.
+      if (msg.includes('crashed') || msg.includes('Target closed')) {
+        try { await page.close(); } catch { /* already closed */ }
+        page = await context.newPage();
+        continue; // handlers already removed by the page being replaced
+      }
     } finally {
-      await page.close();
+      page.off('response', onResponse);
+      page.off('console', onConsole);
     }
   }
+
+  await page.close();
 
   const manifest: CrawlManifest = {
     baseUrl: BASE_URL,

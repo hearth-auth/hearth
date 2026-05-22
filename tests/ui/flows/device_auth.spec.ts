@@ -14,7 +14,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { test, expect } from '@playwright/test';
 import type { SeedFixtures } from '../fixtures/seed';
-import { loadCredentials } from '../helpers/actions';
 
 const BASE_URL = process.env.HEARTH_URL ?? 'http://127.0.0.1:8420';
 const AUTH_DIR = path.join(__dirname, '..', '.auth');
@@ -36,12 +35,12 @@ interface DeviceAuthResponse {
   interval: number;
 }
 
-/** POST /oauth/device_authorization — initiates a device grant. */
-async function startDeviceAuth(clientId: string): Promise<DeviceAuthResponse> {
-  const resp = await fetch(`${BASE_URL}/oauth/device_authorization`, {
+/** POST /realms/{realm}/device_authorization — initiates a device grant. */
+async function startDeviceAuth(clientId: string, realmName: string): Promise<DeviceAuthResponse> {
+  const resp = await fetch(`${BASE_URL}/realms/${realmName}/device_authorization`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: clientId }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: clientId }),
   });
   if (!resp.ok) {
     const body = await resp.text();
@@ -50,20 +49,21 @@ async function startDeviceAuth(clientId: string): Promise<DeviceAuthResponse> {
   return resp.json() as Promise<DeviceAuthResponse>;
 }
 
-/** Poll POST /oauth/token until approved or timeout. Returns access_token. */
+/** Poll POST /realms/{realm}/token until approved or timeout. Returns access_token. */
 async function pollDeviceToken(
   clientId: string,
   deviceCode: string,
+  realmName: string,
   intervalMs: number,
   maxWaitMs = 10_000,
 ): Promise<string> {
   const deadline = Date.now() + maxWaitMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, intervalMs));
-    const resp = await fetch(`${BASE_URL}/oauth/token`, {
+    const resp = await fetch(`${BASE_URL}/realms/${realmName}/token`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         grant_type: DEVICE_GRANT,
         device_code: deviceCode,
         client_id: clientId,
@@ -94,7 +94,7 @@ test.describe('Device auth — approval page', () => {
     await page.goto(`${BASE_URL}/ui/device`, { waitUntil: 'domcontentloaded' });
 
     await expect(page.locator('input[name="user_code"]')).toBeVisible();
-    await expect(page.locator('button[type="submit"]')).toBeVisible();
+    await expect(page.locator('#main button[type="submit"]')).toBeVisible();
 
     await ctx.close();
   });
@@ -118,10 +118,18 @@ test.describe('Device auth — approval page', () => {
 
 test.describe('Device auth — full flow', () => {
   test('device_authorization → user approves → token issued', async ({ browser }) => {
+    // Device approval uses the realm-scoped user session (system-realm admin
+    // cannot approve dev-realm device codes — session.realm_id mismatch).
+    const realmUserState = path.join(AUTH_DIR, 'realm-user.json');
+    test.skip(
+      !fs.existsSync(realmUserState),
+      'realm-user.json not found — setupRealmUserAuth skipped (no dev-realm user)',
+    );
+
     const seed = loadSeed();
 
     // Step 1: initiate device grant via API
-    const deviceAuth = await startDeviceAuth(seed.appClientId);
+    const deviceAuth = await startDeviceAuth(seed.appClientId, seed.realmName);
 
     expect(deviceAuth.device_code, 'Expected device_code').toBeTruthy();
     expect(deviceAuth.user_code, 'Expected user_code').toBeTruthy();
@@ -129,15 +137,16 @@ test.describe('Device auth — full flow', () => {
     // user_code is 8 chars per the Hearth implementation
     expect(deviceAuth.user_code.replace(/-/g, '')).toHaveLength(8);
 
-    // Step 2: browser approval — user navigates to device page and enters code
-    const ctx = await browser.newContext({ storageState: path.join(AUTH_DIR, 'admin.json') });
+    // Step 2: browser approval — must use the realm-scoped session so that
+    // device_approve_submit resolves session.realm_id == dev-realm.
+    const ctx = await browser.newContext({ storageState: realmUserState });
     const page = await ctx.newPage();
 
     await page.goto(`${BASE_URL}/ui/device`, { waitUntil: 'domcontentloaded' });
     await expect(page.locator('input[name="user_code"]')).toBeVisible();
 
     await page.fill('input[name="user_code"]', deviceAuth.user_code);
-    await page.click('button[type="submit"]');
+    await page.click('#main button[type="submit"]');
 
     // After approval the server redirects to a confirmation/success page
     // (not an external redirect_uri — device grant uses polling)
@@ -152,6 +161,7 @@ test.describe('Device auth — full flow', () => {
     const accessToken = await pollDeviceToken(
       seed.appClientId,
       deviceAuth.device_code,
+      seed.realmName,
       (deviceAuth.interval ?? 1) * 1_000,
     );
 
@@ -160,7 +170,7 @@ test.describe('Device auth — full flow', () => {
 
   test('device_authorization response includes required RFC 8628 fields', async () => {
     const seed = loadSeed();
-    const deviceAuth = await startDeviceAuth(seed.appClientId);
+    const deviceAuth = await startDeviceAuth(seed.appClientId, seed.realmName);
 
     expect(typeof deviceAuth.device_code).toBe('string');
     expect(typeof deviceAuth.user_code).toBe('string');
@@ -172,12 +182,12 @@ test.describe('Device auth — full flow', () => {
 
   test('polling before approval returns authorization_pending', async () => {
     const seed = loadSeed();
-    const deviceAuth = await startDeviceAuth(seed.appClientId);
+    const deviceAuth = await startDeviceAuth(seed.appClientId, seed.realmName);
 
-    const resp = await fetch(`${BASE_URL}/oauth/token`, {
+    const resp = await fetch(`${BASE_URL}/realms/${seed.realmName}/token`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         grant_type: DEVICE_GRANT,
         device_code: deviceAuth.device_code,
         client_id: seed.appClientId,

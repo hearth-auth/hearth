@@ -36,6 +36,10 @@
   </div>
 </div>
 
+{% if users.is_empty() && search_query.is_empty() %}
+{% include "ui/admin/users/_empty.html" %}
+{% else %}
+
 {# Search bar — HTMX live search after 200ms idle, ≥2 chars. #}
 <form method="get" action="{{ list_url }}" class="mb-4"
       hx-get="{{ list_url }}"
@@ -153,4 +157,6 @@
   {% when None %}
 {% endmatch %}
 {% endif %}
+
+{% endif %}{# end else: !users.is_empty() || !search_query.is_empty() #}
 {% endblock %}

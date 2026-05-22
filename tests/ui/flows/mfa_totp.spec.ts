@@ -102,7 +102,7 @@ test.describe.serial('MFA TOTP enrollment and disable cycle', () => {
     // Compute code just before submitting to stay within the 30s window
     const code = computeTotp(secret);
     await page.fill('input[name="code"]', code);
-    await page.click('button[type="submit"]');
+    await page.click('#main button[type="submit"]');
 
     // On success the handler redirects to /ui/account
     await page.waitForURL(/\/ui\/account($|\?)/, { timeout: 10_000 });
@@ -124,8 +124,10 @@ test.describe.serial('MFA TOTP enrollment and disable cycle', () => {
       const secret = await extractSecret(page);
       const code = computeTotp(secret);
       await page.fill('input[name="code"]', code);
-      await page.click('button[type="submit"]');
-      await page.waitForURL(/\/ui\/account($|\?)/, { timeout: 10_000 });
+      await Promise.all([
+        page.waitForURL(/\/ui\/account($|\?)/, { timeout: 10_000 }),
+        page.click('#main button[type="submit"]'),
+      ]);
       await navigateToTotpPage(page);
     }
 
@@ -156,10 +158,15 @@ test.describe.serial('MFA TOTP enrollment and disable cycle', () => {
     }
 
     await page.fill('input[name="code"]', '000000');
-    await page.click('button[type="submit"]');
 
-    // Should stay on the TOTP page (no redirect)
-    await page.waitForURL(/\/account\/totp/, { timeout: 5_000 });
+    // Use Promise.all to avoid a race where the navigation completes before
+    // waitForURL installs its listener.  Scope to #main so the sidebar's
+    // logout button[type="submit"] is never accidentally clicked.
+    await Promise.all([
+      page.waitForURL(/\/account\/totp/, { timeout: 10_000 }),
+      page.click('#main button[type="submit"]'),
+    ]);
+
     const afterText = await page.evaluate(() => document.body.innerText);
     // MFA must NOT be enabled
     expect(afterText).not.toMatch(/mfa.*enabled/i);

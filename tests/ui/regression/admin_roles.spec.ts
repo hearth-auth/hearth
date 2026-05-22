@@ -40,7 +40,7 @@ test.describe('Admin RBAC roles', () => {
     await page.goto(rolesUrl(seed.realmName, '/new'), { waitUntil: 'domcontentloaded' });
 
     await expect(page.locator('input[name="name"]')).toBeVisible();
-    await expect(page.locator('button[type="submit"]')).toBeVisible();
+    await expect(page.locator('#main button[type="submit"]')).toBeVisible();
   });
 
   test('creating a role redirects to role detail', async ({ page }) => {
@@ -57,7 +57,7 @@ test.describe('Admin RBAC roles', () => {
 
     await Promise.all([
       page.waitForURL(/\/rbac\/roles\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     const body = await page.evaluate(() => document.body.innerText);
@@ -101,7 +101,7 @@ test.describe('Admin RBAC roles', () => {
 
     await Promise.all([
       page.waitForURL(/\/rbac\/roles\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     const detailUrl = page.url();
@@ -113,7 +113,7 @@ test.describe('Admin RBAC roles', () => {
 
     await Promise.all([
       page.waitForURL(/\/rbac\/roles\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     const body = await page.evaluate(() => document.body.innerText);

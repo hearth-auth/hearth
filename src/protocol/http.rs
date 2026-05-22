@@ -3584,6 +3584,9 @@ struct AdminUpdateClientBody {
     frontchannel_logout_uri: Option<Option<String>>,
     /// Replaces the allowed post-logout redirect URI list.
     post_logout_redirect_uris: Option<Vec<String>>,
+    /// Whether user consent is required for this client. `true` for
+    /// third-party apps; `false` for trusted first-party clients.
+    require_consent: Option<bool>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -3638,6 +3641,7 @@ async fn admin_update_client(
         backchannel_logout_uri: body.backchannel_logout_uri,
         frontchannel_logout_uri: body.frontchannel_logout_uri,
         post_logout_redirect_uris: body.post_logout_redirect_uris,
+        require_consent: body.require_consent,
         ..Default::default()
     };
 
@@ -4257,6 +4261,20 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
     };
 
     let user_id = user.id().clone();
+
+    // Activate the user and set a well-known dev password so browser-based
+    // UI tests can log in at /ui/realms/dev-realm/login.
+    let _ = state.identity.update_user(
+        &realm_id,
+        &user_id,
+        &crate::identity::UpdateUserRequest {
+            status: Some(crate::identity::UserStatus::Active),
+            ..Default::default()
+        },
+    );
+    let dev_pwd =
+        crate::identity::CleartextPassword::from_string("HearthDev123!".to_string());
+    let _ = state.identity.set_password(&realm_id, &user_id, &dev_pwd);
 
     // Grant the realm.admin role to the admin user BEFORE issuing tokens so
     // the access-token `permissions` claim contains `hearth.admin` — otherwise

@@ -45,9 +45,11 @@ test.describe('Sidebar navigation', () => {
     const seed = loadSeed();
     await page.goto(`${BASE_URL}/ui/admin/realms/${seed.realmName}/users`);
 
-    // The Alpine-rendered realm pill shows the current realm name
-    const pill = page.locator('header').getByText(seed.realmName);
-    await expect(pill).toBeVisible({ timeout: 10_000 });
+    // The Alpine-rendered realm pill has an x-text="realm" span in the header.
+    // Using getByText would also match the breadcrumb link for the same realm
+    // name, triggering a strict-mode violation; target the pill span directly.
+    const pill = page.locator('header span[x-text="realm"]');
+    await expect(pill).toHaveText(seed.realmName, { timeout: 10_000 });
   });
 
   test('realm tree expands to show sub-pages for the current realm', async ({ page }) => {
@@ -58,8 +60,10 @@ test.describe('Sidebar navigation', () => {
     // Wait for AlpineJS to render the realm nav from /ui/admin/api/nav/realms
     await expect(nav.getByText(seed.realmName)).toBeVisible({ timeout: 10_000 });
 
-    // At least one sub-page link visible under the expanded realm
-    const subLink = nav.locator('a[href*="/realms/"][href*="/users"]');
+    // At least one sub-page link visible under the expanded realm.
+    // Scope to the current realm to avoid strict-mode violation when multiple
+    // realms have expanded their sub-nav (each has its own "Users" link).
+    const subLink = nav.locator(`a[href*="/realms/${seed.realmName}/users"]`);
     await expect(subLink).toBeVisible({ timeout: 5_000 });
   });
 });

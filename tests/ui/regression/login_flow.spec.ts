@@ -36,8 +36,9 @@ test.describe('Login flow', () => {
     await page.fill('input[name="password"]', 'ThisIsDefinitelyWrong!99');
     await page.click('button[type="submit"]');
 
-    // Server re-renders the form with an error — not redirected away
-    await expect(page.locator('[role="alert"]')).toBeVisible({ timeout: 10_000 });
+    // Server re-renders the form with an error — not redirected away.
+    // Use .first() because the passkey error div also has role="alert" (hidden via x-cloak).
+    await expect(page.locator('[role="alert"]').first()).toBeVisible({ timeout: 10_000 });
     await expect(page.locator('input[name="email"]')).toBeVisible();
   });
 

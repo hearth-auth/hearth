@@ -33,7 +33,7 @@ test.describe('Admin users list', () => {
     await expect(page.locator('input[name="first_name"]')).toBeVisible();
     await expect(page.locator('input[name="last_name"]')).toBeVisible();
     await expect(page.locator('input[name="password"]')).toBeVisible();
-    await expect(page.locator('button[type="submit"]')).toBeVisible();
+    await expect(page.locator('#main button[type="submit"]')).toBeVisible();
   });
 
   test('create user form submits and redirects to user detail', async ({ page }) => {
@@ -48,7 +48,7 @@ test.describe('Admin users list', () => {
 
     await Promise.all([
       page.waitForURL(/\/users\/[^/]+$/, { timeout: 15_000 }),
-      page.click('button[type="submit"]'),
+      page.click('#main button[type="submit"]'),
     ]);
 
     // Landed on the new user's detail page
@@ -74,23 +74,20 @@ test.describe('Admin users list', () => {
     if (!resp.ok) throw new Error(`Seed user creation failed: HTTP ${resp.status}`);
     const created = (await resp.json()) as { id: string };
 
-    // Navigate to the user's detail page and trigger deletion via the Danger tab
+    // Navigate to the user's detail page
     await page.goto(
-      `${BASE_URL}/ui/admin/realms/${seed.realmName}/users/${created.id}?tab=danger`,
+      `${BASE_URL}/ui/admin/realms/${seed.realmName}/users/${created.id}`,
     );
 
-    // The delete button / confirmation form should be present on the Danger tab
+    // Open the delete confirmation dialog (danger zone at bottom of page)
     const deleteButton = page.locator('button', { hasText: /Delete user/i }).first();
     await expect(deleteButton).toBeVisible();
     await deleteButton.click();
 
-    // Confirm by typing the user's email in the confirmation input
-    const confirmInput = page.locator('input[type="text"]').last();
-    await confirmInput.fill(uniqueEmail);
-
+    // Confirm deletion — the dialog has a "Delete" submit button (no email input required)
     await Promise.all([
       page.waitForURL(/\/users$/, { timeout: 15_000 }),
-      page.locator('button[type="submit"]').filter({ hasText: /Delete permanently/i }).click(),
+      page.locator('form[action*="/delete"] button[type="submit"]').click(),
     ]);
 
     // Redirected to the users list; deleted user is no longer present

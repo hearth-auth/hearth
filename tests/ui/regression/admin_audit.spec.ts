@@ -47,11 +47,14 @@ test.describe('Admin audit log', () => {
     expect(body.length).toBeGreaterThan(50);
   });
 
-  test('integrity verify page is reachable', async ({ page }) => {
+  test('integrity verify is triggerable from the audit list page', async ({ page }) => {
     const seed = loadSeed();
-    await page.goto(auditUrl(seed.realmName, '/verify'), { waitUntil: 'domcontentloaded' });
+    // /audit/verify is POST-only; trigger it via the form button on the list page.
+    await page.goto(auditUrl(seed.realmName), { waitUntil: 'domcontentloaded' });
 
-    expect(page.url()).toContain('/audit/verify');
+    await page.locator('form[action*="/audit/verify"] button[type="submit"]').click();
+    await page.waitForLoadState('domcontentloaded');
+
     const body = await page.evaluate(() => document.body.innerText.trim());
     expect(body.length).toBeGreaterThan(10);
   });
@@ -75,7 +78,7 @@ test.describe('Admin audit log', () => {
     );
     const groupName = `audit-test-group-${Date.now()}`;
     await page.fill('input[name="name"]', groupName);
-    await page.click('button[type="submit"]');
+    await page.click('#main button[type="submit"]');
     await page.waitForURL(/\/groups\/[^/]+$/, { timeout: 15_000 });
 
     // Audit list should now include the creation event (eventually consistent)
