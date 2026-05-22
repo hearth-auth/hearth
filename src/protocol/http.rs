@@ -4072,13 +4072,13 @@ fn dev_seed_system_admin(state: &AppState) {
         }
     }
 
-    let admin = match state.identity.create_admin_user(
-        &crate::identity::CreateUserRequest {
+    let admin = match state
+        .identity
+        .create_admin_user(&crate::identity::CreateUserRequest {
             email: "admin@hearth.test".to_string(),
             display_name: "Dev Admin".to_string(),
             ..Default::default()
-        },
-    ) {
+        }) {
         Ok(u) => u,
         Err(e) => {
             tracing::warn!(error = %e, "dev bootstrap: system realm user creation failed");
@@ -4187,7 +4187,9 @@ async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 Ok(None) => {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": "admin@dev.local not found in dev-realm"})),
+                        Json(
+                            serde_json::json!({"error": "admin@dev.local not found in dev-realm"}),
+                        ),
                     )
                         .into_response();
                 }
@@ -4272,8 +4274,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
             ..Default::default()
         },
     );
-    let dev_pwd =
-        crate::identity::CleartextPassword::from_string("HearthDev123!".to_string());
+    let dev_pwd = crate::identity::CleartextPassword::from_string("HearthDev123!".to_string());
     let _ = state.identity.set_password(&realm_id, &user_id, &dev_pwd);
 
     // Grant the realm.admin role to the admin user BEFORE issuing tokens so
