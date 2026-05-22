@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "express": "^4.21.0",
+    "express": "^4.22.2",
     "oidc-provider": "^8.5.1"
   },
   "devDependencies": {
