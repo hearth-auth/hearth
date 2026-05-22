@@ -732,6 +732,15 @@ pub fn router(state: WebState) -> Router {
             "/admin/verify-email",
             axum::routing::get(handlers::admin_verify_email),
         )
+        .route(
+            "/admin/forgot-password",
+            axum::routing::get(handlers::admin_forgot_password_form)
+                .post(handlers::admin_forgot_password_submit),
+        )
+        .route(
+            "/admin/forgot-password/sent",
+            axum::routing::get(handlers::admin_forgot_password_sent),
+        )
         .route("/", axum::routing::get(handlers::dashboard))
         .route(
             "/device",

@@ -41,6 +41,64 @@ EOF
   git add sdks/typescript/src/generated sdks/go/generated
 fi
 
+# ── Rust: auto-format staged .rs files with cargo fmt ───────────────────
+#
+# Why: keep formatting drift out of review. `cargo fmt` rewrites in place
+# (no --check), then we re-stage the originally staged files.
+#
+# Footgun guard: if a staged .rs file also has unstaged hunks, formatting
+# + `git add` would silently swallow those unstaged hunks into the commit.
+# We skip those files and warn — the user can re-stage explicitly.
+staged_rs=$(git diff --cached --name-only --diff-filter=ACMR \
+  | grep -E '\.rs$' || true)
+
+if [ -n "$staged_rs" ]; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+error: pre-commit hook needs 'cargo' on PATH to format staged Rust files.
+
+Install Rust:  https://rustup.rs
+Then retry the commit.
+
+To bypass (discouraged — CI will fail via 'make fmt'):
+  git commit --no-verify
+EOF
+    exit 1
+  fi
+
+  # Partition staged .rs into "clean" (fully staged) vs "partial" (also has
+  # unstaged hunks). Only re-stage clean files after formatting.
+  clean_rs=""
+  partial_rs=""
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if [ -n "$(git diff --name-only -- "$f")" ]; then
+      partial_rs="${partial_rs}${f}"$'\n'
+    else
+      clean_rs="${clean_rs}${f}"$'\n'
+    fi
+  done <<< "$staged_rs"
+
+  if [ -n "$partial_rs" ]; then
+    cat >&2 <<EOF
+warning: these staged .rs files also have unstaged changes; skipping fmt
+  to avoid pulling unstaged hunks into the commit:
+$(printf '  - %s\n' $partial_rs)
+  Stage the rest with 'git add' or stash unstaged changes, then retry.
+EOF
+  fi
+
+  echo "rust changes staged; running 'cargo fmt'..."
+  cargo fmt --all
+
+  # Re-stage only the originally-staged, fully-clean .rs files. No-op when
+  # formatting produced no changes.
+  if [ -n "$clean_rs" ]; then
+    # shellcheck disable=SC2086
+    git add -- $clean_rs
+  fi
+fi
+
 # ── Changelog: warn when src/proto/sdks change but CHANGELOG.md does not ─
 #
 # Why: CLAUDE.md requires a CHANGELOG.md entry for every user-visible change.

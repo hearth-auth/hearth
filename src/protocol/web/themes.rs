@@ -43,7 +43,7 @@ const EMBER: &str = r":root {
   --ht-surface-input:    #1f1f27;
   --ht-content-primary:   #f5f1e8;
   --ht-content-secondary: #a8a39a;
-  --ht-content-muted:     #7a7a85;
+  --ht-content-muted:     #8a8a94;  /* WCAG AA 4.79:1 on #1f1f27 */
   --ht-content-brand:     #f5b544;
   --ht-content-on-brand:  #0e0e12;
   --ht-divider: #ffffff;

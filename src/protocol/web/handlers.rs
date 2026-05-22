@@ -2364,7 +2364,7 @@ impl ResetPasswordOkTemplate {
 
 /// Renders the forgot-password form at the bare URL.
 pub async fn forgot_password_form(State(state): State<Arc<WebState>>) -> Response {
-    forgot_password_form_impl(state, None)
+    forgot_password_form_impl(state, RealmSource::Path(None))
 }
 
 /// Renders the forgot-password form under `/ui/realms/<name>/forgot-password`.
@@ -2372,12 +2372,17 @@ pub async fn forgot_password_form_scoped(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
 ) -> Response {
-    forgot_password_form_impl(state, Some(realm_name))
+    forgot_password_form_impl(state, RealmSource::Path(Some(realm_name)))
+}
+
+/// Renders the admin forgot-password form at `/ui/admin/forgot-password`.
+pub async fn admin_forgot_password_form(State(state): State<Arc<WebState>>) -> Response {
+    forgot_password_form_impl(state, RealmSource::Admin)
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn forgot_password_form_impl(state: Arc<WebState>, path_realm: Option<String>) -> Response {
-    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, false) {
+fn forgot_password_form_impl(state: Arc<WebState>, source: RealmSource) -> Response {
+    let (realm, action_prefix) = match resolve_for_source(&state, source, false) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -2408,7 +2413,7 @@ pub async fn forgot_password_submit(
     headers: HeaderMap,
     Form(form): Form<ForgotPasswordForm>,
 ) -> Response {
-    forgot_password_submit_impl(state, headers, form, None)
+    forgot_password_submit_impl(state, headers, form, RealmSource::Path(None))
 }
 
 /// Handles forgot-password form submission at `/ui/realms/<name>/forgot-password`.
@@ -2418,7 +2423,16 @@ pub async fn forgot_password_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<ForgotPasswordForm>,
 ) -> Response {
-    forgot_password_submit_impl(state, headers, form, Some(realm_name))
+    forgot_password_submit_impl(state, headers, form, RealmSource::Path(Some(realm_name)))
+}
+
+/// Handles admin forgot-password form submission at `/ui/admin/forgot-password`.
+pub async fn admin_forgot_password_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<ForgotPasswordForm>,
+) -> Response {
+    forgot_password_submit_impl(state, headers, form, RealmSource::Admin)
 }
 
 /// Shared implementation. Looks up the user in the resolved realm.
@@ -2429,10 +2443,10 @@ fn forgot_password_submit_impl(
     state: Arc<WebState>,
     headers: HeaderMap,
     form: ForgotPasswordForm,
-    path_realm: Option<String>,
+    source: RealmSource,
 ) -> Response {
     let email = form.email.trim();
-    let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, true) {
+    let (realm, action_prefix) = match resolve_for_source(&state, source, true) {
         PreAuthRealm::Ok {
             realm,
             action_prefix,
@@ -2484,7 +2498,7 @@ fn forgot_password_submit_impl(
 
 /// Renders the "check your email" confirmation page at the bare URL.
 pub async fn forgot_password_sent(State(state): State<Arc<WebState>>) -> Response {
-    forgot_password_sent_impl(state, None)
+    forgot_password_sent_impl(state, RealmSource::Path(None))
 }
 
 /// Realm-scoped variant of the forgot-password "sent" page.
@@ -2492,12 +2506,17 @@ pub async fn forgot_password_sent_scoped(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
 ) -> Response {
-    forgot_password_sent_impl(state, Some(realm_name))
+    forgot_password_sent_impl(state, RealmSource::Path(Some(realm_name)))
+}
+
+/// Admin variant of the forgot-password "sent" page at `/ui/admin/forgot-password/sent`.
+pub async fn admin_forgot_password_sent(State(state): State<Arc<WebState>>) -> Response {
+    forgot_password_sent_impl(state, RealmSource::Admin)
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn forgot_password_sent_impl(state: Arc<WebState>, path_realm: Option<String>) -> Response {
-    let action_prefix = match resolve_pre_auth_realm(&state, path_realm, false) {
+fn forgot_password_sent_impl(state: Arc<WebState>, source: RealmSource) -> Response {
+    let action_prefix = match resolve_for_source(&state, source, false) {
         PreAuthRealm::Ok { action_prefix, .. } => action_prefix,
         PreAuthRealm::Handled(resp) => return resp,
     };

@@ -3584,6 +3584,9 @@ struct AdminUpdateClientBody {
     frontchannel_logout_uri: Option<Option<String>>,
     /// Replaces the allowed post-logout redirect URI list.
     post_logout_redirect_uris: Option<Vec<String>>,
+    /// Whether user consent is required for this client. `true` for
+    /// third-party apps; `false` for trusted first-party clients.
+    require_consent: Option<bool>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -3638,6 +3641,7 @@ async fn admin_update_client(
         backchannel_logout_uri: body.backchannel_logout_uri,
         frontchannel_logout_uri: body.frontchannel_logout_uri,
         post_logout_redirect_uris: body.post_logout_redirect_uris,
+        require_consent: body.require_consent,
         ..Default::default()
     };
 
@@ -4044,6 +4048,86 @@ async fn admin_get_user_effective_permissions(
 
 // === Dev Bootstrap Endpoint ===
 
+/// Seeds a system-realm admin user (`admin@hearth.test` / `HearthTest123!`)
+/// so the admin UI (`/ui/admin/login`) is usable immediately after bootstrap.
+///
+/// Best-effort: logs on error but never returns a failure to the caller.
+/// Called from both the first-time and idempotent bootstrap paths.
+fn dev_seed_system_admin(state: &AppState) {
+    let sys = crate::identity::keys::system_realm_id();
+
+    // Ensure the system realm has RBAC roles seeded.
+    if let Err(e) = state.rbac.seed_realm(&sys) {
+        tracing::warn!(error = %e, "dev bootstrap: RBAC seed for system realm failed");
+        return;
+    }
+
+    // Bail early if user already exists.
+    match state.identity.get_user_by_email(&sys, "admin@hearth.test") {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "dev bootstrap: system realm user lookup failed");
+            return;
+        }
+    }
+
+    let admin = match state
+        .identity
+        .create_admin_user(&crate::identity::CreateUserRequest {
+            email: "admin@hearth.test".to_string(),
+            display_name: "Dev Admin".to_string(),
+            ..Default::default()
+        }) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!(error = %e, "dev bootstrap: system realm user creation failed");
+            return;
+        }
+    };
+
+    // Ensure the account is Active regardless of server default_status config,
+    // so dev logins work without completing email verification.
+    let _ = state.identity.update_user(
+        &sys,
+        admin.id(),
+        &crate::identity::UpdateUserRequest {
+            status: Some(crate::identity::UserStatus::Active),
+            ..Default::default()
+        },
+    );
+
+    let pwd = crate::identity::CleartextPassword::from_string("HearthTest123!".to_string());
+    if let Err(e) = state.identity.set_password(&sys, admin.id(), &pwd) {
+        tracing::warn!(error = %e, "dev bootstrap: system realm password set failed");
+        return;
+    }
+
+    let role = match state.rbac.get_role_by_name(&sys, "realm.admin") {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            tracing::warn!("dev bootstrap: realm.admin role missing from system realm");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "dev bootstrap: system realm role lookup failed");
+            return;
+        }
+    };
+
+    if let Err(e) = state.rbac.assign_role(
+        &sys,
+        &AssignRoleRequest {
+            subject: Subject::User(admin.id().clone()),
+            role_id: role.id.clone(),
+            scope: Scope::Realm,
+            assigned_by: None,
+        },
+    ) {
+        tracing::warn!(error = %e, "dev bootstrap: system realm role assignment failed");
+    }
+}
+
 /// POST /admin/bootstrap — creates a realm, admin user, session, assigns
 /// the admin role, and issues tokens. Returns everything needed for SDK tests.
 ///
@@ -4058,7 +4142,11 @@ async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoRespons
             .into_response();
     }
 
-    // Create realm
+    // Create realm — or refresh tokens if it already exists.
+    // The dev-realm is persistent across server restarts; access tokens expire
+    // in 15 minutes, so callers must be able to get fresh tokens without
+    // wiping state. On DuplicateRealmName we look up the existing realm and
+    // admin user, create a new session, and return fresh tokens as 200 OK.
     let realm = match state
         .identity
         .create_realm(&crate::identity::CreateRealmRequest {
@@ -4066,6 +4154,85 @@ async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoRespons
             config: None,
         }) {
         Ok(t) => t,
+        Err(crate::identity::IdentityError::DuplicateRealmName) => {
+            let existing = match state.identity.get_realm_by_name("dev-realm") {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": "dev-realm missing after duplicate signal"})),
+                    )
+                        .into_response();
+                }
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            };
+            let rid = existing.id().clone();
+
+            // Reconciliation archives realms not in hearth.yaml. Re-activate
+            // the dev-realm so create_session doesn't reject it as non-Active.
+            if existing.status() != crate::identity::RealmStatus::Active {
+                if let Err(e) = state.identity.update_realm(
+                    &rid,
+                    &crate::identity::UpdateRealmRequest {
+                        status: Some(crate::identity::RealmStatus::Active),
+                        ..Default::default()
+                    },
+                ) {
+                    return identity_error_to_response(&e).into_response();
+                }
+            }
+
+            let admin = match state.identity.get_user_by_email(&rid, "admin@dev.local") {
+                Ok(Some(u)) => u,
+                Ok(None) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            serde_json::json!({"error": "admin@dev.local not found in dev-realm"}),
+                        ),
+                    )
+                        .into_response();
+                }
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            };
+            let uid = admin.id().clone();
+            let session = match state.identity.create_session(
+                &rid,
+                &uid,
+                &crate::identity::SessionContext::default(),
+            ) {
+                Ok(s) => s,
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            };
+            let tokens = match state.identity.issue_tokens(&rid, &uid, session.id()) {
+                Ok(t) => t,
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            };
+            let rid_str = rid.as_uuid().to_string();
+            let at_str = tokens.access_token().to_string();
+            let qs = format!(
+                r#"# 1. Register an OAuth application
+curl -fsS -X POST http://127.0.0.1:8420/clients \
+  -H "Authorization: Bearer {at_str}" \
+  -H "X-Realm-ID: {rid_str}" \
+  -H "Content-Type: application/json" \
+  -d '{{"client_name":"my-app","redirect_uris":["https://myapp.example.com/callback"]}}'
+
+# 2. Full PKCE flow — see docs/guides/getting-started.md"#
+            );
+            dev_seed_system_admin(&state);
+            return (
+                StatusCode::OK,
+                Json(pb::BootstrapResponse {
+                    realm_id: rid_str,
+                    user_id: uid.as_uuid().to_string(),
+                    access_token: at_str,
+                    refresh_token: tokens.refresh_token().to_string(),
+                    quickstart: qs,
+                }),
+            )
+                .into_response();
+        }
         Err(e) => return identity_error_to_response(&e).into_response(),
     };
 
@@ -4096,6 +4263,19 @@ async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoRespons
     };
 
     let user_id = user.id().clone();
+
+    // Activate the user and set a well-known dev password so browser-based
+    // UI tests can log in at /ui/realms/dev-realm/login.
+    let _ = state.identity.update_user(
+        &realm_id,
+        &user_id,
+        &crate::identity::UpdateUserRequest {
+            status: Some(crate::identity::UserStatus::Active),
+            ..Default::default()
+        },
+    );
+    let dev_pwd = crate::identity::CleartextPassword::from_string("HearthDev123!".to_string());
+    let _ = state.identity.set_password(&realm_id, &user_id, &dev_pwd);
 
     // Grant the realm.admin role to the admin user BEFORE issuing tokens so
     // the access-token `permissions` claim contains `hearth.admin` — otherwise
@@ -4156,6 +4336,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
 # 2. Full PKCE flow — see docs/guides/getting-started.md"#
     );
 
+    dev_seed_system_admin(&state);
     (
         StatusCode::OK,
         Json(pb::BootstrapResponse {

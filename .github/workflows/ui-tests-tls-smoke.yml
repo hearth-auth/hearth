@@ -1,0 +1,131 @@
+# TLS smoke test (HEA-663).
+#
+# Generates a self-signed certificate, starts Hearth with TLS enabled, and
+# runs the crawler smoke suite against the HTTPS endpoint. Scheduled nightly
+# alongside the cross-browser job. Also available via workflow_dispatch.
+#
+# Purpose: catch regressions where HTTP redirects, HSTS headers, or TLS
+# termination logic break browser-facing flows that work fine over plain HTTP.
+
+name: UI Tests — TLS Smoke
+
+on:
+  schedule:
+    # 02:30 UTC daily — 30 min after the cross-browser job starts
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tls-smoke:
+    name: UI smoke — HTTPS (self-signed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05-14
+        with:
+          toolchain: stable
+
+      - name: Cargo build cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "27.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Tailwind standalone CLI
+        run: make tailwind-install
+
+      - name: Build Hearth binary (debug)
+        run: PROTOC=protoc make build
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: tests/ui/package-lock.json
+
+      - name: Install UI test dependencies
+        run: cd tests/ui && npm ci
+
+      - name: Install Playwright Chromium
+        run: cd tests/ui && npx playwright install chromium --with-deps
+
+      - name: Generate self-signed TLS certificate
+        run: |
+          mkdir -p tls-certs
+          openssl req -x509 -newkey rsa:2048 -keyout tls-certs/key.pem \
+            -out tls-certs/cert.pem -days 1 -nodes \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+          echo "✓ Self-signed cert generated"
+
+      - name: Write TLS hearth config
+        run: |
+          cat > hearth.yaml << 'EOF'
+          server:
+            bind: "127.0.0.1:8443"
+            tls:
+              cert_file: "tls-certs/cert.pem"
+              key_file: "tls-certs/key.pem"
+          EOF
+
+      - name: Wipe dev data (clean slate)
+        run: make dev-reset
+
+      - name: Start Hearth dev server with TLS
+        run: |
+          HEARTH_DEV_DATA_DIR=./data/dev ./target/debug/hearth serve --dev \
+            --config hearth.yaml &
+
+      - name: Wait for HTTPS server to be ready
+        run: |
+          cd tests/ui && npx wait-on \
+            --timeout 60000 \
+            --insecure \
+            https://127.0.0.1:8443/health
+
+      - name: Run crawler smoke suite against HTTPS endpoint
+        run: bash tests/ui/pw-run.sh test --project=smoke
+        env:
+          HEARTH_URL: https://127.0.0.1:8443
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
+          # Chromium launched with --ignore-certificate-errors for self-signed cert
+          PLAYWRIGHT_CHROMIUM_EXTRA_ARGS: --ignore-certificate-errors
+
+      - name: Upload TLS smoke report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tls-smoke-report
+          path: tests/ui/reports/html/
+          retention-days: 7
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## TLS Smoke Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          RESULT="${{ job.status }}"
+          if [ "$RESULT" = "success" ]; then
+            echo "✅ Smoke suite passed against HTTPS (self-signed cert)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ One or more smoke tests failed over HTTPS — see Playwright report artifact" >> "$GITHUB_STEP_SUMMARY"
+          fi

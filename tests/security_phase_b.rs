@@ -233,9 +233,15 @@ async fn csp_allows_eval_no_inline_no_third_party() {
         csp.contains("'unsafe-eval'"),
         "CSP must allow unsafe-eval for Alpine.js directive expressions"
     );
+    // style-src intentionally allows 'unsafe-inline' for Alpine.js x-show/x-cloak
+    // directives that inject inline style attributes. Script-src must never allow it.
+    let script_src = csp
+        .split(';')
+        .find(|d| d.trim().starts_with("script-src"))
+        .unwrap_or("");
     assert!(
-        !csp.contains("'unsafe-inline'"),
-        "CSP must not contain unsafe-inline anywhere: {csp}"
+        !script_src.contains("'unsafe-inline'"),
+        "script-src must not allow unsafe-inline: {csp}"
     );
     assert!(
         !csp.contains("cdn.jsdelivr.net"),

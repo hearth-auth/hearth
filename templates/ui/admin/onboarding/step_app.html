@@ -43,6 +43,7 @@
           <input type="hidden" name="_csrf" value="{{ token }}">
         {% when None %}
       {% endmatch %}
+      <input type="hidden" name="realm" value="{{ realm_name }}">
 
       {# App name #}
       <div>

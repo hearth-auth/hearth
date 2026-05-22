@@ -35,6 +35,38 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 | `make css` | Rebuilds `src/protocol/web/assets/app.css` from Tailwind |
 | `make css-check` | CI gate — fails if app.css is stale |
 | `bacon test` | TDD watch loop (configured in `bacon.toml`) |
+| `make ui-test-smoke` | Playwright crawler smoke against a running dev server |
+| `make ui-test-accessibility` | axe-core scan — critical/serious = FAIL, minor/moderate = WARN |
+| `make ui-test-exploratory` | Deep crawl with pagination + form discovery (always exits 0) |
+| `make ui-coverage-check` | Diff crawl manifest vs declared routes → `reports/coverage-gaps.txt` |
+| `make ui-test-visual` | Visual regression baselines; `UPDATE=1` locks new snapshots |
+| `make ui-test-cross-browser` | Smoke + flows + regression on Chromium, Firefox, WebKit |
+
+### UI Test Pre-commit Workflow
+
+Before pushing a PR that touches templates, admin handlers, or any `src/protocol/web/` code:
+
+```bash
+# 1. Start the dev server (leave running in a separate terminal)
+make dev
+
+# 2. In another terminal, run the crawler smoke + accessibility scan
+make ui-test-smoke           # ~30 s — crawls all nav-reachable pages
+make ui-test-accessibility   # ~60 s — axe-core audit on major pages
+
+# 3. Review any gaps between declared routes and crawled pages
+make ui-coverage-check       # writes tests/ui/reports/coverage-gaps.txt
+
+# 4. Optionally run the exploratory deep crawl (pagination + forms, non-blocking)
+make ui-test-exploratory
+```
+
+Reports land in `tests/ui/reports/`:
+- `html/` — full Playwright HTML report (open in browser for traces + screenshots)
+- `crawl-manifest.json` — every page visited with pass/fail status
+- `axe-*.json` — per-page axe-core violation details
+- `coverage-gaps.txt` — routes declared in `web/mod.rs` but not crawled
+- `deep-crawl-manifest.json` / `deep-crawl-gaps.txt` — exploratory run output
 
 **Build prerequisites:**
 - `PROTOC` env var must point to `protoc` (or set `make PROTOC=protoc check`).

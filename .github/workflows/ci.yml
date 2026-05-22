@@ -81,3 +81,174 @@ jobs:
       - name: make proto-check (regenerate SDKs and fail if generated code drifts)
         run: make proto-check
 
+  ui-tests:
+    name: UI tests (Playwright — smoke + regression + accessibility)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05-14
+        with:
+          toolchain: stable
+
+      - name: Cargo build cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "27.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Tailwind standalone CLI
+        run: make tailwind-install
+
+      - name: Build Hearth binary (debug)
+        run: PROTOC=protoc make build
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: tests/ui/package-lock.json
+
+      - name: Install UI test dependencies
+        run: cd tests/ui && npm ci
+
+      - name: Install Playwright browsers
+        run: cd tests/ui && npx playwright install chromium --with-deps
+
+      - name: Wipe dev data (clean slate)
+        run: make dev-reset
+
+      - name: Start Hearth dev server
+        run: HEARTH_DEV_DATA_DIR=./data/dev ./target/debug/hearth serve --dev &
+
+      - name: Wait for server to be ready
+        run: cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 60000
+
+      - name: Run smoke + regression + components + accessibility suites
+        run: bash tests/ui/pw-run.sh test --project=smoke --project=regression --project=components --project=destructive --project=accessibility
+
+      - name: Generate coverage gaps report
+        if: always()
+        run: make ui-coverage-check
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report
+          path: |
+            tests/ui/reports/html/
+            tests/ui/reports/playwright-output/
+            tests/ui/reports/axe-*.json
+          retention-days: 7
+
+      - name: Upload coverage gaps
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-gaps
+          path: tests/ui/reports/coverage-gaps.txt
+          retention-days: 7
+
+      - name: Summarize coverage gaps in CI log
+        if: always()
+        run: |
+          GAP_FILE=tests/ui/reports/coverage-gaps.txt
+          if [ -f "$GAP_FILE" ]; then
+            echo "## UI Coverage Gaps" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat "$GAP_FILE" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "coverage-gaps.txt not found — run make ui-coverage-check" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  ui-tests-exploratory:
+    name: UI tests (Playwright — exploratory deep crawl, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05-14
+        with:
+          toolchain: stable
+
+      - name: Cargo build cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: "27.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Tailwind standalone CLI
+        run: make tailwind-install
+
+      - name: Build Hearth binary (debug)
+        run: PROTOC=protoc make build
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: tests/ui/package-lock.json
+
+      - name: Install UI test dependencies
+        run: cd tests/ui && npm ci
+
+      - name: Install Playwright browsers
+        run: cd tests/ui && npx playwright install chromium --with-deps
+
+      - name: Wipe dev data (clean slate)
+        run: make dev-reset
+
+      - name: Start Hearth dev server
+        run: HEARTH_DEV_DATA_DIR=./data/dev ./target/debug/hearth serve --dev &
+
+      - name: Wait for server to be ready
+        run: cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 60000
+
+      - name: Run exploratory deep crawl
+        run: bash tests/ui/pw-run.sh test --project=exploratory || true
+
+      - name: Upload deep crawl report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deep-crawl-report
+          path: |
+            tests/ui/reports/deep-crawl-manifest.json
+            tests/ui/reports/deep-crawl-gaps.txt
+            tests/ui/reports/screenshots-deep/
+          retention-days: 7
+
+      - name: Summarize deep crawl gaps in CI log
+        if: always()
+        run: |
+          GAP_FILE=tests/ui/reports/deep-crawl-gaps.txt
+          if [ -f "$GAP_FILE" ]; then
+            echo "## Deep Crawl Gaps" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat "$GAP_FILE" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+

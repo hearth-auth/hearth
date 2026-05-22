@@ -60,7 +60,7 @@
   /* Content */
   --ht-content-primary:   #f5f1e8;  /* graphite-50 */
   --ht-content-secondary: #a8a39a;  /* graphite-300 */
-  --ht-content-muted:     #7a7a85;  /* graphite-400 */
+  --ht-content-muted:     #8a8a94;  /* graphite-400 — WCAG AA 4.79:1 on #1f1f27 */
   --ht-content-brand:     #f5b544;  /* ember-gold */
   --ht-content-on-brand:  #0e0e12;  /* graphite-950 */
 

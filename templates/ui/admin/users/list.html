@@ -3,7 +3,7 @@
 {% block breadcrumb %}
 {% if realm_name.is_empty() %}
 <nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
-  <a href="/ui/admin" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
+  <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
   <span class="text-ht-content-muted">›</span>
   <span class="font-medium text-ht-content-secondary">Admin Users</span>
 </nav>
@@ -35,6 +35,10 @@
     </a>
   </div>
 </div>
+
+{% if users.is_empty() && search_query.is_empty() %}
+{% include "ui/admin/users/_empty.html" %}
+{% else %}
 
 {# Search bar — HTMX live search after 200ms idle, ≥2 chars. #}
 <form method="get" action="{{ list_url }}" class="mb-4"
@@ -153,4 +157,6 @@
   {% when None %}
 {% endmatch %}
 {% endif %}
+
+{% endif %}{# end else: !users.is_empty() || !search_query.is_empty() #}
 {% endblock %}
