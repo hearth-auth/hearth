@@ -87,12 +87,9 @@ jobs:
       - name: Wait for server to be ready
         run: cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 60000
 
-      - name: Bootstrap dev realm + admin token
-        run: curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap
-
       - name: Run smoke + flows + regression (${{ matrix.browser }})
         run: |
-          cd tests/ui && npx playwright test \
+          bash tests/ui/pw-run.sh test \
             --project=smoke \
             --project=flows \
             --project=regression \

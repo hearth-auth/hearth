@@ -102,17 +102,11 @@ jobs:
             --insecure \
             https://127.0.0.1:8443/health
 
-      - name: Bootstrap dev realm + admin token (HTTPS)
-        run: curl -sfk -X POST https://127.0.0.1:8443/admin/bootstrap
-
       - name: Run crawler smoke suite against HTTPS endpoint
-        run: |
-          HEARTH_URL=https://127.0.0.1:8443 \
-          NODE_TLS_REJECT_UNAUTHORIZED=0 \
-          cd tests/ui && npx playwright test --project=smoke \
-            --config playwright.config.ts
+        run: bash tests/ui/pw-run.sh test --project=smoke
         env:
           HEARTH_URL: https://127.0.0.1:8443
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
           # Chromium launched with --ignore-certificate-errors for self-signed cert
           PLAYWRIGHT_CHROMIUM_EXTRA_ARGS: --ignore-certificate-errors
 

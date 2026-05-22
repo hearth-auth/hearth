@@ -134,11 +134,8 @@ jobs:
       - name: Wait for server to be ready
         run: cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 60000
 
-      - name: Bootstrap dev realm + admin token
-        run: curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap
-
       - name: Run smoke + regression + components + accessibility suites
-        run: cd tests/ui && npm run test:all
+        run: bash tests/ui/pw-run.sh test --project=smoke --project=regression --project=components --project=destructive --project=accessibility
 
       - name: Generate coverage gaps report
         if: always()
@@ -230,11 +227,8 @@ jobs:
       - name: Wait for server to be ready
         run: cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 60000
 
-      - name: Bootstrap dev realm + admin token
-        run: curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap
-
       - name: Run exploratory deep crawl
-        run: cd tests/ui && npm run test:exploratory || true
+        run: bash tests/ui/pw-run.sh test --project=exploratory || true
 
       - name: Upload deep crawl report
         if: always()
