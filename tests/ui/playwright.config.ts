@@ -48,6 +48,7 @@ export default defineConfig({
     {
       name: 'regression',
       testMatch: 'regression/**/*.spec.ts',
+      testIgnore: '**/visual_baseline.spec.ts',
       grepInvert: /@destructive/,
       use: { ...devices['Desktop Chrome'] },
     },
@@ -62,6 +63,7 @@ export default defineConfig({
     {
       name: 'destructive',
       testMatch: '{regression,components}/**/*.spec.ts',
+      testIgnore: '**/visual_baseline.spec.ts',
       grep: /@destructive/,
       workers: 1,
       use: { ...devices['Desktop Chrome'] },
