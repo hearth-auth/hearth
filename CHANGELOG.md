@@ -16,6 +16,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **Security scanners replaced** — Snyk removed; CodeQL (all SDK languages + Rust),
+  Trivy (`fs` mode, CRITICAL/HIGH), and OSV-Scanner (all SDK lock files) now run on
+  push/PR to `main` and weekly. Results upload as SARIF to GitHub Code Scanning.
+  No API token required (HEA-669).
 - **Audit log: relative timestamps** — the admin audit table now renders
   timestamps as relative strings (`just now`, `5m ago`, `3h ago`, `May 18`)
   so operators can scan recent activity without mentally converting UTC.
