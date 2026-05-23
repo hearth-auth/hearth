@@ -142,7 +142,12 @@ jobs:
   quality:
     name: quality (clippy + fmt + nextest + css/proto check)
     needs: filter
-    if: needs.filter.outputs.rust == 'true' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    # HEA-685: guard with `needs.filter.result == 'success'` so a filter-job
+    # failure causes downstream jobs to FAIL (not silently SKIP). Without the
+    # guard, `needs.filter.outputs.rust` evaluates to '' on filter failure,
+    # `'' == 'true'` is false, and branch protection treats `skipped` as
+    # passing — allowing a PR to merge with zero quality checks run.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -191,7 +196,8 @@ jobs:
   ui:
     name: ui (Playwright — smoke + regression + accessibility + exploratory)
     needs: filter
-    if: needs.filter.outputs.ui == 'true' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.ui == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
@@ -296,7 +302,8 @@ jobs:
   sdk-node:
     name: sdk-node (${{ matrix.node-version }}.x)
     needs: filter
-    if: needs.filter.outputs.sdks-node == 'true' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-node == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -343,7 +350,8 @@ jobs:
   sdk-conformance:
     name: sdk-conformance (docs/sdk-spec.md)
     needs: filter
-    if: needs.filter.outputs.sdks-any == 'true' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-any == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
