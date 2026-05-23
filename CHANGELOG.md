@@ -9,11 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
-- **CI: bench regression threshold raised from 5% to 10%** — shared GitHub
-  runners have ±5–8% variance for in-process microbenchmarks; the 5% gate
-  produced false positives on unchanged hot-path code. The 10% threshold still
-  catches meaningful regressions (added lock, heap allocation, removed hot-tier
-  cache hit) while filtering measurement noise (HEA-711).
+- **CI: bench relative regression check is now informational** — the
+  `check-bench-regression.sh` step emits GitHub Actions warning annotations but
+  no longer exits non-zero. The authoritative regression blocker is the absolute
+  p50/p99 latency gate built into each bench binary's custom `main()` (limits
+  from `ARCHITECTURE.md`). Shared GitHub runners vary ±10–15% across Azure
+  regions; a hard relative threshold on top of absolute gates produced false
+  positives without adding meaningful signal (HEA-711).
 
 - **CI: scoped security scanners to production code** — CodeQL `paths-ignore`,
   Trivy `skip-dirs`, and a new `osv-scanner.toml` exclude test fixtures,
