@@ -19,6 +19,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **`rsa` crate removed from the dependency graph (RUSTSEC-2023-0071 /
+  CVE-2023-49092, Marvin Attack)** — SAML's RSA-2048 keypair + self-signed
+  X.509 generation in `src/identity/tokens.rs` now goes through `rcgen` with
+  the `aws_lc_rs` backend instead of `rsa@0.9.10`, which has no patched
+  release for the Marvin timing side-channel. Hearth never reached the
+  vulnerable `Pkcs1v15Decrypt` path (RSA signing uses `ring`, which is
+  side-channel-hardened), but dropping the crate eliminates the alert
+  entirely. `RsaSigningKey::from_pkcs8_and_cert()` and the `ring`-based
+  signing path are unchanged; integration tests that fabricated upstream
+  RS256 JWKS now also generate keys via `RsaSigningKey`. Closes Code
+  Scanning alerts #221 and #222 (HEA-697).
 - **OSV-Scanner: suppress RUSTSEC-2025-0141 (bincode unmaintained)** —
   `bincode@1.3.3` is a transitive dependency of `madsim` (simulation test crate
   only) and is never compiled into the production binary. The advisory has no

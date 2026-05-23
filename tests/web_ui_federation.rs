@@ -24,6 +24,7 @@ use hearth::identity::federation::{
     FederationSecret, IdpConfig, IdpKind, LinkMode, StateBag, StubFederationTransport,
 };
 use hearth::identity::onboarding::OnboardingService;
+use hearth::identity::tokens::RsaSigningKey;
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
     IdentityConfig, IdentityEngine, RealmConfig, UpdateRealmRequest,
@@ -31,9 +32,6 @@ use hearth::identity::{
 use hearth::protocol::web::{self, CookieSecret, WebState};
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
-use rsa::pkcs8::EncodePrivateKey;
-use rsa::traits::PublicKeyParts;
-use rsa::RsaPrivateKey;
 use tower::ServiceExt;
 
 const COOKIE_SECRET: [u8; 32] = [7u8; 32];
@@ -201,11 +199,10 @@ fn stub_successful_oidc_callback(
     email_verified: bool,
 ) {
     let kid = "test-key-1";
-    let mut rng = rand_core::OsRng;
-    let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("generate rsa key");
-    let public_key = private_key.to_public_key();
-    let n_b64 = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
-    let e_b64 = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+    let signing_key = RsaSigningKey::generate("web-ui-fed", 1).expect("generate rsa key");
+    let pub_jwk = signing_key.to_jwk().expect("jwk");
+    let n_b64 = pub_jwk.n.expect("modulus");
+    let e_b64 = pub_jwk.e.expect("exponent");
 
     let header = serde_json::json!({
         "alg": "RS256",
@@ -229,18 +226,8 @@ fn stub_successful_oidc_callback(
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("serialize jwt payload"));
     let signing_input = format!("{header_b64}.{payload_b64}");
 
-    let pkcs8_der = private_key.to_pkcs8_der().expect("pkcs8 encode");
-    let key_pair =
-        ring::signature::RsaKeyPair::from_pkcs8(pkcs8_der.as_bytes()).expect("load keypair");
-    let mut signature = vec![0u8; key_pair.public().modulus_len()];
-    let ring_rng = ring::rand::SystemRandom::new();
-    key_pair
-        .sign(
-            &ring::signature::RSA_PKCS1_SHA256,
-            &ring_rng,
-            signing_input.as_bytes(),
-            &mut signature,
-        )
+    let signature = signing_key
+        .sign(signing_input.as_bytes())
         .expect("sign jwt");
     let jwt = format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature));
 

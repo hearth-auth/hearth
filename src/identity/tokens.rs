@@ -726,25 +726,14 @@ impl RsaSigningKey {
     /// `valid_days` sets the certificate validity window. 3650 (10 years)
     /// is a common default for long-lived IdP signing certs.
     pub fn generate(subject_cn: &str, valid_days: u32) -> Result<Self, IdentityError> {
-        use rsa::pkcs8::EncodePrivateKey as _;
-        use rsa::RsaPrivateKey;
-
         // RSA keygen is genuinely slow (~0.5–1s on stock hardware). This
         // is off the hot path and called once per realm at most.
-        let mut rng = rand_core::OsRng;
-        let private =
-            RsaPrivateKey::new(&mut rng, 2048).map_err(|e| IdentityError::SigningError {
-                reason: format!("RSA key generation failed: {e}"),
-            })?;
-        let pkcs8 = private
-            .to_pkcs8_der()
-            .map_err(|e| IdentityError::SigningError {
-                reason: format!("RSA PKCS#8 encoding failed: {e}"),
-            })?;
-        let pkcs8_bytes = pkcs8.as_bytes().to_vec();
-
-        let cert_der = build_self_signed_cert(&pkcs8_bytes, subject_cn, valid_days)?;
-
+        //
+        // `rcgen` with the `aws_lc_rs` backend handles both the RSA-2048
+        // keypair and the self-signed X.509 wrapper SAML metadata needs.
+        // The `rsa` crate was removed to eliminate RUSTSEC-2023-0071
+        // (Marvin Attack timing side-channel) from the dependency graph.
+        let (pkcs8_bytes, cert_der) = generate_rsa2048_self_signed(subject_cn, valid_days)?;
         Self::from_pkcs8_and_cert(&pkcs8_bytes, &cert_der)
     }
 
@@ -809,16 +798,10 @@ impl RsaSigningKey {
     /// (`n`, `e`) as base64url-encoded big-endian bytes. The `kid`
     /// matches `key_id()` and is what JWT headers reference.
     pub fn to_jwk(&self) -> Result<Jwk, IdentityError> {
-        use rsa::pkcs8::DecodePrivateKey as _;
-        use rsa::traits::PublicKeyParts as _;
-
-        let priv_key = rsa::RsaPrivateKey::from_pkcs8_der(&self.pkcs8_doc.0).map_err(|e| {
-            IdentityError::SigningError {
-                reason: format!("RSA PKCS#8 decode for JWK failed: {e}"),
-            }
-        })?;
-        let n_bytes = priv_key.n().to_bytes_be();
-        let e_bytes = priv_key.e().to_bytes_be();
+        // ring exposes the PKCS#1 `RSAPublicKey ::= SEQUENCE { n, e }`
+        // DER via `RsaKeyPair::public().as_ref()`. We parse it directly
+        // rather than re-decoding the PKCS#8 with a third-party crate.
+        let (n_bytes, e_bytes) = parse_pkcs1_rsa_public_key(self.ring_key.public().as_ref())?;
 
         Ok(Jwk {
             kty: "RSA".to_string(),
@@ -941,31 +924,34 @@ impl EcdsaSigningKey {
     }
 }
 
-/// Builds a minimal self-signed X.509 certificate wrapping the RSA public
-/// key extracted from `pkcs8_der`.
+/// Generates a fresh RSA-2048 keypair and its self-signed X.509 wrapper
+/// in a single call.
 ///
-/// SAML metadata requires an X.509 wrapper; the cert's CN, validity, and
-/// issuer are cosmetic — only the embedded `SubjectPublicKeyInfo` matters
-/// for signature verification.
-fn build_self_signed_cert(
-    pkcs8_der: &[u8],
+/// Returns `(pkcs8_der, cert_der)`. SAML metadata requires an X.509
+/// wrapper; the cert's CN, validity, and issuer are cosmetic — only the
+/// embedded `SubjectPublicKeyInfo` matters for signature verification.
+///
+/// Uses `rcgen` with the `aws_lc_rs` backend because the `ring` backend
+/// cannot generate RSA keys and the `rsa` crate carries an unpatched
+/// timing side-channel (RUSTSEC-2023-0071 / CVE-2023-49092).
+fn generate_rsa2048_self_signed(
     subject_cn: &str,
     valid_days: u32,
-) -> Result<Vec<u8>, IdentityError> {
+) -> Result<(Vec<u8>, Vec<u8>), IdentityError> {
     use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 
-    // rcgen 0.13 cannot generate RSA keys itself, but it can consume a
-    // PKCS#8 DER we already generated and sign a self-signed cert with it.
-    let keypair = KeyPair::try_from(pkcs8_der).map_err(|e| IdentityError::SigningError {
-        reason: format!("rcgen keypair load failed: {e}"),
+    let keypair = KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256).map_err(|e| {
+        IdentityError::SigningError {
+            reason: format!("RSA key generation failed: {e}"),
+        }
     })?;
+    let pkcs8_der = keypair.serialize_der();
 
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, subject_cn);
 
     let mut params = CertificateParams::default();
     params.distinguished_name = dn;
-    #[allow(clippy::cast_possible_wrap)]
     let days = i64::from(valid_days);
     params.not_before = time::OffsetDateTime::now_utc() - time::Duration::days(1);
     params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(days);
@@ -975,7 +961,67 @@ fn build_self_signed_cert(
         .map_err(|e| IdentityError::SigningError {
             reason: format!("rcgen self-sign failed: {e}"),
         })?;
-    Ok(cert.der().to_vec())
+    Ok((pkcs8_der, cert.der().to_vec()))
+}
+
+/// Parses a PKCS#1 `RSAPublicKey ::= SEQUENCE { modulus INTEGER, publicExponent INTEGER }`
+/// DER blob and returns `(n, e)` as big-endian byte slices with the
+/// ASN.1 leading-zero sign byte stripped.
+///
+/// This is the encoding `ring::signature::RsaKeyPair::public().as_ref()`
+/// produces — a small, well-defined structure that doesn't justify
+/// pulling in a general-purpose ASN.1 dependency.
+fn parse_pkcs1_rsa_public_key(der: &[u8]) -> Result<(Vec<u8>, Vec<u8>), IdentityError> {
+    let err = || IdentityError::SigningError {
+        reason: "malformed RSA public key DER".to_string(),
+    };
+    let body = der_take_tag(der, 0x30).ok_or_else(err)?.0;
+    let (n_raw, rest) = der_take_tag(body, 0x02).ok_or_else(err)?;
+    let e_raw = der_take_tag(rest, 0x02).ok_or_else(err)?.0;
+    Ok((
+        strip_asn1_sign_byte(n_raw).to_vec(),
+        strip_asn1_sign_byte(e_raw).to_vec(),
+    ))
+}
+
+/// Consumes a single ASN.1 DER TLV with the expected tag and returns
+/// `(value, remaining)`.
+fn der_take_tag(input: &[u8], expected_tag: u8) -> Option<(&[u8], &[u8])> {
+    let (tag, rest) = input.split_first()?;
+    if *tag != expected_tag {
+        return None;
+    }
+    let (len, after_len) = der_take_length(rest)?;
+    if after_len.len() < len {
+        return None;
+    }
+    Some((&after_len[..len], &after_len[len..]))
+}
+
+/// Parses an ASN.1 DER length octet (short or long form, up to 4 bytes).
+fn der_take_length(input: &[u8]) -> Option<(usize, &[u8])> {
+    let (b0, rest) = input.split_first()?;
+    if *b0 & 0x80 == 0 {
+        return Some((usize::from(*b0), rest));
+    }
+    let n = usize::from(*b0 & 0x7F);
+    if n == 0 || n > 4 || rest.len() < n {
+        return None;
+    }
+    let mut len: usize = 0;
+    for byte in &rest[..n] {
+        len = (len << 8) | usize::from(*byte);
+    }
+    Some((len, &rest[n..]))
+}
+
+/// Strips the leading 0x00 byte ASN.1 INTEGERs add when the high bit
+/// would otherwise make the value parse as negative.
+fn strip_asn1_sign_byte(b: &[u8]) -> &[u8] {
+    match b.split_first() {
+        Some((0x00, rest)) if !rest.is_empty() => rest,
+        _ => b,
+    }
 }
 
 #[cfg(test)]
@@ -1587,5 +1633,40 @@ mod tests {
         );
         assert!(json.contains("hearth"));
         assert!(json.contains("https://api.example.com"));
+    }
+
+    // ===== RSA SAML key generation (post-rsa-crate removal) =====
+    //
+    // Regression: `RsaSigningKey::generate` now goes through rcgen + the
+    // aws_lc_rs backend instead of the unmaintained `rsa` crate. Validates
+    // that a fresh key round-trips through PKCS#8 + the cert DER and that
+    // its public key can be re-derived for the JWKS endpoint.
+
+    #[test]
+    fn rsa_signing_key_generates_and_round_trips() {
+        let key = RsaSigningKey::generate("hearth-test", 30).expect("generate");
+
+        // PKCS#8 + cert are non-empty and round-trip cleanly.
+        assert!(!key.pkcs8_bytes().is_empty(), "pkcs8 bytes empty");
+        assert!(!key.cert_der().is_empty(), "cert DER empty");
+        let reloaded =
+            RsaSigningKey::from_pkcs8_and_cert(key.pkcs8_bytes(), key.cert_der()).expect("reload");
+        assert_eq!(reloaded.key_id(), key.key_id(), "kid must be deterministic");
+
+        // Signing produces a 2048-bit (256-byte) signature.
+        let sig = key.sign(b"hello").expect("sign");
+        assert_eq!(sig.len(), 256, "RSA-2048 produces 256-byte signatures");
+
+        // JWK exports a populated RSA modulus + AQAB exponent.
+        let jwk = key.to_jwk().expect("jwk");
+        assert_eq!(jwk.kty, "RSA");
+        assert_eq!(jwk.alg, "RS256");
+        assert_eq!(jwk.kid, key.key_id());
+        let n_b64 = jwk.n.as_deref().expect("modulus present");
+        let e_b64 = jwk.e.as_deref().expect("exponent present");
+        let n_raw = URL_SAFE_NO_PAD.decode(n_b64).expect("decode n");
+        assert_eq!(n_raw.len(), 256, "RSA-2048 modulus is 256 bytes");
+        // 65537 (0x010001) is the universal RSA public exponent rcgen emits.
+        assert_eq!(e_b64, "AQAB");
     }
 }
