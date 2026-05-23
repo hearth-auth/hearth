@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   security-events: write
+  actions: read
 
 jobs:
   analyze:
@@ -38,7 +39,6 @@ jobs:
         uses: github/codeql-action/init@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
         with:
           languages: ${{ matrix.language }}
-          # Exclude test, bench, and simulation code — carry forward from prior Snyk policy
           paths-ignore: |
             tests/
             benches/
