@@ -9,8 +9,27 @@ name: Fuzz
 on:
   pull_request:
     branches: [main]
+    # HEA-680: tighten triggers — fuzz smoke only matters when fuzz targets,
+    # source code under fuzz, or the dependency graph change. Doc-only,
+    # template-only, or SDK-only PRs no longer pay for 10 parallel fuzz legs.
+    paths:
+      - "fuzz/**"
+      - "src/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/fuzz.yml"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/_setup-rust.yml"
   push:
     branches: [main]
+    paths:
+      - "fuzz/**"
+      - "src/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - ".github/workflows/fuzz.yml"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/_setup-rust.yml"
 
 permissions:
   contents: read

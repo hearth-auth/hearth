@@ -1,14 +1,20 @@
 name: CI
 
-# Quality gate for every PR into main and every push to main.
-# Runs the same checks contributors run locally via `make check`,
-# plus the Tailwind and proto regeneration drift checks.
+# Quality gate for every PR into main and every push to main (HEA-680).
+#
+# Architecture (post-HEA-680 mega-consolidation):
+#
+#   filter ─┬─> quality       (Rust changes)
+#           ├─> ui            (UI changes — replaces ui-tests + ui-tests-exploratory)
+#           ├─> sdk-node      (sdks/node changes — folded from node-sdk-ci.yml)
+#           └─> sdk-conformance (any SDK / spec / script change — folded from sdk-conformance.yml)
+#
+# Downstream jobs gate on the `filter` job's outputs so doc-only PRs run
+# only the filter job, while broad changes still run the full matrix.
+# On pushes to main and scheduled runs we bypass the filter and always run.
 #
 # This workflow is the prerequisite gate for Dependabot auto-merge
-# (see HEA-275 / .github/workflows/dependabot-automerge.yml): without
-# a required CI status check, dependency bumps could be auto-merged
-# without ever verifying the build still compiles, passes clippy, or
-# passes tests.
+# (see HEA-275 / .github/workflows/dependabot-automerge.yml).
 
 on:
   pull_request:
@@ -26,8 +32,117 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: make check + css-check + proto-check
+  # ── Path-based change detection (HEA-680 paths-filter foundation) ────────────
+  #
+  # All downstream jobs are gated on this job's outputs. The filter job itself
+  # runs on every event (including doc-only PRs) so we always have explicit
+  # routing information in the workflow summary.
+
+  filter:
+    name: filter (paths-filter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      ui: ${{ steps.filter.outputs.ui }}
+      sdks-node: ${{ steps.filter.outputs.sdks-node }}
+      sdks-any: ${{ steps.filter.outputs.sdks-any }}
+      proto: ${{ steps.filter.outputs.proto }}
+      fuzz-targets: ${{ steps.filter.outputs.fuzz-targets }}
+      bench-targets: ${{ steps.filter.outputs.bench-targets }}
+      docs-only: ${{ steps.filter.outputs.docs-only }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # paths-filter on push events needs full history to diff against
+          # the previous SHA. On PRs it diffs the merge base, which only
+          # needs a shallow clone, but full history is harmless and keeps
+          # behaviour symmetric.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compute changed paths
+        id: filter
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        with:
+          # `predicate-quantifier: every` is the default — a filter matches
+          # if any one of its patterns matches a changed file.
+          filters: |
+            rust:
+              - 'src/**'
+              - 'tests/**'
+              - 'benches/**'
+              - 'simulation/**'
+              - 'build.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rustfmt.toml'
+              - 'clippy.toml'
+              - 'proto/**'
+              - 'templates/**'
+              - 'ui/**'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
+              - '.github/actions/setup-rust/**'
+              - '.github/workflows/_setup-rust.yml'
+            ui:
+              - 'templates/**'
+              - 'ui/**'
+              - 'src/protocol/web/**'
+              - 'tests/ui/**'
+              - 'Makefile'
+              - '.github/workflows/ci.yml'
+            sdks-node:
+              - 'sdks/node/**'
+              - 'proto/**'
+              - '.github/workflows/ci.yml'
+            sdks-any:
+              - 'sdks/**'
+              - 'scripts/check-sdk-conformance.sh'
+              - 'docs/sdk-spec.md'
+              - '.github/workflows/ci.yml'
+            proto:
+              - 'proto/**'
+              - 'buf.yaml'
+              - 'buf.gen.yaml'
+            fuzz-targets:
+              - 'fuzz/**'
+              - 'src/**'
+              - 'Cargo.lock'
+            bench-targets:
+              - 'src/storage/**'
+              - 'benches/**'
+              - 'Cargo.lock'
+            docs-only:
+              - 'docs/**'
+              - '**.md'
+              - 'CHANGELOG.md'
+
+      - name: Summarize filter results
+        run: |
+          {
+            echo "## CI filter results"
+            echo ""
+            echo "| filter | matched |"
+            echo "| --- | --- |"
+            echo "| rust | ${{ steps.filter.outputs.rust }} |"
+            echo "| ui | ${{ steps.filter.outputs.ui }} |"
+            echo "| sdks-node | ${{ steps.filter.outputs.sdks-node }} |"
+            echo "| sdks-any | ${{ steps.filter.outputs.sdks-any }} |"
+            echo "| proto | ${{ steps.filter.outputs.proto }} |"
+            echo "| fuzz-targets | ${{ steps.filter.outputs.fuzz-targets }} |"
+            echo "| bench-targets | ${{ steps.filter.outputs.bench-targets }} |"
+            echo "| docs-only | ${{ steps.filter.outputs.docs-only }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Rust quality gate ────────────────────────────────────────────────────────
+
+  quality:
+    name: quality (clippy + fmt + nextest + css/proto check)
+    needs: filter
+    if: needs.filter.outputs.rust == 'true' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -35,9 +150,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # proto-check / proto-breaking compare against main via the
-          # local .git refs; need full history (not the default shallow
-          # checkout) so the comparison works for PR branches.
+          # proto-check / proto-breaking compare against main via the local
+          # .git refs; need full history (not the default shallow checkout)
+          # so the comparison works for PR branches.
           fetch-depth: 0
           persist-credentials: false
 
@@ -66,10 +181,19 @@ jobs:
       - name: make proto-check (regenerate SDKs and fail if generated code drifts)
         run: make proto-check
 
-  ui-tests:
-    name: UI tests (Playwright — smoke + regression + accessibility)
+  # ── UI tests — merged smoke/regression/accessibility + exploratory ──────────
+  #
+  # Previously two separate jobs (ci.ui-tests + ci.ui-tests-exploratory), each
+  # paying for its own checkout + build + dev-server startup. Now: one setup,
+  # two sequential pw-run.sh invocations sharing the running dev server. Only
+  # the exploratory step is non-blocking (continue-on-error: true).
+
+  ui:
+    name: ui (Playwright — smoke + regression + accessibility + exploratory)
+    needs: filter
+    if: needs.filter.outputs.ui == 'true' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -108,8 +232,12 @@ jobs:
       - name: Wait for server to be ready
         run: cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 60000
 
-      - name: Run smoke + regression + components + accessibility suites
+      - name: Run smoke + regression + components + accessibility (blocking)
         run: bash tests/ui/pw-run.sh test --project=smoke --project=regression --project=components --project=destructive --project=accessibility
+
+      - name: Run exploratory deep crawl (non-blocking)
+        continue-on-error: true
+        run: bash tests/ui/pw-run.sh test --project=exploratory || true
 
       - name: Generate coverage gaps report
         if: always()
@@ -126,32 +254,59 @@ jobs:
             tests/ui/reports/axe-*.json
           retention-days: 7
 
-      - name: Upload coverage gaps
+      - name: Upload coverage gaps + exploratory crawl artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: coverage-gaps
-          path: tests/ui/reports/coverage-gaps.txt
+          name: ui-extras
+          path: |
+            tests/ui/reports/coverage-gaps.txt
+            tests/ui/reports/deep-crawl-manifest.json
+            tests/ui/reports/deep-crawl-gaps.txt
+            tests/ui/reports/screenshots-deep/
           retention-days: 7
+          if-no-files-found: ignore
 
-      - name: Summarize coverage gaps in CI log
+      - name: Summarize coverage + exploratory gaps in CI log
         if: always()
         run: |
           GAP_FILE=tests/ui/reports/coverage-gaps.txt
+          DEEP_GAP_FILE=tests/ui/reports/deep-crawl-gaps.txt
           if [ -f "$GAP_FILE" ]; then
-            echo "## UI Coverage Gaps" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            cat "$GAP_FILE" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "## UI Coverage Gaps"
+              echo '```'
+              cat "$GAP_FILE"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "coverage-gaps.txt not found — run make ui-coverage-check" >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [ -f "$DEEP_GAP_FILE" ]; then
+            {
+              echo "## Deep Crawl Gaps"
+              echo '```'
+              cat "$DEEP_GAP_FILE"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-  ui-tests-exploratory:
-    name: UI tests (Playwright — exploratory deep crawl, non-blocking)
+  # ── Node SDK matrix (folded from node-sdk-ci.yml) ────────────────────────────
+
+  sdk-node:
+    name: sdk-node (${{ matrix.node-version }}.x)
+    needs: filter
+    if: needs.filter.outputs.sdks-node == 'true' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    continue-on-error: true
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sdks/node
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["18", "20", "22"]
 
     steps:
       - name: Checkout
@@ -159,59 +314,44 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Rust toolchain + tailwind (HEA-676 reusable)
-        uses: ./.github/actions/setup-rust
-        with:
-          toolchain: stable
-          install-tailwind: "true"
-
-      - name: Build Hearth binary (debug)
-        run: PROTOC=protoc make build
-
-      - name: Set up Node.js
+      - name: Set up Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node-version }}
           cache: "npm"
-          cache-dependency-path: tests/ui/package-lock.json
+          cache-dependency-path: sdks/node/package-lock.json
 
-      - name: Install UI test dependencies
-        run: cd tests/ui && npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Install Playwright browsers
-        run: cd tests/ui && npx playwright install chromium --with-deps
+      - name: Typecheck
+        run: npm run typecheck
 
-      - name: Wipe dev data (clean slate)
-        run: make dev-reset
+      - name: Test with coverage (>=80% line gate)
+        run: npm test
 
-      - name: Start Hearth dev server
-        run: HEARTH_DEV_DATA_DIR=./data/dev ./target/debug/hearth serve --dev &
-
-      - name: Wait for server to be ready
-        run: cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 60000
-
-      - name: Run exploratory deep crawl
-        run: bash tests/ui/pw-run.sh test --project=exploratory || true
-
-      - name: Upload deep crawl report
-        if: always()
+      - name: Upload coverage report
+        if: matrix.node-version == '20'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: deep-crawl-report
-          path: |
-            tests/ui/reports/deep-crawl-manifest.json
-            tests/ui/reports/deep-crawl-gaps.txt
-            tests/ui/reports/screenshots-deep/
+          name: node-sdk-coverage
+          path: sdks/node/coverage/
           retention-days: 7
 
-      - name: Summarize deep crawl gaps in CI log
-        if: always()
-        run: |
-          GAP_FILE=tests/ui/reports/deep-crawl-gaps.txt
-          if [ -f "$GAP_FILE" ]; then
-            echo "## Deep Crawl Gaps" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-            cat "$GAP_FILE" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-          fi
+  # ── SDK spec conformance (folded from sdk-conformance.yml) ───────────────────
 
+  sdk-conformance:
+    name: sdk-conformance (docs/sdk-spec.md)
+    needs: filter
+    if: needs.filter.outputs.sdks-any == 'true' || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check SDK conformance (spec sections 2,4,5,8,10)
+        run: bash scripts/check-sdk-conformance.sh
