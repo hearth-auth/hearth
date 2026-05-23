@@ -286,12 +286,11 @@ async fn three_node_grpc_loopback_replicates_ten_writes() {
             if idx >= needed {
                 break idx;
             }
-            if Instant::now() > deadline {
-                panic!(
-                    "leader last_applied {idx} never reached {needed} \
-                     (initial={initial_applied} + 10 puts) within 5 s"
-                );
-            }
+            assert!(
+                Instant::now() <= deadline,
+                "leader last_applied {idx} never reached {needed} \
+                 (initial={initial_applied} + 10 puts) within 5 s"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await; // AUDIT: justified-sleep: polling leader apply; openraft has no per-step completion signal
         }
     };
