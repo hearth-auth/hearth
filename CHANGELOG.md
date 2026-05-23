@@ -16,6 +16,22 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **CI: `main` branch protection required-check migration** — the
+  `required_status_checks` list on `main` is rewritten to reference the
+  post-consolidation job names emitted by `ci.yml` and `security.yml`. The
+  legacy `make check + css-check + proto-check` check is removed and replaced
+  by 13 entries: `CI / filter (paths-filter)`,
+  `CI / quality (clippy + fmt + nextest + css/proto check)`,
+  `CI / ui (Playwright — smoke + regression + accessibility + exploratory)`,
+  `CI / sdk-node (18.x|20.x|22.x)`, `CI / sdk-conformance (docs/sdk-spec.md)`,
+  `Security / codeql (rust|go|javascript-typescript|python)`, `Security / trivy`,
+  and `Security / osv-scanner`. The migration is driven by
+  `scripts/ci-required-checks-migrate.sh` (`--dry-run`, `--apply`,
+  `--rollback FILE`), which is idempotent and writes a rollback snapshot
+  before every `--apply`. Open PRs at the moment of cut-over must push a
+  refresh commit so the new check matrix runs against their head SHA
+  (HEA-684).
+
 - **CI: mega-consolidation (paths-filter foundation + workflow merges)** —
   the `.github/workflows/` tree shrinks from 12 → 7 files. Three security
   scanners (`codeql.yml`, `trivy.yml`, `osv-scanner.yml`) collapse into a
