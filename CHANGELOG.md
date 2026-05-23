@@ -31,6 +31,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   (`codeql`, `trivy`, `osv-scanner`). A supply-chain-compromised action in any
   other job (current or future) can no longer mint Code Scanning findings.
   Closes Code Scanning alert #248 (HEA-696).
+- **Go SDK toolchain bumped to 1.26** — `sdks/go/go.mod` `go` directive raised
+  from `1.24` → `1.26` so OSV-Scanner resolves the bundled `stdlib` against
+  patched releases. Closes CVE-2026-39820 (`net/mail` quadratic concatenation
+  DoS) and CVE-2026-39823 (`html/template` XSS bypass) — Code Scanning alerts
+  #219 and #220. No SDK code changes; `go mod tidy` regenerated `go.sum`
+  (HEA-698).
 - **CSP hardened** — `Content-Security-Policy` for all `/ui/**` routes now enforces
   `script-src 'self' 'unsafe-eval'` (no `'unsafe-inline'`), `style-src 'self'`,
   `font-src 'self'`, and `base-uri 'self'`. No third-party origins remain in any
