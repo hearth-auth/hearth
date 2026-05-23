@@ -1,0 +1,83 @@
+# Rust toolchain + adjacent CI tooling setup, composed into a single reusable
+# unit (HEA-676). Callers invoke this *after* their own actions/checkout step,
+# typically with bespoke fetch-depth / persist-credentials, because:
+#
+#   1. A local composite action can only resolve via `uses: ./...` once the
+#      repository has already been cloned onto the runner — the action.yml
+#      itself does not exist on disk until checkout completes.
+#   2. Workflows vary their checkout flags (e.g. ci.yml's `check` job needs
+#      `fetch-depth: 0` for proto-breaking comparisons against main, while
+#      most other jobs want the default shallow clone). Folding checkout into
+#      this action would force every caller through a single configuration.
+#
+# This is a *composite action* rather than a `workflow_call` reusable workflow
+# (HEA-672 plan terminology). A reusable workflow runs as its own job on its
+# own runner with no shared filesystem — installing Rust there cannot be made
+# visible to the caller's job. The composite-action primitive is the only one
+# that satisfies the acceptance criterion "no behavior change to triggers or
+# job graph — this is pure refactor."
+
+name: "Setup Rust toolchain + CI tooling"
+description: >-
+  Installs the Rust toolchain (configurable channel + components), wires up
+  Swatinem/rust-cache for incremental cargo builds, installs protoc, and
+  optionally installs buf and the Tailwind standalone CLI. SHA-pinned so that
+  Dependabot can bump every caller from a single PR.
+
+inputs:
+  toolchain:
+    description: "Rust toolchain channel (stable, nightly, or pinned version)."
+    required: false
+    default: "stable"
+  components:
+    description: "Comma-separated rustup components (e.g. 'clippy,rustfmt')."
+    required: false
+    default: "clippy,rustfmt"
+  install-buf:
+    description: "If 'true', install the buf CLI (needed by `make proto-check`)."
+    required: false
+    default: "false"
+  install-tailwind:
+    description: "If 'true', run `make tailwind-install` to download the Tailwind standalone CLI."
+    required: false
+    default: "false"
+  cache-key-suffix:
+    description: "Optional suffix appended to the Swatinem/rust-cache cache key (for matrix legs that want disjoint caches)."
+    required: false
+    default: ""
+  cache-workspaces:
+    description: "Optional value passed to Swatinem/rust-cache `workspaces:` input (e.g. 'fuzz -> target' for the fuzz crate)."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Rust toolchain (${{ inputs.toolchain }})
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05-14
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+
+    - name: Cargo build cache
+      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      with:
+        key: ${{ inputs.cache-key-suffix }}
+        workspaces: ${{ inputs.cache-workspaces }}
+
+    - name: Install protoc
+      uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+      with:
+        version: "27.x"
+        repo-token: ${{ github.token }}
+
+    - name: Install buf
+      if: inputs.install-buf == 'true'
+      uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+      with:
+        github_token: ${{ github.token }}
+
+    - name: Install Tailwind standalone CLI
+      if: inputs.install-tailwind == 'true'
+      shell: bash
+      run: make tailwind-install
