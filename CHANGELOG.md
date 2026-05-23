@@ -16,6 +16,26 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **CI: mega-consolidation (paths-filter foundation + workflow merges)** —
+  the `.github/workflows/` tree shrinks from 12 → 7 files. Three security
+  scanners (`codeql.yml`, `trivy.yml`, `osv-scanner.yml`) collapse into a
+  single `security.yml` with shared triggers, permissions, and weekly cron;
+  each job uploads its own SARIF category so existing alert correlation is
+  preserved. Two nightly UI workflows (`ui-tests-cross-browser.yml`,
+  `ui-tests-tls-smoke.yml`) collapse into `ui-nightly.yml` with one `build`
+  job uploading the `hearth` debug binary as a workflow artifact and four
+  parallel `test` matrix legs (`chromium`, `firefox`, `webkit`,
+  `https-tls-chromium`) consuming it — eliminates ~4× redundant cargo
+  builds per nightly run. `node-sdk-ci.yml` and `sdk-conformance.yml` are
+  folded into `ci.yml` as `sdk-node` and `sdk-conformance` jobs. `ci.yml`
+  now leads with a `filter` job (`dorny/paths-filter`) whose outputs gate
+  every downstream job, so doc-only PRs run only the filter job, Cargo.lock
+  bumps skip UI/SDK matrices, and `sdks/node/**`-only PRs skip the Rust
+  quality gate. `bench-regression.yml` and `fuzz.yml` triggers now use
+  workflow-level `paths:` filters so they no longer fire on doc, template,
+  or SDK-only changes. Required-check name changes are not applied in this
+  PR — branch-protection rename is sequenced separately (HEA-680).
+
 - **CI: reusable Rust setup action + SHA pin unification** — the Rust toolchain
   / `Swatinem/rust-cache` / `arduino/setup-protoc` / optional `buf` / optional
   Tailwind install sequence is now consolidated into a single composite action

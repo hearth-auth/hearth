@@ -1,0 +1,200 @@
+name: UI Nightly
+
+# Consolidated nightly UI workflow (HEA-680).
+#
+# Replaces ui-tests-cross-browser.yml + ui-tests-tls-smoke.yml.
+#
+# Structure: one `build` job compiles the `hearth` debug binary once and
+# uploads it as a workflow artifact. Four parallel `test` matrix legs
+# (chromium, firefox, webkit, https-tls-chromium) download that artifact
+# and run their suite against it. This is the immutable-artifact pattern
+# applied to CI: build once, promote through environments.
+#
+# All test legs are informational (continue-on-error: true). Failures
+# surface in the GitHub Actions summary and uploaded Playwright reports;
+# they do not block merges. Branch protection for these checks is owned
+# by HEA-684 (the post-merge required-checks rename), not by this PR.
+
+on:
+  schedule:
+    # 02:00 UTC daily — after typical EU/US working-day pushes settle
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build hearth binary (shared artifact)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust toolchain + tailwind (HEA-676 reusable)
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          components: ""
+          install-tailwind: "true"
+
+      - name: Build Hearth binary (debug)
+        run: PROTOC=protoc make build
+
+      - name: Upload hearth binary artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: hearth-binary
+          # Include the css asset so the served UI matches what was built.
+          path: |
+            target/debug/hearth
+            src/protocol/web/assets/app.css
+          retention-days: 1
+
+  test:
+    name: UI tests — ${{ matrix.browser }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit, https-tls-chromium]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download hearth binary artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hearth-binary
+          # Preserves target/debug/hearth and src/protocol/web/assets/app.css.
+          path: .
+
+      - name: Restore binary execute permission
+        run: chmod +x target/debug/hearth
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: tests/ui/package-lock.json
+
+      - name: Install UI test dependencies
+        run: cd tests/ui && npm ci
+
+      - name: Resolve Playwright browser name
+        id: pw-browser
+        run: |
+          # https-tls-chromium reuses chromium under the hood; the suffix only
+          # tags the leg for reporting. Strip it for the Playwright install.
+          BROWSER="${{ matrix.browser }}"
+          case "$BROWSER" in
+            https-tls-chromium) echo "name=chromium" >> "$GITHUB_OUTPUT" ;;
+            *)                  echo "name=$BROWSER" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Install Playwright browser — ${{ steps.pw-browser.outputs.name }}
+        run: cd tests/ui && npx playwright install ${{ steps.pw-browser.outputs.name }} --with-deps
+
+      - name: Wipe dev data (clean slate)
+        run: make dev-reset
+
+      # ── Plain HTTP path (chromium / firefox / webkit) ───────────────────────
+
+      - name: Start Hearth dev server (HTTP)
+        if: matrix.browser != 'https-tls-chromium'
+        run: HEARTH_DEV_DATA_DIR=./data/dev ./target/debug/hearth serve --dev &
+
+      - name: Wait for HTTP server to be ready
+        if: matrix.browser != 'https-tls-chromium'
+        run: cd tests/ui && npx wait-on http://127.0.0.1:8420/health --timeout 60000
+
+      - name: Run smoke + flows + regression (${{ matrix.browser }})
+        if: matrix.browser != 'https-tls-chromium'
+        run: |
+          bash tests/ui/pw-run.sh test \
+            --project=smoke \
+            --project=flows \
+            --project=regression \
+            --browser=${{ steps.pw-browser.outputs.name }}
+
+      # ── HTTPS / TLS path ────────────────────────────────────────────────────
+
+      - name: Generate self-signed TLS certificate
+        if: matrix.browser == 'https-tls-chromium'
+        run: |
+          mkdir -p tls-certs
+          openssl req -x509 -newkey rsa:2048 -keyout tls-certs/key.pem \
+            -out tls-certs/cert.pem -days 1 -nodes \
+            -subj "/CN=localhost" \
+            -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"
+
+      - name: Write TLS hearth config
+        if: matrix.browser == 'https-tls-chromium'
+        run: |
+          cat > hearth.yaml << 'EOF'
+          server:
+            bind: "127.0.0.1:8443"
+            tls:
+              cert_file: "tls-certs/cert.pem"
+              key_file: "tls-certs/key.pem"
+          EOF
+
+      - name: Start Hearth dev server (HTTPS)
+        if: matrix.browser == 'https-tls-chromium'
+        run: |
+          HEARTH_DEV_DATA_DIR=./data/dev ./target/debug/hearth serve --dev \
+            --config hearth.yaml &
+
+      - name: Wait for HTTPS server to be ready
+        if: matrix.browser == 'https-tls-chromium'
+        run: |
+          cd tests/ui && npx wait-on \
+            --timeout 60000 \
+            --insecure \
+            https://127.0.0.1:8443/health
+
+      - name: Run smoke suite against HTTPS endpoint
+        if: matrix.browser == 'https-tls-chromium'
+        run: bash tests/ui/pw-run.sh test --project=smoke
+        env:
+          HEARTH_URL: https://127.0.0.1:8443
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
+          PLAYWRIGHT_CHROMIUM_EXTRA_ARGS: --ignore-certificate-errors
+
+      # ── Reporting (all legs) ────────────────────────────────────────────────
+
+      - name: Upload Playwright report (${{ matrix.browser }})
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ui-nightly-report-${{ matrix.browser }}
+          path: tests/ui/reports/html/
+          retention-days: 7
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## UI Nightly — ${{ matrix.browser }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "All tests passed on ${{ matrix.browser }}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "One or more tests failed on ${{ matrix.browser }} — see Playwright report artifact" >> "$GITHUB_STEP_SUMMARY"
+          fi

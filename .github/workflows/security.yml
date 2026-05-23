@@ -1,0 +1,146 @@
+name: Security
+
+# Consolidated security workflow (HEA-680).
+#
+# Replaces the previous three single-purpose workflows (codeql.yml, trivy.yml,
+# osv-scanner.yml). All three scanners share triggers, permissions, the single
+# weekly cron schedule, and the pinned SARIF upload action — so consolidating
+# them is structural deduplication, not behavioural change.
+#
+# Posture: each job uploads a separate SARIF category to GitHub Code Scanning,
+# so existing alert dedup + branch-protection rules continue to work. Failures
+# in one scanner do not cancel the others (no fail-fast); each writes its own
+# SARIF and is required to remain green independently.
+#
+# Doc-only PRs are skipped via paths-ignore — security scanners don't add value
+# on documentation diffs and would just burn runner minutes.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "CHANGELOG.md"
+  schedule:
+    - cron: "0 6 * * 1"  # Weekly Monday 06:00 UTC
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  codeql:
+    name: codeql (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: autobuild
+          - language: go
+            build-mode: autobuild
+          - language: java-kotlin
+            build-mode: autobuild
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Rust autobuild needs cargo + protoc on PATH before CodeQL invokes it.
+      # Other languages use CodeQL's bundled tracers, so we skip the Rust setup
+      # for non-rust matrix legs to avoid wasted runner minutes.
+      - name: Setup Rust toolchain + protoc (HEA-676 reusable)
+        if: matrix.language == 'rust'
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          components: ""
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
+        with:
+          languages: ${{ matrix.language }}
+          paths-ignore: |
+            tests/
+            benches/
+            simulation/
+          queries: security-extended
+
+      - name: Autobuild
+        if: matrix.build-mode == 'autobuild'
+        uses: github/codeql-action/autobuild@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  trivy:
+    name: trivy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.29.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          skip-dirs: .git,target
+          format: sarif
+          output: trivy.sarif
+
+      - name: Upload Trivy SARIF to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
+
+  osv-scanner:
+    name: osv-scanner
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run OSV-Scanner
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        continue-on-error: true
+        with:
+          scan-args: |-
+            --recursive
+            --format=sarif
+            --output-file=osv.sarif
+            ./
+
+      - name: Upload OSV SARIF to GitHub Code Scanning
+        if: always() && hashFiles('osv.sarif') != ''
+        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
+        with:
+          sarif_file: osv.sarif
+          category: osv-scanner

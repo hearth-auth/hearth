@@ -15,8 +15,31 @@ name: Benchmark Regression Gate
 on:
   pull_request:
     branches: [main]
+    # HEA-680: tighten triggers — benchmarks only matter when storage hot-path
+    # code, benchmark sources, or the dependency graph change. Doc-only,
+    # template-only, or SDK-only PRs no longer burn ~60min of runner time.
+    paths:
+      - "src/storage/**"
+      - "benches/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "scripts/check-bench-regression.sh"
+      - ".github/workflows/bench-regression.yml"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/_setup-rust.yml"
   push:
     branches: [main]
+    # Push to main keeps the same path filter so baseline refreshes only run
+    # when there's actually a benchmark-relevant change.
+    paths:
+      - "src/storage/**"
+      - "benches/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "scripts/check-bench-regression.sh"
+      - ".github/workflows/bench-regression.yml"
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/_setup-rust.yml"
 
 permissions:
   contents: read
