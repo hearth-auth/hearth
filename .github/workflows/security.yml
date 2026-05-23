@@ -74,10 +74,27 @@ jobs:
         uses: github/codeql-action/init@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
         with:
           languages: ${{ matrix.language }}
+          # HEA-690: scoped to production code only — fixtures, harnesses, and
+          # example apps intentionally exercise unsafe inputs (bad URLs, fake
+          # creds) and would otherwise flood code-scanning with false positives.
+          # Production SDKs (sdks/<lang>/src) and root crates remain in scope.
           paths-ignore: |
             tests/
             benches/
             simulation/
+            fuzz/
+            examples/
+            **/tests/
+            **/__tests__/
+            **/*.test.ts
+            **/*.test.js
+            **/*.test.go
+            **/*.test.py
+            **/*.test.rs
+            **/*.spec.ts
+            **/*.spec.js
+            sdks/*/tests/
+            sdks/*/test/
           queries: security-extended
 
       - name: Autobuild
@@ -105,7 +122,10 @@ jobs:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
-          skip-dirs: .git,target
+          # HEA-690: Trivy fs scan focuses on secrets + misconfigs in shipping
+          # code. Tests, examples, fuzz, and node_modules are intentionally noisy
+          # (fake creds in fixtures, vendored deps) and excluded.
+          skip-dirs: .git,target,tests,examples,fuzz,node_modules
           format: sarif
           output: trivy.sarif
 
@@ -130,7 +150,12 @@ jobs:
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         continue-on-error: true
         with:
+          # HEA-690: osv-scanner.toml at repo root scopes scanning to
+          # production lockfiles only — examples/** and tests/ui/** lockfiles
+          # are excluded via [[PackageOverrides]]. Production SDKs
+          # (sdks/<lang>/*) and root Cargo.lock remain in scope.
           scan-args: |-
+            --config=osv-scanner.toml
             --recursive
             --format=sarif
             --output-file=osv.sarif
