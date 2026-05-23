@@ -19,6 +19,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **OSV-Scanner: suppress RUSTSEC-2025-0141 (bincode unmaintained)** —
+  `bincode@1.3.3` is a transitive dependency of `madsim` (simulation test crate
+  only) and is never compiled into the production binary. The advisory has no
+  CVE, no CVSS score, and no known exploit. `madsim@0.2.34` (latest) still
+  requires it; no upgrade path exists. Suppressed in `osv-scanner.toml` with
+  documented rationale. Dismisses Code Scanning alert #223 (HEA-700).
 - **CI: scoped `security-events:write` per-job in `security.yml`** — the
   top-level workflow `permissions` block is downgraded to `security-events: read`,
   and `write` is granted only to the three jobs that upload SARIF
