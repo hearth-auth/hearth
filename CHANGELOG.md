@@ -7,6 +7,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Changed
+
+- **CI: scoped security scanners to production code** — CodeQL `paths-ignore`,
+  Trivy `skip-dirs`, and a new `osv-scanner.toml` exclude test fixtures,
+  example apps, fuzz harness code, and the Playwright runner from code
+  scanning. Production SDKs (`sdks/*/`), root `Cargo.lock`, `fuzz/Cargo.lock`,
+  and `src/**` remain in scope and must stay green. No CVE-id suppressions
+  were added — only directories. Existing alerts for excluded paths are
+  dismissed via `code-scanning/alerts` after the SARIF re-upload (HEA-690).
+
 ### Security
 
 - **CSP hardened** — `Content-Security-Policy` for all `/ui/**` routes now enforces

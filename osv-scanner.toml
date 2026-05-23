@@ -1,0 +1,31 @@
+# OSV-Scanner configuration — Hearth (HEA-690)
+#
+# Scope: production-shipping lockfiles only.
+#
+# Kept in scope (MUST stay green):
+#   - Cargo.lock              — root crate (single-binary identity server)
+#   - fuzz/Cargo.lock         — fuzz harness depends on production crates
+#   - sdks/go/go.{mod,sum}    — Go SDK shipped to integrators
+#   - sdks/node/package-lock.json (and other sdks/<lang>/* lockfiles)
+#
+# Excluded (reference / dev tooling, not shipped to users):
+#   - examples/**             — reference apps; lockfiles drift, not security-critical
+#   - tests/ui/**             — Playwright runner; dev-time only
+#
+# This file does NOT use [[IgnoredVulns]] — we intentionally do not suppress
+# CVEs by ID. Only directories are scoped. If a real CVE lands in shipping code,
+# the scanner must continue to fire.
+
+[[PackageOverrides]]
+name = "*"
+ecosystem = "npm"
+group = "examples/**"
+ignore = true
+reason = "Example apps are reference implementations, not shipped artifacts. Lockfiles drift from main and aren't security-critical (HEA-690)."
+
+[[PackageOverrides]]
+name = "*"
+ecosystem = "npm"
+group = "tests/ui/**"
+ignore = true
+reason = "Playwright test runner — dev tooling, not shipped to users (HEA-690)."
