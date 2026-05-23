@@ -1,8 +1,13 @@
 name: Benchmark Regression Gate
 
-# Detects >5% mean latency regression in criterion benchmarks vs the main
+# Detects >10% mean latency regression in criterion benchmarks vs the main
 # branch baseline. Runs separately from the CI quality gate so that the
 # full benchmark suite (up to 60 min) does not block every clippy/test run.
+#
+# Threshold is 10% (not 5%) because shared GitHub runners have ±5–8%
+# variance for in-process microbenchmarks. A 10% gate reliably catches
+# real regressions (added lock, heap allocation, removed cache) while
+# filtering measurement noise.
 #
 # On push to main: runs benchmarks, saves criterion baselines to cache.
 # On PR into main: restores main baseline, runs benchmarks, fails if any
@@ -49,12 +54,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  BENCH_REGRESSION_THRESHOLD: "5"
+  BENCH_REGRESSION_THRESHOLD: "10"
   PROTOC: protoc
 
 jobs:
   bench-regression:
-    name: Benchmark regression (>5% mean fails)
+    name: Benchmark regression (>10% mean fails)
     runs-on: ubuntu-latest
     timeout-minutes: 60
 

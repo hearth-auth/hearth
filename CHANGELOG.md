@@ -9,6 +9,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **CI: bench regression threshold raised from 5% to 10%** — shared GitHub
+  runners have ±5–8% variance for in-process microbenchmarks; the 5% gate
+  produced false positives on unchanged hot-path code. The 10% threshold still
+  catches meaningful regressions (added lock, heap allocation, removed hot-tier
+  cache hit) while filtering measurement noise (HEA-711).
+
 - **CI: scoped security scanners to production code** — CodeQL `paths-ignore`,
   Trivy `skip-dirs`, and a new `osv-scanner.toml` exclude test fixtures,
   example apps, fuzz harness code, and the Playwright runner from code
