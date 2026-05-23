@@ -46,21 +46,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust nightly (required by cargo-fuzz)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05-14
+      - name: Setup Rust nightly + protoc (HEA-676 reusable)
+        uses: ./.github/actions/setup-rust
         with:
           toolchain: nightly
-
-      - name: Cargo build cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          workspaces: fuzz -> target
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          version: "27.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          # cargo-fuzz only needs the compiler — skip clippy/rustfmt to save time.
+          components: ""
+          cache-workspaces: "fuzz -> target"
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz

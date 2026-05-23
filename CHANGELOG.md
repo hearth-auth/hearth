@@ -16,6 +16,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **CI: reusable Rust setup action + SHA pin unification** — the Rust toolchain
+  / `Swatinem/rust-cache` / `arduino/setup-protoc` / optional `buf` / optional
+  Tailwind install sequence is now consolidated into a single composite action
+  at `.github/actions/setup-rust`, consumed by every Rust-needing workflow
+  (`ci.yml`, `fuzz.yml`, `bench-regression.yml`, `ui-tests-cross-browser.yml`,
+  `ui-tests-tls-smoke.yml`, `codeql.yml`'s Rust matrix leg). All
+  `actions/checkout` pins normalize to a single SHA (v6.0.2) and all
+  `codeql-action/upload-sarif` pins normalize to a single SHA (v4.35.4) across
+  the workflow tree, so Dependabot now bumps each from one PR (HEA-672 PR 1 /
+  HEA-676). No behavior change to triggers, job graph, or required checks.
 - **Security scanners replaced** — Snyk removed; CodeQL (all SDK languages + Rust),
   Trivy (`fs` mode, CRITICAL/HIGH), and OSV-Scanner (all SDK lock files) now run on
   push/PR to `main` and weekly. Results upload as SARIF to GitHub Code Scanning.
