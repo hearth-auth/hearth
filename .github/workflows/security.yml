@@ -104,6 +104,19 @@ jobs:
             sdks/*/test/
           queries: security-extended
 
+      # Go autobuild calls `go get` to resolve module imports. Without git
+      # credentials (persist-credentials: false above), private/internal module
+      # fetches fail with "could not read Username". Inject read-only token via
+      # URL rewriting — scoped to Go leg only, not stored in .git/config.
+      - name: Configure git HTTPS auth for Go module downloads
+        if: matrix.language == 'go'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+
       - name: Autobuild
         if: matrix.build-mode == 'autobuild'
         uses: github/codeql-action/autobuild@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
