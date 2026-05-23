@@ -6,6 +6,11 @@ permissions: {}
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
+    # contents:write + pull-requests:write are the minimum GitHub API permissions
+    # required for `gh pr merge --auto --squash`. No lower-privilege alternative
+    # exists on the GitHub API. The top-level `permissions: {}` already denies all
+    # other scopes. This job is additionally gated on `github.actor ==
+    # 'dependabot[bot]'` and patch/minor update types only (see the `if:` below).
     permissions:
       contents: write
       pull-requests: write
