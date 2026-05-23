@@ -92,21 +92,44 @@ jobs:
           echo "::warning::No criterion baseline found for main. Regression check will be skipped." \
                "Push to main first to establish a baseline."
 
-      # ── Common: run storage benchmarks, always save as 'main' baseline ──────
-      # --save-baseline main writes to target/criterion/.../main/estimates.json.
-      # --noplot skips HTML report generation to keep CI fast.
+      # ── PR: run benchmarks WITHOUT --save-baseline so the restored cache is ──
+      # preserved; criterion writes results to 'new/' for comparison below.
 
-      - name: Run storage_gate benchmark
+      - name: Run storage_gate benchmark (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          PROTOC=${{ env.PROTOC }} cargo bench --bench storage_gate -- \
+            --noplot 2>&1
+
+      - name: Run tiered_storage benchmark (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          PROTOC=${{ env.PROTOC }} cargo bench --bench tiered_storage -- \
+            --noplot 2>&1
+
+      - name: Run demotion_latency benchmark (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          PROTOC=${{ env.PROTOC }} cargo bench --bench demotion_latency -- \
+            --noplot 2>&1
+
+      # ── main push: save fresh baselines to cache for future PRs ─────────────
+      # --save-baseline main writes to target/criterion/.../main/estimates.json.
+
+      - name: Run storage_gate benchmark (main)
+        if: github.ref == 'refs/heads/main'
         run: |
           PROTOC=${{ env.PROTOC }} cargo bench --bench storage_gate -- \
             --save-baseline main --noplot 2>&1
 
-      - name: Run tiered_storage benchmark
+      - name: Run tiered_storage benchmark (main)
+        if: github.ref == 'refs/heads/main'
         run: |
           PROTOC=${{ env.PROTOC }} cargo bench --bench tiered_storage -- \
             --save-baseline main --noplot 2>&1
 
-      - name: Run demotion_latency benchmark
+      - name: Run demotion_latency benchmark (main)
+        if: github.ref == 'refs/heads/main'
         run: |
           PROTOC=${{ env.PROTOC }} cargo bench --bench demotion_latency -- \
             --save-baseline main --noplot 2>&1
@@ -125,3 +148,21 @@ jobs:
       - name: Check for regressions > ${{ env.BENCH_REGRESSION_THRESHOLD }}%
         if: github.event_name == 'pull_request'
         run: bash scripts/check-bench-regression.sh "${{ env.BENCH_REGRESSION_THRESHOLD }}"
+
+  bench-required-summary:
+    name: bench-required-summary
+    if: always()
+    needs: [bench-regression]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check bench job passed or was skipped
+        env:
+          BENCH: ${{ needs.bench-regression.result }}
+        run: |
+          echo "bench-regression=$BENCH"
+          if [ "$BENCH" = "failure" ] || [ "$BENCH" = "cancelled" ]; then
+            echo "Bench regression job failed or was cancelled."
+            exit 1
+          fi
+          echo "Bench job passed or was legitimately skipped."
