@@ -292,9 +292,7 @@ async fn three_node_grpc_loopback_replicates_ten_writes() {
                      (initial={initial_applied} + 10 puts) within 5 s"
                 );
             }
-            // AUDIT: justified-sleep: polling leader state-machine application;
-            // openraft has no completion notification for individual apply steps.
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(Duration::from_millis(20)).await; // AUDIT: justified-sleep: polling leader apply; openraft has no per-step completion signal
         }
     };
     assert!(
