@@ -19,6 +19,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **CI: scoped `security-events:write` per-job in `security.yml`** — the
+  top-level workflow `permissions` block is downgraded to `security-events: read`,
+  and `write` is granted only to the three jobs that upload SARIF
+  (`codeql`, `trivy`, `osv-scanner`). A supply-chain-compromised action in any
+  other job (current or future) can no longer mint Code Scanning findings.
+  Closes Code Scanning alert #248 (HEA-696).
 - **CSP hardened** — `Content-Security-Policy` for all `/ui/**` routes now enforces
   `script-src 'self' 'unsafe-eval'` (no `'unsafe-inline'`), `style-src 'self'`,
   `font-src 'self'`, and `base-uri 'self'`. No third-party origins remain in any
