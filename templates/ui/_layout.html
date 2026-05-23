@@ -9,8 +9,7 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="stylesheet" href="/ui/static/app.css">
-  <link rel="stylesheet" href="/ui/static/theme.css">
-  {% if !theme_css.is_empty() %}<style>{{ theme_css|safe }}</style>{% endif %}
+  {% if theme_css.is_empty() %}<link rel="stylesheet" href="/ui/static/theme.css">{% else %}<style>{{ theme_css|safe }}</style>{% endif %}
   {% if let Some(css) = realm_theme_css %}<style>{{ css|safe }}</style>{% endif %}
   {% match csrf %}
     {% when Some with (token) %}
