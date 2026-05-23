@@ -24,15 +24,10 @@ jobs:
         continue-on-error: true
         with:
           scan-args: |-
-            --lockfile=Cargo.lock
-            --lockfile=sdks/rust/Cargo.lock
-            --lockfile=sdks/go/go.sum
-            --lockfile=sdks/node/package-lock.json
-            --lockfile=sdks/typescript/package-lock.json
-            --lockfile=sdks/python/pyproject.toml
-            --lockfile=sdks/kotlin/build.gradle.kts
+            --recursive
             --format=sarif
             --output-file=osv.sarif
+            ./
 
       - name: Upload OSV SARIF to GitHub Code Scanning
         if: always() && hashFiles('osv.sarif') != ''
