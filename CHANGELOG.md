@@ -42,6 +42,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   (`codeql`, `trivy`, `osv-scanner`). A supply-chain-compromised action in any
   other job (current or future) can no longer mint Code Scanning findings.
   Closes Code Scanning alert #248 (HEA-696).
+- **CI: `required-summary` gate resolves "Waiting for status" on skipped jobs
+  (HEA-693)** — a new `required-summary` job in `ci.yml` runs unconditionally
+  (`if: always()`), reads every upstream job result, and exits non-zero if any
+  dependency failed or was cancelled. Branch protection `main` now requires only
+  `CI / required-summary` for the CI workflow instead of listing each conditional
+  job individually. Conditional matrix jobs (`sdk-node`) and path-filtered jobs
+  (`quality`, `ui`, `sdk-conformance`) no longer leave required checks stuck in
+  "Expected — Waiting for status to be reported" when they are legitimately
+  skipped by the paths-filter (HEA-693).
 - **Go SDK toolchain bumped to 1.26** — `sdks/go/go.mod` `go` directive raised
   from `1.24` → `1.26` so OSV-Scanner resolves the bundled `stdlib` against
   patched releases. Closes CVE-2026-39820 (`net/mail` quadratic concatenation
