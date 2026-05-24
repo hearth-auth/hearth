@@ -27,22 +27,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
-- **Backup salt/nonce generation hardened** — `src/backup/encryption.rs` now
-  uses an explicit `random_bytes` helper so the Argon2id salt and AES-GCM
-  nonce are never zero-initialized at the callsite; resolves CodeQL alert #188
-  (`rust/hard-coded-cryptographic-value`, critical). Salt and nonce were always
-  populated by ring's CSPRNG; this refactor makes the data-flow unambiguous to
-  static analysis (HEA-712).
-
-- **`qs` dependency patched** — root `package.json` overrides `qs` to
-  `>=6.15.2`, resolving CVE-2026-8723 (GHSA-q8mj-m7cp-5q26, medium) in the
-  `context-mode` transitive dependency (HEA-712).
-
-- **`ws` dependency patched** — `sdks/typescript/package.json` overrides `ws`
-  to `>=8.21.0`, resolving CVE-2026-45736 (GHSA-58qx-3vcg-4xpx, medium) in
-  the `jsdom` transitive dependency used by the TypeScript SDK test suite
-  (HEA-712).
-
 - **`rsa` crate removed from the dependency graph (RUSTSEC-2023-0071 /
   CVE-2023-49092, Marvin Attack)** — SAML's RSA-2048 keypair + self-signed
   X.509 generation in `src/identity/tokens.rs` now goes through `rcgen` with
