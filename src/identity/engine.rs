@@ -735,9 +735,20 @@ impl EmbeddedIdentityEngine {
 
         let mut map = HashMap::new();
         for entry in &entries {
-            let Ok(realm) = serde_json::from_slice::<Realm>(&entry.value) else {
-                continue;
-            };
+            // Fail-closed: a corrupted realm record must hard-error rather than
+            // silently skipping, which would leave the realm absent from the
+            // cache and allow validate_token to pass the status check fail-open.
+            let realm = serde_json::from_slice::<Realm>(&entry.value).map_err(|e| {
+                tracing::error!(
+                    key = ?entry.key,
+                    err = %e,
+                    "realm deserialization failed during status cache population \
+                     — refusing to start with an incomplete cache"
+                );
+                IdentityError::Internal {
+                    reason: format!("realm status cache population failed: {e}"),
+                }
+            })?;
             if !keys::is_system_realm(realm.id()) {
                 map.insert(realm.id().clone(), realm.status());
             }
@@ -2491,16 +2502,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let _ = self.storage.delete(&sys_realm, &old_name_key);
         }
 
-        self.record_audit(
-            realm_id,
-            None,
-            AuditAction::RealmUpdated,
-            "realm",
-            &realm_id.as_uuid().to_string(),
-        )?;
-
         // Propagate status change to the wait-free cache so validate_token
-        // immediately reflects the new lifecycle state.
+        // immediately reflects the new lifecycle state. Ordered before
+        // record_audit so the cache is consistent before any further writes,
+        // matching the ordering used in create_realm.
         if request.status.is_some() {
             let id = realm_id.clone();
             let status = realm.status();
@@ -2510,6 +2515,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 new_map
             });
         }
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::RealmUpdated,
+            "realm",
+            &realm_id.as_uuid().to_string(),
+        )?;
 
         // When suspending or archiving a realm, revoke all active sessions so
         // existing tokens backed by those sessions fail immediately on the
@@ -12679,6 +12692,76 @@ mod tests {
                 cache.get(&suspended_id).copied(),
                 Some(RealmStatus::Suspended),
                 "suspended realm must be Suspended in cache after restart"
+            );
+        }
+    }
+
+    /// SEC-1 (HEA-742): a corrupted realm record in storage causes engine
+    /// initialization to fail rather than silently omitting the realm from the
+    /// cache (fail-closed, not fail-open).
+    #[test]
+    fn populate_realm_status_cache_fails_hard_on_corrupted_record() {
+        use crate::audit::EmbeddedAuditEngine;
+        use crate::storage::{EmbeddedStorageEngine, StorageConfig};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // --- First engine: create a realm, then close ---
+        let realm_id;
+        {
+            let config = StorageConfig::dev(dir.path().to_path_buf());
+            let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("open"))
+                as Arc<dyn StorageEngine>;
+            let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+            let audit = Arc::new(EmbeddedAuditEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+            ));
+            let engine = EmbeddedIdentityEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+                IdentityConfig {
+                    credential: CredentialConfig::fast_for_testing(),
+                    ..IdentityConfig::default()
+                },
+                audit as Arc<dyn AuditEngine>,
+            )
+            .expect("engine");
+
+            realm_id = create_test_realm(&engine);
+
+            // Corrupt the realm record in storage with non-JSON garbage bytes.
+            let sys_realm = keys::system_realm_id();
+            let realm_key = keys::encode_realm_id(&realm_id);
+            storage
+                .put(&sys_realm, &realm_key, b"not-valid-json{{{")
+                .expect("corrupt put");
+        }
+
+        // --- Second engine on same storage: must refuse to initialize ---
+        {
+            let config = StorageConfig::dev(dir.path().to_path_buf());
+            let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("reopen"))
+                as Arc<dyn StorageEngine>;
+            let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+            let audit = Arc::new(EmbeddedAuditEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+            ));
+            let result = EmbeddedIdentityEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+                IdentityConfig {
+                    credential: CredentialConfig::fast_for_testing(),
+                    ..IdentityConfig::default()
+                },
+                audit as Arc<dyn AuditEngine>,
+            );
+
+            assert!(
+                result.is_err(),
+                "engine must refuse to initialize when a realm record is corrupted \
+                 (fail-closed, not fail-open)"
             );
         }
     }
