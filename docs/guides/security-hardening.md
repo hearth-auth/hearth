@@ -131,7 +131,7 @@ documented with justification. Known exceptions:
 |---|---|---|
 | RUSTSEC-2023-0071 | `rsa` | Marvin Attack affects decrypt path only; Hearth uses `rsa` only for key generation and PKCS#8 serialization — no decryption. |
 
-Additionally, Dependabot and Snyk are configured to automatically detect and open PRs for
+Additionally, Dependabot is configured to automatically detect and open PRs for
 newly disclosed vulnerabilities in dependencies.
 
 ---

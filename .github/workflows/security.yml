@@ -14,6 +14,35 @@ name: Security
 #
 # Doc-only PRs are skipped via paths-ignore — security scanners don't add value
 # on documentation diffs and would just burn runner minutes.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Stale-analysis hygiene (HEA-716 / HEA-717)
+#
+# Code Scanning keeps the last analysis per (tool, ref, analysis_key) triple
+# forever — even after the source workflow file is deleted or renamed. That
+# leaves "Actions workflow … is missing" / "stale tool" warnings on the
+# Code Scanning Tools page indefinitely, because the REST API still has rows
+# whose `analysis_key` points at a path that no longer exists on main.
+#
+# Convention when touching this file:
+#   1. Prefer renaming jobs / workflow steps IN PLACE so the existing
+#      `analysis_key` continues to receive new uploads. This is the cheapest
+#      path — no API mutation, no token, no extra PR.
+#   2. If a rename is not possible (consolidation, splitting, deletion),
+#      RUN the cleanup script after the consolidation PR has merged to main
+#      and the next scheduled run has uploaded fresh analyses under the new
+#      keys:
+#        scripts/cleanup-stale-code-scanning-analyses.sh --dry-run
+#        scripts/cleanup-stale-code-scanning-analyses.sh --confirm
+#      See the script header for per-tool stale predicates and auth notes.
+#
+# Hard "no Snyk" policy:
+#   Hearth does NOT use Snyk. Dependabot covers automated dependency PRs,
+#   and Trivy + osv-scanner below cover vulnerability scanning. Do not add
+#   Snyk back to this workflow or to any other CI surface without an
+#   explicit CTO + SecurityAuditor sign-off. Stale Snyk Open Source
+#   analyses are an unconditional cleanup target in the script above.
+# ─────────────────────────────────────────────────────────────────────────────
 
 on:
   push:

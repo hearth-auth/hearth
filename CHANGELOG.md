@@ -32,6 +32,28 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   were added — only directories. Existing alerts for excluded paths are
   dismissed via `code-scanning/alerts` after the SARIF re-upload (HEA-690).
 
+### Removed
+
+- **Stale "Snyk is configured" sentence in `docs/guides/security-hardening.md`** —
+  Hearth has not used Snyk since the HEA-680 security workflow consolidation. The
+  prescriptive line in the Dependency Vulnerability Scanning section is replaced
+  with a Dependabot-only statement. Historical changelog entries that reference
+  the old Snyk configuration are preserved as release-note history (HEA-717).
+
+### Fixed
+
+- **Stale "Actions workflow is missing" warnings across CodeQL, Trivy,
+  osv-scanner, and Snyk Open Source on the Code Scanning Tools page** — a new
+  `scripts/cleanup-stale-code-scanning-analyses.sh` walks the
+  `confirm_delete_url` / `next_analysis_url` chain via the `gh` CLI and drains
+  analyses whose `analysis_key` references workflows that no longer exist on
+  `main` (legacy `codeql.yml` / `trivy.yml` / `osv-scanner.yml`,
+  GitHub-managed `dynamic/*` default-setup analyses, the empty
+  `/language:java-kotlin` and noisy `/language:actions` CodeQL databases), plus
+  all Snyk Open Source analyses (Hearth has no Snyk). Defaults to `--dry-run`;
+  `--confirm` actually deletes; `--tool <name>` scopes a single tool. Idempotent.
+  Uses ambient `GITHUB_TOKEN` via `gh` — no secret handling (HEA-716).
+
 ### Security
 
 - **`rsa` crate removed from the dependency graph (RUSTSEC-2023-0071 /
