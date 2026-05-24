@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **CodeQL Rust scan quality** — CodeQL's Rust leg now runs an explicit
+  `cargo build --workspace --all-targets --all-features --locked` (manual
+  build mode) instead of autobuild, and `setup-rust` exports `PROTOC` to
+  the GitHub Actions environment. Lifts Code Scanning's
+  "calls-with-call-target" metric above its 50 % threshold and reduces
+  false negatives from unresolved generated/feature-gated code (HEA-714).
+
 - **CI: bench relative regression check is now informational** — the
   `check-bench-regression.sh` step emits GitHub Actions warning annotations but
   no longer exits non-zero. The authoritative regression blocker is the absolute

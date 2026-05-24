@@ -72,6 +72,10 @@ runs:
           sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
         fi
 
+    - name: Export PROTOC for cargo build scripts
+      shell: bash
+      run: echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+
     - name: Install buf
       if: inputs.install-buf == 'true'
       uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0

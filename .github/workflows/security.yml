@@ -54,7 +54,7 @@ jobs:
       matrix:
         include:
           - language: rust
-            build-mode: autobuild
+            build-mode: manual
           - language: go
             build-mode: autobuild
           - language: javascript-typescript
@@ -120,6 +120,11 @@ jobs:
       - name: Autobuild
         if: matrix.build-mode == 'autobuild'
         uses: github/codeql-action/autobuild@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
+
+      - name: Manual build for CodeQL (Rust)
+        if: matrix.language == 'rust'
+        shell: bash
+        run: cargo build --workspace --all-targets --all-features --locked
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
