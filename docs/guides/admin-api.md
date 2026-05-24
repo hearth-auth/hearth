@@ -333,3 +333,19 @@ All values are stored as UTF-8 strings. The `type` field controls how the Admin 
 | `number` | `<input type="number">` | None (value stored as string) |
 | `boolean` | Checkbox | None (stored as `"true"` or `"false"`) |
 | `enum` | `<select>` | Value must be in `enum_values` |
+
+---
+
+## Identity Providers (Federation)
+
+Federation connectors (Google, GitHub, Microsoft, Apple, generic OIDC, SAML) are **not managed through the Admin API or Admin UI**. They are declared in `hearth.yaml` and reconciled at startup.
+
+The Admin UI's **Identity Providers** page is a read-only inspection surface — it shows which connectors are active but does not allow adding, editing, or deleting them.
+
+To manage federation providers:
+
+1. Edit `realms.<name>.federation.providers` in `hearth.yaml`.
+2. Reload: restart the server, or send `SIGHUP` for a hot reload.
+
+→ See [Federation examples](hearth-yaml-examples.md#part-4--social-login--federation) for YAML configuration for Google, GitHub, Microsoft, Apple, SAML, and generic OIDC.
+→ See [Configuration reference](../specs/CONFIGURATION.md#realmsnamedfederation) for the full field reference.
