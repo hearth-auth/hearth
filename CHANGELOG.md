@@ -69,6 +69,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `script-src 'self' 'unsafe-eval'` (no `'unsafe-inline'`), `style-src 'self'`,
   `font-src 'self'`, and `base-uri 'self'`. No third-party origins remain in any
   directive (HEA-630).
+- **`deny.toml`: stale RUSTSEC-2023-0071 suppression removed** — the advisory
+  ignore entry for the Marvin Attack (`rsa` crate) was left in place after HEA-697
+  removed the `rsa` crate entirely. The entry contained misleading documentation
+  implying the crate was still present. Removing it keeps the advisory suppress
+  list accurate and prevents future confusion about the actual dependency surface
+  (HEA-713).
 
 ### Changed
 
