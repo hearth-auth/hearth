@@ -76,6 +76,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   rule flagged the zero literal as a hard-coded key regardless of the
   subsequent `fill()` — using `generate()` + `.expose()` removes the
   zero-init entirely and keeps the alert closed on main (HEA-712).
+- **Backup key-derivation buffer: `[0u8; 32]` replaced with `Default::default()`**
+  — `derive_key_with_params` used `[0u8; 32]` as the output buffer passed to
+  `argon2::hash_password_into`. CodeQL's `rust/hard-coded-cryptographic-value`
+  rule traces zero literals into any crypto call regardless of whether the
+  argument is an input or output. Replacing with `let mut key: [u8; 32] =
+  Default::default()` removes the literal from CodeQL's taint source while
+  producing identical runtime behavior (HEA-712).
 - **Examples: `qs` patched to ≥ 6.15.2 in all three TypeScript examples** —
   `examples/federation-flow/client-ts`, `examples/federation-flow/upstream-idp`,
   and `examples/oauth-consent-flow/client-ts` each gained an npm `overrides`

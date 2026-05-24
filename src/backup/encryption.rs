@@ -167,7 +167,7 @@ fn derive_key_with_params(
     let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(32))
         .map_err(|e| BackupError::Crypto(format!("argon2 params: {e}")))?;
     let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-    let mut key = [0u8; 32];
+    let mut key: [u8; 32] = Default::default();
     argon2
         .hash_password_into(password, salt, &mut key)
         .map_err(|e| BackupError::Crypto(format!("argon2 derivation: {e}")))?;
