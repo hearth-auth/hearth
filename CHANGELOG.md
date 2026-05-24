@@ -69,6 +69,23 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `script-src 'self' 'unsafe-eval'` (no `'unsafe-inline'`), `style-src 'self'`,
   `font-src 'self'`, and `base-uri 'self'`. No third-party origins remain in any
   directive (HEA-630).
+- **Backup encryption: salt and nonce generation hardened against CodeQL false
+  positive** — `encrypt_archive` now calls `ring::rand::generate::<[u8; N]>()`
+  directly instead of pre-allocating a zero-filled `[0u8; N]` buffer that was
+  then overwritten by `fill()`. CodeQL's `rust/hard-coded-cryptographic-value`
+  rule flagged the zero literal as a hard-coded key regardless of the
+  subsequent `fill()` — using `generate()` + `.expose()` removes the
+  zero-init entirely and keeps the alert closed on main (HEA-712).
+- **Examples: `qs` patched to ≥ 6.15.2 in all three TypeScript examples** —
+  `examples/federation-flow/client-ts`, `examples/federation-flow/upstream-idp`,
+  and `examples/oauth-consent-flow/client-ts` each gained an npm `overrides`
+  entry for `qs >= 6.15.2` to close GHSA-q8mj-m7cp-5q26 (DoS via prototype
+  poisoning). Lock files regenerated; `npm audit` reports 0 vulnerabilities in
+  each directory (HEA-712).
+- **Examples: `uuid` bumped to 11.1.1 in oauth-consent-flow example** —
+  `examples/oauth-consent-flow/client-ts` direct dependency on `uuid` raised
+  from `^10.0.0` → `^11.1.1` to close GHSA-w5hq-g745-h8pq (missing buffer
+  bounds check, uuid < 11.1.1) (HEA-712).
 - **`deny.toml`: stale RUSTSEC-2023-0071 suppression removed** — the advisory
   ignore entry for the Marvin Attack (`rsa` crate) was left in place after HEA-697
   removed the `rsa` crate entirely. The entry contained misleading documentation

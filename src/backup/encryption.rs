@@ -17,7 +17,7 @@
 //! zeroized immediately after the AES context consumes it.
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
-use ring::rand::{SecureRandom, SystemRandom};
+use ring::rand::{generate, SystemRandom};
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroize;
 
@@ -52,8 +52,12 @@ const HEADER_LEN: usize = 14 + 4 + 4 + 4 + 16 + 12;
 /// AES-GCM operation fails.
 pub fn encrypt_archive(passphrase: &SecretString, input: &[u8]) -> Result<Vec<u8>, BackupError> {
     let rng = SystemRandom::new();
-    let salt = random_bytes::<16>(&rng)?;
-    let nonce_bytes = random_bytes::<12>(&rng)?;
+    let salt = generate::<[u8; 16]>(&rng)
+        .map_err(|_| BackupError::Crypto("salt generation failed".into()))?
+        .expose();
+    let nonce_bytes = generate::<[u8; 12]>(&rng)
+        .map_err(|_| BackupError::Crypto("nonce generation failed".into()))?
+        .expose();
 
     let mut key_bytes = derive_key(passphrase.expose_secret().as_bytes(), &salt)?;
 
@@ -168,14 +172,6 @@ fn derive_key_with_params(
         .hash_password_into(password, salt, &mut key)
         .map_err(|e| BackupError::Crypto(format!("argon2 derivation: {e}")))?;
     Ok(key)
-}
-
-/// Fills a stack-allocated `[u8; N]` with cryptographically random bytes.
-fn random_bytes<const N: usize>(rng: &impl SecureRandom) -> Result<[u8; N], BackupError> {
-    let mut buf = [0u8; N];
-    rng.fill(&mut buf)
-        .map_err(|_| BackupError::Crypto("random byte generation failed".into()))?;
-    Ok(buf)
 }
 
 #[cfg(test)]
