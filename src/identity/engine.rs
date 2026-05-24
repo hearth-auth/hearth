@@ -6,6 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
+
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::SecureRandom;
@@ -309,11 +311,20 @@ pub struct EmbeddedIdentityEngine {
     dummy_hash: String,
     /// Default Ed25519 signing key for JWT token issuance (Phase 0 compat).
     signing_key: Arc<SigningKey>,
-    /// Per-realm signing keys, lazily loaded from storage.
+    /// Per-realm Ed25519 signing keys, lazily loaded from storage.
     ///
-    /// Each realm gets its own Ed25519 key pair so tokens from one
-    /// realm cannot validate in another.
-    realm_signing_keys: Mutex<HashMap<String, Arc<SigningKey>>>,
+    /// Each realm gets its own key pair so tokens from one realm cannot
+    /// validate in another.
+    ///
+    /// Hot-path readers call `load()` — one atomic fence, no locking.
+    /// Writers use `rcu()` to clone-and-CAS the map; realm key ops are rare.
+    realm_signing_keys: ArcSwap<HashMap<RealmId, Arc<SigningKey>>>,
+    /// Wait-free realm status cache for the `validate_token` hot path.
+    ///
+    /// Populated at startup and updated on every realm CRUD operation.
+    /// `validate_token` reads with `load()` — no lock, no storage call.
+    /// Writers (`create_realm`, `update_realm`, `delete_realm`) use `rcu()`.
+    realm_status_cache: ArcSwap<HashMap<RealmId, RealmStatus>>,
     /// Per-realm RSA signing keys used for SAML metadata + response signing.
     ///
     /// Lazily loaded. Regeneration happens only on first SAML operation in
@@ -605,7 +616,8 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             signing_key,
-            realm_signing_keys: Mutex::new(HashMap::new()),
+            realm_signing_keys: ArcSwap::from_pointee(HashMap::new()),
+            realm_status_cache: ArcSwap::from_pointee(HashMap::new()),
             realm_saml_keys: Mutex::new(HashMap::new()),
             oidc_rsa_key: std::sync::OnceLock::new(),
             oidc_ecdsa_key: std::sync::OnceLock::new(),
@@ -622,6 +634,7 @@ impl EmbeddedIdentityEngine {
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
+        engine.populate_realm_status_cache()?;
         Ok(engine)
     }
 
@@ -706,6 +719,33 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Scans storage for all non-system realms and populates the wait-free
+    /// `realm_status_cache` used by the `validate_token` hot path.
+    ///
+    /// Called once at startup after seeding. Realms created or updated after
+    /// this point are tracked via the individual CRUD cache updates.
+    fn populate_realm_status_cache(&self) -> Result<(), IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let realm_prefix = keys::realm_id_scan_prefix();
+        let realm_end = keys::prefix_end(&realm_prefix);
+        let entries = self
+            .storage
+            .scan(&sys_realm, &realm_prefix, &realm_end)
+            .map_err(Self::storage_err)?;
+
+        let mut map = HashMap::new();
+        for entry in &entries {
+            let Ok(realm) = serde_json::from_slice::<Realm>(&entry.value) else {
+                continue;
+            };
+            if !keys::is_system_realm(realm.id()) {
+                map.insert(realm.id().clone(), realm.status());
+            }
+        }
+        self.realm_status_cache.store(Arc::new(map));
+        Ok(())
+    }
+
     /// Creates a new identity engine with a pre-existing signing key.
     ///
     /// Used for testing with a known key or for key restoration from storage.
@@ -726,7 +766,8 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             signing_key,
-            realm_signing_keys: Mutex::new(HashMap::new()),
+            realm_signing_keys: ArcSwap::from_pointee(HashMap::new()),
+            realm_status_cache: ArcSwap::from_pointee(HashMap::new()),
             realm_saml_keys: Mutex::new(HashMap::new()),
             oidc_rsa_key: std::sync::OnceLock::new(),
             oidc_ecdsa_key: std::sync::OnceLock::new(),
@@ -745,6 +786,7 @@ impl EmbeddedIdentityEngine {
         // realm will notice and surface it. `new()` panics on failure; this
         // constructor swallows so existing test harnesses don't break.
         let _ = engine.seed_system_realm_if_absent();
+        let _ = engine.populate_realm_status_cache();
         engine
     }
 
@@ -793,8 +835,13 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         {
-            let mut key_cache = self.realm_signing_keys.lock().expect("key cache lock");
-            key_cache.insert(sys_realm.as_uuid().to_string(), Arc::new(realm_signing_key));
+            let key_arc = Arc::new(realm_signing_key);
+            let sys_realm_id = sys_realm.clone();
+            self.realm_signing_keys.rcu(|current| {
+                let mut new_map = (**current).clone();
+                new_map.insert(sys_realm_id.clone(), Arc::clone(&key_arc));
+                new_map
+            });
         }
 
         Ok(())
@@ -1962,17 +2009,15 @@ impl EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
     ) -> Result<Arc<SigningKey>, IdentityError> {
-        let cache_key = realm_id.as_uuid().to_string();
-
-        // Check cache
+        // Wait-free read: one atomic load, no locking.
         {
-            let key_cache = self.realm_signing_keys.lock().expect("key cache lock");
-            if let Some(key) = key_cache.get(&cache_key) {
+            let map = self.realm_signing_keys.load();
+            if let Some(key) = map.get(realm_id) {
                 return Ok(Arc::clone(key));
             }
         }
 
-        // Load from storage
+        // Cache miss: load key bytes from storage.
         let sys_realm = keys::system_realm_id();
         let key_storage_key = keys::encode_realm_signing_key(realm_id);
         let key_bytes = self
@@ -1983,11 +2028,15 @@ impl EmbeddedIdentityEngine {
 
         let signing_key = Arc::new(SigningKey::from_pkcs8(&key_bytes)?);
 
-        // Cache it
-        {
-            let mut key_cache = self.realm_signing_keys.lock().expect("key cache lock");
-            key_cache.insert(cache_key, Arc::clone(&signing_key));
-        }
+        // Insert into cache via CAS loop — safe under concurrent loaders:
+        // the last writer wins but all produce equivalent keys.
+        let realm_id_owned = realm_id.clone();
+        let key_clone = Arc::clone(&signing_key);
+        self.realm_signing_keys.rcu(|current| {
+            let mut new_map = (**current).clone();
+            new_map.insert(realm_id_owned.clone(), Arc::clone(&key_clone));
+            new_map
+        });
 
         Ok(signing_key)
     }
@@ -2300,10 +2349,25 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             )
             .map_err(Self::storage_err)?;
 
-        // Cache the signing key in memory
+        // Cache signing key (wait-free reads on hot path).
         {
-            let mut key_cache = self.realm_signing_keys.lock().expect("key cache lock");
-            key_cache.insert(realm_id.as_uuid().to_string(), Arc::new(realm_signing_key));
+            let key_arc = Arc::new(realm_signing_key);
+            let id = realm_id.clone();
+            self.realm_signing_keys.rcu(|current| {
+                let mut new_map = (**current).clone();
+                new_map.insert(id.clone(), Arc::clone(&key_arc));
+                new_map
+            });
+        }
+
+        // Cache realm status for wait-free validate_token reads.
+        {
+            let id = realm_id.clone();
+            self.realm_status_cache.rcu(|current| {
+                let mut new_map = (**current).clone();
+                new_map.insert(id.clone(), RealmStatus::Active);
+                new_map
+            });
         }
 
         self.record_audit(
@@ -2434,6 +2498,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             "realm",
             &realm_id.as_uuid().to_string(),
         )?;
+
+        // Propagate status change to the wait-free cache so validate_token
+        // immediately reflects the new lifecycle state.
+        if request.status.is_some() {
+            let id = realm_id.clone();
+            let status = realm.status();
+            self.realm_status_cache.rcu(|current| {
+                let mut new_map = (**current).clone();
+                new_map.insert(id.clone(), status);
+                new_map
+            });
+        }
 
         // When suspending or archiving a realm, revoke all active sessions so
         // existing tokens backed by those sessions fail immediately on the
@@ -2790,11 +2866,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
-        // 10. Remove from in-memory key cache. The record+key were already
-        //     deleted durably above; this just drops the cached `Arc`.
+        // 10. Remove from in-memory caches. Durable deletion already
+        //     happened above; this drops the cached Arc and status entry.
         {
-            let mut key_cache = self.realm_signing_keys.lock().expect("key cache lock");
-            key_cache.remove(&realm_id.as_uuid().to_string());
+            let id = realm_id.clone();
+            self.realm_signing_keys.rcu(|current| {
+                let mut new_map = (**current).clone();
+                new_map.remove(&id);
+                new_map
+            });
+            self.realm_status_cache.rcu(|current| {
+                let mut new_map = (**current).clone();
+                new_map.remove(&id);
+                new_map
+            });
         }
 
         // Idempotency guard: if nothing existed for this realm anywhere, the
@@ -2875,8 +2960,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
         {
-            let mut cache = self.realm_signing_keys.lock().expect("key cache lock");
-            cache.remove(&realm_id.as_uuid().to_string());
+            let id = realm_id.clone();
+            self.realm_signing_keys.rcu(|current| {
+                let mut new_map = (**current).clone();
+                new_map.remove(&id);
+                new_map
+            });
         }
 
         tracing::info!(
@@ -3953,21 +4042,25 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidToken);
         }
 
-        // Verify the token was issued for this realm.
-        if claims.tid != realm_id.to_string() {
+        // Zero-alloc realm binding check: parse tid as a RealmId (stack-only
+        // Uuid parse, no heap) and compare against the caller's realm_id.
+        if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
             return Err(IdentityError::InvalidToken);
         }
 
         // Fail-closed on realm lifecycle: suspended or archived realms must not
         // accept tokens. Checked after signature verification so forged tokens
-        // never trigger a storage read.
+        // never reach this path.
         //
-        // Unregistered realm IDs are allowed through — in production they
-        // cannot produce cryptographically-valid tokens (no signing key to
-        // issue with), so there is no realistic bypass path.
-        if let Ok(Some(realm)) = self.get_realm(realm_id) {
-            if realm.status() != RealmStatus::Active {
-                return Err(IdentityError::RealmSuspended);
+        // Wait-free read from the ArcSwap cache — no lock, no storage call.
+        // Absence from cache means realm is unknown (new or system realm);
+        // fail-open matches the original get_realm(None) behavior.
+        {
+            let status_cache = self.realm_status_cache.load();
+            if let Some(&status) = status_cache.get(realm_id) {
+                if status != RealmStatus::Active {
+                    return Err(IdentityError::RealmSuspended);
+                }
             }
         }
 
@@ -4023,7 +4116,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // Verify realm matches
-        if claims.tid != realm_id.to_string() {
+        if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
             return Err(IdentityError::InvalidToken);
         }
 
@@ -5118,7 +5211,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         };
 
         // Verify realm matches
-        if claims.tid != realm_id.to_string() {
+        if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
             return Ok(()); // Silent success per RFC 7009
         }
 
@@ -5201,7 +5294,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         };
 
         // 2. Verify realm matches
-        if claims.tid != realm_id.to_string() {
+        if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
             return Ok(IntrospectionResponse::inactive());
         }
 
@@ -7475,8 +7568,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         {
-            let mut key_cache = self.realm_signing_keys.lock().expect("key cache lock");
-            key_cache.insert(realm_id.as_uuid().to_string(), Arc::new(realm_signing_key));
+            let key_arc = Arc::new(realm_signing_key);
+            let id = realm_id.clone();
+            self.realm_signing_keys.rcu(|current| {
+                let mut new_map = (**current).clone();
+                new_map.insert(id.clone(), Arc::clone(&key_arc));
+                new_map
+            });
+            self.realm_status_cache.rcu(|current| {
+                let mut new_map = (**current).clone();
+                new_map.insert(id.clone(), RealmStatus::Active);
+                new_map
+            });
         }
 
         self.record_audit(
@@ -12393,6 +12496,191 @@ mod tests {
             .delete_realm(&RealmId::generate())
             .expect_err("should fail");
         assert!(matches!(err, IdentityError::RealmNotFound));
+    }
+
+    // ===== HEA-736: validate_token hot-path fix tests =====
+
+    /// AC-4: create_realm immediately reflects Active status in the cache.
+    #[test]
+    fn realm_status_cache_active_after_create() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+
+        let cache = engine.realm_status_cache.load();
+        let status = cache.get(&realm_id).copied();
+        assert_eq!(
+            status,
+            Some(RealmStatus::Active),
+            "realm_status_cache must contain Active immediately after create_realm"
+        );
+    }
+
+    /// AC-4: update_realm(Suspended) immediately updates cache and causes
+    /// validate_token to return RealmSuspended without a storage read.
+    #[test]
+    fn validate_token_reflects_suspend_via_cache() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        let pair = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+
+        // Advance clock by 1 second so the token iat < now.
+        clock.advance(1_000_000);
+
+        // Token must be valid for an Active realm.
+        engine
+            .validate_token(&realm_id, pair.access_token())
+            .expect("token valid for active realm");
+
+        // Suspend the realm — cache must update atomically.
+        engine
+            .update_realm(
+                &realm_id,
+                &UpdateRealmRequest {
+                    name: None,
+                    status: Some(RealmStatus::Suspended),
+                    config: None,
+                },
+            )
+            .expect("suspend realm");
+
+        // Cache must reflect Suspended immediately.
+        {
+            let cache = engine.realm_status_cache.load();
+            assert_eq!(
+                cache.get(&realm_id).copied(),
+                Some(RealmStatus::Suspended),
+                "cache must reflect Suspended after update_realm"
+            );
+        }
+
+        // validate_token must now return RealmSuspended (reads from cache,
+        // not from storage — no get_realm syscall on this path).
+        let err = engine
+            .validate_token(&realm_id, pair.access_token())
+            .expect_err("suspended realm must reject tokens");
+        assert!(
+            matches!(err, IdentityError::RealmSuspended),
+            "expected RealmSuspended, got {err:?}"
+        );
+    }
+
+    /// AC-4: delete_realm removes the realm from the status cache so that
+    /// validate_token fails-open (no RealmSuspended) for unknown realm IDs.
+    #[test]
+    fn realm_status_cache_cleared_after_delete() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+
+        // Confirm it is in the cache.
+        assert!(
+            engine.realm_status_cache.load().contains_key(&realm_id),
+            "realm must be in cache after create"
+        );
+
+        engine.delete_realm(&realm_id).expect("delete realm");
+
+        // Must be gone from cache.
+        assert!(
+            !engine.realm_status_cache.load().contains_key(&realm_id),
+            "realm must be removed from cache after delete"
+        );
+    }
+
+    /// AC-4: a newly opened engine on existing storage scans and populates
+    /// the realm status cache via `populate_realm_status_cache`, so
+    /// `validate_token` works correctly without requiring any CRUD after start.
+    #[test]
+    fn realm_status_cache_populated_on_restart() {
+        use crate::audit::EmbeddedAuditEngine;
+        use crate::storage::{EmbeddedStorageEngine, StorageConfig};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm_id;
+        let suspended_id;
+
+        // --- First engine: create realms then close ---
+        {
+            let config = StorageConfig::dev(dir.path().to_path_buf());
+            let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("open"))
+                as Arc<dyn StorageEngine>;
+            let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+            let audit = Arc::new(EmbeddedAuditEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+            ));
+            let engine = EmbeddedIdentityEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+                IdentityConfig {
+                    credential: CredentialConfig::fast_for_testing(),
+                    ..IdentityConfig::default()
+                },
+                audit as Arc<dyn AuditEngine>,
+            )
+            .expect("engine");
+
+            realm_id = create_test_realm(&engine);
+            suspended_id = engine
+                .create_realm(&CreateRealmRequest {
+                    name: format!("suspended-{}", uuid::Uuid::new_v4()),
+                    config: None,
+                })
+                .expect("create suspended realm")
+                .id()
+                .clone();
+
+            engine
+                .update_realm(
+                    &suspended_id,
+                    &UpdateRealmRequest {
+                        status: Some(RealmStatus::Suspended),
+                        name: None,
+                        config: None,
+                    },
+                )
+                .expect("suspend");
+        }
+
+        // --- Second engine on same storage: should repopulate cache ---
+        {
+            let config = StorageConfig::dev(dir.path().to_path_buf());
+            let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("reopen"))
+                as Arc<dyn StorageEngine>;
+            let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+            let audit = Arc::new(EmbeddedAuditEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+            ));
+            let engine2 = EmbeddedIdentityEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock) as Arc<dyn Clock>,
+                IdentityConfig {
+                    credential: CredentialConfig::fast_for_testing(),
+                    ..IdentityConfig::default()
+                },
+                audit as Arc<dyn AuditEngine>,
+            )
+            .expect("engine2");
+
+            let cache = engine2.realm_status_cache.load();
+            assert_eq!(
+                cache.get(&realm_id).copied(),
+                Some(RealmStatus::Active),
+                "active realm must be Active in cache after restart"
+            );
+            assert_eq!(
+                cache.get(&suspended_id).copied(),
+                Some(RealmStatus::Suspended),
+                "suspended realm must be Suspended in cache after restart"
+            );
+        }
     }
 
     // ===== Phase 1 Step 19: Multi-Tenancy Property Tests =====

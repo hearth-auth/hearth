@@ -7,6 +7,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Fixed
+
+- **`validate_token` hot-path: eliminated heap allocation, storage read, and mutex on read path**
+  — three concrete violations of the zero-allocation hot-path rules (`CLAUDE.md`) were
+  removed (HEA-736):
+  - `claims.tid != realm_id.to_string()` → zero-alloc `parse::<RealmId>()` UUID byte comparison.
+  - `self.get_realm(realm_id)` storage read → wait-free `ArcSwap<HashMap<RealmId, RealmStatus>>`
+    cache populated at startup and updated on every realm CRUD operation.
+  - `self.realm_signing_keys.lock()` mutex → `ArcSwap<HashMap<RealmId, Arc<SigningKey>>>` with
+    `load()` on the hot path; writers use `rcu()` (clone-and-CAS); zero blocking for readers.
+
 ### Changed
 
 - **CodeQL Rust scan quality** — CodeQL's Rust leg now runs an explicit
