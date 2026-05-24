@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **CI: bench relative regression check is now informational** — the
+  `check-bench-regression.sh` step emits GitHub Actions warning annotations but
+  no longer exits non-zero. The authoritative regression blocker is the absolute
+  p50/p99 latency gate built into each bench binary's custom `main()` (limits
+  from `ARCHITECTURE.md`). Shared GitHub runners vary ±10–15% across Azure
+  regions; a hard relative threshold on top of absolute gates produced false
+  positives without adding meaningful signal (HEA-711).
+
 - **CI: scoped security scanners to production code** — CodeQL `paths-ignore`,
   Trivy `skip-dirs`, and a new `osv-scanner.toml` exclude test fixtures,
   example apps, fuzz harness code, and the Playwright runner from code
@@ -19,6 +27,44 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **`rsa` crate removed from the dependency graph (RUSTSEC-2023-0071 /
+  CVE-2023-49092, Marvin Attack)** — SAML's RSA-2048 keypair + self-signed
+  X.509 generation in `src/identity/tokens.rs` now goes through `rcgen` with
+  the `aws_lc_rs` backend instead of `rsa@0.9.10`, which has no patched
+  release for the Marvin timing side-channel. Hearth never reached the
+  vulnerable `Pkcs1v15Decrypt` path (RSA signing uses `ring`, which is
+  side-channel-hardened), but dropping the crate eliminates the alert
+  entirely. `RsaSigningKey::from_pkcs8_and_cert()` and the `ring`-based
+  signing path are unchanged; integration tests that fabricated upstream
+  RS256 JWKS now also generate keys via `RsaSigningKey`. Closes Code
+  Scanning alerts #221 and #222 (HEA-697).
+- **OSV-Scanner: suppress RUSTSEC-2025-0141 (bincode unmaintained)** —
+  `bincode@1.3.3` is a transitive dependency of `madsim` (simulation test crate
+  only) and is never compiled into the production binary. The advisory has no
+  CVE, no CVSS score, and no known exploit. `madsim@0.2.34` (latest) still
+  requires it; no upgrade path exists. Suppressed in `osv-scanner.toml` with
+  documented rationale. Dismisses Code Scanning alert #223 (HEA-700).
+- **CI: scoped `security-events:write` per-job in `security.yml`** — the
+  top-level workflow `permissions` block is downgraded to `security-events: read`,
+  and `write` is granted only to the three jobs that upload SARIF
+  (`codeql`, `trivy`, `osv-scanner`). A supply-chain-compromised action in any
+  other job (current or future) can no longer mint Code Scanning findings.
+  Closes Code Scanning alert #248 (HEA-696).
+- **CI: `required-summary` gate resolves "Waiting for status" on skipped jobs
+  (HEA-693)** — a new `required-summary` job in `ci.yml` runs unconditionally
+  (`if: always()`), reads every upstream job result, and exits non-zero if any
+  dependency failed or was cancelled. Branch protection `main` now requires only
+  `CI / required-summary` for the CI workflow instead of listing each conditional
+  job individually. Conditional matrix jobs (`sdk-node`) and path-filtered jobs
+  (`quality`, `ui`, `sdk-conformance`) no longer leave required checks stuck in
+  "Expected — Waiting for status to be reported" when they are legitimately
+  skipped by the paths-filter (HEA-693).
+- **Go SDK toolchain bumped to 1.26** — `sdks/go/go.mod` `go` directive raised
+  from `1.24` → `1.26` so OSV-Scanner resolves the bundled `stdlib` against
+  patched releases. Closes CVE-2026-39820 (`net/mail` quadratic concatenation
+  DoS) and CVE-2026-39823 (`html/template` XSS bypass) — Code Scanning alerts
+  #219 and #220. No SDK code changes; `go mod tidy` regenerated `go.sum`
+  (HEA-698).
 - **CSP hardened** — `Content-Security-Policy` for all `/ui/**` routes now enforces
   `script-src 'self' 'unsafe-eval'` (no `'unsafe-inline'`), `style-src 'self'`,
   `font-src 'self'`, and `base-uri 'self'`. No third-party origins remain in any

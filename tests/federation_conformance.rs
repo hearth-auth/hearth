@@ -23,10 +23,8 @@ use hearth::identity::federation::{
     verify_id_token_claims, verify_rs256, FederationSecret, IdTokenClaims, IdpConfig, IdpKind, Jwk,
     StateBag,
 };
+use hearth::identity::tokens::RsaSigningKey;
 use hearth::identity::IdentityError;
-use rsa::pkcs8::EncodePrivateKey;
-use rsa::traits::PublicKeyParts;
-use rsa::RsaPrivateKey;
 
 fn sample_cfg() -> IdpConfig {
     IdpConfig {
@@ -272,26 +270,19 @@ fn rejects_nbf_in_the_future_past_skew() {
 
 #[test]
 fn rs256_signature_verify_round_trip() {
-    // Generate a 2048-bit RSA keypair with the `rsa` crate (ring 0.17
-    // doesn't expose key generation), export to PKCS#8 DER, then load
-    // into ring for signing — same stack Hearth uses for verification.
-    // This gives us a real RS256 signature end-to-end without extra
-    // sha2 features or hand-rolled PKCS1v15 encoding.
+    // Generate a 2048-bit RSA keypair via Hearth's `RsaSigningKey`
+    // (rcgen + aws_lc_rs backend) and sign with ring — the same stack
+    // Hearth uses for verification. The `rsa` crate was removed to
+    // eliminate RUSTSEC-2023-0071 from the dependency graph.
 
-    let mut rng = rand_core::OsRng;
-    let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("generate rsa key");
-    let public_key = private_key.to_public_key();
-
-    // Build the JWK from public components. `n` and `e` are base64url-
-    // no-pad big-endian byte encodings.
-    let n_bytes = public_key.n().to_bytes_be();
-    let e_bytes = public_key.e().to_bytes_be();
+    let signing_key = RsaSigningKey::generate("rs256-roundtrip", 1).expect("generate rsa key");
+    let pub_jwk = signing_key.to_jwk().expect("jwk");
     let rsa_jwk = Jwk {
         kty: "RSA".into(),
         alg: Some("RS256".into()),
         kid: Some("test-key-1".into()),
-        n: Some(URL_SAFE_NO_PAD.encode(&n_bytes)),
-        e: Some(URL_SAFE_NO_PAD.encode(&e_bytes)),
+        n: pub_jwk.n,
+        e: pub_jwk.e,
     };
 
     // Craft the synthetic JWT signing input.
@@ -302,20 +293,10 @@ fn rs256_signature_verify_round_trip() {
     let payload_b64 = URL_SAFE_NO_PAD.encode(payload.as_bytes());
     let signing_input = format!("{header_b64}.{payload_b64}");
 
-    // Sign with ring (RSA_PKCS1_SHA256 — same algorithm Hearth verifies).
-    let pkcs8_der = private_key.to_pkcs8_der().expect("pkcs8 encode");
-    let key_pair =
-        ring::signature::RsaKeyPair::from_pkcs8(pkcs8_der.as_bytes()).expect("load keypair");
-    let mut signature = vec![0u8; key_pair.public().modulus_len()];
-    let ring_rng = ring::rand::SystemRandom::new();
-    key_pair
-        .sign(
-            &ring::signature::RSA_PKCS1_SHA256,
-            &ring_rng,
-            signing_input.as_bytes(),
-            &mut signature,
-        )
-        .expect("sign");
+    // RSA_PKCS1_SHA256 — same algorithm Hearth verifies.
+    let signature = signing_key
+        .sign(signing_input.as_bytes())
+        .expect("sign rs256");
 
     let sig_b64 = URL_SAFE_NO_PAD.encode(&signature);
     let jwt = format!("{signing_input}.{sig_b64}");
@@ -334,15 +315,14 @@ fn rs256_signature_verify_round_trip() {
     ));
 
     // 3. Wrong public key: verification must fail.
-    let other = RsaPrivateKey::new(&mut rng, 2048)
-        .expect("another key")
-        .to_public_key();
+    let other_key = RsaSigningKey::generate("rs256-other", 1).expect("another key");
+    let other_jwk = other_key.to_jwk().expect("other jwk");
     let other_rsa_jwk = Jwk {
         kty: "RSA".into(),
         alg: Some("RS256".into()),
         kid: Some("test-key-1".into()),
-        n: Some(URL_SAFE_NO_PAD.encode(other.n().to_bytes_be())),
-        e: Some(URL_SAFE_NO_PAD.encode(other.e().to_bytes_be())),
+        n: other_jwk.n,
+        e: other_jwk.e,
     };
     assert!(matches!(
         verify_rs256(&jwt, &other_rsa_jwk),

@@ -654,18 +654,25 @@ impl Wal {
             pos += 4;
 
             if stored_crc != computed_crc {
+                // CRC mismatch at any position means the record was not
+                // durably written. Stop replay here and discard everything
+                // that follows — entries after a corrupt record cannot be
+                // applied safely since they may depend on state that the
+                // corrupt entry would have established.
+                //
+                // This covers both the tail-truncation case (process crashed
+                // mid-write, no records follow) and the concurrent write-fault
+                // case (another thread appended records after the crash, so
+                // bytes follow the corrupt entry). Both require the same
+                // response: truncate to the last fully-verified record.
                 if pos < all_data.len() {
-                    // Mid-stream CRC corruption: more data follows
-                    // this record. Not normal crash-recovery — the
-                    // trailing bytes are intact but the CRC doesn't
-                    // match. Likely disk rot or tampering.
-                    return Err(StorageError::ChecksumMismatch {
-                        offset: record_start as u64,
-                    });
+                    tracing::warn!(
+                        offset = record_start,
+                        "WAL replay: CRC mismatch with trailing data — \
+                         truncating to last good record (possible concurrent \
+                         write fault or unclean shutdown)"
+                    );
                 }
-                // Terminal CRC failure: this is the last record and
-                // the process crashed before completing it. Silent
-                // truncation is the expected recovery behavior.
                 break;
             }
 

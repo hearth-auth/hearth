@@ -251,6 +251,13 @@ async fn three_node_grpc_loopback_replicates_ten_writes() {
     let leader = cluster.engine_for(leader_id);
     let realm = RealmId::new(Uuid::new_v4());
 
+    // Snapshot before writes so the convergence target is relative — no need
+    // to know how many prelude entries openraft inserted (membership, NoOp, etc.).
+    let initial_applied = leader
+        .raft_metrics()
+        .and_then(|m| m.last_applied.map(|l| l.index))
+        .unwrap_or(0);
+
     for i in 0..10u32 {
         let key = format!("k{i}");
         let val = format!("v{i}");
@@ -260,23 +267,36 @@ async fn three_node_grpc_loopback_replicates_ten_writes() {
             .unwrap_or_else(|e| panic!("put {key} on leader {leader_id} failed: {e}"));
     }
 
-    // Wait for every node to catch up to the LEADER's last_applied index.
+    // Wait for the leader to apply all 10 client writes before pinning the
+    // convergence target for followers.
     //
-    // A hard-coded `>= 10` check is wrong: openraft writes a membership entry
-    // (index 1) at `initialize_cluster` and a blank NoOp (index 2) on leader
-    // election, so the 10 client writes land at indices 3..=12. Comparing to
-    // the leader's high-water mark sidesteps that arithmetic and works for
-    // any future prelude-entry count.
-    //
-    // Spec acceptance requires `last_applied >= 10`; the stricter
-    // leader-parity check naturally implies it once 10 puts have settled.
-    let leader_target = leader
-        .raft_metrics()
-        .and_then(|m| m.last_applied.map(|l| l.index))
-        .expect("leader has last_applied after 10 puts");
+    // `put()` returns after Raft majority commit, but state-machine application
+    // is asynchronous — `last_applied` advances on the apply loop independently.
+    // Reading `leader_target` immediately after the put loop can capture a stale
+    // index that excludes the final write(s); followers then pass the convergence
+    // check prematurely and reads return None for the last key(s).
+    let needed = initial_applied + 10;
+    let leader_target = {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let idx = leader
+                .raft_metrics()
+                .and_then(|m| m.last_applied.map(|l| l.index))
+                .unwrap_or(0);
+            if idx >= needed {
+                break idx;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "leader last_applied {idx} never reached {needed} \
+                 (initial={initial_applied} + 10 puts) within 5 s"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await; // AUDIT: justified-sleep: polling leader apply; openraft has no per-step completion signal
+        }
+    };
     assert!(
-        leader_target >= 10,
-        "leader last_applied {leader_target} < 10 — expected at least one entry per put"
+        leader_target >= needed,
+        "leader last_applied {leader_target} < {needed} after 10 puts"
     );
 
     let converge_deadline = Instant::now() + Duration::from_secs(10);

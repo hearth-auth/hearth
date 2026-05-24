@@ -363,3 +363,42 @@ jobs:
 
       - name: Check SDK conformance (spec sections 2,4,5,8,10)
         run: bash scripts/check-sdk-conformance.sh
+
+  # ── Required-summary gate (HEA-693) ──────────────────────────────────────────
+  #
+  # Branch protection requires ONLY this job for the CI workflow. It always runs
+  # and succeeds when every upstream job either passed or was legitimately skipped
+  # (paths-filter determined no changes in scope). It fails if any upstream job
+  # failed or was cancelled.
+  #
+  # Why: conditional matrix jobs (sdk-node) and conditional jobs (quality, ui,
+  # sdk-conformance) only post individual check-run entries when they actually
+  # execute. When paths-filter skips them, branch protection sees "Expected —
+  # Waiting for status to be reported" for each individual check name forever.
+  # A single always-running summary gate eliminates that gap: one required check
+  # name, always reported, correctly aggregates pass/skip/fail (HEA-693).
+
+  required-summary:
+    name: required-summary
+    if: always()
+    needs: [filter, quality, ui, sdk-node, sdk-conformance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+
+    steps:
+      - name: Check all jobs passed or were skipped
+        env:
+          FILTER: ${{ needs.filter.result }}
+          QUALITY: ${{ needs.quality.result }}
+          UI: ${{ needs.ui.result }}
+          SDK_NODE: ${{ needs.sdk-node.result }}
+          SDK_CONFORMANCE: ${{ needs.sdk-conformance.result }}
+        run: |
+          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-conformance=$SDK_CONFORMANCE"
+          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_CONFORMANCE"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "A required job failed or was cancelled."
+              exit 1
+            fi
+          done
+          echo "All jobs passed or were legitimately skipped."
