@@ -7,6 +7,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **Realm status cache: fail-closed on corrupted storage records** — `populate_realm_status_cache`
+  now returns an error on deserialization failure instead of silently skipping records; the engine
+  refuses to start rather than booting with an incomplete realm-suspension cache (HEA-742).
+- **Realm suspension ordering tightened** — `update_realm` now updates the `realm_status_cache`
+  before writing the audit record, closing a brief window where a `validate_token` call could
+  observe stale realm status between the storage write and cache update (HEA-742).
+
 ### Fixed
 
 - **`validate_token` hot-path: eliminated heap allocation, storage read, and mutex on read path**
