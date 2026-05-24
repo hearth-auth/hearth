@@ -170,7 +170,7 @@ jobs:
           install-tailwind: "true"
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        uses: taiki-e/install-action@f48d2f8ba2b452934c948b7be1a768079c3632ff # v2.79.6
         with:
           tool: cargo-nextest
 
