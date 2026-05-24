@@ -7,5 +7,8 @@
   },
   "scripts": {
     "postinstall": "node scripts/patch-shrinkwrap.js"
+  },
+  "overrides": {
+    "qs": ">=6.15.2"
   }
 }
