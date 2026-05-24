@@ -159,6 +159,10 @@ harness = false
 name = "demotion_latency"
 harness = false
 
+[[bench]]
+name = "validate_token"
+harness = false
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
