@@ -26,6 +26,7 @@ use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{debug, error, info, Level};
 
 use crate::audit::{AuditEngine, CreateAuditEvent};
+use crate::cluster::ClusterEngine;
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
 use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
 use crate::identity::{IdentityEngine, PasswordGrantRequest, UpdateRealmRequest};
@@ -109,6 +110,11 @@ pub struct AppState {
     /// to derive the real client IP. When empty (default), the peer socket
     /// IP is used directly.
     pub trusted_proxies: Vec<IpAddr>,
+    /// Cluster engine for Raft admin operations. `None` in single-node mode.
+    ///
+    /// When `None`, all `/admin/cluster/*` endpoints return `503 Service
+    /// Unavailable` rather than panicking.
+    pub cluster: Option<Arc<ClusterEngine>>,
 }
 
 impl AppState {
@@ -129,6 +135,7 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
+            cluster: None,
         }
     }
 
@@ -151,6 +158,7 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
+            cluster: None,
         }
     }
 
@@ -175,6 +183,7 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
+            cluster: None,
         }
     }
 
@@ -199,6 +208,12 @@ impl AppState {
     /// Sets the signing key rotation grace period.
     pub fn with_signing_key_rotation_grace_period_secs(mut self, secs: u64) -> Self {
         self.signing_key_rotation_grace_period_secs = secs;
+        self
+    }
+
+    /// Attaches a cluster engine, enabling the `/admin/cluster/*` endpoints.
+    pub fn with_cluster(mut self, engine: Arc<ClusterEngine>) -> Self {
+        self.cluster = Some(engine);
         self
     }
 }
@@ -488,6 +503,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/backup/restore",
             axum::routing::post(admin_backup_restore).route_layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/cluster/bootstrap",
+            axum::routing::post(crate::protocol::cluster_admin::admin_cluster_bootstrap),
+        )
+        .route(
+            "/cluster/status",
+            axum::routing::get(crate::protocol::cluster_admin::admin_cluster_status),
+        )
+        .route(
+            "/cluster/transfer-leadership",
+            axum::routing::post(crate::protocol::cluster_admin::admin_cluster_transfer_leadership),
         );
 
     Router::new()
