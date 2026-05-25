@@ -1397,6 +1397,12 @@ pub fn router(state: WebState) -> Router {
         .route("/favicon.svg", axum::routing::get(serve_favicon))
         .nest("/ui", ui_routes)
         // --- Required-Action pages (outside /ui; cookie Path=/required-action) ---
+        // Specific action routes take precedence over the generic {action} wildcard.
+        .route(
+            "/required-action/UPDATE_PASSWORD",
+            axum::routing::get(required_action::update_password_page)
+                .post(required_action::update_password_submit),
+        )
         .route(
             "/required-action/{action}",
             axum::routing::get(required_action::action_page).post(required_action::action_complete),

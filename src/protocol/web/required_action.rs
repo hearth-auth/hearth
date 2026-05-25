@@ -29,14 +29,18 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Path, State};
+use axum::extract::{Form, Path, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
+use serde::Deserialize;
 
+use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
+use crate::identity::error::IdentityError;
 use crate::identity::ra_token::{self, OidcParams};
 use crate::identity::CodeChallengeMethod;
 use crate::identity::RequiredAction;
+use crate::identity::{CleartextPassword, UpdateUserRequest};
 use crate::protocol::web::oauth_consent::AuthorizeQuery;
 
 use super::handlers::append_cookie;
@@ -68,6 +72,35 @@ struct ActionPageTemplate {
     logo_url: String,
     theme_css: String,
     realm_theme_css: Option<String>,
+}
+
+/// Rendered by `GET /required-action/UPDATE_PASSWORD` (and re-rendered on validation failure).
+#[derive(Template)]
+#[template(path = "ui/required_action/update_password.html")]
+struct UpdatePasswordPageTemplate {
+    /// Inline error message shown above the form on validation failure.
+    error: Option<String>,
+    // Layout chrome.
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    theme_css: String,
+    realm_theme_css: Option<String>,
+}
+
+/// `application/x-www-form-urlencoded` body for `POST /required-action/UPDATE_PASSWORD`.
+#[derive(Debug, Deserialize)]
+pub struct UpdatePasswordForm {
+    #[serde(default)]
+    pub new_password: String,
+    #[serde(default)]
+    pub confirm_password: String,
 }
 
 fn action_label(action: &str) -> &'static str {
@@ -363,6 +396,174 @@ pub fn next_required_action(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// GET /required-action/UPDATE_PASSWORD
+// ---------------------------------------------------------------------------
+
+/// Renders the update-password form.
+pub async fn update_password_page(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    if read_ra_cookie(&headers).is_none() {
+        return handlers_common::bad_request("No active required-action session");
+    }
+    render_update_password_form(&state, None)
+}
+
+// ---------------------------------------------------------------------------
+// POST /required-action/UPDATE_PASSWORD
+// ---------------------------------------------------------------------------
+
+/// Processes the new-password submission for the UPDATE_PASSWORD required action.
+///
+/// On validation failure the form is re-rendered with an inline error and the
+/// RA cookie is left intact (the token remains valid for the remaining TTL).
+/// On success the password credential is replaced, the action is removed from
+/// the user record, and the OIDC flow resumes.
+pub async fn update_password_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<UpdatePasswordForm>,
+) -> Response {
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            // RA session expired — redirect to root so user can restart the login flow.
+            return Redirect::to("/").into_response();
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let secure = state.is_secure_request(&headers);
+
+    if form.new_password != form.confirm_password {
+        return render_update_password_form(
+            &state,
+            Some("New password and confirmation do not match."),
+        );
+    }
+
+    let new_pw = CleartextPassword::from_string(form.new_password);
+    match state.identity.set_password(&realm, &user_id, &new_pw) {
+        Ok(()) => {}
+        Err(IdentityError::InvalidInput { reason }) => {
+            return render_update_password_form(&state, Some(&reason));
+        }
+        Err(IdentityError::PasswordReused) => {
+            return render_update_password_form(
+                &state,
+                Some("That password was used recently — choose a different one."),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "update_password_submit: set_password failed");
+            return render_update_password_form(
+                &state,
+                Some("Unable to update password. Please try again."),
+            );
+        }
+    }
+
+    // Remove UPDATE_PASSWORD from the user's persistent required_actions so
+    // future logins are not intercepted again for this action.
+    if let Ok(Some(user)) = state.identity.get_user(&realm, &user_id) {
+        let updated_actions: Vec<RequiredAction> = user
+            .required_actions()
+            .iter()
+            .filter(|&&a| a != RequiredAction::UpdatePassword)
+            .copied()
+            .collect();
+        if let Err(e) = state.identity.update_user(
+            &realm,
+            &user_id,
+            &UpdateUserRequest {
+                required_actions: Some(updated_actions),
+                ..Default::default()
+            },
+        ) {
+            tracing::warn!(
+                error = %e,
+                "update_password_submit: failed to clear UPDATE_PASSWORD from user record"
+            );
+        }
+    }
+
+    // Emit audit event (best-effort — never blocks the response).
+    if let Err(e) = state.audit.append(&CreateAuditEvent {
+        realm_id: realm.clone(),
+        actor: user_id.as_uuid().to_string(),
+        action: AuditAction::RequiredActionCompleted,
+        resource_type: "user".to_string(),
+        resource_id: user_id.as_uuid().to_string(),
+        metadata: Some(serde_json::json!({ "action_type": "UPDATE_PASSWORD" })),
+    }) {
+        tracing::warn!(error = %e, "update_password_submit: audit append failed");
+    }
+
+    // Advance the OIDC flow: remove UPDATE_PASSWORD from the RA JWT pending list.
+    let remaining: Vec<RequiredAction> = claims
+        .pending_actions
+        .into_iter()
+        .filter(|a| *a != RequiredAction::UpdatePassword)
+        .collect();
+
+    if remaining.is_empty() {
+        resume_oidc_flow(&state, &realm, &claims.sub, claims.oidc_params, secure)
+    } else {
+        next_required_action(
+            &state,
+            &realm,
+            &claims.sub,
+            remaining,
+            claims.oidc_params,
+            secure,
+            now,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UPDATE_PASSWORD helpers
+// ---------------------------------------------------------------------------
+
+fn render_update_password_form(state: &Arc<WebState>, error: Option<&str>) -> Response {
+    let tmpl = UpdatePasswordPageTemplate {
+        error: error.map(str::to_string),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        theme_css: state.theme_css.clone(),
+        realm_theme_css: state.realm_theme_css(),
+    };
+    render(&tmpl)
+}
 
 fn read_ra_cookie(headers: &HeaderMap) -> Option<String> {
     super::auth::cookie_value_from_headers(headers, ra_token::RA_SESSION_COOKIE).map(str::to_string)

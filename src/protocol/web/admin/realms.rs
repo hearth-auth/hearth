@@ -390,6 +390,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::BackupRestored => "Backup Restored",
         A::RequiredActionAssigned => "Required Action Assigned",
         A::RequiredActionRemoved => "Required Action Removed",
+        A::RequiredActionCompleted => "Required Action Completed",
     }
 }
 
@@ -415,7 +416,8 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::BulkUsersCreated
         | A::BulkUsersDisabled
         | A::RequiredActionAssigned
-        | A::RequiredActionRemoved => "Identity",
+        | A::RequiredActionRemoved
+        | A::RequiredActionCompleted => "Identity",
         // Session — sessions, tokens, login attempts (logins gate session entry).
         A::SessionCreated
         | A::SessionRevoked

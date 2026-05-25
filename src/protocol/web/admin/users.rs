@@ -2827,7 +2827,7 @@ pub async fn admin_api_user_required_actions_patch(
     let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
     for a in &add_actions {
         if !actions.contains(a) {
-            actions.push(a.clone());
+            actions.push(*a);
         }
     }
     actions.retain(|a| !remove_actions.contains(a));
