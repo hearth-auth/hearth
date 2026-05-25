@@ -205,8 +205,8 @@ fn example_output_is_valid_yaml() {
     );
 
     // The example YAML must parse successfully.
-    let parsed: serde_yml::Value =
-        serde_yml::from_str(&stdout).expect("example output must be valid YAML");
+    let parsed: serde_norway::Value =
+        serde_norway::from_str(&stdout).expect("example output must be valid YAML");
     assert!(
         parsed.is_mapping(),
         "example YAML root must be a mapping, got: {parsed:?}"
@@ -254,7 +254,8 @@ fn example_output_file_option_writes_file() {
     assert!(!content.is_empty(), "output file should not be empty");
 
     // The written file must also parse as valid YAML.
-    serde_yml::from_str::<serde_yml::Value>(&content).expect("written example must be valid YAML");
+    serde_norway::from_str::<serde_norway::Value>(&content)
+        .expect("written example must be valid YAML");
 }
 
 #[test]

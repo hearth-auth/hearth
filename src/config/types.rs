@@ -2152,7 +2152,7 @@ mod tests {
     #[test]
     fn auth_config_yaml_parsing() {
         let yaml = "session_ttl: '24h'\npassword_memory_cost: 65536\n";
-        let cfg: AuthConfig = serde_yml::from_str(yaml).expect("parse");
+        let cfg: AuthConfig = serde_norway::from_str(yaml).expect("parse");
         assert_eq!(cfg.session_ttl.as_deref(), Some("24h"));
         assert_eq!(cfg.password_memory_cost, Some(65536));
     }
