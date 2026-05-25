@@ -95,7 +95,7 @@ jobs:
         run: cargo cyclonedx --format json --spec-version 1.4 -p hearth
 
       - name: Stage SBOM
-        run: cp hearth/hearth.cdx.json hearth-sbom.cdx.json
+        run: cp hearth.cdx.json hearth-sbom.cdx.json
 
       - uses: actions/upload-artifact@v4
         with:
