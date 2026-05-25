@@ -78,6 +78,7 @@ jobs:
               - 'build.rs'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'deny.toml'
               - 'rustfmt.toml'
               - 'clippy.toml'
               - 'proto/**'
@@ -173,6 +174,17 @@ jobs:
         uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
         with:
           tool: cargo-nextest
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-deny
+
+      # HEA-779: enforce deny.toml policy (advisories + licenses + bans + sources).
+      # Runs before the longer make targets so a policy violation fails fast
+      # without burning a full clippy + nextest cycle.
+      - name: Dependency policy (cargo deny check)
+        run: cargo deny check
 
       - name: make test-quality (block false-confidence test patterns — HEA-571)
         run: make test-quality
