@@ -108,3 +108,34 @@ For transparency, Hearth's core cryptographic primitive selections:
 | TLS | TLS 1.2 / 1.3 | `rustls` 0.23 |
 | Webhook signing | HMAC-SHA256 | `ring` 0.17 |
 | SCIM token comparison | SHA-256 + constant-time eq | `ring` + `subtle` |
+
+## Release Signing
+
+All Hearth release binaries (≥ v0.1.0) are signed with [cosign](https://github.com/sigstore/cosign) keyless signing via the GitHub Actions OIDC identity. Signatures and a CycloneDX SBOM are published alongside every GitHub Release.
+
+### Signing identity
+
+| Field | Value |
+|---|---|
+| OIDC issuer | `https://token.actions.githubusercontent.com` |
+| Certificate identity regexp | `https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v.*` |
+
+### Quick verification
+
+```sh
+cosign verify-blob \
+  --certificate         hearth-linux-amd64.pem \
+  --signature           hearth-linux-amd64.sig \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-identity-regexp \
+    "https://github\\.com/therecluse26/hearth/\\.github/workflows/release\\.yml@refs/tags/v.*" \
+  hearth-linux-amd64
+```
+
+See [`docs/guides/verify-release.md`](docs/guides/verify-release.md) for the full verification guide including SLSA provenance and SBOM import instructions.
+
+### Supply-chain artefacts per release
+
+- **`*.sig` / `*.pem`** — cosign detached signatures (keyless, Sigstore Rekor-logged)
+- **`hearth-sbom.cdx.json`** — CycloneDX 1.4 SBOM
+- **`hearth-multiple.intoto.jsonl`** — SLSA L1 provenance attestation (slsa-github-generator)
