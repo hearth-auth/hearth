@@ -9,6 +9,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **UPDATE_PASSWORD required-action handler** — `GET /required-action/UPDATE_PASSWORD`
+  renders a password-change form; `POST /required-action/UPDATE_PASSWORD` validates the new
+  password against realm policy, updates the credential, clears the action from the user
+  record, emits a `RequiredActionCompleted` audit event, and resumes the OIDC authorization
+  flow (or advances to the next pending action in multi-action sequences) (HEA-809).
+
 - **Required-actions admin API** — two new admin endpoints manage required actions
   without a full user-object PATCH:
   `PATCH /admin/realms/{id}/users/{id}/required-actions` (body `{"add":[],"remove":[]}`)
