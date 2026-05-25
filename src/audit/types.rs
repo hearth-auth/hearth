@@ -195,6 +195,14 @@ pub enum AuditAction {
     /// Metadata carries `dry_run` (`"true"` / `"false"`) and the list of
     /// restored realm slugs.
     BackupRestored,
+    /// A required action was assigned to a user by an admin.
+    ///
+    /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `admin_id`.
+    RequiredActionAssigned,
+    /// A required action was removed from a user by an admin.
+    ///
+    /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `admin_id`.
+    RequiredActionRemoved,
 }
 
 impl AuditAction {
@@ -272,6 +280,8 @@ impl AuditAction {
             Self::IpLoginLimitExceeded,
             Self::BackupCreated,
             Self::BackupRestored,
+            Self::RequiredActionAssigned,
+            Self::RequiredActionRemoved,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -347,6 +357,8 @@ impl AuditAction {
             Self::IpLoginLimitExceeded => "ip_login_limit_exceeded",
             Self::BackupCreated => "backup_created",
             Self::BackupRestored => "backup_restored",
+            Self::RequiredActionAssigned => "required_action_assigned",
+            Self::RequiredActionRemoved => "required_action_removed",
         }
     }
 }
@@ -423,6 +435,8 @@ impl std::str::FromStr for AuditAction {
             "ip_login_limit_exceeded" => Ok(Self::IpLoginLimitExceeded),
             "backup_created" => Ok(Self::BackupCreated),
             "backup_restored" => Ok(Self::BackupRestored),
+            "required_action_assigned" => Ok(Self::RequiredActionAssigned),
+            "required_action_removed" => Ok(Self::RequiredActionRemoved),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -507,7 +521,9 @@ impl AuditAction {
             | Self::LoginFailed
             | Self::IpLoginLimitExceeded
             | Self::BackupCreated
-            | Self::BackupRestored => LogOnly,
+            | Self::BackupRestored
+            | Self::RequiredActionAssigned
+            | Self::RequiredActionRemoved => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged

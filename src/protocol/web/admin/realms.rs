@@ -388,6 +388,8 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::IpLoginLimitExceeded => "IP Login Limit Exceeded",
         A::BackupCreated => "Backup Created",
         A::BackupRestored => "Backup Restored",
+        A::RequiredActionAssigned => "Required Action Assigned",
+        A::RequiredActionRemoved => "Required Action Removed",
     }
 }
 
@@ -411,7 +413,9 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::CredentialChanged
         | A::CredentialVerified
         | A::BulkUsersCreated
-        | A::BulkUsersDisabled => "Identity",
+        | A::BulkUsersDisabled
+        | A::RequiredActionAssigned
+        | A::RequiredActionRemoved => "Identity",
         // Session — sessions, tokens, login attempts (logins gate session entry).
         A::SessionCreated
         | A::SessionRevoked
@@ -2221,6 +2225,76 @@ pub async fn admin_realm_admin_revoke(
         "admin",
     );
     Redirect::to(&format!("/ui/admin/realms/{}", target.0.name())).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Realm config PATCH (HEA-807)
+// ---------------------------------------------------------------------------
+
+/// Request body for `PATCH /admin/realms/{realm}/config`.
+///
+/// Only `default_required_actions` is exposed in v1. Future fields may be
+/// added without breaking existing callers because unknown JSON keys are
+/// silently ignored by `serde`.
+#[derive(Debug, Deserialize)]
+pub struct PatchRealmConfigBody {
+    /// Replaces the realm's full `default_required_actions` list.
+    ///
+    /// Pass an empty array (`[]`) to clear the default. All strings must
+    /// be valid v1 action types (`"VERIFY_EMAIL"`, `"UPDATE_PASSWORD"`);
+    /// unknown values return 400.
+    pub default_required_actions: Vec<String>,
+}
+
+/// `PATCH /admin/realms/{realm}/config`
+///
+/// Replaces the realm's `default_required_actions` list. The change only
+/// affects users created after this call; existing users are unmodified.
+///
+/// Requires realm-admin token; returns 403 otherwise.
+/// Unknown action type strings return 400.
+/// Returns 200 with the updated [`crate::identity::Realm`] JSON.
+pub async fn admin_api_realm_config_patch(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(_session): RequireAdmin,
+    target: TargetRealm,
+    AxumPath(_realm_name): AxumPath<String>,
+    axum::Json(body): axum::Json<PatchRealmConfigBody>,
+) -> Response {
+    use crate::identity::{RequiredAction, UpdateRealmRequest};
+
+    // Validate and parse action strings.
+    let mut actions: Vec<RequiredAction> = Vec::with_capacity(body.default_required_actions.len());
+    for s in &body.default_required_actions {
+        match serde_json::from_value::<RequiredAction>(serde_json::Value::String(s.clone())) {
+            Ok(a) => actions.push(a),
+            Err(_) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({ "error": format!("unknown action type: {s}") })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Build updated config: take existing config, replace default_required_actions.
+    let mut config = target.0.config().clone();
+    config.default_required_actions = actions;
+
+    match state.identity.update_realm(
+        target.id(),
+        &UpdateRealmRequest {
+            config: Some(config),
+            ..Default::default()
+        },
+    ) {
+        Ok(realm) => axum::Json(realm).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "update_realm failed in realm_config_patch");
+            super::handlers_common::server_error()
+        }
+    }
 }
 
 #[cfg(test)]

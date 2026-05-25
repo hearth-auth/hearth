@@ -2735,6 +2735,155 @@ fn process_csv_import(
     summary
 }
 
+// ---------------------------------------------------------------------------
+// Required actions (HEA-807)
+// ---------------------------------------------------------------------------
+
+/// Request body for `PATCH /admin/realms/{realm}/users/{user_id}/required-actions`.
+#[derive(Debug, Deserialize)]
+pub struct PatchRequiredActionsBody {
+    /// Action type strings to add (e.g. `"VERIFY_EMAIL"`).
+    #[serde(default)]
+    pub add: Vec<String>,
+    /// Action type strings to remove.
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// `PATCH /admin/realms/{realm}/users/{user_id}/required-actions`
+///
+/// Adds or removes required actions on a specific user. Only realm admins
+/// may call this endpoint; non-admins receive 403. Unknown action type
+/// strings receive 400.
+///
+/// Returns 200 with the updated [`User`] JSON.
+pub async fn admin_api_user_required_actions_patch(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(session): RequireAdmin,
+    target: TargetRealm,
+    AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
+    axum::Json(body): axum::Json<PatchRequiredActionsBody>,
+) -> Response {
+    use crate::audit::{AuditAction, CreateAuditEvent};
+    use crate::identity::{RequiredAction, UpdateUserRequest};
+
+    // Parse user ID.
+    let uid = match user_id.parse::<uuid::Uuid>() {
+        Ok(u) => crate::core::UserId::new(u),
+        Err(_) => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({ "error": "user not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate and parse action strings.
+    let mut add_actions: Vec<RequiredAction> = Vec::with_capacity(body.add.len());
+    for s in &body.add {
+        match serde_json::from_value::<RequiredAction>(serde_json::Value::String(s.clone())) {
+            Ok(a) => add_actions.push(a),
+            Err(_) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({ "error": format!("unknown action type: {s}") })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    let mut remove_actions: Vec<RequiredAction> = Vec::with_capacity(body.remove.len());
+    for s in &body.remove {
+        match serde_json::from_value::<RequiredAction>(serde_json::Value::String(s.clone())) {
+            Ok(a) => remove_actions.push(a),
+            Err(_) => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({ "error": format!("unknown action type: {s}") })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Fetch the current user.
+    let user = match state.identity.get_user(target.id(), &uid) {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({ "error": "user not found" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "get_user failed in required_actions_patch");
+            return super::handlers_common::server_error();
+        }
+    };
+
+    // Compute the new required_actions list.
+    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
+    for a in &add_actions {
+        if !actions.contains(a) {
+            actions.push(a.clone());
+        }
+    }
+    actions.retain(|a| !remove_actions.contains(a));
+
+    // Persist via update_user.
+    let updated = match state.identity.update_user(
+        target.id(),
+        &uid,
+        &UpdateUserRequest {
+            required_actions: Some(actions),
+            ..Default::default()
+        },
+    ) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!(error = %e, "update_user failed in required_actions_patch");
+            return super::handlers_common::server_error();
+        }
+    };
+
+    // Emit audit events — one per added action, one per removed action.
+    let admin_id = session.user_id.as_uuid().to_string();
+    for a in &add_actions {
+        if let Err(e) = state.audit.append(&CreateAuditEvent {
+            realm_id: target.id().clone(),
+            actor: admin_id.clone(),
+            action: AuditAction::RequiredActionAssigned,
+            resource_type: "user".to_string(),
+            resource_id: uid.as_uuid().to_string(),
+            metadata: Some(serde_json::json!({
+                "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                "admin_id": admin_id,
+            })),
+        }) {
+            tracing::warn!(error = %e, "required_action_assigned audit append failed");
+        }
+    }
+    for a in &remove_actions {
+        if let Err(e) = state.audit.append(&CreateAuditEvent {
+            realm_id: target.id().clone(),
+            actor: admin_id.clone(),
+            action: AuditAction::RequiredActionRemoved,
+            resource_type: "user".to_string(),
+            resource_id: uid.as_uuid().to_string(),
+            metadata: Some(serde_json::json!({
+                "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                "admin_id": admin_id,
+            })),
+        }) {
+            tracing::warn!(error = %e, "required_action_removed audit append failed");
+        }
+    }
+
+    axum::Json(updated).into_response()
+}
+
 /// Looks up a role by slug name and assigns it to the user (best-effort, silent on miss).
 fn assign_role_by_slug(
     state: &Arc<WebState>,
