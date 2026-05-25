@@ -24,6 +24,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`VERIFY_EMAIL` required-action flow** — new endpoints let required-action tokens with
+  `VERIFY_EMAIL` pending send and redeem single-use email verification links without an
+  additional login:
+  - `POST /v1/required-actions/request-email-verification` (auth: `VERIFY_EMAIL` required-action
+    JWT) — generates a 24-hour token, returns 202 with `{"verification_token": "..."}`.
+    Rate-limited to 3 requests per user per hour; each resend supersedes the previous token.
+  - `GET /v1/required-actions/verify-email?token={raw_token}` — redeems the token, clears
+    `VERIFY_EMAIL`, and returns a full-access token pair (or another required-action token
+    if further actions remain). Returns 410 Gone for expired or already-redeemed tokens
+    (HEA-754).
+
 - **Required-actions admin endpoints** — operators can now manage a user's pending-action
   set without direct DB access (HEA-755):
   - `POST /admin/users/{id}/required-actions` — adds an action (`UPDATE_PASSWORD`,
