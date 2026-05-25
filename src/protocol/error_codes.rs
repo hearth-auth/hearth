@@ -323,6 +323,8 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::Unauthorized => Some(FORBIDDEN),
         IdentityError::SystemRealmProtected { .. } => Some(SYSTEM_REALM_PROTECTED),
         IdentityError::RequiredActionsPending => Some(REQUIRED_ACTIONS_PENDING),
+        IdentityError::EmailVerificationTokenExpired
+        | IdentityError::EmailVerificationTokenInvalid => None,
 
         // 5xx — do not leak internal detail
         IdentityError::SigningError { .. }

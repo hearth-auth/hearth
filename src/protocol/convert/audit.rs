@@ -85,7 +85,8 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         | domain::AuditAction::BackupCreated
         | domain::AuditAction::BackupRestored
         | domain::AuditAction::RequiredActionAdded
-        | domain::AuditAction::RequiredActionRemoved => pb::AuditAction::Unspecified,
+        | domain::AuditAction::RequiredActionRemoved
+        | domain::AuditAction::EmailVerified => pb::AuditAction::Unspecified,
     }
 }
 

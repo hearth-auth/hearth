@@ -101,7 +101,11 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::TokenRevoked
         | IdentityError::PasswordExpired
         | IdentityError::PasswordReused
-        | IdentityError::RequiredActionsPending => (Code::FailedPrecondition, err.to_string()),
+        | IdentityError::RequiredActionsPending
+        | IdentityError::EmailVerificationTokenExpired
+        | IdentityError::EmailVerificationTokenInvalid => {
+            (Code::FailedPrecondition, err.to_string())
+        }
         IdentityError::RateLimited
         | IdentityError::MemberLimitReached
         | IdentityError::TokenTooLarge { .. } => (Code::ResourceExhausted, err.to_string()),

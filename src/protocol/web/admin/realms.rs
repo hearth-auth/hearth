@@ -390,6 +390,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::BackupRestored => "Backup Restored",
         A::RequiredActionAdded => "Required Action Added",
         A::RequiredActionRemoved => "Required Action Removed",
+        A::EmailVerified => "Email Verified",
     }
 }
 
@@ -481,6 +482,7 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::BackupRestored
         | A::RequiredActionAdded
         | A::RequiredActionRemoved
+        | A::EmailVerified
         | A::Cleanup => "System",
     }
 }

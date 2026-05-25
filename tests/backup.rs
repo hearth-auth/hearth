@@ -239,6 +239,7 @@ async fn test_restore_preserves_signing_keys() {
         roles: Vec::new(),
         groups: Vec::new(),
         permissions: Vec::new(),
+        required_actions: Vec::new(),
         custom: BTreeMap::new(),
     };
     let pre_restore_jwt = src_signing_key.issue_token(&claims).expect("issue jwt");

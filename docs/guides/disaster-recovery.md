@@ -45,6 +45,29 @@ yourself about to break one, stop and escalate before continuing.
    suspected key leak — do this explicitly with `rotate_realm_signing_key`,
    never by deleting the archive's `signing_key.json`.
 
+   **Verify, don't hope.** After any restore, prove signing-key continuity
+   by diffing the JWKS `kid` you captured before the incident against the
+   restored deployment's JWKS:
+
+   ```bash
+   # Pre-incident snapshot (capture this routinely as part of healthy ops):
+   curl -fsS https://auth.example.com/realms/<realm>/.well-known/jwks.json \
+     | jq -r '.keys[0].kid' > /backups/jwks-kid-<realm>.txt
+
+   # After restore — compare against the snapshot:
+   diff /backups/jwks-kid-<realm>.txt \
+        <(curl -fsS https://auth.example.com/realms/<realm>/.well-known/jwks.json \
+            | jq -r '.keys[0].kid')
+   # Empty diff = key preserved. Any difference = key was regenerated and
+   # every pre-restore JWT (per-realm-signed OIDC tokens, ID tokens,
+   # client_credentials grants) will fail signature verification.
+   ```
+
+   The same check appears in the [Full-restore procedure](#full-restore-procedure)
+   step 3 and the [Test-restore drill checklist](#test-restore-drill-checklist).
+   It is cheap, deterministic, and the only way to convert "the restore
+   worked" from a hope into a measurement.
+
 ---
 
 ## SST corruption recovery

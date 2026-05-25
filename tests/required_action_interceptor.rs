@@ -198,7 +198,7 @@ async fn multiple_pending_actions_all_listed_in_token() {
         .expect("decode access token");
 
     assert_eq!(claims.token_type, "required_action");
-    let pending: BTreeSet<RequiredAction> = claims.required_actions.iter().cloned().collect();
+    let pending: BTreeSet<RequiredAction> = claims.required_actions.iter().copied().collect();
     assert!(
         pending.contains(&RequiredAction::UpdatePassword),
         "must list UpdatePassword"

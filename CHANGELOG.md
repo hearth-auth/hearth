@@ -24,6 +24,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`POST /v1/required-actions/update-password`** — new endpoint that accepts a
+  required-action JWT, validates the new password against the realm policy, rotates the
+  credential to Argon2id, clears `UPDATE_PASSWORD` from the pending-action set, and returns
+  a fresh full-access token pair (or a new required-action token if other actions remain).
+  Replay attacks on a completed token are rejected with 401 via stored-state check (HEA-753).
+
 - **HA failover simulation suite** — four deterministic multi-node Raft simulation tests
   covering network partition heal, leader kill mid-write, rolling restart with zero read
   errors, and snapshot-based catch-up for a cold follower. All tests run in-process via an
