@@ -388,6 +388,8 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::IpLoginLimitExceeded => "IP Login Limit Exceeded",
         A::BackupCreated => "Backup Created",
         A::BackupRestored => "Backup Restored",
+        A::RequiredActionAdded => "Required Action Added",
+        A::RequiredActionRemoved => "Required Action Removed",
     }
 }
 
@@ -477,6 +479,8 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::ScimGroupDeleted
         | A::BackupCreated
         | A::BackupRestored
+        | A::RequiredActionAdded
+        | A::RequiredActionRemoved
         | A::Cleanup => "System",
     }
 }

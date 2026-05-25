@@ -52,6 +52,7 @@ pub struct BulkResult<T> {
 /// Stored as a `BTreeSet<RequiredAction>` per user under the `rqa:` storage prefix.
 /// The set is empty when no actions are pending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[non_exhaustive]
 pub enum RequiredAction {
     /// The user must change their password before proceeding.

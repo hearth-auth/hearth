@@ -448,6 +448,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/users/{id}/effective-permissions",
             axum::routing::get(admin_get_user_effective_permissions),
         )
+        .route(
+            "/users/{id}/required-actions",
+            axum::routing::post(admin_add_required_action),
+        )
+        .route(
+            "/users/{id}/required-actions/{action}",
+            axum::routing::delete(admin_remove_required_action),
+        )
         .route("/audit", axum::routing::get(admin_list_audit))
         .route(
             "/roles",
@@ -3986,6 +3994,142 @@ async fn admin_revoke_user_consent(
                 })),
             });
             (StatusCode::NO_CONTENT, ()).into_response()
+        }
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Required-actions admin endpoints
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /admin/users/{id}/required-actions`.
+#[derive(serde::Deserialize)]
+struct AddRequiredActionBody {
+    action: crate::identity::RequiredAction,
+}
+
+/// `POST /admin/users/{id}/required-actions` — adds a required action to the
+/// user's pending-action set (idempotent).
+///
+/// Requires an admin token. Returns `200 OK` with `{"user_id":"…","pending_actions":[…]}`.
+/// Returns `422` when the action name is not a known `RequiredAction` variant.
+async fn admin_add_required_action(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(user_id_str): axum::extract::Path<String>,
+    Json(body): Json<AddRequiredActionBody>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    let Ok(uuid) = user_id_str.parse::<uuid::Uuid>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid user_id"})),
+        )
+            .into_response();
+    };
+    let user_id = UserId::new(uuid);
+
+    match state
+        .identity
+        .add_required_action(&auth.realm_id, &user_id, body.action)
+    {
+        Ok(()) => {
+            let pending = match state.identity.pending_actions(&auth.realm_id, &user_id) {
+                Ok(p) => p,
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            };
+            let _ = state.audit.append(&crate::audit::CreateAuditEvent {
+                realm_id: auth.realm_id.clone(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::RequiredActionAdded,
+                resource_type: "user".to_string(),
+                resource_id: user_id.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({
+                    "action": serde_json::to_value(body.action).unwrap_or(serde_json::Value::Null),
+                    "target_user": user_id.as_uuid().to_string(),
+                })),
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "user_id": user_id.as_uuid().to_string(),
+                    "pending_actions": pending,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+/// `DELETE /admin/users/{id}/required-actions/{action}` — removes a required
+/// action from the user's pending-action set (idempotent).
+///
+/// Requires an admin token. Returns `200 OK` with updated `{"user_id":"…","pending_actions":[…]}`.
+/// Returns `422` when `{action}` is not a known `RequiredAction` variant.
+async fn admin_remove_required_action(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path((user_id_str, action_str)): axum::extract::Path<(String, String)>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    let Ok(uuid) = user_id_str.parse::<uuid::Uuid>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid user_id"})),
+        )
+            .into_response();
+    };
+    let action: crate::identity::RequiredAction =
+        match serde_json::from_value(serde_json::Value::String(action_str.clone())) {
+            Ok(a) => a,
+            Err(_) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": format!("unknown required action: {action_str}")
+                    })),
+                )
+                    .into_response();
+            }
+        };
+    let user_id = UserId::new(uuid);
+
+    match state
+        .identity
+        .remove_required_action(&auth.realm_id, &user_id, action)
+    {
+        Ok(()) => {
+            let pending = match state.identity.pending_actions(&auth.realm_id, &user_id) {
+                Ok(p) => p,
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            };
+            let _ = state.audit.append(&crate::audit::CreateAuditEvent {
+                realm_id: auth.realm_id.clone(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::RequiredActionRemoved,
+                resource_type: "user".to_string(),
+                resource_id: user_id.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({
+                    "action": serde_json::to_value(action).unwrap_or(serde_json::Value::Null),
+                    "target_user": user_id.as_uuid().to_string(),
+                })),
+            });
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "user_id": user_id.as_uuid().to_string(),
+                    "pending_actions": pending,
+                })),
+            )
+                .into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
     }

@@ -195,6 +195,14 @@ pub enum AuditAction {
     /// Metadata carries `dry_run` (`"true"` / `"false"`) and the list of
     /// restored realm slugs.
     BackupRestored,
+    /// An admin added a required action to a user's pending-action set.
+    ///
+    /// Metadata carries `action` (the action name) and `target_user` (user ID).
+    RequiredActionAdded,
+    /// An admin removed a required action from a user's pending-action set.
+    ///
+    /// Metadata carries `action` (the action name) and `target_user` (user ID).
+    RequiredActionRemoved,
 }
 
 impl AuditAction {
@@ -272,6 +280,8 @@ impl AuditAction {
             Self::IpLoginLimitExceeded,
             Self::BackupCreated,
             Self::BackupRestored,
+            Self::RequiredActionAdded,
+            Self::RequiredActionRemoved,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -347,6 +357,8 @@ impl AuditAction {
             Self::IpLoginLimitExceeded => "ip_login_limit_exceeded",
             Self::BackupCreated => "backup_created",
             Self::BackupRestored => "backup_restored",
+            Self::RequiredActionAdded => "required_action_added",
+            Self::RequiredActionRemoved => "required_action_removed",
         }
     }
 }
@@ -423,6 +435,8 @@ impl std::str::FromStr for AuditAction {
             "ip_login_limit_exceeded" => Ok(Self::IpLoginLimitExceeded),
             "backup_created" => Ok(Self::BackupCreated),
             "backup_restored" => Ok(Self::BackupRestored),
+            "required_action_added" => Ok(Self::RequiredActionAdded),
+            "required_action_removed" => Ok(Self::RequiredActionRemoved),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -507,7 +521,9 @@ impl AuditAction {
             | Self::LoginFailed
             | Self::IpLoginLimitExceeded
             | Self::BackupCreated
-            | Self::BackupRestored => LogOnly,
+            | Self::BackupRestored
+            | Self::RequiredActionAdded
+            | Self::RequiredActionRemoved => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
