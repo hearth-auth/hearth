@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **HTTP auth helpers now return 403 for required-action tokens** — `extract_admin_auth`,
+  `me_permissions`, and `extract_user_auth` were returning 401 `invalid_token` for
+  `RequiredActionsPending`, masking the real reason and preventing clients from
+  distinguishing an invalid token from one that needs action completion. All three now
+  return 403 with `error: required_actions_pending` and
+  `error_code: HEARTH_REQUIRED_ACTIONS_PENDING` (HEA-760).
+
 - **`introspect_token` now rejects required-action tokens** — previously, a valid
   non-expired required-action token was returned as `active: true` by the RFC 7662
   introspection endpoint, allowing resource servers to accept it as a bearer credential
