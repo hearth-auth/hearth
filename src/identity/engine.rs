@@ -5467,6 +5467,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(IntrospectionResponse::inactive());
         }
 
+        // Required-action tokens must not be accepted as bearer credentials (RFC 7662 §2.2).
+        if claims.token_type == REQUIRED_ACTION_TOKEN_TYPE {
+            return Ok(IntrospectionResponse::inactive());
+        }
+
         // 4. Check session validity (if session-bound) or JTI blocklist (if sessionless)
         if claims.sid != "none" {
             let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);

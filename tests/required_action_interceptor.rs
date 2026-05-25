@@ -10,12 +10,15 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use hearth::identity::{
     AuthorizationRequest, CleartextPassword, CodeChallengeMethod, CreateRealmRequest,
     CreateUserRequest, IdentityEngine, PasswordGrantRequest, RegisterClientRequest, RequiredAction,
-    TokenExchangeRequest,
+    TokenExchangeRequest, TokenIntrospectionRequest,
 };
+use hearth::protocol::http::{router, AppState};
+use tokio::net::TcpListener;
 
 const TEST_PKCE_VERIFIER: &str = "S4gKJfVNgWiFl2PQ8RxXS7E6Mhr9BqyTvUIe3WoA5Zc";
 
@@ -416,4 +419,175 @@ async fn auth_code_exchange_with_pending_action_returns_required_action_token() 
     );
     assert!(claims.permissions.is_empty());
     assert!(claims.exp - claims.iat <= 900);
+}
+
+// ===== HEA-759: introspect_token must return active:false for required-action tokens =====
+
+#[tokio::test]
+async fn introspect_required_action_token_is_inactive() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let (realm_id, user_id, email, password) = setup_realm_user_password(identity).await;
+
+    identity
+        .add_required_action(&realm_id, &user_id, RequiredAction::UpdatePassword)
+        .expect("add action");
+
+    let response = identity
+        .password_grant_token(
+            &realm_id,
+            &PasswordGrantRequest {
+                email,
+                password,
+                scope: None,
+            },
+        )
+        .expect("password_grant_token");
+
+    // Confirm the token is actually a required-action token before introspecting
+    let claims =
+        hearth::identity::decode_claims_unverified(response.access_token()).expect("decode");
+    assert_eq!(claims.token_type, "required_action");
+
+    // RFC 7662 §2.2: introspection must return active:false — required-action tokens
+    // are not authorized for resource access and must not be treated as bearer credentials.
+    let introspect = identity
+        .introspect_token(
+            &realm_id,
+            &TokenIntrospectionRequest {
+                token: response.access_token().to_string(),
+                token_type_hint: None,
+            },
+        )
+        .expect("introspect_token should not error");
+
+    assert!(
+        !introspect.active,
+        "introspect_token must return active:false for a required-action token (HEA-759)"
+    );
+}
+
+// ===== HEA-760: HTTP auth helpers return 403 (not 401) for required-action tokens =====
+
+/// Starts an in-process axum server, returns `(base_url, identity_arc, shutdown_tx)`.
+async fn start_http_server() -> (
+    String,
+    Arc<dyn IdentityEngine>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("embedded harness");
+    let identity = harness.identity_arc();
+    let state = Arc::new(AppState::new_dev(
+        Arc::clone(&identity),
+        harness.rbac_arc(),
+        harness.audit_arc(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind random port");
+    let port = listener.local_addr().expect("local addr").port();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _harness = harness;
+        axum::serve(listener, router(state))
+            .with_graceful_shutdown(async {
+                rx.await.ok();
+            })
+            .await
+            .ok();
+    });
+    (format!("http://127.0.0.1:{port}"), identity, tx)
+}
+
+/// `GET /v1/me/permissions` with a required-action token must return 403
+/// with `error_code: HEARTH_REQUIRED_ACTIONS_PENDING` (not 401 invalid_token).
+///
+/// Covers the `me_permissions` handler path in `extract_user_auth` (HEA-760).
+#[tokio::test]
+async fn required_action_token_at_me_permissions_returns_403() {
+    let (base, identity, _shutdown) = start_http_server().await;
+
+    // Bootstrap: create realm + user with password via the identity engine directly.
+    let realm = identity
+        .create_realm(&CreateRealmRequest {
+            name: format!("hea760-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+    let realm_id = realm.id().clone();
+
+    let email = format!("user-{}@hea760.test", uuid::Uuid::new_v4());
+    let user = identity
+        .create_user(
+            &realm_id,
+            &CreateUserRequest {
+                email: email.clone(),
+                display_name: "HEA-760 Test".to_string(),
+                first_name: "Test".to_string(),
+                last_name: "User".to_string(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+
+    let pw = CleartextPassword::from_string("Hearth_760_P@ssword!".to_string());
+    identity
+        .set_password(&realm_id, user.id(), &pw)
+        .expect("set password");
+
+    identity
+        .add_required_action(&realm_id, user.id(), RequiredAction::UpdatePassword)
+        .expect("add required action");
+
+    // Obtain a required-action token via the password grant.
+    let grant_resp = identity
+        .password_grant_token(
+            &realm_id,
+            &PasswordGrantRequest {
+                email,
+                password: "Hearth_760_P@ssword!".to_string(),
+                scope: None,
+            },
+        )
+        .expect("password_grant_token");
+
+    let claims =
+        hearth::identity::decode_claims_unverified(grant_resp.access_token()).expect("decode");
+    assert_eq!(
+        claims.token_type, "required_action",
+        "precondition: must be a required-action token"
+    );
+
+    // Hit a helper-protected endpoint with the required-action token.
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/v1/me/permissions"))
+        .header("X-Realm-ID", realm_id.as_uuid().to_string())
+        .header(
+            "Authorization",
+            format!("Bearer {}", grant_resp.access_token()),
+        )
+        .send()
+        .await
+        .expect("GET /v1/me/permissions");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "required-action token must yield 403 Forbidden, not {}",
+        resp.status()
+    );
+
+    let body: serde_json::Value = resp.json().await.expect("parse response body");
+    assert_eq!(
+        body["error_code"].as_str(),
+        Some("HEARTH_REQUIRED_ACTIONS_PENDING"),
+        "error_code must be HEARTH_REQUIRED_ACTIONS_PENDING, got: {body}"
+    );
+    assert_eq!(
+        body["error"].as_str(),
+        Some("required_actions_pending"),
+        "error field must be required_actions_pending, got: {body}"
+    );
 }
