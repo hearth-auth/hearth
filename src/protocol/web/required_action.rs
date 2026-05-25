@@ -639,7 +639,10 @@ pub async fn verify_email_confirm(
     }
 
     match state.identity.verify_email_token(&realm, &q.token) {
-        Ok(_verified_user_id) => {
+        Ok(verified_user_id) => {
+            if verified_user_id != user_id {
+                return handlers_common::bad_request("Verification token does not match session");
+            }
             // Remove VERIFY_EMAIL from the user's persistent required_actions.
             if let Ok(Some(user)) = state.identity.get_user(&realm, &user_id) {
                 let updated: Vec<RequiredAction> = user
