@@ -186,10 +186,40 @@ When a user's token is issued in an org context, the `oid` claim is set and org-
 
 ---
 
+## Federation (Social Login / SSO)
+
+Hearth supports external IdP federation — Google, GitHub, Microsoft, Apple, generic OIDC, and SAML — via declarative connectors in `hearth.yaml`.
+
+### YAML owns the connectors
+
+Federation providers follow the same **config-as-code** model as RBAC roles and OAuth applications: `hearth.yaml` is the authoritative source, and Hearth reconciles storage with the YAML state on every startup or `SIGHUP`. As a result:
+
+- **The Admin UI's Identity Providers page is read-only.** It is an inspection surface, not a management surface.
+- To **add** a provider: add it to `hearth.yaml`, then reload.
+- To **change** a provider: update the YAML entry, then reload.
+- To **remove** a provider: delete the YAML entry, then reload. Existing users who authenticated via that provider keep their local identity.
+
+This design keeps secrets (client IDs, client secrets, SAML certificates) in version-controlled config files with access controls, rather than in the database where any admin UI user could view or modify them.
+
+### Account-linking policy
+
+When a federated login arrives with an email that matches an existing local account, Hearth checks the realm's `federation.link_existing_accounts` policy:
+
+| Value | Behavior |
+|---|---|
+| `confirm` (default) | User must re-authenticate with their local credential before the external identity is linked. Safe default — prevents account takeover via email spoofing. |
+| `auto` | External identity is linked immediately on verified-email match. Suitable when the upstream IdP verifies emails. |
+| `disabled` | Always JIT-provision a new account; never link to an existing one. |
+
+→ See [Federation examples](hearth-yaml-examples.md#part-4--social-login--federation) for YAML configuration for each provider type.
+
+---
+
 ## Further reading
 
 - [Getting Started](getting-started.md) — hands-on curl walkthrough
 - [RBAC guide](rbac.md) — creating roles, assigning permissions, managing groups, SDK helpers
 - [Organizations guide](organizations.md) — B2B multi-tenancy within a realm
+- [Federation examples](hearth-yaml-examples.md#part-4--social-login--federation) — Google, GitHub, Microsoft, Apple, SAML YAML config
 - [Security hardening](security-hardening.md) — production TLS, token TTLs, rate limiting
-- [Configuration reference](../../README.md#configuration) — full `hearth.yaml` option list
+- [Configuration reference](../specs/CONFIGURATION.md#realmsnamedfederation) — full federation field reference

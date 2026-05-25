@@ -28,8 +28,10 @@ on:
     # HEA-680: tighten triggers — benchmarks only matter when storage hot-path
     # code, benchmark sources, or the dependency graph change. Doc-only,
     # template-only, or SDK-only PRs no longer burn ~60min of runner time.
+    # HEA-739: added src/identity/** so validate_token hot-path changes trigger.
     paths:
       - "src/storage/**"
+      - "src/identity/**"
       - "benches/**"
       - "Cargo.lock"
       - "Cargo.toml"
@@ -43,6 +45,7 @@ on:
     # when there's actually a benchmark-relevant change.
     paths:
       - "src/storage/**"
+      - "src/identity/**"
       - "benches/**"
       - "Cargo.lock"
       - "Cargo.toml"
@@ -123,6 +126,12 @@ jobs:
           PROTOC=${{ env.PROTOC }} cargo bench --bench demotion_latency -- \
             --noplot 2>&1
 
+      - name: Run validate_token benchmark (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          PROTOC=${{ env.PROTOC }} cargo bench --bench validate_token -- \
+            --noplot 2>&1
+
       # ── main push: save fresh baselines to cache for future PRs ─────────────
       # --save-baseline main writes to target/criterion/.../main/estimates.json.
 
@@ -142,6 +151,12 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           PROTOC=${{ env.PROTOC }} cargo bench --bench demotion_latency -- \
+            --save-baseline main --noplot 2>&1
+
+      - name: Run validate_token benchmark (main)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          PROTOC=${{ env.PROTOC }} cargo bench --bench validate_token -- \
             --save-baseline main --noplot 2>&1
 
       # ── main push: persist freshly-run baselines for future PRs ─────────────

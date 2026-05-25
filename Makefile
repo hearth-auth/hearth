@@ -121,7 +121,7 @@ ci-fast: fmt clippy proto-lint css-check test-quality
 
 ## CI benchmark gate: compile and run hot-path perf threshold gates.
 ##
-## Three bench binaries run in sequence; each asserts p50 and p99 targets
+## Four bench binaries run in sequence; each asserts p50/p99 targets
 ## before Criterion sampling begins. Non-zero exit fails the Standard CI tier.
 ##
 ## rbac_check gates:
@@ -138,10 +138,15 @@ ci-fast: fmt clippy proto-lint css-check test-quality
 ##   pre-demotion read p99     ≤ 500 µs
 ##   during-demotion read p99  ≤ 500 µs
 ##   post-demotion read p99    ≤ 500 µs
+##
+## validate_token gates (HEA-739):
+##   validate_token latency    p99 ≤ 1 ms  (1×runner headroom over 500 µs production target)
+##   validate_token allocs     ≤ 64 allocs/call (regression ceiling)
 bench-gate:
 	PROTOC=$(PROTOC) cargo bench --bench rbac_check $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench storage_gate $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench demotion_latency $(CARGO_FLAGS)
+	PROTOC=$(PROTOC) cargo bench --bench validate_token $(CARGO_FLAGS)
 
 ## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate (merge).
 ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate

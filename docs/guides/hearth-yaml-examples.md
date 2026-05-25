@@ -430,6 +430,10 @@ realms:
 
 ## Part 4 — Social Login / Federation
 
+> **`hearth.yaml` is the source of truth for federation providers.** The Admin UI's Identity Providers page is a **read-only inspection surface** — you cannot add, edit, or delete connectors from the UI. To add or modify a provider, update `hearth.yaml` and either restart the server or send `SIGHUP` to hot-reload. Removing a provider key from YAML removes the connector; users who authenticated via that provider retain their local identity but can no longer use the federated login.
+>
+> This is an intentional "config-as-code" design: federation connectors contain secrets and endpoint URLs that belong in version-controlled config files, not in a database modified through a UI.
+
 Federation providers are configured per-realm under `realms.<name>.federation.providers`. Each
 provider entry is keyed by the operator-assigned name that appears in the login URL as
 `?idp=<name>`.
