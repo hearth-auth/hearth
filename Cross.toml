@@ -1,0 +1,6 @@
+# cross configuration — installs build-time dependencies inside the Docker
+# containers used for cross-compilation targets.
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+  "apt-get update -qq && apt-get install -y protobuf-compiler",
+]

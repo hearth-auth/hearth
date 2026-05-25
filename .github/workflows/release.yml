@@ -48,6 +48,18 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
+      - name: Install protoc (Linux native)
+        if: runner.os == 'Linux' && matrix.use_cross != true
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y protobuf-compiler
+          echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf
+          echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+
       - name: Install cross
         if: matrix.use_cross == true
         uses: taiki-e/install-action@v2
