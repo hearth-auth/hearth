@@ -24,6 +24,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **HA failover simulation suite** — four deterministic multi-node Raft simulation tests
+  covering network partition heal, leader kill mid-write, rolling restart with zero read
+  errors, and snapshot-based catch-up for a cold follower. All tests run in-process via an
+  in-memory network factory with no TLS or real ports (HEA-738).
+
 - **`VERIFY_EMAIL` required-action flow** — new endpoints let required-action tokens with
   `VERIFY_EMAIL` pending send and redeem single-use email verification links without an
   additional login:
