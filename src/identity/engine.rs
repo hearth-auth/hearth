@@ -153,8 +153,8 @@ use crate::identity::types::{
     ImportUserRequest, InvitationStatus, Organization, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
     PendingAuthorizationRequest, Realm, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, Session, SessionContext, UpdateOrganizationRequest, UpdateRealmRequest,
-    UpdateUserRequest, User, UserStatus,
+    RegistrationPolicy, RequiredAction, Session, SessionContext, UpdateOrganizationRequest,
+    UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::webauthn::{
@@ -9955,6 +9955,72 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             post_logout_redirect_uri,
             state: request.state.clone(),
         })
+    }
+
+    fn add_required_action(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        action: RequiredAction,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_required_action_key(user_id);
+        let mut set = load_required_actions(&*self.storage, realm_id, &key)?;
+        if set.insert(action) {
+            let bytes = serde_json::to_vec(&set).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+            self.storage
+                .put_batch(realm_id, &[(key, bytes)])
+                .map_err(Self::storage_err)?;
+        }
+        Ok(())
+    }
+
+    fn remove_required_action(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        action: RequiredAction,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_required_action_key(user_id);
+        let mut set = load_required_actions(&*self.storage, realm_id, &key)?;
+        if set.remove(&action) {
+            let bytes = serde_json::to_vec(&set).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+            self.storage
+                .put_batch(realm_id, &[(key, bytes)])
+                .map_err(Self::storage_err)?;
+        }
+        Ok(())
+    }
+
+    fn pending_actions(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<BTreeSet<RequiredAction>, IdentityError> {
+        let key = keys::encode_required_action_key(user_id);
+        load_required_actions(&*self.storage, realm_id, &key)
+    }
+}
+
+/// Loads the `BTreeSet<RequiredAction>` for a user from storage.
+///
+/// Returns an empty set when the key is absent (no actions pending).
+fn load_required_actions(
+    storage: &dyn StorageEngine,
+    realm_id: &RealmId,
+    key: &[u8],
+) -> Result<BTreeSet<RequiredAction>, IdentityError> {
+    match storage.get(realm_id, key) {
+        Ok(Some(bytes)) => {
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })
+        }
+        Ok(None) => Ok(BTreeSet::new()),
+        Err(e) => Err(IdentityError::Storage(Box::new(e))),
     }
 }
 

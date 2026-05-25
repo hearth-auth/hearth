@@ -55,8 +55,9 @@ pub use types::{
     MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
-    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, Session, SessionContext,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
+    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction, Session,
+    SessionContext, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User,
+    UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -1512,4 +1513,38 @@ pub trait IdentityEngine: Send + Sync {
     /// The caller is responsible for encrypting the bytes before writing
     /// them to an archive. Used exclusively by the backup exporter.
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError>;
+
+    // ===== Required actions =====
+
+    /// Adds a required action to the user's pending-action set.
+    ///
+    /// The operation is idempotent: adding an action that is already present
+    /// is a no-op. The set is persisted via a single `put_batch` WAL record so
+    /// a mid-write crash leaves the set either fully updated or unchanged.
+    fn add_required_action(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        action: RequiredAction,
+    ) -> Result<(), IdentityError>;
+
+    /// Removes a required action from the user's pending-action set.
+    ///
+    /// Idempotent: removing an action not in the set succeeds silently.
+    fn remove_required_action(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        action: RequiredAction,
+    ) -> Result<(), IdentityError>;
+
+    /// Returns the set of actions the user must complete before proceeding.
+    ///
+    /// Served from the memtable (zero WAL I/O on the hot path). Returns an
+    /// empty set when no actions are pending or the user record does not exist.
+    fn pending_actions(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<std::collections::BTreeSet<RequiredAction>, IdentityError>;
 }

@@ -1299,6 +1299,30 @@ pub(crate) fn attempt_tracker_scan_prefix() -> Vec<u8> {
     ATTEMPT_TRACKER_PREFIX.as_bytes().to_vec()
 }
 
+// ===== Required-action keys =====
+
+/// Prefix for per-user pending required-action sets.
+const REQUIRED_ACTION_PREFIX: &str = "rqa:";
+
+/// Encodes the storage key for a user's pending required-action set.
+///
+/// Format: `rqa:{user_uuid}`
+///
+/// The realm scope is provided by the `StorageEngine` handle; no realm
+/// segment is embedded in the key (same convention as `cred:user:`,
+/// `mfa:totp:`, etc.).
+pub(crate) fn encode_required_action_key(user_id: &UserId) -> Vec<u8> {
+    format!("{REQUIRED_ACTION_PREFIX}{}", user_id.as_uuid()).into_bytes()
+}
+
+/// Returns the scan prefix for all required-action keys in a realm.
+///
+/// Format: `rqa:`
+#[allow(dead_code)]
+pub(crate) fn required_action_scan_prefix() -> Vec<u8> {
+    REQUIRED_ACTION_PREFIX.as_bytes().to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1838,6 +1862,46 @@ mod tests {
         for p in &legacy_prefixes {
             assert!(!fed.starts_with(p));
             assert!(!p.starts_with(&fed));
+        }
+    }
+
+    // ===== Required-action key tests =====
+
+    #[test]
+    fn encode_required_action_key_format() {
+        let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("valid uuid");
+        let user_id = UserId::new(uuid);
+        let key = encode_required_action_key(&user_id);
+        let key_str = std::str::from_utf8(&key).expect("utf8");
+        assert_eq!(key_str, "rqa:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn required_action_key_starts_with_scan_prefix() {
+        let user_id = UserId::generate();
+        let key = encode_required_action_key(&user_id);
+        assert!(key.starts_with(&required_action_scan_prefix()));
+    }
+
+    #[test]
+    fn different_users_produce_different_required_action_keys() {
+        let key1 = encode_required_action_key(&UserId::generate());
+        let key2 = encode_required_action_key(&UserId::generate());
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn required_action_prefix_does_not_overlap_with_other_prefixes() {
+        let rqa = required_action_scan_prefix();
+        let others = [
+            user_id_scan_prefix(),
+            session_id_scan_prefix(),
+            org_id_scan_prefix(),
+            attempt_tracker_scan_prefix(),
+        ];
+        for p in &others {
+            assert!(!rqa.starts_with(p), "rqa overlaps with {p:?}");
+            assert!(!p.starts_with(&rqa), "prefix {p:?} overlaps with rqa");
         }
     }
 }

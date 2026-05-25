@@ -47,6 +47,19 @@ pub struct BulkResult<T> {
     pub result: Result<T, String>,
 }
 
+/// An action the user is required to complete before accessing protected resources.
+///
+/// Stored as a `BTreeSet<RequiredAction>` per user under the `rqa:` storage prefix.
+/// The set is empty when no actions are pending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum RequiredAction {
+    /// The user must change their password before proceeding.
+    UpdatePassword,
+    /// The user must verify their email address before proceeding.
+    VerifyEmail,
+}
+
 /// The lifecycle status of a user account.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserStatus {
