@@ -161,10 +161,11 @@ struct ConsentTemplate {
 pub async fn authorize_get(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    headers: axum::http::HeaderMap,
     Query(q): Query<AuthorizeQuery>,
 ) -> Response {
     let realm = session.realm_id.clone();
-    authorize_get_impl(&state, &session, &realm, &q).await
+    authorize_get_impl(&state, &session, &realm, &q, &headers).await
 }
 
 /// Realm-scoped variant at `GET /ui/realms/{realm}/oauth/authorize`.
@@ -175,6 +176,7 @@ pub async fn authorize_get_scoped(
     State(state): State<Arc<WebState>>,
     session: UiSession,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
     Query(q): Query<AuthorizeQuery>,
 ) -> Response {
     let Ok(Some(realm)) = state.identity.get_realm_by_name(&realm_name) else {
@@ -183,7 +185,7 @@ pub async fn authorize_get_scoped(
     if realm.id() != &session.realm_id {
         return handlers_common::not_found("Realm not found");
     }
-    authorize_get_impl(&state, &session, realm.id(), &q).await
+    authorize_get_impl(&state, &session, realm.id(), &q, &headers).await
 }
 
 #[allow(clippy::unused_async, clippy::too_many_lines)]
@@ -192,6 +194,7 @@ async fn authorize_get_impl(
     session: &UiSession,
     realm: &RealmId,
     q: &AuthorizeQuery,
+    headers: &axum::http::HeaderMap,
 ) -> Response {
     // 1. Basic parameter validation before we reveal anything about the client.
     if q.response_type != "code" {
@@ -244,7 +247,20 @@ async fn authorize_get_impl(
         );
     }
 
-    // 4. Canonicalize requested scopes once for consent matching.
+    // 4. Required-action intercept (AC-1): runs after auth, before code issuance.
+    let now = Timestamp::from_micros(now_micros());
+    if let Some(ra_response) = super::required_action::required_action_check(
+        state,
+        realm,
+        &session.user_id,
+        q,
+        headers,
+        now,
+    ) {
+        return ra_response;
+    }
+
+    // 5. Canonicalize requested scopes once for consent matching.
     let requested_scopes = canonicalize_scopes(
         q.scope
             .split_whitespace()
@@ -252,7 +268,7 @@ async fn authorize_get_impl(
             .collect::<Vec<_>>(),
     );
 
-    // 5. Existing consent lookup.
+    // 6. Existing consent lookup.
     let existing = match state
         .identity
         .get_consent(realm, &session.user_id, &client_id)
@@ -267,7 +283,7 @@ async fn authorize_get_impl(
         .as_ref()
         .is_some_and(|r| r.covers(&requested_scopes));
 
-    // 6. OIDC prompt handling.
+    // 7. OIDC prompt handling.
     let force_prompt = q.prompt == "consent";
     let silent_only = q.prompt == "none";
 
@@ -299,8 +315,7 @@ async fn authorize_get_impl(
         );
     }
 
-    // 7. Store pending-auth + redirect to consent page.
-    let now = Timestamp::from_micros(now_micros());
+    // 8. Store pending-auth + redirect to consent page.
     let pending = PendingAuthorizationRequest {
         user_id: session.user_id.clone(),
         client_id: client_id.clone(),

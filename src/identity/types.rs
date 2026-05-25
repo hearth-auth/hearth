@@ -71,6 +71,38 @@ pub enum RequiredAction {
     UpdatePassword,
 }
 
+impl RequiredAction {
+    /// Canonical execution priority. Lower numbers run first.
+    ///
+    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`. Used to sort pending actions
+    /// into a deterministic order regardless of storage insertion order.
+    #[must_use]
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::VerifyEmail => 1,
+            Self::UpdatePassword => 2,
+        }
+    }
+
+    /// URL path segment used in `/required-action/{action}` routes.
+    #[must_use]
+    pub fn as_path_segment(self) -> &'static str {
+        match self {
+            Self::VerifyEmail => "VERIFY_EMAIL",
+            Self::UpdatePassword => "UPDATE_PASSWORD",
+        }
+    }
+
+    /// Parse from a URL path segment (case-sensitive, SCREAMING_SNAKE_CASE).
+    pub fn from_path_segment(s: &str) -> Option<Self> {
+        match s {
+            "VERIFY_EMAIL" => Some(Self::VerifyEmail),
+            "UPDATE_PASSWORD" => Some(Self::UpdatePassword),
+            _ => None,
+        }
+    }
+}
+
 /// A user record within a realm.
 ///
 /// Fields are private; access via accessor methods. Email is always stored

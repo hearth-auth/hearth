@@ -14,7 +14,8 @@ use ring::rand::SecureRandom;
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
-    ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId, Uri, UserId, WebhookId,
+    ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, Uri, UserId,
+    WebhookId,
 };
 use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
@@ -2952,6 +2953,37 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         Ok(jwks)
+    }
+
+    fn generate_ra_token(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        pending_actions: Vec<crate::identity::types::RequiredAction>,
+        oidc_params: crate::identity::ra_token::OidcParams,
+        now: Timestamp,
+    ) -> Result<String, IdentityError> {
+        let key = self.get_or_load_realm_signing_key(realm_id)?;
+        crate::identity::ra_token::generate(
+            &user_id.as_uuid().to_string(),
+            &realm_id.as_uuid().to_string(),
+            pending_actions,
+            oidc_params,
+            &key,
+            now,
+        )
+    }
+
+    fn validate_ra_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        now: Timestamp,
+    ) -> Result<crate::identity::ra_token::RaClaims, crate::identity::ra_token::RaTokenError> {
+        let key = self
+            .get_or_load_realm_signing_key(realm_id)
+            .map_err(|_| crate::identity::ra_token::RaTokenError::InvalidSignature)?;
+        crate::identity::ra_token::validate(token, key.public_key_bytes(), now)
     }
 
     fn rotate_realm_signing_key(

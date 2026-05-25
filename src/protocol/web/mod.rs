@@ -59,6 +59,7 @@ pub(crate) mod handlers_common;
 pub mod mailcatcher;
 pub mod oauth_consent;
 pub mod realm_resolver;
+pub mod required_action;
 pub mod saml;
 pub mod security;
 pub(crate) mod templates;
@@ -1024,6 +1025,15 @@ pub fn router(state: WebState) -> Router {
             "/admin/realms/{realm}/users/{id}/applications/{client_id}/revoke",
             axum::routing::post(admin::admin_user_consent_revoke),
         )
+        .route(
+            "/admin/realms/{realm}/users/{id}/required-actions",
+            axum::routing::patch(admin::admin_api_user_required_actions_patch),
+        )
+        // --- Realm config (HEA-807) ---
+        .route(
+            "/admin/realms/{realm}/config",
+            axum::routing::patch(admin::admin_api_realm_config_patch),
+        )
         // --- Realm meta (workspace landing, delete, admin grants, claims) ---
         .route(
             "/admin/realms/{realm}",
@@ -1386,6 +1396,11 @@ pub fn router(state: WebState) -> Router {
         .route("/favicon.ico", axum::routing::get(serve_favicon))
         .route("/favicon.svg", axum::routing::get(serve_favicon))
         .nest("/ui", ui_routes)
+        // --- Required-Action pages (outside /ui; cookie Path=/required-action) ---
+        .route(
+            "/required-action/{action}",
+            axum::routing::get(required_action::action_page).post(required_action::action_complete),
+        )
         // Branded 404 for any /ui/* path that no nested route matched, plus
         // every other unrouted path on the web tree. Without this, axum's
         // default falls through with an empty body and the browser paints
