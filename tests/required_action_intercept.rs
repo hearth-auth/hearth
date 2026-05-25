@@ -464,7 +464,7 @@ async fn multiple_required_actions_sequential_completion() {
         "each step must issue a fresh RA JWT"
     );
 
-    // Step 3: complete UPDATE_PASSWORD → all done, flow resumes with auth code.
+    // Step 3: complete UPDATE_PASSWORD — now requires a new-password form submission.
     let resp3 = rig
         .app
         .clone()
@@ -472,8 +472,11 @@ async fn multiple_required_actions_sequential_completion() {
             Request::builder()
                 .method("POST")
                 .uri("/required-action/UPDATE_PASSWORD")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token_2}"))
-                .body(Body::empty())
+                .body(Body::from(
+                    "new_password=NewSecurePass1!&confirm_password=NewSecurePass1!",
+                ))
                 .expect("req"),
         )
         .await

@@ -203,6 +203,10 @@ pub enum AuditAction {
     ///
     /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `admin_id`.
     RequiredActionRemoved,
+    /// A required action was completed by the user during the OIDC intercept flow.
+    ///
+    /// Metadata carries `action_type` (e.g. `"UPDATE_PASSWORD"`).
+    RequiredActionCompleted,
 }
 
 impl AuditAction {
@@ -282,6 +286,7 @@ impl AuditAction {
             Self::BackupRestored,
             Self::RequiredActionAssigned,
             Self::RequiredActionRemoved,
+            Self::RequiredActionCompleted,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -359,6 +364,7 @@ impl AuditAction {
             Self::BackupRestored => "backup_restored",
             Self::RequiredActionAssigned => "required_action_assigned",
             Self::RequiredActionRemoved => "required_action_removed",
+            Self::RequiredActionCompleted => "required_action_completed",
         }
     }
 }
@@ -437,6 +443,7 @@ impl std::str::FromStr for AuditAction {
             "backup_restored" => Ok(Self::BackupRestored),
             "required_action_assigned" => Ok(Self::RequiredActionAssigned),
             "required_action_removed" => Ok(Self::RequiredActionRemoved),
+            "required_action_completed" => Ok(Self::RequiredActionCompleted),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -523,7 +530,8 @@ impl AuditAction {
             | Self::BackupCreated
             | Self::BackupRestored
             | Self::RequiredActionAssigned
-            | Self::RequiredActionRemoved => LogOnly,
+            | Self::RequiredActionRemoved
+            | Self::RequiredActionCompleted => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
