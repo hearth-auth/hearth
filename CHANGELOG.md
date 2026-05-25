@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Required actions on users** — user records now carry a `required_actions`
+  list (`VERIFY_EMAIL`, `UPDATE_PASSWORD`). Realms may set
+  `default_required_actions` so every new user is created with those actions
+  pre-populated. Existing stored users deserialize with an empty list (no manual
+  migration needed). Admins may clear or replace the list via the update-user API
+  (HEA-801).
+
 - **Release signing workflow** — every `v*` tag now produces signed release
   binaries for `linux-amd64`, `linux-arm64`, `darwin-amd64`, and `darwin-arm64`
   via `.github/workflows/release.yml`.  Supply-chain trust artefacts included in
