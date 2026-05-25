@@ -7,6 +7,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **`introspect_token` now rejects required-action tokens** — previously, a valid
+  non-expired required-action token was returned as `active: true` by the RFC 7662
+  introspection endpoint, allowing resource servers to accept it as a bearer credential
+  and bypass required-action enforcement entirely. The endpoint now returns
+  `active: false` for all tokens with `token_type = "required_action"` (HEA-759).
+
 ### Added
 
 - **Required-actions admin endpoints** — operators can now manage a user's pending-action
