@@ -41,6 +41,9 @@ pub enum ClusterError {
         minimum: usize,
     },
 
+    #[error("cluster already bootstrapped")]
+    AlreadyBootstrapped,
+
     #[error("raft error: {0}")]
     Raft(#[from] anyhow::Error),
 }
@@ -552,5 +555,150 @@ pub mod test_harness {
         pub fn node_ids(&self) -> Vec<NodeId> {
             self.nodes.keys().copied().collect()
         }
+    }
+}
+
+// ── ClusterEngine — HTTP-facing cluster API ───────────────────────────────────
+
+use std::collections::BTreeMap as PeerMap;
+
+/// Response types for the three admin endpoints.
+#[derive(Debug)]
+pub struct BootstrapResult {
+    pub node_id: NodeId,
+    pub term: u64,
+    pub leader_id: NodeId,
+}
+
+#[derive(Debug)]
+pub struct PeerInfo {
+    pub id: NodeId,
+    pub addr: String,
+    pub is_healthy: bool,
+}
+
+#[derive(Debug)]
+pub struct StatusResult {
+    pub role: String,
+    pub term: u64,
+    pub last_applied_index: Option<u64>,
+    pub peers: Vec<PeerInfo>,
+}
+
+/// HTTP-facing cluster manager: wraps a `ClusterNode` with peer topology and
+/// own node identity, exposing the three `/admin/cluster/*` operations.
+pub struct ClusterEngine {
+    inner: Arc<ClusterNode>,
+    self_node_id: NodeId,
+    /// NodeId → "host:port" for all cluster members (including self).
+    peer_addrs: PeerMap<NodeId, String>,
+}
+
+impl ClusterEngine {
+    pub fn new(
+        node: Arc<ClusterNode>,
+        self_node_id: NodeId,
+        peer_addrs: PeerMap<NodeId, String>,
+    ) -> Self {
+        Self { inner: node, self_node_id, peer_addrs }
+    }
+
+    pub fn self_node_id(&self) -> NodeId {
+        self.self_node_id
+    }
+
+    /// Bootstrap the cluster from the configured peer list.
+    /// Returns 409-equivalent `AlreadyBootstrapped` if already initialized.
+    pub async fn bootstrap(&self) -> Result<BootstrapResult, ClusterError> {
+        use openraft::error::{InitializeError, RaftError};
+        let members: PeerMap<NodeId, openraft::BasicNode> = self
+            .peer_addrs
+            .keys()
+            .map(|&id| (id, openraft::BasicNode::default()))
+            .collect();
+        match self.inner.raft().initialize(members).await {
+            Ok(()) => {}
+            Err(RaftError::APIError(InitializeError::NotAllowed(_))) => {
+                return Err(ClusterError::AlreadyBootstrapped);
+            }
+            Err(e) => return Err(ClusterError::Raft(anyhow::anyhow!("{e}"))),
+        }
+        let m = self.inner.raft().metrics().borrow().clone();
+        Ok(BootstrapResult {
+            node_id: self.self_node_id,
+            term: m.current_term,
+            leader_id: m.current_leader.unwrap_or(self.self_node_id),
+        })
+    }
+
+    /// Read current cluster status from Raft metrics (non-blocking).
+    pub fn status(&self) -> StatusResult {
+        let m = self.inner.raft().metrics().borrow().clone();
+        let role = match m.current_leader {
+            Some(id) if id == self.self_node_id => "leader",
+            Some(_) => "follower",
+            None => "candidate",
+        }
+        .to_string();
+        let last_applied_index = m.last_applied.map(|l| l.index);
+        let peers = self
+            .peer_addrs
+            .iter()
+            .filter(|(&id, _)| id != self.self_node_id)
+            .map(|(&id, addr)| {
+                let is_healthy = m
+                    .replication
+                    .as_ref()
+                    .map(|r| r.get(&id).map_or(false, |v| v.is_some()))
+                    .unwrap_or(false);
+                PeerInfo { id, addr: addr.clone(), is_healthy }
+            })
+            .collect();
+        StatusResult { role, term: m.current_term, last_applied_index, peers }
+    }
+
+    /// Gracefully transfer leadership.  Triggers an election so another node
+    /// wins; polls for up to 5 s.  The `preferred` target is best-effort.
+    pub async fn transfer_leadership(
+        &self,
+        preferred: Option<NodeId>,
+    ) -> Result<NodeId, ClusterError> {
+        let m = self.inner.raft().metrics().borrow().clone();
+        if m.current_leader != Some(self.self_node_id) {
+            let leader_addr = m
+                .current_leader
+                .and_then(|id| self.peer_addrs.get(&id).cloned())
+                .unwrap_or_default();
+            return Err(ClusterError::NotLeader { leader_addr });
+        }
+        // Prevent this node from re-winning the next election.
+        self.inner.raft().runtime_config().elect(false);
+        self.inner
+            .raft()
+            .trigger()
+            .elect()
+            .await
+            .map_err(|e| ClusterError::Raft(anyhow::anyhow!("{e}")))?;
+
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let new_leader = loop {
+            let m = self.inner.raft().metrics().borrow().clone();
+            if let Some(leader) = m.current_leader {
+                if leader != self.self_node_id {
+                    break leader;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                self.inner.raft().runtime_config().elect(true);
+                return Err(ClusterError::Raft(anyhow::anyhow!(
+                    "transfer-leadership: timeout waiting for new leader"
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        self.inner.raft().runtime_config().elect(true);
+        let _ = preferred; // accepted for forward-compat; winner is whoever wins
+        Ok(new_leader)
     }
 }

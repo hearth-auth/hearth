@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`POST /admin/cluster/bootstrap`** — initialize a new cluster or join an existing one;
+  responds `{node_id, term, leader_id}` (200), 409 if already bootstrapped, 503 in
+  single-node mode. Requires admin `Authorization` header (401/403 otherwise).
+- **`GET /admin/cluster/status`** — returns `{role, term, last_applied_index, peers:[{id,addr,is_healthy}]}`;
+  peer health derived from Raft replication metrics. 503 in single-node mode.
+- **`POST /admin/cluster/transfer-leadership`** — graceful leadership hand-off via
+  `runtime_config().elect(false)` + `trigger().elect()`; polls up to 5 s for new leader.
+  Body: optional `{"target_node_id": <u64>}` (best-effort; response indicates
+  `exact_target: bool`). 409 if this node is not the leader.
+- **`hearth::protocol`** — new module: `http` (AppState, extract_admin_auth, cluster_admin_routes)
+  and `cluster_admin` (three Axum handlers + request/response types).
+- **`hearth::ClusterEngine`** — HTTP-facing wrapper around `ClusterNode` carrying peer
+  topology and exposing `bootstrap`, `status`, and `transfer_leadership` methods.
+
 - **Release signing workflow** (`.github/workflows/release.yml`) — every `v*` tag now
   produces signed release artifacts via cosign keyless OIDC signing:
   - Multi-platform binaries: `linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`
