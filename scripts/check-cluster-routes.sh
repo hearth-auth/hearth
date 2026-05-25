@@ -6,6 +6,11 @@
 # absent but the routes ARE wired up). The gate fails if any route returns 404,
 # which would mean the route is missing from the router entirely.
 #
+# MAINTAINER NOTE: When a new cluster admin route ships, it must be added to
+# TWO places: docs/guides/clustering.md AND the check_route calls below.
+# Updating only the docs will not make CI catch a missing route — this script
+# is the durable enforcement mechanism.
+#
 # Usage:
 #   ./scripts/check-cluster-routes.sh            # auto-builds debug binary
 #   BINARY=./target/release/hearth ./scripts/check-cluster-routes.sh
