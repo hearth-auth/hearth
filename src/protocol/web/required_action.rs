@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use askama::Template;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
@@ -396,6 +396,337 @@ pub fn next_required_action(
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// GET /required-action/VERIFY_EMAIL
+// ---------------------------------------------------------------------------
+
+/// Rendered by `GET /required-action/VERIFY_EMAIL`.
+#[derive(Template)]
+#[template(path = "ui/required_action/verify_email.html")]
+struct VerifyEmailPageTemplate {
+    /// Masked/full email address shown on the "check your email" page.
+    user_email: Option<String>,
+    // Layout chrome.
+    chrome: bool,
+    active: &'static str,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    theme_css: String,
+    realm_theme_css: Option<String>,
+}
+
+/// Rendered by `GET /required-action/VERIFY_EMAIL/confirm` when the token is
+/// expired or invalid.
+#[derive(Template)]
+#[template(path = "ui/required_action/verify_email_expired.html")]
+struct VerifyEmailExpiredTemplate {
+    // Layout chrome.
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    theme_css: String,
+    realm_theme_css: Option<String>,
+}
+
+/// Query parameters for `GET /required-action/VERIFY_EMAIL/confirm`.
+#[derive(Debug, Deserialize)]
+pub struct VerifyEmailConfirmQuery {
+    /// The plaintext verification token from the emailed link.
+    #[serde(default)]
+    pub token: String,
+}
+
+/// Renders the "check your email" page for the VERIFY_EMAIL required action.
+///
+/// Before sending the verification email, checks if the user's email is already
+/// verified in storage (auto-clear scenario for migration artifacts). If so,
+/// clears the VERIFY_EMAIL action and advances the OIDC flow without sending
+/// another email (AC-8 / OQ-3 resolution).
+pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return Redirect::to("/").into_response();
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let secure = state.is_secure_request(&headers);
+
+    // Look up the user to get email and email_verified status.
+    let Ok(Some(user)) = state.identity.get_user(&realm, &user_id) else {
+        return handlers_common::server_error();
+    };
+
+    // Auto-clear: if the email is already verified in storage, skip sending
+    // another email and advance the OIDC flow directly (OQ-3 / AC-8).
+    if user.email_verified() {
+        if let Err(e) = state.identity.update_user(
+            &realm,
+            &user_id,
+            &UpdateUserRequest {
+                required_actions: Some(
+                    user.required_actions()
+                        .iter()
+                        .filter(|&&a| a != RequiredAction::VerifyEmail)
+                        .copied()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+        ) {
+            tracing::warn!(
+                error = %e,
+                "verify_email_page: auto-clear failed to update required_actions"
+            );
+        }
+
+        if let Err(e) = state.audit.append(&CreateAuditEvent {
+            realm_id: realm.clone(),
+            actor: user_id.as_uuid().to_string(),
+            action: AuditAction::RequiredActionAutoCleared,
+            resource_type: "user".to_string(),
+            resource_id: user_id.as_uuid().to_string(),
+            metadata: Some(serde_json::json!({
+                "action_type": "VERIFY_EMAIL",
+                "reason": "email_already_verified"
+            })),
+        }) {
+            tracing::warn!(error = %e, "verify_email_page: auto-clear audit append failed");
+        }
+
+        let remaining: Vec<RequiredAction> = claims
+            .pending_actions
+            .into_iter()
+            .filter(|a| *a != RequiredAction::VerifyEmail)
+            .collect();
+
+        return if remaining.is_empty() {
+            resume_oidc_flow(&state, &realm, &claims.sub, claims.oidc_params, secure)
+        } else {
+            next_required_action(
+                &state,
+                &realm,
+                &claims.sub,
+                remaining,
+                claims.oidc_params,
+                secure,
+                now,
+            )
+        };
+    }
+
+    // Issue a new verification token and send the email (best-effort).
+    match state
+        .identity
+        .issue_email_verification_token(&realm, &user_id)
+    {
+        Ok(verify_token) => {
+            if let Some(email_svc) = state.email.as_ref() {
+                let base = state
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.onboarding.base_url.as_deref())
+                    .unwrap_or("http://localhost")
+                    .trim_end_matches('/');
+                let verify_url = format!(
+                    "{base}/required-action/VERIFY_EMAIL/confirm?token={}",
+                    percent_encode_string(&verify_token)
+                );
+                if let Err(e) =
+                    email_svc.send_verification_email(user.email(), &verify_url, None, None, None)
+                {
+                    tracing::warn!(error = %e, "verify_email_page: failed to send verification email");
+                }
+            } else {
+                tracing::warn!("verify_email_page: no email transport configured");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "verify_email_page: issue_email_verification_token failed");
+        }
+    }
+
+    let tmpl = VerifyEmailPageTemplate {
+        user_email: Some(user.email().to_string()),
+        chrome: false,
+        active: "",
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        theme_css: state.theme_css.clone(),
+        realm_theme_css: state.realm_theme_css(),
+    };
+    render(&tmpl)
+}
+
+/// Validates a clicked verification token and advances the OIDC flow.
+///
+/// Requires the RA session cookie (400 if absent). On success, removes
+/// VERIFY_EMAIL from the RA pending list and calls
+/// [`resume_oidc_flow`] or [`next_required_action`]. On failure, renders an
+/// error page with a link to resend the verification email.
+pub async fn verify_email_confirm(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Query(q): Query<VerifyEmailConfirmQuery>,
+) -> Response {
+    let Some(ra_cookie) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&ra_cookie) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &ra_cookie, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return Redirect::to("/").into_response();
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let secure = state.is_secure_request(&headers);
+
+    // Validate and consume the email verification token.
+    if q.token.is_empty() {
+        return render_verify_email_expired(&state);
+    }
+
+    match state.identity.verify_email_token(&realm, &q.token) {
+        Ok(_verified_user_id) => {
+            // Remove VERIFY_EMAIL from the user's persistent required_actions.
+            if let Ok(Some(user)) = state.identity.get_user(&realm, &user_id) {
+                let updated: Vec<RequiredAction> = user
+                    .required_actions()
+                    .iter()
+                    .filter(|&&a| a != RequiredAction::VerifyEmail)
+                    .copied()
+                    .collect();
+                if let Err(e) = state.identity.update_user(
+                    &realm,
+                    &user_id,
+                    &UpdateUserRequest {
+                        required_actions: Some(updated),
+                        ..Default::default()
+                    },
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        "verify_email_confirm: failed to clear VERIFY_EMAIL from user record"
+                    );
+                }
+            }
+
+            // Audit: RequiredActionCompleted.
+            if let Err(e) = state.audit.append(&CreateAuditEvent {
+                realm_id: realm.clone(),
+                actor: user_id.as_uuid().to_string(),
+                action: AuditAction::RequiredActionCompleted,
+                resource_type: "user".to_string(),
+                resource_id: user_id.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({ "action_type": "VERIFY_EMAIL" })),
+            }) {
+                tracing::warn!(error = %e, "verify_email_confirm: audit append failed");
+            }
+
+            // Advance OIDC flow.
+            let remaining: Vec<RequiredAction> = claims
+                .pending_actions
+                .into_iter()
+                .filter(|a| *a != RequiredAction::VerifyEmail)
+                .collect();
+
+            if remaining.is_empty() {
+                resume_oidc_flow(&state, &realm, &claims.sub, claims.oidc_params, secure)
+            } else {
+                next_required_action(
+                    &state,
+                    &realm,
+                    &claims.sub,
+                    remaining,
+                    claims.oidc_params,
+                    secure,
+                    now,
+                )
+            }
+        }
+        Err(IdentityError::VerificationTokenInvalid) => render_verify_email_expired(&state),
+        Err(e) => {
+            tracing::warn!(error = %e, "verify_email_confirm: unexpected error");
+            handlers_common::server_error()
+        }
+    }
+}
+
+fn render_verify_email_expired(state: &Arc<WebState>) -> Response {
+    let tmpl = VerifyEmailExpiredTemplate {
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        theme_css: state.theme_css.clone(),
+        realm_theme_css: state.realm_theme_css(),
+    };
+    render(&tmpl)
+}
+
+/// Percent-encodes a string for safe inclusion in a URL query parameter.
+fn percent_encode_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 8);
+    percent_encode_into(value, &mut out);
+    out
+}
 
 // ---------------------------------------------------------------------------
 // GET /required-action/UPDATE_PASSWORD

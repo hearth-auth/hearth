@@ -1,0 +1,35 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · Verify your email{% endblock %}
+{% block body %}
+<div class="mx-auto max-w-lg">
+  <div class="rounded-lg bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle">
+    <div class="mb-6 flex flex-col items-center text-center">
+      <div class="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-accent/[0.12]">
+        <svg class="h-6 w-6 text-accent" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+        </svg>
+      </div>
+      <p class="font-mono text-[11px] uppercase tracking-[0.14em] text-ht-content-muted">Required action</p>
+      <h1 class="font-display text-xl font-medium text-ht-content-primary">Check your email</h1>
+      <p class="mt-2 text-sm text-ht-content-muted">
+        We sent a verification link to
+        {% match user_email %}
+          {% when Some with (email) %}
+            <span class="font-medium text-ht-content-secondary">{{ email }}</span>
+          {% when None %}
+            your email address
+        {% endmatch %}
+      </p>
+      <p class="mt-1 text-sm text-ht-content-muted">
+        Click the link in the email to continue. The link expires in 24 hours.
+      </p>
+    </div>
+
+    <div class="mt-6 rounded-lg bg-ht-surface px-4 py-3 text-sm text-ht-content-muted ring-1 ring-divider-subtle">
+      <p>Didn't receive an email?
+        <a href="/required-action/VERIFY_EMAIL" class="font-medium text-accent hover:underline">Send again</a>
+      </p>
+    </div>
+  </div>
+</div>
+{% endblock %}

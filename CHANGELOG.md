@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **VERIFY_EMAIL required-action handler** — `GET /required-action/VERIFY_EMAIL` renders a
+  "check your email" page and sends a verification email; if the user's email is already
+  verified the action is auto-cleared and the OIDC flow resumes immediately (emits a
+  `RequiredActionAutoCleared` audit event with reason `email_already_verified`).
+  `GET /required-action/VERIFY_EMAIL/confirm?token={token}` validates the single-use token,
+  marks the user `email_verified=true`, clears the action, emits a
+  `RequiredActionCompleted` audit event, and resumes the OIDC authorization flow (HEA-808).
+
 - **UPDATE_PASSWORD required-action handler** — `GET /required-action/UPDATE_PASSWORD`
   renders a password-change form; `POST /required-action/UPDATE_PASSWORD` validates the new
   password against realm policy, updates the credential, clears the action from the user
