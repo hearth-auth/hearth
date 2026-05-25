@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none" role="img" aria-label="Hearth">
+  <defs>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop offset="0%"   stop-color="#f5b544"/>
+      <stop offset="55%"  stop-color="#e8743b"/>
+      <stop offset="100%" stop-color="#a8321f"/>
+    </linearGradient>
+  </defs>
+  <!-- Stylised flame / ember mark -->
+  <path d="M20 4 C20 4 28 12 28 20 C28 25.5 24.5 30 20 32 C15.5 30 12 25.5 12 20 C12 14 16 8 20 4Z"
+        fill="url(#ember)"/>
+  <path d="M20 16 C20 16 23.5 20 23.5 23 C23.5 25.5 22 27.5 20 28.5 C18 27.5 16.5 25.5 16.5 23 C16.5 20 18.5 17.5 20 16Z"
+        fill="#141418" opacity="0.55"/>
+</svg>
