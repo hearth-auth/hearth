@@ -304,6 +304,34 @@ pub(crate) fn extract_admin_auth(
     Ok(AdminAuth { realm_id, user_id })
 }
 
+/// Extracts and validates admin authentication for cluster-level operations.
+///
+/// Identical to [`extract_admin_auth`] but additionally asserts that the
+/// `X-Realm-ID` header identifies the **system realm** (nil UUID). Cluster
+/// operations are node-wide, not realm-scoped; accepting a tenant-realm token
+/// would allow a tenant admin to transfer Raft leadership or bootstrap the
+/// cluster — a privilege-escalation vector (HEA-763).
+///
+/// Returns `403 Forbidden` with `"cluster admin requires system realm"` if the
+/// realm is non-nil, even when the bearer token is otherwise valid.
+///
+/// **Future note:** if `extract_admin_auth` is ever changed to support
+/// non-realm-scoped tokens (e.g. a static allowlist), this function still
+/// provides the correct boundary for cluster endpoints.
+pub(crate) fn extract_cluster_admin_auth(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<AdminAuth, (StatusCode, Json<serde_json::Value>)> {
+    let auth = extract_admin_auth(headers, state)?;
+    if !auth.realm_id.as_uuid().is_nil() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "cluster admin requires system realm"})),
+        ));
+    }
+    Ok(auth)
+}
+
 /// Checks the admin API rate limit for a user.
 ///
 /// Returns 429 if the user has exceeded 100 requests in the current

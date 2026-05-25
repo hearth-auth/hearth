@@ -10,7 +10,9 @@
 //! | `POST` | `/admin/cluster/transfer-leadership` | Graceful leader handoff |
 //!
 //! All endpoints require a valid admin token (`hearth.admin` permission) via
-//! `Authorization: Bearer <token>` and `X-Realm-ID` headers.
+//! `Authorization: Bearer <token>` and `X-Realm-ID: <nil-uuid>` headers.
+//! The realm ID **must** be the system (nil) realm; tenant-realm tokens are
+//! rejected with 403 to prevent privilege escalation (HEA-763).
 
 use std::sync::Arc;
 
@@ -22,7 +24,7 @@ use openraft::ServerState;
 use serde::Deserialize;
 
 use crate::cluster::ClusterError;
-use crate::protocol::http::{extract_admin_auth, AppState};
+use crate::protocol::http::{extract_cluster_admin_auth, AppState};
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
@@ -38,7 +40,7 @@ pub(crate) async fn admin_cluster_bootstrap(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(e) = extract_admin_auth(&headers, &state) {
+    if let Err(e) = extract_cluster_admin_auth(&headers, &state) {
         return e.into_response();
     }
 
@@ -107,7 +109,7 @@ pub(crate) async fn admin_cluster_status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(e) = extract_admin_auth(&headers, &state) {
+    if let Err(e) = extract_cluster_admin_auth(&headers, &state) {
         return e.into_response();
     }
 
@@ -202,7 +204,7 @@ pub(crate) async fn admin_cluster_transfer_leadership(
     // body parsing — otherwise Json<T> returns 415 before the handler runs.
     raw: axum::body::Bytes,
 ) -> Response {
-    if let Err(e) = extract_admin_auth(&headers, &state) {
+    if let Err(e) = extract_cluster_admin_auth(&headers, &state) {
         return e.into_response();
     }
 

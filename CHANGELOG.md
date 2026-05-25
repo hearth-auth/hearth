@@ -7,6 +7,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **Cluster admin endpoints now require system-realm token** — `POST /admin/cluster/bootstrap`,
+  `GET /admin/cluster/status`, and `POST /admin/cluster/transfer-leadership` previously
+  accepted any valid tenant-realm admin token, allowing a tenant admin to invoke
+  node-wide Raft operations (privilege escalation). All three endpoints now return
+  `403 Forbidden` with `"cluster admin requires system realm"` when the `X-Realm-ID`
+  header is not the nil UUID (HEA-763).
+
+
 ### Added
 
 - **HA failover simulation suite** — four deterministic multi-node Raft simulation tests
