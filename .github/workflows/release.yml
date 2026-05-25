@@ -68,11 +68,15 @@ jobs:
 
       - name: Build (cross)
         if: matrix.use_cross == true
-        run: cross build --release --target ${{ matrix.target }} -p hearth
+        # --locked forbids resolving any Cargo.lock changes during the build.
+        # Required for SLSA L1 reproducibility (HEA-786).
+        run: cross build --locked --release --target ${{ matrix.target }} -p hearth
 
       - name: Build (cargo)
         if: matrix.use_cross != true
-        run: cargo build --release --target ${{ matrix.target }} -p hearth
+        # --locked forbids resolving any Cargo.lock changes during the build.
+        # Required for SLSA L1 reproducibility (HEA-786).
+        run: cargo build --locked --release --target ${{ matrix.target }} -p hearth
 
       - name: Stage binary
         run: cp target/${{ matrix.target }}/release/hearth ${{ matrix.artifact }}
