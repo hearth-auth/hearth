@@ -268,11 +268,18 @@ pub(crate) fn extract_admin_auth(
     let claims = state
         .identity
         .validate_token(&realm_id, token)
-        .map_err(|_| {
-            (
+        .map_err(|e| match e {
+            crate::identity::IdentityError::RequiredActionsPending => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "required_actions_pending",
+                    "error_code": "HEARTH_REQUIRED_ACTIONS_PENDING"
+                })),
+            ),
+            _ => (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "invalid token"})),
-            )
+            ),
         })?;
 
     // sub is "user_{uuid}" — strip prefix to get raw UUID
@@ -2238,6 +2245,16 @@ async fn me_permissions(
 
     let claims = match state.identity.validate_token(&realm_id, token) {
         Ok(c) => c,
+        Err(crate::identity::IdentityError::RequiredActionsPending) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "required_actions_pending",
+                    "error_code": "HEARTH_REQUIRED_ACTIONS_PENDING"
+                })),
+            )
+                .into_response();
+        }
         Err(_) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -3829,11 +3846,18 @@ fn extract_user_auth(
     let claims = state
         .identity
         .validate_token(realm_id, token)
-        .map_err(|_| {
-            (
+        .map_err(|e| match e {
+            crate::identity::IdentityError::RequiredActionsPending => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "required_actions_pending",
+                    "error_code": "HEARTH_REQUIRED_ACTIONS_PENDING"
+                })),
+            ),
+            _ => (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "invalid_token"})),
-            )
+            ),
         })?;
 
     uuid::Uuid::parse_str(&claims.sub)
