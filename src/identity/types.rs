@@ -120,6 +120,9 @@ pub struct User {
     /// Pending actions the user must complete. Absent in old records = [].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     required_actions: Vec<RequiredAction>,
+    /// Whether the user's email address has been verified. Absent in old records = false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    email_verified: bool,
     created_at: Timestamp,
     updated_at: Timestamp,
 }
@@ -146,6 +149,7 @@ impl User {
             attributes: BTreeMap::new(),
             status,
             required_actions,
+            email_verified: false,
             created_at,
             updated_at,
         }
@@ -234,6 +238,16 @@ impl User {
     /// Replaces the required actions list. Used internally by the identity engine.
     pub(crate) fn set_required_actions(&mut self, actions: Vec<RequiredAction>) {
         self.required_actions = actions;
+    }
+
+    /// Returns whether the user's email address has been verified.
+    pub fn email_verified(&self) -> bool {
+        self.email_verified
+    }
+
+    /// Marks the user's email as verified. Used internally by the identity engine.
+    pub(crate) fn set_email_verified(&mut self, verified: bool) {
+        self.email_verified = verified;
     }
 
     /// Updates the `updated_at` timestamp.

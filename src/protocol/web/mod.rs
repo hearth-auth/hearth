@@ -1399,6 +1399,14 @@ pub fn router(state: WebState) -> Router {
         // --- Required-Action pages (outside /ui; cookie Path=/required-action) ---
         // Specific action routes take precedence over the generic {action} wildcard.
         .route(
+            "/required-action/VERIFY_EMAIL/confirm",
+            axum::routing::get(required_action::verify_email_confirm),
+        )
+        .route(
+            "/required-action/VERIFY_EMAIL",
+            axum::routing::get(required_action::verify_email_page),
+        )
+        .route(
             "/required-action/UPDATE_PASSWORD",
             axum::routing::get(required_action::update_password_page)
                 .post(required_action::update_password_submit),

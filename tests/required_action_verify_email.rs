@@ -1,9 +1,10 @@
-//! Integration tests for the Required-Action OIDC interceptor (HEA-806).
+//! Integration tests for the VERIFY_EMAIL required-action handler (HEA-808).
 //!
 //! Covers:
-//! * AC-1: authorize route intercepts users with pending required actions
-//! * AC-3: sequential multi-action completion
-//! * AC-5: users with no required actions proceed normally (no-op path)
+//! * Normal flow: page renders, email sent, confirm link validates token and resumes OIDC
+//! * Expired/invalid token: confirm route renders error page (does not advance RA state)
+//! * Auto-clear: user whose email is already verified is advanced without re-verification
+//! * Missing RA cookie: 400 on both page and confirm routes
 
 use std::sync::Arc;
 
@@ -24,8 +25,8 @@ use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig};
 use tower::ServiceExt;
 
-const COOKIE_SECRET: [u8; 32] = [7u8; 32];
-const PASSWORD: &str = "test-password-hearth";
+const COOKIE_SECRET: [u8; 32] = [9u8; 32];
+const PASSWORD: &str = "test-password-hearth-ve";
 const PKCE_VERIFIER: &str = "dGVzdC12ZXJpZmllci10aGlzLWlzLTQzLWNoYXJhY3RlcnM";
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -54,7 +55,7 @@ struct Rig {
     client: OAuthClient,
 }
 
-fn build_rig_with_realm_actions(default_actions: Vec<RequiredAction>) -> Rig {
+fn build_rig() -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     std::mem::forget(temp);
@@ -86,9 +87,9 @@ fn build_rig_with_realm_actions(default_actions: Vec<RequiredAction>) -> Rig {
 
     let realm = identity
         .create_realm(&CreateRealmRequest {
-            name: format!("ra-test-{}", uuid::Uuid::new_v4()),
+            name: format!("ve-test-{}", uuid::Uuid::new_v4()),
             config: Some(RealmConfig {
-                default_required_actions: default_actions,
+                default_required_actions: vec![RequiredAction::VerifyEmail],
                 ..Default::default()
             }),
         })
@@ -98,12 +99,10 @@ fn build_rig_with_realm_actions(default_actions: Vec<RequiredAction>) -> Rig {
         .register_client(
             realm.id(),
             &RegisterClientRequest {
-                client_name: "Test App".to_string(),
+                client_name: "VE Test App".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
                 require_consent: false,
                 grant_types: vec!["authorization_code".to_string()],
-                // FirstParty trust level bypasses consent (engine ignores require_consent field;
-                // it derives consent requirement from trust_level == ThirdParty).
                 trust_level: hearth::identity::ClientTrustLevel::FirstParty,
                 ..Default::default()
             },
@@ -123,7 +122,7 @@ fn build_rig_with_realm_actions(default_actions: Vec<RequiredAction>) -> Rig {
         Arc::clone(&audit) as _,
         onboarding,
         CookieSecret::from_bytes(COOKIE_SECRET),
-        None,
+        Some(null_email()),
     );
 
     Rig {
@@ -134,8 +133,8 @@ fn build_rig_with_realm_actions(default_actions: Vec<RequiredAction>) -> Rig {
     }
 }
 
-/// Creates an active user and returns their UserId + a valid session cookie string.
-fn create_active_user_with_session(rig: &Rig, email: &str) -> (UserId, String) {
+/// Creates an active user with VERIFY_EMAIL in required_actions.
+fn create_user_needing_email_verify(rig: &Rig, email: &str) -> (UserId, String) {
     let user = rig
         .identity
         .create_user(
@@ -157,16 +156,18 @@ fn create_active_user_with_session(rig: &Rig, email: &str) -> (UserId, String) {
             &CleartextPassword::from_string(PASSWORD.to_string()),
         )
         .expect("set password");
+    // Activate but keep VerifyEmail in required_actions.
     rig.identity
         .update_user(
             &rig.realm_id,
             user.id(),
             &UpdateUserRequest {
                 status: Some(UserStatus::Active),
+                required_actions: Some(vec![RequiredAction::VerifyEmail]),
                 ..Default::default()
             },
         )
-        .expect("activate");
+        .expect("activate with verify-email action");
 
     let session = rig
         .identity
@@ -177,7 +178,6 @@ fn create_active_user_with_session(rig: &Rig, email: &str) -> (UserId, String) {
     (user.id().clone(), cookie)
 }
 
-/// Builds a signed UI session cookie.
 fn session_cookie(realm_id: &RealmId, session_id: &SessionId, csrf: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -195,13 +195,12 @@ fn session_cookie(realm_id: &RealmId, session_id: &SessionId, csrf: &str) -> Str
     )
 }
 
-fn authorize_uri(client: &OAuthClient, scope: &str) -> String {
+fn authorize_uri(client: &OAuthClient) -> String {
     let challenge = pkce_challenge(PKCE_VERIFIER);
     format!(
-        "/ui/oauth/authorize?client_id={}&redirect_uri={}&response_type=code&scope={}&state=csrf-state&code_challenge={}&code_challenge_method=S256",
+        "/ui/oauth/authorize?client_id={}&redirect_uri={}&response_type=code&scope=openid&state=csrf-state&code_challenge={}&code_challenge_method=S256",
         client.client_id().as_uuid(),
         urlencode("https://app.example.com/cb"),
-        urlencode(scope),
         urlencode(&challenge),
     )
 }
@@ -239,111 +238,28 @@ fn ra_cookie_value(resp: &axum::response::Response) -> Option<String> {
     None
 }
 
-#[allow(dead_code)]
-async fn body_utf8(resp: axum::response::Response) -> String {
+async fn body_text(resp: axum::response::Response) -> String {
     let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.expect("body");
     String::from_utf8(bytes.to_vec()).expect("utf-8")
 }
 
 // ==========================================================================
-// AC-5: No required actions → flow proceeds normally
+// Normal flow: VERIFY_EMAIL page renders and confirm completes the action
 // ==========================================================================
 
 #[tokio::test]
-async fn no_required_actions_issues_code_normally() {
-    let rig = build_rig_with_realm_actions(vec![]);
-    let (_, cookie) = create_active_user_with_session(&rig, "clean@example.com");
+async fn verify_email_page_renders_and_confirm_resumes_oidc() {
+    let rig = build_rig();
+    let (user_id, ui_cookie) = create_user_needing_email_verify(&rig, "user@example.com");
 
+    // 1. GET authorize → intercepted at VERIFY_EMAIL.
     let resp = rig
         .app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(authorize_uri(&rig.client, "openid"))
-                .header(header::COOKIE, &cookie)
-                .body(Body::empty())
-                .expect("req"),
-        )
-        .await
-        .expect("oneshot");
-
-    // Trusted client (require_consent=false) → immediate code redirect to redirect_uri.
-    assert!(
-        resp.status().is_redirection(),
-        "expected redirect, got {}",
-        resp.status()
-    );
-    let loc = location_of(&resp).expect("Location header");
-    assert!(
-        loc.starts_with("https://app.example.com/cb?code="),
-        "expected code redirect, got: {loc}"
-    );
-    // No RA cookie should be set.
-    assert!(ra_cookie_value(&resp).is_none(), "unexpected RA cookie set");
-}
-
-// ==========================================================================
-// AC-1: Single required action → intercepts before code issuance
-// ==========================================================================
-
-#[tokio::test]
-async fn single_required_action_intercepts_authorize() {
-    let rig = build_rig_with_realm_actions(vec![RequiredAction::VerifyEmail]);
-    let (_, cookie) = create_active_user_with_session(&rig, "unverified@example.com");
-
-    let resp = rig
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(authorize_uri(&rig.client, "openid"))
-                .header(header::COOKIE, &cookie)
-                .body(Body::empty())
-                .expect("req"),
-        )
-        .await
-        .expect("oneshot");
-
-    // Must redirect to the RA action page, not to the client redirect_uri.
-    assert!(
-        resp.status().is_redirection(),
-        "expected redirect, got {}",
-        resp.status()
-    );
-    let loc = location_of(&resp).expect("Location header");
-    assert_eq!(
-        loc, "/required-action/VERIFY_EMAIL",
-        "unexpected redirect location: {loc}"
-    );
-
-    // RA session cookie must be set.
-    let ra_token = ra_cookie_value(&resp).expect("RA session cookie should be set");
-    assert!(!ra_token.is_empty(), "RA token must not be empty");
-
-    // No code should be in the location.
-    assert!(
-        !loc.contains("code="),
-        "auth code must NOT be issued during intercept"
-    );
-}
-
-// Tests the generic RA-completion framework using UPDATE_PASSWORD (which has a POST handler).
-// VERIFY_EMAIL completion is tested separately in required_action_verify_email.rs via GET /confirm.
-#[tokio::test]
-async fn single_required_action_completion_resumes_oidc_flow() {
-    let rig = build_rig_with_realm_actions(vec![RequiredAction::UpdatePassword]);
-    let (_, ui_cookie) = create_active_user_with_session(&rig, "complete@example.com");
-
-    // 1. GET authorize → intercepted, RA cookie set.
-    let resp = rig
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(authorize_uri(&rig.client, "openid"))
+                .uri(authorize_uri(&rig.client))
                 .header(header::COOKIE, &ui_cookie)
                 .body(Body::empty())
                 .expect("req"),
@@ -353,98 +269,44 @@ async fn single_required_action_completion_resumes_oidc_flow() {
 
     assert_eq!(
         location_of(&resp).as_deref(),
-        Some("/required-action/UPDATE_PASSWORD")
+        Some("/required-action/VERIFY_EMAIL"),
+        "must be intercepted at VERIFY_EMAIL"
     );
-    let ra_token = ra_cookie_value(&resp).expect("RA token");
+    let ra_token = ra_cookie_value(&resp).expect("RA cookie must be set");
 
-    // 2. POST /required-action/UPDATE_PASSWORD (action complete) with RA cookie.
+    // 2. GET /required-action/VERIFY_EMAIL → renders "check your email" page.
     let resp2 = rig
         .app
         .clone()
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri("/required-action/UPDATE_PASSWORD")
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
-                .body(Body::from(
-                    "new_password=NewSecurePass1!&confirm_password=NewSecurePass1!",
-                ))
-                .expect("req"),
-        )
-        .await
-        .expect("oneshot");
-
-    // All actions complete → must redirect to client redirect_uri with auth code.
-    assert!(
-        resp2.status().is_redirection(),
-        "expected redirect after completion, got {}",
-        resp2.status()
-    );
-    let loc2 = location_of(&resp2).expect("Location after completion");
-    assert!(
-        loc2.starts_with("https://app.example.com/cb?code="),
-        "expected code redirect after RA completion, got: {loc2}",
-    );
-    assert!(
-        loc2.contains("state=csrf-state"),
-        "state param must be preserved: {loc2}"
-    );
-
-    // RA cookie must be cleared (Max-Age=0).
-    let cleared = resp2
-        .headers()
-        .get_all(header::SET_COOKIE)
-        .iter()
-        .any(|v| v.to_str().unwrap_or("").contains("hearth_ra_session=;"));
-    assert!(
-        cleared,
-        "RA session cookie must be cleared after completion"
-    );
-}
-
-// ==========================================================================
-// AC-3: Multiple required actions → sequential completion
-// ==========================================================================
-
-#[tokio::test]
-async fn multiple_required_actions_sequential_completion() {
-    // Realm defaults: both actions required. Priority: VerifyEmail(1) first.
-    let rig = build_rig_with_realm_actions(vec![
-        RequiredAction::UpdatePassword, // stored out-of-priority-order
-        RequiredAction::VerifyEmail,
-    ]);
-    let (user_id, ui_cookie) = create_active_user_with_session(&rig, "multi@example.com");
-
-    // Step 1: authorize → intercepted, redirected to VERIFY_EMAIL (lower priority = first).
-    let resp = rig
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
                 .method("GET")
-                .uri(authorize_uri(&rig.client, "openid"))
-                .header(header::COOKIE, &ui_cookie)
+                .uri("/required-action/VERIFY_EMAIL")
+                .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
                 .body(Body::empty())
                 .expect("req"),
         )
         .await
         .expect("oneshot");
 
-    let loc = location_of(&resp).expect("location");
     assert_eq!(
-        loc, "/required-action/VERIFY_EMAIL",
-        "first action must be VERIFY_EMAIL (priority 1)"
+        resp2.status(),
+        StatusCode::OK,
+        "VERIFY_EMAIL page must return 200"
     );
-    let ra_token_1 = ra_cookie_value(&resp).expect("RA token after first intercept");
-
-    // Step 2: complete VERIFY_EMAIL via the confirm path (VERIFY_EMAIL uses GET /confirm,
-    // not the generic POST handler) → should redirect to UPDATE_PASSWORD (not to client).
-    let ve_token = rig
+    let body = body_text(resp2).await;
+    assert!(
+        body.contains("user@example.com") || body.contains("email"),
+        "page must reference the user's email or email verification: {body}"
+    );
+    // 3. Get a fresh verification token directly (simulates clicking the email link).
+    let token = rig
         .identity
         .issue_email_verification_token(&rig.realm_id, &user_id)
-        .expect("issue verification token");
-    let resp2 = rig
+        .expect("issue token");
+
+    // 4. GET /required-action/VERIFY_EMAIL/confirm?token={token} → resumes OIDC.
+    let resp3 = rig
         .app
         .clone()
         .oneshot(
@@ -452,44 +314,10 @@ async fn multiple_required_actions_sequential_completion() {
                 .method("GET")
                 .uri(format!(
                     "/required-action/VERIFY_EMAIL/confirm?token={}",
-                    urlencode(&ve_token)
+                    urlencode(&token)
                 ))
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token_1}"))
+                .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
                 .body(Body::empty())
-                .expect("req"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert!(
-        resp2.status().is_redirection(),
-        "expected redirect after first completion"
-    );
-    let loc2 = location_of(&resp2).expect("location after first completion");
-    assert_eq!(
-        loc2, "/required-action/UPDATE_PASSWORD",
-        "second action must be UPDATE_PASSWORD: {loc2}",
-    );
-    // A fresh RA token must be issued for the second action.
-    let ra_token_2 = ra_cookie_value(&resp2).expect("fresh RA token for second action");
-    assert_ne!(
-        ra_token_1, ra_token_2,
-        "each step must issue a fresh RA JWT"
-    );
-
-    // Step 3: complete UPDATE_PASSWORD — now requires a new-password form submission.
-    let resp3 = rig
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/required-action/UPDATE_PASSWORD")
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header(header::COOKIE, format!("hearth_ra_session={ra_token_2}"))
-                .body(Body::from(
-                    "new_password=NewSecurePass1!&confirm_password=NewSecurePass1!",
-                ))
                 .expect("req"),
         )
         .await
@@ -497,48 +325,184 @@ async fn multiple_required_actions_sequential_completion() {
 
     assert!(
         resp3.status().is_redirection(),
-        "expected code redirect after all actions"
+        "confirm must redirect, got {}",
+        resp3.status()
     );
-    let loc3 = location_of(&resp3).expect("final location");
+    let loc = location_of(&resp3).expect("Location after confirm");
     assert!(
-        loc3.starts_with("https://app.example.com/cb?code="),
-        "expected auth code after completing all actions: {loc3}",
+        loc.starts_with("https://app.example.com/cb?code="),
+        "must redirect to OIDC redirect_uri with auth code: {loc}"
     );
     assert!(
-        loc3.contains("state=csrf-state"),
-        "state param must be preserved: {loc3}"
+        loc.contains("state=csrf-state"),
+        "state param must be preserved: {loc}"
+    );
+
+    // RA cookie must be cleared (Max-Age=0).
+    let cleared = resp3
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .any(|v| v.to_str().unwrap_or("").contains("hearth_ra_session=;"));
+    assert!(cleared, "RA cookie must be cleared after completion");
+
+    // The user record must now have email_verified = true.
+    let user = rig
+        .identity
+        .get_user(&rig.realm_id, &user_id)
+        .expect("get user")
+        .expect("user exists");
+    assert!(
+        user.email_verified(),
+        "email_verified must be true after confirm"
     );
 }
 
 // ==========================================================================
-// Adversarial: missing / tampered RA cookie → 400
+// Expired / invalid token → error page rendered, RA state not advanced
 // ==========================================================================
 
-// VERIFY_EMAIL completes via GET /confirm, not POST. Use UPDATE_PASSWORD to test
-// the generic action_complete handler's RA-cookie guard.
 #[tokio::test]
-async fn action_complete_without_ra_cookie_returns_bad_request() {
-    let rig = build_rig_with_realm_actions(vec![]);
+async fn confirm_with_invalid_token_renders_error_page() {
+    let rig = build_rig();
+    let (_user_id, ui_cookie) = create_user_needing_email_verify(&rig, "user2@example.com");
+
+    // Intercept.
     let resp = rig
         .app
         .clone()
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri("/required-action/UPDATE_PASSWORD")
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .method("GET")
+                .uri(authorize_uri(&rig.client))
+                .header(header::COOKIE, &ui_cookie)
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot");
+    let ra_token = ra_cookie_value(&resp).expect("RA cookie");
+
+    // Confirm with an obviously invalid token.
+    let resp2 = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/required-action/VERIFY_EMAIL/confirm?token=invalid-token-abc123")
+                .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
                 .body(Body::empty())
                 .expect("req"),
         )
         .await
         .expect("oneshot");
 
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // Must render an error page (not redirect to OIDC).
+    assert_eq!(
+        resp2.status(),
+        StatusCode::OK,
+        "invalid token must render error page, not redirect"
+    );
+    let body = body_text(resp2).await;
+    assert!(
+        body.contains("expired") || body.contains("invalid") || body.contains("resend"),
+        "error page must indicate link is expired/invalid and offer resend: {body}"
+    );
 }
 
+// ==========================================================================
+// Auto-clear: user email_verified=true in storage → action auto-cleared
+// ==========================================================================
+
 #[tokio::test]
-async fn action_page_without_ra_cookie_returns_bad_request() {
-    let rig = build_rig_with_realm_actions(vec![]);
+async fn verify_email_auto_clears_when_already_verified() {
+    let rig = build_rig();
+    let (user_id, ui_cookie) = create_user_needing_email_verify(&rig, "user3@example.com");
+
+    // Mark email as verified in storage without removing the required action.
+    // We do this by consuming a verification token (which sets email_verified=true).
+    let token = rig
+        .identity
+        .issue_email_verification_token(&rig.realm_id, &user_id)
+        .expect("issue token");
+    rig.identity
+        .verify_email_token(&rig.realm_id, &token)
+        .expect("consume token — sets email_verified=true");
+
+    // VERIFY_EMAIL is still in required_actions (user must still be intercepted).
+    let user = rig
+        .identity
+        .get_user(&rig.realm_id, &user_id)
+        .expect("get")
+        .expect("exists");
+    assert!(
+        user.email_verified(),
+        "email_verified must be true after verify_email_token"
+    );
+    assert!(
+        user.required_actions()
+            .contains(&RequiredAction::VerifyEmail),
+        "VERIFY_EMAIL must still be in required_actions (not yet auto-cleared)"
+    );
+
+    // Intercept at OIDC authorize.
+    let resp = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(authorize_uri(&rig.client))
+                .header(header::COOKIE, &ui_cookie)
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        location_of(&resp).as_deref(),
+        Some("/required-action/VERIFY_EMAIL"),
+        "VERIFY_EMAIL still in required_actions → must intercept"
+    );
+    let ra_token = ra_cookie_value(&resp).expect("RA cookie");
+
+    // GET /required-action/VERIFY_EMAIL → auto-clear fires because email_verified=true.
+    let resp2 = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/required-action/VERIFY_EMAIL")
+                .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot");
+
+    // Must redirect directly to OIDC flow (no verification email needed).
+    assert!(
+        resp2.status().is_redirection(),
+        "auto-clear must redirect, got {}",
+        resp2.status()
+    );
+    let loc = location_of(&resp2).expect("Location after auto-clear");
+    assert!(
+        loc.starts_with("https://app.example.com/cb?code="),
+        "auto-clear must resume OIDC with auth code: {loc}"
+    );
+}
+
+// ==========================================================================
+// Missing RA cookie → HTTP 400
+// ==========================================================================
+
+#[tokio::test]
+async fn verify_email_page_without_ra_cookie_returns_400() {
+    let rig = build_rig();
     let resp = rig
         .app
         .clone()
@@ -556,20 +520,20 @@ async fn action_page_without_ra_cookie_returns_bad_request() {
 }
 
 #[tokio::test]
-async fn action_page_unknown_action_returns_not_found() {
-    let rig = build_rig_with_realm_actions(vec![]);
+async fn verify_email_confirm_without_ra_cookie_returns_400() {
+    let rig = build_rig();
     let resp = rig
         .app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/required-action/UNKNOWN_ACTION")
+                .uri("/required-action/VERIFY_EMAIL/confirm?token=some-token")
                 .body(Body::empty())
                 .expect("req"),
         )
         .await
         .expect("oneshot");
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

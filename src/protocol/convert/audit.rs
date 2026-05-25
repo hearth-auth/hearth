@@ -86,7 +86,8 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         | domain::AuditAction::BackupRestored
         | domain::AuditAction::RequiredActionAssigned
         | domain::AuditAction::RequiredActionRemoved
-        | domain::AuditAction::RequiredActionCompleted => pb::AuditAction::Unspecified,
+        | domain::AuditAction::RequiredActionCompleted
+        | domain::AuditAction::RequiredActionAutoCleared => pb::AuditAction::Unspecified,
     }
 }
 

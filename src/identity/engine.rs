@@ -6543,14 +6543,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             })?;
         let user_id = UserId::new(uuid);
 
-        // Transition user to Active. If the user was already Active we
-        // still consume the token to keep single-use semantics, but leave
-        // the user record alone.
+        // Transition user to Active (from PendingVerification) and mark
+        // email_verified = true. For already-Active users we still set the
+        // verified flag — e.g. the RA VERIFY_EMAIL flow for admin-created users.
         let mut user = self
             .get_user(realm_id, &user_id)?
             .ok_or(IdentityError::VerificationTokenInvalid)?;
-        if user.status() == UserStatus::PendingVerification {
-            user.set_status(UserStatus::Active);
+        let needs_update =
+            user.status() == UserStatus::PendingVerification || !user.email_verified();
+        if needs_update {
+            if user.status() == UserStatus::PendingVerification {
+                user.set_status(UserStatus::Active);
+            }
+            user.set_email_verified(true);
             user.set_updated_at(self.clock.now());
             let user_bytes =
                 serde_json::to_vec(&user).map_err(|e| IdentityError::Serialization {

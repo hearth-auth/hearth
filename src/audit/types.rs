@@ -207,6 +207,12 @@ pub enum AuditAction {
     ///
     /// Metadata carries `action_type` (e.g. `"UPDATE_PASSWORD"`).
     RequiredActionCompleted,
+    /// A required action was automatically cleared without user interaction.
+    ///
+    /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `reason`
+    /// (e.g. `"email_already_verified"`). Used to self-heal data-migration
+    /// artifacts where a required action was added spuriously.
+    RequiredActionAutoCleared,
 }
 
 impl AuditAction {
@@ -287,6 +293,7 @@ impl AuditAction {
             Self::RequiredActionAssigned,
             Self::RequiredActionRemoved,
             Self::RequiredActionCompleted,
+            Self::RequiredActionAutoCleared,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -365,6 +372,7 @@ impl AuditAction {
             Self::RequiredActionAssigned => "required_action_assigned",
             Self::RequiredActionRemoved => "required_action_removed",
             Self::RequiredActionCompleted => "required_action_completed",
+            Self::RequiredActionAutoCleared => "required_action_auto_cleared",
         }
     }
 }
@@ -444,6 +452,7 @@ impl std::str::FromStr for AuditAction {
             "required_action_assigned" => Ok(Self::RequiredActionAssigned),
             "required_action_removed" => Ok(Self::RequiredActionRemoved),
             "required_action_completed" => Ok(Self::RequiredActionCompleted),
+            "required_action_auto_cleared" => Ok(Self::RequiredActionAutoCleared),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -531,7 +540,8 @@ impl AuditAction {
             | Self::BackupRestored
             | Self::RequiredActionAssigned
             | Self::RequiredActionRemoved
-            | Self::RequiredActionCompleted => LogOnly,
+            | Self::RequiredActionCompleted
+            | Self::RequiredActionAutoCleared => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
