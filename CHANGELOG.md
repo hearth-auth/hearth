@@ -23,6 +23,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Replaced unsound `serde_yml` dependency** — `serde_yml 0.0.12` (RUSTSEC-2025-0068) is
+  unsound (segfault via `Serializer.emitter`) and its GitHub project has been archived.
+  Migrated to `serde_norway 0.9`, a maintained fork with an identical API surface (HEA-793).
+
 - **Realm status cache: fail-closed on corrupted storage records** — `populate_realm_status_cache`
   now returns an error on deserialization failure instead of silently skipping records; the engine
   refuses to start rather than booting with an incomplete realm-suspension cache (HEA-742).
