@@ -7,6 +7,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **VERIFY_EMAIL cross-user token substitution** — the `verify_email_confirm` handler now
+  validates that the `UserId` bound to the submitted email-verification token matches the
+  user in the RA session cookie.  Previously the handler discarded the returned user ID,
+  allowing an attacker to clear another user's `VERIFY_EMAIL` required-action by submitting
+  a token minted for a different account (HEA-815; security review HEA-810 FINDING-1 HIGH).
+
 ### Added
 
 - **VERIFY_EMAIL required-action handler** — `GET /required-action/VERIFY_EMAIL` renders a
