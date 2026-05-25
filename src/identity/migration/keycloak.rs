@@ -207,7 +207,12 @@ impl KeycloakImporter {
             name: export.realm.clone(),
             config: None,
         };
-        let realm = self.identity.import_realm(&realm_request, realm_id_hint)?;
+        // Keycloak migration starts a new realm — no pre-existing
+        // signing key to preserve. New tokens issued by Hearth will
+        // sign with the generated key.
+        let realm = self
+            .identity
+            .import_realm(&realm_request, realm_id_hint, None)?;
         let realm_id = realm.id().clone();
         report.realm_id = Some(realm_id.clone());
 
