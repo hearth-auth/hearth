@@ -747,6 +747,24 @@ pub fn router(state: WebState) -> Router {
             axum::routing::get(handlers::device_approve_form).post(handlers::device_approve_submit),
         )
         .route("/logout", axum::routing::post(handlers::logout_submit))
+        // --- Required-action interstitials ---
+        .route(
+            "/required-actions/update-password",
+            axum::routing::get(handlers::ra_update_password_form)
+                .post(handlers::ra_update_password_submit),
+        )
+        .route(
+            "/required-actions/verify-email",
+            axum::routing::get(handlers::ra_verify_email_page),
+        )
+        .route(
+            "/required-actions/verify-email/resend",
+            axum::routing::post(handlers::ra_verify_email_resend),
+        )
+        .route(
+            "/required-actions/verify-email/success",
+            axum::routing::get(handlers::ra_verify_email_success),
+        )
         .route("/account", axum::routing::get(account::account_index))
         .route(
             "/account/password",
