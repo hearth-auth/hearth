@@ -659,6 +659,11 @@ impl ClusterEngine {
 
     /// Gracefully transfer leadership.  Triggers an election so another node
     /// wins; polls for up to 5 s.  The `preferred` target is best-effort.
+    ///
+    /// # Cancellation safety
+    /// `ElectRestoreGuard` ensures `elect(true)` is called on drop even if this
+    /// future is cancelled (e.g. HTTP connection drop) between `elect(false)` and
+    /// the final restore — preventing permanent election-loss (see HEA-762).
     pub async fn transfer_leadership(
         &self,
         preferred: Option<NodeId>,
@@ -671,8 +676,11 @@ impl ClusterEngine {
                 .unwrap_or_default();
             return Err(ClusterError::NotLeader { leader_addr });
         }
-        // Prevent this node from re-winning the next election.
+        // Prevent this node from re-winning the next election.  The guard calls
+        // elect(true) on drop, so every code path (success, timeout, cancel) restores.
         self.inner.raft().runtime_config().elect(false);
+        let _elect_guard = ElectRestoreGuard(Arc::clone(self.inner.raft()));
+
         self.inner
             .raft()
             .trigger()
@@ -690,15 +698,27 @@ impl ClusterEngine {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                self.inner.raft().runtime_config().elect(true);
                 return Err(ClusterError::Raft(anyhow::anyhow!(
                     "transfer-leadership: timeout waiting for new leader"
                 )));
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
-        self.inner.raft().runtime_config().elect(true);
         let _ = preferred; // accepted for forward-compat; winner is whoever wins
         Ok(new_leader)
+    }
+}
+
+// ── ElectRestoreGuard ─────────────────────────────────────────────────────────
+
+/// RAII guard that re-enables election on drop.
+/// Created immediately after `runtime_config().elect(false)` in
+/// `transfer_leadership` so that task cancellation can never leave the node
+/// permanently unable to win elections.
+struct ElectRestoreGuard(Arc<HearthRaft>);
+
+impl Drop for ElectRestoreGuard {
+    fn drop(&mut self) {
+        self.0.runtime_config().elect(true);
     }
 }
