@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Minimal default; each job escalates only what it needs.
+permissions:
+  contents: read
+
+jobs:
+  # ── 1. Build release binaries ─────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: hearth-linux-amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: hearth-linux-arm64
+            use_cross: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: hearth-darwin-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: hearth-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Install cross
+        if: matrix.use_cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build (cross)
+        if: matrix.use_cross == true
+        run: cross build --release --target ${{ matrix.target }} -p hearth
+
+      - name: Build (cargo)
+        if: matrix.use_cross != true
+        run: cargo build --release --target ${{ matrix.target }} -p hearth
+
+      - name: Stage binary
+        run: cp target/${{ matrix.target }}/release/hearth ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  # ── 2. CycloneDX SBOM ─────────────────────────────────────────────────────
+  sbom:
+    name: Generate CycloneDX SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-sbom-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM
+        run: cargo cyclonedx --format json --spec-version 1.4 -p hearth
+
+      - name: Stage SBOM
+        run: cp hearth/hearth.cdx.json hearth-sbom.cdx.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hearth-sbom
+          path: hearth-sbom.cdx.json
+          if-no-files-found: error
+
+  # ── 3. Compute SHA-256 hashes (SLSA subjects) ─────────────────────────────
+  hash:
+    name: Compute artifact hashes
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+
+      - id: hash
+        working-directory: artifacts
+        run: |
+          hashes=$(sha256sum \
+            hearth-linux-amd64 \
+            hearth-linux-arm64 \
+            hearth-darwin-amd64 \
+            hearth-darwin-arm64 \
+            hearth-sbom.cdx.json | base64 -w 0)
+          echo "hashes=$hashes" >> "$GITHUB_OUTPUT"
+
+  # ── 4. Cosign keyless signing ──────────────────────────────────────────────
+  sign:
+    name: Sign with cosign (keyless OIDC)
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC token exchange
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: artifacts
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign artifacts
+        working-directory: artifacts
+        run: |
+          for f in hearth-linux-amd64 hearth-linux-arm64 hearth-darwin-amd64 hearth-darwin-arm64 hearth-sbom.cdx.json; do
+            cosign sign-blob --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "${f}"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signatures
+          path: |
+            artifacts/*.sig
+            artifacts/*.pem
+          if-no-files-found: error
+
+  # ── 5. SLSA L1 provenance ─────────────────────────────────────────────────
+  # Runs in a slsa-github-generator-controlled job to establish the attestation.
+  provenance:
+    needs: [hash]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write   # needed to upload .intoto.jsonl to the draft release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.hash.outputs.hashes }}"
+      upload-assets: true
+
+  # ── 6. Publish GitHub Release ─────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: [sign, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: List release artifacts
+        run: ls -lh dist/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/hearth-linux-amd64
+            dist/hearth-linux-arm64
+            dist/hearth-darwin-amd64
+            dist/hearth-darwin-arm64
+            dist/hearth-sbom.cdx.json
+            dist/*.sig
+            dist/*.pem
+          generate_release_notes: true
+          fail_on_unmatched_files: true
