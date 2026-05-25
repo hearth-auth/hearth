@@ -73,6 +73,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Removed
 
+- **Dead backup file `src/protocol/web/admin.rs.bak` removed from working tree** —
+  a 10 005-line editor artifact was present on disk but never committed; deleted
+  and the existing `*.bak` `.gitignore` rule confirmed in place (HEA-748).
+
 - **Stale "Snyk is configured" sentence in `docs/guides/security-hardening.md`** —
   Hearth has not used Snyk since the HEA-680 security workflow consolidation. The
   prescriptive line in the Dependency Vulnerability Scanning section is replaced
