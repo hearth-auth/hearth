@@ -370,6 +370,12 @@ pub enum IdentityError {
     },
     /// The requested webhook was not found in this realm.
     WebhookNotFound,
+    /// The token presented is a required-action token and cannot be used to
+    /// access protected resources until all pending required actions are
+    /// completed.
+    ///
+    /// Returned by `validate_token` when `token_type == "required_action"`.
+    RequiredActionsPending,
 }
 
 impl fmt::Display for IdentityError {
@@ -532,6 +538,7 @@ impl fmt::Display for IdentityError {
                 )
             }
             Self::WebhookNotFound => write!(f, "webhook not found"),
+            Self::RequiredActionsPending => write!(f, "required actions pending"),
         }
     }
 }
@@ -627,7 +634,8 @@ impl std::error::Error for IdentityError {
             | Self::PasswordExpired
             | Self::PasswordReused
             | Self::AuthMethodNotAllowed { .. }
-            | Self::WebhookNotFound => None,
+            | Self::WebhookNotFound
+            | Self::RequiredActionsPending => None,
         }
     }
 }

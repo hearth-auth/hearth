@@ -144,7 +144,7 @@ use crate::identity::oidc::{
 };
 use crate::identity::tokens::{
     self, Audience, IssueTokenRequest, JwksDocument, LogoutTokenClaims, SigningKey, TokenClaims,
-    TokenConfig, TokenPair,
+    TokenConfig, TokenPair, REQUIRED_ACTION_TOKEN_TYPE,
 };
 use crate::identity::totp::{self, RecoveryCodes, StoredMfaState, TotpEnrollment, TotpSecret};
 use crate::identity::types::{
@@ -1806,6 +1806,7 @@ impl EmbeddedIdentityEngine {
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
             permissions: claims.permissions.clone(),
+            required_actions: Vec::new(),
             custom: claims.custom.clone(),
         };
         let new_refresh_claims = TokenClaims {
@@ -1825,6 +1826,7 @@ impl EmbeddedIdentityEngine {
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
             permissions: claims.permissions.clone(),
+            required_actions: Vec::new(),
             custom: claims.custom.clone(),
         };
 
@@ -2281,6 +2283,59 @@ impl EmbeddedIdentityEngine {
                 &user_id_str,
             );
         }
+    }
+
+    /// Maximum TTL for required-action tokens, in seconds (15 minutes).
+    ///
+    /// Required-action tokens MUST have a shorter TTL than normal access
+    /// tokens to limit the window during which a stolen token can be used.
+    /// The cap matches the default access_token_ttl_secs but is enforced
+    /// unconditionally regardless of per-realm TTL configuration.
+    const REQUIRED_ACTION_TOKEN_TTL_SECS: i64 = 900;
+
+    /// Issues a required-action JWT for a user with pending required actions.
+    ///
+    /// The token has `token_type = "required_action"`, lists all pending
+    /// actions in the `required_actions` claim, and carries no scopes,
+    /// roles, or permissions. TTL is capped at 15 minutes.
+    ///
+    /// `validate_token` rejects these tokens with `RequiredActionsPending`,
+    /// so they cannot be used to access protected resources.
+    fn issue_required_action_jwt(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        session_id: &SessionId,
+        pending: Vec<RequiredAction>,
+    ) -> Result<String, IdentityError> {
+        let now = self.clock.now();
+        let iat = now.as_micros() / 1_000_000;
+        let signing_key = self.get_signing_key_or_default(realm_id);
+        let claims = TokenClaims {
+            sub: user_id.to_string(),
+            iss: self.config.token.issuer.clone(),
+            aud: Audience::single(self.config.token.audience.clone()),
+            exp: iat + Self::REQUIRED_ACTION_TOKEN_TTL_SECS,
+            iat,
+            sid: session_id.to_string(),
+            tid: realm_id.to_string(),
+            oid: None,
+            token_type: REQUIRED_ACTION_TOKEN_TYPE.to_string(),
+            jti: Some(uuid::Uuid::new_v4().to_string()),
+            fid: None,
+            scope: None,
+            nonce: None,
+            roles: Vec::new(),
+            groups: Vec::new(),
+            permissions: Vec::new(),
+            required_actions: pending,
+            custom: std::collections::BTreeMap::new(),
+        };
+        signing_key
+            .issue_token(&claims)
+            .map_err(|e| IdentityError::SigningError {
+                reason: format!("failed to issue required-action token: {e}"),
+            })
     }
 }
 
@@ -4045,12 +4100,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // at the cryptographic layer before any claim inspection.
         let claims = self.verify_token_signature_for_realm(realm_id, token)?;
 
-        // Only accept access tokens — refresh tokens must not be accepted here.
-        if claims.token_type != "access" {
-            return Err(IdentityError::InvalidToken);
-        }
-
-        // Enforce expiration before any session or permission check.
+        // Enforce expiration FIRST — an expired required-action token must
+        // return TokenExpired (401) rather than RequiredActionsPending (403),
+        // so expiry is always checked before the token_type gate.
         let now = self.clock.now();
         let now_secs = now.as_micros() / 1_000_000;
         if now_secs >= claims.exp {
@@ -4062,6 +4114,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         // Coherence: iat must not exceed exp (would be an invalid token).
         if claims.iat > claims.exp {
+            return Err(IdentityError::InvalidToken);
+        }
+
+        // Required-action tokens are valid JWTs but MUST NOT be accepted at
+        // protected endpoints. Return RequiredActionsPending so callers know
+        // the user must complete pending actions before accessing resources.
+        if claims.token_type == REQUIRED_ACTION_TOKEN_TYPE {
+            return Err(IdentityError::RequiredActionsPending);
+        }
+
+        // Only accept access tokens — refresh, id_token, etc. are rejected.
+        if claims.token_type != "access" {
             return Err(IdentityError::InvalidToken);
         }
 
@@ -4673,6 +4737,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let session =
             self.create_session(realm_id, &stored_code.user_id, &SessionContext::default())?;
 
+        // 10a. Check for pending required actions before issuing tokens.
+        let pending = self.pending_actions(realm_id, &stored_code.user_id)?;
+        if !pending.is_empty() {
+            let token = self.issue_required_action_jwt(
+                realm_id,
+                &stored_code.user_id,
+                session.id(),
+                pending.into_iter().collect(),
+            )?;
+            return Ok(OidcTokenResponse::new(
+                token,
+                String::new(),
+                "Bearer".to_string(),
+                Self::REQUIRED_ACTION_TOKEN_TTL_SECS,
+                String::new(),
+            ));
+        }
+
         // 11. Create grant family for refresh token rotation
         let family_id = uuid::Uuid::new_v4().to_string();
 
@@ -4714,6 +4796,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             roles: access_roles,
             groups: access_groups,
             permissions: access_permissions,
+            required_actions: Vec::new(),
             custom: access_custom,
         };
         let refresh_claims = TokenClaims {
@@ -4733,6 +4816,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             roles: access_claims.roles.clone(),
             groups: access_claims.groups.clone(),
             permissions: access_claims.permissions.clone(),
+            required_actions: Vec::new(),
             custom: access_claims.custom.clone(),
         };
 
@@ -4799,6 +4883,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             roles: id_roles,
             groups: id_groups,
             permissions: id_permissions,
+            required_actions: Vec::new(),
             custom: id_custom,
         };
         let id_token =
@@ -4868,12 +4953,34 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
-        // 3. Create session and issue token pair
+        // 3. Create session
         let session = self.create_session(
             realm_id,
             user.id(),
             &crate::identity::SessionContext::default(),
         )?;
+
+        // 4. Check for pending required actions. If any exist, issue a
+        //    required-action token (short TTL, no scopes/permissions) instead
+        //    of a normal access token. The user must complete all actions before
+        //    they can obtain a full access token.
+        let pending = self.pending_actions(realm_id, user.id())?;
+        if !pending.is_empty() {
+            let token = self.issue_required_action_jwt(
+                realm_id,
+                user.id(),
+                session.id(),
+                pending.into_iter().collect(),
+            )?;
+            return Ok(crate::identity::oidc::PasswordGrantResponse {
+                access_token: token,
+                refresh_token: String::new(),
+                token_type: "Bearer".to_string(),
+                expires_in: Self::REQUIRED_ACTION_TOKEN_TTL_SECS,
+            });
+        }
+
+        // 5. No pending actions — issue normal token pair
         let token_pair = self.issue_tokens(realm_id, user.id(), session.id())?;
 
         Ok(crate::identity::oidc::PasswordGrantResponse {
@@ -4952,6 +5059,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             roles: Vec::new(),
             groups: Vec::new(),
             permissions: Vec::new(),
+            required_actions: Vec::new(),
             custom: std::collections::BTreeMap::new(),
         };
 
@@ -5174,6 +5282,25 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             DeviceCodeStatus::Approved { user_id } => {
                 // Issue tokens like exchange_authorization_code (device flow — no browser context)
                 let session = self.create_session(realm_id, user_id, &SessionContext::default())?;
+
+                // Check for pending required actions before issuing tokens.
+                let pending = self.pending_actions(realm_id, user_id)?;
+                if !pending.is_empty() {
+                    let token = self.issue_required_action_jwt(
+                        realm_id,
+                        user_id,
+                        session.id(),
+                        pending.into_iter().collect(),
+                    )?;
+                    return Ok(OidcTokenResponse::new(
+                        token,
+                        String::new(),
+                        "Bearer".to_string(),
+                        Self::REQUIRED_ACTION_TOKEN_TTL_SECS,
+                        String::new(),
+                    ));
+                }
+
                 let token_pair = self.issue_tokens(realm_id, user_id, session.id())?;
 
                 // Issue ID token
@@ -5196,6 +5323,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     roles: Vec::new(),
                     groups: Vec::new(),
                     permissions: Vec::new(),
+                    required_actions: Vec::new(),
                     custom: std::collections::BTreeMap::new(),
                 };
                 let signing_key = self.get_or_load_realm_signing_key(realm_id)?;

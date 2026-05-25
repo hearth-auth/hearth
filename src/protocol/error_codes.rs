@@ -203,6 +203,8 @@ pub const DUPLICATE_SCIM_EXTERNAL_ID: &str = "HEARTH_DUPLICATE_SCIM_EXTERNAL_ID"
 pub const FORBIDDEN: &str = "HEARTH_FORBIDDEN";
 /// Operation is not permitted on the system realm.
 pub const SYSTEM_REALM_PROTECTED: &str = "HEARTH_SYSTEM_REALM_PROTECTED";
+/// Token presented is a required-action token; user must complete pending actions first.
+pub const REQUIRED_ACTIONS_PENDING: &str = "HEARTH_REQUIRED_ACTIONS_PENDING";
 
 // ── Mapping ────────────────────────────────────────────────────────────────────
 
@@ -320,6 +322,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
 
         IdentityError::Unauthorized => Some(FORBIDDEN),
         IdentityError::SystemRealmProtected { .. } => Some(SYSTEM_REALM_PROTECTED),
+        IdentityError::RequiredActionsPending => Some(REQUIRED_ACTIONS_PENDING),
 
         // 5xx — do not leak internal detail
         IdentityError::SigningError { .. }
@@ -581,6 +584,7 @@ mod tests {
             DUPLICATE_SCIM_EXTERNAL_ID,
             FORBIDDEN,
             SYSTEM_REALM_PROTECTED,
+            REQUIRED_ACTIONS_PENDING,
         ];
         for code in codes {
             assert!(

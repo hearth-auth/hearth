@@ -1244,4 +1244,9 @@ impl PasswordGrantResponse {
     pub fn refresh_token(&self) -> &str {
         &self.refresh_token
     }
+
+    /// Returns the access token lifetime in seconds.
+    pub fn expires_in(&self) -> i64 {
+        self.expires_in
+    }
 }

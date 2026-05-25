@@ -1509,6 +1509,9 @@ fn identity_error_to_response(
             "internal error: audit record failed",
         ),
         IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
+        IdentityError::RequiredActionsPending => {
+            (StatusCode::FORBIDDEN, "required actions pending")
+        }
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);

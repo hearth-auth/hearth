@@ -18,12 +18,21 @@ use zeroize::Zeroize;
 use crate::core::Timestamp;
 use crate::core::Uri;
 use crate::identity::error::IdentityError;
+use crate::identity::types::RequiredAction;
 
 /// The only supported JWT algorithm.
 const JWT_ALGORITHM: &str = "EdDSA";
 
 /// The JWT type header value.
 const JWT_TYPE: &str = "JWT";
+
+/// The `token_type` claim value for required-action tokens.
+///
+/// A required-action token is issued when the user has pending required
+/// actions (e.g. `UpdatePassword`, `VerifyEmail`). It carries a short TTL
+/// and is rejected by `validate_token` with `RequiredActionsPending` so that
+/// protected resources remain inaccessible until the actions are completed.
+pub(crate) const REQUIRED_ACTION_TOKEN_TYPE: &str = "required_action";
 
 /// Microseconds per second, for timestamp conversion.
 const MICROS_PER_SEC: i64 = 1_000_000;
@@ -177,6 +186,12 @@ pub struct TokenClaims {
     /// this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permissions: Vec<String>,
+    /// Pending required actions for the subject.
+    ///
+    /// Non-empty only in required-action tokens (`token_type == "required_action"`).
+    /// Protected endpoints MUST reject these tokens with 403 RequiredActionsPending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_actions: Vec<RequiredAction>,
     /// Declaratively-mapped custom claims emitted at the top level.
     #[serde(default, flatten)]
     pub custom: BTreeMap<String, serde_json::Value>,
@@ -466,6 +481,7 @@ impl SigningKey {
             roles: request.roles.to_vec(),
             groups: request.groups.to_vec(),
             permissions: request.permissions.to_vec(),
+            required_actions: Vec::new(),
             custom: request.custom.clone(),
         };
 
@@ -486,6 +502,7 @@ impl SigningKey {
             roles: Vec::new(),
             groups: Vec::new(),
             permissions: Vec::new(),
+            required_actions: Vec::new(),
             custom: BTreeMap::new(),
         };
 
@@ -1053,6 +1070,7 @@ mod tests {
             roles: Vec::new(),
             groups: Vec::new(),
             permissions: Vec::new(),
+            required_actions: Vec::new(),
             custom: BTreeMap::new(),
         }
     }
