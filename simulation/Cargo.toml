@@ -9,7 +9,9 @@ publish = false
 [dependencies]
 hearth = { path = "..", features = ["test-hooks"] }
 madsim = "0.2"
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 tempfile = "3"
+tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

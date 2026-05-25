@@ -9,6 +9,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **HA failover simulation suite** — four deterministic multi-node Raft simulation tests
+  covering network partition heal, leader kill mid-write, rolling restart with zero read
+  errors, and snapshot-based catch-up for a cold follower. All tests run in-process via an
+  in-memory network factory with no TLS or real ports (HEA-738).
+
+
 - **Cluster admin HTTP endpoints** — three operator-facing routes on the admin API:
   - `POST /admin/cluster/bootstrap` — initializes Raft membership from `hearth.yaml`
     `cluster.peers` on the designated bootstrap node. Idempotent (409 on
