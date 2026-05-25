@@ -1,6 +1,11 @@
 # cross configuration — installs build-time dependencies inside the Docker
 # containers used for cross-compilation targets.
+#
+# The aarch64 cross image is Ubuntu Xenial whose apt protobuf-compiler is
+# v2.6.1 (proto2 only). We install a modern protoc binary from GitHub releases
+# so that proto3 syntax in the project's .proto files is accepted.
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
-  "apt-get update -qq && apt-get install -y protobuf-compiler",
+  "apt-get update -qq && apt-get install -y curl unzip ca-certificates",
+  "curl -sSfL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip -o /tmp/protoc.zip && unzip -qo /tmp/protoc.zip bin/protoc include/* -d /usr/local/protoc-25 && ln -sf /usr/local/protoc-25/bin/protoc /usr/local/bin/protoc && rm /tmp/protoc.zip",
 ]
