@@ -1,0 +1,42 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · Email verified{% endblock %}
+{% block body %}
+<div class="rounded-md bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle"
+     x-data="{ secondsLeft: 3 }"
+     x-init="
+       const dest = $el.dataset.redirectUrl;
+       const iv = setInterval(() => {
+         secondsLeft--;
+         if (secondsLeft <= 0) { clearInterval(iv); window.location.href = dest; }
+       }, 1000)
+     "
+     data-redirect-url="{{ redirect_url }}">
+
+  {# Success icon #}
+  <div class="mb-4 flex justify-center">
+    <div class="flex h-12 w-12 items-center justify-center rounded-full bg-success/[0.12]">
+      <svg class="h-6 w-6 text-success-fg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true">
+        <polyline points="20 6 9 17 4 12"/>
+      </svg>
+    </div>
+  </div>
+
+  <h1 class="mb-2 text-center font-display text-xl font-medium text-ht-content-primary">
+    Email verified
+  </h1>
+  <p class="mb-6 text-center text-sm text-ht-content-secondary">
+    Your email address is confirmed. Redirecting you to your account
+    <span class="text-ht-content-muted" x-text="`in ${secondsLeft}…`" x-cloak>in 3…</span>
+  </p>
+
+  {# Fallback CTA — visible immediately for no-JS and for users who don't want to wait #}
+  <div class="text-center">
+    <a href="{{ redirect_url }}"
+       class="inline-block btn-ember rounded px-6 py-2.5 text-sm font-semibold">
+      Go to my account
+    </a>
+  </div>
+</div>
+{% endblock %}
