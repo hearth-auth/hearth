@@ -1,0 +1,291 @@
+name: Release
+
+# Triggered on every version tag. Produces signed binaries, a CycloneDX SBOM,
+# cosign signatures (keyless OIDC), and SLSA L1 provenance, then publishes them
+# to a GitHub Release.
+#
+# Supply-chain trust chain (HEA-747):
+#   binary  ──cosign──▶  <binary>.sig + <binary>.pem   (Sigstore Fulcio / Rekor)
+#   binary  ──SLSA──▶    <binary>.intoto.jsonl          (slsa-github-generator)
+#   codebase ─cyclonedx▶ hearth-sbom.cdx.json           (CycloneDX SBOM)
+#
+# Cosign OIDC identity for verification:
+#   Issuer:  https://token.actions.githubusercontent.com
+#   Subject: https://github.com/therecluse26/hearth/.github/workflows/release.yml@refs/tags/v*
+
+on:
+  push:
+    tags: ["v*"]
+
+# Minimal default permissions. Each job that needs elevated access declares its
+# own permissions block explicitly (job-level permissions replace, not extend,
+# the workflow-level defaults).
+permissions:
+  contents: read
+
+jobs:
+  # ── Build release binaries ─────────────────────────────────────────────────
+  #
+  # Four targets in a matrix. Linux builds share the .github/actions/setup-rust
+  # composite action (apt-get–based protoc install). macOS builds inline the
+  # same steps because setup-rust uses apt-get, which is Linux-only.
+  #
+  # aarch64-unknown-linux-gnu cross-compiles via the `cross` CLI (Docker);
+  # aarch64-apple-darwin cross-compiles natively on GitHub's M1 macOS runners.
+
+  build:
+    name: build (${{ matrix.artifact }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: hearth-linux-amd64
+            use-cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: hearth-linux-arm64
+            use-cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: hearth-darwin-amd64
+            use-cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: hearth-darwin-arm64
+            use-cross: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Linux runners: use the shared composite action (handles protoc + cache).
+      - name: Setup Rust toolchain (Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          components: ""
+          cache-key-suffix: ${{ matrix.target }}
+
+      # macOS runners: inline equivalent steps because setup-rust uses apt-get.
+      - name: Install Rust toolchain (macOS)
+        if: runner.os == 'macOS'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-05-14
+        with:
+          toolchain: stable
+
+      - name: Cargo build cache (macOS)
+        if: runner.os == 'macOS'
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Export PROTOC for build scripts (macOS)
+        if: runner.os == 'macOS'
+        run: echo "PROTOC=$(command -v protoc)" >> "$GITHUB_ENV"
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross (aarch64-linux only)
+        if: matrix.use-cross == true
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cross
+
+      - name: Build release binary
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Stage artifact
+        run: cp target/${{ matrix.target }}/release/hearth ${{ matrix.artifact }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          retention-days: 1
+
+  # ── Generate CycloneDX SBOM ────────────────────────────────────────────────
+
+  sbom:
+    name: sbom (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+          components: ""
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-cyclonedx
+
+      - name: Generate SBOM (JSON)
+        # cargo-cyclonedx writes bom.json by default; rename for clarity.
+        run: |
+          cargo cyclonedx --format json
+          mv bom.json hearth-sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: hearth-sbom.cdx.json
+          retention-days: 1
+
+  # ── SHA-256 all artifacts (input to SLSA provenance generator) ─────────────
+
+  hash:
+    name: hash (SHA-256 → SLSA subjects)
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4 # SHA auto-pinned by Dependabot
+        with:
+          merge-multiple: true
+
+      - name: Compute SHA-256 hashes
+        id: hash
+        run: |
+          HASHES=$(sha256sum \
+            hearth-linux-amd64 \
+            hearth-linux-arm64 \
+            hearth-darwin-amd64 \
+            hearth-darwin-arm64 \
+            hearth-sbom.cdx.json | base64 -w0)
+          echo "hashes=$HASHES" >> "$GITHUB_OUTPUT"
+
+  # ── Sign artifacts with cosign (keyless OIDC via GitHub Actions) ───────────
+  #
+  # Each artifact gets a detached signature (<artifact>.sig) and a
+  # short-lived Sigstore certificate (<artifact>.pem).  The certificate embeds
+  # the workflow identity so verifiers can confirm the signing origin without a
+  # long-lived key.
+
+  sign:
+    name: sign (cosign keyless)
+    needs: [build, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC token for Sigstore Fulcio certificate issuance
+      contents: read
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4 # SHA auto-pinned by Dependabot
+        with:
+          merge-multiple: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3 # SHA auto-pinned by Dependabot
+
+      - name: Sign artifacts
+        run: |
+          for artifact in \
+              hearth-linux-amd64 \
+              hearth-linux-arm64 \
+              hearth-darwin-amd64 \
+              hearth-darwin-arm64 \
+              hearth-sbom.cdx.json; do
+            cosign sign-blob --yes \
+              --output-certificate "${artifact}.pem" \
+              --output-signature  "${artifact}.sig" \
+              "${artifact}"
+          done
+
+      - name: Upload signatures and certificates
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signatures
+          path: |
+            *.sig
+            *.pem
+          retention-days: 1
+
+  # ── SLSA L1 provenance ─────────────────────────────────────────────────────
+  #
+  # Generates a signed SLSA provenance document (intoto.jsonl) attesting which
+  # artifacts were built and by which workflow.  Uses the SLSA community
+  # generator — MUST be pinned to a specific tag (not SHA) so that the SLSA
+  # framework can verify the generator's own identity.
+  #
+  # upload-assets: false → provenance uploaded as a GitHub Actions artifact and
+  # retrieved by the release job, which combines everything in one upload.
+
+  provenance:
+    name: provenance (SLSA L1)
+    needs: [hash]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.hash.outputs.hashes }}"
+      upload-assets: false
+
+  # ── Publish GitHub Release ─────────────────────────────────────────────────
+  #
+  # Collects binaries, SBOM, cosign signatures/certs, and SLSA provenance into
+  # a single GitHub Release.  Runs after both sign and provenance are complete.
+
+  release:
+    name: release (GitHub)
+    needs: [sign, provenance]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all release artifacts (binaries + SBOM + signatures + provenance)
+        uses: actions/download-artifact@v4 # SHA auto-pinned by Dependabot
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release and upload artifacts
+        uses: softprops/action-gh-release@v2 # SHA auto-pinned by Dependabot
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            hearth-linux-amd64
+            hearth-linux-arm64
+            hearth-darwin-amd64
+            hearth-darwin-arm64
+            hearth-sbom.cdx.json
+            hearth-linux-amd64.sig
+            hearth-linux-arm64.sig
+            hearth-darwin-amd64.sig
+            hearth-darwin-arm64.sig
+            hearth-sbom.cdx.json.sig
+            hearth-linux-amd64.pem
+            hearth-linux-arm64.pem
+            hearth-darwin-amd64.pem
+            hearth-darwin-arm64.pem
+            hearth-sbom.cdx.json.pem
+            ${{ needs.provenance.outputs.provenance-name }}

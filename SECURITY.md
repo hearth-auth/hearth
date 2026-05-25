@@ -96,6 +96,21 @@ Key rotation re-wraps only the DEK header in each file (O(file count), not O(dat
 
 If you self-host Hearth and need to rotate the host key, back up `hearth.host_key` and `hearth.keys` before any rotation operation. Loss of the host key makes all on-disk data permanently unrecoverable.
 
+## Release Signing
+
+Every Hearth release binary and SBOM is signed via **cosign keyless signing** using a GitHub Actions OIDC identity. No long-lived private key exists; each release obtains a short-lived certificate from [Sigstore Fulcio](https://docs.sigstore.dev/certificate_authority/overview/) and logs the event to [Sigstore Rekor](https://docs.sigstore.dev/logging/overview/).
+
+**Cosign verification identity:**
+
+| Field | Value |
+|-------|-------|
+| `--certificate-oidc-issuer` | `https://token.actions.githubusercontent.com` |
+| `--certificate-identity-regexp` | `https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v.*` |
+
+Every release also ships a **SLSA L1 provenance document** (`hearth.intoto.jsonl`) and a **CycloneDX SBOM** (`hearth-sbom.cdx.json`).
+
+See [docs/guides/verify-release.md](docs/guides/verify-release.md) for full verification instructions including `cosign verify-blob`, `slsa-verifier`, and SBOM inspection.
+
 ## Cryptographic Choices
 
 For transparency, Hearth's core cryptographic primitive selections:
