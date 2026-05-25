@@ -9,6 +9,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Required-actions admin API** — two new admin endpoints manage required actions
+  without a full user-object PATCH:
+  `PATCH /admin/realms/{id}/users/{id}/required-actions` (body `{"add":[],"remove":[]}`)
+  assigns or removes actions on a specific user; each change emits a
+  `RequiredActionAssigned` or `RequiredActionRemoved` audit event.
+  `PATCH /admin/realms/{id}/config` (body `{"default_required_actions":[]}`)
+  replaces the realm-level default list applied to newly created users.
+  Unknown action strings return 400 (HEA-807).
+
 - **Required actions on users** — user records now carry a `required_actions`
   list (`VERIFY_EMAIL`, `UPDATE_PASSWORD`). Realms may set
   `default_required_actions` so every new user is created with those actions
