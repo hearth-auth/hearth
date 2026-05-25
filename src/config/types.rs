@@ -1923,6 +1923,8 @@ impl RealmYamlConfig {
                         .collect(),
                 }
             }),
+            // Required actions are managed via the admin API, not via hearth.yaml.
+            default_required_actions: Vec::new(),
         })
     }
 }
