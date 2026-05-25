@@ -3514,6 +3514,417 @@ pub async fn device_approve_submit(
     }
 }
 
+// ============================================================================
+// Required-action UI interstitials
+// ============================================================================
+
+/// Required-action "update your password" page template.
+#[derive(Template)]
+#[template(path = "ui/required-actions/update_password.html")]
+struct UpdatePasswordTemplate {
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    flash: Option<Flash>,
+    csrf: Option<String>,
+    narrow: bool,
+    product_name: String,
+    logo_url: String,
+    theme_css: String,
+    realm_theme_css: Option<String>,
+    /// POST target URL.
+    form_action: String,
+    /// Required-action JWT forwarded as a hidden form field.
+    ra_token: String,
+    /// Inline form error message (password mismatch, policy violation, etc.).
+    error: Option<String>,
+}
+
+/// Required-action "verify your email" page template.
+#[derive(Template)]
+#[template(path = "ui/required-actions/verify_email.html")]
+struct VerifyEmailTemplate {
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    flash: Option<Flash>,
+    csrf: Option<String>,
+    narrow: bool,
+    product_name: String,
+    logo_url: String,
+    theme_css: String,
+    realm_theme_css: Option<String>,
+    /// Email address the verification link was sent to.
+    email: String,
+    /// POST URL for the "Resend" button.
+    resend_action: String,
+    /// Required-action JWT forwarded in the resend POST body.
+    ra_token: String,
+    /// Inline error (e.g. rate-limit message).
+    error: Option<String>,
+}
+
+/// Required-action "email verified" success page template.
+#[derive(Template)]
+#[template(path = "ui/required-actions/verify_email_success.html")]
+struct VerifyEmailSuccessTemplate {
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    flash: Option<Flash>,
+    csrf: Option<String>,
+    narrow: bool,
+    product_name: String,
+    logo_url: String,
+    theme_css: String,
+    realm_theme_css: Option<String>,
+    /// Destination URL for the 3-second auto-redirect.
+    redirect_url: String,
+}
+
+/// Query parameters shared by the required-action GET pages.
+#[derive(Debug, Deserialize)]
+pub struct RaTokenQuery {
+    /// Required-action JWT passed as a query parameter.
+    pub ra_token: String,
+}
+
+/// Query parameters for the verify-email success page.
+#[derive(Debug, Deserialize)]
+pub struct RaSuccessQuery {
+    /// Destination after the auto-redirect countdown.
+    pub redirect_url: Option<String>,
+}
+
+/// Form data for the update-password required-action submission.
+#[derive(Debug, Deserialize)]
+pub struct RaUpdatePasswordForm {
+    /// Required-action JWT forwarded from the hidden field.
+    pub ra_token: String,
+    /// New password.
+    pub password: String,
+    /// Confirmation — must match `password`.
+    pub password_confirm: String,
+}
+
+/// Form data for the verify-email resend submission.
+#[derive(Debug, Deserialize)]
+pub struct RaResendForm {
+    /// Required-action JWT forwarded from the hidden field.
+    pub ra_token: String,
+}
+
+/// Decodes the realm ID from an ra-JWT without verifying the signature.
+///
+/// Used to locate the realm's signing key before the full cryptographic
+/// validation. Returns `None` for tokens that are structurally invalid.
+fn realm_id_from_ra_token(token: &str) -> Option<crate::core::RealmId> {
+    let claims = crate::identity::decode_claims_unverified(token).ok()?;
+    let realm_uuid_str = claims.tid.strip_prefix("realm_").unwrap_or(&claims.tid);
+    let realm_uuid: uuid::Uuid = realm_uuid_str.parse().ok()?;
+    Some(crate::core::RealmId::new(realm_uuid))
+}
+
+/// Extracts a `SessionId` from the `sid` claim of decoded token claims.
+fn session_id_from_ra_claims(
+    claims: &crate::identity::tokens::TokenClaims,
+) -> Option<crate::core::SessionId> {
+    let uuid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
+    let uuid: uuid::Uuid = uuid_str.parse().ok()?;
+    Some(crate::core::SessionId::new(uuid))
+}
+
+/// Extracts a `UserId` from the `sub` claim of decoded token claims.
+fn user_id_from_ra_claims(
+    claims: &crate::identity::tokens::TokenClaims,
+) -> Option<crate::core::UserId> {
+    let uuid_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
+    let uuid: uuid::Uuid = uuid_str.parse().ok()?;
+    Some(crate::core::UserId::new(uuid))
+}
+
+/// `GET /ui/required-actions/update-password` — renders the password-update
+/// form. The `ra_token` query parameter carries the required-action JWT.
+pub async fn ra_update_password_form(
+    State(state): State<Arc<WebState>>,
+    Query(params): Query<RaTokenQuery>,
+) -> Response {
+    let Some(realm_id) = realm_id_from_ra_token(&params.ra_token) else {
+        return internal_error_response();
+    };
+    render(&UpdatePasswordTemplate {
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        flash: None,
+        csrf: None,
+        narrow: true,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        theme_css: state.theme_css.clone(),
+        realm_theme_css: state.realm_theme_css_for(&realm_id),
+        form_action: "/ui/required-actions/update-password".to_string(),
+        ra_token: params.ra_token,
+        error: None,
+    })
+}
+
+/// `POST /ui/required-actions/update-password` — validates the new password
+/// and, on success, issues UI session cookies and redirects to `/ui/account`.
+pub async fn ra_update_password_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<RaUpdatePasswordForm>,
+) -> Response {
+    let Some(realm_id) = realm_id_from_ra_token(&form.ra_token) else {
+        return internal_error_response();
+    };
+
+    let theme_css = state.theme_css.clone();
+    let realm_theme = state.realm_theme_css_for(&realm_id);
+    let product_name = state.product_name.clone();
+    let logo_url = state.logo_url.clone();
+
+    let render_err = |ra_token: String, msg: String| {
+        render(&UpdatePasswordTemplate {
+            chrome: false,
+            active: "",
+            user_email: None,
+            is_admin: false,
+            flash: None,
+            csrf: None,
+            narrow: true,
+            product_name: product_name.clone(),
+            logo_url: logo_url.clone(),
+            theme_css: theme_css.clone(),
+            realm_theme_css: realm_theme.clone(),
+            form_action: "/ui/required-actions/update-password".to_string(),
+            ra_token,
+            error: Some(msg),
+        })
+    };
+
+    if form.password != form.password_confirm {
+        return render_err(form.ra_token, "Passwords do not match.".to_string());
+    }
+    if form.password.len() < 8 {
+        return render_err(
+            form.ra_token,
+            "Password must be at least 8 characters.".to_string(),
+        );
+    }
+
+    let password = CleartextPassword::from_string(form.password);
+    match state
+        .identity
+        .complete_update_password(&realm_id, &form.ra_token, password)
+    {
+        Ok(response) => {
+            let Ok(new_claims) = crate::identity::decode_claims_unverified(&response.access_token)
+            else {
+                return internal_error_response();
+            };
+
+            // More required actions remain — redirect to the next interstitial.
+            if new_claims.token_type == crate::identity::tokens::REQUIRED_ACTION_TOKEN_TYPE {
+                let next = new_claims.required_actions.first().cloned();
+                let path = match next {
+                    Some(crate::identity::RequiredAction::VerifyEmail) => {
+                        format!(
+                            "/ui/required-actions/verify-email?ra_token={}",
+                            &response.access_token
+                        )
+                    }
+                    _ => format!(
+                        "/ui/required-actions/update-password?ra_token={}",
+                        &response.access_token
+                    ),
+                };
+                return Redirect::to(&path).into_response();
+            }
+
+            // Full-access token — set UI session cookies and go to account.
+            let Some(session_id) = session_id_from_ra_claims(&new_claims) else {
+                return internal_error_response();
+            };
+            let secure = state.is_secure_request(&headers);
+            let issued = super::auth::issue_auth_cookies(
+                &state.cookie_secret,
+                &realm_id,
+                &session_id,
+                secure,
+            );
+            let mut resp = Redirect::to("/ui/account").into_response();
+            append_cookie(&mut resp, &issued.session_cookie);
+            append_cookie(&mut resp, &issued.csrf_cookie);
+            resp
+        }
+        Err(IdentityError::PasswordReused) => render_err(
+            form.ra_token,
+            "Password has been used before. Please choose a different password.".to_string(),
+        ),
+        Err(IdentityError::InvalidInput { ref reason }) => {
+            render_err(form.ra_token, reason.clone())
+        }
+        Err(IdentityError::InvalidToken | IdentityError::TokenExpired) => render_err(
+            String::new(),
+            "This link has expired. Please request a new one.".to_string(),
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "ra_update_password: failed");
+            render_err(
+                form.ra_token,
+                "Failed to update password. Please try again.".to_string(),
+            )
+        }
+    }
+}
+
+/// `GET /ui/required-actions/verify-email` — renders the "check your email"
+/// interstitial. Validates the ra-JWT and looks up the user's email address
+/// to display in the template.
+pub async fn ra_verify_email_page(
+    State(state): State<Arc<WebState>>,
+    Query(params): Query<RaTokenQuery>,
+) -> Response {
+    let Some(realm_id) = realm_id_from_ra_token(&params.ra_token) else {
+        return internal_error_response();
+    };
+
+    let claims = match state.identity.validate_required_action_token(
+        &realm_id,
+        &params.ra_token,
+        crate::identity::RequiredAction::VerifyEmail,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "ra_verify_email_page: invalid token");
+            return internal_error_response();
+        }
+    };
+
+    let Some(user_id) = user_id_from_ra_claims(&claims) else {
+        return internal_error_response();
+    };
+
+    let email = match state.identity.get_user(&realm_id, &user_id) {
+        Ok(Some(u)) => u.email().to_string(),
+        _ => {
+            tracing::warn!("ra_verify_email_page: user not found");
+            return internal_error_response();
+        }
+    };
+
+    render(&VerifyEmailTemplate {
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        flash: None,
+        csrf: None,
+        narrow: true,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        theme_css: state.theme_css.clone(),
+        realm_theme_css: state.realm_theme_css_for(&realm_id),
+        email,
+        resend_action: "/ui/required-actions/verify-email/resend".to_string(),
+        ra_token: params.ra_token,
+        error: None,
+    })
+}
+
+/// `POST /ui/required-actions/verify-email/resend` — triggers a new
+/// verification email. Redirects back to the verify-email page with a flash
+/// message indicating success or rate-limit.
+pub async fn ra_verify_email_resend(
+    State(state): State<Arc<WebState>>,
+    Form(form): Form<RaResendForm>,
+) -> Response {
+    let Some(realm_id) = realm_id_from_ra_token(&form.ra_token) else {
+        return internal_error_response();
+    };
+
+    let claims = match state.identity.validate_required_action_token(
+        &realm_id,
+        &form.ra_token,
+        crate::identity::RequiredAction::VerifyEmail,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "ra_verify_email_resend: invalid token");
+            return internal_error_response();
+        }
+    };
+
+    let Some(user_id) = user_id_from_ra_claims(&claims) else {
+        return internal_error_response();
+    };
+
+    let return_url = format!(
+        "/ui/required-actions/verify-email?ra_token={}",
+        &form.ra_token
+    );
+
+    match state
+        .identity
+        .request_email_verification(&realm_id, &user_id)
+    {
+        Ok(_) => super::templates::redirect_with_flash(
+            &return_url,
+            "Verification email sent. Check your inbox.",
+            "success",
+        ),
+        Err(IdentityError::RateLimited) => super::templates::redirect_with_flash(
+            &return_url,
+            "Please wait a moment before requesting another email.",
+            "error",
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "ra_verify_email_resend: request_email_verification failed");
+            super::templates::redirect_with_flash(
+                &return_url,
+                "Failed to send verification email. Please try again.",
+                "error",
+            )
+        }
+    }
+}
+
+/// `GET /ui/required-actions/verify-email/success` — shown after the
+/// verification token is redeemed. Displays a 3-second countdown and then
+/// redirects to `redirect_url` (defaults to `/ui/account`).
+pub async fn ra_verify_email_success(
+    State(state): State<Arc<WebState>>,
+    Query(params): Query<RaSuccessQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let redirect_url = params
+        .redirect_url
+        .as_deref()
+        .and_then(sanitize_return_to)
+        .unwrap_or_else(|| "/ui/account".to_string());
+    let flash = super::templates::take_flash_cookie(&headers);
+    render(&VerifyEmailSuccessTemplate {
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        flash,
+        csrf: None,
+        narrow: true,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        theme_css: state.theme_css.clone(),
+        realm_theme_css: None,
+        redirect_url,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
