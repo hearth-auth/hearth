@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Required-actions admin endpoints** — operators can now manage a user's pending-action
+  set without direct DB access (HEA-755):
+  - `POST /admin/users/{id}/required-actions` — adds an action (`UPDATE_PASSWORD`,
+    `VERIFY_EMAIL`) to the user's pending set; idempotent; audit-logged.
+  - `DELETE /admin/users/{id}/required-actions/{action}` — removes the named action;
+    idempotent; audit-logged. Returns `422` for unknown action names.
+
 - **Cluster admin HTTP endpoints** — three operator-facing routes on the admin API:
   - `POST /admin/cluster/bootstrap` — initializes Raft membership from `hearth.yaml`
     `cluster.peers` on the designated bootstrap node. Idempotent (409 on
