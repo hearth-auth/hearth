@@ -176,17 +176,20 @@ func (OrganizationStatus) EnumDescriptor() ([]byte, []int) {
 
 // A user record within a realm.
 type User struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Email         string                 `protobuf:"bytes,2,opt,name=email,proto3" json:"email,omitempty"`
-	DisplayName   string                 `protobuf:"bytes,3,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	Status        UserStatus             `protobuf:"varint,4,opt,name=status,proto3,enum=hearth.identity.v1.UserStatus" json:"status,omitempty"`
-	CreatedAt     int64                  `protobuf:"varint,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt     int64                  `protobuf:"varint,6,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	FirstName     string                 `protobuf:"bytes,7,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
-	LastName      string                 `protobuf:"bytes,8,opt,name=last_name,json=lastName,proto3" json:"last_name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Id          string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Email       string                 `protobuf:"bytes,2,opt,name=email,proto3" json:"email,omitempty"`
+	DisplayName string                 `protobuf:"bytes,3,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	Status      UserStatus             `protobuf:"varint,4,opt,name=status,proto3,enum=hearth.identity.v1.UserStatus" json:"status,omitempty"`
+	CreatedAt   int64                  `protobuf:"varint,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt   int64                  `protobuf:"varint,6,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	FirstName   string                 `protobuf:"bytes,7,opt,name=first_name,json=firstName,proto3" json:"first_name,omitempty"`
+	LastName    string                 `protobuf:"bytes,8,opt,name=last_name,json=lastName,proto3" json:"last_name,omitempty"`
+	// Actions the user must complete before full access is granted.
+	// Values: "VERIFY_EMAIL", "UPDATE_PASSWORD".
+	RequiredActions []string `protobuf:"bytes,9,rep,name=required_actions,json=requiredActions,proto3" json:"required_actions,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *User) Reset() {
@@ -273,6 +276,13 @@ func (x *User) GetLastName() string {
 		return x.LastName
 	}
 	return ""
+}
+
+func (x *User) GetRequiredActions() []string {
+	if x != nil {
+		return x.RequiredActions
+	}
+	return nil
 }
 
 // An authentication session bound to a user.
@@ -1955,7 +1965,7 @@ var File_hearth_identity_v1_identity_proto protoreflect.FileDescriptor
 
 const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"\n" +
-	"!hearth/identity/v1/identity.proto\x12\x12hearth.identity.v1\"\x81\x02\n" +
+	"!hearth/identity/v1/identity.proto\x12\x12hearth.identity.v1\"\xac\x02\n" +
 	"\x04User\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12!\n" +
@@ -1967,7 +1977,8 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"updated_at\x18\x06 \x01(\x03R\tupdatedAt\x12\x1d\n" +
 	"\n" +
 	"first_name\x18\a \x01(\tR\tfirstName\x12\x1b\n" +
-	"\tlast_name\x18\b \x01(\tR\blastName\"\x9c\x01\n" +
+	"\tlast_name\x18\b \x01(\tR\blastName\x12)\n" +
+	"\x10required_actions\x18\t \x03(\tR\x0frequiredActions\"\x9c\x01\n" +
 	"\aSession\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1d\n" +

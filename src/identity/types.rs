@@ -58,6 +58,19 @@ pub enum UserStatus {
     PendingVerification,
 }
 
+/// An action the user must complete before full access is granted.
+///
+/// Validated at write time — only these variants are accepted in v1.
+/// Stored as `SCREAMING_SNAKE_CASE` strings (e.g. `"VERIFY_EMAIL"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RequiredAction {
+    /// User must verify their email address before proceeding.
+    VerifyEmail,
+    /// User must set a new password before proceeding.
+    UpdatePassword,
+}
+
 /// A user record within a realm.
 ///
 /// Fields are private; access via accessor methods. Email is always stored
@@ -72,6 +85,9 @@ pub struct User {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     attributes: BTreeMap<String, String>,
     status: UserStatus,
+    /// Pending actions the user must complete. Absent in old records = [].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    required_actions: Vec<RequiredAction>,
     created_at: Timestamp,
     updated_at: Timestamp,
 }
@@ -85,6 +101,7 @@ impl User {
         first_name: String,
         last_name: String,
         status: UserStatus,
+        required_actions: Vec<RequiredAction>,
         created_at: Timestamp,
         updated_at: Timestamp,
     ) -> Self {
@@ -96,6 +113,7 @@ impl User {
             last_name,
             attributes: BTreeMap::new(),
             status,
+            required_actions,
             created_at,
             updated_at,
         }
@@ -174,6 +192,16 @@ impl User {
     /// Updates the status. Used internally during user updates.
     pub(crate) fn set_status(&mut self, status: UserStatus) {
         self.status = status;
+    }
+
+    /// Returns pending required actions for this user.
+    pub fn required_actions(&self) -> &[RequiredAction] {
+        &self.required_actions
+    }
+
+    /// Replaces the required actions list. Used internally by the identity engine.
+    pub(crate) fn set_required_actions(&mut self, actions: Vec<RequiredAction>) {
+        self.required_actions = actions;
     }
 
     /// Updates the `updated_at` timestamp.
@@ -384,6 +412,8 @@ pub struct UpdateUserRequest {
     pub status: Option<UserStatus>,
     /// Replace the custom attribute map.
     pub attributes: Option<BTreeMap<String, String>>,
+    /// Replace the required actions list. `Some([])` clears all actions; `None` leaves unchanged.
+    pub required_actions: Option<Vec<RequiredAction>>,
 }
 
 // ===== Realm types =====
@@ -663,6 +693,12 @@ pub struct RealmConfig {
     /// keys are accepted; unknown keys are rejected with `InvalidAttribute`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribute_definitions: Option<AttributeDefinitions>,
+    /// Actions automatically assigned to every new user created in this realm.
+    ///
+    /// Defaults to `[]` (no required actions). Existing realms without this
+    /// field deserialize to `[]` via serde default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_required_actions: Vec<RequiredAction>,
 }
 
 /// A realm record.
@@ -1500,6 +1536,7 @@ mod tests {
             "Alice".to_string(),
             String::new(),
             UserStatus::Active,
+            Vec::new(),
             now,
             now,
         );
@@ -1521,6 +1558,7 @@ mod tests {
             "Bob".to_string(),
             String::new(),
             UserStatus::PendingVerification,
+            Vec::new(),
             Timestamp::from_micros(1_000),
             Timestamp::from_micros(2_000),
         );
@@ -1552,6 +1590,7 @@ mod tests {
             "Old".to_string(),
             "Name".to_string(),
             UserStatus::Active,
+            Vec::new(),
             Timestamp::from_micros(1_000),
             Timestamp::from_micros(1_000),
         );
@@ -1950,6 +1989,95 @@ mod tests {
         let json = serde_json::to_string(&rec).expect("serialize");
         let back: ConsentRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(rec, back);
+    }
+
+    // ===== RequiredAction tests =====
+
+    #[test]
+    fn required_action_serializes_to_screaming_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&RequiredAction::VerifyEmail).expect("serialize"),
+            "\"VERIFY_EMAIL\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RequiredAction::UpdatePassword).expect("serialize"),
+            "\"UPDATE_PASSWORD\""
+        );
+    }
+
+    #[test]
+    fn required_action_deserializes_from_screaming_snake_case() {
+        let a: RequiredAction = serde_json::from_str("\"VERIFY_EMAIL\"").expect("deserialize");
+        assert_eq!(a, RequiredAction::VerifyEmail);
+
+        let b: RequiredAction = serde_json::from_str("\"UPDATE_PASSWORD\"").expect("deserialize");
+        assert_eq!(b, RequiredAction::UpdatePassword);
+    }
+
+    #[test]
+    fn required_action_unknown_value_is_rejected() {
+        let result: Result<RequiredAction, _> = serde_json::from_str("\"INVALID_ACTION\"");
+        assert!(result.is_err(), "unknown required action must be rejected");
+    }
+
+    #[test]
+    fn user_required_actions_default_empty_on_legacy_record() {
+        // Simulate a user record stored before required_actions was added.
+        let legacy_json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "email": "old@example.com",
+            "display_name": "Old User",
+            "first_name": "Old",
+            "last_name": "User",
+            "status": "Active",
+            "created_at": 1000000,
+            "updated_at": 1000000
+        }"#;
+        let user: User = serde_json::from_str(legacy_json).expect("deserialize");
+        assert!(
+            user.required_actions().is_empty(),
+            "legacy user must have no required actions"
+        );
+    }
+
+    #[test]
+    fn user_with_required_actions_round_trips() {
+        let now = Timestamp::from_micros(1_000_000);
+        let user = User::new(
+            UserId::generate(),
+            "alice@example.com".to_string(),
+            "Alice".to_string(),
+            "Alice".to_string(),
+            String::new(),
+            UserStatus::Active,
+            vec![RequiredAction::VerifyEmail, RequiredAction::UpdatePassword],
+            now,
+            now,
+        );
+        let json = serde_json::to_string(&user).expect("serialize");
+        let back: User = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.required_actions(), user.required_actions());
+    }
+
+    #[test]
+    fn user_with_empty_required_actions_omits_field_in_json() {
+        let now = Timestamp::from_micros(1_000_000);
+        let user = User::new(
+            UserId::generate(),
+            "bob@example.com".to_string(),
+            "Bob".to_string(),
+            "Bob".to_string(),
+            String::new(),
+            UserStatus::Active,
+            Vec::new(),
+            now,
+            now,
+        );
+        let json = serde_json::to_string(&user).expect("serialize");
+        assert!(
+            !json.contains("required_actions"),
+            "empty required_actions must be omitted to keep records compact"
+        );
     }
 
     #[test]

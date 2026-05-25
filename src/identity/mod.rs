@@ -55,8 +55,9 @@ pub use types::{
     MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
-    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, Session, SessionContext,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
+    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction, Session,
+    SessionContext, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User,
+    UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
