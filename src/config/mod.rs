@@ -130,7 +130,7 @@ impl Config {
     /// Returns an error for invalid YAML or values that fail validation.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, ConfigError> {
         let (substituted, warnings) = env::substitute_env_vars(yaml);
-        let mut config: Self = serde_yaml::from_str(&substituted)
+        let mut config: Self = serde_yml::from_str(&substituted)
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.config_warnings = warnings;
         config.validate()?;
@@ -241,7 +241,7 @@ impl Config {
     /// Environment variables are still substituted.
     pub fn from_yaml_str_unchecked(yaml: &str) -> Result<Self, ConfigError> {
         let (substituted, warnings) = env::substitute_env_vars(yaml);
-        let mut config: Self = serde_yaml::from_str(&substituted)
+        let mut config: Self = serde_yml::from_str(&substituted)
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.config_warnings = warnings;
         Ok(config)

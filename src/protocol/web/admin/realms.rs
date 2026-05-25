@@ -1696,14 +1696,14 @@ fn render_config_editor_with_flash(
 /// visual editor. Env var references like `${PORT:-8420}` stay as literal
 /// strings in the JSON.
 fn yaml_to_editor_json(yaml_str: &str) -> Result<String, String> {
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(yaml_str).map_err(|e| format!("YAML parse error: {e}"))?;
+    let value: serde_yml::Value =
+        serde_yml::from_str(yaml_str).map_err(|e| format!("YAML parse error: {e}"))?;
     serde_json::to_string(&value).map_err(|e| format!("JSON serialization error: {e}"))
 }
 
-/// Try to extract a dotted field path from a `serde_yaml` parse error.
+/// Try to extract a dotted field path from a `serde_yml` parse error.
 ///
-/// `serde_yaml` errors for type mismatches typically look like:
+/// `serde_yml` errors for type mismatches typically look like:
 /// `server.port: invalid type: string "asdf", expected u16 at line 3 column 9`
 ///
 /// Returns the extracted field path, or `"_yaml"` if no path can be parsed.
@@ -1725,9 +1725,9 @@ fn field_from_parse_error(msg: &str) -> &str {
 /// Converts editor JSON back to a YAML string. The resulting YAML is
 /// machine-generated (no comments, consistent ordering).
 fn editor_json_to_yaml(json: &serde_json::Value) -> Result<String, String> {
-    let value: serde_yaml::Value =
+    let value: serde_yml::Value =
         serde_json::from_value(json.clone()).map_err(|e| format!("JSON→YAML conversion: {e}"))?;
-    serde_yaml::to_string(&value).map_err(|e| format!("YAML serialization error: {e}"))
+    serde_yml::to_string(&value).map_err(|e| format!("YAML serialization error: {e}"))
 }
 
 /// `POST /ui/admin/settings/editor/visual/preview` — JSON-based diff preview.
