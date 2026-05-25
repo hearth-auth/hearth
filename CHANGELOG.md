@@ -7,6 +7,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **Required actions on users** — user records now carry a `required_actions`
+  list (`VERIFY_EMAIL`, `UPDATE_PASSWORD`). Realms may set
+  `default_required_actions` so every new user is created with those actions
+  pre-populated. Existing stored users deserialize with an empty list (no manual
+  migration needed). Admins may clear or replace the list via the update-user API
+  (HEA-801).
+
+
 ### Security
 
 - **Replaced unsound `serde_yml` dependency** — `serde_yml 0.0.12` (RUSTSEC-2025-0068) is
