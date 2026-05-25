@@ -19,6 +19,7 @@ impl From<&domain::User> for pb::User {
             required_actions: u
                 .required_actions()
                 .iter()
+                .copied()
                 .map(required_action_to_str)
                 .map(str::to_owned)
                 .collect(),
@@ -27,7 +28,7 @@ impl From<&domain::User> for pb::User {
 }
 
 /// Returns the canonical wire-format string for a `RequiredAction`.
-fn required_action_to_str(action: &RequiredAction) -> &'static str {
+fn required_action_to_str(action: RequiredAction) -> &'static str {
     match action {
         RequiredAction::VerifyEmail => "VERIFY_EMAIL",
         RequiredAction::UpdatePassword => "UPDATE_PASSWORD",
