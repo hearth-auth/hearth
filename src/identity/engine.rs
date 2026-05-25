@@ -11,6 +11,7 @@ use arc_swap::ArcSwap;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::SecureRandom;
+use zeroize::Zeroizing;
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
@@ -833,7 +834,9 @@ impl EmbeddedIdentityEngine {
         let realm_bytes = Self::serialize_realm(&realm)?;
         let realm_signing_key = SigningKey::generate()?;
         let key_storage_key = keys::encode_realm_signing_key(&sys_realm);
-        let key_bytes = realm_signing_key.pkcs8_bytes().to_vec();
+        // Zeroizing ensures the local PKCS#8 copy is actively overwritten
+        // when dropped rather than relying on the allocator (HEA-750 M1).
+        let key_bytes = Zeroizing::new(realm_signing_key.pkcs8_bytes().to_vec());
         // Note: we intentionally do NOT write a name index entry — that
         // would let `get_realm_by_name("system")` find it, violating the
         // "invisible to lookups" invariant.
@@ -841,7 +844,10 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put_batch(
                 &sys_realm,
-                &[(realm_key, realm_bytes), (key_storage_key, key_bytes)],
+                &[
+                    (realm_key, realm_bytes),
+                    (key_storage_key, key_bytes.to_vec()),
+                ],
             )
             .map_err(Self::storage_err)?;
 
@@ -2341,7 +2347,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let realm_bytes = Self::serialize_realm(&realm)?;
         let realm_key = keys::encode_realm_id(&realm_id);
         let key_storage_key = keys::encode_realm_signing_key(&realm_id);
-        let key_bytes = realm_signing_key.pkcs8_bytes().to_vec();
+        // Zeroizing ensures the local PKCS#8 copy is actively overwritten
+        // when dropped rather than relying on the allocator (HEA-750 M1).
+        let key_bytes = Zeroizing::new(realm_signing_key.pkcs8_bytes().to_vec());
 
         // Name index: realm:name:{name} → realm UUID bytes
         let name_key = keys::encode_realm_name(&request.name);
@@ -2354,7 +2362,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 &sys_realm,
                 &[
                     (realm_key, realm_bytes),
-                    (key_storage_key, key_bytes),
+                    (key_storage_key, key_bytes.to_vec()),
                     (name_key, name_value),
                 ],
             )
@@ -2952,11 +2960,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let sys_realm = keys::system_realm_id();
         let old_key = self.get_or_load_realm_signing_key(realm_id)?;
         let old_key_id = old_key.key_id().to_string();
-        let old_pkcs8 = old_key.pkcs8_bytes().to_vec();
+        // Zeroizing ensures both PKCS#8 copies are actively overwritten when
+        // dropped; put() takes &[u8] so Deref chain handles the coercion (HEA-750).
+        let old_pkcs8 = Zeroizing::new(old_key.pkcs8_bytes().to_vec());
 
         // Generate and store the new active signing key.
         let new_key = SigningKey::generate()?;
-        let new_pkcs8 = new_key.pkcs8_bytes().to_vec();
+        let new_pkcs8 = Zeroizing::new(new_key.pkcs8_bytes().to_vec());
         let key_storage_key = keys::encode_realm_signing_key(realm_id);
         self.storage
             .put(&sys_realm, &key_storage_key, &new_pkcs8)
@@ -7516,6 +7526,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         request: &CreateRealmRequest,
         requested_id: Option<RealmId>,
+        signing_key_pkcs8: Option<&[u8]>,
     ) -> Result<Realm, IdentityError> {
         // The reserved system realm is never an import target. An
         // external dump can legitimately be named "system" (Keycloak's
@@ -7559,7 +7570,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         let now = self.clock.now();
         let config = request.config.clone().unwrap_or_default();
-        let realm_signing_key = SigningKey::generate()?;
+        // Disaster-recovery restore path: when the caller supplies the
+        // original PKCS#8 bytes from a backup, install them verbatim
+        // so every pre-restore JWT keeps validating. A parse failure
+        // here is unrecoverable corruption — fail loudly rather than
+        // silently fall back to a fresh key (that would invalidate
+        // every token under the realm).
+        let realm_signing_key = match signing_key_pkcs8 {
+            Some(bytes) => SigningKey::from_pkcs8(bytes)?,
+            None => SigningKey::generate()?,
+        };
 
         let realm = Realm::new(
             realm_id.clone(),
@@ -7571,12 +7591,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         );
         let realm_bytes = Self::serialize_realm(&realm)?;
         let key_storage_key = keys::encode_realm_signing_key(&realm_id);
-        let key_bytes = realm_signing_key.pkcs8_bytes().to_vec();
+        // Zeroizing ensures the local PKCS#8 copy is actively overwritten
+        // when dropped rather than relying on the allocator (HEA-750 M1).
+        let key_bytes = Zeroizing::new(realm_signing_key.pkcs8_bytes().to_vec());
 
         self.storage
             .put_batch(
                 &sys_realm,
-                &[(realm_key, realm_bytes), (key_storage_key, key_bytes)],
+                &[
+                    (realm_key, realm_bytes),
+                    (key_storage_key, key_bytes.to_vec()),
+                ],
             )
             .map_err(Self::storage_err)?;
 
