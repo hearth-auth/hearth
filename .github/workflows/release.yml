@@ -11,11 +11,16 @@ name: Release
 #
 # Cosign OIDC identity for verification:
 #   Issuer:  https://token.actions.githubusercontent.com
-#   Subject: https://github.com/therecluse26/hearth/.github/workflows/release.yml@refs/tags/v*
+#   Subject: ^https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$
 
 on:
   push:
-    tags: ["v*"]
+    # Strict semver-only tag trigger (HEA-791 SR-3): prevents arbitrary ref
+    # names like `vtest` or `vfoo` from minting Sigstore certs under the
+    # project identity and littering the Rekor transparency log.
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
 
 # Minimal default permissions. Each job that needs elevated access declares its
 # own permissions block explicitly (job-level permissions replace, not extend,
@@ -144,7 +149,7 @@ jobs:
       - name: Install cargo-cyclonedx
         uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
         with:
-          tool: cargo-cyclonedx
+          tool: cargo-cyclonedx@0.5.9
 
       - name: Generate SBOM (JSON)
         # cargo-cyclonedx writes bom.json by default; rename for clarity.
@@ -169,7 +174,7 @@ jobs:
       hashes: ${{ steps.hash.outputs.hashes }}
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4 # SHA auto-pinned by Dependabot
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           merge-multiple: true
 
@@ -201,12 +206,12 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4 # SHA auto-pinned by Dependabot
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           merge-multiple: true
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3 # SHA auto-pinned by Dependabot
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Sign artifacts
         run: |
@@ -267,12 +272,12 @@ jobs:
 
     steps:
       - name: Download all release artifacts (binaries + SBOM + signatures + provenance)
-        uses: actions/download-artifact@v4 # SHA auto-pinned by Dependabot
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           merge-multiple: true
 
       - name: Create GitHub Release and upload artifacts
-        uses: softprops/action-gh-release@v2 # SHA auto-pinned by Dependabot
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           generate_release_notes: true
           fail_on_unmatched_files: true

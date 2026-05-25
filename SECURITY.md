@@ -105,7 +105,7 @@ Every Hearth release binary and SBOM is signed via **cosign keyless signing** us
 | Field | Value |
 |-------|-------|
 | `--certificate-oidc-issuer` | `https://token.actions.githubusercontent.com` |
-| `--certificate-identity-regexp` | `https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v.*` |
+| `--certificate-identity-regexp` | `^https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$` |
 
 Every release also ships a **SLSA L1 provenance document** (`hearth.intoto.jsonl`) and a **CycloneDX SBOM** (`hearth-sbom.cdx.json`).
 
