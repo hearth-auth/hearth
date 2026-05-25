@@ -1,0 +1,22 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · {{ action_label }}{% endblock %}
+{% block body %}
+<div class="mx-auto max-w-lg">
+  <div class="rounded-lg bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle">
+    <div class="mb-6">
+      <p class="font-mono text-[11px] uppercase tracking-[0.14em] text-ht-content-muted">Required action</p>
+      <h1 class="font-display text-xl font-medium text-ht-content-primary">{{ action_label }}</h1>
+      <p class="mt-1 text-sm text-ht-content-muted">
+        You must complete this step before continuing to the application.
+      </p>
+    </div>
+
+    <form method="post" action="/required-action/{{ action }}" class="space-y-5" data-testid="required-action-form">
+      <button type="submit"
+        class="btn-ember w-full rounded-md px-4 py-2.5 text-sm font-medium">
+        Continue
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,437 @@
+//! Required-Action OIDC interceptor.
+//!
+//! After a user authenticates, the authorize route checks for pending required
+//! actions before issuing an authorization code.  When actions are present the
+//! flow is:
+//!
+//! 1. `required_action_check` intercepts the authorize request, sorts actions
+//!    by priority, generates an RA session JWT (via the identity engine), sets
+//!    an HttpOnly cookie, and redirects to `/required-action/{first_action}`.
+//! 2. `/required-action/{action}` renders the action page (GET) or marks the
+//!    action complete (POST).
+//! 3. On POST the handler calls `next_required_action` (more actions remain)
+//!    or `resume_oidc_flow` (all actions done).
+//! 4. `resume_oidc_flow` clears the RA cookie, issues the authorization code,
+//!    and redirects to `redirect_uri?code=…&state=…`.
+//!
+//! | Route | Method | Purpose |
+//! |-------|--------|---------|
+//! | `/required-action/{action}` | GET  | Render the action page |
+//! | `/required-action/{action}` | POST | Mark action complete |
+//!
+//! # Cookie security
+//!
+//! The RA session cookie is `HttpOnly; Path=/required-action; SameSite=Strict`.
+//! It is scoped to `/required-action` only, preventing the RA JWT from being
+//! sent to the main UI paths.  `Secure` is added when the server is TLS-enabled
+//! or a trusted proxy signals `X-Forwarded-Proto: https`.
+
+use std::sync::Arc;
+
+use askama::Template;
+use axum::extract::{Path, State};
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Redirect, Response};
+
+use crate::core::{ClientId, RealmId, Timestamp, UserId};
+use crate::identity::ra_token::{self, OidcParams};
+use crate::identity::CodeChallengeMethod;
+use crate::identity::RequiredAction;
+use crate::protocol::web::oauth_consent::AuthorizeQuery;
+
+use super::handlers::append_cookie;
+use super::handlers_common;
+use super::templates::render;
+use super::WebState;
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
+
+/// Rendered by `GET /required-action/{action}`.
+#[derive(Template)]
+#[template(path = "ui/required_action/action.html")]
+struct ActionPageTemplate {
+    /// SCREAMING_SNAKE_CASE action name (e.g. `"VERIFY_EMAIL"`).
+    action: String,
+    /// Human-readable action description for the page heading.
+    action_label: &'static str,
+    // Layout chrome.
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    theme_css: String,
+    realm_theme_css: Option<String>,
+}
+
+fn action_label(action: &str) -> &'static str {
+    match action {
+        "VERIFY_EMAIL" => "Verify your email address",
+        "UPDATE_PASSWORD" => "Update your password",
+        _ => "Complete required action",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point: called from oauth_consent::authorize_get_impl  (AC-1)
+// ---------------------------------------------------------------------------
+
+/// Checks whether the authenticated user has pending required actions.
+///
+/// Returns `Some(redirect_response)` when actions are present — the caller
+/// MUST return this response immediately.  Returns `None` to indicate the
+/// normal flow should continue (AC-5: no-op path).
+///
+/// The OIDC params are embedded in the signed RA session JWT so the flow can
+/// be resumed by [`resume_oidc_flow`] once all actions are complete.
+pub fn required_action_check(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    q: &AuthorizeQuery,
+    headers: &HeaderMap,
+    now: Timestamp,
+) -> Option<Response> {
+    let user = state.identity.get_user(realm, user_id).ok().flatten()?;
+
+    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
+    if actions.is_empty() {
+        return None;
+    }
+
+    // Sort by canonical priority so execution order is deterministic regardless
+    // of how actions were stored.
+    actions.sort_by_key(|a| a.priority());
+    let first = actions[0];
+
+    let oidc_params = OidcParams {
+        client_id: q.client_id.clone(),
+        redirect_uri: q.redirect_uri.clone(),
+        scope: q.scope.clone(),
+        code_challenge: q.code_challenge.clone(),
+        code_challenge_method: q.code_challenge_method.clone(),
+        nonce: if q.nonce.is_empty() {
+            None
+        } else {
+            Some(q.nonce.clone())
+        },
+        state: if q.state.is_empty() {
+            None
+        } else {
+            Some(q.state.clone())
+        },
+        response_type: q.response_type.clone(),
+    };
+
+    let token = match state
+        .identity
+        .generate_ra_token(realm, user_id, actions, oidc_params, now)
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "required_action_check: generate_ra_token failed");
+            return Some(handlers_common::server_error());
+        }
+    };
+
+    let secure = state.is_secure_request(headers);
+    let cookie = ra_token::ra_session_cookie(&token, secure);
+    let path = format!("/required-action/{}", first.as_path_segment());
+    let mut response = Redirect::to(&path).into_response();
+    append_cookie(&mut response, &cookie);
+    Some(response)
+}
+
+// ---------------------------------------------------------------------------
+// GET /required-action/{action}
+// ---------------------------------------------------------------------------
+
+/// Renders the action-specific page stub.
+pub async fn action_page(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path(action): Path<String>,
+) -> Response {
+    if RequiredAction::from_path_segment(&action).is_none() {
+        return handlers_common::not_found("Unknown required action");
+    }
+    // Require a syntactically present RA cookie before rendering so orphaned
+    // page loads (no active intercept) get a clear error rather than a form
+    // the user cannot submit successfully.
+    if read_ra_cookie(&headers).is_none() {
+        return handlers_common::bad_request("No active required-action session");
+    }
+
+    let tmpl = ActionPageTemplate {
+        action_label: action_label(&action),
+        action: action.clone(),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        theme_css: state.theme_css.clone(),
+        realm_theme_css: state.realm_theme_css(),
+    };
+    render(&tmpl)
+}
+
+// ---------------------------------------------------------------------------
+// POST /required-action/{action}  (AC-3: sequential completion)
+// ---------------------------------------------------------------------------
+
+/// Marks the current required action complete and advances the flow.
+///
+/// Reads the RA session cookie, validates the JWT, removes `action` from
+/// `pending_actions`, then either:
+/// - Calls [`next_required_action`] (more actions remain), or
+/// - Calls [`resume_oidc_flow`] (all actions done — issues the auth code).
+pub async fn action_complete(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path(action): Path<String>,
+) -> Response {
+    let Some(completed) = RequiredAction::from_path_segment(&action) else {
+        return handlers_common::not_found("Unknown required action");
+    };
+
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+
+    // Bootstrap realm lookup from the unsigned payload before verifying.
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return handlers_common::bad_request("Required-action session has expired");
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+
+    let secure = state.is_secure_request(&headers);
+
+    // Remove the just-completed action from the pending list.
+    let remaining: Vec<RequiredAction> = claims
+        .pending_actions
+        .into_iter()
+        .filter(|a| *a != completed)
+        .collect();
+
+    if remaining.is_empty() {
+        resume_oidc_flow(&state, &realm, &claims.sub, claims.oidc_params, secure)
+    } else {
+        next_required_action(
+            &state,
+            &realm,
+            &claims.sub,
+            remaining,
+            claims.oidc_params,
+            secure,
+            now,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flow helpers (also used in tests)
+// ---------------------------------------------------------------------------
+
+/// Clears the RA cookie and issues the authorization code.
+///
+/// Called when all required actions have been completed.  Reconstructs the
+/// original OIDC authorize request from `RaClaims` and calls
+/// `identity.issue_authorization_code`.
+pub fn resume_oidc_flow(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_sub: &str,
+    oidc_params: OidcParams,
+    secure: bool,
+) -> Response {
+    let clear_cookie = ra_token::clear_ra_session_cookie(secure);
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(user_sub) else {
+        return handlers_common::server_error();
+    };
+    let Ok(client_uuid) = uuid::Uuid::parse_str(&oidc_params.client_id) else {
+        return handlers_common::server_error();
+    };
+
+    let user_id = UserId::new(user_uuid);
+    let client_id = ClientId::new(client_uuid);
+
+    let code_challenge_method = match oidc_params.code_challenge_method.as_str() {
+        "S256" => Some(CodeChallengeMethod::S256),
+        _ => None,
+    };
+    let state_param = oidc_params.state.as_deref().unwrap_or("");
+    let code_challenge = if oidc_params.code_challenge.is_empty() {
+        None
+    } else {
+        Some(oidc_params.code_challenge.clone())
+    };
+
+    match state.identity.issue_authorization_code(
+        realm,
+        &user_id,
+        &client_id,
+        &oidc_params.redirect_uri,
+        &oidc_params.scope,
+        state_param,
+        code_challenge,
+        code_challenge_method,
+        oidc_params.nonce.clone(),
+    ) {
+        Ok(resp) => {
+            let location = build_redirect_location(
+                &oidc_params.redirect_uri,
+                &[
+                    ("code", resp.code()),
+                    ("state", resp.state()),
+                    ("iss", resp.iss()),
+                ],
+            );
+            let mut response = Redirect::to(&location).into_response();
+            append_cookie(&mut response, &clear_cookie);
+            response
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "resume_oidc_flow: issue_authorization_code failed");
+            handlers_common::server_error()
+        }
+    }
+}
+
+/// Generates a fresh RA session JWT for the remaining actions and redirects
+/// to the next action page.  (AC-3: sequential multi-action flow)
+pub fn next_required_action(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_sub: &str,
+    mut remaining: Vec<RequiredAction>,
+    oidc_params: OidcParams,
+    secure: bool,
+    now: Timestamp,
+) -> Response {
+    remaining.sort_by_key(|a| a.priority());
+    let next = remaining[0];
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(user_sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+
+    let token = match state
+        .identity
+        .generate_ra_token(realm, &user_id, remaining, oidc_params, now)
+    {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "next_required_action: generate_ra_token failed");
+            return handlers_common::server_error();
+        }
+    };
+
+    let cookie = ra_token::ra_session_cookie(&token, secure);
+    let path = format!("/required-action/{}", next.as_path_segment());
+    let mut response = Redirect::to(&path).into_response();
+    append_cookie(&mut response, &cookie);
+    response
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+fn read_ra_cookie(headers: &HeaderMap) -> Option<String> {
+    super::auth::cookie_value_from_headers(headers, ra_token::RA_SESSION_COOKIE).map(str::to_string)
+}
+
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_micros()).ok())
+        .unwrap_or(0)
+}
+
+/// Appends query parameters to a redirect URI.  Replicates the logic from
+/// [`super::oauth_consent`] without a cross-module dependency.
+fn build_redirect_location(base: &str, params: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(base.len() + 64);
+    out.push_str(base);
+    let mut first = !base.contains('?');
+    for (k, v) in params {
+        if v.is_empty() {
+            continue;
+        }
+        out.push(if first { '?' } else { '&' });
+        first = false;
+        percent_encode_into(k, &mut out);
+        out.push('=');
+        percent_encode_into(v, &mut out);
+    }
+    out
+}
+
+fn percent_encode_into(value: &str, out: &mut String) {
+    use std::fmt::Write as _;
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_redirect_location_appends_params() {
+        let loc = build_redirect_location(
+            "https://app/cb",
+            &[("code", "abc"), ("state", "xyz"), ("iss", "https://hearth")],
+        );
+        assert!(loc.starts_with("https://app/cb?code=abc&state=xyz&iss="));
+    }
+
+    #[test]
+    fn build_redirect_location_skips_empty_values() {
+        let loc = build_redirect_location("https://app/cb", &[("code", "abc"), ("state", "")]);
+        assert_eq!(loc, "https://app/cb?code=abc");
+    }
+
+    #[test]
+    fn action_label_maps_known_actions() {
+        assert_eq!(action_label("VERIFY_EMAIL"), "Verify your email address");
+        assert_eq!(action_label("UPDATE_PASSWORD"), "Update your password");
+        assert_eq!(action_label("UNKNOWN"), "Complete required action");
+    }
+}
