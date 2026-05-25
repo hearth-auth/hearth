@@ -9,6 +9,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Docusaurus docs site** — `docs-site/` scaffolds a Docusaurus 3.5 site that publishes
+  all `docs/guides/*` pages to GitHub Pages via `.github/workflows/docs-site.yml`.
+  Hearth-branded dark theme (ember gradient, Fraunces/Manrope/JetBrains Mono), local
+  full-text search, and version selector initialized at `next`. Triggered on push to `main`
+  when `docs-site/**` or `docs/guides/**` change (HEA-746).
+
 - **Release signing workflow** — every `v*` tag now produces signed release
   binaries for `linux-amd64`, `linux-arm64`, `darwin-amd64`, and `darwin-arm64`
   via `.github/workflows/release.yml`.  Supply-chain trust artefacts included in
