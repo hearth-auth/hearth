@@ -96,6 +96,22 @@ Key rotation re-wraps only the DEK header in each file (O(file count), not O(dat
 
 If you self-host Hearth and need to rotate the host key, back up `hearth.host_key` and `hearth.keys` before any rotation operation. Loss of the host key makes all on-disk data permanently unrecoverable.
 
+## Release Signing
+
+Every Hearth release binary and SBOM is signed via **cosign keyless signing** using a GitHub Actions OIDC identity. No long-lived private key exists; each release obtains a short-lived certificate from [Sigstore Fulcio](https://docs.sigstore.dev/certificate_authority/overview/) and logs the event to [Sigstore Rekor](https://docs.sigstore.dev/logging/overview/).
+
+**Cosign verification identity:**
+
+| Field | Value |
+|-------|-------|
+| `--certificate-oidc-issuer` | `https://token.actions.githubusercontent.com` |
+| `--certificate-identity-regexp` | `^https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$` |
+
+Every release also ships a **SLSA L1 provenance document** (`hearth.intoto.jsonl`) and a **CycloneDX SBOM** (`hearth-sbom.cdx.json`).
+
+See [docs/guides/verify-release.md](docs/guides/verify-release.md) for full verification instructions including `cosign verify-blob`, `slsa-verifier`, and SBOM inspection.
+
+
 ## Cryptographic Choices
 
 For transparency, Hearth's core cryptographic primitive selections:
@@ -109,33 +125,3 @@ For transparency, Hearth's core cryptographic primitive selections:
 | Webhook signing | HMAC-SHA256 | `ring` 0.17 |
 | SCIM token comparison | SHA-256 + constant-time eq | `ring` + `subtle` |
 
-## Release Signing
-
-All Hearth release binaries (≥ v0.1.0) are signed with [cosign](https://github.com/sigstore/cosign) keyless signing via the GitHub Actions OIDC identity. Signatures and a CycloneDX SBOM are published alongside every GitHub Release.
-
-### Signing identity
-
-| Field | Value |
-|---|---|
-| OIDC issuer | `https://token.actions.githubusercontent.com` |
-| Certificate identity regexp | `https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v.*` |
-
-### Quick verification
-
-```sh
-cosign verify-blob \
-  --certificate         hearth-linux-amd64.pem \
-  --signature           hearth-linux-amd64.sig \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  --certificate-identity-regexp \
-    "https://github\\.com/therecluse26/hearth/\\.github/workflows/release\\.yml@refs/tags/v.*" \
-  hearth-linux-amd64
-```
-
-See [`docs/guides/verify-release.md`](docs/guides/verify-release.md) for the full verification guide including SLSA provenance and SBOM import instructions.
-
-### Supply-chain artefacts per release
-
-- **`*.sig` / `*.pem`** — cosign detached signatures (keyless, Sigstore Rekor-logged)
-- **`hearth-sbom.cdx.json`** — CycloneDX 1.4 SBOM
-- **`hearth-multiple.intoto.jsonl`** — SLSA L1 provenance attestation (slsa-github-generator)
