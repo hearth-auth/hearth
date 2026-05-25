@@ -26,6 +26,7 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   - **CycloneDX SBOM** (`hearth-sbom.cdx.json`) — full dependency inventory in CycloneDX JSON
     format, signed with cosign.
   - Operator verification instructions: `docs/guides/verify-release.md` (HEA-747).
+
 ### Security
 
 - **Realm status cache: fail-closed on corrupted storage records** — `populate_realm_status_cache`
