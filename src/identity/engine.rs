@@ -35,8 +35,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 use crate::identity::magic_link::{
-    self, MagicLinkResponse, StoredMagicLink, StoredPasswordReset, MAGIC_LINK_EXPIRY_MICROS,
-    PASSWORD_RESET_EXPIRY_MICROS,
+    self, MagicLinkResponse, StoredEmailVerifyToken, StoredMagicLink, StoredPasswordReset,
+    MAGIC_LINK_EXPIRY_MICROS, PASSWORD_RESET_EXPIRY_MICROS,
 };
 
 /// Enforces token size caps per AUTHORIZATION.md § 2.6.
@@ -372,6 +372,11 @@ pub struct EmbeddedIdentityEngine {
     /// Limits the number of password reset requests per email per hour.
     /// Key format: `reset:{realm}:{email}`.
     password_reset_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
+    /// Per-user email verification rate trackers.
+    ///
+    /// Limits the number of verification email requests per user per hour.
+    /// Key format: `email-verify:{realm}:{user_uuid}`.
+    email_verify_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-email self-registration rate trackers.
     ///
     /// Limits the number of registration attempts per email per hour.
@@ -626,6 +631,7 @@ impl EmbeddedIdentityEngine {
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
             password_reset_rate_trackers: Mutex::new(HashMap::new()),
+            email_verify_rate_trackers: Mutex::new(HashMap::new()),
             registration_email_rate_trackers: Mutex::new(HashMap::new()),
             registration_ip_rate_trackers: Mutex::new(HashMap::new()),
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
@@ -787,6 +793,7 @@ impl EmbeddedIdentityEngine {
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
             password_reset_rate_trackers: Mutex::new(HashMap::new()),
+            email_verify_rate_trackers: Mutex::new(HashMap::new()),
             registration_email_rate_trackers: Mutex::new(HashMap::new()),
             registration_ip_rate_trackers: Mutex::new(HashMap::new()),
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
@@ -1276,6 +1283,57 @@ impl EmbeddedIdentityEngine {
             .password_reset_rate_trackers
             .lock()
             .expect("password reset tracker lock");
+        let tracker = trackers.entry(key).or_insert(AttemptTracker {
+            failed_count: 0,
+            last_failure_micros: now,
+        });
+        tracker.failed_count += 1;
+        tracker.last_failure_micros = now;
+    }
+
+    // ===== Email verification rate limiting helpers =====
+
+    /// Email verification rate limit: 3 requests per user per hour.
+    const EMAIL_VERIFY_MAX_REQUESTS: u32 = 3;
+    /// Email verification rate limit window: 1 hour in microseconds.
+    const EMAIL_VERIFY_RATE_WINDOW_MICROS: i64 = 60 * 60 * 1_000_000;
+
+    /// Builds an email-verify rate tracker key from realm and user.
+    fn email_verify_tracker_key(realm_id: &RealmId, user_id: &UserId) -> String {
+        format!("email-verify:{}:{}", realm_id.as_uuid(), user_id.as_uuid())
+    }
+
+    /// Checks whether email verification requests for this user are rate-limited.
+    fn check_email_verify_rate_limit(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        let key = Self::email_verify_tracker_key(realm_id, user_id);
+        let trackers = self
+            .email_verify_rate_trackers
+            .lock()
+            .expect("email verify tracker lock");
+        if let Some(tracker) = trackers.get(&key) {
+            if tracker.failed_count >= Self::EMAIL_VERIFY_MAX_REQUESTS {
+                let now = self.clock.now().as_micros();
+                let elapsed = now - tracker.last_failure_micros;
+                if elapsed < Self::EMAIL_VERIFY_RATE_WINDOW_MICROS {
+                    return Err(IdentityError::RateLimited);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Records an email verification request for rate limiting.
+    fn record_email_verify_request(&self, realm_id: &RealmId, user_id: &UserId) {
+        let key = Self::email_verify_tracker_key(realm_id, user_id);
+        let now = self.clock.now().as_micros();
+        let mut trackers = self
+            .email_verify_rate_trackers
+            .lock()
+            .expect("email verify tracker lock");
         let tracker = trackers.entry(key).or_insert(AttemptTracker {
             failed_count: 0,
             last_failure_micros: now,
@@ -6663,6 +6721,192 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(user_id)
     }
 
+    // ===== Required-action: email verification =====
+
+    fn request_email_verification(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<String, IdentityError> {
+        // 1. Rate limit check (3/hr per user).
+        self.check_email_verify_rate_limit(realm_id, user_id)?;
+
+        // 2. Ensure the user exists.
+        self.get_user(realm_id, user_id)?
+            .ok_or(IdentityError::UserNotFound)?;
+
+        // 3. Create a session so the redemption step can issue full-access tokens.
+        let session = self.create_session(
+            realm_id,
+            user_id,
+            &crate::identity::SessionContext::default(),
+        )?;
+
+        // 4. Generate random token and build composite: "{realm_uuid}.{random_b64url}".
+        //    Embedding realm in the token lets the GET /verify-email handler route
+        //    without an X-Realm-ID header.  SHA-256 is computed over the random
+        //    portion only so the realm cannot be swapped to claim another realm's token.
+        let random_token = magic_link::generate_magic_link_token()?;
+        let composite = format!("{}.{}", realm_id.as_uuid(), random_token.as_str());
+        let token_hash = Self::sha256_hex(random_token.as_str().as_bytes());
+
+        // 5. Persist the token record.
+        let now = self.clock.now().as_micros();
+        let stored = StoredEmailVerifyToken {
+            user_id: user_id.as_uuid().to_string(),
+            session_id: session.id().as_uuid().to_string(),
+            realm_id: realm_id.as_uuid().to_string(),
+            created_at_micros: now,
+            used: false,
+        };
+        let stored_bytes =
+            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let key = keys::encode_email_verify_token(&token_hash);
+        self.storage
+            .put(realm_id, &key, &stored_bytes)
+            .map_err(Self::storage_err)?;
+
+        // 6. Update the per-user index (supersedes any previous token).
+        let index_key = keys::encode_email_verify_user_index(realm_id, user_id);
+        self.storage
+            .put(realm_id, &index_key, token_hash.as_bytes())
+            .map_err(Self::storage_err)?;
+
+        // 7. Record rate limit event.
+        self.record_email_verify_request(realm_id, user_id);
+
+        Ok(composite)
+    }
+
+    fn redeem_email_verification(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+    ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
+        // 1. Parse composite token "{realm_uuid}.{random_b64url}".
+        let (realm_part, random_part) = token
+            .split_once('.')
+            .ok_or(IdentityError::EmailVerificationTokenInvalid)?;
+
+        // Validate the embedded realm matches the caller's realm.
+        let token_realm_uuid = uuid::Uuid::parse_str(realm_part)
+            .map_err(|_| IdentityError::EmailVerificationTokenInvalid)?;
+        if token_realm_uuid != *realm_id.as_uuid() {
+            return Err(IdentityError::EmailVerificationTokenInvalid);
+        }
+
+        // 2. Hash the random portion and look up the stored record.
+        let token_hash = Self::sha256_hex(random_part.as_bytes());
+        let key = keys::encode_email_verify_token(&token_hash);
+
+        let bytes = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::EmailVerificationTokenInvalid)?;
+
+        let mut stored: StoredEmailVerifyToken =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        // 3. Single-use check.
+        if stored.used {
+            return Err(IdentityError::EmailVerificationTokenInvalid);
+        }
+
+        // 4. TTL check (24 hours).
+        let now = self.clock.now().as_micros();
+        if now - stored.created_at_micros > EMAIL_VERIFY_EXPIRY_MICROS {
+            let _ = self.storage.delete(realm_id, &key);
+            return Err(IdentityError::EmailVerificationTokenExpired);
+        }
+
+        // 5. Supersession check: user index must still point to this hash.
+        let user_id_uuid =
+            uuid::Uuid::parse_str(&stored.user_id).map_err(|e| IdentityError::Serialization {
+                reason: format!("invalid stored user_id: {e}"),
+            })?;
+        let user_id = UserId::new(user_id_uuid);
+        let index_key = keys::encode_email_verify_user_index(realm_id, &user_id);
+        let current_hash = self
+            .storage
+            .get(realm_id, &index_key)
+            .map_err(Self::storage_err)?
+            .and_then(|b| String::from_utf8(b).ok());
+        if current_hash.as_deref() != Some(&token_hash) {
+            return Err(IdentityError::EmailVerificationTokenInvalid);
+        }
+
+        // 6. Mark as used and write back.
+        stored.used = true;
+        let updated_bytes =
+            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &key, &updated_bytes)
+            .map_err(Self::storage_err)?;
+
+        // 7. Remove the user index (this token is now consumed).
+        let _ = self.storage.delete(realm_id, &index_key);
+
+        // 8. Parse session ID from stored record.
+        let session_id_uuid = uuid::Uuid::parse_str(&stored.session_id).map_err(|e| {
+            IdentityError::Serialization {
+                reason: format!("invalid stored session_id: {e}"),
+            }
+        })?;
+        let session_id = crate::core::SessionId::new(session_id_uuid);
+
+        // 9. Clear VERIFY_EMAIL from pending required actions.
+        self.remove_required_action(
+            realm_id,
+            &user_id,
+            crate::identity::types::RequiredAction::VerifyEmail,
+        )?;
+
+        // 10. Audit.
+        self.record_audit(
+            realm_id,
+            Some(&AuditContext {
+                actor: crate::audit::Actor::User(user_id.clone()),
+                metadata: None,
+            }),
+            crate::audit::AuditAction::EmailVerified,
+            "user",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        // 11. Issue tokens: if more required actions remain, issue another RA token;
+        //     otherwise issue a full-access token pair.
+        let remaining = self.pending_actions(realm_id, &user_id)?;
+        if !remaining.is_empty() {
+            let ra_token = self.issue_required_action_jwt(
+                realm_id,
+                &user_id,
+                &session_id,
+                remaining.into_iter().collect(),
+            )?;
+            return Ok(crate::identity::oidc::PasswordGrantResponse {
+                access_token: ra_token,
+                refresh_token: String::new(),
+                token_type: "Bearer".to_string(),
+                expires_in: Self::REQUIRED_ACTION_TOKEN_TTL_SECS,
+            });
+        }
+
+        let token_pair = self.issue_tokens(realm_id, &user_id, &session_id)?;
+        Ok(crate::identity::oidc::PasswordGrantResponse {
+            access_token: token_pair.access_token().to_string(),
+            refresh_token: token_pair.refresh_token().to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: self.config.token.access_token_ttl_secs,
+        })
+    }
+
     // ===== UserInfo (OIDC Core §5.3) =====
 
     fn userinfo(
@@ -10135,6 +10379,152 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<BTreeSet<RequiredAction>, IdentityError> {
         let key = keys::encode_required_action_key(user_id);
         load_required_actions(&*self.storage, realm_id, &key)
+    }
+
+    fn validate_required_action_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        expected_action: RequiredAction,
+    ) -> Result<crate::identity::tokens::TokenClaims, IdentityError> {
+        let claims = self.verify_token_signature_for_realm(realm_id, token)?;
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if now_secs >= claims.exp {
+            return Err(IdentityError::TokenExpired);
+        }
+        if claims.token_type != REQUIRED_ACTION_TOKEN_TYPE {
+            return Err(IdentityError::Unauthorized);
+        }
+        if !claims.required_actions.contains(&expected_action) {
+            return Err(IdentityError::Unauthorized);
+        }
+        Ok(claims)
+    }
+
+    fn complete_update_password(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        new_password: CleartextPassword,
+    ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
+        // 1. Cryptographically verify the token against the realm's signing key.
+        let claims = self.verify_token_signature_for_realm(realm_id, token)?;
+
+        // 2. Enforce expiry (mirrors validate_token ordering: expiry before type gate).
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if now_secs >= claims.exp {
+            return Err(IdentityError::TokenExpired);
+        }
+
+        // 3. Type gate: only required-action tokens may reach this endpoint.
+        //    Regular access/refresh tokens → Unauthorized (→ HTTP 403).
+        if claims.token_type != REQUIRED_ACTION_TOKEN_TYPE {
+            return Err(IdentityError::Unauthorized);
+        }
+
+        // 4. The token's claim set must include UPDATE_PASSWORD.
+        if !claims
+            .required_actions
+            .contains(&RequiredAction::UpdatePassword)
+        {
+            return Err(IdentityError::Unauthorized);
+        }
+
+        // 5. Extract user_id and session_id from verified claims.
+        //    Claims use prefixed string format: "user_<uuid>" / "session_<uuid>".
+        let user_id = Self::parse_user_id_claim(&claims)?;
+        let session_id =
+            Self::parse_session_id_claim(&claims)?.ok_or(IdentityError::InvalidToken)?;
+
+        // 6. Anti-replay: verify UPDATE_PASSWORD is still in the STORED pending set.
+        //    If the action was already completed, the stored set is empty/cleared
+        //    while the (still-valid) JWT claim still lists it. → 401.
+        let stored_pending = self.pending_actions(realm_id, &user_id)?;
+        if !stored_pending.contains(&RequiredAction::UpdatePassword) {
+            return Err(IdentityError::InvalidToken);
+        }
+
+        // 7. Validate password length (guards against hashing DoS).
+        validation::validate_password_length(new_password.as_bytes())?;
+
+        // 8. Load user for policy checks (display_name / email for not_username / not_email).
+        let user = self
+            .get_user(realm_id, &user_id)?
+            .ok_or(IdentityError::UserNotFound)?;
+
+        // 9. Validate against realm password policy.
+        let policy = self.password_policy_for_realm(realm_id)?;
+        if let Some(policy) = policy.as_ref() {
+            validation::validate_password_against_policy(
+                new_password.as_bytes(),
+                policy,
+                Some(user.display_name()),
+                Some(user.email()),
+            )?;
+        }
+
+        // 10. Reuse check: reject if the new password matches the current credential.
+        let cred_key = keys::encode_credential_key(&user_id);
+        if let Some(bytes) = self
+            .storage
+            .get(realm_id, &cred_key)
+            .map_err(Self::storage_err)?
+        {
+            let current = Self::deserialize_credential(&bytes)?;
+            if credentials::verify_hash(&new_password, &current.hash)? {
+                return Err(IdentityError::PasswordReused);
+            }
+        }
+
+        // 11. Hash the new password with Argon2id (upgrades any PBKDF2/bcrypt hash).
+        let now_micros = self.clock.now().as_micros();
+        let credential_cfg = self.credential_config_for_realm(realm_id)?;
+        let new_cred = credentials::hash_password(&new_password, &credential_cfg, now_micros)?;
+        let new_cred_bytes = Self::serialize_credential(&new_cred)?;
+        self.storage
+            .put(realm_id, &cred_key, &new_cred_bytes)
+            .map_err(Self::storage_err)?;
+
+        // 12. Clear UPDATE_PASSWORD from the stored pending-action set.
+        self.remove_required_action(realm_id, &user_id, RequiredAction::UpdatePassword)?;
+
+        // 13. Audit: user-initiated credential change.
+        self.record_audit(
+            realm_id,
+            Some(&AuditContext {
+                actor: Actor::User(user_id.clone()),
+                metadata: None,
+            }),
+            AuditAction::CredentialChanged,
+            "credential",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        // 14. Issue a fresh token. If other actions remain, issue another RA token;
+        //     otherwise issue a full-access token pair.
+        let remaining = self.pending_actions(realm_id, &user_id)?;
+        if !remaining.is_empty() {
+            let ra_token = self.issue_required_action_jwt(
+                realm_id,
+                &user_id,
+                &session_id,
+                remaining.into_iter().collect(),
+            )?;
+            return Ok(crate::identity::oidc::PasswordGrantResponse {
+                access_token: ra_token,
+                refresh_token: String::new(),
+                token_type: "Bearer".to_string(),
+                expires_in: Self::REQUIRED_ACTION_TOKEN_TTL_SECS,
+            });
+        }
+
+        let token_pair = self.issue_tokens(realm_id, &user_id, &session_id)?;
+        Ok(crate::identity::oidc::PasswordGrantResponse {
+            access_token: token_pair.access_token().to_string(),
+            refresh_token: token_pair.refresh_token().to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: self.config.token.access_token_ttl_secs,
+        })
     }
 }
 

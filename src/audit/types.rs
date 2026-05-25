@@ -203,6 +203,10 @@ pub enum AuditAction {
     ///
     /// Metadata carries `action` (the action name) and `target_user` (user ID).
     RequiredActionRemoved,
+    /// A user successfully verified their email address via a verification link.
+    ///
+    /// Logged on successful redemption of a `VERIFY_EMAIL` required-action token.
+    EmailVerified,
 }
 
 impl AuditAction {
@@ -282,6 +286,7 @@ impl AuditAction {
             Self::BackupRestored,
             Self::RequiredActionAdded,
             Self::RequiredActionRemoved,
+            Self::EmailVerified,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -359,6 +364,7 @@ impl AuditAction {
             Self::BackupRestored => "backup_restored",
             Self::RequiredActionAdded => "required_action_added",
             Self::RequiredActionRemoved => "required_action_removed",
+            Self::EmailVerified => "email_verified",
         }
     }
 }
@@ -437,6 +443,7 @@ impl std::str::FromStr for AuditAction {
             "backup_restored" => Ok(Self::BackupRestored),
             "required_action_added" => Ok(Self::RequiredActionAdded),
             "required_action_removed" => Ok(Self::RequiredActionRemoved),
+            "email_verified" => Ok(Self::EmailVerified),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -523,7 +530,8 @@ impl AuditAction {
             | Self::BackupCreated
             | Self::BackupRestored
             | Self::RequiredActionAdded
-            | Self::RequiredActionRemoved => LogOnly,
+            | Self::RequiredActionRemoved
+            | Self::EmailVerified => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged

@@ -125,6 +125,16 @@ pub enum IdentityError {
     /// Intentionally conflates not-found, expired, and already-used for
     /// enumeration resistance — callers cannot distinguish the three.
     PasswordResetTokenInvalid,
+    /// The email verification token (HEA-754) has expired (past 24 hr TTL).
+    ///
+    /// Distinct from `EmailVerificationTokenInvalid` so the HTTP handler can
+    /// map it to a 410 Gone with `error: "verification_token_expired"`.
+    EmailVerificationTokenExpired,
+    /// The email verification token is invalid, unknown, already used, or superseded.
+    ///
+    /// Returned for not-found, already-used, and superseded-by-resend cases.
+    /// The HTTP handler maps this to 410 Gone.
+    EmailVerificationTokenInvalid,
     /// The user account has not yet verified their email address.
     ///
     /// Returned by `create_session` when a user in `PendingVerification`
@@ -430,6 +440,12 @@ impl fmt::Display for IdentityError {
             Self::PasswordResetTokenInvalid => {
                 write!(f, "invalid or expired password reset link")
             }
+            Self::EmailVerificationTokenExpired => {
+                write!(f, "email verification link has expired")
+            }
+            Self::EmailVerificationTokenInvalid => {
+                write!(f, "invalid or already-used email verification link")
+            }
             Self::UserNotVerified => write!(f, "user email not verified"),
             Self::RateLimited => write!(f, "too many failed attempts"),
             Self::OrganizationNotFound => write!(f, "organization not found"),
@@ -584,6 +600,8 @@ impl std::error::Error for IdentityError {
             | Self::MagicLinkTokenInvalid
             | Self::VerificationTokenInvalid
             | Self::PasswordResetTokenInvalid
+            | Self::EmailVerificationTokenExpired
+            | Self::EmailVerificationTokenInvalid
             | Self::UserNotVerified
             | Self::RateLimited
             | Self::OrganizationNotFound

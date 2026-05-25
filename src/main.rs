@@ -1392,7 +1392,8 @@ async fn run_serve(
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
-            .with_trusted_proxies(api_trusted_proxies.clone()),
+            .with_trusted_proxies(api_trusted_proxies.clone())
+            .with_email(Arc::clone(&email_service)),
         )
     } else {
         Arc::new(
@@ -1404,7 +1405,8 @@ async fn run_serve(
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
-            .with_trusted_proxies(api_trusted_proxies.clone()),
+            .with_trusted_proxies(api_trusted_proxies.clone())
+            .with_email(Arc::clone(&email_service)),
         )
     };
 

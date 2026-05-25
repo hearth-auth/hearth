@@ -23,6 +23,10 @@ pub(crate) const MAGIC_LINK_EXPIRY_MICROS: i64 = 15 * 60 * 1_000_000;
 /// Password reset token expiry: 30 minutes in microseconds.
 pub(crate) const PASSWORD_RESET_EXPIRY_MICROS: i64 = 30 * 60 * 1_000_000;
 
+/// Email verification token expiry: 24 hours in microseconds.
+#[allow(dead_code)]
+pub(crate) const EMAIL_VERIFY_EXPIRY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+
 /// Number of random bytes for a magic link token.
 pub(crate) const MAGIC_LINK_TOKEN_BYTES: usize = 32;
 
@@ -56,6 +60,30 @@ pub(crate) struct StoredPasswordReset {
     /// When this token was created (Unix microseconds).
     pub created_at_micros: i64,
     /// Whether this token has already been used.
+    pub used: bool,
+}
+
+/// Stored state for a pending email verification token.
+///
+/// Persisted under `email:verify:{sha256_hex_of_token}` within the realm's
+/// key space. The plaintext token is never stored.
+///
+/// A secondary index at `email:verify:user:{realm_uuid}:{user_uuid}` always
+/// points to the **current** (latest) token hash so that re-sends automatically
+/// supersede older tokens at redemption time.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoredEmailVerifyToken {
+    /// The user ID whose email is being verified.
+    pub user_id: String,
+    /// The session ID from the required-action JWT so a full-access token
+    /// can be issued directly upon successful redemption.
+    pub session_id: String,
+    /// The realm this token belongs to.
+    pub realm_id: String,
+    /// When this token was created (Unix microseconds).
+    pub created_at_micros: i64,
+    /// Whether this token has already been redeemed.
     pub used: bool,
 }
 

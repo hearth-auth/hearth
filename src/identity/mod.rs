@@ -1547,4 +1547,86 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<std::collections::BTreeSet<RequiredAction>, IdentityError>;
+
+    /// Completes the `UPDATE_PASSWORD` required action.
+    ///
+    /// `token` must be a valid, unexpired required-action JWT with
+    /// `UPDATE_PASSWORD` in its `required_actions` claim. Regular access tokens
+    /// are rejected with [`IdentityError::Unauthorized`] (→ HTTP 403).
+    ///
+    /// On success:
+    /// - The new password is validated against the realm policy and checked for
+    ///   reuse against the current credential.
+    /// - The credential is rehashed with Argon2id (upgrading any PBKDF2/bcrypt
+    ///   hash produced by the Keycloak migration path).
+    /// - `UPDATE_PASSWORD` is removed from the user's stored pending-action set.
+    /// - A `CredentialChanged` audit event is recorded with actor = user.
+    /// - A fresh token is issued: full-access if no other actions remain,
+    ///   otherwise another required-action token listing the remaining actions.
+    ///
+    /// Error cases:
+    /// - [`IdentityError::InvalidToken`] / [`IdentityError::TokenExpired`] —
+    ///   bad or expired JWT.
+    /// - [`IdentityError::Unauthorized`] — token is not a required-action type
+    ///   or does not carry `UPDATE_PASSWORD`.
+    /// - [`IdentityError::InvalidToken`] — action already completed (stored
+    ///   pending set no longer contains `UPDATE_PASSWORD`); prevents replay.
+    /// - [`IdentityError::PasswordReused`] — new password matches the current
+    ///   credential.
+    /// - [`IdentityError::InvalidInput`] — password violates the realm policy.
+    fn complete_update_password(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        new_password: CleartextPassword,
+    ) -> Result<PasswordGrantResponse, IdentityError>;
+
+    /// Generates a single-use, 24-hour email verification token for the given user.
+    ///
+    /// Stores the SHA-256 hash of the token under `email:verify:{hash}` and
+    /// updates the per-user index at `email:verify:user:{realm}:{user}` so that
+    /// any previously issued (unredeemed) token is automatically superseded.
+    ///
+    /// Rate-limited to 3 requests per user per hour.
+    ///
+    /// Returns the plaintext token (base64url, 32 random bytes) for delivery
+    /// via email. The token is shown exactly once and never persisted in plaintext.
+    /// Validates a required-action JWT for a specific required action.
+    ///
+    /// Verifies the token signature against the realm's signing key, enforces
+    /// expiry, confirms `token_type == "required_action"`, and confirms that
+    /// `required_actions` contains `expected_action`.
+    ///
+    /// Returns the verified [`TokenClaims`] on success, which the caller may
+    /// use to extract `sub` (user_id) and `sid` (session_id).
+    fn validate_required_action_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        expected_action: RequiredAction,
+    ) -> Result<crate::identity::tokens::TokenClaims, IdentityError>;
+
+    fn request_email_verification(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<String, IdentityError>;
+
+    /// Redeems an email verification token.
+    ///
+    /// Validates the token, clears `VERIFY_EMAIL` from the user's pending
+    /// required actions, logs an `EmailVerified` audit event, and issues a fresh
+    /// token — full-access if no other actions remain, or another required-action
+    /// token listing any remaining actions.
+    ///
+    /// Error cases:
+    /// - [`IdentityError::EmailVerificationTokenInvalid`] — token not found,
+    ///   already used, or superseded by a more recent resend.
+    /// - [`IdentityError::EmailVerificationTokenExpired`] — token is older than
+    ///   24 hours.
+    fn redeem_email_verification(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+    ) -> Result<PasswordGrantResponse, IdentityError>;
 }

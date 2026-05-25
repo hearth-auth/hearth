@@ -90,6 +90,14 @@ const MAGIC_LINK_PREFIX: &str = "magic:link:";
 /// Prefix for email verification token storage (stored by SHA-256 hash).
 const EMAIL_VERIFY_PREFIX: &str = "email:verify:";
 
+/// Prefix for the per-user "current active token hash" index.
+///
+/// Format: `email:verify:user:{realm_uuid}:{user_uuid}`
+/// Points to the SHA-256 hex digest of the most-recently-issued verification
+/// token for this user. Used to supersede previous tokens on re-send.
+#[allow(dead_code)]
+const EMAIL_VERIFY_USER_PREFIX: &str = "email:verify:user:";
+
 /// Prefix for password reset token storage (stored by SHA-256 hash).
 const PASSWORD_RESET_PREFIX: &str = "rst:token:";
 
@@ -590,6 +598,26 @@ pub(crate) fn encode_magic_link_token(token_hash: &str) -> Vec<u8> {
 /// The plaintext is never stored.
 pub(crate) fn encode_email_verify_token(token_hash: &str) -> Vec<u8> {
     format!("{EMAIL_VERIFY_PREFIX}{token_hash}").into_bytes()
+}
+
+/// Encodes the per-user pointer to the current active email verification token hash.
+///
+/// Format: `email:verify:user:{realm_uuid}:{user_uuid}`
+///
+/// Value: the SHA-256 hex digest of the currently-active verification token.
+/// Updated on every new `request_email_verification` call, superseding the
+/// previous token for this user.
+#[allow(dead_code)]
+pub(crate) fn encode_email_verify_user_index(
+    realm_id: &crate::core::RealmId,
+    user_id: &crate::core::UserId,
+) -> Vec<u8> {
+    format!(
+        "{EMAIL_VERIFY_USER_PREFIX}{}:{}",
+        realm_id.as_uuid(),
+        user_id.as_uuid()
+    )
+    .into_bytes()
 }
 
 /// Encodes the storage key for a password reset token.

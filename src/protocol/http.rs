@@ -28,7 +28,9 @@ use tracing::{debug, error, info, Level};
 use crate::audit::{AuditEngine, CreateAuditEvent};
 use crate::cluster::ClusterEngine;
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
-use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
+use crate::identity::email::{
+    validate_email_template, EmailBranding, EmailService, LocalizedEmailTemplate,
+};
 use crate::identity::{IdentityEngine, PasswordGrantRequest, UpdateRealmRequest};
 use crate::protocol::admin_auth::{
     AdminRateLimiter, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
@@ -115,6 +117,9 @@ pub struct AppState {
     /// When `None`, all `/admin/cluster/*` endpoints return `503 Service
     /// Unavailable` rather than panicking.
     pub cluster: Option<Arc<ClusterEngine>>,
+    /// Email service for transactional mail delivery. `None` in test harnesses
+    /// that don't configure an email transport.
+    pub email: Option<Arc<EmailService>>,
 }
 
 impl AppState {
@@ -136,6 +141,7 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
+            email: None,
         }
     }
 
@@ -159,6 +165,7 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
+            email: None,
         }
     }
 
@@ -184,6 +191,7 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
+            email: None,
         }
     }
 
@@ -214,6 +222,12 @@ impl AppState {
     /// Attaches a cluster engine, enabling the `/admin/cluster/*` endpoints.
     pub fn with_cluster(mut self, engine: Arc<ClusterEngine>) -> Self {
         self.cluster = Some(engine);
+        self
+    }
+
+    /// Attaches an email service, enabling transactional email delivery.
+    pub fn with_email(mut self, email: Arc<EmailService>) -> Self {
+        self.email = Some(email);
         self
     }
 }
@@ -578,6 +592,19 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/userinfo", axum::routing::get(userinfo))
         .route("/v1/me/permissions", axum::routing::get(me_permissions))
+        .route(
+            "/v1/required-actions/update-password",
+            axum::routing::post(complete_update_password)
+                .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
+        )
+        .route(
+            "/v1/required-actions/request-email-verification",
+            axum::routing::post(ra_request_email_verification),
+        )
+        .route(
+            "/v1/required-actions/verify-email",
+            axum::routing::get(ra_verify_email),
+        )
         .route(
             "/v1/{realm}/auth/magic-link",
             axum::routing::post(magic_link_request)
@@ -1406,8 +1433,11 @@ fn identity_error_to_response(
         IdentityError::MagicLinkTokenInvalid => {
             (StatusCode::UNAUTHORIZED, "invalid or expired link")
         }
-        IdentityError::VerificationTokenInvalid => {
+        IdentityError::VerificationTokenInvalid | IdentityError::EmailVerificationTokenInvalid => {
             (StatusCode::GONE, "invalid or expired verification link")
+        }
+        IdentityError::EmailVerificationTokenExpired => {
+            (StatusCode::GONE, "verification token expired")
         }
         IdentityError::PasswordResetTokenInvalid => {
             (StatusCode::UNAUTHORIZED, "invalid or expired reset link")
@@ -4022,6 +4052,259 @@ async fn admin_revoke_user_consent(
             });
             (StatusCode::NO_CONTENT, ()).into_response()
         }
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Required-actions self-service endpoints
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /v1/required-actions/update-password`.
+#[derive(serde::Deserialize)]
+struct UpdatePasswordBody {
+    new_password: String,
+}
+
+/// `POST /v1/required-actions/update-password` — completes the `UPDATE_PASSWORD`
+/// required action for the authenticated user.
+///
+/// Auth: required-action JWT only. Regular access tokens → 403 Forbidden.
+///
+/// Returns `200 OK` with a new token on success. The new token is a full-access
+/// token when no other required actions remain, or another required-action token
+/// if further actions are pending.
+///
+/// Error responses:
+/// - `401` — missing/invalid/expired token, or token already consumed (action cleared).
+/// - `403` — token is not a required-action token.
+/// - `422` — password violates the realm policy, or equals the current password
+///   (`error: "password_reuse"`). The action is NOT cleared on 422.
+async fn complete_update_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<UpdatePasswordBody>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+
+    let Some(token) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_token"})),
+        )
+            .into_response();
+    };
+
+    let new_password = crate::identity::CleartextPassword::from_string(body.new_password);
+
+    match state
+        .identity
+        .complete_update_password(&realm_id, token, new_password)
+    {
+        Ok(response) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "access_token": response.access_token,
+                "refresh_token": response.refresh_token,
+                "token_type": response.token_type,
+                "expires_in": response.expires_in,
+            })),
+        )
+            .into_response(),
+        Err(crate::identity::IdentityError::PasswordReused) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "password_reuse"})),
+        )
+            .into_response(),
+        Err(crate::identity::IdentityError::InvalidInput { ref reason }) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "policy_violation", "detail": reason})),
+        )
+            .into_response(),
+        Err(crate::identity::IdentityError::Unauthorized) => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "required_action_only"})),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Required-action: email verification
+// ---------------------------------------------------------------------------
+
+/// `POST /v1/required-actions/request-email-verification`
+///
+/// Generates a single-use 24-hour email verification token. Requires a
+/// required-action JWT with `VERIFY_EMAIL` pending.
+/// Returns `202 Accepted` with `{"verification_token": "<raw_token>"}`.
+// HEA-754: route not yet registered; allow until implementation is wired up.
+#[allow(dead_code)]
+async fn ra_request_email_verification(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(token) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_token"})),
+        )
+            .into_response();
+    };
+
+    // Decode unverified to extract realm_id from the `tid` claim.
+    let unverified = match crate::identity::decode_claims_unverified(token) {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    // tid is "realm_{uuid}" — strip prefix before parsing.
+    let realm_uuid_str = unverified
+        .tid
+        .strip_prefix("realm_")
+        .unwrap_or(&unverified.tid);
+    let realm_uuid = match realm_uuid_str.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_token"})),
+            )
+                .into_response()
+        }
+    };
+    let realm_id = crate::core::RealmId::new(realm_uuid);
+
+    // Full cryptographic validation — rejects non-required-action tokens.
+    let claims = match state.identity.validate_required_action_token(
+        &realm_id,
+        token,
+        crate::identity::RequiredAction::VerifyEmail,
+    ) {
+        Ok(c) => c,
+        Err(crate::identity::IdentityError::Unauthorized) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "required_action_only"})),
+            )
+                .into_response()
+        }
+        Err(e) => return identity_error_to_response(&e).into_response(),
+    };
+
+    let uuid_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
+    let user_id = match uuid_str.parse::<uuid::Uuid>().map(crate::core::UserId::new) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    match state
+        .identity
+        .request_email_verification(&realm_id, &user_id)
+    {
+        Ok(verification_token) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"verification_token": verification_token})),
+        )
+            .into_response(),
+        Err(crate::identity::IdentityError::RateLimited) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "rate_limited"})),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+/// Query parameters for `GET /v1/required-actions/verify-email`.
+// HEA-754: unused until route is registered.
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+struct VerifyEmailQuery {
+    token: String,
+}
+
+/// `GET /v1/required-actions/verify-email?token={raw_token}`
+///
+/// Redeems an email verification token, clears `VERIFY_EMAIL`, and returns a
+/// full-access token pair (or another required-action token if other actions remain).
+// HEA-754: route not yet registered; allow until implementation is wired up.
+#[allow(dead_code)]
+async fn ra_verify_email(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<VerifyEmailQuery>,
+) -> impl IntoResponse {
+    // Token format: "{realm_uuid}.{random_b64url}" — extract realm for routing.
+    let Some((realm_part, _)) = params.token.split_once('.') else {
+        return (
+            StatusCode::GONE,
+            Json(serde_json::json!({"error": "invalid_verification_token"})),
+        )
+            .into_response();
+    };
+
+    let realm_id = match realm_part
+        .parse::<uuid::Uuid>()
+        .map(crate::core::RealmId::new)
+    {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                StatusCode::GONE,
+                Json(serde_json::json!({"error": "invalid_verification_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    match state
+        .identity
+        .redeem_email_verification(&realm_id, &params.token)
+    {
+        Ok(response) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "access_token": response.access_token,
+                "refresh_token": response.refresh_token,
+                "token_type": response.token_type,
+                "expires_in": response.expires_in,
+            })),
+        )
+            .into_response(),
+        Err(crate::identity::IdentityError::EmailVerificationTokenExpired) => (
+            StatusCode::GONE,
+            Json(serde_json::json!({"error": "verification_token_expired"})),
+        )
+            .into_response(),
+        Err(crate::identity::IdentityError::EmailVerificationTokenInvalid) => (
+            StatusCode::GONE,
+            Json(serde_json::json!({"error": "invalid_verification_token"})),
+        )
+            .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }
