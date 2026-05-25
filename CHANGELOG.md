@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Cluster admin endpoints now require system-realm token** — `POST /admin/cluster/bootstrap`,
+  `GET /admin/cluster/status`, and `POST /admin/cluster/transfer-leadership` previously
+  accepted any valid tenant-realm admin token, allowing a tenant admin to invoke
+  node-wide Raft operations (privilege escalation). All three endpoints now return
+  `403 Forbidden` with `"cluster admin requires system realm"` when the `X-Realm-ID`
+  header is not the nil UUID (HEA-763).
+
 - **HTTP auth helpers now return 403 for required-action tokens** — `extract_admin_auth`,
   `me_permissions`, and `extract_user_auth` were returning 401 `invalid_token` for
   `RequiredActionsPending`, masking the real reason and preventing clients from
