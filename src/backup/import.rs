@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -16,7 +18,9 @@ use crate::identity::{
 };
 use crate::rbac::RbacEngine;
 
-use super::{ArchiveReader, BackupError};
+use zeroize::Zeroizing;
+
+use super::{decrypt_bytes, ArchiveReader, BackupError};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -178,6 +182,27 @@ impl BackupImporter {
             std::collections::HashMap::new()
         };
 
+        // ── Signing key (decrypted, optional) ──────────────────────────────
+        //
+        // Decrypt the archive's signing_key.json *before* creating the realm
+        // so that `import_realm` can install the original key atomically with
+        // the realm record (preserving the create_realm invariant that a
+        // realm always has a usable key). A failure here is fatal: silently
+        // generating a fresh key would invalidate every JWT issued under
+        // this realm prior to backup, which is the bug HEA-745 fixes.
+        let signing_key_pkcs8 = self.load_signing_key(realm_slug, &files, reader)?;
+        if signing_key_pkcs8.is_none() {
+            // The archive predates HEA-745 or shipped without a DEK in the
+            // manifest. Restore can still proceed but operators must rotate
+            // and re-issue tokens — log loudly so this shows up in restore
+            // audit trails.
+            warn!(
+                slug = realm_slug,
+                "signing_key not restored — archive missing signing_key.json or signing_key_dek_b64; \
+                 pre-restore JWTs will fail to validate against the freshly generated key"
+            );
+        }
+
         // ── Realm ──────────────────────────────────────────────────────────
         let target_name = opts.realm_target.as_deref().unwrap_or_else(|| realm.name());
 
@@ -191,7 +216,15 @@ impl BackupImporter {
             report.realms.created += 1;
             realm_id.clone()
         } else {
-            self.import_realm_record(&create_req, realm_id, opts, &mut report)?
+            self.import_realm_record(
+                &create_req,
+                realm_id,
+                // Zeroizing<Vec<u8>> derefs to Vec<u8> which derefs to [u8];
+                // as_deref() only takes one step, so we do the second manually.
+                signing_key_pkcs8.as_ref().map(|z| z.as_slice()),
+                opts,
+                &mut report,
+            )?
         };
 
         // ── Users ──────────────────────────────────────────────────────────
@@ -212,14 +245,56 @@ impl BackupImporter {
             self.import_clients(bytes, &restored_realm_id, opts, &mut report)?;
         }
 
-        // Signing key restore requires a dedicated engine method not yet
-        // available (`import_realm` always generates a fresh key). Skipped.
-        let sk_key = format!("realms/{realm_slug}/signing_key.json");
-        if files.contains_key(&sk_key) {
-            debug!(slug = realm_slug, "signing_key.json present but skipped (engine always generates a fresh key on import_realm)");
-        }
-
         Ok(report)
+    }
+
+    /// Decrypts `realms/<slug>/signing_key.json` using the DEK from the
+    /// archive manifest. Returns `Ok(None)` when either the encrypted blob
+    /// or the DEK is absent (older archives), and a hard error when the
+    /// blob is present but cannot be decrypted (corruption / wrong DEK).
+    /// Decrypts `realms/<slug>/signing_key.json` from the archive, returning
+    /// `Zeroizing<Vec<u8>>` so both the DEK bytes and the plaintext PKCS#8
+    /// bytes are actively overwritten on drop (HEA-750 M1 + M2).
+    fn load_signing_key(
+        &self,
+        realm_slug: &str,
+        files: &std::collections::HashMap<String, Vec<u8>>,
+        reader: &ArchiveReader,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, BackupError> {
+        let sk_key = format!("realms/{realm_slug}/signing_key.json");
+        let Some(encrypted) = files.get(&sk_key) else {
+            return Ok(None);
+        };
+        let Some(dek_b64) = reader.manifest.signing_key_dek_b64.as_deref() else {
+            return Ok(None);
+        };
+        if reader.manifest.dek_wrapping_params.is_some() {
+            return Err(BackupError::Crypto(
+                "signing-key DEK is passphrase-wrapped; unwrap via decrypt_archive() before \
+                 calling import_realm"
+                    .into(),
+            ));
+        }
+        // M2 fix: wrap the base64-decoded DEK in Zeroizing so the 32 heap bytes
+        // are actively overwritten when this function returns (HEA-750).
+        let dek_vec = Zeroizing::new(
+            BASE64
+                .decode(dek_b64)
+                .map_err(|e| BackupError::Crypto(format!("DEK base64 decode failed: {e}")))?,
+        );
+        if dek_vec.len() != 32 {
+            return Err(BackupError::Crypto(format!(
+                "DEK must be 32 bytes after base64 decode, got {}",
+                dek_vec.len()
+            )));
+        }
+        let mut dek = [0u8; 32];
+        dek.copy_from_slice(&dek_vec);
+        // M1 fix: decrypt_bytes now returns Zeroizing<Vec<u8>>, so pkcs8 is
+        // actively overwritten on drop here and at the call site (HEA-750).
+        let pkcs8 = decrypt_bytes(encrypted, &dek)?;
+        debug!(slug = realm_slug, "signing_key restored from archive");
+        Ok(Some(pkcs8))
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
@@ -228,10 +303,14 @@ impl BackupImporter {
         &self,
         req: &CreateRealmRequest,
         realm_id: RealmId,
+        signing_key_pkcs8: Option<&[u8]>,
         opts: &ImportOptions,
         report: &mut ImportReport,
     ) -> Result<RealmId, BackupError> {
-        match self.identity.import_realm(req, Some(realm_id.clone())) {
+        match self
+            .identity
+            .import_realm(req, Some(realm_id.clone()), signing_key_pkcs8)
+        {
             Ok(r) => {
                 report.realms.created += 1;
                 Ok(r.id().clone())
@@ -254,7 +333,7 @@ impl BackupImporter {
                             .map_err(identity_to_backup_err)?;
                         let r = self
                             .identity
-                            .import_realm(req, Some(realm_id))
+                            .import_realm(req, Some(realm_id), signing_key_pkcs8)
                             .map_err(identity_to_backup_err)?;
                         report.realms.overwritten += 1;
                         Ok(r.id().clone())

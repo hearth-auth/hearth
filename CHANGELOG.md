@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Zeroize intermediate PKCS#8 and DEK heap copies** — plaintext key material in transit no
+  longer relies on the OS/allocator to zero freed heap pages. Specifically: `decrypt_bytes` now
+  returns `Zeroizing<Vec<u8>>`; the DEK (`dek_vec`) in `load_signing_key` is wrapped in
+  `Zeroizing`; and every `key_bytes` local in `create_realm`, `import_realm`,
+  `seed_system_realm_if_absent`, and `rotate_realm_signing_key` is wrapped in `Zeroizing` so the
+  active overwrite fires on drop. No public-API behavior change (HEA-750).
+
 - **Realm status cache: fail-closed on corrupted storage records** — `populate_realm_status_cache`
   now returns an error on deserialization failure instead of silently skipping records; the engine
   refuses to start rather than booting with an incomplete realm-suspension cache (HEA-742).
@@ -17,6 +24,21 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   observe stale realm status between the storage write and cache update (HEA-742).
 
 ### Fixed
+
+- **Restore preserves realm signing keys** — `BackupImporter::import_realm` previously
+  detected the encrypted `signing_key.json` in each archive but silently discarded it,
+  letting `IdentityEngine::import_realm` regenerate a fresh Ed25519 key. Every JWT issued
+  before the backup (per-realm-signed OIDC tokens: `client_credentials`, `authorization_code`,
+  ID tokens, RP-initiated logout tokens) was therefore invalidated post-restore, and every
+  RP that cached the realm's JWKS `kid` began failing verification. Restore now decrypts
+  `signing_key.json` with the manifest's DEK and installs the original PKCS#8 bytes
+  atomically with the realm record via a new `signing_key_pkcs8: Option<&[u8]>` parameter
+  on `IdentityEngine::import_realm`. New regression test `test_restore_preserves_signing_keys`
+  in `tests/backup.rs` asserts PKCS#8 byte equality, JWKS `kid` continuity, and end-to-end
+  JWT verification against the restored key — it fails against pre-fix `main`. Migration
+  importers (Auth0, Keycloak) pass `None` and continue to generate a fresh key per realm.
+  See [docs/guides/disaster-recovery.md](./docs/guides/disaster-recovery.md) for the
+  post-incident rotation procedure when a fresh key *is* desired (HEA-745).
 
 - **`validate_token` hot-path: eliminated heap allocation, storage read, and mutex on read path**
   — three concrete violations of the zero-allocation hot-path rules (`CLAUDE.md`) were
