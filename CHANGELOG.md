@@ -23,6 +23,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Step-up MFA follow-up hardening (HEA-861)** — four deferred findings from the
+  HEA-836 SecurityAuditor re-review resolved: (1) duplicate `record_device_fingerprint`
+  call removed from the `Recognised` path (triple write on every recognised login);
+  (2) silent `let _ =` discard on `StepUpMfaTriggered` audit replaced with
+  `tracing::warn` so broken audit pipelines surface in logs; (3) `StepUpMfaCompleted`
+  audit event added to `step_up_mfa_grant_token` on success, enabling
+  trigger → resolution correlation; (4) `fingerprint_hmac_secret` minimum-length
+  guard tightened to ≥ 32 bytes (NIST SP 800-107 / SHA-256 output length) — secrets
+  shorter than 32 bytes with `adaptive_mfa.enabled=true` now fail-secure with a
+  configuration error.
+
 - **Step-up MFA rate-limit gaps closed (HEA-836)** — three additional findings
   from the SecurityAuditor re-review resolved: the pre-flight IP rate-limit check
   now covers `grant_type=urn:hearth:params:grant-type:step-up-mfa` (previously
