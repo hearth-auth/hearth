@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **GDPR Art.17: device fingerprint erasure cascade + admin API (HEA-875)** — `delete_user`
+  now cascades to all `dfp:user:{uid}:*` storage entries so right-to-erasure is complete.
+  New endpoint `DELETE /admin/users/{id}/device-fingerprints` (AC-11) lets operators satisfy
+  DSAR erasure requests without deleting the entire account; returns `{"erased": N}` and
+  emits a `DeviceFingerprintsErased` audit event. Also fixed: `derive_fingerprint_key` helper
+  was producing keys with the stale `dev:fp:` prefix instead of the correct `dfp:user:` prefix.
+
 - **CSP hardened: `unsafe-eval` and `unsafe-inline` removed (HEA-850)** — Alpine.js
   has been fully replaced by HTMX + Hyperscript across all ~40 admin templates.
   Layout reactivity (sidebar toggle, realm nav tree, toast notifications, realm pill)
