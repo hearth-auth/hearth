@@ -7,6 +7,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **CSP GAP-4 remediation (HEA-824)** — vendored Hyperscript 0.9.13 as the
+  eval-free replacement for Alpine.js; tooltip patterns migrated to pure CSS
+  (`group-hover`/`group-focus-within`); audit row expand and migrations accordion
+  migrated to Hyperscript. Documented the `unsafe-eval` trade-off with threat-model
+  rationale in `docs/security/csp.md`. Remaining Alpine components tracked for
+  removal in child issues; `unsafe-eval` removal from CSP blocked until complete.
+
 ### Added
 
 - **Required-action UI interstitials** — five new browser-facing routes handle the
