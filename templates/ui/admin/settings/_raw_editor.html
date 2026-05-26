@@ -33,13 +33,12 @@
          caret aligns. aria-hidden because it's purely decorative. #}
       <pre id="yaml-mirror" aria-hidden="true"
            class="yaml-mirror pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre px-6 py-4 font-mono text-sm leading-relaxed"
-           style="tab-size: 2; -moz-tab-size: 2;"></pre>
+           ></pre>
       <textarea id="yaml-editor" name="yaml"
                 {% if read_only %}readonly{% endif %}
                 spellcheck="false"
                 wrap="off"
                 class="yaml-editor relative block w-full resize-y border-0 bg-transparent px-6 py-4 font-mono text-sm leading-relaxed text-transparent caret-ht-content-primary placeholder:text-ht-content-muted focus:outline-none"
-                style="tab-size: 2; -moz-tab-size: 2;"
                 rows="32">{{ yaml_content }}</textarea>
     </form>
   </div>

@@ -104,7 +104,7 @@
                         class="text-sm transition-colors text-ht-content-muted hover:text-danger-fg"
                         _="on click
                              if @data-confirming is 'yes'
-                               call (closest <form>).submit()
+                               call (closest <form/>).submit()
                              else
                                set @data-confirming to 'yes'
                                set @class to 'text-sm transition-colors text-danger-fg font-medium'

@@ -1069,10 +1069,8 @@ fn validate_sms_awssns(sms: &SmsConfig) -> Result<(), ConfigError> {
 
 /// Accumulating SMS validator (used by `validate_all`).
 fn validate_sms_all(sms: &SmsConfig, issues: &mut Vec<ValidationIssue>) {
-    if let Err(e) = validate_sms(sms) {
-        if let ConfigError::ValidationError { field, reason } = e {
-            issues.push(ValidationIssue { field, reason });
-        }
+    if let Err(ConfigError::ValidationError { field, reason }) = validate_sms(sms) {
+        issues.push(ValidationIssue { field, reason });
     }
 }
 

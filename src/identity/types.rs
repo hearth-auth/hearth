@@ -875,7 +875,7 @@ mod secret_string_serde {
     {
         use serde::Deserialize;
         let val = String::deserialize(deserializer)?;
-        Ok(SecretString::new(val.into()))
+        Ok(SecretString::new(val))
     }
 }
 

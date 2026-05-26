@@ -1,5 +1,5 @@
 {# Step 1 of 4 — Create your first realm.
-   Rust handler vars: product_name, logo_url, theme_css, realm_theme_css, csrf,
+   Rust handler vars: product_name, logo_url, realm_theme_url, csrf,
      chrome: bool, active: &str ("onboarding"),
      error: Option<String>,
      form_realm_name: String,   -- slug/internal name
@@ -107,7 +107,7 @@
                    {% if form_theme == "ember" %}checked{% endif %} required>
             <span class="flex items-center gap-2 rounded-sm border border-divider bg-ht-surface-input px-3 py-1.5 text-sm font-medium text-ht-content-secondary transition-colors
                          [input:checked+&]:border-ht-content-brand [input:checked+&]:text-ht-content-primary [input:checked+&]:bg-brand-subtle">
-              <span class="h-3 w-3 rounded-full shrink-0" style="background:#e8743b"></span>
+              <svg class="h-3 w-3 shrink-0" viewBox="0 0 1 1" aria-hidden="true"><circle cx=".5" cy=".5" r=".5" fill="#e8743b"/></svg>
               Ember
             </span>
           </label>
@@ -116,7 +116,7 @@
                    {% if form_theme == "ocean" %}checked{% endif %} required>
             <span class="flex items-center gap-2 rounded-sm border border-divider bg-ht-surface-input px-3 py-1.5 text-sm font-medium text-ht-content-secondary transition-colors
                          [input:checked+&]:border-ht-content-brand [input:checked+&]:text-ht-content-primary [input:checked+&]:bg-brand-subtle">
-              <span class="h-3 w-3 rounded-full shrink-0" style="background:#3b82f6"></span>
+              <svg class="h-3 w-3 shrink-0" viewBox="0 0 1 1" aria-hidden="true"><circle cx=".5" cy=".5" r=".5" fill="#3b82f6"/></svg>
               Ocean
             </span>
           </label>
@@ -125,7 +125,7 @@
                    {% if form_theme == "midnight" %}checked{% endif %} required>
             <span class="flex items-center gap-2 rounded-sm border border-divider bg-ht-surface-input px-3 py-1.5 text-sm font-medium text-ht-content-secondary transition-colors
                          [input:checked+&]:border-ht-content-brand [input:checked+&]:text-ht-content-primary [input:checked+&]:bg-brand-subtle">
-              <span class="h-3 w-3 rounded-full shrink-0" style="background:#6d68d8"></span>
+              <svg class="h-3 w-3 shrink-0" viewBox="0 0 1 1" aria-hidden="true"><circle cx=".5" cy=".5" r=".5" fill="#6d68d8"/></svg>
               Midnight
             </span>
           </label>
@@ -134,7 +134,7 @@
                    {% if form_theme == "forest" %}checked{% endif %} required>
             <span class="flex items-center gap-2 rounded-sm border border-divider bg-ht-surface-input px-3 py-1.5 text-sm font-medium text-ht-content-secondary transition-colors
                          [input:checked+&]:border-ht-content-brand [input:checked+&]:text-ht-content-primary [input:checked+&]:bg-brand-subtle">
-              <span class="h-3 w-3 rounded-full shrink-0" style="background:#22a66a"></span>
+              <svg class="h-3 w-3 shrink-0" viewBox="0 0 1 1" aria-hidden="true"><circle cx=".5" cy=".5" r=".5" fill="#22a66a"/></svg>
               Forest
             </span>
           </label>
@@ -143,7 +143,7 @@
                    {% if form_theme == "slate" %}checked{% endif %} required>
             <span class="flex items-center gap-2 rounded-sm border border-divider bg-ht-surface-input px-3 py-1.5 text-sm font-medium text-ht-content-secondary transition-colors
                          [input:checked+&]:border-ht-content-brand [input:checked+&]:text-ht-content-primary [input:checked+&]:bg-brand-subtle">
-              <span class="h-3 w-3 rounded-full shrink-0" style="background:#64748b"></span>
+              <svg class="h-3 w-3 shrink-0" viewBox="0 0 1 1" aria-hidden="true"><circle cx=".5" cy=".5" r=".5" fill="#64748b"/></svg>
               Slate
             </span>
           </label>

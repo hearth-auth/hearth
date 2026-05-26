@@ -488,8 +488,8 @@ class ConfigEditor {
     this._root = root;
 
     const fallback = document.getElementById('ssr-editor-fallback');
-    if (fallback) fallback.style.display = 'none';
-    root.style.display = '';
+    if (fallback) fallback.classList.add('hidden');
+    root.classList.remove('hidden');
 
     const initialConfig = readJsonScript('config-editor-data') || {};
     this.config = JSON.parse(JSON.stringify(initialConfig));
