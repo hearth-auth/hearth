@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Device fingerprint proactive TTL sweeper (HEA-862)** — a background task now
+  runs every 6 hours (configurable via `identity.cleanup.dfp_sweeper_interval_secs`)
+  and evicts expired `dfp:user:*` storage entries across all realms. This satisfies
+  the GDPR 30-day retention window for users who stop logging in. Two new Prometheus
+  metrics are exported: `hearth_dfp_sweeper_evicted_total` (cumulative counter of
+  evicted entries) and `hearth_dfp_keys_active` (gauge, sampled per sweep). Errors
+  are logged at `WARN` level and do not crash the process.
+
 - **SMS MFA realm config (HEA-855)** — `RealmConfig` gains two new optional fields:
   `sms_otp_expiry_seconds` (override default OTP lifetime per realm) and
   `sms_otp_max_attempts` (override maximum guess attempts per realm). Both are
