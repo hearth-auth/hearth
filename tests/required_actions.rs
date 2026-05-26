@@ -6,7 +6,8 @@
 mod common;
 
 use hearth::identity::{
-    CreateRealmRequest, CreateUserRequest, RealmConfig, RequiredAction, UpdateUserRequest,
+    CleartextPassword, CreateRealmRequest, CreateUserRequest, RealmConfig, RegisterUserRequest,
+    RegistrationPolicy, RequiredAction, UpdateUserRequest,
 };
 
 fn make_user_request(prefix: &str) -> CreateUserRequest {
@@ -158,6 +159,64 @@ async fn update_user_can_clear_required_actions() {
     assert!(
         updated.required_actions().is_empty(),
         "required_actions should be empty after clearing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// AC-7: realm defaults applied on self-service registration (register_user)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn register_user_inherits_realm_default_required_actions() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("realm-reg-ac7-{}", uuid::Uuid::new_v4()),
+            config: Some(RealmConfig {
+                default_required_actions: vec![
+                    RequiredAction::VerifyEmail,
+                    RequiredAction::UpdatePassword,
+                ],
+                registration_policy: Some(RegistrationPolicy::Open),
+                ..Default::default()
+            }),
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+
+    let email = format!("registrant-{}@example.com", uuid::Uuid::new_v4());
+    let resp = h
+        .identity()
+        .register_user(
+            &realm,
+            &RegisterUserRequest {
+                email: email.clone(),
+                display_name: "Reg User".to_string(),
+                first_name: "Reg".to_string(),
+                last_name: "User".to_string(),
+                password: CleartextPassword::from_string(
+                    "correct-horse-battery-staple1!".to_string(),
+                ),
+                client_ip: None,
+                invitation_token: None,
+            },
+        )
+        .expect("register_user");
+
+    let user = h
+        .identity()
+        .get_user(&realm, &resp.user_id)
+        .expect("get user ok")
+        .expect("user must exist after registration");
+
+    assert_eq!(
+        user.required_actions(),
+        &[RequiredAction::VerifyEmail, RequiredAction::UpdatePassword],
+        "register_user must copy realm default_required_actions onto new user"
     );
 }
 
