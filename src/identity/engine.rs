@@ -1850,7 +1850,7 @@ impl EmbeddedIdentityEngine {
             groups: claims.groups.clone(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
-            amr: claims.amr.clone(),
+            amr: family.amr_values.clone(),
             custom: claims.custom.clone(),
         };
         let new_refresh_claims = TokenClaims {
@@ -5045,6 +5045,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // consent digest re-check without a separate client lookup.
             client_id: Some(request.client_id.clone()),
             resources: resource_uri.iter().cloned().collect(),
+            amr_values: stored_code.amr_values.clone(),
         };
         let family_bytes =
             serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {

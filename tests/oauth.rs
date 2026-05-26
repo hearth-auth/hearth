@@ -284,6 +284,7 @@ async fn refresh_token_rotation_e2e() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize");
@@ -388,6 +389,7 @@ async fn conformance_rfc7662_introspection_response() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize");
@@ -697,6 +699,7 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
                 code_challenge_method: Some(hearth::identity::CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect_err("authorize on archived client must fail");
@@ -734,6 +737,7 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
                 code_challenge_method: Some(hearth::identity::CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize on restored client must succeed");

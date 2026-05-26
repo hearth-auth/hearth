@@ -523,6 +523,7 @@ mod tests {
             expires_at: Timestamp::from_micros(T0 + TEN_MINUTES),
             client_id: None,
             resources: Vec::new(),
+            amr_values: Vec::new(),
         };
 
         let key = keys::encode_grant_family("fid1");
@@ -555,6 +556,7 @@ mod tests {
             expires_at: Timestamp::from_micros(T0 + TEN_MINUTES),
             client_id: None,
             resources: Vec::new(),
+            amr_values: Vec::new(),
         };
 
         let key = keys::encode_grant_family("fid2");
@@ -587,6 +589,7 @@ mod tests {
             expires_at: Timestamp::from_micros(T0 + ONE_HOUR),
             client_id: None,
             resources: Vec::new(),
+            amr_values: Vec::new(),
         };
 
         let key = keys::encode_grant_family("fid3");

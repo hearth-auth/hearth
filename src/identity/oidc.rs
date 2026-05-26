@@ -934,6 +934,11 @@ pub(crate) struct StoredGrantFamily {
     /// to preserve the resource binding across refresh token rotations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) resources: Vec<crate::core::Uri>,
+    /// AMR values from the original authorization grant (RFC 8176).
+    /// Stored here so they are preserved across all refresh rotations
+    /// without needing to embed them in the refresh token itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) amr_values: Vec<String>,
 }
 
 // ===== Token Revocation (RFC 7009) =====
