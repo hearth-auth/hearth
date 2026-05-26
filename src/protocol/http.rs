@@ -3104,6 +3104,14 @@ async fn admin_patch_user_required_actions(
     };
     let realm_id = RealmId::new(realm_uuid);
 
+    if auth.realm_id != realm_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        )
+            .into_response();
+    }
+
     let user_uuid: uuid::Uuid = match user_id_str.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -3230,7 +3238,7 @@ async fn admin_patch_realm_config(
 ) -> impl IntoResponse {
     use crate::identity::{RequiredAction, UpdateRealmRequest};
 
-    let _auth = match extract_admin_auth(&headers, &state) {
+    let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
@@ -3246,6 +3254,14 @@ async fn admin_patch_realm_config(
         }
     };
     let realm_id = RealmId::new(realm_uuid);
+
+    if auth.realm_id != realm_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        )
+            .into_response();
+    }
 
     let action_strs = body["default_required_actions"]
         .as_array()

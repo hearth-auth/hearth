@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use hearth::audit::{AuditAction, AuditQuery};
 use hearth::core::RealmId;
 use hearth::identity::{CreateUserRequest, SessionContext};
 use hearth::protocol::http::{router, AppState};
@@ -27,12 +28,16 @@ fn build_app(h: &common::TestHarness) -> axum::Router {
 }
 
 async fn admin_token(h: &common::TestHarness, realm: &RealmId) -> String {
+    admin_token_with_email(h, realm, "admin@ra-test.example").await
+}
+
+async fn admin_token_with_email(h: &common::TestHarness, realm: &RealmId, email: &str) -> String {
     let user = h
         .identity()
         .create_user(
             realm,
             &CreateUserRequest {
-                email: "admin@ra-test.example".into(),
+                email: email.into(),
                 display_name: "Admin".into(),
                 first_name: "Admin".into(),
                 last_name: "User".into(),
@@ -96,12 +101,20 @@ async fn non_admin_token(h: &common::TestHarness, realm: &RealmId) -> String {
 }
 
 async fn create_target_user(h: &common::TestHarness, realm: &RealmId) -> String {
+    create_target_user_with_email(h, realm, "target@ra-test.example").await
+}
+
+async fn create_target_user_with_email(
+    h: &common::TestHarness,
+    realm: &RealmId,
+    email: &str,
+) -> String {
     let user = h
         .identity()
         .create_user(
             realm,
             &CreateUserRequest {
-                email: "target@ra-test.example".into(),
+                email: email.into(),
                 display_name: "Target User".into(),
                 first_name: "Target".into(),
                 last_name: "User".into(),
@@ -354,4 +367,145 @@ async fn patch_realm_config_unknown_action_returns_400() {
         .expect("oneshot");
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+// ===== AC-8: RequiredActionAssigned audit event =====
+
+/// PATCH /required-actions with `add` must emit a RequiredActionAssigned audit
+/// event for each added action with the correct action_type in the metadata.
+#[tokio::test]
+async fn assign_action_emits_required_action_assigned_audit_event() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token(&h, &realm).await;
+    let uid = create_target_user(&h, &realm).await;
+    let realm_uuid = realm.as_uuid().to_string();
+
+    let app = build_app(&h);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/admin/realms/{realm_uuid}/users/{uid}/required-actions"
+                ))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm_uuid.clone())
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"add":["VERIFY_EMAIL"],"remove":[]}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::OK, "PATCH must succeed");
+
+    let events = h
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::RequiredActionAssigned),
+            ..AuditQuery::for_realm(realm.clone())
+        })
+        .expect("audit query");
+
+    let matched = events.iter().any(|e| {
+        e.action == AuditAction::RequiredActionAssigned
+            && e.resource_id == uid
+            && e.metadata
+                .as_ref()
+                .and_then(|m| m.get("action_type"))
+                .and_then(|v| v.as_str())
+                == Some("VERIFY_EMAIL")
+    });
+    assert!(
+        matched,
+        "RequiredActionAssigned(VERIFY_EMAIL) must be in audit log; events: {events:?}"
+    );
+}
+
+// ===== BOLA regression tests (HEA-816) =====
+
+/// Admin of realm A must receive 403 when targeting a user in realm B.
+/// Regression for FINDING-2 from HEA-810: cross-realm BOLA in required-actions handler.
+#[tokio::test]
+async fn cross_realm_patch_user_required_actions_is_forbidden() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+
+    let realm_a = h.create_realm();
+    h.rbac().seed_realm(&realm_a).expect("seed realm_a");
+
+    let realm_b = h.create_realm();
+    h.rbac().seed_realm(&realm_b).expect("seed realm_b");
+
+    let admin_a_token = admin_token_with_email(&h, &realm_a, "bola-admin-a@ra-test.example").await;
+    let uid_b = create_target_user_with_email(&h, &realm_b, "bola-target-b@ra-test.example").await;
+
+    let realm_a_uuid = realm_a.as_uuid().to_string();
+    let realm_b_uuid = realm_b.as_uuid().to_string();
+
+    let app = build_app(&h);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/admin/realms/{realm_b_uuid}/users/{uid_b}/required-actions"
+                ))
+                .header("Authorization", format!("Bearer {admin_a_token}"))
+                .header("X-Realm-ID", realm_a_uuid)
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"add":["VERIFY_EMAIL"],"remove":[]}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "realm-A admin must not modify users in realm-B (cross-realm BOLA)"
+    );
+}
+
+/// Admin of realm A must receive 403 when patching realm B's config.
+/// Regression for FINDING-2 from HEA-810: cross-realm BOLA in realm-config handler.
+#[tokio::test]
+async fn cross_realm_patch_realm_config_is_forbidden() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+
+    let realm_a = h.create_realm();
+    h.rbac().seed_realm(&realm_a).expect("seed realm_a");
+
+    let realm_b = h.create_realm();
+    h.rbac().seed_realm(&realm_b).expect("seed realm_b");
+
+    let admin_a_token =
+        admin_token_with_email(&h, &realm_a, "bola-cfg-admin-a@ra-test.example").await;
+
+    let realm_a_uuid = realm_a.as_uuid().to_string();
+    let realm_b_uuid = realm_b.as_uuid().to_string();
+
+    let app = build_app(&h);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/admin/realms/{realm_b_uuid}/config"))
+                .header("Authorization", format!("Bearer {admin_a_token}"))
+                .header("X-Realm-ID", realm_a_uuid)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"default_required_actions":["VERIFY_EMAIL"]}"#,
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "realm-A admin must not modify config of realm-B (cross-realm BOLA)"
+    );
 }
