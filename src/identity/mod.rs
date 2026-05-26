@@ -44,8 +44,9 @@ pub use oidc::{
     ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel, CodeChallengeMethod,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     IntrospectionResponse, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
-    PasswordGrantRequest, PasswordGrantResponse, RegisterClientRequest, TokenExchangeRequest,
-    TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest, UserInfoResponse,
+    PasswordGrantRequest, PasswordGrantResponse, RegisterClientRequest, StepUpMfaGrantRequest,
+    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
+    UserInfoResponse,
 };
 pub use sms::{
     LoggingSmsSender, SharedSmsSender, SmsError, SmsMessage, SmsSecret, SmsSender, SnsSmsSender,
@@ -540,6 +541,18 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         request: &PasswordGrantRequest,
+    ) -> Result<PasswordGrantResponse, IdentityError>;
+
+    /// Completes a step-up MFA challenge and issues tokens (HEA-836).
+    ///
+    /// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
+    /// Re-verifies the user's password, validates the MFA code (TOTP or
+    /// recovery), records the device fingerprint as trusted, and returns a
+    /// full token pair.
+    fn step_up_mfa_grant_token(
+        &self,
+        realm_id: &RealmId,
+        request: &StepUpMfaGrantRequest,
     ) -> Result<PasswordGrantResponse, IdentityError>;
 
     /// Issues an access token via the Client Credentials Grant (RFC 6749 §4.4).

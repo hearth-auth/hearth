@@ -399,6 +399,8 @@ pub async fn replace_user(
         }),
         attributes: None,
         required_actions: None,
+        phone_number: None,
+        phone_verified: None,
     };
 
     let user = match state.identity.update_user(&auth.realm_id, &user_id, &req) {
@@ -495,6 +497,8 @@ pub async fn patch_user(
         status: Some(status),
         attributes: None,
         required_actions: None,
+        phone_number: None,
+        phone_verified: None,
     };
     // `display_name` Some("") would clear it — but `validate_display_name`
     // rejects empty. Re-synthesize if empty.

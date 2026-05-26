@@ -29,7 +29,9 @@ use crate::audit::{AuditEngine, CreateAuditEvent};
 use crate::cluster::ClusterEngine;
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
 use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
-use crate::identity::{IdentityEngine, PasswordGrantRequest, UpdateRealmRequest};
+use crate::identity::{
+    IdentityEngine, PasswordGrantRequest, StepUpMfaGrantRequest, UpdateRealmRequest,
+};
 use crate::protocol::admin_auth::{
     AdminRateLimiter, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
 };
@@ -1090,6 +1092,9 @@ struct HttpTokenRequest {
     username: Option<String>,
     #[serde(default)]
     password: Option<String>,
+    // Step-up MFA completion (HEA-836)
+    #[serde(default)]
+    mfa_code: Option<String>,
 }
 
 /// HTTP request body for token revocation (RFC 7009).
@@ -2038,6 +2043,58 @@ async fn token_exchange_impl(
                     | crate::identity::IdentityError::RateLimited),
                 ) => {
                     // Record the failed attempt against the IP for credential failures.
+                    state
+                        .identity
+                        .record_ip_login_attempt(&realm_id, &client_ip);
+                    identity_error_to_response(e).into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
+        "urn:hearth:params:grant-type:step-up-mfa" => {
+            let (Some(email), Some(password), Some(mfa_code)) =
+                (body.username, body.password, body.mfa_code)
+            else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "username, password, and mfa_code required for step-up-mfa grant"})),
+                )
+                    .into_response();
+            };
+            let request = StepUpMfaGrantRequest {
+                email,
+                password,
+                mfa_code,
+                scope: body.scope,
+                client_ip: Some(client_ip.clone()),
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+            };
+            let realm_str = realm_id.as_uuid().to_string();
+            match state.identity.step_up_mfa_grant_token(&realm_id, &request) {
+                Ok(response) => {
+                    crate::metrics::metrics()
+                        .tokens_issued_total
+                        .with_label_values(&[realm_str.as_str(), "step_up_mfa"])
+                        .inc();
+                    crate::metrics::metrics().active_sessions.inc();
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "access_token": response.access_token(),
+                            "refresh_token": response.refresh_token(),
+                            "token_type": response.token_type,
+                            "expires_in": response.expires_in,
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(
+                    ref e @ (crate::identity::IdentityError::InvalidCredential { .. }
+                    | crate::identity::IdentityError::RateLimited),
+                ) => {
                     state
                         .identity
                         .record_ip_login_attempt(&realm_id, &client_ip);
@@ -5934,6 +5991,50 @@ async fn realm_token_exchange(
                     .map(str::to_string),
             };
             match state.identity.password_grant_token(&realm_id, &request) {
+                Ok(response) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "access_token": response.access_token(),
+                        "refresh_token": response.refresh_token(),
+                        "token_type": response.token_type,
+                        "expires_in": response.expires_in,
+                    })),
+                )
+                    .into_response(),
+                Err(
+                    ref e @ (crate::identity::IdentityError::InvalidCredential { .. }
+                    | crate::identity::IdentityError::RateLimited),
+                ) => {
+                    state
+                        .identity
+                        .record_ip_login_attempt(&realm_id, &client_ip);
+                    identity_error_to_response(e).into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
+        "urn:hearth:params:grant-type:step-up-mfa" => {
+            let (Some(email), Some(password), Some(mfa_code)) =
+                (body.username, body.password, body.mfa_code)
+            else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "username, password, and mfa_code required for step-up-mfa grant"})),
+                )
+                    .into_response();
+            };
+            let request = StepUpMfaGrantRequest {
+                email,
+                password,
+                mfa_code,
+                scope: body.scope,
+                client_ip: Some(client_ip.clone()),
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+            };
+            match state.identity.step_up_mfa_grant_token(&realm_id, &request) {
                 Ok(response) => (
                     StatusCode::OK,
                     Json(serde_json::json!({

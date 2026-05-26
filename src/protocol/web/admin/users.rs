@@ -1169,6 +1169,8 @@ pub async fn admin_user_edit_submit(
         status,
         attributes: Some(attributes),
         required_actions: None,
+        phone_number: None,
+        phone_verified: None,
     };
 
     match state.identity.update_user(target.id(), &uid, &req) {
@@ -2342,6 +2344,8 @@ pub async fn admin_users_bulk_action(
                 attributes: None,
                 status: Some(UserStatus::Disabled),
                 required_actions: None,
+                phone_number: None,
+                phone_verified: None,
             };
             for uid in &user_ids {
                 if let Err(e) = state.identity.update_user(target.id(), uid, &req) {
@@ -2693,6 +2697,8 @@ fn process_csv_import(
                     status: None,
                     email: None,
                     required_actions: None,
+                    phone_number: None,
+                    phone_verified: None,
                 };
                 if let Err(e) = state.identity.update_user(realm_id, user.id(), &req) {
                     tracing::warn!(error = %e, email = %email, "import update failed");

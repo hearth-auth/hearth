@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use hearth::audit::{AuditAction, AuditQuery};
 use hearth::identity::{
     AdaptiveMfaConfig, CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError,
-    PasswordGrantRequest, RealmConfig, RequiredAction,
+    PasswordGrantRequest, RealmConfig, RequiredAction, StepUpMfaGrantRequest,
 };
 
 // ──────────────────────────────────────────────────────────────
@@ -113,7 +113,9 @@ async fn adaptive_mfa_disabled_issues_token_normally() {
 // ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn empty_hmac_secret_treated_as_disabled() {
+async fn empty_hmac_secret_is_a_hard_config_error() {
+    // BLK-2: enabled=true with empty secret must be a hard error (fail-secure),
+    // not silently skip the check (fail-open).
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = h
         .identity()
@@ -143,13 +145,16 @@ async fn empty_hmac_secret_treated_as_disabled() {
         )
         .expect("set password");
 
-    let result = h.identity().password_grant_token(
-        realm.id(),
-        &ropc(user.email(), "192.168.1.55", "Mozilla/5.0"),
-    );
+    let err = h
+        .identity()
+        .password_grant_token(
+            realm.id(),
+            &ropc(user.email(), "192.168.1.55", "Mozilla/5.0"),
+        )
+        .expect_err("enabled=true with empty secret must return an error");
     assert!(
-        result.is_ok(),
-        "empty HMAC secret must behave like disabled; got: {result:?}"
+        matches!(err, IdentityError::Internal { .. }),
+        "expected Internal config error, got: {err:?}"
     );
 }
 
@@ -473,5 +478,349 @@ async fn step_up_emits_audit_event() {
     assert!(
         !events.is_empty(),
         "StepUpMfaTriggered audit event must be emitted on unrecognised device"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────
+// BLK-1: Step-up completion grant issues tokens and records device
+// ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn step_up_completion_issues_token_and_records_device() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let secret = "step-up-complete-secret-32bytes!";
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("stepup-complete-{}", uuid::Uuid::new_v4()),
+            config: Some(realm_cfg_with_adaptive(true, secret, 30)),
+        })
+        .expect("create realm");
+    let user = h
+        .identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: format!("complete-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Completion User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    h.identity()
+        .set_password(
+            realm.id(),
+            user.id(),
+            &CleartextPassword::from_string(PASSWORD.to_string()),
+        )
+        .expect("set password");
+
+    // Enroll TOTP.
+    let enrollment = h
+        .identity()
+        .enroll_totp(realm.id(), user.id())
+        .expect("enroll totp");
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&enrollment.secret_base32, now_secs);
+    h.identity()
+        .verify_totp_enrollment(realm.id(), user.id(), &code)
+        .expect("verify enrollment");
+
+    // Confirm initial login from unrecognised device triggers step-up.
+    let err = h
+        .identity()
+        .password_grant_token(
+            realm.id(),
+            &ropc(user.email(), "10.20.30.40", "Chrome/125.0"),
+        )
+        .expect_err("unrecognised device must trigger step-up");
+    assert!(
+        matches!(err, IdentityError::StepUpChallengeRequired),
+        "expected StepUpChallengeRequired, got: {err:?}"
+    );
+
+    // Complete the step-up with correct MFA code.
+    // Use now_secs + 30 (next TOTP step) so the code isn't rejected as a replay
+    // of the enrollment-verification step which also consumed the current step.
+    let now_secs2 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let mfa_code = compute_totp_code(&enrollment.secret_base32, now_secs2 + 30);
+    let response = h
+        .identity()
+        .step_up_mfa_grant_token(
+            realm.id(),
+            &StepUpMfaGrantRequest {
+                email: user.email().to_string(),
+                password: PASSWORD.to_string(),
+                mfa_code,
+                scope: None,
+                client_ip: Some("10.20.30.40".to_string()),
+                user_agent: Some("Chrome/125.0".to_string()),
+            },
+        )
+        .expect("step-up completion must succeed with correct MFA code");
+
+    assert!(
+        !response.access_token().is_empty(),
+        "access token must be non-empty"
+    );
+
+    // Subsequent login from the same device must be recognised without step-up.
+    let second_login = h.identity().password_grant_token(
+        realm.id(),
+        &ropc(user.email(), "10.20.30.40", "Chrome/125.0"),
+    );
+    assert!(
+        second_login.is_ok(),
+        "device must be recognised after step-up completion; got: {second_login:?}"
+    );
+}
+
+#[tokio::test]
+async fn step_up_completion_rejects_wrong_mfa_code() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let secret = "step-up-reject-secret-32-bytes-0";
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("stepup-reject-{}", uuid::Uuid::new_v4()),
+            config: Some(realm_cfg_with_adaptive(true, secret, 30)),
+        })
+        .expect("create realm");
+    let user = h
+        .identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: format!("reject-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Reject User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    h.identity()
+        .set_password(
+            realm.id(),
+            user.id(),
+            &CleartextPassword::from_string(PASSWORD.to_string()),
+        )
+        .expect("set password");
+
+    // Enroll TOTP.
+    let enrollment = h
+        .identity()
+        .enroll_totp(realm.id(), user.id())
+        .expect("enroll totp");
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&enrollment.secret_base32, now_secs);
+    h.identity()
+        .verify_totp_enrollment(realm.id(), user.id(), &code)
+        .expect("verify enrollment");
+
+    let err = h
+        .identity()
+        .step_up_mfa_grant_token(
+            realm.id(),
+            &StepUpMfaGrantRequest {
+                email: user.email().to_string(),
+                password: PASSWORD.to_string(),
+                mfa_code: "000000".to_string(), // wrong code
+                scope: None,
+                client_ip: Some("10.20.30.40".to_string()),
+                user_agent: Some("Firefox/109.0".to_string()),
+            },
+        )
+        .expect_err("wrong MFA code must be rejected");
+    assert!(
+        matches!(err, IdentityError::InvalidMfaCode),
+        "expected InvalidMfaCode, got: {err:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────
+// HIGH-2: UA normalisation — minor update must NOT retrigger step-up
+// ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn minor_ua_update_does_not_retrigger_step_up() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let secret = "ua-minor-update-secret-32-bytes-!";
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("stepup-uaminor-{}", uuid::Uuid::new_v4()),
+            config: Some(realm_cfg_with_adaptive(true, secret, 30)),
+        })
+        .expect("create realm");
+    let user = h
+        .identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: format!("uaminor-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "UA Minor User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    h.identity()
+        .set_password(
+            realm.id(),
+            user.id(),
+            &CleartextPassword::from_string(PASSWORD.to_string()),
+        )
+        .expect("set password");
+
+    // Enroll TOTP so step-up returns StepUpChallengeRequired (not EnrollMfaRequired).
+    let enrollment = h
+        .identity()
+        .enroll_totp(realm.id(), user.id())
+        .expect("enroll totp");
+    let enroll_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let enroll_code = compute_totp_code(&enrollment.secret_base32, enroll_secs);
+    h.identity()
+        .verify_totp_enrollment(realm.id(), user.id(), &enroll_code)
+        .expect("verify enrollment");
+
+    // Use step_up_mfa_grant_token to establish the fingerprint for Chrome/125.
+    // Use next TOTP step (+30s) to avoid replay of the enrollment-verification step.
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let mfa_code = compute_totp_code(&enrollment.secret_base32, now_secs + 30);
+    h.identity()
+        .step_up_mfa_grant_token(
+            realm.id(),
+            &StepUpMfaGrantRequest {
+                email: user.email().to_string(),
+                password: PASSWORD.to_string(),
+                mfa_code,
+                scope: None,
+                client_ip: Some("10.0.0.1".to_string()),
+                user_agent: Some("Mozilla/5.0 Chrome/125.0.6422.112".to_string()),
+            },
+        )
+        .expect("step-up completion must record Chrome/125 fingerprint");
+
+    // Second login with a minor version bump — same major, should still be recognised.
+    let second = h.identity().password_grant_token(
+        realm.id(),
+        &ropc(user.email(), "10.0.0.1", "Mozilla/5.0 Chrome/125.0.9999.0"),
+    );
+    assert!(
+        second.is_ok(),
+        "minor UA update must NOT trigger step-up (same major version); got: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn major_ua_update_triggers_step_up() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let secret = "ua-major-update-secret-32-bytes-!";
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("stepup-uamajor-{}", uuid::Uuid::new_v4()),
+            config: Some(realm_cfg_with_adaptive(true, secret, 30)),
+        })
+        .expect("create realm");
+    let user = h
+        .identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: format!("uamajor-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "UA Major User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    h.identity()
+        .set_password(
+            realm.id(),
+            user.id(),
+            &CleartextPassword::from_string(PASSWORD.to_string()),
+        )
+        .expect("set password");
+
+    // Enroll TOTP so step-up returns StepUpChallengeRequired (not EnrollMfaRequired).
+    let enrollment = h
+        .identity()
+        .enroll_totp(realm.id(), user.id())
+        .expect("enroll totp");
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&enrollment.secret_base32, now_secs);
+    h.identity()
+        .verify_totp_enrollment(realm.id(), user.id(), &code)
+        .expect("verify enrollment");
+
+    // First login — establishes fingerprint for Chrome/125.
+    // This device is NOT recognised yet, so expect StepUpChallengeRequired.
+    // We use step_up_mfa_grant_token to complete it and record the fingerprint.
+    // Use now + 30 to get the next TOTP step so it isn't rejected as a replay
+    // of the enrollment-verification step that already consumed the current step.
+    let now_secs2 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let mfa_code = compute_totp_code(&enrollment.secret_base32, now_secs2 + 30);
+    h.identity()
+        .step_up_mfa_grant_token(
+            realm.id(),
+            &StepUpMfaGrantRequest {
+                email: user.email().to_string(),
+                password: PASSWORD.to_string(),
+                mfa_code,
+                scope: None,
+                client_ip: Some("10.0.0.5".to_string()),
+                user_agent: Some("Mozilla/5.0 Chrome/125.0.0.0".to_string()),
+            },
+        )
+        .expect("step-up completion with Chrome/125 must succeed");
+
+    // Confirm same major is recognised.
+    let same_major = h.identity().password_grant_token(
+        realm.id(),
+        &ropc(user.email(), "10.0.0.5", "Mozilla/5.0 Chrome/125.0.9999.0"),
+    );
+    assert!(
+        same_major.is_ok(),
+        "same major version must be recognised; got: {same_major:?}"
+    );
+
+    // Login with Chrome/126 (major bump) — must trigger step-up again.
+    let major_bump = h
+        .identity()
+        .password_grant_token(
+            realm.id(),
+            &ropc(user.email(), "10.0.0.5", "Mozilla/5.0 Chrome/126.0.0.0"),
+        )
+        .expect_err("major UA update must trigger step-up");
+    assert!(
+        matches!(major_bump, IdentityError::StepUpChallengeRequired),
+        "expected StepUpChallengeRequired on major UA bump, got: {major_bump:?}"
     );
 }

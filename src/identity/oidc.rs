@@ -1255,3 +1255,24 @@ impl PasswordGrantResponse {
         &self.refresh_token
     }
 }
+
+/// Request to complete a step-up MFA challenge issued during ROPC login.
+///
+/// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
+/// The caller re-supplies the password and adds an `mfa_code`; both are
+/// verified before tokens are issued and the device fingerprint is recorded.
+#[derive(Debug)]
+pub struct StepUpMfaGrantRequest {
+    /// The user's email address.
+    pub email: String,
+    /// The user's plaintext password (re-verified to prevent session fixation).
+    pub password: String,
+    /// TOTP code or recovery code presented by the user.
+    pub mfa_code: String,
+    /// Optional OAuth scope (space-delimited).
+    pub scope: Option<String>,
+    /// Client IP address — used to record the trusted device fingerprint.
+    pub client_ip: Option<String>,
+    /// Raw `User-Agent` header value — used to record the trusted device fingerprint.
+    pub user_agent: Option<String>,
+}

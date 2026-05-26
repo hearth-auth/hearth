@@ -33,6 +33,7 @@ fn required_action_to_str(action: RequiredAction) -> &'static str {
         RequiredAction::VerifyEmail => "VERIFY_EMAIL",
         RequiredAction::UpdatePassword => "UPDATE_PASSWORD",
         RequiredAction::EnrollMfa => "ENROLL_MFA",
+        RequiredAction::EnrollPhoneOtp => "ENROLL_PHONE_OTP",
     }
 }
 
@@ -92,6 +93,8 @@ impl From<pb::UpdateUserRequest> for domain::UpdateUserRequest {
             status: r.status.and_then(proto_user_status_to_domain),
             attributes,
             required_actions: None,
+            phone_number: None,
+            phone_verified: None,
         }
     }
 }
