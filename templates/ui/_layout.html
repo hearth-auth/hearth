@@ -269,8 +269,8 @@
      admin.js via custom events; ESC fires hearth-shortcut-help-close. #}
   <div id="keyboard-shortcut-overlay"
        class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden"
-       _="on hearth-shortcut-help from window remove .hidden from me
-          on hearth-shortcut-help-close from window add .hidden to me
+       _="on 'hearth-shortcut-help' from window remove .hidden from me
+          on 'hearth-shortcut-help-close' from window add .hidden to me
           on click(event) if event.target is me then add .hidden to me end">
     <div class="w-full max-w-md rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle shadow-md">
       <div class="flex items-start justify-between">
