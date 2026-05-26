@@ -8,6 +8,7 @@ use hearth::identity::{
     device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore, FingerprintResult},
     AdaptiveMfaConfig, CreateRealmRequest, CreateUserRequest, RealmConfig,
 };
+use secrecy::SecretString;
 
 // ===================================================================
 // AC-11: GDPR — only HMAC bytes stored, not raw IP / UA
@@ -279,7 +280,7 @@ async fn adaptive_mfa_disabled_returns_skipped() {
                 adaptive_mfa: AdaptiveMfaConfig {
                     enabled: false,
                     recognition_window_days: 30,
-                    fingerprint_hmac_secret: "some-secret-value-here".to_string(),
+                    fingerprint_hmac_secret: SecretString::new("some-secret-value-here".into()),
                 },
                 ..Default::default()
             }),
@@ -320,7 +321,7 @@ async fn empty_hmac_secret_returns_skipped() {
                 adaptive_mfa: AdaptiveMfaConfig {
                     enabled: true,
                     recognition_window_days: 30,
-                    fingerprint_hmac_secret: String::new(), // intentionally empty
+                    fingerprint_hmac_secret: SecretString::new(String::new()), // intentionally empty
                 },
                 ..Default::default()
             }),
@@ -366,7 +367,9 @@ async fn unrecognised_no_mfa_returns_enroll_required() {
                 adaptive_mfa: AdaptiveMfaConfig {
                     enabled: true,
                     recognition_window_days: 30,
-                    fingerprint_hmac_secret: "test-secret-at-least-32-bytes-ok".to_string(),
+                    fingerprint_hmac_secret: SecretString::new(
+                        "test-secret-at-least-32-bytes-ok".into(),
+                    ),
                 },
                 ..Default::default()
             }),
@@ -411,7 +414,9 @@ async fn unrecognised_with_mfa_returns_step_up_required() {
                 adaptive_mfa: AdaptiveMfaConfig {
                     enabled: true,
                     recognition_window_days: 30,
-                    fingerprint_hmac_secret: "test-secret-at-least-32-bytes-ok".to_string(),
+                    fingerprint_hmac_secret: SecretString::new(
+                        "test-secret-at-least-32-bytes-ok".into(),
+                    ),
                 },
                 ..Default::default()
             }),
@@ -467,7 +472,9 @@ async fn recognised_device_skips_step_up() {
                 adaptive_mfa: AdaptiveMfaConfig {
                     enabled: true,
                     recognition_window_days: 30,
-                    fingerprint_hmac_secret: "test-secret-at-least-32-bytes-ok".to_string(),
+                    fingerprint_hmac_secret: SecretString::new(
+                        "test-secret-at-least-32-bytes-ok".into(),
+                    ),
                 },
                 ..Default::default()
             }),
@@ -530,6 +537,55 @@ async fn recognised_device_skips_step_up() {
 // ===================================================================
 // Helpers
 // ===================================================================
+
+// ===================================================================
+// CWE-532 regression: Debug output must not contain the secret value
+// ===================================================================
+
+/// `AdaptiveMfaConfig` `Debug` must redact `fingerprint_hmac_secret`.
+///
+/// Regression for HEA-869: the field must never appear in log output.
+#[test]
+fn adaptive_mfa_config_debug_redacts_secret() {
+    let sentinel = "super-secret-hmac-sentinel-value";
+    let cfg = AdaptiveMfaConfig {
+        enabled: true,
+        recognition_window_days: 30,
+        fingerprint_hmac_secret: SecretString::new(sentinel.into()),
+    };
+    let debug_output = format!("{cfg:?}");
+    assert!(
+        !debug_output.contains(sentinel),
+        "Debug output must not contain the HMAC secret; got: {debug_output}"
+    );
+    assert!(
+        debug_output.contains("[REDACTED]"),
+        "Debug output should contain [REDACTED]; got: {debug_output}"
+    );
+}
+
+/// `BreachCheckConfig` `Debug` must redact `hibp_api_key`.
+///
+/// Regression for HEA-869: the API key must never appear in log output.
+#[test]
+fn breach_check_config_debug_redacts_api_key() {
+    use hearth::identity::BreachCheckConfig;
+    let sentinel = "hibp-api-key-sentinel-value-12345";
+    let cfg = BreachCheckConfig {
+        enabled: true,
+        timeout_ms: 3000,
+        hibp_api_key: SecretString::new(sentinel.into()),
+    };
+    let debug_output = format!("{cfg:?}");
+    assert!(
+        !debug_output.contains(sentinel),
+        "Debug output must not contain the HIBP API key; got: {debug_output}"
+    );
+    assert!(
+        debug_output.contains("[REDACTED]"),
+        "Debug output should contain [REDACTED]; got: {debug_output}"
+    );
+}
 
 /// Computes a TOTP code using the same algorithm as the engine.
 fn compute_totp_code(secret_base32: &str, unix_secs: u64) -> String {

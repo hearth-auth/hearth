@@ -1,7 +1,9 @@
 //! Identity domain types: users, realms, requests, and status.
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::core::{
     ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
@@ -852,11 +854,44 @@ pub struct RealmConfig {
     pub adaptive_mfa: AdaptiveMfaConfig,
 }
 
+// ── SecretString serde helpers ────────────────────────────────────────────────
+//
+// Used by BreachCheckConfig and AdaptiveMfaConfig to safely round-trip secret
+// fields through storage without relying on SecretString's missing Serialize impl.
+mod secret_string_serde {
+    use secrecy::{ExposeSecret, SecretString};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(secret.expose_secret())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SecretString, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::Deserialize;
+        let val = String::deserialize(deserializer)?;
+        Ok(SecretString::new(val.into()))
+    }
+}
+
+fn is_empty_secret(s: &SecretString) -> bool {
+    s.expose_secret().is_empty()
+}
+
+fn default_secret_string() -> SecretString {
+    SecretString::new(String::new())
+}
+
 /// Configuration for the HIBP Pwned Passwords k-anonymity breach-check.
 ///
 /// Only the first 5 hex characters of the SHA-1 hash are sent to the HIBP
 /// Range API — no plaintext password or full hash leaves the process.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BreachCheckConfig {
     /// When `true`, every password-set or password-change call queries the HIBP
     /// Range API before accepting the new credential.
@@ -868,8 +903,31 @@ pub struct BreachCheckConfig {
     pub timeout_ms: u64,
     /// Optional HIBP API key. When non-empty, sent as the `hibp-api-key` header.
     /// Required for paid HIBP Enterprise plans.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub hibp_api_key: String,
+    #[serde(
+        default = "default_secret_string",
+        skip_serializing_if = "is_empty_secret",
+        serialize_with = "secret_string_serde::serialize",
+        deserialize_with = "secret_string_serde::deserialize"
+    )]
+    pub hibp_api_key: SecretString,
+}
+
+impl fmt::Debug for BreachCheckConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BreachCheckConfig")
+            .field("enabled", &self.enabled)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("hibp_api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PartialEq for BreachCheckConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.timeout_ms == other.timeout_ms
+            && self.hibp_api_key.expose_secret() == other.hibp_api_key.expose_secret()
+    }
 }
 
 impl Default for BreachCheckConfig {
@@ -878,7 +936,7 @@ impl Default for BreachCheckConfig {
             // Safe migration default: disabled so existing realms are unaffected.
             enabled: false,
             timeout_ms: 3000,
-            hibp_api_key: String::new(),
+            hibp_api_key: SecretString::new(String::new()),
         }
     }
 }
@@ -889,7 +947,7 @@ impl Default for BreachCheckConfig {
 /// every login from an unrecognised device triggers a step-up challenge or
 /// an MFA-enrollment required-action. Only the HMAC output is stored —
 /// never raw IP or User-Agent strings (AC-11 / GDPR).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AdaptiveMfaConfig {
     /// Whether adaptive MFA is active for this realm.
     ///
@@ -903,8 +961,32 @@ pub struct AdaptiveMfaConfig {
     /// Should be at least 32 bytes of cryptographically-random data. When empty,
     /// the feature behaves as if `enabled = false` to prevent accidentally
     /// treating every device as unrecognised due to a trivially-guessable key.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub fingerprint_hmac_secret: String,
+    #[serde(
+        default = "default_secret_string",
+        skip_serializing_if = "is_empty_secret",
+        serialize_with = "secret_string_serde::serialize",
+        deserialize_with = "secret_string_serde::deserialize"
+    )]
+    pub fingerprint_hmac_secret: SecretString,
+}
+
+impl fmt::Debug for AdaptiveMfaConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdaptiveMfaConfig")
+            .field("enabled", &self.enabled)
+            .field("recognition_window_days", &self.recognition_window_days)
+            .field("fingerprint_hmac_secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PartialEq for AdaptiveMfaConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.recognition_window_days == other.recognition_window_days
+            && self.fingerprint_hmac_secret.expose_secret()
+                == other.fingerprint_hmac_secret.expose_secret()
+    }
 }
 
 impl Default for AdaptiveMfaConfig {
@@ -913,7 +995,7 @@ impl Default for AdaptiveMfaConfig {
             // Safe migration default: disabled so existing realms are unaffected.
             enabled: false,
             recognition_window_days: 30,
-            fingerprint_hmac_secret: String::new(),
+            fingerprint_hmac_secret: SecretString::new(String::new()),
         }
     }
 }

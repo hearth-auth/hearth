@@ -11,6 +11,7 @@ use arc_swap::ArcSwap;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::SecureRandom;
+use secrecy::ExposeSecret;
 use zeroize::Zeroizing;
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
@@ -3642,10 +3643,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Some(realm) = self.get_realm(realm_id)? {
             let bc = &realm.config().breach_check;
             if bc.enabled {
-                let api_key = if bc.hibp_api_key.is_empty() {
+                let api_key = if bc.hibp_api_key.expose_secret().is_empty() {
                     None
                 } else {
-                    Some(bc.hibp_api_key.as_str())
+                    Some(bc.hibp_api_key.expose_secret().as_str())
                 };
                 match self.hibp.is_pwned(password.as_bytes(), api_key) {
                     Ok(true) => {
@@ -10415,17 +10416,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // misconfiguration that must surface as an error — silently skipping would issue
         // tokens without the intended fingerprint gate (fail-open).
         // NIST SP 800-107 recommends HMAC keys ≥ hash output length (32 bytes for SHA-256).
-        if cfg.fingerprint_hmac_secret.len() < 32 {
+        if cfg.fingerprint_hmac_secret.expose_secret().len() < 32 {
             return Err(IdentityError::Internal {
                 reason: format!(
                     "adaptive_mfa.enabled=true but fingerprint_hmac_secret is too short ({} bytes, minimum 32)",
-                    cfg.fingerprint_hmac_secret.len()
+                    cfg.fingerprint_hmac_secret.expose_secret().len()
                 ),
             });
         }
 
         let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
-            &cfg.fingerprint_hmac_secret,
+            cfg.fingerprint_hmac_secret.expose_secret(),
             user_id,
             ip,
             user_agent,
@@ -10491,11 +10492,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(());
         }
         // Misconfiguration guard: skip recording silently when secret is empty.
-        if cfg.fingerprint_hmac_secret.is_empty() {
+        if cfg.fingerprint_hmac_secret.expose_secret().is_empty() {
             return Ok(());
         }
         let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
-            &cfg.fingerprint_hmac_secret,
+            cfg.fingerprint_hmac_secret.expose_secret(),
             user_id,
             ip,
             user_agent,

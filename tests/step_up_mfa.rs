@@ -16,6 +16,7 @@ use hearth::identity::{
     AdaptiveMfaConfig, CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError,
     PasswordGrantRequest, RealmConfig, RequiredAction, StepUpMfaGrantRequest,
 };
+use secrecy::SecretString;
 
 // ──────────────────────────────────────────────────────────────
 // Shared helpers
@@ -28,7 +29,7 @@ fn realm_cfg_with_adaptive(enabled: bool, secret: &str, window_days: u32) -> Rea
         adaptive_mfa: AdaptiveMfaConfig {
             enabled,
             recognition_window_days: window_days,
-            fingerprint_hmac_secret: secret.to_string(),
+            fingerprint_hmac_secret: SecretString::new(secret.into()),
         },
         ..RealmConfig::default()
     }
