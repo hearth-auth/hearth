@@ -1850,6 +1850,7 @@ impl EmbeddedIdentityEngine {
             groups: claims.groups.clone(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
+            amr: claims.amr.clone(),
             custom: claims.custom.clone(),
         };
         let new_refresh_claims = TokenClaims {
@@ -1870,6 +1871,7 @@ impl EmbeddedIdentityEngine {
             groups: claims.groups.clone(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
+            amr: Vec::new(),
             custom: claims.custom.clone(),
         };
 
@@ -3132,6 +3134,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 groups: Vec::new(),
                 permissions: Vec::new(),
                 required_actions: remaining,
+                amr: Vec::new(),
                 custom: Default::default(),
             };
             let access_token = signing_key.issue_token(&ra_claims)?;
@@ -4782,6 +4785,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             used: false,
             nonce: request.nonce.clone(),
             resource: request.resource.clone(),
+            amr_values: request.amr_values.clone(),
         };
 
         // 9. Persist the code
@@ -4987,6 +4991,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             groups: access_groups,
             permissions: access_permissions,
             required_actions: Vec::new(),
+            amr: stored_code.amr_values.clone(),
             custom: access_custom,
         };
         let refresh_claims = TokenClaims {
@@ -5007,6 +5012,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             groups: access_claims.groups.clone(),
             permissions: access_claims.permissions.clone(),
             required_actions: Vec::new(),
+            amr: Vec::new(),
             custom: access_claims.custom.clone(),
         };
 
@@ -5074,6 +5080,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             groups: id_groups,
             permissions: id_permissions,
             required_actions: Vec::new(),
+            amr: stored_code.amr_values.clone(),
             custom: id_custom,
         };
         let id_token =
@@ -5335,6 +5342,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
+            amr: Vec::new(),
             custom: std::collections::BTreeMap::new(),
         };
 
@@ -5580,6 +5588,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     groups: Vec::new(),
                     permissions: Vec::new(),
                     required_actions: Vec::new(),
+                    amr: Vec::new(),
                     custom: std::collections::BTreeMap::new(),
                 };
                 let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
@@ -7822,11 +7831,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         code_challenge: Option<String>,
         code_challenge_method: Option<CodeChallengeMethod>,
         nonce: Option<String>,
+        amr_values: Vec<String>,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        // Reuse the canonical path by constructing an AuthorizationRequest
-        // and delegating to `authorize`. This keeps PKCE rules, nonce
-        // enforcement, client/redirect_uri validation, and code storage
-        // all in one place.
         let request = AuthorizationRequest {
             client_id: client_id.clone(),
             redirect_uri: redirect_uri.to_string(),
@@ -7838,6 +7844,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             code_challenge,
             code_challenge_method,
             nonce,
+            amr_values,
         };
         self.authorize(realm_id, &request)
     }
@@ -10509,8 +10516,29 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
-        // 2. Generate nonce + OTP, persist, send.
-        self.do_issue_sms_otp_inner(realm_id, phone, otp_hmac_key_bytes, sender, now_unix_ts)
+        // 2. Look up per-realm OTP config, falling back to module defaults.
+        use crate::identity::sms::otp::{OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS};
+        let (expiry_secs, max_attempts) = match self.get_realm(realm_id) {
+            Ok(Some(realm)) => {
+                let cfg = realm.config();
+                (
+                    cfg.sms_otp_expiry_seconds.unwrap_or(OTP_EXPIRY_SECS),
+                    cfg.sms_otp_max_attempts.unwrap_or(OTP_MAX_ATTEMPTS),
+                )
+            }
+            _ => (OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS),
+        };
+
+        // 3. Generate nonce + OTP, persist, send.
+        self.do_issue_sms_otp_inner(
+            realm_id,
+            phone,
+            otp_hmac_key_bytes,
+            sender,
+            now_unix_ts,
+            expiry_secs,
+            max_attempts,
+        )
     }
 
     fn verify_sms_otp(
@@ -10591,14 +10619,17 @@ impl EmbeddedIdentityEngine {
         otp_hmac_key_bytes: &[u8],
         sender: &dyn crate::identity::sms::SmsSender,
         now_unix_ts: u64,
+        expiry_secs: u64,
+        max_attempts: u32,
     ) -> Result<String, IdentityError> {
-        use crate::identity::sms::otp::{self as otp_mod, StoredOtp, OTP_EXPIRY_SECS};
+        use crate::identity::sms::otp::{self as otp_mod, StoredOtp};
         use crate::identity::sms::SmsMessage;
 
         let rng = ring::rand::SystemRandom::new();
         let nonce = otp_mod::generate_otp_nonce(&rng)?;
-        let expiry_unix_ts = now_unix_ts.saturating_add(OTP_EXPIRY_SECS);
-        let (digits, stored) = StoredOtp::create(&rng, otp_hmac_key_bytes, expiry_unix_ts)?;
+        let expiry_unix_ts = now_unix_ts.saturating_add(expiry_secs);
+        let (digits, stored) =
+            StoredOtp::create(&rng, otp_hmac_key_bytes, expiry_unix_ts, max_attempts)?;
 
         let otp_key = keys::encode_sms_pending_otp(&nonce);
         let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {

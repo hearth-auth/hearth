@@ -231,6 +231,27 @@ pub enum AuditAction {
     /// enrollment redirect; the step-up event itself is informational.
     /// Metadata carries `user_id` and `reason` (e.g. `"unrecognised_device"`).
     StepUpMfaTriggered,
+    /// An SMS OTP was generated and sent to a user's phone to begin
+    /// phone-number enrollment. Metadata carries `phone_suffix` (last 4 digits,
+    /// never full number).
+    SmsOtpEnrollmentStarted,
+    /// A user successfully verified their phone number via SMS OTP during
+    /// enrollment. Metadata carries `phone_suffix`.
+    SmsOtpEnrollmentVerified,
+    /// A phone enrollment SMS OTP verification attempt failed (wrong code,
+    /// expired, or max attempts). Metadata carries `phone_suffix` and
+    /// `reason` (`"wrong_code"` / `"expired"` / `"exhausted"`).
+    SmsOtpEnrollmentFailed,
+    /// An SMS MFA challenge was satisfied — the user entered the correct OTP
+    /// during the OIDC login pipeline. Metadata carries `user_id`.
+    SmsMfaChallengeSucceeded,
+    /// An SMS MFA challenge attempt failed (wrong code or expired).
+    /// Metadata carries `user_id` and `reason`.
+    SmsMfaChallengeFailed,
+    /// An SMS MFA challenge was locked because the maximum number of
+    /// incorrect attempts was exceeded. Metadata carries `user_id` and
+    /// `attempt_count`.
+    SmsMfaLocked,
 }
 
 impl AuditAction {
@@ -315,6 +336,12 @@ impl AuditAction {
             Self::PasswordCompromisedRejected,
             Self::BreachCheckUnavailable,
             Self::StepUpMfaTriggered,
+            Self::SmsOtpEnrollmentStarted,
+            Self::SmsOtpEnrollmentVerified,
+            Self::SmsOtpEnrollmentFailed,
+            Self::SmsMfaChallengeSucceeded,
+            Self::SmsMfaChallengeFailed,
+            Self::SmsMfaLocked,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -397,6 +424,12 @@ impl AuditAction {
             Self::PasswordCompromisedRejected => "password_compromised_rejected",
             Self::BreachCheckUnavailable => "breach_check_unavailable",
             Self::StepUpMfaTriggered => "step_up_mfa_triggered",
+            Self::SmsOtpEnrollmentStarted => "sms_otp_enrollment_started",
+            Self::SmsOtpEnrollmentVerified => "sms_otp_enrollment_verified",
+            Self::SmsOtpEnrollmentFailed => "sms_otp_enrollment_failed",
+            Self::SmsMfaChallengeSucceeded => "sms_mfa_challenge_succeeded",
+            Self::SmsMfaChallengeFailed => "sms_mfa_challenge_failed",
+            Self::SmsMfaLocked => "sms_mfa_locked",
         }
     }
 }
@@ -480,6 +513,12 @@ impl std::str::FromStr for AuditAction {
             "password_compromised_rejected" => Ok(Self::PasswordCompromisedRejected),
             "breach_check_unavailable" => Ok(Self::BreachCheckUnavailable),
             "step_up_mfa_triggered" => Ok(Self::StepUpMfaTriggered),
+            "sms_otp_enrollment_started" => Ok(Self::SmsOtpEnrollmentStarted),
+            "sms_otp_enrollment_verified" => Ok(Self::SmsOtpEnrollmentVerified),
+            "sms_otp_enrollment_failed" => Ok(Self::SmsOtpEnrollmentFailed),
+            "sms_mfa_challenge_succeeded" => Ok(Self::SmsMfaChallengeSucceeded),
+            "sms_mfa_challenge_failed" => Ok(Self::SmsMfaChallengeFailed),
+            "sms_mfa_locked" => Ok(Self::SmsMfaLocked),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -570,7 +609,10 @@ impl AuditAction {
             | Self::RequiredActionCompleted
             | Self::RequiredActionAutoCleared
             | Self::BreachCheckUnavailable
-            | Self::StepUpMfaTriggered => LogOnly,
+            | Self::StepUpMfaTriggered
+            | Self::SmsOtpEnrollmentStarted
+            | Self::SmsOtpEnrollmentVerified
+            | Self::SmsMfaChallengeSucceeded => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
@@ -591,7 +633,10 @@ impl AuditAction {
             | Self::RoleRevoked
             | Self::ClientConsentRevoked
             | Self::LoginLocked
-            | Self::PasswordCompromisedRejected => FailOperation,
+            | Self::PasswordCompromisedRejected
+            | Self::SmsOtpEnrollmentFailed
+            | Self::SmsMfaChallengeFailed
+            | Self::SmsMfaLocked => FailOperation,
         }
     }
 }

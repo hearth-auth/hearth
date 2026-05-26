@@ -278,6 +278,18 @@ impl User {
         self.phone_number.as_deref()
     }
 
+    /// Returns the phone number masked for display in admin UIs (e.g. `+1***-***-1234`).
+    ///
+    /// Shows the `+` sign and the first country-code digit, then `***-***-`, then the
+    /// last four digits. Returns `None` when no phone is enrolled. Phone numbers shorter
+    /// than 6 E.164 characters return `"****"` instead of a structured mask.
+    ///
+    /// The raw number is never included — callers MUST NOT log or trace the return value
+    /// as it still conveys partial PII.
+    pub fn masked_phone_number(&self) -> Option<String> {
+        self.phone_number.as_deref().map(mask_phone_number)
+    }
+
     /// Sets (or clears) the user's phone number. Used internally by the identity engine.
     pub(crate) fn set_phone_number(&mut self, phone: Option<String>) {
         self.phone_number = phone;
@@ -297,6 +309,21 @@ impl User {
     pub(crate) fn set_updated_at(&mut self, ts: Timestamp) {
         self.updated_at = ts;
     }
+}
+
+/// Masks an E.164 phone number for admin display.
+///
+/// Shows `+{first digit}***-***-{last 4}`. For numbers shorter than 6 chars,
+/// returns `"****"`. This function is intentionally not public — go through
+/// `User::masked_phone_number()`.
+fn mask_phone_number(phone: &str) -> String {
+    let chars: Vec<char> = phone.chars().collect();
+    if chars.len() < 6 {
+        return "****".to_string();
+    }
+    let prefix: String = chars[..2].iter().collect();
+    let suffix: String = chars[chars.len() - 4..].iter().collect();
+    format!("{prefix}***-***-{suffix}")
 }
 
 /// Device and network context captured at session creation time.
@@ -726,8 +753,13 @@ pub struct RealmConfig {
     pub web_theme_name: Option<String>,
     /// Whether MFA is required for all users in this realm.
     pub mfa_required: Option<bool>,
-    /// Allowed MFA methods (e.g. `["totp", "webauthn"]`).
+    /// Allowed MFA methods (e.g. `["totp", "webauthn", "sms"]`).
     pub mfa_methods: Option<Vec<String>>,
+    /// Per-realm SMS OTP expiry in seconds. `None` falls back to the module default (600 s / 10 min).
+    pub sms_otp_expiry_seconds: Option<u64>,
+    /// Per-realm SMS OTP maximum verification attempts before the record is discarded.
+    /// `None` falls back to the module default (5).
+    pub sms_otp_max_attempts: Option<u32>,
     /// Allowed authentication methods (e.g. `["password", "magic_link", "passkey"]`).
     pub allowed_auth_methods: Option<Vec<String>>,
     /// Password complexity policy.
@@ -2354,6 +2386,106 @@ mod tests {
             !json.contains("required_actions"),
             "empty required_actions must be omitted to keep records compact"
         );
+    }
+
+    // ── mask_phone_number / User::masked_phone_number ──────────────────────
+
+    #[test]
+    fn masked_phone_matches_ac_example() {
+        // AC 3.5.2: masked display MUST be `+1***-***-1234` for `+15555551234`.
+        assert_eq!(mask_phone_number("+15555551234"), "+1***-***-1234");
+    }
+
+    #[test]
+    fn masked_phone_uk_number() {
+        // Verifies that the mask works for multi-digit country codes too.
+        assert_eq!(mask_phone_number("+441234567890"), "+4***-***-7890");
+    }
+
+    #[test]
+    fn masked_phone_short_number_returns_stars() {
+        assert_eq!(mask_phone_number("+123"), "****");
+        assert_eq!(mask_phone_number("+12"), "****");
+    }
+
+    #[test]
+    fn user_masked_phone_number_returns_none_when_no_phone() {
+        let now = Timestamp::from_micros(1_000_000);
+        let user = User::new(
+            UserId::generate(),
+            "alice@example.com".to_string(),
+            "Alice".to_string(),
+            "Alice".to_string(),
+            String::new(),
+            UserStatus::Active,
+            Vec::new(),
+            now,
+            now,
+        );
+        assert!(user.masked_phone_number().is_none());
+    }
+
+    #[test]
+    fn user_masked_phone_number_masks_enrolled_phone() {
+        let now = Timestamp::from_micros(1_000_000);
+        let mut user = User::new(
+            UserId::generate(),
+            "alice@example.com".to_string(),
+            "Alice".to_string(),
+            "Alice".to_string(),
+            String::new(),
+            UserStatus::Active,
+            Vec::new(),
+            now,
+            now,
+        );
+        user.set_phone_number(Some("+15555551234".to_string()));
+        assert_eq!(
+            user.masked_phone_number(),
+            Some("+1***-***-1234".to_string())
+        );
+    }
+
+    // ── RealmConfig sms_otp fields ─────────────────────────────────────────
+
+    #[test]
+    fn realm_config_sms_otp_fields_default_none() {
+        let config = RealmConfig::default();
+        assert!(config.sms_otp_expiry_seconds.is_none());
+        assert!(config.sms_otp_max_attempts.is_none());
+    }
+
+    #[test]
+    fn realm_config_sms_otp_fields_roundtrip() {
+        let config = RealmConfig {
+            sms_otp_expiry_seconds: Some(300),
+            sms_otp_max_attempts: Some(3),
+            ..RealmConfig::default()
+        };
+        let json = serde_json::to_string(&config).expect("serialize");
+        let back: RealmConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.sms_otp_expiry_seconds, Some(300));
+        assert_eq!(back.sms_otp_max_attempts, Some(3));
+    }
+
+    #[test]
+    fn realm_config_sms_otp_fields_absent_in_legacy_json() {
+        // Records stored before these fields were added must deserialize cleanly.
+        let legacy_json = r#"{"name": "test", "status": "Active"}"#;
+        let config: RealmConfig = serde_json::from_str(legacy_json).unwrap_or_default();
+        assert!(config.sms_otp_expiry_seconds.is_none());
+        assert!(config.sms_otp_max_attempts.is_none());
+    }
+
+    #[test]
+    fn realm_config_mfa_methods_accepts_sms_value() {
+        let config = RealmConfig {
+            mfa_methods: Some(vec!["sms".to_string()]),
+            ..RealmConfig::default()
+        };
+        let json = serde_json::to_string(&config).expect("serialize");
+        let back: RealmConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.mfa_methods, Some(vec!["sms".to_string()]));
     }
 
     #[test]

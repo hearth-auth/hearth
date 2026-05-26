@@ -7,6 +7,20 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **SMS MFA realm config (HEA-855)** — `RealmConfig` gains two new optional fields:
+  `sms_otp_expiry_seconds` (override default OTP lifetime per realm) and
+  `sms_otp_max_attempts` (override maximum guess attempts per realm). Both are
+  configurable via `PATCH /admin/realms/{realm}/config` (JSON API) and the admin
+  realm settings UI. `"sms"` is now a valid value in the `mfa_methods` array.
+
+- **Admin user phone management (HEA-855)** — the admin user detail page now shows
+  the user's phone number in masked form (`+1***-***-1234`) alongside its verification
+  status. A **Remove Phone** button clears the number and automatically adds
+  `ENROLL_PHONE_OTP` to the user's required actions so they are prompted to
+  re-enroll on next login. Exposed as `POST /ui/admin/realms/{realm}/users/{id}/remove-phone`.
+
 ### Security
 
 - **Step-up MFA security hardening (HEA-836)** — five SecurityAuditor findings

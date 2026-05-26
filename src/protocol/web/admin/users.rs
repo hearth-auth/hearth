@@ -461,6 +461,10 @@ struct UserDetailTemplate {
     user_id: String,
     sessions: Vec<UserSessionRow>,
     mfa_enabled: bool,
+    /// Masked phone number for display (e.g. `+1***-***-1234`), or `None` if not set.
+    masked_phone: Option<String>,
+    /// Whether the user's enrolled phone number has been verified.
+    phone_verified: bool,
     webauthn_credentials: Vec<WebAuthnCredRow>,
     org_memberships: Vec<OrgMembershipRow>,
     flash_message: Option<String>,
@@ -593,6 +597,9 @@ pub async fn admin_user_detail(
         .mfa_enabled(target.id(), &uid)
         .unwrap_or(false);
 
+    let masked_phone = user.masked_phone_number();
+    let phone_verified = user.phone_verified();
+
     let raw_creds = state
         .identity
         .list_webauthn_credentials(target.id(), &uid)
@@ -644,6 +651,9 @@ pub async fn admin_user_detail(
         "role_unassigned" => "Role removed.".to_string(),
         "permission_granted" => "Permission granted.".to_string(),
         "permission_revoked" => "Permission revoked.".to_string(),
+        "phone_removed" => {
+            "Phone number removed. User will be prompted to re-enrol on next login.".to_string()
+        }
         other => other.to_string(),
     });
 
@@ -735,6 +745,8 @@ pub async fn admin_user_detail(
         realm_name: target.0.name().to_string(),
         sessions,
         mfa_enabled,
+        masked_phone,
+        phone_verified,
         webauthn_credentials,
         org_memberships,
         flash_message,
@@ -835,6 +847,72 @@ pub async fn admin_user_disable_mfa(
         target.0.name()
     ))
     .into_response()
+}
+
+/// `POST /ui/admin/realms/:realm/users/:id/remove-phone`
+///
+/// Clears the user's enrolled phone number, marks it unverified, and adds
+/// `ENROLL_PHONE_OTP` to the user's required actions so they are prompted
+/// to re-enrol on next login. Idempotent — succeeds even when no phone is set.
+pub async fn admin_user_remove_phone(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(session): RequireAdmin,
+    target: TargetRealm,
+    AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
+    FriendlyForm(form): FriendlyForm<CsrfOnlyForm>,
+) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
+    let uid = match user_id.parse::<uuid::Uuid>() {
+        Ok(u) => crate::core::UserId::new(u),
+        Err(_) => return super::handlers_common::not_found("User not found"),
+    };
+
+    let redirect_base = format!("/ui/admin/realms/{}/users/{user_id}", target.0.name());
+
+    // Fetch current user to build the new required_actions list.
+    let current_user = match state.identity.get_user(target.id(), &uid) {
+        Ok(Some(u)) => u,
+        Ok(None) => return super::handlers_common::not_found("User not found"),
+        Err(e) => {
+            tracing::warn!(error = %e, "get_user failed in remove_phone");
+            return super::handlers_common::server_error();
+        }
+    };
+
+    // Build the new required_actions: preserve existing, add ENROLL_PHONE_OTP if absent.
+    let mut new_actions: Vec<crate::identity::RequiredAction> =
+        current_user.required_actions().to_vec();
+    if !new_actions.contains(&crate::identity::RequiredAction::EnrollPhoneOtp) {
+        new_actions.push(crate::identity::RequiredAction::EnrollPhoneOtp);
+    }
+
+    let req = crate::identity::UpdateUserRequest {
+        phone_number: Some(None), // clear
+        phone_verified: Some(false),
+        required_actions: Some(new_actions),
+        ..Default::default()
+    };
+
+    match state.identity.update_user(target.id(), &uid, &req) {
+        Ok(_) => {
+            tracing::info!(
+                user_id = %uid,
+                admin = %session.user_email,
+                "admin removed phone number"
+            );
+            Redirect::to(&format!("{redirect_base}?flash=phone_removed")).into_response()
+        }
+        Err(crate::identity::IdentityError::UserNotFound) => {
+            super::handlers_common::not_found("User not found")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "update_user failed in remove_phone");
+            super::handlers_common::server_error()
+        }
+    }
 }
 
 /// Template showing new recovery codes after an admin reset.

@@ -105,6 +105,18 @@ pub(crate) struct StoredOtp {
     pub expiry_unix_ts: u64,
     /// Number of failed verification attempts so far.
     pub attempt_count: u32,
+    /// Maximum allowed attempts before the record is invalidated.
+    ///
+    /// Baked in at creation time from the per-realm config (or the module
+    /// default). Stored here so mid-flow config changes do not retroactively
+    /// affect in-flight OTPs. Absent on records written before this field
+    /// was added; those deserialize to `OTP_MAX_ATTEMPTS` via the serde default.
+    #[serde(default = "default_otp_max_attempts")]
+    pub max_attempts: u32,
+}
+
+fn default_otp_max_attempts() -> u32 {
+    OTP_MAX_ATTEMPTS
 }
 
 impl StoredOtp {
@@ -116,6 +128,7 @@ impl StoredOtp {
         rng: &dyn SecureRandom,
         key_bytes: &[u8],
         expiry_unix_ts: u64,
+        max_attempts: u32,
     ) -> Result<(Zeroizing<String>, Self), IdentityError> {
         let digits = generate_otp_digits(rng)?;
         let key = hmac::Key::new(hmac::HMAC_SHA256, key_bytes);
@@ -125,6 +138,7 @@ impl StoredOtp {
             hmac_hex,
             expiry_unix_ts,
             attempt_count: 0,
+            max_attempts,
         };
         Ok((digits, stored))
     }
@@ -136,7 +150,7 @@ impl StoredOtp {
 
     /// Returns `true` if maximum verification attempts have been reached.
     pub(crate) fn is_exhausted(&self) -> bool {
-        self.attempt_count >= OTP_MAX_ATTEMPTS
+        self.attempt_count >= self.max_attempts
     }
 
     /// Verifies `candidate_digits` against the stored HMAC in constant time.
@@ -345,7 +359,7 @@ mod tests {
     fn create_otp_returns_valid_digits_and_record() {
         let rng = SystemRandom::new();
         let expiry = 9_999_999_999u64;
-        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, expiry).unwrap();
+        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, expiry, OTP_MAX_ATTEMPTS).unwrap();
         assert_eq!(digits.len(), 6, "digits must be 6 chars");
         assert!(
             digits.chars().all(|c| c.is_ascii_digit()),
@@ -359,7 +373,8 @@ mod tests {
     #[test]
     fn verify_succeeds_with_correct_code() {
         let rng = SystemRandom::new();
-        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999).unwrap();
+        let (digits, stored) =
+            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
         assert!(
             stored.verify(&digits, TEST_KEY).is_ok(),
             "verification must succeed with the correct code"
@@ -369,7 +384,8 @@ mod tests {
     #[test]
     fn verify_fails_with_wrong_code() {
         let rng = SystemRandom::new();
-        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999).unwrap();
+        let (digits, stored) =
+            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
         let wrong: String = if digits.as_str() == "000000" {
             "000001".to_string()
         } else {
@@ -384,7 +400,8 @@ mod tests {
     #[test]
     fn verify_fails_with_wrong_key() {
         let rng = SystemRandom::new();
-        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999).unwrap();
+        let (digits, stored) =
+            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
         let other_key = b"a-completely-different-key!!!!!!!!";
         assert!(
             stored.verify(&digits, other_key).is_err(),
@@ -395,7 +412,8 @@ mod tests {
     #[test]
     fn verify_fails_with_tampered_hmac_hex() {
         let rng = SystemRandom::new();
-        let (digits, mut stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999).unwrap();
+        let (digits, mut stored) =
+            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
         // Flip the first byte of the hex string.
         let original_first = stored.hmac_hex.chars().next().unwrap();
         let replacement = if original_first == 'a' { 'b' } else { 'a' };
@@ -409,7 +427,7 @@ mod tests {
     #[test]
     fn is_expired_returns_true_when_past_expiry() {
         let rng = SystemRandom::new();
-        let (_, stored) = StoredOtp::create(&rng, TEST_KEY, 1_000u64).unwrap();
+        let (_, stored) = StoredOtp::create(&rng, TEST_KEY, 1_000u64, OTP_MAX_ATTEMPTS).unwrap();
         assert!(
             stored.is_expired(1_001),
             "must be expired after expiry time"
@@ -421,7 +439,8 @@ mod tests {
     #[test]
     fn is_exhausted_after_max_attempts() {
         let rng = SystemRandom::new();
-        let (_, mut stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999).unwrap();
+        let (_, mut stored) =
+            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
         assert!(!stored.is_exhausted(), "fresh OTP must not be exhausted");
         stored.attempt_count = OTP_MAX_ATTEMPTS - 1;
         assert!(
@@ -430,6 +449,36 @@ mod tests {
         );
         stored.attempt_count = OTP_MAX_ATTEMPTS;
         assert!(stored.is_exhausted(), "at max must be exhausted");
+    }
+
+    #[test]
+    fn per_realm_max_attempts_overrides_module_default() {
+        let rng = SystemRandom::new();
+        // Create an OTP with max_attempts = 2 (lower than the module default of 5).
+        let (_, mut stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, 2).unwrap();
+        assert!(!stored.is_exhausted(), "fresh OTP must not be exhausted");
+        stored.attempt_count = 1;
+        assert!(!stored.is_exhausted(), "one attempt below limit");
+        stored.attempt_count = 2;
+        assert!(
+            stored.is_exhausted(),
+            "at per-realm limit must be exhausted"
+        );
+    }
+
+    #[test]
+    fn stored_otp_max_attempts_defaults_on_legacy_record() {
+        // Simulate a stored record written before max_attempts was added.
+        let legacy_json = r#"{
+            "hmac_hex": "aabbcc",
+            "expiry_unix_ts": 9999999999,
+            "attempt_count": 0
+        }"#;
+        let stored: StoredOtp = serde_json::from_str(legacy_json).expect("deserialize");
+        assert_eq!(
+            stored.max_attempts, OTP_MAX_ATTEMPTS,
+            "legacy record must default to module constant"
+        );
     }
 
     // ── StoredResendCount ─────────────────────────────────────────────────────
@@ -487,7 +536,7 @@ mod tests {
     #[test]
     fn stored_otp_roundtrips_via_json() {
         let rng = SystemRandom::new();
-        let (_, original) = StoredOtp::create(&rng, TEST_KEY, 12345678).unwrap();
+        let (_, original) = StoredOtp::create(&rng, TEST_KEY, 12345678, OTP_MAX_ATTEMPTS).unwrap();
         let json = serde_json::to_vec(&original).unwrap();
         let restored: StoredOtp = serde_json::from_slice(&json).unwrap();
         assert_eq!(restored.hmac_hex, original.hmac_hex);

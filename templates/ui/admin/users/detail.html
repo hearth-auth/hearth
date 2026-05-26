@@ -61,6 +61,21 @@
       <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Updated</dt>
       <dd class="mt-1 text-sm text-ht-content-muted">{{ updated_at_display }}</dd>
     </div>
+    {% match masked_phone %}
+      {% when Some with (phone) %}
+      <div>
+        <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Phone</dt>
+        <dd class="mt-1 flex items-center gap-2 text-sm text-ht-content-primary">
+          <span>{{ phone }}</span>
+          {% if phone_verified %}
+            <span class="inline-flex items-center rounded-full bg-success/[0.12] px-1.5 py-0.5 text-xs font-medium text-success-fg">Verified</span>
+          {% else %}
+            <span class="inline-flex items-center rounded-full bg-warning/[0.12] px-1.5 py-0.5 text-xs font-medium text-warning-fg">Unverified</span>
+          {% endif %}
+        </dd>
+      </div>
+      {% when None %}
+    {% endmatch %}
   </dl>
 </div>
 
@@ -87,6 +102,18 @@
       </button>
     </form>
     {% endif %}
+    {% match masked_phone %}
+      {% when Some with (_) %}
+      <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/remove-phone" x-data="{ confirm: false }">
+        {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
+        <button @click.prevent="confirm ? $el.form.submit() : (confirm = true)" type="button"
+                :class="confirm ? 'btn-danger' : 'border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider'"
+                class="rounded px-3 py-1.5 text-sm font-medium">
+          <span x-text="confirm ? 'Confirm remove phone' : 'Remove phone'"></span>
+        </button>
+      </form>
+      {% when None %}
+    {% endmatch %}
   </div>
 </div>
 

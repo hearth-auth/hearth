@@ -395,6 +395,12 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::PasswordCompromisedRejected => "Password Compromised Rejected",
         A::BreachCheckUnavailable => "Breach Check Unavailable",
         A::StepUpMfaTriggered => "Step-Up MFA Triggered",
+        A::SmsOtpEnrollmentStarted => "SMS OTP Enrollment Started",
+        A::SmsOtpEnrollmentVerified => "SMS OTP Enrollment Verified",
+        A::SmsOtpEnrollmentFailed => "SMS OTP Enrollment Failed",
+        A::SmsMfaChallengeSucceeded => "SMS MFA Challenge Succeeded",
+        A::SmsMfaChallengeFailed => "SMS MFA Challenge Failed",
+        A::SmsMfaLocked => "SMS MFA Locked",
     }
 }
 
@@ -464,7 +470,13 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::OrphanedReferenceSkipped
         | A::PasswordCompromisedRejected
         | A::BreachCheckUnavailable
-        | A::StepUpMfaTriggered => "Security",
+        | A::StepUpMfaTriggered
+        | A::SmsOtpEnrollmentStarted
+        | A::SmsOtpEnrollmentVerified
+        | A::SmsOtpEnrollmentFailed
+        | A::SmsMfaChallengeSucceeded
+        | A::SmsMfaChallengeFailed
+        | A::SmsMfaLocked => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
         // backup/restore, and internal cleanup jobs.
         A::RealmCreated
@@ -2243,9 +2255,8 @@ pub async fn admin_realm_admin_revoke(
 
 /// Request body for `PATCH /admin/realms/{realm}/config`.
 ///
-/// Only `default_required_actions` is exposed in v1. Future fields may be
-/// added without breaking existing callers because unknown JSON keys are
-/// silently ignored by `serde`.
+/// All fields are optional — send only the keys you want to change.
+/// Unknown JSON keys are silently ignored by `serde`.
 #[derive(Debug, Deserialize)]
 pub struct PatchRealmConfigBody {
     /// Replaces the realm's full `default_required_actions` list.
@@ -2253,13 +2264,26 @@ pub struct PatchRealmConfigBody {
     /// Pass an empty array (`[]`) to clear the default. All strings must
     /// be valid v1 action types (`"VERIFY_EMAIL"`, `"UPDATE_PASSWORD"`);
     /// unknown values return 400.
+    #[serde(default)]
     pub default_required_actions: Vec<String>,
+    /// Replaces the realm's allowed MFA methods list (e.g. `["totp","sms"]`).
+    ///
+    /// `null` / absent leaves the field unchanged. Pass `[]` to clear.
+    /// The value `"sms"` enables SMS OTP as an MFA method for this realm.
+    pub mfa_methods: Option<Vec<String>>,
+    /// Per-realm SMS OTP expiry in seconds. `null` clears the override
+    /// (reverts to the engine default of 600 s).
+    pub sms_otp_expiry_seconds: Option<u64>,
+    /// Per-realm SMS OTP maximum verification attempts. `null` clears
+    /// the override (reverts to the engine default of 5).
+    pub sms_otp_max_attempts: Option<u32>,
 }
 
 /// `PATCH /admin/realms/{realm}/config`
 ///
-/// Replaces the realm's `default_required_actions` list. The change only
-/// affects users created after this call; existing users are unmodified.
+/// Updates mutable realm config fields. Currently exposed:
+/// `default_required_actions`, `mfa_methods`, `sms_otp_expiry_seconds`,
+/// `sms_otp_max_attempts`.
 ///
 /// Requires realm-admin token; returns 403 otherwise.
 /// Unknown action type strings return 400.
@@ -2288,9 +2312,27 @@ pub async fn admin_api_realm_config_patch(
         }
     }
 
-    // Build updated config: take existing config, replace default_required_actions.
+    // Build updated config: start from existing, apply only provided fields.
     let mut config = target.0.config().clone();
     config.default_required_actions = actions;
+    if let Some(methods) = body.mfa_methods {
+        config.mfa_methods = if methods.is_empty() {
+            None
+        } else {
+            Some(methods)
+        };
+    }
+    // `serde_json` deserializes absent fields as `None`; we use a sentinel
+    // `Option<Option<T>>` pattern isn't needed here — the caller either omits
+    // the field (None → leave unchanged) or passes a value (Some(v) → set).
+    // Passing JSON `null` is not supported for these numeric fields; omit to
+    // leave unchanged.
+    if let Some(v) = body.sms_otp_expiry_seconds {
+        config.sms_otp_expiry_seconds = Some(v);
+    }
+    if let Some(v) = body.sms_otp_max_attempts {
+        config.sms_otp_max_attempts = Some(v);
+    }
 
     match state.identity.update_realm(
         target.id(),
@@ -2584,6 +2626,12 @@ mod action_category_tests {
             A::OrphanedReferenceSkipped,
             A::PasswordCompromisedRejected,
             A::BreachCheckUnavailable,
+            A::SmsOtpEnrollmentStarted,
+            A::SmsOtpEnrollmentVerified,
+            A::SmsOtpEnrollmentFailed,
+            A::SmsMfaChallengeSucceeded,
+            A::SmsMfaChallengeFailed,
+            A::SmsMfaLocked,
         ] {
             assert_eq!(action_category(&a), "Security", "{a:?}");
         }

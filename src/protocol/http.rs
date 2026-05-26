@@ -3424,6 +3424,24 @@ async fn admin_patch_realm_config(
     let mut config = realm.config().clone();
     config.default_required_actions = actions;
 
+    // Optional fields: apply only when present in the JSON body.
+    if let Some(methods) = body["mfa_methods"].as_array() {
+        let strs: Vec<String> = methods
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        config.mfa_methods = if strs.is_empty() { None } else { Some(strs) };
+    }
+    if let Some(v) = body["sms_otp_expiry_seconds"].as_u64() {
+        config.sms_otp_expiry_seconds = Some(v);
+    }
+    if let Some(v) = body["sms_otp_max_attempts"].as_u64() {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            config.sms_otp_max_attempts = Some(v as u32);
+        }
+    }
+
     match state.identity.update_realm(
         &realm_id,
         &UpdateRealmRequest {

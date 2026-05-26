@@ -62,6 +62,7 @@ pub mod realm_resolver;
 pub mod required_action;
 pub mod saml;
 pub mod security;
+pub mod sms_challenge;
 pub(crate) mod templates;
 pub mod themes;
 
@@ -937,6 +938,12 @@ pub fn router(state: WebState) -> Router {
             "/oauth/consent",
             axum::routing::get(oauth_consent::consent_page).post(oauth_consent::consent_submit),
         )
+        // --- SMS MFA challenge interstitial ---
+        .route(
+            "/sms-challenge",
+            axum::routing::get(sms_challenge::sms_challenge_get)
+                .post(sms_challenge::sms_challenge_post),
+        )
         // --- First-run onboarding wizard ---
         .route(
             "/admin/onboarding",
@@ -1022,6 +1029,10 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/realms/{realm}/users/{id}/disable-mfa",
             axum::routing::post(admin::admin_user_disable_mfa),
+        )
+        .route(
+            "/admin/realms/{realm}/users/{id}/remove-phone",
+            axum::routing::post(admin::admin_user_remove_phone),
         )
         .route(
             "/admin/realms/{realm}/users/{id}/reset-mfa-codes",
