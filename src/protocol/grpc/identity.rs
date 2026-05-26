@@ -1,6 +1,6 @@
 //! Admin service implementations: users, realms, organizations, applications.
 
-use tonic::{Request, Response, Status};
+use tonic::{Code, Request, Response, Status};
 
 use crate::core::{ClientId, OrganizationId, UserId};
 use crate::identity::{
@@ -171,24 +171,46 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::ListRealmsRequest>,
     ) -> Result<Response<pb::RealmPage>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let body = req.into_inner();
         let limit = body.limit.unwrap_or(50) as usize;
-        let page = self
-            .state
-            .identity
-            .list_realms(body.cursor.as_deref(), limit)
-            .map_err(identity_to_status)?;
-        Ok(Response::new(realm_page_to_proto(&page)))
+        // System-realm admins may list all realms; regular realm admins see only their own.
+        if crate::identity::keys::is_system_realm(&auth.realm_id) {
+            let page = self
+                .state
+                .identity
+                .list_realms(body.cursor.as_deref(), limit)
+                .map_err(identity_to_status)?;
+            Ok(Response::new(realm_page_to_proto(&page)))
+        } else {
+            match self
+                .state
+                .identity
+                .get_realm(&auth.realm_id)
+                .map_err(identity_to_status)?
+            {
+                Some(realm) => Ok(Response::new(pb::RealmPage {
+                    items: vec![pb::Realm::from(&realm)],
+                    next_cursor: None,
+                })),
+                None => Ok(Response::new(pb::RealmPage {
+                    items: vec![],
+                    next_cursor: None,
+                })),
+            }
+        }
     }
 
     async fn get_realm(
         &self,
         req: Request<pb::GetRealmRequest>,
     ) -> Result<Response<pb::Realm>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let body = req.into_inner();
         let realm_id = parse_realm_id(&body.id)?;
+        if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::new(Code::PermissionDenied, "forbidden"));
+        }
         let realm = self
             .state
             .identity
@@ -202,7 +224,11 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::CreateRealmRequest>,
     ) -> Result<Response<pb::Realm>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        // Only system-realm admins may create new realms.
+        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::new(Code::PermissionDenied, "forbidden"));
+        }
         let body: CreateRealmRequest = req.into_inner().into();
         let realm = self
             .state
@@ -222,9 +248,12 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::UpdateRealmCall>,
     ) -> Result<Response<pb::Realm>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let call = req.into_inner();
         let realm_id = parse_realm_id(&call.id)?;
+        if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::new(Code::PermissionDenied, "forbidden"));
+        }
         let body: UpdateRealmRequest = call
             .body
             .ok_or_else(|| Status::invalid_argument("body required"))?
@@ -241,9 +270,12 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::DeleteRealmRequest>,
     ) -> Result<Response<pb::Empty>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let body = req.into_inner();
         let realm_id = parse_realm_id(&body.id)?;
+        if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::new(Code::PermissionDenied, "forbidden"));
+        }
         self.state
             .identity
             .delete_realm(&realm_id)
