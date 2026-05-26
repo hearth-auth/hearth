@@ -18,9 +18,13 @@ use zeroize::Zeroize;
 use crate::core::Timestamp;
 use crate::core::Uri;
 use crate::identity::error::IdentityError;
+use crate::identity::types::RequiredAction;
 
 /// The only supported JWT algorithm.
 const JWT_ALGORITHM: &str = "EdDSA";
+
+/// Token type value used in the `token_type` claim of required-action JWTs.
+pub const REQUIRED_ACTION_TOKEN_TYPE: &str = "ra";
 
 /// The JWT type header value.
 const JWT_TYPE: &str = "JWT";
@@ -177,6 +181,12 @@ pub struct TokenClaims {
     /// this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permissions: Vec<String>,
+    /// Pending required actions (non-empty only in RA tokens).
+    ///
+    /// Present when `token_type == REQUIRED_ACTION_TOKEN_TYPE`. The browser
+    /// interstitial handlers read this field to determine the next action page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_actions: Vec<RequiredAction>,
     /// Declaratively-mapped custom claims emitted at the top level.
     #[serde(default, flatten)]
     pub custom: BTreeMap<String, serde_json::Value>,
@@ -502,6 +512,7 @@ impl SigningKey {
             roles: request.roles.to_vec(),
             groups: request.groups.to_vec(),
             permissions: request.permissions.to_vec(),
+            required_actions: Vec::new(),
             custom: request.custom.clone(),
         };
 
@@ -522,6 +533,7 @@ impl SigningKey {
             roles: Vec::new(),
             groups: Vec::new(),
             permissions: Vec::new(),
+            required_actions: Vec::new(),
             custom: BTreeMap::new(),
         };
 

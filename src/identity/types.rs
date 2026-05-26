@@ -441,6 +441,18 @@ pub struct RegisterUserResponse {
     pub verification_token: String,
 }
 
+/// Response returned by `complete_update_password`.
+///
+/// The `access_token` is either a new RA JWT (when further required actions
+/// remain) or a full-access JWT (when all actions are satisfied). Callers
+/// distinguish the two cases by decoding `token_type` from the payload:
+/// `"ra"` → more actions remain; `"access"` → flow complete.
+#[derive(Debug)]
+pub struct RequiredActionTokenResponse {
+    /// The next token in the required-action flow.
+    pub access_token: String,
+}
+
 /// Request to update an existing user.
 ///
 /// Only `Some` fields are applied; `None` fields are left unchanged.

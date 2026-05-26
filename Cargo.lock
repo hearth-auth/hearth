@@ -1407,8 +1407,10 @@ dependencies = [
  "crc32fast",
  "hearth",
  "madsim",
+ "openraft",
  "proptest",
  "tempfile",
+ "tokio",
  "uuid",
 ]
 

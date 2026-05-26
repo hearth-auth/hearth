@@ -1,0 +1,22 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · Email verified{% endblock %}
+{% block body %}
+<div class="mx-auto max-w-lg">
+  <div class="rounded-lg bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle text-center">
+    <div class="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-success/[0.12] mx-auto">
+      <svg class="h-6 w-6 text-success" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+      </svg>
+    </div>
+    <p class="font-mono text-[11px] uppercase tracking-[0.14em] text-ht-content-muted">Required action</p>
+    <h1 class="font-display text-xl font-medium text-ht-content-primary mt-1">Email verified</h1>
+    <p class="mt-2 text-sm text-ht-content-muted">
+      Your email address has been verified. Redirecting you in a moment…
+    </p>
+    <p class="mt-4 text-sm text-ht-content-muted">
+      <a href="{{ redirect_url }}" class="font-medium text-accent hover:underline">Continue now</a>
+    </p>
+    <meta http-equiv="refresh" content="3; url={{ redirect_url }}" />
+  </div>
+</div>
+{% endblock %}
