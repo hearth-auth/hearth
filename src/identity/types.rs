@@ -757,6 +757,44 @@ pub struct RealmConfig {
     /// field deserialize to `[]` via serde default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_required_actions: Vec<RequiredAction>,
+    /// HIBP k-anonymity breach-check configuration.
+    ///
+    /// Existing realms deserialised without this field get the safe migration
+    /// default (`enabled = false`). Newly provisioned realms should set
+    /// `enabled = true` explicitly in their configuration.
+    #[serde(default)]
+    pub breach_check: BreachCheckConfig,
+}
+
+/// Configuration for the HIBP Pwned Passwords k-anonymity breach-check.
+///
+/// Only the first 5 hex characters of the SHA-1 hash are sent to the HIBP
+/// Range API — no plaintext password or full hash leaves the process.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BreachCheckConfig {
+    /// When `true`, every password-set or password-change call queries the HIBP
+    /// Range API before accepting the new credential.
+    pub enabled: bool,
+    /// Request timeout for the HIBP API in milliseconds.
+    ///
+    /// Defaults to 3000 ms. On timeout the call fails-open (password accepted,
+    /// `BreachCheckUnavailable` audit event emitted).
+    pub timeout_ms: u64,
+    /// Optional HIBP API key. When non-empty, sent as the `hibp-api-key` header.
+    /// Required for paid HIBP Enterprise plans.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hibp_api_key: String,
+}
+
+impl Default for BreachCheckConfig {
+    fn default() -> Self {
+        Self {
+            // Safe migration default: disabled so existing realms are unaffected.
+            enabled: false,
+            timeout_ms: 3000,
+            hibp_api_key: String::new(),
+        }
+    }
 }
 
 /// A realm record.

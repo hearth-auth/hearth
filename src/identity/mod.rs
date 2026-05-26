@@ -11,6 +11,7 @@ pub mod email;
 mod engine;
 pub mod error;
 pub mod federation;
+pub mod hibp;
 pub(crate) mod keys;
 pub(crate) mod magic_link;
 pub mod migration;
@@ -49,11 +50,11 @@ pub use tokens::{
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
-    canonicalize_scopes, AttributeDefinition, AttributeDefinitions, AttributeType, BulkResult,
-    ConsentDecision, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
-    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, CreateWebhookRequest,
-    CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest, InvitationStatus,
-    MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
+    canonicalize_scopes, AttributeDefinition, AttributeDefinitions, AttributeType,
+    BreachCheckConfig, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
+    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
+    CreateWebhookRequest, CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest,
+    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,

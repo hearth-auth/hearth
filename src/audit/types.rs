@@ -213,6 +213,17 @@ pub enum AuditAction {
     /// (e.g. `"email_already_verified"`). Used to self-heal data-migration
     /// artifacts where a required action was added spuriously.
     RequiredActionAutoCleared,
+    /// A password-set or password-change was rejected because the candidate
+    /// password appeared in a known HIBP data breach.
+    ///
+    /// Failure policy: `FailOperation` (the credential was NOT stored).
+    /// Metadata carries `user_id`.
+    PasswordCompromisedRejected,
+    /// The HIBP breach-check API was unavailable (timeout or network error).
+    ///
+    /// Failure policy: `LogOnly`. The password was accepted (fail-open).
+    /// Metadata carries `user_id` and `reason`.
+    BreachCheckUnavailable,
 }
 
 impl AuditAction {
@@ -294,6 +305,8 @@ impl AuditAction {
             Self::RequiredActionRemoved,
             Self::RequiredActionCompleted,
             Self::RequiredActionAutoCleared,
+            Self::PasswordCompromisedRejected,
+            Self::BreachCheckUnavailable,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -373,6 +386,8 @@ impl AuditAction {
             Self::RequiredActionRemoved => "required_action_removed",
             Self::RequiredActionCompleted => "required_action_completed",
             Self::RequiredActionAutoCleared => "required_action_auto_cleared",
+            Self::PasswordCompromisedRejected => "password_compromised_rejected",
+            Self::BreachCheckUnavailable => "breach_check_unavailable",
         }
     }
 }
@@ -453,6 +468,8 @@ impl std::str::FromStr for AuditAction {
             "required_action_removed" => Ok(Self::RequiredActionRemoved),
             "required_action_completed" => Ok(Self::RequiredActionCompleted),
             "required_action_auto_cleared" => Ok(Self::RequiredActionAutoCleared),
+            "password_compromised_rejected" => Ok(Self::PasswordCompromisedRejected),
+            "breach_check_unavailable" => Ok(Self::BreachCheckUnavailable),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -541,7 +558,8 @@ impl AuditAction {
             | Self::RequiredActionAssigned
             | Self::RequiredActionRemoved
             | Self::RequiredActionCompleted
-            | Self::RequiredActionAutoCleared => LogOnly,
+            | Self::RequiredActionAutoCleared
+            | Self::BreachCheckUnavailable => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
@@ -561,7 +579,8 @@ impl AuditAction {
             | Self::ScimGroupDeleted
             | Self::RoleRevoked
             | Self::ClientConsentRevoked
-            | Self::LoginLocked => FailOperation,
+            | Self::LoginLocked
+            | Self::PasswordCompromisedRejected => FailOperation,
         }
     }
 }

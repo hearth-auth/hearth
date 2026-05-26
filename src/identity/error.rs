@@ -370,6 +370,12 @@ pub enum IdentityError {
     },
     /// The requested webhook was not found in this realm.
     WebhookNotFound,
+    /// The new password has appeared in a known data breach (HIBP check).
+    ///
+    /// Returned when `realm.config.breach_check.enabled` is `true` and the
+    /// HIBP Range API confirms the password is compromised. The caller must
+    /// return HTTP 422 with `error_code: "password_compromised"`.
+    PasswordCompromised,
 }
 
 impl fmt::Display for IdentityError {
@@ -532,6 +538,9 @@ impl fmt::Display for IdentityError {
                 )
             }
             Self::WebhookNotFound => write!(f, "webhook not found"),
+            Self::PasswordCompromised => {
+                write!(f, "password has appeared in a known data breach")
+            }
         }
     }
 }
@@ -626,6 +635,7 @@ impl std::error::Error for IdentityError {
             | Self::AuditFailure { .. }
             | Self::PasswordExpired
             | Self::PasswordReused
+            | Self::PasswordCompromised
             | Self::AuthMethodNotAllowed { .. }
             | Self::WebhookNotFound => None,
         }

@@ -401,6 +401,11 @@ pub struct EmbeddedIdentityEngine {
     /// callers; a finer-grained per-realm lock could come later if
     /// contention ever becomes measurable.
     realm_ops_lock: Mutex<()>,
+    /// HIBP k-anonymity breach-check client.
+    ///
+    /// Shared across all password-set/-change operations. Uses an injectable
+    /// transport so tests can stub out network I/O.
+    hibp: Arc<crate::identity::hibp::HibpClient>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -633,6 +638,7 @@ impl EmbeddedIdentityEngine {
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
             realm_ops_lock: Mutex::new(()),
+            hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
@@ -794,6 +800,7 @@ impl EmbeddedIdentityEngine {
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
             realm_ops_lock: Mutex::new(()),
+            hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
         };
         // Best-effort: if seeding fails here, tests that expect a system
         // realm will notice and surface it. `new()` panics on failure; this
@@ -801,6 +808,18 @@ impl EmbeddedIdentityEngine {
         let _ = engine.seed_system_realm_if_absent();
         let _ = engine.populate_realm_status_cache();
         engine
+    }
+
+    /// Replaces the HIBP client transport.
+    ///
+    /// Used in integration tests to inject a stub without network calls.
+    /// Follows the same pattern as `with_email_sender` / `StubHttpTransport`.
+    pub fn with_hibp_transport(
+        mut self,
+        transport: std::sync::Arc<dyn crate::identity::hibp::HibpTransport>,
+    ) -> Self {
+        self.hibp = Arc::new(crate::identity::hibp::HibpClient::with_transport(transport));
+        self
     }
 
     /// Ensures the reserved system realm exists in storage. Called from
@@ -3593,6 +3612,48 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 Some(user.display_name()),
                 Some(user.email()),
             )?;
+        }
+
+        // HIBP k-anonymity breach check.
+        // Only the 5-char SHA-1 prefix is sent to the API; no PII leaves the process (AC-2).
+        if let Some(realm) = self.get_realm(realm_id)? {
+            let bc = &realm.config().breach_check;
+            if bc.enabled {
+                let api_key = if bc.hibp_api_key.is_empty() {
+                    None
+                } else {
+                    Some(bc.hibp_api_key.as_str())
+                };
+                match self.hibp.is_pwned(password.as_bytes(), api_key) {
+                    Ok(true) => {
+                        // Compromised — reject and audit (AC-1).
+                        let _ = self.record_audit(
+                            realm_id,
+                            None,
+                            crate::audit::AuditAction::PasswordCompromisedRejected,
+                            "credential",
+                            &user_id.as_uuid().to_string(),
+                        );
+                        return Err(IdentityError::PasswordCompromised);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        // HIBP unavailable — fail-open and audit (AC-3).
+                        tracing::warn!(
+                            user_id = %user_id.as_uuid(),
+                            reason = %e,
+                            "HIBP breach-check unavailable; accepting password (fail-open)"
+                        );
+                        let _ = self.record_audit(
+                            realm_id,
+                            None,
+                            crate::audit::AuditAction::BreachCheckUnavailable,
+                            "credential",
+                            &user_id.as_uuid().to_string(),
+                        );
+                    }
+                }
+            }
         }
 
         // Resolve history depth from the realm's password policy.
