@@ -1814,12 +1814,12 @@ async fn token_exchange_impl(
 
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the ROPC password grant.
+    // Per-IP rate limiting for the ROPC password grant and step-up-mfa grant.
     // In production traffic goes through a reverse proxy so the real IP
     // arrives via X-Forwarded-For; FALLBACK_PEER is used when ConnectInfo is
     // unavailable (e.g. tower::ServiceExt::oneshot in tests).
     let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
-    if grant_type == "password"
+    if (grant_type == "password" || grant_type == "urn:hearth:params:grant-type:step-up-mfa")
         && state
             .identity
             .check_ip_login_rate_limit(&realm_id, &client_ip)
@@ -5857,10 +5857,10 @@ async fn realm_token_exchange(
     }
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the ROPC password grant.
+    // Per-IP rate limiting for the ROPC password grant and step-up-mfa grant.
     // Real IP arrives via X-Forwarded-For in production; FALLBACK_PEER used in tests.
     let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
-    if grant_type == "password"
+    if (grant_type == "password" || grant_type == "urn:hearth:params:grant-type:step-up-mfa")
         && state
             .identity
             .check_ip_login_rate_limit(&realm_id, &client_ip)

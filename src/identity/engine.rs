@@ -16256,9 +16256,16 @@ mod tests {
 
     /// NEW-LOW-1: a failed MFA code in step_up_mfa_grant_token must increment
     /// the IP login attempt counter so the IP-level rate limiter can act.
+    ///
+    /// Strategy: pre-seed the IP counter to (ip_max_attempts - 1) via the public
+    /// helper, then make one bad step-up request. If the step-up handler records
+    /// the attempt, the counter tips over and `check_ip_login_rate_limit` returns
+    /// `RateLimited`. If the handler does NOT record it, the counter stays below
+    /// the threshold and the check still returns `Ok`.
     #[test]
+    #[allow(clippy::cast_sign_loss)]
     fn step_up_mfa_bad_code_records_ip_attempt() {
-        let (_dir, engine, _clock) = setup_engine();
+        let (_dir, engine, clock) = setup_engine();
         let realm = create_test_realm(&engine);
         let user = create_test_user(&engine, &realm);
 
@@ -16272,19 +16279,24 @@ mod tests {
         let secret_bytes = data_encoding::BASE32_NOPAD
             .decode(enrollment.secret_base32.as_bytes())
             .expect("decode");
-        let code0 = crate::identity::totp::compute_totp(&secret_bytes, 0);
+        let now_secs = (clock.now().as_micros() / 1_000_000) as u64;
+        let code0 = crate::identity::totp::compute_totp(&secret_bytes, now_secs / 30);
         engine
             .verify_totp_enrollment(&realm, user.id(), &code0)
             .expect("activate");
 
         let test_ip = "10.0.0.1";
 
-        // Confirm the IP counter starts clean.
+        // Pre-seed the IP counter to (ip_max_attempts - 1).
+        let ip_max = engine.config.rate_limit.ip_max_attempts;
+        for _ in 0..(ip_max - 1) {
+            engine.record_ip_login_attempt(&realm, test_ip);
+        }
         engine
             .check_ip_login_rate_limit(&realm, test_ip)
-            .expect("IP should not be rate limited initially");
+            .expect("IP should not yet be rate-limited");
 
-        // Submit step-up request with wrong MFA code (correct password).
+        // Submit one step-up request with a wrong MFA code.
         let request = crate::identity::oidc::StepUpMfaGrantRequest {
             email: user.email().to_string(),
             password: "password".to_string(),
@@ -16304,12 +16316,11 @@ mod tests {
             "unexpected error: {err:?}"
         );
 
-        // The IP attempt counter must now be non-zero (engine exposes the retry-after
-        // helper which returns 0 when no attempts are recorded).
-        let retry_after = engine.ip_login_retry_after_micros(&realm, test_ip);
+        // The step-up handler must have pushed the counter over the threshold.
+        let ip_rate_result = engine.check_ip_login_rate_limit(&realm, test_ip);
         assert!(
-            retry_after > 0,
-            "IP attempt not recorded after step-up MFA failure"
+            matches!(ip_rate_result, Err(IdentityError::RateLimited)),
+            "IP should be rate-limited after step-up MFA failure, got: {ip_rate_result:?}"
         );
     }
 }
