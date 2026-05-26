@@ -1,14 +1,23 @@
 //! Integration tests for device fingerprint storage and adaptive-MFA step-up.
 //!
 //! Tests correspond to HEA-839 acceptance criteria AC-6 through AC-11.
+//! HEA-875 adds GDPR Art.17 regression tests (cascade + admin erasure endpoint).
 
 mod common;
 
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use hearth::core::RealmId;
 use hearth::identity::{
     device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore, FingerprintResult},
-    AdaptiveMfaConfig, CreateRealmRequest, CreateUserRequest, RealmConfig,
+    AdaptiveMfaConfig, CreateRealmRequest, CreateUserRequest, RealmConfig, SessionContext,
 };
+use hearth::protocol::http::{router, AppState};
+use hearth::rbac::{AssignRoleRequest, Scope, Subject};
 use secrecy::SecretString;
+use tower::ServiceExt as _;
 
 // ===================================================================
 // AC-11: GDPR — only HMAC bytes stored, not raw IP / UA
@@ -584,6 +593,184 @@ fn breach_check_config_debug_redacts_api_key() {
     assert!(
         debug_output.contains("[REDACTED]"),
         "Debug output should contain [REDACTED]; got: {debug_output}"
+    );
+}
+
+// ===================================================================
+// HEA-875: GDPR Art.17 — Gap A cascade + Gap B admin erasure API
+// ===================================================================
+
+async fn build_app(harness: &common::TestHarness) -> axum::Router {
+    let state = Arc::new(AppState::new(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        harness.audit_arc(),
+    ));
+    router(state)
+}
+
+async fn admin_token_for(harness: &common::TestHarness, realm: &RealmId) -> String {
+    let user = harness
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: format!("admin-{}@test.example", uuid::Uuid::new_v4()),
+                display_name: "Admin".into(),
+                first_name: "Admin".into(),
+                last_name: "User".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create admin user");
+    let role = harness
+        .rbac()
+        .get_role_by_name(realm, "realm.admin")
+        .expect("lookup")
+        .expect("seeded");
+    harness
+        .rbac()
+        .assign_role(
+            realm,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign");
+    let session = harness
+        .identity()
+        .create_session(realm, user.id(), &SessionContext::default())
+        .expect("session");
+    harness
+        .identity()
+        .issue_tokens(realm, user.id(), session.id())
+        .expect("tokens")
+        .access_token()
+        .to_string()
+}
+
+/// Gap A regression: `delete_user` must erase all device fingerprints so
+/// GDPR Art.17 erasure is complete without a separate API call.
+#[tokio::test]
+async fn delete_user_erases_device_fingerprints() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: "gdpr-cascade-test".into(),
+            config: None,
+        })
+        .expect("realm");
+    let user = harness
+        .identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: "eraseme@example.com".into(),
+                display_name: "Erase Me".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("user");
+
+    let store = harness.device_fp_store();
+    let secret = "test-secret-gdpr-cascade-32-bytes!";
+    let hmac = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.1.2.3", "TestUA/1");
+    store
+        .record(realm.id(), user.id(), &hmac, 30)
+        .expect("record");
+
+    // Pre-condition: fingerprint exists.
+    assert_eq!(
+        store
+            .check_and_refresh(realm.id(), user.id(), &hmac, 30)
+            .expect("pre-check"),
+        FingerprintResult::Recognised
+    );
+
+    // Delete the user.
+    harness
+        .identity()
+        .delete_user(realm.id(), user.id())
+        .expect("delete");
+
+    // Post-condition: fingerprint gone.
+    assert_eq!(
+        store
+            .check_and_refresh(realm.id(), user.id(), &hmac, 30)
+            .expect("post-check"),
+        FingerprintResult::Unrecognised,
+        "fingerprint must be erased when user is deleted"
+    );
+}
+
+/// Gap B: `DELETE /admin/users/{id}/device-fingerprints` returns 200 with
+/// `{"erased": N}` and the fingerprints are gone from storage.
+#[tokio::test]
+async fn admin_delete_device_fingerprints_erases_and_returns_count() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = harness.create_realm();
+    harness.rbac().seed_realm(&realm).expect("seed");
+    let token = admin_token_for(&harness, &realm).await;
+
+    let user = harness
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "fp-erase@example.com".into(),
+                display_name: "FP Target".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("user");
+
+    let store = harness.device_fp_store();
+    let secret = "test-secret-admin-erasure-32-bytes!";
+    for ip in &["10.2.0.1", "10.3.0.1"] {
+        let hmac = DeviceFingerprintStore::derive_hmac(secret, user.id(), ip, "AdminUA/1");
+        store.record(&realm, user.id(), &hmac, 30).expect("record");
+    }
+
+    let app = build_app(&harness).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/admin/users/{}/device-fingerprints",
+                    user.id().as_uuid()
+                ))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(body["erased"], 2, "must report 2 erased records");
+
+    // Verify storage is actually empty.
+    let hmac = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.2.0.1", "AdminUA/1");
+    assert_eq!(
+        store
+            .check_and_refresh(&realm, user.id(), &hmac, 30)
+            .expect("post-check"),
+        FingerprintResult::Unrecognised,
+        "fingerprint must be gone after admin erasure"
     );
 }
 

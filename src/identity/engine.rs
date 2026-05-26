@@ -3603,6 +3603,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
+        // 11. Cascade: delete all device fingerprints (GDPR Art. 17, AC-11).
+        //     Failures here must not block the deletion — fingerprints are
+        //     advisory risk signals, not authoritative data.  The UserDeleted
+        //     audit event already records that erasure happened.
+        let _ = self.device_fp.delete_all_for_user(realm_id, user_id);
+
         self.record_audit(
             realm_id,
             None,
@@ -3612,6 +3618,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )?;
 
         Ok(())
+    }
+
+    fn delete_user_device_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<usize, IdentityError> {
+        self.device_fp.delete_all_for_user(realm_id, user_id)
     }
 
     fn set_password(
@@ -15315,6 +15329,59 @@ mod tests {
             .get_consent(&realm, &user, &client)
             .expect("get")
             .is_none());
+    }
+
+    // ===== Delete cascades to device fingerprints (GDPR Art.17 / AC-11) =====
+
+    #[test]
+    fn delete_user_cascades_device_fingerprints() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+
+        // Record two fingerprints for the user.
+        let secret = "test-secret-at-least-32-bytes-long!!";
+        let hmac1 = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.0.1.1", "UA/1");
+        let hmac2 = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.0.2.1", "UA/1");
+        engine
+            .device_fp
+            .record(&realm, user.id(), &hmac1, 30)
+            .expect("record fp1");
+        engine
+            .device_fp
+            .record(&realm, user.id(), &hmac2, 30)
+            .expect("record fp2");
+
+        // Confirm both are recognised before deletion.
+        assert_eq!(
+            engine
+                .device_fp
+                .check_and_refresh(&realm, user.id(), &hmac1, 30)
+                .expect("check1"),
+            crate::identity::device_fp::FingerprintResult::Recognised,
+            "fp1 must be recognised before delete"
+        );
+
+        // Delete the user — cascade must erase both fingerprints.
+        engine.delete_user(&realm, user.id()).expect("delete user");
+
+        // Both fingerprints must now be gone.
+        assert_eq!(
+            engine
+                .device_fp
+                .check_and_refresh(&realm, user.id(), &hmac1, 30)
+                .expect("check1-after"),
+            crate::identity::device_fp::FingerprintResult::Unrecognised,
+            "fp1 must be erased after delete_user"
+        );
+        assert_eq!(
+            engine
+                .device_fp
+                .check_and_refresh(&realm, user.id(), &hmac2, 30)
+                .expect("check2-after"),
+            crate::identity::device_fp::FingerprintResult::Unrecognised,
+            "fp2 must be erased after delete_user"
+        );
     }
 
     #[test]

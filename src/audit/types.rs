@@ -256,6 +256,12 @@ pub enum AuditAction {
     /// incorrect attempts was exceeded. Metadata carries `user_id` and
     /// `attempt_count`.
     SmsMfaLocked,
+    /// All device fingerprints for a user were erased — either as part of
+    /// `delete_user` (GDPR Art. 17 cascade) or via the admin erasure API
+    /// (`DELETE /admin/users/{id}/device-fingerprints`).
+    ///
+    /// Metadata carries `user_id` and `count` (number of records removed).
+    DeviceFingerprintsErased,
 }
 
 impl AuditAction {
@@ -347,6 +353,7 @@ impl AuditAction {
             Self::SmsMfaChallengeSucceeded,
             Self::SmsMfaChallengeFailed,
             Self::SmsMfaLocked,
+            Self::DeviceFingerprintsErased,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -436,6 +443,7 @@ impl AuditAction {
             Self::SmsMfaChallengeSucceeded => "sms_mfa_challenge_succeeded",
             Self::SmsMfaChallengeFailed => "sms_mfa_challenge_failed",
             Self::SmsMfaLocked => "sms_mfa_locked",
+            Self::DeviceFingerprintsErased => "device_fingerprints_erased",
         }
     }
 }
@@ -526,6 +534,7 @@ impl std::str::FromStr for AuditAction {
             "sms_mfa_challenge_succeeded" => Ok(Self::SmsMfaChallengeSucceeded),
             "sms_mfa_challenge_failed" => Ok(Self::SmsMfaChallengeFailed),
             "sms_mfa_locked" => Ok(Self::SmsMfaLocked),
+            "device_fingerprints_erased" => Ok(Self::DeviceFingerprintsErased),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -644,7 +653,8 @@ impl AuditAction {
             | Self::PasswordCompromisedRejected
             | Self::SmsOtpEnrollmentFailed
             | Self::SmsMfaChallengeFailed
-            | Self::SmsMfaLocked => FailOperation,
+            | Self::SmsMfaLocked
+            | Self::DeviceFingerprintsErased => FailOperation,
         }
     }
 }

@@ -169,6 +169,31 @@ impl DeviceFingerprintStore {
         }
     }
 
+    /// Deletes every fingerprint stored for `user_id` in this realm.
+    ///
+    /// Used during `delete_user` (GDPR Art. 17 right-to-erasure cascade) and by
+    /// the admin erasure API (`DELETE /admin/users/{id}/device-fingerprints`).
+    /// Returns the number of keys removed.
+    pub fn delete_all_for_user(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<usize, IdentityError> {
+        let prefix = keys::device_fp_scan_prefix(user_id);
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        let count = entries.len();
+        for entry in entries {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        }
+        Ok(count)
+    }
+
     /// Removes all fingerprints whose expiry is in the past.
     ///
     /// Intended for periodic background sweeping. The hot path uses lazy expiry

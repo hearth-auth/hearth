@@ -272,6 +272,20 @@ pub trait IdentityEngine: Send + Sync {
     /// Returns `IdentityError::UserNotFound` if the user does not exist.
     fn delete_user(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError>;
 
+    /// Deletes all device fingerprints for a user (GDPR Art. 17 / AC-11).
+    ///
+    /// Used by the admin erasure endpoint
+    /// (`DELETE /admin/users/{id}/device-fingerprints`) to satisfy DSAR
+    /// erasure demands without deleting the entire account.
+    ///
+    /// Returns the number of fingerprint records removed. Does not error if
+    /// the user has no fingerprints — returns `Ok(0)`.
+    fn delete_user_device_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<usize, IdentityError>;
+
     /// Sets (or replaces) the password for a user.
     ///
     /// Hashes the password using Argon2id with the configured parameters

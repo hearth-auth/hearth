@@ -429,6 +429,10 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(admin_delete_user),
         )
         .route(
+            "/users/{id}/device-fingerprints",
+            axum::routing::delete(admin_delete_user_device_fingerprints),
+        )
+        .route(
             "/realms",
             axum::routing::get(admin_list_realms).post(admin_create_realm),
         )
@@ -2939,6 +2943,57 @@ async fn admin_delete_user(
                 metadata: Some(serde_json::json!({"via": "admin_api"})),
             });
             StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+/// Admin: erase all device fingerprints for a user (GDPR Art. 17 / AC-11).
+///
+/// `DELETE /admin/users/{id}/device-fingerprints`
+///
+/// Satisfies DSAR erasure requests for biometric/device-signal data without
+/// requiring deletion of the entire user account.  Returns `{ "erased": N }`.
+async fn admin_delete_user_device_fingerprints(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+
+    let user_uuid: uuid::Uuid = match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    let user_id = UserId::new(user_uuid);
+
+    match state
+        .identity
+        .delete_user_device_fingerprints(&auth.realm_id, &user_id)
+    {
+        Ok(erased) => {
+            let _ = state.audit.append(&CreateAuditEvent {
+                realm_id: auth.realm_id.clone(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::DeviceFingerprintsErased,
+                resource_type: "user".to_string(),
+                resource_id: user_uuid.to_string(),
+                metadata: Some(serde_json::json!({
+                    "via": "admin_api",
+                    "count": erased,
+                })),
+            });
+            (StatusCode::OK, Json(serde_json::json!({"erased": erased}))).into_response()
         }
         Err(e) => identity_error_to_response(&e).into_response(),
     }

@@ -402,6 +402,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::SmsMfaChallengeSucceeded => "SMS MFA Challenge Succeeded",
         A::SmsMfaChallengeFailed => "SMS MFA Challenge Failed",
         A::SmsMfaLocked => "SMS MFA Locked",
+        A::DeviceFingerprintsErased => "Device Fingerprints Erased",
     }
 }
 
@@ -478,7 +479,8 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::SmsOtpEnrollmentFailed
         | A::SmsMfaChallengeSucceeded
         | A::SmsMfaChallengeFailed
-        | A::SmsMfaLocked => "Security",
+        | A::SmsMfaLocked
+        | A::DeviceFingerprintsErased => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
         // backup/restore, and internal cleanup jobs.
         A::RealmCreated
