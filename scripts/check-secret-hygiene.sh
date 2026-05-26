@@ -30,9 +30,15 @@
 
 set -euo pipefail
 
-# Test-only literals that may legitimately appear in tests/. These are documented
-# dummy values that match the ≥32-byte length validation but have no real cryptographic
-# meaning. Keep this list short — every entry is one fewer signal we can rely on.
+# Test-only literals that may legitimately appear in tests/. These are documented dummy
+# values with no real cryptographic meaning. Each entry is one fewer signal we can rely
+# on — keep this list short and named so reviewers know the value is intentional.
+#
+#   • "test-secret-at-least-32-bytes-ok" — 32 bytes, used in tests that exercise the
+#     enabled=true / valid-length path. Clears HEA-861's len() < 32 fail-secure check.
+#   • "some-secret-value-here"         — 22 bytes, used ONLY in tests where
+#     enabled=false (the length check is bypassed when adaptive MFA is disabled).
+#     Do not use this sentinel in an enabled-path test or it will fail at load time.
 ALLOW_LITERALS=(
     "test-secret-at-least-32-bytes-ok"
     "some-secret-value-here"

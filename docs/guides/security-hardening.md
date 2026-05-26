@@ -110,8 +110,12 @@ MFA on an unrecognised device.** Treat it accordingly.
 **Scope:** the secret is **per-realm** — each realm has its own value. Rotating one realm's
 secret does not affect any other realm. There is no global Hearth-level fingerprint secret.
 
-**Generation.** Use a CSPRNG to produce ≥ 32 bytes of randomness, encoded as Base64 or hex
-for transport through env vars / Helm `secret.env`:
+**Generation.** Hearth enforces a **hard 32-byte minimum** on this field (NIST SP 800-107:
+HMAC keys ≥ hash output length, i.e. ≥ 32 bytes for SHA-256). A secret shorter than 32
+bytes with `adaptive_mfa.enabled = true` is a configuration error — Hearth fails closed at
+load time with a message naming the actual length, *not* fail-open. See HEA-861. Use a
+CSPRNG to produce ≥ 32 bytes of randomness, encoded as Base64 or hex for transport
+through env vars / Helm `secret.env`:
 
 ```sh
 # 32 random bytes, Base64 (44 chars including padding) — recommended
@@ -120,6 +124,10 @@ openssl rand -base64 32
 # 32 random bytes, hex (64 chars) — equivalent entropy, longer encoding
 openssl rand -hex 32
 ```
+
+Note: both encodings shown above produce strings longer than 32 bytes (Base64 → 44 chars,
+hex → 64 chars), so they clear the minimum-length check trivially. The encoded length —
+not the underlying entropy — is what `len() < 32` measures.
 
 **Storage and injection.** The secret MUST come from an external secret store at deploy
 time, never from a committed file. The supported chain is:
@@ -152,10 +160,11 @@ time, never from a committed file. The supported chain is:
    `/proc/<pid>/environ` or systemd's `EnvironmentFile` content via diagnostics tooling
    can still see it. Restrict that access at the platform layer.
 
-**Fail-secure behaviour.** When `adaptive_mfa.enabled = true` but the substituted secret is
-empty (env var unset → empty substitution + load warning), Hearth returns a hard
-configuration error on any code path that would derive a fingerprint. There is no silent
-fail-open. See `src/identity/engine.rs` (HEA-836 BLK-2 fix).
+**Fail-secure behaviour.** When `adaptive_mfa.enabled = true` but the substituted secret
+fails the length check (env var unset → empty substitution + load warning, or value
+shorter than 32 bytes → length error), Hearth returns a hard configuration error on any
+code path that would derive a fingerprint. There is no silent fail-open. See
+`src/identity/engine.rs` (HEA-836 BLK-2 fix + HEA-861 LOW-1 hardening).
 
 #### Rotation runbook
 
