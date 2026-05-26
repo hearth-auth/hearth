@@ -853,7 +853,57 @@ Every SDK MUST ship:
 
 ---
 
-## 13. Cross-references
+## 13. Credential hashing parameters
+
+Hearth uses **Argon2id** (RFC 9106) for all new password credentials. The parameters
+below meet or exceed the [OWASP Password Storage Cheat Sheet 2023](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+minimum configuration for Argon2id.
+
+### 13.1 Default parameters (`CredentialConfig::default()`)
+
+| Parameter | Value | Unit | OWASP 2023 minimum |
+|-----------|-------|------|--------------------|
+| `memory_cost` (`m`) | 19 456 | KiB (19 MiB) | 19 456 KiB |
+| `time_cost` (`t`) | 2 | iterations | 2 |
+| `parallelism` (`p`) | 1 | threads | 1 |
+| Algorithm | Argon2id | — | Argon2id |
+| Version | 0x13 (v=19) | — | — |
+
+These are the values used unless a realm overrides them via `RealmConfig.password_memory_cost`
+and `RealmConfig.password_time_cost`. Overrides apply only to new credentials and to
+re-hashed credentials on the next successful login.
+
+### 13.2 Per-realm overrides
+
+Operators MAY raise (but not lower below minimum) the memory or time cost per realm:
+
+```yaml
+realms:
+  my-realm:
+    password_memory_cost: 65536   # 64 MiB — higher security, slower logins
+    password_time_cost: 3
+```
+
+### 13.3 Automatic rehash on login
+
+When a stored credential's Argon2id parameters differ from the realm's current config
+(e.g., after an operator raises the memory cost), Hearth transparently re-hashes the
+password using the new parameters on the next successful login. The upgrade is atomic:
+the old hash is replaced in a single storage write before the login response is returned.
+
+Legacy hashes (bcrypt, scrypt, PBKDF2-SHA256 from Keycloak/Auth0 migrations) are also
+upgraded to Argon2id on first successful login.
+
+### 13.4 Regression guard
+
+A unit test (`credentials::tests::default_credential_config_meets_owasp_2023_minimum`)
+pins the default parameter values and fails CI if they are accidentally lowered. Any
+intentional reduction below the OWASP minimum MUST be accompanied by a security review
+and a `### Security` entry in `CHANGELOG.md`.
+
+---
+
+## 14. Cross-references
 
 - [`ARCHITECTURE.md § 1`](./ARCHITECTURE.md) — module placement (`src/rbac/` as a peer of `src/identity/`).
 - [`ARCHITECTURE.md § 3`](./ARCHITECTURE.md) — hot path rules (RBAC resolution is OFF the hot path; token claim reads are on it).

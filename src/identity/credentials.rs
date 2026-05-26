@@ -614,6 +614,29 @@ mod tests {
         assert!(result, "custom-params hash should still verify");
     }
 
+    // ===== Default parameter pins (OWASP 2023 compliance regression guard) =====
+
+    /// Pins the `CredentialConfig::default()` values to the OWASP 2023 minimum.
+    ///
+    /// If this test fails, a change accidentally regressed the security floor.
+    /// Any intentional reduction MUST be reviewed and the CHANGELOG updated.
+    #[test]
+    fn default_credential_config_meets_owasp_2023_minimum() {
+        let config = CredentialConfig::default();
+        assert_eq!(
+            config.memory_cost_kib, 19_456,
+            "memory cost must be 19 MiB (OWASP 2023 minimum m=19456); see HEA-823"
+        );
+        assert_eq!(
+            config.time_cost, 2,
+            "time cost must be >= 2 iterations (OWASP 2023 minimum); see HEA-823"
+        );
+        assert_eq!(
+            config.parallelism, 1,
+            "parallelism must be >= 1 (OWASP 2023 minimum); see HEA-823"
+        );
+    }
+
     // ===== argon2_params_need_rehash =====
 
     #[test]

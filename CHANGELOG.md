@@ -148,6 +148,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   before writing the audit record, closing a brief window where a `validate_token` call could
   observe stale realm status between the storage write and cache update (HEA-742).
 
+- **Argon2id defaults confirmed at OWASP 2023 minimum** — `CredentialConfig::default()` uses
+  `m=19456` (19 MiB), `t=2`, `p=1`, meeting the OWASP Password Storage Cheat Sheet 2023
+  minimum for Argon2id. A pinning unit test (`default_credential_config_meets_owasp_2023_minimum`)
+  now fails CI if these values are ever accidentally regressed below the security floor (HEA-823).
+
 ### Fixed
 
 - **Restore preserves realm signing keys** — `BackupImporter::import_realm` previously
