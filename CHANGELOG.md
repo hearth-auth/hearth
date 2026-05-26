@@ -9,6 +9,21 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Step-up MFA security hardening (HEA-836)** — five SecurityAuditor findings
+  resolved: `enabled=true` with an empty `fingerprint_hmac_secret` now returns a
+  hard configuration error instead of silently bypassing step-up (fail-secure);
+  non-UTF-8 HMAC secret degradation to empty string removed at the type level;
+  `EnrollMfaRequired` path now uses `update_user()` (atomic read-modify-write)
+  instead of a direct `storage.put()` that was subject to a TOCTOU race;
+  User-Agent is normalised to major version only before HMAC so minor browser
+  auto-updates no longer trigger spurious step-up challenges.
+
+- **Step-up MFA completion endpoint (HEA-836)** — added
+  `grant_type=urn:hearth:params:grant-type:step-up-mfa` token endpoint that
+  re-verifies the user's password, validates TOTP (or recovery code), records
+  the device fingerprint as trusted, and issues a full token pair.  Without this
+  endpoint users with enrolled MFA on an unrecognised device received 401 forever.
+
 - **CSP GAP-4 remediation (HEA-824)** — vendored Hyperscript 0.9.13 as the
   eval-free replacement for Alpine.js; tooltip patterns migrated to pure CSS
   (`group-hover`/`group-focus-within`); audit row expand and migrations accordion
