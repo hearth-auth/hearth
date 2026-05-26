@@ -1498,6 +1498,10 @@ const ALPINE_JS: &[u8] = include_bytes!("assets/alpine.min.js");
 /// Alpine component registrations for every `/ui/**` template (HEA-630).
 /// Extracting them here lets CSP use `script-src 'self'` without `unsafe-inline`.
 const ADMIN_JS: &[u8] = include_bytes!("assets/admin.js");
+/// Eval-free vanilla JS for WebAuthn (passkey) ceremonies (HEA-849).
+/// Replaces the `passkeyLogin` / `passkeyManager` / `passkeyRow` Alpine
+/// components so these pages no longer require `unsafe-eval` in the CSP.
+const PASSKEY_JS: &[u8] = include_bytes!("assets/passkey.js");
 /// Global Alpine.js component registrations and keyboard shortcuts, extracted
 /// from inline `<script>` tags so the CSP can omit `unsafe-inline`.
 const LAYOUT_JS: &[u8] = include_bytes!("assets/layout.js");
@@ -1696,6 +1700,7 @@ async fn serve_static(
         "htmx.min.js" => Some((HTMX_JS, "application/javascript; charset=utf-8")),
         "alpine.min.js" => Some((ALPINE_JS, "application/javascript; charset=utf-8")),
         "admin.js" => Some((ADMIN_JS, "application/javascript; charset=utf-8")),
+        "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
         "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
         "hyperscript.min.js" => Some((HYPERSCRIPT_JS, "application/javascript; charset=utf-8")),
         "favicon.svg" => Some((FAVICON_SVG, "image/svg+xml")),

@@ -251,6 +251,10 @@
      development, and is served by the same binary as this HTML, so
      SRI provides no security benefit here (HEA-630). #}
   <script src="/ui/static/admin.js"></script>
+  {# passkey.js — eval-free vanilla JS for WebAuthn ceremonies (HEA-849).
+     Replaces the passkeyLogin/passkeyManager/passkeyRow Alpine components
+     so these pages no longer require 'unsafe-eval' in the CSP. #}
+  <script src="/ui/static/passkey.js"></script>
   <script src="/ui/static/alpine.min.js"
           integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
           defer></script>

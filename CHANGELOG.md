@@ -16,6 +16,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   rationale in `docs/security/csp.md`. Remaining Alpine components tracked for
   removal in child issues; `unsafe-eval` removal from CSP blocked until complete.
 
+- **WebAuthn Alpine components migrated to eval-free vanilla JS (HEA-849)** —
+  `passkeyLogin`, `passkeyManager`, and `passkeyRow` Alpine components replaced
+  with `passkey.js`, a plain IIFE that wires WebAuthn ceremonies to static DOM
+  elements via `id` / `data-*` selectors. All three WebAuthn POST calls now
+  include `X-CSRF-Token` from the layout `<meta name="csrf">` tag (previously
+  absent). No change to the WebAuthn ceremony logic or server API contract.
+
 ### Added
 
 - **Adaptive step-up MFA on unrecognised device** — when `adaptive_mfa.enabled = true` on a
