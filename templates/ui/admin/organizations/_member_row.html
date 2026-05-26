@@ -187,7 +187,7 @@
                   class="rounded px-2 py-1 text-xs font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
                   _="on click
                        if @data-confirming is 'yes'
-                         closest <form/>.submit()
+                         closest <form>.submit()
                        else
                          set @data-confirming to 'yes'
                          set my.textContent to 'Confirm'
