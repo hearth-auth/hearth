@@ -1340,10 +1340,20 @@ pub trait IdentityEngine: Send + Sync {
     /// Unlike `create_realm`, this allows preserving an external system's
     /// realm/organization UUID. Returns `DuplicateRealmName` or a
     /// realm-id-conflict error if one already exists with the same id.
+    ///
+    /// When `signing_key_pkcs8` is `Some`, the bytes are installed as the
+    /// realm's signing key instead of generating a fresh one. The realm
+    /// record and signing key are written atomically in a single batch,
+    /// preserving the invariant that a realm always has a usable key. This
+    /// is the disaster-recovery restore path: any token issued under the
+    /// original key must still validate after restore. Pass `None` for
+    /// new realms imported from external providers (Keycloak, Auth0,
+    /// migrations) where token continuity is not a requirement.
     fn import_realm(
         &self,
         request: &CreateRealmRequest,
         requested_id: Option<RealmId>,
+        signing_key_pkcs8: Option<&[u8]>,
     ) -> Result<Realm, IdentityError>;
 
     /// Imports a user with a pre-hashed credential from an external system.

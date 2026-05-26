@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate ci-standard dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -148,8 +148,14 @@ bench-gate:
 	PROTOC=$(PROTOC) cargo bench --bench demotion_latency $(CARGO_FLAGS)
 	PROTOC=$(PROTOC) cargo bench --bench validate_token $(CARGO_FLAGS)
 
-## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate (merge).
-ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate
+## Cluster admin route presence gate: builds the binary, starts it in single-node dev mode,
+## and verifies every route documented in docs/guides/clustering.md returns non-404.
+## Routes return 503 in single-node mode (expected); 404 means the route is not registered.
+cluster-route-check:
+	@bash scripts/check-cluster-routes.sh
+
+## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate + cluster route check (merge).
+ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster-route-check
 
 ## Run Hearth in local dev mode with persistent storage (./data/dev).
 ## Data survives restarts. Use `make dev-reset` to wipe it.
