@@ -135,10 +135,22 @@ secret:
   tlsKey: ""
 
   # Environment variables injected into the Hearth pod (e.g. ${SMTP_PASSWORD}).
-  # Each entry becomes a key/value pair in the Secret.
+  # Each entry becomes a key/value pair in the Secret. Reference these from
+  # `config:` above using ${VAR_NAME} substitution.
+  #
+  # Naming convention for per-realm adaptive-MFA fingerprint HMAC secrets
+  # (one secret per realm — see docs/guides/security-hardening.md
+  # §"Device fingerprint HMAC secret" for generation and rotation):
+  #     HEARTH_REALM_<SCREAMING_SNAKE_REALM_NAME>_FINGERPRINT_HMAC_SECRET
+  #
+  # Production values should be sourced from an external secret store
+  # (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager) via the
+  # External Secrets Operator or sealed-secrets — do NOT commit literal
+  # values to this file. Local plaintext examples are illustrative only.
   env: {}
     # SMTP_PASSWORD: "s3cr3t"
     # SENDGRID_API_KEY: "SG.xxx"
+    # HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET: ""
 
 # -- Extra environment variables (non-secret) -----------------------------------
 env:

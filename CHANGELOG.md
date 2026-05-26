@@ -41,6 +41,20 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   evicted entries) and `hearth_dfp_keys_active` (gauge, sampled per sweep). Errors
   are logged at `WARN` level and do not crash the process.
 
+- **Device fingerprint HMAC secrets pipeline (HEA-858)** — operator guidance, Helm
+  wiring, and CI guard for the per-realm `adaptive_mfa.fingerprint_hmac_secret`
+  introduced by HEA-836. `hearth.example.yaml` now documents the
+  `${HEARTH_REALM_<NAME>_FINGERPRINT_HMAC_SECRET}` env-substitution pattern;
+  `deploy/helm/hearth/values.yaml` documents the matching `secret.env` naming
+  convention; `docs/guides/security-hardening.md` adds a "Device fingerprint HMAC
+  secret" section with generation, storage, and a step-by-step rotation runbook
+  (including blast-radius notes — rotation invalidates the per-realm device
+  recognition cache, briefly increasing step-up MFA challenges). A new CI guard
+  (`scripts/check-secret-hygiene.sh`, run from the `filter` job on every PR)
+  fails the build if any tracked file contains a `fingerprint_hmac_secret`
+  literal that is not an empty string, a `${VAR}` substitution, or a documented
+  test sentinel.
+
 - **SMS MFA realm config (HEA-855)** — `RealmConfig` gains two new optional fields:
   `sms_otp_expiry_seconds` (override default OTP lifetime per realm) and
   `sms_otp_max_attempts` (override maximum guess attempts per realm). Both are

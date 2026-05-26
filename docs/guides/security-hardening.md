@@ -98,6 +98,174 @@ OAuth client secrets are stored as Argon2id hashes, not plaintext. Treat them li
 - Rotate them immediately if compromised (Hearth supports multiple active secrets per client
   for zero-downtime rotation).
 
+### Device fingerprint HMAC secret
+
+Adaptive MFA (`adaptive_mfa.enabled = true` on a realm) derives a per-device fingerprint by
+computing `HMAC-SHA256(secret, "{user_id}:{ip_/24}:{user_agent_normalized}")` and storing the
+hex digest in the Redis device-recognition cache. The `fingerprint_hmac_secret` is the HMAC
+key for that derivation. **A weak or compromised secret allows an attacker who knows a
+victim's `{user_id, ip_/24, user_agent}` tuple to forge the fingerprint and bypass step-up
+MFA on an unrecognised device.** Treat it accordingly.
+
+**Scope:** the secret is **per-realm** — each realm has its own value. Rotating one realm's
+secret does not affect any other realm. There is no global Hearth-level fingerprint secret.
+
+**Generation.** Use a CSPRNG to produce ≥ 32 bytes of randomness, encoded as Base64 or hex
+for transport through env vars / Helm `secret.env`:
+
+```sh
+# 32 random bytes, Base64 (44 chars including padding) — recommended
+openssl rand -base64 32
+
+# 32 random bytes, hex (64 chars) — equivalent entropy, longer encoding
+openssl rand -hex 32
+```
+
+**Storage and injection.** The secret MUST come from an external secret store at deploy
+time, never from a committed file. The supported chain is:
+
+1. **External secret store** (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager,
+   1Password Connect) — the authoritative copy.
+2. **Kubernetes Secret**, populated by External Secrets Operator / sealed-secrets / SOPS, or
+   for non-K8s deployments a systemd `EnvironmentFile` with mode `0400` root-owned.
+3. **Pod env var**, by convention named
+   `HEARTH_REALM_<SCREAMING_SNAKE_REALM_NAME>_FINGERPRINT_HMAC_SECRET`. The Helm chart's
+   `secret.env` map (see `deploy/helm/hearth/values.yaml`) wires this through.
+4. **YAML substitution.** Reference the env var from your realm config — Hearth's config
+   loader (`src/config/env.rs`) supports `${VAR}` substitution at load time:
+
+   ```yaml
+   realms:
+     customer-portal:
+       adaptive_mfa:
+         enabled: true
+         recognition_window_days: 30
+         fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
+   ```
+
+   The substituted value lives only in memory inside the Hearth process — it is never
+   written back to disk and is never logged (the field is `skip_serializing_if = "is_empty"`
+   and absent from `Debug` output via the realm-config redaction layer).
+
+**Fail-secure behaviour.** When `adaptive_mfa.enabled = true` but the substituted secret is
+empty (env var unset → empty substitution + load warning), Hearth returns a hard
+configuration error on any code path that would derive a fingerprint. There is no silent
+fail-open. See `src/identity/engine.rs` (HEA-836 BLK-2 fix).
+
+#### Rotation runbook
+
+Use this procedure for scheduled rotation (recommended every 12 months) or in response to
+suspected compromise. Plan the rotation per-realm — there is no atomic multi-realm rotation.
+
+**Blast radius.** Rotating the secret invalidates every cached device fingerprint for that
+realm (the previous-secret HMAC no longer matches the new-secret HMAC). For the
+`recognition_window_days` window after rotation, every active user appears as an
+"unrecognised device" exactly once and is challenged with step-up MFA on their next login.
+This is the intended behaviour but causes a short-lived support-ticket spike — schedule
+rotations outside peak hours and pre-notify support.
+
+**Pre-flight checklist**
+
+- Confirm the user is `realm-admin` for the target realm (or company-level admin).
+- Verify all Hearth replicas in the target deployment are healthy (`/health` 200) and on the
+  same release. A rotation against a mixed-version fleet can produce inconsistent fingerprint
+  behaviour until the slowest replica observes the new secret.
+- Locate the current secret in the source of truth (Vault path, AWS Secrets Manager ARN, …)
+  and the env-var name it maps to (e.g. `HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET`).
+- Snapshot or version the secret store entry so you can roll back.
+- Pre-notify support of the expected step-up-MFA spike window.
+
+**Procedure**
+
+1. **Generate the replacement secret.**
+
+   ```sh
+   NEW_SECRET="$(openssl rand -base64 32)"
+   ```
+
+   Do not echo `$NEW_SECRET` to a shell with command logging enabled and do not pipe it
+   anywhere except the secret store CLI.
+
+2. **Write the new secret to the secret store.** Use the store's versioning so the old
+   value is retained as an automatic rollback point. Examples:
+
+   ```sh
+   # HashiCorp Vault (KV v2 — automatic versioning)
+   vault kv put secret/hearth/customer-portal fingerprint_hmac_secret="$NEW_SECRET"
+
+   # AWS Secrets Manager — VersionStage: AWSCURRENT becomes the new value
+   aws secretsmanager put-secret-value \
+     --secret-id hearth/customer-portal/fingerprint-hmac-secret \
+     --secret-string "$NEW_SECRET"
+
+   # GCP Secret Manager
+   gcloud secrets versions add hearth-customer-portal-fingerprint-hmac-secret \
+     --data-file=<(printf '%s' "$NEW_SECRET")
+   ```
+
+3. **Trigger a refresh of the in-cluster Kubernetes Secret.** External Secrets Operator
+   picks the new value up on its next refresh interval — force a sync if you do not want to
+   wait:
+
+   ```sh
+   kubectl annotate externalsecret hearth-customer-portal-fingerprint-hmac-secret \
+     force-sync="$(date +%s)" --overwrite
+   ```
+
+4. **Roll the Hearth pods so they pick up the new env var.** A standard Helm-managed
+   `kubectl rollout restart deploy/hearth` is sufficient; the deployment's pod template
+   already has `checksum/secret` and `checksum/config` annotations, so any change to the
+   underlying Secret triggers a rolling restart on the next `helm upgrade` as well.
+
+   ```sh
+   kubectl rollout restart deployment/hearth -n <namespace>
+   kubectl rollout status  deployment/hearth -n <namespace> --timeout=5m
+   ```
+
+5. **Verify the new secret is in effect.** From a workstation with a configured Hearth
+   admin token, log in as a test user that already has a recognised device. You should be
+   challenged with step-up MFA — confirming the previous-secret HMAC no longer matches.
+   After successful MFA, repeat the login: it should now be silent (the new-secret HMAC has
+   been cached).
+
+6. **Confirm there is no plaintext leak.** Check the rolling logs for the substituted
+   value:
+
+   ```sh
+   kubectl logs -n <namespace> deploy/hearth --since=10m | grep -F "$NEW_SECRET" && \
+     echo "FAIL: secret material found in logs" || \
+     echo "OK: no plaintext secret in recent logs"
+   ```
+
+   (`grep` exits 0 on match, so the `&&` branch fires only on the failure case.)
+
+7. **Delete the temporary shell variable.**
+
+   ```sh
+   unset NEW_SECRET
+   history -d $((HISTCMD-1)) 2>/dev/null || true
+   ```
+
+8. **Mark the rotation in your audit log.** Hearth emits a `StepUpMfaTriggered` audit event
+   whenever a user is challenged — the rotation window will show a spike in those events.
+   Tag the operational change in your change-management system with the realm name, the new
+   secret store version id, and the operator who performed the rotation.
+
+**Rollback.** If the new secret causes unexpected behaviour, restore the previous version
+in the secret store and repeat steps 3–4. The previous-version fingerprints rejoin the
+recognition cache automatically as users log in.
+
+**Compromise response.** If you suspect the secret has leaked, run the rotation immediately
+and additionally invalidate the realm's Redis device-recognition cache so attackers cannot
+ride out the rotation on a stale, attacker-controlled fingerprint:
+
+```sh
+redis-cli --scan --pattern "dev:fp:*:*" | xargs -r redis-cli del
+```
+
+Combine with credential-stuffing rate-limit review (`security.rate_limiting`) and a forced
+session revoke for affected users.
+
 ### SCIM bearer tokens
 
 SCIM bearer tokens are SHA-256 hashed before storage and compared in constant time. Generate
