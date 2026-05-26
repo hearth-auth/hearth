@@ -1077,6 +1077,29 @@ fn login_submit_impl(
         return response;
     }
 
+    // --- Required-action gate ---
+    // Mirror the OIDC interceptor: check for pending required actions
+    // before issuing a session. If any are pending, redirect the user to
+    // the action interstitial and only resume the session on completion.
+    let now = crate::core::Timestamp::from_micros(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_micros()).ok())
+            .unwrap_or(0),
+    );
+    if let Some(ra_response) = super::required_action::required_action_check_browser(
+        &state,
+        realm.id(),
+        user.id(),
+        return_to.as_deref(),
+        &headers,
+        now,
+    ) {
+        state.set_current_realm(realm.id().clone());
+        return ra_response;
+    }
+
     match state
         .identity
         .create_session(realm.id(), user.id(), &session_ctx)

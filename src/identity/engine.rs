@@ -2974,6 +2974,25 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )
     }
 
+    fn generate_browser_ra_token(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        pending_actions: Vec<crate::identity::types::RequiredAction>,
+        return_to: Option<String>,
+        now: Timestamp,
+    ) -> Result<String, IdentityError> {
+        let key = self.get_or_load_realm_signing_key(realm_id)?;
+        crate::identity::ra_token::generate_browser(
+            &user_id.as_uuid().to_string(),
+            &realm_id.as_uuid().to_string(),
+            pending_actions,
+            return_to,
+            &key,
+            now,
+        )
+    }
+
     fn validate_ra_token(
         &self,
         realm_id: &RealmId,

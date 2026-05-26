@@ -64,8 +64,19 @@ pub struct RaClaims {
     pub realm: String,
     /// Ordered list of remaining required actions.
     pub pending_actions: Vec<RequiredAction>,
-    /// Preserved OIDC authorization parameters for flow resumption.
-    pub oidc_params: OidcParams,
+    /// Preserved OIDC authorization parameters for OIDC flow resumption.
+    ///
+    /// `Some` for the OIDC login path; `None` for the direct browser login
+    /// path (which resumes by creating a session cookie instead).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc_params: Option<OidcParams>,
+    /// Return-to URL for browser-login-path flow resumption.
+    ///
+    /// `Some` for the direct browser login path; `None` for OIDC.
+    /// After all required actions complete, the handler creates a session
+    /// and redirects to this path (or `/ui` when `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_return_to: Option<String>,
     /// Issued-at time (Unix seconds).
     pub iat: i64,
     /// Expiry time (Unix seconds).
@@ -97,7 +108,7 @@ struct JwtHeader {
     typ: String,
 }
 
-/// Generates a signed RA session JWT for the given user and flow state.
+/// Generates a signed RA session JWT for the OIDC login path.
 ///
 /// The token is valid for [`RA_TOKEN_TTL_SECS`] seconds from `now`.
 pub fn generate(
@@ -115,7 +126,36 @@ pub fn generate(
         sub: user_id.to_string(),
         realm: realm_id.to_string(),
         pending_actions,
-        oidc_params,
+        oidc_params: Some(oidc_params),
+        browser_return_to: None,
+        iat,
+        exp,
+    };
+
+    signing_key.sign_jwt(&claims, RA_TOKEN_TYPE)
+}
+
+/// Generates a signed RA session JWT for the direct browser login path.
+///
+/// After all required actions complete, the flow resumes by creating a
+/// session cookie and redirecting to `return_to` (or `/ui` when `None`).
+pub fn generate_browser(
+    user_id: &str,
+    realm_id: &str,
+    pending_actions: Vec<RequiredAction>,
+    return_to: Option<String>,
+    signing_key: &SigningKey,
+    now: Timestamp,
+) -> Result<String, IdentityError> {
+    let iat = now.as_micros() / MICROS_PER_SEC;
+    let exp = iat + RA_TOKEN_TTL_SECS;
+
+    let claims = RaClaims {
+        sub: user_id.to_string(),
+        realm: realm_id.to_string(),
+        pending_actions,
+        oidc_params: None,
+        browser_return_to: return_to,
         iat,
         exp,
     };
@@ -277,7 +317,7 @@ mod tests {
             claims.pending_actions,
             vec![RequiredAction::VerifyEmail, RequiredAction::UpdatePassword]
         );
-        assert_eq!(claims.oidc_params, test_oidc_params());
+        assert_eq!(claims.oidc_params, Some(test_oidc_params()));
         assert_eq!(claims.exp, claims.iat + RA_TOKEN_TTL_SECS);
     }
 

@@ -7,6 +7,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Fixed
+
+- **Browser login bypassed required-action gates** — `login_submit_impl` now intercepts
+  pending required actions between credential verification and session issuance.  Users with
+  `UPDATE_PASSWORD` or `VERIFY_EMAIL` actions are redirected to the required-action
+  interstitial; on completion a full browser session cookie is issued and the user is
+  returned to their original destination (`return_to`).  Previously the browser login path
+  issued a session immediately, skipping all required-action enforcement (HEA-797).
+
 ### Security
 
 - **VERIFY_EMAIL cross-user token substitution** — the `verify_email_confirm` handler now
