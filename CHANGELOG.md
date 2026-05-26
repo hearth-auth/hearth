@@ -16,6 +16,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   emits a `DeviceFingerprintsErased` audit event. Also fixed: `derive_fingerprint_key` helper
   was producing keys with the stale `dev:fp:` prefix instead of the correct `dfp:user:` prefix.
 
+- **CSP regression fix: inline styles eliminated (HEA-876)** — Two regressions from the
+  HEA-850 `style-src 'self'` hardening are resolved. Theme CSS is now served via external
+  `<link>` tags (`/ui/static/theme.css`, `/ui/static/realm-theme/{id}`) instead of inline
+  `<style>` blocks. HTMX's startup `insertAdjacentHTML` style injection for `.htmx-indicator`
+  is suppressed with `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>`;
+  indicator styles are declared in `app.css` instead.
+
 - **CSP hardened: `unsafe-eval` and `unsafe-inline` removed (HEA-850)** — Alpine.js
   has been fully replaced by HTMX + Hyperscript across all ~40 admin templates.
   Layout reactivity (sidebar toggle, realm nav tree, toast notifications, realm pill)
