@@ -29,8 +29,7 @@ struct GroupListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 pub async fn admin_groups_list(
@@ -81,8 +80,7 @@ pub async fn admin_groups_list(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_groups failed");
@@ -114,8 +112,7 @@ struct GroupNewTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/admin/groups/new`.
@@ -140,8 +137,7 @@ pub async fn admin_group_create_form(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     })
 }
 
@@ -218,8 +214,7 @@ pub async fn admin_group_create_submit(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
     }
@@ -374,8 +369,7 @@ struct GroupDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Query params for the group-detail page (sub-tab selection).
@@ -524,8 +518,7 @@ pub async fn admin_group_detail(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     })
 }
 
@@ -633,8 +626,7 @@ struct GroupEditTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/admin/groups/:id/edit`.
@@ -669,8 +661,7 @@ pub async fn admin_group_edit_form(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
         Ok(None) => super::handlers_common::not_found("Group not found"),
@@ -758,8 +749,7 @@ pub async fn admin_group_edit_submit(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
     }

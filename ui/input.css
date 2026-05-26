@@ -239,6 +239,11 @@
 }
 
 /* YAML editor — custom scrollbar + styling */
+.yaml-editor,
+.yaml-mirror {
+  tab-size: 2;
+  -moz-tab-size: 2;
+}
 .yaml-editor {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--ht-divider) 15%, transparent) transparent;

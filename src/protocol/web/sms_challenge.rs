@@ -306,8 +306,7 @@ struct SmsChallengeTemplate {
     flash: Option<super::templates::Flash>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,8 +342,7 @@ pub async fn sms_challenge_get(
         flash: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     })
 }
 
@@ -424,8 +422,7 @@ pub async fn sms_challenge_post(
             flash: None,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
         });
     }
 
@@ -511,8 +508,7 @@ pub async fn sms_challenge_post(
                 flash: None,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
     }

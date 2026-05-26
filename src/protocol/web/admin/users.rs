@@ -43,8 +43,7 @@ struct UserListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Rows-only partial returned when the user list is filtered live via
@@ -116,8 +115,7 @@ pub async fn admin_users_list(
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
         Err(e) => {
@@ -189,8 +187,7 @@ pub async fn admin_admin_users_list(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
         Err(e) => {
@@ -227,8 +224,7 @@ struct UserNewTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/admin/users/new`.
@@ -263,8 +259,7 @@ pub async fn admin_user_create_form(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     })
 }
 
@@ -355,8 +350,7 @@ pub async fn admin_user_create_submit(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
         })
     };
 
@@ -503,8 +497,7 @@ struct UserDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Template for the Roles tab HTMX partial.
@@ -771,8 +764,7 @@ pub async fn admin_user_detail(
         narrow: false,
         product_name: state.product_name_for(target.id()),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     })
 }
 
@@ -931,8 +923,7 @@ struct AdminMfaCodesResetTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `POST /ui/admin/users/:id/reset-mfa-codes` — regenerates recovery codes for the user.
@@ -973,8 +964,7 @@ pub async fn admin_user_reset_mfa_codes(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             };
             render(&tmpl)
         }
@@ -1101,8 +1091,7 @@ struct UserEditTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// View model for a user's organization membership (displayed on user edit page).
@@ -1176,8 +1165,7 @@ pub async fn admin_user_edit_form(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
         Ok(None) => super::handlers_common::not_found("User not found"),
@@ -1426,8 +1414,7 @@ fn render_edit_error(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
         None => super::handlers_common::not_found("User not found"),
@@ -1501,8 +1488,7 @@ struct SessionListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Query params for the sessions list page. Extends pagination with an
@@ -1643,8 +1629,7 @@ pub async fn admin_sessions_list(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
         Err(e) => {
@@ -1789,8 +1774,7 @@ struct AdminUserConsentsTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/admin/users/{id}/applications` — lists every OAuth consent the
@@ -1844,11 +1828,9 @@ pub async fn admin_user_consents_list(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: String::new(),
-        realm_theme_css: None,
+        realm_theme_url: None,
     };
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 
@@ -2511,8 +2493,7 @@ struct UserImportTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/admin/realms/{realm}/users/import`
@@ -2535,8 +2516,7 @@ pub async fn admin_users_import_form(
         narrow: false,
         product_name: state.product_name_for(target.id()),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     })
 }
 
@@ -2621,8 +2601,7 @@ pub async fn admin_users_import_submit(
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             });
         }
     };
@@ -2643,8 +2622,7 @@ pub async fn admin_users_import_submit(
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             });
         }
     };
@@ -2663,8 +2641,7 @@ pub async fn admin_users_import_submit(
             narrow: false,
             product_name: state.product_name_for(target.id()),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
         });
     }
 

@@ -79,8 +79,7 @@ struct OrgListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/admin/organizations`.
@@ -137,8 +136,7 @@ pub async fn admin_orgs_list(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_organizations failed");
@@ -172,8 +170,7 @@ struct OrgNewTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/admin/organizations/new`.
@@ -207,8 +204,7 @@ pub async fn admin_org_create_form(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     })
 }
 
@@ -343,8 +339,7 @@ pub async fn admin_org_create_submit(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "create_organization failed");
@@ -365,8 +360,7 @@ pub async fn admin_org_create_submit(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
     }
@@ -416,8 +410,7 @@ struct OrgDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Query params for org detail page (flash messages via PRG).
@@ -548,8 +541,7 @@ pub async fn admin_org_detail(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     });
     if had_flash {
         if let Ok(value) =
@@ -591,8 +583,7 @@ struct OrgEditTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/admin/organizations/:id/edit`.
@@ -651,8 +642,7 @@ pub async fn admin_org_edit_form(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
             })
         }
         Ok(None) => super::handlers_common::not_found("Organization not found"),
@@ -944,8 +934,7 @@ struct MemberPickerRowsTemplate {
     available_roles: Vec<AvailableRole>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Template for a single member row (`<tbody>`). Included by `detail.html` in the
@@ -1029,8 +1018,7 @@ pub async fn admin_org_member_picker(
         available_roles,
         product_name: String::new(),
         logo_url: String::new(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: None,
+        realm_theme_url: None,
     })
 }
 
@@ -1677,8 +1665,7 @@ struct UserSearchResultsTemplate {
     query: String,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/admin/api/users/search?q=...` — returns HTML fragment for HTMX.
@@ -1704,8 +1691,7 @@ pub async fn admin_api_user_search(
         query,
         product_name: String::new(),
         logo_url: String::new(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: None,
+        realm_theme_url: None,
     })
 }
 

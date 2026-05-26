@@ -9,8 +9,11 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="stylesheet" href="/ui/static/app.css">
-  {% if theme_css.is_empty() %}<link rel="stylesheet" href="/ui/static/theme.css">{% else %}<style>{{ theme_css|safe }}</style>{% endif %}
-  {% if let Some(css) = realm_theme_css %}<style>{{ css|safe }}</style>{% endif %}
+  <link rel="stylesheet" href="/ui/static/theme.css">
+  {% if let Some(url) = realm_theme_url %}<link rel="stylesheet" href="{{ url }}">{% endif %}
+  {# Disable HTMX's inline <style> injection for .htmx-indicator (HEA-876);
+     indicator styles are declared in app.css instead. #}
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
   {% match csrf %}
     {% when Some with (token) %}
       <meta name="csrf" content="{{ token }}">

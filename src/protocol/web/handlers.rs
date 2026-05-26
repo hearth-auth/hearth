@@ -83,8 +83,7 @@ struct SetupTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl SetupTemplate {
@@ -101,8 +100,7 @@ impl SetupTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -124,8 +122,7 @@ struct SetupSentTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl SetupSentTemplate {
@@ -141,8 +138,7 @@ impl SetupSentTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -218,8 +214,7 @@ struct LoginTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl LoginTemplate {
@@ -273,8 +268,7 @@ impl LoginTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -297,8 +291,7 @@ struct VerifyOkTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl VerifyOkTemplate {
@@ -314,8 +307,7 @@ impl VerifyOkTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -334,8 +326,7 @@ struct DashboardTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
     config_warnings: Vec<crate::config::EnvVarWarning>,
     /// Orphaned realms detected at startup (archived + has users + no resolution).
     orphaned_realms: Vec<crate::identity::reconcile::OrphanRecord>,
@@ -365,8 +356,7 @@ struct VerifyInvalidTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl VerifyInvalidTemplate {
@@ -388,8 +378,7 @@ impl VerifyInvalidTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -414,8 +403,7 @@ struct MfaEnrollRequiredTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl MfaEnrollRequiredTemplate {
@@ -443,8 +431,7 @@ impl MfaEnrollRequiredTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -470,8 +457,7 @@ struct MfaChallengeTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl MfaChallengeTemplate {
@@ -495,8 +481,7 @@ impl MfaChallengeTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -540,13 +525,12 @@ pub async fn setup_form(
         }
     }
 
-    let mut tmpl = SetupTemplate::new(
+    let tmpl = SetupTemplate::new(
         token.to_string(),
         None,
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
     render(&tmpl)
 }
 
@@ -587,10 +571,8 @@ pub async fn setup_submit(
 
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
-    let theme_css = state.theme_css.clone();
     let setup_err = |token: String, msg: String, status: StatusCode| {
-        let mut tmpl = SetupTemplate::new(token, Some(msg), product_name.clone(), logo_url.clone());
-        tmpl.theme_css.clone_from(&theme_css);
+        let tmpl = SetupTemplate::new(token, Some(msg), product_name.clone(), logo_url.clone());
         render_status(&tmpl, status)
     };
 
@@ -661,12 +643,11 @@ pub async fn setup_submit(
 /// Shows a "check your server logs" callout only when the email
 /// transport is `Log` (i.e. no real email delivery).
 pub async fn setup_sent(State(state): State<Arc<WebState>>) -> Response {
-    let mut tmpl = SetupSentTemplate::new(
+    let tmpl = SetupSentTemplate::new(
         state.email_is_log_transport,
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
     render(&tmpl)
 }
 
@@ -717,13 +698,12 @@ fn verify_email_impl(state: Arc<WebState>, query: VerifyQuery, source: RealmSour
     let logo_url = state.logo_url.clone();
 
     let Some(token) = query.token.as_deref() else {
-        let mut tmpl = VerifyInvalidTemplate::new(
+        let tmpl = VerifyInvalidTemplate::new(
             "Invalid link",
             "This verification link is missing or malformed.",
             product_name,
             logo_url,
         );
-        tmpl.theme_css.clone_from(&state.theme_css);
         return render_status(&tmpl, StatusCode::BAD_REQUEST);
     };
 
@@ -739,19 +719,17 @@ fn verify_email_impl(state: Arc<WebState>, query: VerifyQuery, source: RealmSour
         Ok(_) => {
             let login_url = format!("{action_prefix}/login");
             let mut tmpl = VerifyOkTemplate::new(login_url, product_name, logo_url);
-            tmpl.theme_css.clone_from(&state.theme_css);
-            tmpl.realm_theme_css = state.realm_theme_css_for(realm.id());
+            tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
             render(&tmpl)
         }
         Err(IdentityError::VerificationTokenInvalid) => {
-            let mut tmpl = VerifyInvalidTemplate::new(
+            let tmpl = VerifyInvalidTemplate::new(
                 "Link expired or already used",
                 "This verification link is no longer valid. Request a new verification email from \
                 the sign-in page once it becomes available.",
                 product_name,
                 logo_url,
             );
-            tmpl.theme_css.clone_from(&state.theme_css);
             render_status(&tmpl, StatusCode::GONE)
         }
         Err(e) => {
@@ -835,8 +813,7 @@ fn login_form_impl(
         product_name,
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css_for(realm.id());
+    tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
     tmpl.federation_buttons = federation_buttons_for(&state, realm.id(), &action_prefix);
     render(&tmpl)
 }
@@ -944,8 +921,7 @@ fn login_submit_impl(
 
     let product_name = state.product_name_for(realm.id());
     let logo_url = state.logo_url.clone();
-    let theme_css = state.theme_css.clone();
-    let realm_theme = state.realm_theme_css_for(realm.id());
+    let realm_theme = state.realm_theme_url_for(realm.id());
     let show_register = registration_enabled(&realm);
     // Extract the client IP once, after trusted-proxy stripping, for the
     // per-IP rate limiter. Empty string = no IP available (skipped by engine).
@@ -972,8 +948,7 @@ fn login_submit_impl(
             // regardless of whether the address matches a real account
             // (enumeration resistance), so this leaks nothing.
             tmpl.email.clone_from(&submitted_email);
-            tmpl.theme_css.clone_from(&theme_css);
-            tmpl.realm_theme_css.clone_from(&realm_theme);
+            tmpl.realm_theme_url.clone_from(&realm_theme);
             render_status(&tmpl, StatusCode::UNAUTHORIZED)
         }
     };
@@ -1056,8 +1031,7 @@ fn login_submit_impl(
         );
         tmpl.show_totp = true;
         tmpl.email = email.to_string();
-        tmpl.theme_css = state.theme_css.clone();
-        tmpl.realm_theme_css.clone_from(&realm_theme);
+        tmpl.realm_theme_url.clone_from(&realm_theme);
         let mut response = render(&tmpl);
         append_cookie(&mut response, &cookie);
         return response;
@@ -1140,8 +1114,7 @@ fn login_submit_impl(
                 state.logo_url.clone(),
             );
             tmpl.email = email.to_string();
-            tmpl.theme_css.clone_from(&state.theme_css);
-            tmpl.realm_theme_css = realm_theme;
+            tmpl.realm_theme_url = realm_theme;
             render_status(&tmpl, StatusCode::FORBIDDEN)
         }
         Err(e) => {
@@ -1545,13 +1518,12 @@ pub async fn mfa_challenge_form(
         return Redirect::to("/ui/login").into_response();
     };
 
-    let mut tmpl = MfaChallengeTemplate::new(
+    let tmpl = MfaChallengeTemplate::new(
         None,
         state.product_name.clone(),
         state.logo_url.clone(),
         pending.return_to,
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
     render(&tmpl)
 }
 
@@ -1568,18 +1540,10 @@ pub async fn mfa_challenge_submit(
 ) -> Response {
     let session_ctx = build_session_context(&headers, FALLBACK_PEER, &state.trusted_proxies);
     let Some(raw) = cookie_value_from_headers(&headers, MFA_PENDING_COOKIE) else {
-        return mfa_expired_response(
-            state.product_name.clone(),
-            state.logo_url.clone(),
-            &state.theme_css,
-        );
+        return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
     };
     let Some(pending) = parse_mfa_pending_cookie(&state.cookie_secret, raw) else {
-        return mfa_expired_response(
-            state.product_name.clone(),
-            state.logo_url.clone(),
-            &state.theme_css,
-        );
+        return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
     };
 
     let code = form.code.trim();
@@ -1598,16 +1562,14 @@ pub async fn mfa_challenge_submit(
 
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
-    let theme_css = state.theme_css.clone();
     let return_to = pending.return_to.clone();
     let mfa_err = |msg: String, status: StatusCode| {
-        let mut tmpl = MfaChallengeTemplate::new(
+        let tmpl = MfaChallengeTemplate::new(
             Some(msg),
             product_name.clone(),
             logo_url.clone(),
             return_to.clone(),
         );
-        tmpl.theme_css.clone_from(&theme_css);
         render_status(&tmpl, status)
     };
 
@@ -1674,14 +1636,13 @@ pub async fn mfa_challenge_submit(
 
 /// Returns a 401 response when the MFA pending cookie is expired or
 /// missing.
-fn mfa_expired_response(product_name: String, logo_url: String, theme_css: &str) -> Response {
-    let mut tmpl = MfaChallengeTemplate::new(
+fn mfa_expired_response(product_name: String, logo_url: String) -> Response {
+    let tmpl = MfaChallengeTemplate::new(
         Some("Your session has expired. Please sign in again.".to_string()),
         product_name,
         logo_url,
         None,
     );
-    tmpl.theme_css = theme_css.to_string();
     render_status(&tmpl, StatusCode::UNAUTHORIZED)
 }
 
@@ -1724,7 +1685,7 @@ pub async fn mfa_enroll_required_form(
         Ok(enrollment) => {
             use super::account::generate_qr_svg;
             let qr_svg = generate_qr_svg(&enrollment.provisioning_uri);
-            let mut tmpl = MfaEnrollRequiredTemplate::new(
+            let tmpl = MfaEnrollRequiredTemplate::new(
                 None,
                 enrollment.secret_base32,
                 enrollment.provisioning_uri,
@@ -1733,7 +1694,6 @@ pub async fn mfa_enroll_required_form(
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            tmpl.theme_css.clone_from(&state.theme_css);
             render(&tmpl)
         }
         Err(IdentityError::MfaAlreadyEnabled) => {
@@ -1742,7 +1702,7 @@ pub async fn mfa_enroll_required_form(
         }
         Err(e) => {
             tracing::warn!(error = %e, "forced enroll_totp failed");
-            let mut tmpl = MfaEnrollRequiredTemplate::new(
+            let tmpl = MfaEnrollRequiredTemplate::new(
                 Some("Unable to start MFA enrollment. Please try signing in again.".to_string()),
                 String::new(),
                 String::new(),
@@ -1751,7 +1711,6 @@ pub async fn mfa_enroll_required_form(
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            tmpl.theme_css.clone_from(&state.theme_css);
             render_status(&tmpl, StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1799,7 +1758,7 @@ pub async fn mfa_enroll_required_submit(
     };
 
     let err_response = |msg: &str| {
-        let mut tmpl = MfaEnrollRequiredTemplate::new(
+        let tmpl = MfaEnrollRequiredTemplate::new(
             Some(msg.to_string()),
             String::new(),
             String::new(),
@@ -1808,7 +1767,6 @@ pub async fn mfa_enroll_required_submit(
             state.product_name.clone(),
             state.logo_url.clone(),
         );
-        tmpl.theme_css.clone_from(&state.theme_css);
         render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY)
     };
 
@@ -1949,8 +1907,7 @@ pub async fn dashboard(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
         config_warnings,
         orphaned_realms: if is_admin {
             state.orphaned_realms.clone()
@@ -2234,8 +2191,7 @@ struct ForgotPasswordTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl ForgotPasswordTemplate {
@@ -2258,8 +2214,7 @@ impl ForgotPasswordTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -2278,8 +2233,7 @@ struct ForgotPasswordSentTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl ForgotPasswordSentTemplate {
@@ -2295,8 +2249,7 @@ impl ForgotPasswordSentTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -2317,8 +2270,7 @@ struct ResetPasswordTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl ResetPasswordTemplate {
@@ -2342,8 +2294,7 @@ impl ResetPasswordTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -2362,8 +2313,7 @@ struct ResetPasswordOkTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl ResetPasswordOkTemplate {
@@ -2379,8 +2329,7 @@ impl ResetPasswordOkTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -2418,8 +2367,7 @@ fn forgot_password_form_impl(state: Arc<WebState>, source: RealmSource) -> Respo
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css_for(realm.id());
+    tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
     render(&tmpl)
 }
 
@@ -2543,12 +2491,11 @@ fn forgot_password_sent_impl(state: Arc<WebState>, source: RealmSource) -> Respo
         PreAuthRealm::Ok { action_prefix, .. } => action_prefix,
         PreAuthRealm::Handled(resp) => return resp,
     };
-    let mut tmpl = ForgotPasswordSentTemplate::new(
+    let tmpl = ForgotPasswordSentTemplate::new(
         format!("{action_prefix}/login"),
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
     render(&tmpl)
 }
 
@@ -2591,12 +2538,11 @@ fn reset_password_form_impl(
         } => (realm, action_prefix),
         PreAuthRealm::Handled(resp) => return resp,
     };
-    let realm_theme = state.realm_theme_css_for(realm.id());
+    let realm_theme = state.realm_theme_url_for(realm.id());
     if let Some(token) = query.token {
         let mut tmpl =
             ResetPasswordTemplate::new(token, None, &action_prefix, product_name, logo_url);
-        tmpl.theme_css.clone_from(&state.theme_css);
-        tmpl.realm_theme_css = realm_theme;
+        tmpl.realm_theme_url = realm_theme;
         render(&tmpl)
     } else {
         let mut tmpl = ResetPasswordTemplate::new(
@@ -2606,8 +2552,7 @@ fn reset_password_form_impl(
             product_name,
             logo_url,
         );
-        tmpl.theme_css.clone_from(&state.theme_css);
-        tmpl.realm_theme_css = realm_theme;
+        tmpl.realm_theme_url = realm_theme;
         render_status(&tmpl, StatusCode::BAD_REQUEST)
     }
 }
@@ -2657,8 +2602,7 @@ fn reset_password_submit_impl(
     };
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
-    let theme_css = state.theme_css.clone();
-    let realm_theme = state.realm_theme_css_for(realm.id());
+    let realm_theme = state.realm_theme_url_for(realm.id());
 
     let reset_err = |token: String, msg: String| {
         let mut tmpl = ResetPasswordTemplate::new(
@@ -2668,8 +2612,7 @@ fn reset_password_submit_impl(
             product_name.clone(),
             logo_url.clone(),
         );
-        tmpl.theme_css.clone_from(&theme_css);
-        tmpl.realm_theme_css.clone_from(&realm_theme);
+        tmpl.realm_theme_url.clone_from(&realm_theme);
         render(&tmpl)
     };
 
@@ -2693,8 +2636,7 @@ fn reset_password_submit_impl(
         Ok(_user_id) => {
             let login_url = format!("{action_prefix}/login");
             let mut tmpl = ResetPasswordOkTemplate::new(login_url, product_name, logo_url);
-            tmpl.theme_css.clone_from(&state.theme_css);
-            tmpl.realm_theme_css.clone_from(&realm_theme);
+            tmpl.realm_theme_url.clone_from(&realm_theme);
             render(&tmpl)
         }
         Err(IdentityError::PasswordResetTokenInvalid) => reset_err(
@@ -2738,8 +2680,7 @@ struct RegisterTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl RegisterTemplate {
@@ -2770,8 +2711,7 @@ impl RegisterTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -2790,8 +2730,7 @@ struct RegisterSentTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl RegisterSentTemplate {
@@ -2807,8 +2746,7 @@ impl RegisterSentTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -2890,8 +2828,7 @@ fn register_form_impl(state: Arc<WebState>, path_realm: Option<String>) -> Respo
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css_for(realm.id());
+    tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
     render(&tmpl)
 }
 
@@ -2974,8 +2911,7 @@ fn register_submit_impl(
 
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
-    let theme_css = state.theme_css.clone();
-    let realm_theme = state.realm_theme_css_for(realm.id());
+    let realm_theme = state.realm_theme_url_for(realm.id());
     let (disabled, invite_only) = registration_policy_flags(&realm);
     let form_action = format!("{action_prefix}/register");
     let login_url = format!("{action_prefix}/login");
@@ -2992,8 +2928,7 @@ fn register_submit_impl(
             product_name.clone(),
             logo_url.clone(),
         );
-        tmpl.theme_css.clone_from(&theme_css);
-        tmpl.realm_theme_css.clone_from(&realm_theme);
+        tmpl.realm_theme_url.clone_from(&realm_theme);
         render_status(&tmpl, StatusCode::BAD_REQUEST)
     };
 
@@ -3091,12 +3026,11 @@ fn register_sent_impl(state: Arc<WebState>, path_realm: Option<String>) -> Respo
         PreAuthRealm::Ok { action_prefix, .. } => action_prefix,
         PreAuthRealm::Handled(resp) => return resp,
     };
-    let mut tmpl = RegisterSentTemplate::new(
+    let tmpl = RegisterSentTemplate::new(
         format!("{action_prefix}/login"),
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
     render(&tmpl)
 }
 
@@ -3135,8 +3069,7 @@ struct RealmRequiredTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl RealmRequiredTemplate {
@@ -3151,8 +3084,7 @@ impl RealmRequiredTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -3280,8 +3212,7 @@ pub(super) fn resolve_admin_realm(state: &WebState) -> PreAuthRealm {
 /// realm names. Shown on multi-realm deployments when a bare `/ui/*`
 /// URL is hit without `server.default_realm` configured.
 fn realm_required_response(state: &WebState) -> Response {
-    let mut tmpl = RealmRequiredTemplate::new(state.product_name.clone(), state.logo_url.clone());
-    tmpl.theme_css.clone_from(&state.theme_css);
+    let tmpl = RealmRequiredTemplate::new(state.product_name.clone(), state.logo_url.clone());
     render_status(&tmpl, StatusCode::BAD_REQUEST)
 }
 
@@ -3315,8 +3246,7 @@ struct AcceptInvitationTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `GET /ui/accept-invitation?token=...` — bare URL variant.
@@ -3362,8 +3292,7 @@ fn accept_invitation_page_impl(
             narrow: true,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: realm_theme,
+            realm_theme_url: realm_theme,
         })
     };
 
@@ -3374,7 +3303,7 @@ fn accept_invitation_page_impl(
         } => (realm, action_prefix),
         PreAuthRealm::Handled(resp) => return resp,
     };
-    let realm_theme = state.realm_theme_css_for(realm.id());
+    let realm_theme = state.realm_theme_url_for(realm.id());
     let login_url = format!("{action_prefix}/login");
 
     let token = match &params.token {
@@ -3435,8 +3364,7 @@ pub struct DeviceApproveTemplate {
     pub narrow: bool,
     pub product_name: String,
     pub logo_url: String,
-    pub theme_css: String,
-    pub realm_theme_css: Option<String>,
+    pub realm_theme_url: Option<String>,
 }
 
 /// Form submitted when the user approves a device.
@@ -3482,8 +3410,7 @@ pub async fn device_approve_form(
         narrow: true,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     })
 }
 
@@ -3531,8 +3458,7 @@ struct UpdatePasswordTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
     /// POST target URL.
     form_action: String,
     /// Required-action JWT forwarded as a hidden form field.
@@ -3554,8 +3480,7 @@ struct VerifyEmailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
     /// Email address the verification link was sent to.
     email: String,
     /// POST URL for the "Resend" button.
@@ -3579,8 +3504,7 @@ struct VerifyEmailSuccessTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
     /// Destination URL for the 3-second auto-redirect.
     redirect_url: String,
 }
@@ -3665,8 +3589,7 @@ pub async fn ra_update_password_form(
         narrow: true,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css_for(&realm_id),
+        realm_theme_url: state.realm_theme_url_for(&realm_id),
         form_action: "/ui/required-actions/update-password".to_string(),
         ra_token: params.ra_token,
         error: None,
@@ -3684,8 +3607,7 @@ pub async fn ra_update_password_submit(
         return internal_error_response();
     };
 
-    let theme_css = state.theme_css.clone();
-    let realm_theme = state.realm_theme_css_for(&realm_id);
+    let realm_theme = state.realm_theme_url_for(&realm_id);
     let product_name = state.product_name.clone();
     let logo_url = state.logo_url.clone();
 
@@ -3700,8 +3622,7 @@ pub async fn ra_update_password_submit(
             narrow: true,
             product_name: product_name.clone(),
             logo_url: logo_url.clone(),
-            theme_css: theme_css.clone(),
-            realm_theme_css: realm_theme.clone(),
+            realm_theme_url: realm_theme.clone(),
             form_action: "/ui/required-actions/update-password".to_string(),
             ra_token,
             error: Some(msg),
@@ -3829,8 +3750,7 @@ pub async fn ra_verify_email_page(
         narrow: true,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css_for(&realm_id),
+        realm_theme_url: state.realm_theme_url_for(&realm_id),
         email,
         resend_action: "/ui/required-actions/verify-email/resend".to_string(),
         ra_token: params.ra_token,
@@ -3919,8 +3839,7 @@ pub async fn ra_verify_email_success(
         narrow: true,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: None,
+        realm_theme_url: None,
         redirect_url,
     })
 }

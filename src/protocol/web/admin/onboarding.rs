@@ -55,8 +55,7 @@ pub struct WizardStepParams {
 struct WizardTemplate {
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
     csrf: Option<String>,
     chrome: bool,
     active: &'static str,
@@ -90,8 +89,7 @@ pub async fn admin_onboarding_get(
     render(&WizardTemplate {
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
         csrf: session.csrf.clone(),
         chrome: true,
         active: "onboarding",
@@ -140,8 +138,7 @@ pub async fn admin_onboarding_realm_post(
         return render(&WizardTemplate {
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
             csrf: session.csrf.clone(),
             chrome: true,
             active: "onboarding",
@@ -181,8 +178,7 @@ pub async fn admin_onboarding_realm_post(
             render(&WizardTemplate {
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
                 csrf: session.csrf.clone(),
                 chrome: true,
                 active: "onboarding",
@@ -208,8 +204,7 @@ pub async fn admin_onboarding_realm_post(
 struct StepAppTemplate {
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
     csrf: Option<String>,
     chrome: bool,
     active: &'static str,
@@ -235,8 +230,7 @@ pub async fn admin_onboarding_app_get(
     render(&StepAppTemplate {
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
         csrf: session.csrf.clone(),
         chrome: true,
         active: "onboarding",
@@ -295,8 +289,7 @@ pub async fn admin_onboarding_app_post(
         return render(&StepAppTemplate {
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
             csrf: session.csrf.clone(),
             chrome: true,
             active: "onboarding",
@@ -367,8 +360,7 @@ pub async fn admin_onboarding_app_post(
             render(&StepAppTemplate {
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
                 csrf: session.csrf.clone(),
                 chrome: true,
                 active: "onboarding",
@@ -397,8 +389,7 @@ pub async fn admin_onboarding_app_post(
 struct StepInviteTemplate {
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
     csrf: Option<String>,
     chrome: bool,
     active: &'static str,
@@ -422,8 +413,7 @@ pub async fn admin_onboarding_invite_get(
     render(&StepInviteTemplate {
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
         csrf: session.csrf.clone(),
         chrome: true,
         active: "onboarding",
@@ -481,8 +471,7 @@ pub async fn admin_onboarding_invite_post(
         return render(&StepInviteTemplate {
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
             csrf: session.csrf.clone(),
             chrome: true,
             active: "onboarding",
@@ -518,8 +507,7 @@ pub async fn admin_onboarding_invite_post(
             return render(&StepInviteTemplate {
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
                 csrf: session.csrf.clone(),
                 chrome: true,
                 active: "onboarding",
@@ -545,8 +533,7 @@ pub async fn admin_onboarding_invite_post(
                 return render(&StepInviteTemplate {
                     product_name: state.product_name.clone(),
                     logo_url: state.logo_url.clone(),
-                    theme_css: state.theme_css.clone(),
-                    realm_theme_css: state.realm_theme_css(),
+                    realm_theme_url: state.realm_theme_url(),
                     csrf: session.csrf.clone(),
                     chrome: true,
                     active: "onboarding",
@@ -653,8 +640,7 @@ pub async fn admin_onboarding_invite_post(
 struct StepEmailTemplate {
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
     csrf: Option<String>,
     chrome: bool,
     active: &'static str,
@@ -682,8 +668,7 @@ pub async fn admin_onboarding_email_get(
     render(&StepEmailTemplate {
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
         csrf: session.csrf.clone(),
         chrome: true,
         active: "onboarding",
@@ -780,8 +765,7 @@ pub async fn admin_onboarding_email_test_post(
 struct CompleteTemplate {
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
     csrf: Option<String>,
     chrome: bool,
     active: &'static str,
@@ -828,8 +812,7 @@ pub async fn admin_onboarding_complete_get(
     render(&CompleteTemplate {
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
         csrf: session.csrf.clone(),
         chrome: true,
         active: "onboarding",

@@ -65,8 +65,7 @@ struct AccountIndexTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// A row in the passkey credentials table on the account page.
@@ -108,8 +107,7 @@ impl AccountIndexTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -132,8 +130,7 @@ pub async fn account_index(State(state): State<Arc<WebState>>, session: UiSessio
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 
@@ -238,8 +235,7 @@ fn render_with_password_error(state: &Arc<WebState>, session: &UiSession, msg: &
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 
@@ -261,8 +257,7 @@ fn render_with_flash(state: &Arc<WebState>, session: &UiSession, flash: Flash) -
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 
@@ -347,8 +342,7 @@ struct TotpEnrollTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl TotpEnrollTemplate {
@@ -381,8 +375,7 @@ impl TotpEnrollTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -414,8 +407,7 @@ pub async fn totp_enroll_form(State(state): State<Arc<WebState>>, session: UiSes
             state.product_name.clone(),
             state.logo_url.clone(),
         );
-        tmpl.theme_css.clone_from(&state.theme_css);
-        tmpl.realm_theme_css = state.realm_theme_css();
+        tmpl.realm_theme_url = state.realm_theme_url();
         return render(&tmpl);
     }
 
@@ -448,8 +440,7 @@ pub async fn totp_enroll_form(State(state): State<Arc<WebState>>, session: UiSes
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            tmpl.theme_css.clone_from(&state.theme_css);
-            tmpl.realm_theme_css = state.realm_theme_css();
+            tmpl.realm_theme_url = state.realm_theme_url();
             render(&tmpl)
         }
         Err(IdentityError::MfaAlreadyEnabled) => {
@@ -465,8 +456,7 @@ pub async fn totp_enroll_form(State(state): State<Arc<WebState>>, session: UiSes
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            tmpl.theme_css.clone_from(&state.theme_css);
-            tmpl.realm_theme_css = state.realm_theme_css();
+            tmpl.realm_theme_url = state.realm_theme_url();
             render(&tmpl)
         }
         Err(e) => {
@@ -483,8 +473,7 @@ pub async fn totp_enroll_form(State(state): State<Arc<WebState>>, session: UiSes
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            tmpl.theme_css.clone_from(&state.theme_css);
-            tmpl.realm_theme_css = state.realm_theme_css();
+            tmpl.realm_theme_url = state.realm_theme_url();
             render(&tmpl)
         }
     }
@@ -674,8 +663,7 @@ pub async fn totp_regenerate_codes(
     // form but we pass empty secret/uri so only the recovery codes section
     // is meaningful. The template's activate form is a no-op here since the
     // user is already enrolled.
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 
@@ -705,8 +693,7 @@ fn render_totp_error(state: &Arc<WebState>, session: &UiSession, msg: &str) -> R
             state.product_name.clone(),
             state.logo_url.clone(),
         );
-        tmpl.theme_css.clone_from(&state.theme_css);
-        tmpl.realm_theme_css = state.realm_theme_css();
+        tmpl.realm_theme_url = state.realm_theme_url();
         return render(&tmpl);
     }
 
@@ -725,8 +712,7 @@ fn render_totp_error(state: &Arc<WebState>, session: &UiSession, msg: &str) -> R
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 
@@ -1059,8 +1045,7 @@ struct AccountSessionsTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 impl AccountSessionsTemplate {
@@ -1082,8 +1067,7 @@ impl AccountSessionsTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
         }
     }
 }
@@ -1099,8 +1083,7 @@ pub async fn sessions_index(State(state): State<Arc<WebState>>, session: UiSessi
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 

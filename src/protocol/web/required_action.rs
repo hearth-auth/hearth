@@ -71,8 +71,7 @@ struct ActionPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Rendered by `GET /required-action/UPDATE_PASSWORD` (and re-rendered on validation failure).
@@ -91,8 +90,7 @@ struct UpdatePasswordPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `application/x-www-form-urlencoded` body for `POST /required-action/UPDATE_PASSWORD`.
@@ -327,8 +325,7 @@ pub async fn action_page(
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     };
     render(&tmpl)
 }
@@ -621,8 +618,7 @@ struct VerifyEmailPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Rendered by `GET /required-action/VERIFY_EMAIL/confirm` when the token is
@@ -640,8 +636,7 @@ struct VerifyEmailExpiredTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Query parameters for `GET /required-action/VERIFY_EMAIL/confirm`.
@@ -805,8 +800,7 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     };
     render(&tmpl)
 }
@@ -949,8 +943,7 @@ fn render_verify_email_expired(state: &Arc<WebState>) -> Response {
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     };
     render(&tmpl)
 }
@@ -1137,8 +1130,7 @@ fn render_update_password_form(state: &Arc<WebState>, error: Option<&str>) -> Re
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     };
     render(&tmpl)
 }
@@ -1161,8 +1153,7 @@ struct EnrollPhoneOtpPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// Rendered by `POST /required-action/ENROLL_PHONE_OTP/send` on success.
@@ -1185,8 +1176,7 @@ struct EnrollPhoneOtpVerifyTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 /// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_PHONE_OTP/send`.
@@ -1425,8 +1415,7 @@ fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Respo
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     };
     render(&tmpl)
 }
@@ -1451,8 +1440,7 @@ fn render_enroll_phone_verify(
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     };
     render(&tmpl)
 }

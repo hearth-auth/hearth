@@ -149,8 +149,7 @@ struct ConsentTemplate {
     flash: Option<super::templates::Flash>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +424,7 @@ pub async fn consent_page(
         .collect();
 
     let admin = super::handlers::is_admin(state.as_ref(), &session);
-    let mut tmpl = ConsentTemplate {
+    let tmpl = ConsentTemplate {
         client_name: client.client_name().to_string(),
         client_logo_url: client.client_logo_url().map(str::to_string),
         scopes,
@@ -439,10 +438,8 @@ pub async fn consent_page(
         flash: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
     };
-    tmpl.theme_css.clone_from(&state.theme_css);
     render(&tmpl)
 }
 

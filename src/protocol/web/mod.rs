@@ -467,7 +467,7 @@ impl WebState {
     /// the process-global `current_realm` cache. Prefer this in pre-auth
     /// handlers where the realm is resolved from the URL or cookie.
     #[must_use]
-    pub fn realm_theme_css_for(&self, realm_id: &RealmId) -> Option<String> {
+    pub fn realm_theme_url_for(&self, realm_id: &RealmId) -> Option<String> {
         let id = realm_id.as_uuid().to_string();
         self.realm_themes.get(&id).cloned()
     }
@@ -502,16 +502,21 @@ impl WebState {
         self.current_realm.read().ok().and_then(|g| g.clone())
     }
 
-    /// Returns the per-realm theme CSS for the currently-pinned realm,
-    /// or `None` if no per-realm theme is configured.
+    /// Returns the external CSS URL for the per-realm theme, or `None` if the
+    /// realm has no theme configured.
     ///
-    /// Used by all authenticated handlers to populate `realm_theme_css`
-    /// in template structs, enabling inline per-realm CSS overrides.
+    /// Used by all authenticated handlers to populate `realm_theme_url` in
+    /// template structs. The URL points to `/ui/static/realm-theme/{uuid}`,
+    /// which is served without inline injection and satisfies `style-src 'self'`.
     #[must_use]
-    pub fn realm_theme_css(&self) -> Option<String> {
+    pub fn realm_theme_url(&self) -> Option<String> {
         let realm_id = self.current_realm()?;
         let id = realm_id.as_uuid().to_string();
-        self.realm_themes.get(&id).cloned()
+        if self.realm_themes.contains_key(&id) {
+            Some(format!("/ui/static/realm-theme/{id}"))
+        } else {
+            None
+        }
     }
 }
 
