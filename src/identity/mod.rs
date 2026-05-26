@@ -7,6 +7,8 @@
 pub mod claims_config;
 pub(crate) mod cleanup;
 pub(crate) mod credentials;
+pub mod device_fingerprint;
+pub mod device_fp;
 pub mod email;
 mod engine;
 pub mod error;
@@ -50,8 +52,8 @@ pub use tokens::{
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
-    canonicalize_scopes, AttributeDefinition, AttributeDefinitions, AttributeType,
-    BreachCheckConfig, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
+    canonicalize_scopes, AdaptiveMfaConfig, AttributeDefinition, AttributeDefinitions,
+    AttributeType, BreachCheckConfig, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
     CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
     CreateWebhookRequest, CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest,
     InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
@@ -1598,4 +1600,42 @@ pub trait IdentityEngine: Send + Sync {
     /// The caller is responsible for encrypting the bytes before writing
     /// them to an archive. Used exclusively by the backup exporter.
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError>;
+
+    // ===== Adaptive MFA — device fingerprint (HEA-839) =====
+
+    /// Checks whether the device described by `(ip, user_agent)` is recognised
+    /// for this user in this realm.
+    ///
+    /// If the realm's `adaptive_mfa.enabled` is `false`, or if the
+    /// `fingerprint_hmac_secret` is empty, returns
+    /// [`DeviceFingerprintOutcome::Skipped`] immediately.
+    ///
+    /// On an unrecognised device:
+    /// - If the user has an enrolled MFA factor → [`DeviceFingerprintOutcome::StepUpRequired`].
+    /// - If the user has **no** enrolled factor → [`DeviceFingerprintOutcome::EnrollMfaRequired`].
+    ///
+    /// The TTL of an existing recognised fingerprint is refreshed in-place on
+    /// every call (AC-9 rolling window).
+    ///
+    /// An audit event (`StepUpMfaTriggered`) is emitted on every step-up.
+    fn check_device_fingerprint(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<device_fp::DeviceFingerprintOutcome, IdentityError>;
+
+    /// Records `(ip, user_agent)` as a trusted device for this user, resetting
+    /// the rolling window to `realm.config.adaptive_mfa.recognition_window_days`.
+    ///
+    /// Call this after a successful step-up MFA challenge to mark the device.
+    /// No-ops when adaptive MFA is disabled or the HMAC secret is empty.
+    fn record_device_fingerprint(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<(), IdentityError>;
 }

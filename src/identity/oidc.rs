@@ -1211,7 +1211,7 @@ mod tests {
 /// Identifies the end-user by email address. The client_id is used for
 /// per-client rate limiting only; no client authentication is required for
 /// public clients.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PasswordGrantRequest {
     /// The user's email address.
     pub email: String,
@@ -1219,6 +1219,16 @@ pub struct PasswordGrantRequest {
     pub password: String,
     /// Optional OAuth scope (space-delimited). Passed through to the token.
     pub scope: Option<String>,
+    /// Client IP address for device-fingerprint step-up MFA.
+    ///
+    /// Pass the value of `X-Forwarded-For` / peer address after proxy normalisation.
+    /// When `None`, adaptive MFA is skipped (behaves as if feature is disabled for
+    /// this request). Falls back to `"unknown"` prefix in the HMAC input.
+    pub client_ip: Option<String>,
+    /// Raw `User-Agent` header value for device-fingerprint step-up MFA.
+    ///
+    /// When `None`, adaptive MFA uses an empty string for the UA component.
+    pub user_agent: Option<String>,
 }
 
 /// Response from a successful ROPC grant — mirrors `OidcTokenResponse`.

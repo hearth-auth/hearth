@@ -798,6 +798,7 @@ async fn password_grant_success() {
                 email: user.email().to_string(),
                 password: password.to_string(),
                 scope: None,
+                ..Default::default()
             },
         )
         .expect("password_grant_token should succeed");
@@ -827,6 +828,7 @@ async fn password_grant_wrong_password_returns_invalid_credential() {
             email: user.email().to_string(),
             password: "wrong".to_string(),
             scope: None,
+            ..Default::default()
         },
     );
     assert!(
@@ -846,6 +848,7 @@ async fn password_grant_unknown_email_returns_invalid_credential() {
             email: "nobody@nowhere.invalid".to_string(),
             password: "anything".to_string(),
             scope: None,
+            ..Default::default()
         },
     );
     assert!(

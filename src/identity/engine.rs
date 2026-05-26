@@ -22,6 +22,7 @@ use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
 };
 use crate::identity::credentials::{self, CleartextPassword, CredentialConfig, StoredCredential};
+use crate::identity::device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore};
 use crate::identity::error::IdentityError;
 use crate::identity::keys;
 /// Encodes bytes as lowercase hexadecimal.
@@ -406,6 +407,11 @@ pub struct EmbeddedIdentityEngine {
     /// Shared across all password-set/-change operations. Uses an injectable
     /// transport so tests can stub out network I/O.
     hibp: Arc<crate::identity::hibp::HibpClient>,
+    /// Device fingerprint store for adaptive (risk-based) MFA.
+    ///
+    /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
+    /// timestamps. Shared across all realms — storage is realm-scoped internally.
+    device_fp: Arc<DeviceFingerprintStore>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -615,6 +621,7 @@ impl EmbeddedIdentityEngine {
     ) -> Result<Self, IdentityError> {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
         let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage)?);
+        let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
         let engine = Self {
             storage,
             clock,
@@ -639,6 +646,7 @@ impl EmbeddedIdentityEngine {
             webauthn_challenges: WebAuthnChallengeStore::new(),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
+            device_fp,
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
@@ -777,6 +785,7 @@ impl EmbeddedIdentityEngine {
         audit: Arc<dyn AuditEngine>,
     ) -> Self {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
+        let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
         let engine = Self {
             storage,
             clock,
@@ -801,6 +810,7 @@ impl EmbeddedIdentityEngine {
             webauthn_challenges: WebAuthnChallengeStore::new(),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
+            device_fp,
         };
         // Best-effort: if seeding fails here, tests that expect a system
         // realm will notice and surface it. `new()` panics on failure; this
@@ -5123,13 +5133,62 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
-        // 3. Create session and issue token pair
+        // 3. Adaptive step-up MFA check (HEA-836).
+        //    Only runs when the request carries IP/UA context (ROPC via HTTP).
+        if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
+            use crate::identity::device_fp::DeviceFingerprintOutcome;
+            use crate::identity::types::RequiredAction;
+
+            let outcome = self.check_device_fingerprint(realm_id, user.id(), ip, ua)?;
+
+            match outcome {
+                DeviceFingerprintOutcome::Skipped | DeviceFingerprintOutcome::Recognised => {
+                    // Device is trusted or feature disabled — proceed normally.
+                    // Record/refresh the fingerprint TTL on a recognised hit.
+                    if matches!(outcome, DeviceFingerprintOutcome::Recognised) {
+                        let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
+                    }
+                }
+                DeviceFingerprintOutcome::StepUpRequired => {
+                    // User has an enrolled factor — require MFA challenge.
+                    return Err(IdentityError::StepUpChallengeRequired);
+                }
+                DeviceFingerprintOutcome::EnrollMfaRequired => {
+                    // No factor enrolled — inject EnrollMfa required action.
+                    let mut current_user = self
+                        .get_user(realm_id, user.id())?
+                        .ok_or(IdentityError::UserNotFound)?;
+                    let mut actions: Vec<RequiredAction> = current_user.required_actions().to_vec();
+                    if !actions.contains(&RequiredAction::EnrollMfa) {
+                        actions.push(RequiredAction::EnrollMfa);
+                        current_user.set_required_actions(actions);
+                        let key = keys::encode_user_id(user.id());
+                        let bytes = serde_json::to_vec(&current_user).map_err(|e| {
+                            IdentityError::Serialization {
+                                reason: e.to_string(),
+                            }
+                        })?;
+                        self.storage
+                            .put(realm_id, &key, &bytes)
+                            .map_err(Self::storage_err)?;
+                    }
+                    return Err(IdentityError::EnrollMfaRequired);
+                }
+            }
+        }
+
+        // 4. Create session and issue token pair
         let session = self.create_session(
             realm_id,
             user.id(),
             &crate::identity::SessionContext::default(),
         )?;
         let token_pair = self.issue_tokens(realm_id, user.id(), session.id())?;
+
+        // 5. Record device fingerprint on first successful login from this device.
+        if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
+            let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
+        }
 
         Ok(crate::identity::oidc::PasswordGrantResponse {
             access_token: token_pair.access_token().to_string(),
@@ -10219,6 +10278,98 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             post_logout_redirect_uri,
             state: request.state.clone(),
         })
+    }
+
+    fn check_device_fingerprint(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<DeviceFingerprintOutcome, IdentityError> {
+        // Load realm config to check if adaptive MFA is enabled.
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        let cfg = &realm.config().adaptive_mfa;
+
+        // AC-10: disabled or no secret → skip immediately.
+        if !cfg.enabled || cfg.fingerprint_hmac_secret.is_empty() {
+            return Ok(DeviceFingerprintOutcome::Skipped);
+        }
+
+        let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
+            &cfg.fingerprint_hmac_secret,
+            user_id,
+            ip,
+            user_agent,
+        );
+
+        match self.device_fp.check_and_refresh(
+            realm_id,
+            user_id,
+            &hmac,
+            cfg.recognition_window_days,
+        )? {
+            crate::identity::device_fp::FingerprintResult::Recognised => {
+                Ok(DeviceFingerprintOutcome::Recognised)
+            }
+            crate::identity::device_fp::FingerprintResult::Unrecognised => {
+                // Emit step-up audit event (LogOnly — login continues with challenge).
+                let metadata = Some(serde_json::json!({
+                    "user_id": user_id.as_uuid().to_string(),
+                    "reason": "unrecognised_device"
+                }));
+                let ctx = AuditContext {
+                    actor: Actor::User(user_id.clone()),
+                    metadata,
+                };
+                let _ = self.record_audit(
+                    realm_id,
+                    Some(&ctx),
+                    AuditAction::StepUpMfaTriggered,
+                    "user",
+                    &user_id.as_uuid().to_string(),
+                );
+
+                // AC-6 vs AC-8: check whether user has an enrolled MFA factor.
+                let has_mfa = self.mfa_enabled(realm_id, user_id).unwrap_or(false)
+                    || self
+                        .list_webauthn_credentials(realm_id, user_id)
+                        .map(|creds| !creds.is_empty())
+                        .unwrap_or(false);
+
+                if has_mfa {
+                    Ok(DeviceFingerprintOutcome::StepUpRequired)
+                } else {
+                    Ok(DeviceFingerprintOutcome::EnrollMfaRequired)
+                }
+            }
+        }
+    }
+
+    fn record_device_fingerprint(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<(), IdentityError> {
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        let cfg = &realm.config().adaptive_mfa;
+        if !cfg.enabled || cfg.fingerprint_hmac_secret.is_empty() {
+            return Ok(());
+        }
+        let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
+            &cfg.fingerprint_hmac_secret,
+            user_id,
+            ip,
+            user_agent,
+        );
+        self.device_fp
+            .record(realm_id, user_id, &hmac, cfg.recognition_window_days)
     }
 }
 

@@ -18,6 +18,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Adaptive step-up MFA on unrecognised device** — when `adaptive_mfa.enabled = true` on a
+  realm, the `password_grant_token` ROPC flow checks an HMAC-SHA256 fingerprint of
+  `(user_id, IP /24 subnet, User-Agent)` against a rolling recognition window stored in the
+  embedded WAL. Unknown devices return `HEARTH_STEP_UP_CHALLENGE_REQUIRED` (HTTP 401) for
+  users with an enrolled factor, or `HEARTH_ENROLL_MFA_REQUIRED` (HTTP 403) for users without
+  one (injecting `RequiredAction::EnrollMfa` on the user record). Recognised devices continue
+  normally with TTL refresh. A `StepUpMfaTriggered` audit event is emitted on every
+  unrecognised-device login attempt. Empty HMAC secrets or disabled config skip the check
+  (fail-open). gRPC surfaces both errors via `UNAUTHENTICATED` and `PERMISSION_DENIED`
+  respectively (HEA-836).
+
 - **Required-action UI interstitials** — five new browser-facing routes handle the
   required-action flow without API clients:
   - `GET /ui/required-actions/update-password` — password-update form (ra-JWT in query param).

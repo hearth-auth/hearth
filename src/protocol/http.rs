@@ -1532,11 +1532,16 @@ fn identity_error_to_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "password was recently used",
         ),
+        IdentityError::PasswordCompromised => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "password_compromised")
+        }
         IdentityError::AuditFailure { .. } => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal error: audit record failed",
         ),
         IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
+        IdentityError::StepUpChallengeRequired => (StatusCode::UNAUTHORIZED, "mfa_required"),
+        IdentityError::EnrollMfaRequired => (StatusCode::FORBIDDEN, "mfa_enrollment_required"),
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);
@@ -1999,6 +2004,11 @@ async fn token_exchange_impl(
                 email,
                 password,
                 scope: body.scope,
+                client_ip: Some(client_ip.clone()),
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
             };
             let realm_str = realm_id.as_uuid().to_string();
             match state.identity.password_grant_token(&realm_id, &request) {
@@ -5913,6 +5923,11 @@ async fn realm_token_exchange(
                 email,
                 password,
                 scope: body.scope,
+                client_ip: Some(client_ip.clone()),
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
             };
             match state.identity.password_grant_token(&realm_id, &request) {
                 Ok(response) => (

@@ -376,6 +376,14 @@ pub enum IdentityError {
     /// HIBP Range API confirms the password is compromised. The caller must
     /// return HTTP 422 with `error_code: "password_compromised"`.
     PasswordCompromised,
+    /// Adaptive step-up MFA required: login from unrecognised device, user
+    /// has at least one enrolled factor. The caller must challenge the user
+    /// for their MFA code before issuing tokens.
+    StepUpChallengeRequired,
+    /// Adaptive step-up MFA enrollment required: login from unrecognised
+    /// device with no enrolled factor. `RequiredAction::EnrollMfa` has been
+    /// injected into the user's pending actions.
+    EnrollMfaRequired,
 }
 
 impl fmt::Display for IdentityError {
@@ -541,6 +549,13 @@ impl fmt::Display for IdentityError {
             Self::PasswordCompromised => {
                 write!(f, "password has appeared in a known data breach")
             }
+            Self::StepUpChallengeRequired => {
+                write!(f, "MFA challenge required: login from unrecognised device")
+            }
+            Self::EnrollMfaRequired => write!(
+                f,
+                "MFA enrollment required: login from unrecognised device with no enrolled factor"
+            ),
         }
     }
 }
@@ -637,7 +652,9 @@ impl std::error::Error for IdentityError {
             | Self::PasswordReused
             | Self::PasswordCompromised
             | Self::AuthMethodNotAllowed { .. }
-            | Self::WebhookNotFound => None,
+            | Self::WebhookNotFound
+            | Self::StepUpChallengeRequired
+            | Self::EnrollMfaRequired => None,
         }
     }
 }
