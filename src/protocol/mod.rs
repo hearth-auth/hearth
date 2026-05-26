@@ -5,6 +5,7 @@
 
 pub mod admin_auth;
 pub(crate) mod client_info;
+pub(crate) mod cluster_admin;
 pub mod convert;
 pub mod error_codes;
 pub mod grpc;

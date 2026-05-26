@@ -29,6 +29,43 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Cluster admin endpoints now require system-realm token** — `POST /admin/cluster/bootstrap`,
+  `GET /admin/cluster/status`, and `POST /admin/cluster/transfer-leadership` previously
+  accepted any valid tenant-realm admin token, allowing a tenant admin to invoke
+  node-wide Raft operations (privilege escalation). All three endpoints now return
+  `403 Forbidden` with `"cluster admin requires system realm"` when the `X-Realm-ID`
+  header is not the nil UUID (HEA-763).
+
+
+### Added
+
+- **HA failover simulation suite** — four deterministic multi-node Raft simulation tests
+  covering network partition heal, leader kill mid-write, rolling restart with zero read
+  errors, and snapshot-based catch-up for a cold follower. All tests run in-process via an
+  in-memory network factory with no TLS or real ports (HEA-738).
+
+
+- **Cluster admin HTTP endpoints** — three operator-facing routes on the admin API:
+  - `POST /admin/cluster/bootstrap` — initializes Raft membership from `hearth.yaml`
+    `cluster.peers` on the designated bootstrap node. Idempotent (409 on
+    double-initialization). Requires a `cluster:` block in config; returns 503 in
+    single-node mode.
+  - `GET /admin/cluster/status` — returns `{role, term, last_applied_index,
+    peers: [{id, addr, is_healthy}]}` for the local node. Peer health is derived
+    from the leader's replication map.
+  - `POST /admin/cluster/transfer-leadership` — gracefully steps the leader down
+    and returns `{new_leader_id, exact_target}`. Accepts `target_node_id` for
+    forward-compatibility; `exact_target` indicates whether the election winner
+    matched the requested target (openraft 0.9 has no targeted-transfer API).
+    **Note:** writes are briefly unavailable (~1.5–3 s) during the step-down
+    window — do not initiate during write bursts. 409 if this node is not leader.
+
+  All three endpoints require `Authorization: Bearer <admin-token>` with
+  `hearth.admin` permission and `X-Realm-ID`; 401 without auth, 403 without
+  admin permission (HEA-737).
+
+
+### Security
 - **Zeroize intermediate PKCS#8 and DEK heap copies** — plaintext key material in transit no
   longer relies on the OS/allocator to zero freed heap pages. Specifically: `decrypt_bytes` now
   returns `Zeroizing<Vec<u8>>`; the DEK (`dek_vec`) in `load_signing_key` is wrapped in
