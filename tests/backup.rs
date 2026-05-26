@@ -174,6 +174,156 @@ async fn full_roundtrip() {
     );
 }
 
+// ── 1b. restore_preserves_signing_keys (HEA-745) ──────────────────────────────
+
+/// Restore must preserve the realm's Ed25519 signing key so every JWT issued
+/// under the per-realm key (OIDC flows: `client_credentials`,
+/// `authorization_code`, ID tokens, logout tokens, RP-initiated logout) keeps
+/// validating after restore. Regression: prior to HEA-745, `import_realm`
+/// silently generated a fresh key, breaking JWKS continuity for every
+/// downstream RP and invalidating every per-realm-signed JWT.
+///
+/// Three layered assertions:
+/// 1. **Raw key material identity** — the PKCS#8 bytes returned by
+///    `export_realm_signing_key_pkcs8` are byte-equal before and after
+///    restore. This is the airtight low-level invariant.
+/// 2. **JWKS continuity** — `realm_jwks` reports the same `kid` (which is a
+///    SHA-256 hash of the public key) and the same `x` coordinate. RPs that
+///    cached the JWKS would still verify against the same key after restore.
+/// 3. **End-to-end JWT round-trip** — a JWT signed *under the source realm's
+///    per-realm key* before backup verifies cryptographically against the
+///    destination realm's public key after restore.
+///
+/// Note on `issue_tokens` vs OIDC flows: Hearth's legacy session-based
+/// `issue_tokens` path signs with the global `sys:global:key` (Phase 0
+/// fallback), so those tokens would survive restore even without this fix.
+/// The OIDC paths — which are the public-facing token surface in
+/// production — sign with the per-realm key and are the user-visible victim
+/// of the bug. The test therefore exercises the per-realm key directly.
+#[tokio::test]
+async fn test_restore_preserves_signing_keys() {
+    use std::collections::BTreeMap;
+
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use hearth::identity::tokens::{verify_token_signature, Audience, SigningKey, TokenClaims};
+
+    // ── Source harness: realm + user + per-realm-signed JWT ────────────
+    let src = common::TestHarness::embedded().await.expect("src harness");
+    let (realm_src, _email, _password) = seeded_realm(&src);
+
+    // Snapshot the source realm's per-realm signing key (PKCS#8 bytes).
+    let src_pkcs8 = src
+        .identity()
+        .export_realm_signing_key_pkcs8(&realm_src)
+        .expect("export src signing key");
+
+    // Sign a JWT directly with the per-realm key (mirrors what OIDC flows
+    // do internally — see `EmbeddedIdentityEngine::client_credentials`).
+    let src_signing_key = SigningKey::from_pkcs8(&src_pkcs8).expect("parse src key");
+    let claims = TokenClaims {
+        sub: "client_test-rp".to_string(),
+        iss: "hearth".to_string(),
+        aud: Audience::single("hearth-api".to_string()),
+        // Far-future exp so verify_token_signature (signature-only) is
+        // deterministic regardless of wall-clock skew.
+        exp: 4_102_444_800, // 2100-01-01
+        iat: 1_700_000_000,
+        sid: "none".to_string(),
+        tid: realm_src.to_string(),
+        oid: None,
+        token_type: "access".to_string(),
+        jti: Some("test-jwt".to_string()),
+        fid: None,
+        scope: None,
+        nonce: None,
+        roles: Vec::new(),
+        groups: Vec::new(),
+        permissions: Vec::new(),
+        custom: BTreeMap::new(),
+    };
+    let pre_restore_jwt = src_signing_key.issue_token(&claims).expect("issue jwt");
+
+    // Snapshot JWKS for the kid/public-key continuity assertion.
+    let src_realm_jwks = src.identity().realm_jwks(&realm_src).expect("src jwks");
+    let src_ed25519_jwk = src_realm_jwks
+        .keys
+        .iter()
+        .find(|k| k.kty == "OKP" && k.crv.as_deref() == Some("Ed25519"))
+        .expect("source jwks must publish an Ed25519 key");
+    let src_kid = src_ed25519_jwk.kid.clone();
+    let src_pubkey_x = src_ed25519_jwk.x.clone().expect("Ed25519 jwk must have x");
+
+    // Pre-flight sanity check: the JWT verifies under its own source key.
+    verify_token_signature(&pre_restore_jwt, src_signing_key.public_key_bytes())
+        .expect("pre-flight: src JWT must verify under src key");
+
+    // ── Export the realm ───────────────────────────────────────────────
+    let tmp = export_realm_to_file(&src, &realm_src, &ExportOptions::default());
+    let slug = realm_slug(&src, &realm_src);
+
+    // ── Destination harness: restore into a fresh data dir ─────────────
+    let dst = common::TestHarness::embedded().await.expect("dst harness");
+    let reader = BackupArchive::open(tmp.path()).expect("open archive");
+    let importer = make_importer(&dst);
+    let report = importer
+        .import_realm(&slug, &reader, &ImportOptions::default())
+        .expect("import realm");
+    assert_eq!(report.realms.created, 1, "realm must be restored");
+    assert_eq!(report.users.created, 1, "user must be restored");
+    assert_eq!(report.realms.errored, 0);
+
+    let restored_realm_id: hearth::core::RealmId =
+        reader.realms()[0].realm_id.parse().expect("parse realm_id");
+
+    // ── Assertion 1: raw key material is byte-identical ────────────────
+    let dst_pkcs8 = dst
+        .identity()
+        .export_realm_signing_key_pkcs8(&restored_realm_id)
+        .expect("export dst signing key");
+    assert_eq!(
+        src_pkcs8, dst_pkcs8,
+        "restored realm's PKCS#8 signing key bytes must equal the source's — \
+         mismatch means `import_realm` regenerated the key (HEA-745 regression)"
+    );
+
+    // ── Assertion 2: JWKS continuity (kid + public coordinate) ─────────
+    let dst_realm_jwks = dst
+        .identity()
+        .realm_jwks(&restored_realm_id)
+        .expect("dst jwks");
+    let dst_ed25519_jwk = dst_realm_jwks
+        .keys
+        .iter()
+        .find(|k| k.kty == "OKP" && k.crv.as_deref() == Some("Ed25519"))
+        .expect("dst jwks must publish an Ed25519 key");
+    assert_eq!(
+        dst_ed25519_jwk.kid, src_kid,
+        "restored realm's JWKS kid must equal the source's — RPs that cached \
+         the kid would otherwise fail to find a matching key"
+    );
+    assert_eq!(
+        dst_ed25519_jwk.x.as_deref(),
+        Some(src_pubkey_x.as_str()),
+        "restored realm's Ed25519 public coordinate must equal the source's"
+    );
+
+    // ── Assertion 3: pre-restore JWT verifies under dst's public key ───
+    //
+    // Decode the destination's public key from its published JWK and
+    // verify the pre-backup JWT against it. This is the cryptographic
+    // proof that tokens issued before the backup survive restore — the
+    // exact regression HEA-745 fixes.
+    let dst_pubkey_bytes = URL_SAFE_NO_PAD
+        .decode(dst_ed25519_jwk.x.as_ref().expect("dst jwk x"))
+        .expect("decode dst Ed25519 x");
+    let verified_claims = verify_token_signature(&pre_restore_jwt, &dst_pubkey_bytes).expect(
+        "pre-restore JWT must validate against restored signing key — restoring with a \
+         freshly generated key (the HEA-745 bug) would surface here as InvalidToken",
+    );
+    assert_eq!(verified_claims.sub, "client_test-rp");
+    assert_eq!(verified_claims.tid, realm_src.to_string());
+}
+
 // ── 2. realm_scoped_backup ────────────────────────────────────────────────────
 
 /// Exports only `realm_a` from a two-realm harness, restores into a fresh
