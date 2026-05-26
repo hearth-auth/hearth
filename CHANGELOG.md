@@ -38,6 +38,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   the device fingerprint as trusted, and issues a full token pair.  Without this
   endpoint users with enrolled MFA on an unrecognised device received 401 forever.
 
+- **Phone number PII masking in SMS transport logs (HEA-857)** — all three SMS
+  transports (Twilio, AWS SNS, Log) now emit only the masked form of the recipient
+  phone number in tracing output (`+***4567` instead of the full E.164 number),
+  satisfying AC 3.5.2. The `mask_phone` helper lives in `src/identity/sms/mod.rs`.
+
 - **CSP GAP-4 remediation (HEA-824)** — vendored Hyperscript 0.9.13 as the
   eval-free replacement for Alpine.js; tooltip patterns migrated to pure CSS
   (`group-hover`/`group-focus-within`); audit row expand and migrations accordion

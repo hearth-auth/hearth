@@ -321,6 +321,7 @@ mod tests {
             used: false,
             nonce: None,
             resource: None,
+            amr_values: Vec::new(),
         };
         let key = keys::encode_oauth_code("hash1");
         s.put(&realm, &key, &serde_json::to_vec(&code).expect("serialize"))
@@ -351,6 +352,7 @@ mod tests {
             used: false,
             nonce: None,
             resource: None,
+            amr_values: Vec::new(),
         };
         let key = keys::encode_oauth_code("hash2");
         s.put(&realm, &key, &serde_json::to_vec(&code).expect("serialize"))
@@ -628,6 +630,7 @@ mod tests {
                 used: false,
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             };
             let key = keys::encode_oauth_code(&format!("expired_hash_{i}"));
             s.put(&realm, &key, &serde_json::to_vec(&code).expect("serialize"))

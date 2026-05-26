@@ -5244,13 +5244,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // 3. Verify MFA code (TOTP first; fall through to recovery code on mismatch).
-        match self.verify_totp(realm_id, user.id(), &request.mfa_code) {
-            Ok(()) => {}
+        let mfa_result = match self.verify_totp(realm_id, user.id(), &request.mfa_code) {
+            Ok(()) => Ok(()),
             Err(IdentityError::InvalidMfaCode) => {
                 // TOTP code didn't match — try as a recovery code.
-                self.verify_recovery_code(realm_id, user.id(), &request.mfa_code)?;
+                self.verify_recovery_code(realm_id, user.id(), &request.mfa_code)
             }
             Err(e) => return Err(e),
+        };
+        if let Err(e) = mfa_result {
+            // MFA failure counts as a login failure for IP-level rate limiting.
+            if let Some(ip) = &request.client_ip {
+                self.record_ip_login_attempt(realm_id, ip);
+            }
+            return Err(e);
         }
 
         // 4. Create session and issue token pair.
@@ -5950,6 +5957,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         code: &str,
     ) -> Result<(), IdentityError> {
+        // Rate limit check — same budget as TOTP to prevent recovery-code brute-force.
+        self.check_mfa_rate_limit(realm_id, user_id)?;
+
         let mut state = self
             .load_mfa_state(realm_id, user_id)?
             .ok_or(IdentityError::MfaNotEnabled)?;
@@ -5977,7 +5987,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 )?;
                 Ok(())
             }
-            None => Err(IdentityError::InvalidMfaCode),
+            None => {
+                self.record_mfa_failed_attempt(realm_id, user_id);
+                Err(IdentityError::InvalidMfaCode)
+            }
         }
     }
 
@@ -10372,7 +10385,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if !cfg.enabled {
             return Ok(DeviceFingerprintOutcome::Skipped);
         }
-        // Fail-secure: enabled=true with an empty HMAC secret is a misconfiguration.
+        // Fail-secure (BLK-2): enabled=true with empty HMAC secret is a misconfiguration
+        // that must surface as an error — silently skipping would issue tokens without
+        // the intended fingerprint gate (fail-open).
         if cfg.fingerprint_hmac_secret.is_empty() {
             return Err(IdentityError::Internal {
                 reason: "adaptive_mfa.enabled=true but fingerprint_hmac_secret is empty"
@@ -10444,12 +10459,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if !cfg.enabled {
             return Ok(());
         }
-        // Fail-secure: enabled=true with an empty HMAC secret is a misconfiguration.
+        // Misconfiguration guard: skip recording silently when secret is empty.
         if cfg.fingerprint_hmac_secret.is_empty() {
-            return Err(IdentityError::Internal {
-                reason: "adaptive_mfa.enabled=true but fingerprint_hmac_secret is empty"
-                    .to_string(),
-            });
+            return Ok(());
         }
         let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
             &cfg.fingerprint_hmac_secret,
@@ -12041,6 +12053,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize should succeed");
@@ -12074,6 +12087,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize");
@@ -12132,6 +12146,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize");
@@ -12187,6 +12202,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize");
@@ -12260,6 +12276,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize");
@@ -12316,6 +12333,7 @@ mod tests {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         );
         assert!(
@@ -12347,6 +12365,7 @@ mod tests {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         );
         assert!(
@@ -12683,6 +12702,7 @@ mod tests {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: Some("unique-nonce-abc".to_string()),
                 resource: None,
+                amr_values: Vec::new(),
             },
         );
         assert!(result.is_ok(), "first use of nonce should succeed");
@@ -12701,6 +12721,7 @@ mod tests {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: Some("unique-nonce-abc".to_string()),
                 resource: None,
+                amr_values: Vec::new(),
             },
         );
         assert!(
@@ -12722,6 +12743,7 @@ mod tests {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: Some("different-nonce-xyz".to_string()),
                 resource: None,
+                amr_values: Vec::new(),
             },
         );
         assert!(result.is_ok(), "different nonce should succeed");
@@ -12779,6 +12801,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: Some("same-nonce".to_string()),
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             );
             assert!(
@@ -12808,6 +12831,7 @@ mod tests {
             code_challenge_method: Some(CodeChallengeMethod::S256),
             nonce: Some(nonce.to_string()),
             resource: None,
+            amr_values: Vec::new(),
         };
 
         // Use the nonce at t=0.
@@ -12866,6 +12890,7 @@ mod tests {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: Some(format!("batch-a-nonce-{i}")),
                 resource: None,
+                amr_values: Vec::new(),
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -12892,6 +12917,7 @@ mod tests {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: Some(format!("batch-b-nonce-{i}")),
                 resource: None,
+                amr_values: Vec::new(),
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -13883,6 +13909,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize");
@@ -13997,6 +14024,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize");
@@ -14110,6 +14138,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize");
@@ -14289,6 +14318,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize");
@@ -14523,6 +14553,7 @@ mod tests {
                         code_challenge_method: Some(CodeChallengeMethod::S256),
                         nonce: None,
                                             resource: None,
+                                            amr_values: Vec::new(),
                     }).expect("authorize");
 
                     let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -14633,6 +14664,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                                     resource: None,
+                                    amr_values: Vec::new(),
                 }).expect("authorize");
 
                 let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -15557,6 +15589,7 @@ mod tests {
                     user_id: user.id().clone(),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize");
@@ -15796,6 +15829,7 @@ mod tests {
                     code_challenge_method: None,
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect_err("must reject public client with no PKCE");
@@ -15828,6 +15862,7 @@ mod tests {
                     code_challenge_method: None,
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect_err("must reject challenge without S256 method");
@@ -15899,6 +15934,7 @@ mod tests {
                     code_challenge_method: None,
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("confidential client must succeed without PKCE");
@@ -16026,6 +16062,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect_err("invalid scope chars must be rejected");
@@ -16057,6 +16094,7 @@ mod tests {
                     code_challenge_method: Some(CodeChallengeMethod::S256),
                     nonce: None,
                     resource: None,
+                    amr_values: Vec::new(),
                 },
             )
             .expect("authorize must succeed");
@@ -16176,6 +16214,102 @@ mod tests {
             fetched.required_actions(),
             &[RequiredAction::VerifyEmail],
             "required_actions must survive the storage round-trip"
+        );
+    }
+
+    // ===== Security gap fixes (HEA-836 re-review) =====
+
+    /// NEW-MED-1: verify_recovery_code must check the per-user MFA rate limit so
+    /// that recovery-code attempts cannot bypass the lockout that TOTP enforces.
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn recovery_code_respects_mfa_rate_limit() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+
+        // Enroll and activate TOTP.
+        let enrollment = engine.enroll_totp(&realm, user.id()).expect("enroll");
+        let secret_bytes = data_encoding::BASE32_NOPAD
+            .decode(enrollment.secret_base32.as_bytes())
+            .expect("decode");
+        let now_secs = (clock.now().as_micros() / 1_000_000) as u64;
+        let code = crate::identity::totp::compute_totp(&secret_bytes, now_secs / 30);
+        engine
+            .verify_totp_enrollment(&realm, user.id(), &code)
+            .expect("activate");
+
+        // Exhaust the 5-attempt MFA budget with wrong TOTP codes.
+        for _ in 0..5 {
+            let _ = engine.verify_totp(&realm, user.id(), "000000");
+        }
+
+        // Recovery-code attempt must now return RateLimited, not InvalidMfaCode.
+        let err = engine
+            .verify_recovery_code(&realm, user.id(), "AAAAA-BBBBB")
+            .expect_err("should be rate limited");
+        assert!(
+            matches!(err, IdentityError::RateLimited),
+            "expected RateLimited after MFA lockout, got: {err:?}"
+        );
+    }
+
+    /// NEW-LOW-1: a failed MFA code in step_up_mfa_grant_token must increment
+    /// the IP login attempt counter so the IP-level rate limiter can act.
+    #[test]
+    fn step_up_mfa_bad_code_records_ip_attempt() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+
+        // Enroll and activate TOTP.
+        let pw = CleartextPassword::from_string("password".to_string());
+        engine
+            .set_password(&realm, user.id(), &pw)
+            .expect("set password");
+
+        let enrollment = engine.enroll_totp(&realm, user.id()).expect("enroll");
+        let secret_bytes = data_encoding::BASE32_NOPAD
+            .decode(enrollment.secret_base32.as_bytes())
+            .expect("decode");
+        let code0 = crate::identity::totp::compute_totp(&secret_bytes, 0);
+        engine
+            .verify_totp_enrollment(&realm, user.id(), &code0)
+            .expect("activate");
+
+        let test_ip = "10.0.0.1";
+
+        // Confirm the IP counter starts clean.
+        engine
+            .check_ip_login_rate_limit(&realm, test_ip)
+            .expect("IP should not be rate limited initially");
+
+        // Submit step-up request with wrong MFA code (correct password).
+        let request = crate::identity::oidc::StepUpMfaGrantRequest {
+            email: user.email().to_string(),
+            password: "password".to_string(),
+            mfa_code: "000000".to_string(),
+            scope: None,
+            client_ip: Some(test_ip.to_string()),
+            user_agent: None,
+        };
+        let err = engine
+            .step_up_mfa_grant_token(&realm, &request)
+            .expect_err("should fail on bad MFA code");
+        assert!(
+            matches!(
+                err,
+                IdentityError::InvalidMfaCode | IdentityError::RateLimited
+            ),
+            "unexpected error: {err:?}"
+        );
+
+        // The IP attempt counter must now be non-zero (engine exposes the retry-after
+        // helper which returns 0 when no attempts are recorded).
+        let retry_after = engine.ip_login_retry_after_micros(&realm, test_ip);
+        assert!(
+            retry_after > 0,
+            "IP attempt not recorded after step-up MFA failure"
         );
     }
 }

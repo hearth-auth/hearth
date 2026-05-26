@@ -306,7 +306,9 @@ async fn adaptive_mfa_disabled_returns_skipped() {
     assert_eq!(outcome, DeviceFingerprintOutcome::Skipped);
 }
 
-/// Empty HMAC secret also returns Skipped (misconfiguration guard).
+/// Empty HMAC secret with adaptive_mfa enabled must return a hard Internal error
+/// (BLK-2: fail-secure, not fail-open). Silently skipping would allow tokens
+/// to be issued without the intended fingerprint gate.
 #[tokio::test]
 async fn empty_hmac_secret_returns_skipped() {
     let harness = common::TestHarness::embedded().await.expect("harness");
@@ -338,11 +340,14 @@ async fn empty_hmac_secret_returns_skipped() {
         )
         .expect("create user");
 
-    let outcome = harness
+    let err = harness
         .identity()
         .check_device_fingerprint(realm.id(), user.id(), "10.0.0.5", "TestAgent")
-        .expect("check");
-    assert_eq!(outcome, DeviceFingerprintOutcome::Skipped);
+        .expect_err("empty secret with enabled=true must return Internal error");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::Internal { .. }),
+        "expected Internal config error, got: {err:?}"
+    );
 }
 
 // ===================================================================

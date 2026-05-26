@@ -103,6 +103,26 @@ pub trait SmsSender: Send + Sync {
 /// Convenience alias for a shared dynamic [`SmsSender`].
 pub type SharedSmsSender = Arc<dyn SmsSender>;
 
+/// Returns the masked form of an E.164 phone number for safe use in
+/// observability output (AC 3.5.2).
+///
+/// Keeps the `+` prefix (if any) and the last four decimal digits visible;
+/// replaces everything in between with `***`. For example:
+/// `+15551234567` → `+***4567`, `07911123456` → `***3456`.
+pub(crate) fn mask_phone(phone: &str) -> String {
+    let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+    let last4 = if digits.len() > 4 {
+        &digits[digits.len() - 4..]
+    } else {
+        &digits
+    };
+    if phone.starts_with('+') {
+        format!("+***{last4}")
+    } else {
+        format!("***{last4}")
+    }
+}
+
 /// Rejects a field value that contains CR or LF — prevents header/body injection.
 pub(crate) fn reject_crlf(field: &str, value: &str) -> Result<(), SmsError> {
     if value.contains('\r') || value.contains('\n') {
@@ -163,5 +183,28 @@ mod tests {
     #[test]
     fn reject_crlf_passes_clean_input() {
         assert!(reject_crlf("field", "+15551234567").is_ok());
+    }
+
+    #[test]
+    fn mask_phone_e164_us() {
+        assert_eq!(mask_phone("+15551234567"), "+***4567");
+    }
+
+    #[test]
+    fn mask_phone_no_plus_prefix() {
+        assert_eq!(mask_phone("07911123456"), "***3456");
+    }
+
+    #[test]
+    fn mask_phone_short_number() {
+        // Fewer than 4 digits — show all digits, still safe.
+        assert_eq!(mask_phone("+123"), "+***123");
+    }
+
+    #[test]
+    fn mask_phone_hides_middle_digits() {
+        let masked = mask_phone("+447700900123");
+        assert!(!masked.contains("7700900"), "middle digits must not appear");
+        assert!(masked.ends_with("0123"), "last 4 must be visible");
     }
 }

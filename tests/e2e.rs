@@ -95,6 +95,7 @@ async fn developer_onramp_realm_app_oidc_login() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize");

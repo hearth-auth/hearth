@@ -617,6 +617,7 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize");

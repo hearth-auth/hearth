@@ -81,7 +81,7 @@ impl<H: SmsHttpTransport> SmsSender for TwilioSmsSender<H> {
         }
 
         tracing::info!(
-            recipient = %message.to,
+            recipient = %super::mask_phone(&message.to),
             "sms.send: delivered via Twilio"
         );
         Ok(())

@@ -84,6 +84,7 @@ async fn oidc_authorization_code_flow_roundtrip() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize");
@@ -413,6 +414,7 @@ async fn oidc_pkce_s256_flow() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize with PKCE");
@@ -448,6 +450,7 @@ async fn oidc_pkce_s256_flow() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize with PKCE again");
@@ -486,6 +489,7 @@ async fn oidc_pkce_s256_flow() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize with PKCE third time");
@@ -719,6 +723,7 @@ async fn conformance_token_endpoint_rfc6749() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize");
@@ -831,6 +836,7 @@ async fn conformance_token_endpoint_rfc6749() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize again");

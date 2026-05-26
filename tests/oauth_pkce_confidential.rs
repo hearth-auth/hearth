@@ -127,6 +127,7 @@ fn confidential_client_without_pkce_rejected_by_default() {
             code_challenge_method: None,
             nonce: None,
             resource: None,
+            amr_values: Vec::new(),
         },
     );
 
@@ -165,6 +166,7 @@ fn confidential_client_without_pkce_allowed_with_opt_out() {
                 code_challenge_method: None,
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("confidential client without PKCE must succeed when opt-out is configured");
@@ -212,6 +214,7 @@ fn public_client_without_pkce_always_rejected() {
             code_challenge_method: None,
             nonce: None,
             resource: None,
+            amr_values: Vec::new(),
         },
     );
 

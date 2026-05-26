@@ -24,7 +24,7 @@ impl SmsSender for LoggingSmsSender {
     fn send(&self, message: &SmsMessage) -> Result<(), SmsError> {
         reject_crlf("recipient", &message.to)?;
         tracing::warn!(
-            recipient = %message.to,
+            recipient = %super::mask_phone(&message.to),
             body      = %message.body,
             "sms.send (log transport): message logged instead of delivered"
         );

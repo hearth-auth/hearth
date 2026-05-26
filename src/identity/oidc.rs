@@ -1171,6 +1171,7 @@ mod tests {
             used: false,
             nonce: Some("test-nonce-abc".to_string()),
             resource: None,
+            amr_values: Vec::new(),
         };
 
         let json = serde_json::to_string(&code).expect("serialize");

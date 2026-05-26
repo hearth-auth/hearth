@@ -171,7 +171,7 @@ impl<H: SmsHttpTransport> SmsSender for SnsSmsSender<H> {
         }
 
         tracing::info!(
-            recipient = %message.to,
+            recipient = %super::mask_phone(&message.to),
             "sms.send: delivered via AWS SNS"
         );
         Ok(())
