@@ -41,6 +41,7 @@ use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::Serialize;
 use tracing::instrument;
+use zeroize::Zeroizing;
 
 use crate::audit::{AuditEngine, AuditQuery};
 use crate::core::RealmId;
@@ -357,7 +358,13 @@ fn encrypt_bytes(plaintext: &[u8], dek: &[u8; 32]) -> Result<Vec<u8>, BackupErro
 }
 
 /// AES-256-GCM decrypts a blob produced by [`encrypt_bytes`].
-pub fn decrypt_bytes(encrypted_json: &[u8], dek: &[u8; 32]) -> Result<Vec<u8>, BackupError> {
+///
+/// Returns a [`Zeroizing`] wrapper so the plaintext key material is actively
+/// overwritten when the returned value is dropped (HEA-750 M1).
+pub fn decrypt_bytes(
+    encrypted_json: &[u8],
+    dek: &[u8; 32],
+) -> Result<Zeroizing<Vec<u8>>, BackupError> {
     #[derive(serde::Deserialize)]
     struct Payload {
         nonce_b64: String,
@@ -386,7 +393,7 @@ pub fn decrypt_bytes(encrypted_json: &[u8], dek: &[u8; 32]) -> Result<Vec<u8>, B
         .map_err(|_| {
             BackupError::Crypto("decryption failed — wrong DEK or corrupted data".into())
         })?;
-    Ok(plaintext.to_vec())
+    Ok(Zeroizing::new(plaintext.to_vec()))
 }
 
 #[cfg(test)]
@@ -428,7 +435,7 @@ mod tests {
         let plaintext = b"this is my PKCS#8 signing key";
         let encrypted = encrypt_bytes(plaintext, &dek).expect("encrypt");
         let decrypted = decrypt_bytes(&encrypted, &dek).expect("decrypt");
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(&*decrypted, plaintext);
     }
 
     #[test]
@@ -445,5 +452,17 @@ mod tests {
         let a = BackupExporter::generate_dek().expect("dek a");
         let b = BackupExporter::generate_dek().expect("dek b");
         assert_ne!(a, b, "each generated DEK must be unique");
+    }
+
+    #[test]
+    fn decrypt_bytes_returns_zeroizing() {
+        // Type-level assertion: decrypt_bytes must return Zeroizing<Vec<u8>> so
+        // that the plaintext key material is actively overwritten when dropped,
+        // rather than relying on the OS to zero freed heap pages (HEA-750 M1).
+        use zeroize::Zeroizing;
+        let dek = BackupExporter::generate_dek().expect("generate DEK");
+        let enc = encrypt_bytes(b"pkcs8-key-material", &dek).expect("encrypt");
+        let result: Zeroizing<Vec<u8>> = decrypt_bytes(&enc, &dek).expect("decrypt");
+        assert_eq!(&*result, b"pkcs8-key-material");
     }
 }

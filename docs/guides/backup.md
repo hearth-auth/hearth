@@ -116,7 +116,7 @@ hearth backup restore \
   --data-dir /var/lib/hearth/data
 ```
 
-> **Note:** Signing keys in the archive are ignored by default during restore — Hearth generates a fresh signing key for each imported realm. To restore the original signing key (and preserve issued JWT signatures), pass the passphrase when prompted during an encrypted restore.
+> **Signing-key continuity.** Restore preserves each realm's Ed25519 signing key by default (HEA-745). Every JWT issued before backup keeps validating after restore, and the realm's published JWKS `kid` is unchanged. If you need a fresh key after restore — for example because the original key is suspected compromised — run `hearth realm rotate-signing-key` explicitly. See the [Disaster Recovery Guide](./disaster-recovery.md#post-incident-signing-key-rotation) for the rotation procedure.
 
 **Exit codes:** `0` success · `1` partial (some records skipped/failed) · `2` fatal error.
 

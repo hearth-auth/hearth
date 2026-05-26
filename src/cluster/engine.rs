@@ -22,8 +22,7 @@ use std::time::SystemTime;
 
 use openraft::error::{ClientWriteError, RaftError};
 use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
-use openraft::RaftMetrics;
-use openraft::{Config as RaftConfig, EntryPayload};
+use openraft::{Config as RaftConfig, EntryPayload, RaftMetrics, ServerState};
 use tokio::task::spawn_blocking;
 use tracing::{info, warn};
 
@@ -82,6 +81,12 @@ pub struct ClusterEngine {
     reads_allowed: Arc<AtomicBool>,
     /// Maximum acceptable replication lag in milliseconds (default 500).
     read_lag_threshold_ms: u64,
+    /// This node's own Raft node ID. `None` in single-node mode.
+    self_node_id: Option<u64>,
+    /// Initial membership derived from config at startup. Used by the
+    /// bootstrap HTTP handler without requiring access to `ClusterConfig`.
+    /// `None` in single-node mode.
+    initial_members: Option<BTreeMap<u64, HearthNode>>,
 }
 
 impl ClusterEngine {
@@ -94,6 +99,8 @@ impl ClusterEngine {
             raft: None,
             reads_allowed: Arc::new(AtomicBool::new(true)),
             read_lag_threshold_ms: 500,
+            self_node_id: None,
+            initial_members: None,
         }
     }
 
@@ -149,6 +156,23 @@ impl ClusterEngine {
             run_lag_monitor(raft_for_monitor, reads_flag, threshold).await;
         });
 
+        // Build initial membership map for use by the bootstrap HTTP handler.
+        let mut initial_members = BTreeMap::new();
+        initial_members.insert(
+            config.node_id,
+            HearthNode {
+                addr: config.peer_address.clone(),
+            },
+        );
+        for peer in &config.peers {
+            initial_members.insert(
+                peer.id,
+                HearthNode {
+                    addr: peer.address.clone(),
+                },
+            );
+        }
+
         info!(
             node_id = config.node_id,
             peer_address = %config.peer_address,
@@ -161,6 +185,8 @@ impl ClusterEngine {
             raft: Some(raft),
             reads_allowed,
             read_lag_threshold_ms: threshold,
+            self_node_id: Some(config.node_id),
+            initial_members: Some(initial_members),
         })
     }
 
@@ -192,6 +218,82 @@ impl ClusterEngine {
     /// Configured replication-lag threshold in milliseconds.
     pub fn read_lag_threshold_ms(&self) -> u64 {
         self.read_lag_threshold_ms
+    }
+
+    /// This node's own Raft node ID. `None` in single-node mode.
+    pub fn node_id(&self) -> Option<u64> {
+        self.self_node_id
+    }
+
+    /// Initial cluster membership map built from config at startup.
+    ///
+    /// Contains self + all configured peers. Used by the bootstrap HTTP
+    /// handler to call [`Self::initialize_cluster`] without needing to
+    /// re-parse `hearth.yaml`. `None` in single-node mode.
+    pub fn initial_members(&self) -> Option<&BTreeMap<u64, HearthNode>> {
+        self.initial_members.as_ref()
+    }
+
+    /// Transfer Raft leadership to another node.
+    ///
+    /// This node must be the current leader; returns [`ClusterError::NotLeader`]
+    /// otherwise. The implementation gracefully steps down by:
+    /// 1. Disabling re-election on this node via `runtime_config().elect(false)`.
+    /// 2. Triggering a cluster-wide election via `trigger().elect()`.
+    /// 3. Polling until a different node confirms leadership (≤ 5 s).
+    /// 4. Re-enabling re-election on this node.
+    ///
+    /// Returns the new leader's node ID. The caller decides whether the winner
+    /// matches a preferred target — this method does not attempt to target a
+    /// specific follower (openraft 0.9 has no targeted transfer API).
+    ///
+    /// **Note on availability:** writes will fail with `NoLeader` for up to
+    /// one election timeout (~1.5–3 s) during the step-down window. Operators
+    /// should avoid initiating transfer during write bursts.
+    pub async fn transfer_leadership(&self) -> Result<u64, ClusterError> {
+        let raft = self.raft.as_ref().ok_or_else(|| {
+            ClusterError::Raft("transfer_leadership called on single-node engine".to_string())
+        })?;
+
+        let my_id = {
+            let metrics = raft.metrics().borrow().clone();
+            if metrics.state != ServerState::Leader {
+                return Err(ClusterError::NotLeader {
+                    leader_addr: self.current_leader_addr(),
+                });
+            }
+            metrics.id
+        };
+
+        // Disable re-election so this node yields without immediately re-winning.
+        // runtime_config().elect() is the non-deprecated replacement for enable_elect().
+        raft.runtime_config().elect(false);
+
+        // Wake all followers for a new election.
+        if let Err(e) = raft.trigger().elect().await {
+            raft.runtime_config().elect(true);
+            return Err(ClusterError::Raft(e.to_string()));
+        }
+
+        // Poll up to 5 s for a different node to become leader.
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                let metrics = raft.metrics().borrow().clone();
+                if let Some(leader_id) = metrics.current_leader {
+                    if leader_id != my_id {
+                        return leader_id;
+                    }
+                }
+            }
+        })
+        .await;
+
+        // Always restore re-election capability regardless of outcome.
+        raft.runtime_config().elect(true);
+
+        result
+            .map_err(|_| ClusterError::Raft("leadership transfer timed out after 5 s".to_string()))
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────

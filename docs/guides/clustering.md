@@ -95,17 +95,54 @@ Bootstrapping initializes the cluster's initial membership. Do this **once** —
 
 ```bash
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/bootstrap \
-  -H "Authorization: Bearer <admin-token>"
+  -H "Authorization: Bearer <admin-token>" \
+  -H "X-Realm-ID: <realm-uuid>"
 ```
 
 This sends the initial membership list (derived from the node's `peers` + its own `node_id`) to `openraft`'s `initialize()`. The cluster holds an election and begins accepting writes within one election timeout (~1.5–3 seconds).
+
+**Expected response (`200 OK`):**
+
+```json
+{
+  "node_id": 1,
+  "term": 1,
+  "leader_id": 1
+}
+```
+
+`leader_id` is the node that won the election. If the election has not completed within 3 seconds, the response still returns `200` with the best available values.
+
+**Error responses:**
+- `409 Conflict` — cluster already initialized (safe to ignore on retry)
+- `503 Service Unavailable` — server is running in single-node mode (no `cluster:` config)
 
 4. Verify with the cluster status endpoint:
 
 ```bash
 curl -s http://10.0.0.1:8420/admin/cluster/status \
-  -H "Authorization: Bearer <admin-token>"
+  -H "Authorization: Bearer <admin-token>" \
+  -H "X-Realm-ID: <realm-uuid>"
 ```
+
+**Expected response (`200 OK`):**
+
+```json
+{
+  "role": "leader",
+  "term": 1,
+  "last_applied_index": 0,
+  "peers": [
+    { "id": 2, "addr": "10.0.0.2:8421", "is_healthy": true },
+    { "id": 3, "addr": "10.0.0.3:8421", "is_healthy": true }
+  ]
+}
+```
+
+`role` is one of `"leader"`, `"follower"`, `"candidate"`, `"learner"`, or `"unknown"`. `is_healthy` reflects whether the peer appears in the leader's replication map; on a follower node all peers report `is_healthy: false` (followers have no replication state).
+
+**Error responses:**
+- `503 Service Unavailable` — server is running in single-node mode or Raft is not yet initialized
 
 ---
 
@@ -158,11 +195,33 @@ Before shutting down a node, initiate a **Raft leadership transfer** to avoid a 
 ```bash
 # Transfer leadership before stopping the process
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/transfer-leadership \
-  -H "Authorization: Bearer <admin-token>"
+  -H "Authorization: Bearer <admin-token>" \
+  -H "X-Realm-ID: <realm-uuid>"
 
 # Then stop the process
 systemctl stop hearth
 ```
+
+The request body is optional. To request a specific target node, pass:
+
+```json
+{ "target_node_id": 2 }
+```
+
+`target_node_id` is accepted for forward-compatibility. In the current release, openraft 0.9 does not support targeted transfer, so the election winner is not guaranteed to be the requested node. Check `exact_target` in the response to verify.
+
+**Expected response (`200 OK`):**
+
+```json
+{
+  "new_leader_id": 2,
+  "exact_target": true
+}
+```
+
+**Error responses:**
+- `409 Conflict` — this node is not the leader; transfer must be initiated from the leader
+- `503 Service Unavailable` — server is running in single-node mode
 
 The server drains in-flight requests (up to `operational.shutdown_timeout_secs`, default 10 s) after receiving `SIGTERM`. The leadership transfer should complete well within this window on a healthy cluster.
 
@@ -173,11 +232,15 @@ The server drains in-flight requests (up to `operational.shutdown_timeout_secs`,
 Take backups from a **follower** to avoid adding I/O load to the leader (which is processing all writes).
 
 ```bash
-# Snapshot the data directory on a follower node
-hearth snapshot --data-dir /var/lib/hearth/data --output /backups/hearth-$(date +%F).snap
+# Create a backup archive from a follower node
+hearth backup create \
+  --data-dir /var/lib/hearth/data \
+  --output /backups/hearth-$(date +%F).hearth-backup
 ```
 
 The Raft log (`raft.db`) is ephemeral metadata — only the storage WAL and SSTs need to be backed up. Restoring to a new node from a backup and then rejoining the cluster is the recommended recovery path for a completely failed node.
+
+See the [Backup and Restore Guide](./backup.md) for the full `hearth backup` CLI reference, archive format, and restore procedure.
 
 ---
 

@@ -26,6 +26,7 @@ use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{debug, error, info, Level};
 
 use crate::audit::{AuditEngine, CreateAuditEvent};
+use crate::cluster::ClusterEngine;
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
 use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
 use crate::identity::{IdentityEngine, PasswordGrantRequest, UpdateRealmRequest};
@@ -109,6 +110,11 @@ pub struct AppState {
     /// to derive the real client IP. When empty (default), the peer socket
     /// IP is used directly.
     pub trusted_proxies: Vec<IpAddr>,
+    /// Cluster engine for Raft admin operations. `None` in single-node mode.
+    ///
+    /// When `None`, all `/admin/cluster/*` endpoints return `503 Service
+    /// Unavailable` rather than panicking.
+    pub cluster: Option<Arc<ClusterEngine>>,
 }
 
 impl AppState {
@@ -129,6 +135,7 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
+            cluster: None,
         }
     }
 
@@ -151,6 +158,7 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
+            cluster: None,
         }
     }
 
@@ -175,6 +183,7 @@ impl AppState {
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
+            cluster: None,
         }
     }
 
@@ -199,6 +208,12 @@ impl AppState {
     /// Sets the signing key rotation grace period.
     pub fn with_signing_key_rotation_grace_period_secs(mut self, secs: u64) -> Self {
         self.signing_key_rotation_grace_period_secs = secs;
+        self
+    }
+
+    /// Attaches a cluster engine, enabling the `/admin/cluster/*` endpoints.
+    pub fn with_cluster(mut self, engine: Arc<ClusterEngine>) -> Self {
+        self.cluster = Some(engine);
         self
     }
 }
@@ -287,6 +302,34 @@ pub(crate) fn extract_admin_auth(
     check_admin_rate_limit(state, &user_id)?;
 
     Ok(AdminAuth { realm_id, user_id })
+}
+
+/// Extracts and validates admin authentication for cluster-level operations.
+///
+/// Identical to [`extract_admin_auth`] but additionally asserts that the
+/// `X-Realm-ID` header identifies the **system realm** (nil UUID). Cluster
+/// operations are node-wide, not realm-scoped; accepting a tenant-realm token
+/// would allow a tenant admin to transfer Raft leadership or bootstrap the
+/// cluster — a privilege-escalation vector (HEA-763).
+///
+/// Returns `403 Forbidden` with `"cluster admin requires system realm"` if the
+/// realm is non-nil, even when the bearer token is otherwise valid.
+///
+/// **Future note:** if `extract_admin_auth` is ever changed to support
+/// non-realm-scoped tokens (e.g. a static allowlist), this function still
+/// provides the correct boundary for cluster endpoints.
+pub(crate) fn extract_cluster_admin_auth(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<AdminAuth, (StatusCode, Json<serde_json::Value>)> {
+    let auth = extract_admin_auth(headers, state)?;
+    if !auth.realm_id.as_uuid().is_nil() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "cluster admin requires system realm"})),
+        ));
+    }
+    Ok(auth)
 }
 
 /// Checks the admin API rate limit for a user.
@@ -496,6 +539,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/realms/{realm_id}/config",
             axum::routing::patch(admin_patch_realm_config),
+        )
+        .route(
+            "/cluster/bootstrap",
+            axum::routing::post(crate::protocol::cluster_admin::admin_cluster_bootstrap),
+        )
+        .route(
+            "/cluster/status",
+            axum::routing::get(crate::protocol::cluster_admin::admin_cluster_status),
+        )
+        .route(
+            "/cluster/transfer-leadership",
+            axum::routing::post(crate::protocol::cluster_admin::admin_cluster_transfer_leadership),
         );
 
     Router::new()
