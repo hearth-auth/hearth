@@ -1,0 +1,230 @@
+/**
+ * Hearth docs theme — ember dark.
+ * Maps Docusaurus IFM variables to Hearth design tokens.
+ * See docs/specs/THEME.md for the full token reference.
+ *
+ * Color tokens:
+ *   ember-gold    #f5b544   ember-orange  #e8743b   ember-deep    #a8321f
+ *   graphite-950  #0e0e12   graphite-900  #141418   graphite-850  #191920
+ *   graphite-800  #1f1f27   graphite-700  #2d2d38   graphite-600  #3a3a46
+ *   graphite-500  #5c5c68   graphite-400  #7a7a85   graphite-300  #a8a39a
+ *   graphite-050  #f5f1e8
+ */
+
+/* ─── Google Fonts ─────────────────────────────────────────────────── */
+/* Loaded via headTags in docusaurus.config.js; import here as fallback. */
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;1,9..144,400&family=JetBrains+Mono:wght@400;500&family=Manrope:wght@400;500;600&display=swap');
+
+/* ─── Root / light placeholder (never actually shown — dark-only site) */
+:root {
+  --ifm-color-primary: #e8743b;
+  --ifm-color-primary-dark: #d6612a;
+  --ifm-color-primary-darker: #c85b26;
+  --ifm-color-primary-darkest: #a8321f;
+  --ifm-color-primary-light: #ec8a55;
+  --ifm-color-primary-lighter: #ef9464;
+  --ifm-color-primary-lightest: #f5b544;
+
+  --ifm-font-family-base: 'Manrope', system-ui, sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'SFMono-Regular', monospace;
+  --ifm-heading-font-family: 'Fraunces', Georgia, serif;
+
+  --ifm-code-font-size: 93%;
+  --docusaurus-highlighted-code-line-bg: rgba(232, 116, 59, 0.1);
+}
+
+/* ─── Dark theme (the only theme ever rendered) ─────────────────────── */
+[data-theme='dark'] {
+  /* Primary interactive / accent — ember orange */
+  --ifm-color-primary: #e8743b;
+  --ifm-color-primary-dark: #d6612a;
+  --ifm-color-primary-darker: #c85b26;
+  --ifm-color-primary-darkest: #a8321f;
+  --ifm-color-primary-light: #ec8a55;
+  --ifm-color-primary-lighter: #ef9464;
+  --ifm-color-primary-lightest: #f5b544;
+
+  /* Surfaces */
+  --ifm-background-color: #141418;           /* graphite-900 — page bg */
+  --ifm-background-surface-color: #191920;   /* graphite-850 — raised panels */
+
+  /* Text */
+  --ifm-color-content: #f5f1e8;              /* graphite-050 — primary text */
+  --ifm-color-content-secondary: #a8a39a;    /* graphite-300 — body / secondary */
+
+  /* Navbar */
+  --ifm-navbar-background-color: #0e0e12;    /* graphite-950 */
+  --ifm-navbar-link-color: #f5f1e8;
+  --ifm-navbar-link-hover-color: #e8743b;
+  --ifm-navbar-shadow: 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  /* Footer */
+  --ifm-footer-background-color: #0e0e12;   /* graphite-950 */
+  --ifm-footer-color: #a8a39a;
+  --ifm-footer-link-color: #a8a39a;
+  --ifm-footer-link-hover-color: #e8743b;
+  --ifm-footer-title-color: #f5f1e8;
+
+  /* Sidebar */
+  --ifm-menu-color: #a8a39a;
+  --ifm-menu-color-active: #f5f1e8;
+  --ifm-menu-color-background-active: rgba(232, 116, 59, 0.12);
+  --ifm-menu-color-background-hover: rgba(255, 255, 255, 0.04);
+
+  /* Links */
+  --ifm-link-color: #e8743b;
+  --ifm-link-hover-color: #f5b544;
+
+  /* Borders */
+  --ifm-toc-border-color: rgba(255, 255, 255, 0.06);
+  --ifm-color-emphasis-300: rgba(255, 255, 255, 0.10);
+
+  /* Code blocks */
+  --ifm-code-background: #1f1f27;            /* graphite-800 */
+  --ifm-pre-background: #1f1f27;
+  --docusaurus-highlighted-code-line-bg: rgba(232, 116, 59, 0.10);
+
+  /* Borders / dividers */
+  --ifm-hr-border-color: rgba(255, 255, 255, 0.06);
+  --ifm-table-border-color: rgba(255, 255, 255, 0.10);
+  --ifm-color-gray-600: #3a3a46;             /* graphite-600 */
+
+  /* Alerts / callouts */
+  --ifm-color-info-contrast-background: rgba(95, 135, 210, 0.10);
+  --ifm-color-warning-contrast-background: rgba(245, 181, 68, 0.10);
+  --ifm-color-danger-contrast-background: rgba(224, 93, 93, 0.10);
+  --ifm-color-success-contrast-background: rgba(74, 158, 120, 0.10);
+  --ifm-color-info-dark: #8aa8e0;
+  --ifm-color-warning-dark: #f5b544;
+  --ifm-color-danger-dark: #ec8080;
+  --ifm-color-success-dark: #6ec198;
+
+  /* Shape */
+  --ifm-button-border-radius: 10px;          /* r-md */
+  --ifm-card-border-radius: 14px;            /* r-lg */
+  --ifm-global-radius: 6px;                  /* r-sm */
+
+  /* Focus ring — ember glow */
+  --ifm-focus-visible-outline-color: rgba(245, 181, 68, 0.50);
+  --ifm-focus-visible-outline-width: 3px;
+
+  /* Font families */
+  --ifm-font-family-base: 'Manrope', system-ui, sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', 'SFMono-Regular', monospace;
+  --ifm-heading-font-family: 'Fraunces', Georgia, serif;
+}
+
+/* ─── Heading typography ─────────────────────────────────────────────── */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: -0.02em;
+}
+
+h1 { letter-spacing: -0.03em; }
+h3 { letter-spacing: -0.01em; }
+
+/* ─── Code / pre ─────────────────────────────────────────────────────── */
+code {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  background: #1f1f27;
+  color: #f5f1e8;
+}
+
+pre code {
+  border: none;
+  background: transparent;
+}
+
+/* ─── Navbar ─────────────────────────────────────────────────────────── */
+.navbar {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.navbar__title {
+  font-family: 'Fraunces', serif;
+  font-weight: 500;
+  font-size: 1.2rem;
+  letter-spacing: -0.02em;
+  color: #f5f1e8;
+}
+
+.navbar__logo {
+  height: 28px;
+}
+
+/* ─── Sidebar ────────────────────────────────────────────────────────── */
+.menu__link--active {
+  background-color: rgba(232, 116, 59, 0.10) !important;
+  color: #f5f1e8 !important;
+  border-left: 2px solid #e8743b;
+}
+
+.menu__link {
+  border-radius: 6px;
+  transition: background 180ms ease, color 180ms ease;
+}
+
+/* ─── Tables ─────────────────────────────────────────────────────────── */
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th {
+  background-color: #1f1f27;
+  color: #f5f1e8;
+  font-family: 'Manrope', sans-serif;
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+tr:nth-child(even) td {
+  background-color: rgba(255, 255, 255, 0.025);
+}
+
+/* ─── Admonitions ────────────────────────────────────────────────────── */
+.alert {
+  border-radius: 10px;
+  border-left-width: 3px;
+}
+
+/* ─── Footer ─────────────────────────────────────────────────────────── */
+.footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ─── Buttons ────────────────────────────────────────────────────────── */
+.button--primary {
+  background: linear-gradient(135deg, #f5b544 0%, #e8743b 55%, #a8321f 100%);
+  border: none;
+  color: #141418;
+  font-weight: 600;
+  transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+.button--primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px -4px rgba(232, 116, 59, 0.35);
+  color: #141418;
+}
+
+/* ─── DocSearch (Algolia placeholder) — remove when Algolia is wired ── */
+/* Local search styles inherit automatically from the plugin. */
+
+/* ─── Version badge ──────────────────────────────────────────────────── */
+.badge--secondary {
+  background: rgba(232, 116, 59, 0.12);
+  color: #e8743b;
+  border: 1px solid rgba(232, 116, 59, 0.25);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ─── Scrollbar ──────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #141418; }
+::-webkit-scrollbar-thumb { background: #3a3a46; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #5c5c68; }
