@@ -40,7 +40,8 @@ use crate::identity::error::IdentityError;
 use crate::identity::ra_token::{self, OidcParams};
 use crate::identity::CodeChallengeMethod;
 use crate::identity::RequiredAction;
-use crate::identity::{CleartextPassword, UpdateUserRequest};
+use crate::identity::{CleartextPassword, SessionContext, UpdateUserRequest};
+use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
 use crate::protocol::web::oauth_consent::AuthorizeQuery;
 
 use super::handlers::append_cookie;
@@ -181,6 +182,108 @@ pub fn required_action_check(
     Some(response)
 }
 
+/// Checks whether the authenticating user has pending required actions for
+/// the **direct browser login path** (not OIDC).
+///
+/// Returns `Some(redirect_response)` when actions are pending — the caller
+/// MUST return this response immediately instead of creating a session.
+/// Returns `None` when no actions are pending and the login can proceed.
+///
+/// Unlike [`required_action_check`], this generates an RA token without
+/// OIDC params; flow resumption creates a session cookie and redirects to
+/// `return_to` once all actions are complete.
+pub fn required_action_check_browser(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    return_to: Option<&str>,
+    headers: &HeaderMap,
+    now: Timestamp,
+) -> Option<Response> {
+    let user = state.identity.get_user(realm, user_id).ok().flatten()?;
+
+    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
+    if actions.is_empty() {
+        return None;
+    }
+
+    actions.sort_by_key(|a| a.priority());
+    let first = actions[0];
+
+    let token = match state.identity.generate_browser_ra_token(
+        realm,
+        user_id,
+        actions,
+        return_to.map(str::to_string),
+        now,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "required_action_check_browser: generate_browser_ra_token failed");
+            return Some(handlers_common::server_error());
+        }
+    };
+
+    let secure = state.is_secure_request(headers);
+    let cookie = ra_token::ra_session_cookie(&token, secure);
+    let path = format!("/required-action/{}", first.as_path_segment());
+    let mut response = Redirect::to(&path).into_response();
+    append_cookie(&mut response, &cookie);
+    Some(response)
+}
+
+/// Clears the RA cookie, creates a session, and redirects to the original
+/// destination for the **direct browser login path**.
+///
+/// Called when all required actions have been completed on the browser path.
+pub fn resume_browser_flow(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_sub: &str,
+    return_to: Option<String>,
+    secure: bool,
+) -> Response {
+    let clear_cookie = ra_token::clear_ra_session_cookie(secure);
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(user_sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+
+    let session = match state
+        .identity
+        .create_session(realm, &user_id, &SessionContext::default())
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "resume_browser_flow: create_session failed");
+            return handlers_common::server_error();
+        }
+    };
+
+    let IssuedCookies {
+        session_cookie,
+        csrf_cookie,
+    } = issue_auth_cookies(&state.cookie_secret, realm, session.id(), secure);
+
+    let last_realm_cookie = super::auth::last_realm_cookie(
+        &super::auth::last_realm_value(state.identity.as_ref(), realm),
+        secure,
+    );
+
+    let location = return_to
+        .as_deref()
+        .and_then(super::auth::sanitize_return_to)
+        .unwrap_or_else(|| "/ui".to_string());
+
+    let mut response = Redirect::to(&location).into_response();
+    append_cookie(&mut response, &clear_cookie);
+    append_cookie(&mut response, &session_cookie);
+    append_cookie(&mut response, &csrf_cookie);
+    append_cookie(&mut response, &last_realm_cookie);
+    response
+}
+
 // ---------------------------------------------------------------------------
 // GET /required-action/{action}
 // ---------------------------------------------------------------------------
@@ -272,7 +375,25 @@ pub async fn action_complete(
         .collect();
 
     if remaining.is_empty() {
-        resume_oidc_flow(&state, &realm, &claims.sub, claims.oidc_params, secure)
+        if claims.browser_return_to.is_some() || claims.oidc_params.is_none() {
+            resume_browser_flow(
+                &state,
+                &realm,
+                &claims.sub,
+                claims.browser_return_to,
+                secure,
+            )
+        } else {
+            // SAFETY: checked oidc_params.is_some() via the else branch.
+            #[allow(clippy::unwrap_used)]
+            resume_oidc_flow(
+                &state,
+                &realm,
+                &claims.sub,
+                claims.oidc_params.unwrap(),
+                secure,
+            )
+        }
     } else {
         next_required_action(
             &state,
@@ -280,6 +401,7 @@ pub async fn action_complete(
             &claims.sub,
             remaining,
             claims.oidc_params,
+            claims.browser_return_to,
             secure,
             now,
         )
@@ -358,12 +480,16 @@ pub fn resume_oidc_flow(
 
 /// Generates a fresh RA session JWT for the remaining actions and redirects
 /// to the next action page.  (AC-3: sequential multi-action flow)
+///
+/// Exactly one of `oidc_params` or `browser_return_to` should be `Some` —
+/// whichever was set when the RA flow was originally initiated.
 pub fn next_required_action(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_sub: &str,
     mut remaining: Vec<RequiredAction>,
-    oidc_params: OidcParams,
+    oidc_params: Option<OidcParams>,
+    browser_return_to: Option<String>,
     secure: bool,
     now: Timestamp,
 ) -> Response {
@@ -375,14 +501,30 @@ pub fn next_required_action(
     };
     let user_id = UserId::new(user_uuid);
 
-    let token = match state
-        .identity
-        .generate_ra_token(realm, &user_id, remaining, oidc_params, now)
-    {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!(error = %e, "next_required_action: generate_ra_token failed");
-            return handlers_common::server_error();
+    let token = if let Some(oidc) = oidc_params {
+        match state
+            .identity
+            .generate_ra_token(realm, &user_id, remaining, oidc, now)
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "next_required_action: generate_ra_token failed");
+                return handlers_common::server_error();
+            }
+        }
+    } else {
+        match state.identity.generate_browser_ra_token(
+            realm,
+            &user_id,
+            remaining,
+            browser_return_to,
+            now,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "next_required_action: generate_browser_ra_token failed");
+                return handlers_common::server_error();
+            }
         }
     };
 
@@ -532,7 +674,25 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
             .collect();
 
         return if remaining.is_empty() {
-            resume_oidc_flow(&state, &realm, &claims.sub, claims.oidc_params, secure)
+            if claims.browser_return_to.is_some() || claims.oidc_params.is_none() {
+                resume_browser_flow(
+                    &state,
+                    &realm,
+                    &claims.sub,
+                    claims.browser_return_to,
+                    secure,
+                )
+            } else {
+                // INVARIANT: oidc_params is Some when browser_return_to is None.
+                #[allow(clippy::unwrap_used)]
+                resume_oidc_flow(
+                    &state,
+                    &realm,
+                    &claims.sub,
+                    claims.oidc_params.unwrap(),
+                    secure,
+                )
+            }
         } else {
             next_required_action(
                 &state,
@@ -540,6 +700,7 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
                 &claims.sub,
                 remaining,
                 claims.oidc_params,
+                claims.browser_return_to,
                 secure,
                 now,
             )
@@ -678,7 +839,7 @@ pub async fn verify_email_confirm(
                 tracing::warn!(error = %e, "verify_email_confirm: audit append failed");
             }
 
-            // Advance OIDC flow.
+            // Advance flow (OIDC or browser).
             let remaining: Vec<RequiredAction> = claims
                 .pending_actions
                 .into_iter()
@@ -686,7 +847,25 @@ pub async fn verify_email_confirm(
                 .collect();
 
             if remaining.is_empty() {
-                resume_oidc_flow(&state, &realm, &claims.sub, claims.oidc_params, secure)
+                if claims.browser_return_to.is_some() || claims.oidc_params.is_none() {
+                    resume_browser_flow(
+                        &state,
+                        &realm,
+                        &claims.sub,
+                        claims.browser_return_to,
+                        secure,
+                    )
+                } else {
+                    // INVARIANT: oidc_params is Some when browser_return_to is None.
+                    #[allow(clippy::unwrap_used)]
+                    resume_oidc_flow(
+                        &state,
+                        &realm,
+                        &claims.sub,
+                        claims.oidc_params.unwrap(),
+                        secure,
+                    )
+                }
             } else {
                 next_required_action(
                     &state,
@@ -694,6 +873,7 @@ pub async fn verify_email_confirm(
                     &claims.sub,
                     remaining,
                     claims.oidc_params,
+                    claims.browser_return_to,
                     secure,
                     now,
                 )
@@ -863,7 +1043,25 @@ pub async fn update_password_submit(
         .collect();
 
     if remaining.is_empty() {
-        resume_oidc_flow(&state, &realm, &claims.sub, claims.oidc_params, secure)
+        if claims.browser_return_to.is_some() || claims.oidc_params.is_none() {
+            resume_browser_flow(
+                &state,
+                &realm,
+                &claims.sub,
+                claims.browser_return_to,
+                secure,
+            )
+        } else {
+            // INVARIANT: oidc_params is Some when browser_return_to is None.
+            #[allow(clippy::unwrap_used)]
+            resume_oidc_flow(
+                &state,
+                &realm,
+                &claims.sub,
+                claims.oidc_params.unwrap(),
+                secure,
+            )
+        }
     } else {
         next_required_action(
             &state,
@@ -871,6 +1069,7 @@ pub async fn update_password_submit(
             &claims.sub,
             remaining,
             claims.oidc_params,
+            claims.browser_return_to,
             secure,
             now,
         )

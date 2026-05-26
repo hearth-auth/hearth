@@ -119,7 +119,7 @@ pub trait IdentityEngine: Send + Sync {
     /// the new active key and any non-expired retiring keys are included.
     fn realm_jwks(&self, realm_id: &RealmId) -> Result<JwksDocument, IdentityError>;
 
-    /// Generates a signed Required-Action session JWT for the given user.
+    /// Generates a signed Required-Action session JWT for the OIDC login path.
     ///
     /// Signs with the realm's Ed25519 key. The `pending_actions` list is
     /// embedded in the token verbatim — callers are responsible for sorting by
@@ -130,6 +130,20 @@ pub trait IdentityEngine: Send + Sync {
         user_id: &UserId,
         pending_actions: Vec<RequiredAction>,
         oidc_params: ra_token::OidcParams,
+        now: Timestamp,
+    ) -> Result<String, IdentityError>;
+
+    /// Generates a signed Required-Action session JWT for the direct browser
+    /// login path.
+    ///
+    /// After all actions complete, the flow resumes by creating a session
+    /// cookie and redirecting to `return_to` (or `/ui` when `None`).
+    fn generate_browser_ra_token(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        pending_actions: Vec<RequiredAction>,
+        return_to: Option<String>,
         now: Timestamp,
     ) -> Result<String, IdentityError>;
 
