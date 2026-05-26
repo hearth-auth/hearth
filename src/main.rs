@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::config::{Config, EmailTransport, EnvVarWarningKind, ValidationIssue};
+use hearth::config::{Config, EmailTransport, EnvVarWarningKind, SmsTransport, ValidationIssue};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::email::mailcatcher::{
     generate_password, MailcatcherSender, MailcatcherState,
@@ -19,6 +19,9 @@ use hearth::identity::email::{
     MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender, SharedEmailSender,
 };
 use hearth::identity::onboarding::{self, OnboardingService};
+use hearth::identity::sms::{
+    LoggingSmsSender, SharedSmsSender, SmsSecret, SnsSmsSender, TwilioSmsSender,
+};
 use hearth::identity::{
     CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, OidcConfig,
     RateLimitConfig, TokenConfig,
@@ -941,6 +944,27 @@ async fn run_serve(
     let email_sender: SharedEmailSender = build_email_sender(&config, mailcatcher_state.as_ref())?;
     let email_service = Arc::new(build_email_service(email_sender, &config)?);
 
+    // SMS sender (default: log transport).
+    // HEARTH_SMS_OTP_HMAC_KEY is required in production so OTP codes are
+    // cryptographically bound to the server; the Log transport in dev mode
+    // skips the check to avoid friction during local development.
+    let sms_otp_hmac_key: Option<String> = match std::env::var("HEARTH_SMS_OTP_HMAC_KEY") {
+        Ok(key) if !key.is_empty() => Some(key),
+        Ok(_) | Err(_) => {
+            if config.sms.transport != SmsTransport::Log || !config.dev_mode {
+                return Err("HEARTH_SMS_OTP_HMAC_KEY environment variable is required \
+                     when sms.transport is not 'log' or when running in production mode"
+                    .into());
+            }
+            None
+        }
+    };
+    let _sms_otp_hmac_key = sms_otp_hmac_key; // reserved for OTP issuance (HEA-829)
+    let _sms_sender: SharedSmsSender = build_sms_sender(&config)?; // reserved for SMS MFA (HEA-829)
+    if config.sms.transport == SmsTransport::Log && !config.dev_mode {
+        warn!("sms.transport = log is active outside dev mode — no real SMS messages will be sent");
+    }
+
     // Ensure a first-run setup token exists BEFORE realm reconciliation.
     // Reconciliation may auto-create realms from YAML config, which would
     // make is_first_run() return false and prevent the setup URL from being
@@ -1813,6 +1837,45 @@ fn build_email_sender(
                 ApiKey::new(mt.api_key.clone()),
                 from.clone(),
                 mt.inbox_id,
+            ))
+        }
+    })
+}
+
+/// Builds the outbound SMS sender from configuration.
+///
+/// Returns the appropriate transport adapter based on the configured
+/// `sms.transport`. Fails if the transport config is structurally invalid.
+fn build_sms_sender(config: &Config) -> Result<SharedSmsSender, Box<dyn std::error::Error>> {
+    use hearth::identity::sms::http::UreqSmsTransport;
+
+    Ok(match config.sms.transport {
+        SmsTransport::Log => Arc::new(LoggingSmsSender::new()),
+        SmsTransport::Twilio => {
+            let tw = config
+                .sms
+                .twilio
+                .as_ref()
+                .ok_or("sms.twilio block is required for twilio transport")?;
+            Arc::new(TwilioSmsSender::new(
+                UreqSmsTransport,
+                tw.account_sid.clone(),
+                SmsSecret::new(tw.auth_token.clone()),
+                tw.from.clone(),
+            ))
+        }
+        SmsTransport::AwsSns => {
+            let sns = config
+                .sms
+                .aws_sns
+                .as_ref()
+                .ok_or("sms.aws_sns block is required for awssns transport")?;
+            Arc::new(SnsSmsSender::new(
+                UreqSmsTransport,
+                sns.region.clone(),
+                sns.access_key_id.clone(),
+                SmsSecret::new(sns.secret_access_key.clone()),
+                sns.sender_id.clone(),
             ))
         }
     })

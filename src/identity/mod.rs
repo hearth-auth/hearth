@@ -21,6 +21,7 @@ pub mod oidc;
 pub mod onboarding;
 pub mod ra_token;
 pub mod reconcile;
+pub mod sms;
 pub mod tokens;
 pub(crate) mod totp;
 mod types;
@@ -45,6 +46,10 @@ pub use oidc::{
     IntrospectionResponse, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
     PasswordGrantRequest, PasswordGrantResponse, RegisterClientRequest, TokenExchangeRequest,
     TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest, UserInfoResponse,
+};
+pub use sms::{
+    LoggingSmsSender, SharedSmsSender, SmsError, SmsMessage, SmsSecret, SmsSender, SnsSmsSender,
+    StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_token_signature, IssueTokenRequest,

@@ -23,7 +23,8 @@ pub use types::{
     ProtectedResourceYamlConfig, RateLimitYaml, RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml,
     RealmScimYaml, RealmTokenYaml, RealmWebYaml, RealmYamlConfig, RoleYamlConfig,
     SamlServiceProviderYaml, ScopeBundleYamlConfig, SecurityYaml, SendgridConfig, ServerConfig,
-    SmtpConfig, SmtpEncryption, StorageSection, TokenYamlConfig,
+    SmsConfig, SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection,
+    TokenYamlConfig, TwilioConfig,
 };
 
 /// Helper: construct a validation error without repeating the struct
@@ -74,6 +75,9 @@ pub struct Config {
     /// Outbound email delivery settings.
     #[serde(default)]
     pub email: EmailConfig,
+    /// Outbound SMS delivery settings.
+    #[serde(default)]
+    pub sms: SmsConfig,
     /// First-run onboarding settings.
     #[serde(default)]
     pub onboarding: OnboardingConfig,
@@ -191,6 +195,7 @@ impl Config {
             },
             operational: OperationalConfig::default(),
             email: EmailConfig::default(),
+            sms: SmsConfig::default(),
             onboarding: OnboardingConfig::default(),
             branding: BrandingConfig::default(),
             oidc: OidcYamlConfig::default(),
@@ -347,6 +352,8 @@ impl Config {
         validate_token_all(&self.token, &mut issues);
         // Email
         validate_email_all(&self.email, &mut issues);
+        // SMS
+        validate_sms_all(&self.sms, &mut issues);
         // Branding
         validate_branding_all(&self.branding, &mut issues);
         // Realm configs
@@ -489,6 +496,7 @@ impl Config {
         validate_oidc(&self.oidc, self.dev_mode)?;
         validate_token(&self.token)?;
         validate_email(&self.email)?;
+        validate_sms(&self.sms)?;
         validate_branding(&self.branding)?;
         validate_realm_names(self.realms.as_ref())?;
         validate_realm_web_configs(self.realms.as_ref())?;
@@ -1001,6 +1009,71 @@ fn validate_email_mailtrap(email: &EmailConfig) -> Result<(), ConfigError> {
         return Err(invalid("email.mailtrap.api_key", "must not be empty"));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SMS validators
+// ---------------------------------------------------------------------------
+
+/// Validates SMS transport configuration (fail-fast path).
+fn validate_sms(sms: &SmsConfig) -> Result<(), ConfigError> {
+    match sms.transport {
+        SmsTransport::Log => Ok(()),
+        SmsTransport::Twilio => validate_sms_twilio(sms),
+        SmsTransport::AwsSns => validate_sms_awssns(sms),
+    }
+}
+
+/// Validates Twilio SMS transport configuration.
+fn validate_sms_twilio(sms: &SmsConfig) -> Result<(), ConfigError> {
+    let tw = sms.twilio.as_ref().ok_or_else(|| {
+        invalid(
+            "sms.twilio",
+            "twilio block is required when sms.transport is twilio",
+        )
+    })?;
+    if tw.account_sid.is_empty() {
+        return Err(invalid("sms.twilio.account_sid", "must not be empty"));
+    }
+    if tw.auth_token.is_empty() {
+        return Err(invalid("sms.twilio.auth_token", "must not be empty"));
+    }
+    if tw.from.is_empty() {
+        return Err(invalid("sms.twilio.from", "must not be empty"));
+    }
+    Ok(())
+}
+
+/// Validates AWS SNS SMS transport configuration.
+fn validate_sms_awssns(sms: &SmsConfig) -> Result<(), ConfigError> {
+    let sns = sms.aws_sns.as_ref().ok_or_else(|| {
+        invalid(
+            "sms.aws_sns",
+            "aws_sns block is required when sms.transport is awssns",
+        )
+    })?;
+    if sns.region.is_empty() {
+        return Err(invalid("sms.aws_sns.region", "must not be empty"));
+    }
+    if sns.access_key_id.is_empty() {
+        return Err(invalid("sms.aws_sns.access_key_id", "must not be empty"));
+    }
+    if sns.secret_access_key.is_empty() {
+        return Err(invalid(
+            "sms.aws_sns.secret_access_key",
+            "must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+/// Accumulating SMS validator (used by `validate_all`).
+fn validate_sms_all(sms: &SmsConfig, issues: &mut Vec<ValidationIssue>) {
+    if let Err(e) = validate_sms(sms) {
+        if let ConfigError::ValidationError { field, reason } = e {
+            issues.push(ValidationIssue { field, reason });
+        }
+    }
 }
 
 /// Validates the `from` address (shared across all non-log transports).
@@ -2162,5 +2235,66 @@ storage:
             config.security.rate_limiting.is_none(),
             "rate_limiting should be absent when not specified"
         );
+    }
+
+    // === SMS transport validation ===
+
+    #[test]
+    fn sms_config_defaults_to_log() {
+        let config = Config::dev();
+        assert_eq!(config.sms.transport, SmsTransport::Log);
+    }
+
+    #[test]
+    fn sms_log_transport_requires_no_blocks() {
+        let yaml = "sms:\n  transport: log\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        assert!(validate_sms(&config.sms).is_ok());
+    }
+
+    #[test]
+    fn sms_twilio_requires_twilio_block() {
+        let yaml = "sms:\n  transport: twilio\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let err = validate_sms(&config.sms).expect_err("missing twilio block should error");
+        assert!(err.to_string().contains("sms.twilio"), "error: {err}");
+    }
+
+    #[test]
+    fn sms_twilio_rejects_empty_account_sid() {
+        let yaml = "sms:\n  transport: twilio\n  twilio:\n    account_sid: \"\"\n    auth_token: \"tok\"\n    from: \"+15550001111\"\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let err = validate_sms(&config.sms).expect_err("empty account_sid should error");
+        assert!(err.to_string().contains("account_sid"), "error: {err}");
+    }
+
+    #[test]
+    fn sms_twilio_accepts_valid_config() {
+        let yaml = "sms:\n  transport: twilio\n  twilio:\n    account_sid: \"AC12345\"\n    auth_token: \"secret\"\n    from: \"+15550001111\"\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        assert!(validate_sms(&config.sms).is_ok());
+    }
+
+    #[test]
+    fn sms_awssns_requires_aws_sns_block() {
+        let yaml = "sms:\n  transport: awssns\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let err = validate_sms(&config.sms).expect_err("missing aws_sns block should error");
+        assert!(err.to_string().contains("sms.aws_sns"), "error: {err}");
+    }
+
+    #[test]
+    fn sms_awssns_accepts_valid_config() {
+        let yaml = "sms:\n  transport: awssns\n  aws_sns:\n    region: \"us-east-1\"\n    access_key_id: \"AKIAIOSFODNN7EXAMPLE\"\n    secret_access_key: \"wJalrXUtnFEMI\"\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        assert!(validate_sms(&config.sms).is_ok());
+    }
+
+    #[test]
+    fn sms_awssns_rejects_empty_region() {
+        let yaml = "sms:\n  transport: awssns\n  aws_sns:\n    region: \"\"\n    access_key_id: \"AKIAIOSFODNN7EXAMPLE\"\n    secret_access_key: \"secret\"\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        let err = validate_sms(&config.sms).expect_err("empty region should error");
+        assert!(err.to_string().contains("region"), "error: {err}");
     }
 }

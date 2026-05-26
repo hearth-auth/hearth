@@ -25,6 +25,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **SMS transport layer** — new `sms:` config block with three providers:
+  `log` (dev default), `twilio` (Messaging REST API), and `awssns` (SNS
+  Transactional tier, Signature Version 4). Fail-fast startup validation for
+  missing Twilio / SNS credentials. `HEARTH_SMS_OTP_HMAC_KEY` env var is
+  required in production to cryptographically bind OTP codes to the server
+  instance (HEA-851).
+
 - **Adaptive step-up MFA on unrecognised device** — when `adaptive_mfa.enabled = true` on a
   realm, the `password_grant_token` ROPC flow checks an HMAC-SHA256 fingerprint of
   `(user_id, IP /24 subnet, User-Agent)` against a rolling recognition window stored in the

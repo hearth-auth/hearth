@@ -554,6 +554,69 @@ pub struct EmailConfig {
     pub templates_dir: Option<String>,
 }
 
+/// SMS delivery transport selector.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmsTransport {
+    /// Write SMS body to the `tracing` log at WARN level. No external delivery. Default.
+    #[default]
+    Log,
+    /// Deliver via the Twilio Messaging REST API.
+    Twilio,
+    /// Deliver via AWS SNS Transactional SMS (Signature Version 4).
+    #[serde(rename = "awssns")]
+    AwsSns,
+}
+
+/// Twilio SMS transport settings.
+///
+/// Required when [`SmsTransport::Twilio`] is selected.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TwilioConfig {
+    /// Twilio Account SID (e.g. `AC…`).
+    pub account_sid: String,
+    /// Twilio Auth Token. Loaded from the config file but handled as a secret.
+    pub auth_token: String,
+    /// Twilio sender phone number in E.164 format (e.g. `+15550001111`)
+    /// or a Messaging Service SID.
+    pub from: String,
+}
+
+/// AWS SNS SMS transport settings.
+///
+/// Required when [`SmsTransport::AwsSns`] is selected.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SnsSmsConfig {
+    /// AWS region (e.g. `us-east-1`).
+    pub region: String,
+    /// AWS Access Key ID.
+    pub access_key_id: String,
+    /// AWS Secret Access Key. Loaded from the config file but handled as a secret.
+    pub secret_access_key: String,
+    /// Optional alphanumeric sender ID shown on recipient device (up to 11 chars).
+    #[serde(default)]
+    pub sender_id: Option<String>,
+}
+
+/// SMS sender configuration.
+///
+/// Controls how OTP and transactional SMS messages are delivered.
+/// Defaults to the `Log` transport, suitable for local development.
+/// Production deployments should set `transport: twilio` (or `awssns`)
+/// and provide the corresponding config block.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SmsConfig {
+    /// Which transport to use for outbound SMS.
+    #[serde(default)]
+    pub transport: SmsTransport,
+    /// Twilio-specific settings. Required when `transport == Twilio`.
+    #[serde(default)]
+    pub twilio: Option<TwilioConfig>,
+    /// AWS SNS-specific settings. Required when `transport == AwsSns`.
+    #[serde(default)]
+    pub aws_sns: Option<SnsSmsConfig>,
+}
+
 /// Global branding configuration.
 ///
 /// Applies across the admin UI and email templates. When `logo_url` is
