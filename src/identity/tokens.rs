@@ -432,6 +432,42 @@ impl SigningKey {
         Ok(format!("{signing_input}.{sig_b64}"))
     }
 
+    /// Signs a JWT with arbitrary serializable claims and a custom `typ` header.
+    ///
+    /// Used by specialized token issuers that share the same Ed25519 key but
+    /// need a distinct `typ` to prevent cross-context token confusion
+    /// (RFC 8725 §3.11). The caller controls the `typ` string and is
+    /// responsible for using a value that does not collide with `"JWT"` or
+    /// `"logout+JWT"`.
+    pub(crate) fn sign_jwt<T: serde::Serialize>(
+        &self,
+        claims: &T,
+        typ: &str,
+    ) -> Result<String, IdentityError> {
+        let header = JwtHeader {
+            alg: JWT_ALGORITHM.to_string(),
+            typ: typ.to_string(),
+            kid: self.key_id.clone(),
+        };
+
+        let header_json =
+            serde_json::to_vec(&header).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let claims_json = serde_json::to_vec(claims).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(&header_json);
+        let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
+
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let sig = self.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(&sig);
+
+        Ok(format!("{signing_input}.{sig_b64}"))
+    }
+
     /// Issues an access/refresh token pair for the given request.
     pub fn issue_token_pair(
         &self,

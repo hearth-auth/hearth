@@ -195,6 +195,24 @@ pub enum AuditAction {
     /// Metadata carries `dry_run` (`"true"` / `"false"`) and the list of
     /// restored realm slugs.
     BackupRestored,
+    /// A required action was assigned to a user by an admin.
+    ///
+    /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `admin_id`.
+    RequiredActionAssigned,
+    /// A required action was removed from a user by an admin.
+    ///
+    /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `admin_id`.
+    RequiredActionRemoved,
+    /// A required action was completed by the user during the OIDC intercept flow.
+    ///
+    /// Metadata carries `action_type` (e.g. `"UPDATE_PASSWORD"`).
+    RequiredActionCompleted,
+    /// A required action was automatically cleared without user interaction.
+    ///
+    /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `reason`
+    /// (e.g. `"email_already_verified"`). Used to self-heal data-migration
+    /// artifacts where a required action was added spuriously.
+    RequiredActionAutoCleared,
 }
 
 impl AuditAction {
@@ -272,6 +290,10 @@ impl AuditAction {
             Self::IpLoginLimitExceeded,
             Self::BackupCreated,
             Self::BackupRestored,
+            Self::RequiredActionAssigned,
+            Self::RequiredActionRemoved,
+            Self::RequiredActionCompleted,
+            Self::RequiredActionAutoCleared,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -347,6 +369,10 @@ impl AuditAction {
             Self::IpLoginLimitExceeded => "ip_login_limit_exceeded",
             Self::BackupCreated => "backup_created",
             Self::BackupRestored => "backup_restored",
+            Self::RequiredActionAssigned => "required_action_assigned",
+            Self::RequiredActionRemoved => "required_action_removed",
+            Self::RequiredActionCompleted => "required_action_completed",
+            Self::RequiredActionAutoCleared => "required_action_auto_cleared",
         }
     }
 }
@@ -423,6 +449,10 @@ impl std::str::FromStr for AuditAction {
             "ip_login_limit_exceeded" => Ok(Self::IpLoginLimitExceeded),
             "backup_created" => Ok(Self::BackupCreated),
             "backup_restored" => Ok(Self::BackupRestored),
+            "required_action_assigned" => Ok(Self::RequiredActionAssigned),
+            "required_action_removed" => Ok(Self::RequiredActionRemoved),
+            "required_action_completed" => Ok(Self::RequiredActionCompleted),
+            "required_action_auto_cleared" => Ok(Self::RequiredActionAutoCleared),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -507,7 +537,11 @@ impl AuditAction {
             | Self::LoginFailed
             | Self::IpLoginLimitExceeded
             | Self::BackupCreated
-            | Self::BackupRestored => LogOnly,
+            | Self::BackupRestored
+            | Self::RequiredActionAssigned
+            | Self::RequiredActionRemoved
+            | Self::RequiredActionCompleted
+            | Self::RequiredActionAutoCleared => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged

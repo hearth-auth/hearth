@@ -9,6 +9,36 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **VERIFY_EMAIL required-action handler** — `GET /required-action/VERIFY_EMAIL` renders a
+  "check your email" page and sends a verification email; if the user's email is already
+  verified the action is auto-cleared and the OIDC flow resumes immediately (emits a
+  `RequiredActionAutoCleared` audit event with reason `email_already_verified`).
+  `GET /required-action/VERIFY_EMAIL/confirm?token={token}` validates the single-use token,
+  marks the user `email_verified=true`, clears the action, emits a
+  `RequiredActionCompleted` audit event, and resumes the OIDC authorization flow (HEA-808).
+
+- **UPDATE_PASSWORD required-action handler** — `GET /required-action/UPDATE_PASSWORD`
+  renders a password-change form; `POST /required-action/UPDATE_PASSWORD` validates the new
+  password against realm policy, updates the credential, clears the action from the user
+  record, emits a `RequiredActionCompleted` audit event, and resumes the OIDC authorization
+  flow (or advances to the next pending action in multi-action sequences) (HEA-809).
+
+- **Required-actions admin API** — two new admin endpoints manage required actions
+  without a full user-object PATCH:
+  `PATCH /admin/realms/{id}/users/{id}/required-actions` (body `{"add":[],"remove":[]}`)
+  assigns or removes actions on a specific user; each change emits a
+  `RequiredActionAssigned` or `RequiredActionRemoved` audit event.
+  `PATCH /admin/realms/{id}/config` (body `{"default_required_actions":[]}`)
+  replaces the realm-level default list applied to newly created users.
+  Unknown action strings return 400 (HEA-807).
+
+- **Required actions on users** — user records now carry a `required_actions`
+  list (`VERIFY_EMAIL`, `UPDATE_PASSWORD`). Realms may set
+  `default_required_actions` so every new user is created with those actions
+  pre-populated. Existing stored users deserialize with an empty list (no manual
+  migration needed). Admins may clear or replace the list via the update-user API
+  (HEA-801).
+
 - **Docusaurus docs site** — `docs-site/` scaffolds a Docusaurus 3.5 site that publishes
   all `docs/guides/*` pages to GitHub Pages via `.github/workflows/docs-site.yml`.
   Hearth-branded dark theme (ember gradient, Fraunces/Manrope/JetBrains Mono), local
@@ -27,23 +57,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
     format, signed with cosign.
   - Operator verification instructions: `docs/guides/verify-release.md` (HEA-747).
 
-### Security
-
-- **Cluster admin endpoints now require system-realm token** — `POST /admin/cluster/bootstrap`,
-  `GET /admin/cluster/status`, and `POST /admin/cluster/transfer-leadership` previously
-  accepted any valid tenant-realm admin token, allowing a tenant admin to invoke
-  node-wide Raft operations (privilege escalation). All three endpoints now return
-  `403 Forbidden` with `"cluster admin requires system realm"` when the `X-Realm-ID`
-  header is not the nil UUID (HEA-763).
-
-
-### Added
-
 - **HA failover simulation suite** — four deterministic multi-node Raft simulation tests
   covering network partition heal, leader kill mid-write, rolling restart with zero read
   errors, and snapshot-based catch-up for a cold follower. All tests run in-process via an
   in-memory network factory with no TLS or real ports (HEA-738).
-
 
 - **Cluster admin HTTP endpoints** — three operator-facing routes on the admin API:
   - `POST /admin/cluster/bootstrap` — initializes Raft membership from `hearth.yaml`
@@ -64,8 +81,30 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `hearth.admin` permission and `X-Realm-ID`; 401 without auth, 403 without
   admin permission (HEA-737).
 
+### Fixed
+
+- **Browser login bypassed required-action gates** — `login_submit_impl` now intercepts
+  pending required actions between credential verification and session issuance.  Users with
+  `UPDATE_PASSWORD` or `VERIFY_EMAIL` actions are redirected to the required-action
+  interstitial; on completion a full browser session cookie is issued and the user is
+  returned to their original destination (`return_to`).  Previously the browser login path
+  issued a session immediately, skipping all required-action enforcement (HEA-797).
 
 ### Security
+
+- **VERIFY_EMAIL cross-user token substitution** — the `verify_email_confirm` handler now
+  validates that the `UserId` bound to the submitted email-verification token matches the
+  user in the RA session cookie.  Previously the handler discarded the returned user ID,
+  allowing an attacker to clear another user's `VERIFY_EMAIL` required-action by submitting
+  a token minted for a different account (HEA-815; security review HEA-810 FINDING-1 HIGH).
+
+- **Cluster admin endpoints now require system-realm token** — `POST /admin/cluster/bootstrap`,
+  `GET /admin/cluster/status`, and `POST /admin/cluster/transfer-leadership` previously
+  accepted any valid tenant-realm admin token, allowing a tenant admin to invoke
+  node-wide Raft operations (privilege escalation). All three endpoints now return
+  `403 Forbidden` with `"cluster admin requires system realm"` when the `X-Realm-ID`
+  header is not the nil UUID (HEA-763).
+
 - **Zeroize intermediate PKCS#8 and DEK heap copies** — plaintext key material in transit no
   longer relies on the OS/allocator to zero freed heap pages. Specifically: `decrypt_bytes` now
   returns `Zeroizing<Vec<u8>>`; the DEK (`dek_vec`) in `load_signing_key` is wrapped in

@@ -1,6 +1,6 @@
 //! Identity type conversions: domain <-> proto wire types.
 
-use crate::identity::{self as domain, UserStatus as DomainUserStatus};
+use crate::identity::{self as domain, RequiredAction, UserStatus as DomainUserStatus};
 use crate::protocol::proto::identity::v1 as pb;
 
 // ==================== User ====================
@@ -16,7 +16,22 @@ impl From<&domain::User> for pb::User {
             updated_at: u.updated_at().as_micros(),
             first_name: u.first_name().to_string(),
             last_name: u.last_name().to_string(),
+            required_actions: u
+                .required_actions()
+                .iter()
+                .copied()
+                .map(required_action_to_str)
+                .map(str::to_owned)
+                .collect(),
         }
+    }
+}
+
+/// Returns the canonical wire-format string for a `RequiredAction`.
+fn required_action_to_str(action: RequiredAction) -> &'static str {
+    match action {
+        RequiredAction::VerifyEmail => "VERIFY_EMAIL",
+        RequiredAction::UpdatePassword => "UPDATE_PASSWORD",
     }
 }
 
@@ -75,6 +90,7 @@ impl From<pb::UpdateUserRequest> for domain::UpdateUserRequest {
             last_name: r.last_name,
             status: r.status.and_then(proto_user_status_to_domain),
             attributes,
+            required_actions: None,
         }
     }
 }
@@ -240,6 +256,7 @@ mod tests {
             "Alice".to_string(),
             "Smith".to_string(),
             DomainUserStatus::Active,
+            Vec::new(),
             Timestamp::from_micros(1_000_000),
             Timestamp::from_micros(2_000_000),
         );

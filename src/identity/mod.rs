@@ -16,6 +16,7 @@ pub(crate) mod magic_link;
 pub mod migration;
 pub mod oidc;
 pub mod onboarding;
+pub mod ra_token;
 pub mod reconcile;
 pub mod tokens;
 pub(crate) mod totp;
@@ -55,8 +56,9 @@ pub use types::{
     MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
-    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, Session, SessionContext,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
+    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction, Session,
+    SessionContext, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User,
+    UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -64,7 +66,9 @@ pub use webauthn::{
     WebAuthnAuthResult, WebAuthnCredentialInfo,
 };
 
-use crate::core::{ClientId, InvitationId, OrganizationId, RealmId, SessionId, UserId, WebhookId};
+use crate::core::{
+    ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
+};
 
 /// Trait defining the identity engine interface.
 ///
@@ -114,6 +118,45 @@ pub trait IdentityEngine: Send + Sync {
     /// only that realm's public key. During a key rotation grace period both
     /// the new active key and any non-expired retiring keys are included.
     fn realm_jwks(&self, realm_id: &RealmId) -> Result<JwksDocument, IdentityError>;
+
+    /// Generates a signed Required-Action session JWT for the OIDC login path.
+    ///
+    /// Signs with the realm's Ed25519 key. The `pending_actions` list is
+    /// embedded in the token verbatim — callers are responsible for sorting by
+    /// priority before calling this function.
+    fn generate_ra_token(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        pending_actions: Vec<RequiredAction>,
+        oidc_params: ra_token::OidcParams,
+        now: Timestamp,
+    ) -> Result<String, IdentityError>;
+
+    /// Generates a signed Required-Action session JWT for the direct browser
+    /// login path.
+    ///
+    /// After all actions complete, the flow resumes by creating a session
+    /// cookie and redirecting to `return_to` (or `/ui` when `None`).
+    fn generate_browser_ra_token(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        pending_actions: Vec<RequiredAction>,
+        return_to: Option<String>,
+        now: Timestamp,
+    ) -> Result<String, IdentityError>;
+
+    /// Validates a Required-Action session JWT using the realm's public key.
+    ///
+    /// Checks signature, `alg`/`typ` headers, and expiry. Returns the decoded
+    /// claims on success.
+    fn validate_ra_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        now: Timestamp,
+    ) -> Result<ra_token::RaClaims, ra_token::RaTokenError>;
 
     /// Rotates the Ed25519 signing key for a realm.
     ///

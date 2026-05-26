@@ -15,7 +15,8 @@ use zeroize::Zeroizing;
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
-    ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId, Uri, UserId, WebhookId,
+    ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, Uri, UserId,
+    WebhookId,
 };
 use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
@@ -1453,6 +1454,15 @@ impl EmbeddedIdentityEngine {
 
         let user_id = UserId::generate();
         let now = self.clock.now();
+
+        // Fetch realm config once for both default_required_actions and attribute_definitions.
+        let realm_config = self
+            .get_realm(realm_id)?
+            .map(|r| r.config().clone())
+            .unwrap_or_default();
+
+        let required_actions = realm_config.default_required_actions.clone();
+
         let mut user = User::new(
             user_id.clone(),
             email.clone(),
@@ -1460,16 +1470,20 @@ impl EmbeddedIdentityEngine {
             first_name,
             last_name,
             status,
+            required_actions,
             now,
             now,
         );
 
         {
-            let user_attr_defs = self
-                .get_realm(realm_id)?
-                .and_then(|r| r.config().attribute_definitions.clone())
-                .map(|d| d.users);
-            validation::validate_attributes(&request.attributes, user_attr_defs.as_deref())?;
+            let user_attr_defs = realm_config
+                .attribute_definitions
+                .as_ref()
+                .map(|d| &d.users);
+            validation::validate_attributes(
+                &request.attributes,
+                user_attr_defs.map(Vec::as_slice),
+            )?;
             if !request.attributes.is_empty() {
                 user.set_attributes(request.attributes.clone());
             }
@@ -2949,6 +2963,56 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(jwks)
     }
 
+    fn generate_ra_token(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        pending_actions: Vec<crate::identity::types::RequiredAction>,
+        oidc_params: crate::identity::ra_token::OidcParams,
+        now: Timestamp,
+    ) -> Result<String, IdentityError> {
+        let key = self.get_or_load_realm_signing_key(realm_id)?;
+        crate::identity::ra_token::generate(
+            &user_id.as_uuid().to_string(),
+            &realm_id.as_uuid().to_string(),
+            pending_actions,
+            oidc_params,
+            &key,
+            now,
+        )
+    }
+
+    fn generate_browser_ra_token(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        pending_actions: Vec<crate::identity::types::RequiredAction>,
+        return_to: Option<String>,
+        now: Timestamp,
+    ) -> Result<String, IdentityError> {
+        let key = self.get_or_load_realm_signing_key(realm_id)?;
+        crate::identity::ra_token::generate_browser(
+            &user_id.as_uuid().to_string(),
+            &realm_id.as_uuid().to_string(),
+            pending_actions,
+            return_to,
+            &key,
+            now,
+        )
+    }
+
+    fn validate_ra_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        now: Timestamp,
+    ) -> Result<crate::identity::ra_token::RaClaims, crate::identity::ra_token::RaTokenError> {
+        let key = self
+            .get_or_load_realm_signing_key(realm_id)
+            .map_err(|_| crate::identity::ra_token::RaTokenError::InvalidSignature)?;
+        crate::identity::ra_token::validate(token, key.public_key_bytes(), now)
+    }
+
     fn rotate_realm_signing_key(
         &self,
         realm_id: &RealmId,
@@ -3171,6 +3235,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map(|d| d.users);
             validation::validate_attributes(attributes, user_attr_defs.as_deref())?;
             user.set_attributes(attributes.clone());
+        }
+
+        // 4b. Replace required actions if requested.
+        if let Some(actions) = request.required_actions.clone() {
+            user.set_required_actions(actions);
         }
 
         // 5. Update timestamp
@@ -6503,14 +6572,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             })?;
         let user_id = UserId::new(uuid);
 
-        // Transition user to Active. If the user was already Active we
-        // still consume the token to keep single-use semantics, but leave
-        // the user record alone.
+        // Transition user to Active (from PendingVerification) and mark
+        // email_verified = true. For already-Active users we still set the
+        // verified flag — e.g. the RA VERIFY_EMAIL flow for admin-created users.
         let mut user = self
             .get_user(realm_id, &user_id)?
             .ok_or(IdentityError::VerificationTokenInvalid)?;
-        if user.status() == UserStatus::PendingVerification {
-            user.set_status(UserStatus::Active);
+        let needs_update =
+            user.status() == UserStatus::PendingVerification || !user.email_verified();
+        if needs_update {
+            if user.status() == UserStatus::PendingVerification {
+                user.set_status(UserStatus::Active);
+            }
+            user.set_email_verified(true);
             user.set_updated_at(self.clock.now());
             let user_bytes =
                 serde_json::to_vec(&user).map_err(|e| IdentityError::Serialization {
@@ -7684,6 +7758,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         let now = self.clock.now();
+        // Imports preserve the source state; required_actions are not inferred from realm defaults.
         let mut user = User::new(
             user_id.clone(),
             email.clone(),
@@ -7691,6 +7766,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             first_name,
             last_name,
             request.status,
+            Vec::new(),
             now,
             now,
         );
@@ -15382,6 +15458,105 @@ mod tests {
         assert!(
             doc.authorization_response_iss_parameter_supported,
             "discovery must advertise iss parameter support"
+        );
+    }
+
+    // ===== HEA-801: required_actions / default_required_actions =====
+
+    #[test]
+    fn new_user_has_empty_required_actions_when_realm_has_no_defaults() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        let user = engine
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: "ra_none@example.com".to_string(),
+                    display_name: "RA None".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("create user");
+
+        assert!(
+            user.required_actions().is_empty(),
+            "user created under a realm with no defaults must have no required actions"
+        );
+    }
+
+    #[test]
+    fn new_user_inherits_realm_default_required_actions() {
+        use crate::identity::types::RequiredAction;
+        let (_dir, engine, _clock) = setup_engine();
+
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("ra-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    default_required_actions: vec![
+                        RequiredAction::VerifyEmail,
+                        RequiredAction::UpdatePassword,
+                    ],
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm");
+
+        let user = engine
+            .create_user(
+                realm.id(),
+                &CreateUserRequest {
+                    email: "ra_user@example.com".to_string(),
+                    display_name: "RA User".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("create user");
+
+        assert_eq!(
+            user.required_actions(),
+            &[RequiredAction::VerifyEmail, RequiredAction::UpdatePassword],
+            "user must inherit realm's default_required_actions"
+        );
+    }
+
+    #[test]
+    fn required_actions_survive_storage_round_trip() {
+        use crate::identity::types::RequiredAction;
+        let (_dir, engine, _clock) = setup_engine();
+
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: format!("ra-rt-realm-{}", uuid::Uuid::new_v4()),
+                config: Some(RealmConfig {
+                    default_required_actions: vec![RequiredAction::VerifyEmail],
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect("create realm");
+
+        let created = engine
+            .create_user(
+                realm.id(),
+                &CreateUserRequest {
+                    email: "ra_rt@example.com".to_string(),
+                    display_name: "RA RT".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("create user");
+
+        // Read back from storage to verify the field was persisted.
+        let fetched = engine
+            .get_user(realm.id(), created.id())
+            .expect("get user")
+            .expect("user exists");
+
+        assert_eq!(
+            fetched.required_actions(),
+            &[RequiredAction::VerifyEmail],
+            "required_actions must survive the storage round-trip"
         );
     }
 }

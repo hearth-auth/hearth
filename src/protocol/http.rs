@@ -533,6 +533,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::post(admin_backup_restore).route_layer(DefaultBodyLimit::disable()),
         )
         .route(
+            "/realms/{realm_id}/users/{user_id}/required-actions",
+            axum::routing::patch(admin_patch_user_required_actions),
+        )
+        .route(
+            "/realms/{realm_id}/config",
+            axum::routing::patch(admin_patch_realm_config),
+        )
+        .route(
             "/cluster/bootstrap",
             axum::routing::post(crate::protocol::cluster_admin::admin_cluster_bootstrap),
         )
@@ -3110,6 +3118,251 @@ async fn admin_delete_realm(
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "not found"})),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+/// Admin: PATCH required-actions for a specific user in a realm (HEA-807).
+///
+/// `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`
+///
+/// Body: `{ "add": ["VERIFY_EMAIL"], "remove": [] }`
+///
+/// Validates action strings against the v1 allowlist, adds/removes from the
+/// user's list atomically, emits one audit event per modified action, and
+/// returns the updated user JSON.
+async fn admin_patch_user_required_actions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((realm_id_str, user_id_str)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::audit::AuditAction;
+    use crate::identity::{RequiredAction, UpdateUserRequest};
+
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+
+    let realm_uuid: uuid::Uuid = match realm_id_str.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid realm ID"})),
+            )
+                .into_response()
+        }
+    };
+    let realm_id = RealmId::new(realm_uuid);
+
+    if auth.realm_id != realm_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        )
+            .into_response();
+    }
+
+    let user_uuid: uuid::Uuid = match user_id_str.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user ID"})),
+            )
+                .into_response()
+        }
+    };
+    let uid = UserId::new(user_uuid);
+
+    // Parse and validate action string arrays from the request body.
+    let parse_actions = |key: &str| -> Result<Vec<RequiredAction>, axum::response::Response> {
+        let arr = body[key].as_array().cloned().unwrap_or_default();
+        let mut out = Vec::with_capacity(arr.len());
+        for v in arr {
+            match serde_json::from_value::<RequiredAction>(v.clone()) {
+                Ok(a) => out.push(a),
+                Err(_) => {
+                    let s = v.as_str().unwrap_or("(non-string)");
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("unknown action type: {s}")})),
+                    )
+                        .into_response());
+                }
+            }
+        }
+        Ok(out)
+    };
+
+    let add_actions = match parse_actions("add") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let remove_actions = match parse_actions("remove") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let user = match state.identity.get_user(&realm_id, &uid) {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "user not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => return identity_error_to_response(&e).into_response(),
+    };
+
+    let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
+    for a in &add_actions {
+        if !actions.contains(a) {
+            actions.push(*a);
+        }
+    }
+    actions.retain(|a| !remove_actions.contains(a));
+
+    let updated = match state.identity.update_user(
+        &realm_id,
+        &uid,
+        &UpdateUserRequest {
+            required_actions: Some(actions),
+            ..Default::default()
+        },
+    ) {
+        Ok(u) => u,
+        Err(e) => return identity_error_to_response(&e).into_response(),
+    };
+
+    let admin_id = auth.user_id.as_uuid().to_string();
+    for a in &add_actions {
+        let _ = state.audit.append(&CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: admin_id.clone(),
+            action: AuditAction::RequiredActionAssigned,
+            resource_type: "user".to_string(),
+            resource_id: uid.as_uuid().to_string(),
+            metadata: Some(serde_json::json!({
+                "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                "admin_id": admin_id,
+                "via": "admin_api",
+            })),
+        });
+    }
+    for a in &remove_actions {
+        let _ = state.audit.append(&CreateAuditEvent {
+            realm_id: realm_id.clone(),
+            actor: admin_id.clone(),
+            action: AuditAction::RequiredActionRemoved,
+            resource_type: "user".to_string(),
+            resource_id: uid.as_uuid().to_string(),
+            metadata: Some(serde_json::json!({
+                "action_type": serde_json::to_value(a).unwrap_or(serde_json::Value::Null),
+                "admin_id": admin_id,
+                "via": "admin_api",
+            })),
+        });
+    }
+
+    (
+        StatusCode::OK,
+        Json(proto_to_rest_json(&pb::User::from(&updated))),
+    )
+        .into_response()
+}
+
+/// Admin: PATCH realm config — sets `default_required_actions` (HEA-807).
+///
+/// `PATCH /admin/realms/{realm_id}/config`
+///
+/// Body: `{ "default_required_actions": ["VERIFY_EMAIL"] }`
+///
+/// Replaces the realm's default required-actions list. Only affects users
+/// created after this call. Unknown action strings return 400.
+async fn admin_patch_realm_config(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(realm_id_str): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use crate::identity::{RequiredAction, UpdateRealmRequest};
+
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+
+    let realm_uuid: uuid::Uuid = match realm_id_str.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid realm ID"})),
+            )
+                .into_response()
+        }
+    };
+    let realm_id = RealmId::new(realm_uuid);
+
+    if auth.realm_id != realm_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        )
+            .into_response();
+    }
+
+    let action_strs = body["default_required_actions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let mut actions: Vec<RequiredAction> = Vec::with_capacity(action_strs.len());
+    for v in action_strs {
+        match serde_json::from_value::<RequiredAction>(v.clone()) {
+            Ok(a) => actions.push(a),
+            Err(_) => {
+                let s = v.as_str().unwrap_or("(non-string)");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("unknown action type: {s}")})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let realm = match state.identity.get_realm(&realm_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "realm not found"})),
+            )
+                .into_response()
+        }
+        Err(e) => return identity_error_to_response(&e).into_response(),
+    };
+
+    let mut config = realm.config().clone();
+    config.default_required_actions = actions;
+
+    match state.identity.update_realm(
+        &realm_id,
+        &UpdateRealmRequest {
+            config: Some(config),
+            ..Default::default()
+        },
+    ) {
+        Ok(updated) => (
+            StatusCode::OK,
+            Json(proto_to_rest_json(&pb::Realm::from(&updated))),
         )
             .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
