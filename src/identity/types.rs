@@ -69,18 +69,23 @@ pub enum RequiredAction {
     VerifyEmail,
     /// User must set a new password before proceeding.
     UpdatePassword,
+    /// User must enroll an MFA factor before proceeding.
+    ///
+    /// Injected automatically by the adaptive-MFA engine when a login arrives
+    /// from an unrecognised device and the user has no enrolled factor.
+    EnrollMfa,
 }
 
 impl RequiredAction {
     /// Canonical execution priority. Lower numbers run first.
     ///
-    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`. Used to sort pending actions
-    /// into a deterministic order regardless of storage insertion order.
+    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`.
     #[must_use]
     pub fn priority(self) -> u8 {
         match self {
             Self::VerifyEmail => 1,
             Self::UpdatePassword => 2,
+            Self::EnrollMfa => 3,
         }
     }
 
@@ -90,14 +95,16 @@ impl RequiredAction {
         match self {
             Self::VerifyEmail => "VERIFY_EMAIL",
             Self::UpdatePassword => "UPDATE_PASSWORD",
+            Self::EnrollMfa => "enroll-mfa",
         }
     }
 
-    /// Parse from a URL path segment (case-sensitive, SCREAMING_SNAKE_CASE).
+    /// Parse from a URL path segment (case-sensitive).
     pub fn from_path_segment(s: &str) -> Option<Self> {
         match s {
             "VERIFY_EMAIL" => Some(Self::VerifyEmail),
             "UPDATE_PASSWORD" => Some(Self::UpdatePassword),
+            "enroll-mfa" => Some(Self::EnrollMfa),
             _ => None,
         }
     }
@@ -764,6 +771,13 @@ pub struct RealmConfig {
     /// `enabled = true` explicitly in their configuration.
     #[serde(default)]
     pub breach_check: BreachCheckConfig,
+    /// Adaptive (risk-based) MFA configuration.
+    ///
+    /// Existing realms deserialised without this field get the safe migration
+    /// default (`enabled = false`). Set `enabled = true` and supply a
+    /// `fingerprint_hmac_secret` to activate device-recognition step-up.
+    #[serde(default)]
+    pub adaptive_mfa: AdaptiveMfaConfig,
 }
 
 /// Configuration for the HIBP Pwned Passwords k-anonymity breach-check.
@@ -793,6 +807,41 @@ impl Default for BreachCheckConfig {
             enabled: false,
             timeout_ms: 3000,
             hibp_api_key: String::new(),
+        }
+    }
+}
+
+/// Adaptive MFA configuration for a realm.
+///
+/// Controls device-fingerprint–based step-up MFA injection. When `enabled`,
+/// every login from an unrecognised device triggers a step-up challenge or
+/// an MFA-enrollment required-action. Only the HMAC output is stored —
+/// never raw IP or User-Agent strings (AC-11 / GDPR).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdaptiveMfaConfig {
+    /// Whether adaptive MFA is active for this realm.
+    ///
+    /// Defaults to `false` for existing realms (safe migration default).
+    /// New realms should set this to `true` explicitly.
+    pub enabled: bool,
+    /// Number of days a recognised device is trusted before requiring re-verification.
+    pub recognition_window_days: u32,
+    /// HMAC-SHA256 key used to derive device fingerprints.
+    ///
+    /// Should be at least 32 bytes of cryptographically-random data. When empty,
+    /// the feature behaves as if `enabled = false` to prevent accidentally
+    /// treating every device as unrecognised due to a trivially-guessable key.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fingerprint_hmac_secret: String,
+}
+
+impl Default for AdaptiveMfaConfig {
+    fn default() -> Self {
+        Self {
+            // Safe migration default: disabled so existing realms are unaffected.
+            enabled: false,
+            recognition_window_days: 30,
+            fingerprint_hmac_secret: String::new(),
         }
     }
 }

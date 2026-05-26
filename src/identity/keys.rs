@@ -244,6 +244,13 @@ const CONFIG_SNAPSHOT_KEY: &str = "config:snapshot:v1";
 /// Prefix for user-to-sessions index keys.
 const SESSION_USER_PREFIX: &str = "ses:user:";
 
+/// Prefix for device-fingerprint records.
+///
+/// Format: `dfp:user:{user_uuid}:{hmac_hex}` → 8-byte little-endian i64 (Unix seconds expiry).
+/// Stored under the realm to which the user belongs. Scan by `dfp:user:{uuid}:` to enumerate
+/// all fingerprints for one user.
+const DEVICE_FP_PREFIX: &str = "dfp:user:";
+
 /// Encodes the primary key for a user record.
 ///
 /// Format: `usr:id:{uuid}`
@@ -1297,6 +1304,26 @@ pub(crate) fn encode_attempt_tracker(user_id: &UserId) -> Vec<u8> {
 /// Format: `rl:user:`
 pub(crate) fn attempt_tracker_scan_prefix() -> Vec<u8> {
     ATTEMPT_TRACKER_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes a device-fingerprint storage key.
+///
+/// Format: `dfp:user:{user_uuid}:{hmac_hex}`
+///
+/// `hmac_hex` is the lower-case hex encoding of the 32-byte HMAC-SHA256 output.
+/// The compound key supports scanning all fingerprints for a user and O(1)
+/// existence checks for a specific fingerprint.
+pub(crate) fn encode_device_fp(user_id: &UserId, hmac_hex: &str) -> Vec<u8> {
+    format!("{DEVICE_FP_PREFIX}{}:{hmac_hex}", user_id.as_uuid()).into_bytes()
+}
+
+/// Returns the per-user device-fingerprint scan prefix.
+///
+/// Format: `dfp:user:{user_uuid}:`
+///
+/// Use with [`prefix_end`] to scan all fingerprints for a given user.
+pub(crate) fn device_fp_scan_prefix(user_id: &UserId) -> Vec<u8> {
+    format!("{DEVICE_FP_PREFIX}{}:", user_id.as_uuid()).into_bytes()
 }
 
 #[cfg(test)]

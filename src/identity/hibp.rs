@@ -87,6 +87,12 @@ pub struct HibpClient {
     transport: Arc<dyn HibpTransport>,
 }
 
+impl Default for HibpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HibpClient {
     /// Creates a production client backed by [`UreqHibpTransport`].
     pub fn new() -> Self {

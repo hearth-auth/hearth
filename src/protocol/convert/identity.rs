@@ -32,6 +32,7 @@ fn required_action_to_str(action: RequiredAction) -> &'static str {
     match action {
         RequiredAction::VerifyEmail => "VERIFY_EMAIL",
         RequiredAction::UpdatePassword => "UPDATE_PASSWORD",
+        RequiredAction::EnrollMfa => "ENROLL_MFA",
     }
 }
 

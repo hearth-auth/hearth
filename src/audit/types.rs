@@ -224,6 +224,13 @@ pub enum AuditAction {
     /// Failure policy: `LogOnly`. The password was accepted (fail-open).
     /// Metadata carries `user_id` and `reason`.
     BreachCheckUnavailable,
+    /// Adaptive MFA step-up was triggered because the login arrived from an
+    /// unrecognised device or IP subnet.
+    ///
+    /// Failure policy: `LogOnly` — the login continues with an MFA challenge or
+    /// enrollment redirect; the step-up event itself is informational.
+    /// Metadata carries `user_id` and `reason` (e.g. `"unrecognised_device"`).
+    StepUpMfaTriggered,
 }
 
 impl AuditAction {
@@ -307,6 +314,7 @@ impl AuditAction {
             Self::RequiredActionAutoCleared,
             Self::PasswordCompromisedRejected,
             Self::BreachCheckUnavailable,
+            Self::StepUpMfaTriggered,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -388,6 +396,7 @@ impl AuditAction {
             Self::RequiredActionAutoCleared => "required_action_auto_cleared",
             Self::PasswordCompromisedRejected => "password_compromised_rejected",
             Self::BreachCheckUnavailable => "breach_check_unavailable",
+            Self::StepUpMfaTriggered => "step_up_mfa_triggered",
         }
     }
 }
@@ -470,6 +479,7 @@ impl std::str::FromStr for AuditAction {
             "required_action_auto_cleared" => Ok(Self::RequiredActionAutoCleared),
             "password_compromised_rejected" => Ok(Self::PasswordCompromisedRejected),
             "breach_check_unavailable" => Ok(Self::BreachCheckUnavailable),
+            "step_up_mfa_triggered" => Ok(Self::StepUpMfaTriggered),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -559,7 +569,8 @@ impl AuditAction {
             | Self::RequiredActionRemoved
             | Self::RequiredActionCompleted
             | Self::RequiredActionAutoCleared
-            | Self::BreachCheckUnavailable => LogOnly,
+            | Self::BreachCheckUnavailable
+            | Self::StepUpMfaTriggered => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged

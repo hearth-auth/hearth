@@ -1925,6 +1925,11 @@ impl RealmYamlConfig {
             }),
             // Required actions are managed via the admin API, not via hearth.yaml.
             default_required_actions: Vec::new(),
+            // Breach-check config is managed via the admin API or per-realm YAML.
+            // Default is disabled so existing realms are unaffected.
+            breach_check: crate::identity::BreachCheckConfig::default(),
+            // Adaptive MFA defaults to disabled; enable per-realm via admin API or YAML.
+            adaptive_mfa: crate::identity::AdaptiveMfaConfig::default(),
         })
     }
 }

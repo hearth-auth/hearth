@@ -342,31 +342,30 @@ impl RbacEngine for FailSeedRbac {
 async fn grpc_create_realm_fails_when_seed_fails() {
     let h = common::TestHarness::embedded().await.expect("harness");
 
-    // Set up an admin user in a fresh realm using the real RBAC engine so
-    // we get a valid JWT with hearth.admin embedded in its claims.
-    let realm = h.create_realm();
-    h.rbac().seed_realm(&realm).expect("seed admin realm");
+    // Build a system-realm admin token (gRPC realm management requires it —
+    // see `is_system_realm` check added in HEA-822).
+    let system_realm = RealmId::new(uuid::Uuid::nil());
+    h.rbac()
+        .seed_realm(&system_realm)
+        .expect("seed system realm");
     let user = h
         .identity()
-        .create_user(
-            &realm,
-            &CreateUserRequest {
-                email: format!("admin-{}@example.com", uuid::Uuid::new_v4()),
-                display_name: "Admin".into(),
-                first_name: String::new(),
-                last_name: String::new(),
-                attributes: Default::default(),
-            },
-        )
-        .expect("create user");
+        .create_admin_user(&CreateUserRequest {
+            email: format!("admin-{}@example.com", uuid::Uuid::new_v4()),
+            display_name: "Admin".into(),
+            first_name: String::new(),
+            last_name: String::new(),
+            attributes: Default::default(),
+        })
+        .expect("create admin user");
     let admin_role = h
         .rbac()
-        .get_role_by_name(&realm, "realm.admin")
+        .get_role_by_name(&system_realm, "realm.admin")
         .expect("lookup")
         .expect("seeded");
     h.rbac()
         .assign_role(
-            &realm,
+            &system_realm,
             &AssignRoleRequest {
                 subject: Subject::User(user.id().clone()),
                 role_id: admin_role.id,
@@ -377,11 +376,11 @@ async fn grpc_create_realm_fails_when_seed_fails() {
         .expect("assign admin role");
     let session = h
         .identity()
-        .create_session(&realm, user.id(), &SessionContext::default())
+        .create_session(&system_realm, user.id(), &SessionContext::default())
         .expect("session");
     let token = h
         .identity()
-        .issue_tokens(&realm, user.id(), session.id())
+        .issue_tokens(&system_realm, user.id(), session.id())
         .expect("issue tokens")
         .access_token()
         .to_string();
@@ -408,7 +407,11 @@ async fn grpc_create_realm_fails_when_seed_fails() {
     );
     req.metadata_mut().insert(
         "x-realm-id",
-        realm.as_uuid().to_string().parse().expect("meta value"),
+        system_realm
+            .as_uuid()
+            .to_string()
+            .parse()
+            .expect("meta value"),
     );
 
     let result = svc.create_realm(req).await;
@@ -418,8 +421,10 @@ async fn grpc_create_realm_fails_when_seed_fails() {
         tonic::Code::Internal,
         "expected Internal status, got: {status:?}"
     );
+    // HEA-822 sanitizes internal error strings at the gRPC boundary —
+    // the full "RBAC realm seed failed" detail is only in server logs.
     assert!(
-        status.message().contains("RBAC seed failed"),
-        "error message must mention RBAC seed failure, got: {status:?}"
+        status.message().starts_with("internal error"),
+        "error message must be a sanitized internal error, got: {status:?}"
     );
 }

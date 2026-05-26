@@ -392,6 +392,9 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::RequiredActionRemoved => "Required Action Removed",
         A::RequiredActionCompleted => "Required Action Completed",
         A::RequiredActionAutoCleared => "Required Action Auto-Cleared",
+        A::PasswordCompromisedRejected => "Password Compromised Rejected",
+        A::BreachCheckUnavailable => "Breach Check Unavailable",
+        A::StepUpMfaTriggered => "Step-Up MFA Triggered",
     }
 }
 
@@ -451,14 +454,17 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::GroupMemberRemoved
         | A::GroupMemberRoleChanged => "Organization",
         // Security — RBAC role assignments, direct user permissions,
-        // raw authz tuples, and integrity-watchdog events.
+        // raw authz tuples, integrity-watchdog events, and breach-check outcomes.
         A::RoleAssigned
         | A::RoleRevoked
         | A::UserPermissionGranted
         | A::UserPermissionRevoked
         | A::TupleWritten
         | A::TupleDeleted
-        | A::OrphanedReferenceSkipped => "Security",
+        | A::OrphanedReferenceSkipped
+        | A::PasswordCompromisedRejected
+        | A::BreachCheckUnavailable
+        | A::StepUpMfaTriggered => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
         // backup/restore, and internal cleanup jobs.
         A::RealmCreated
@@ -2576,6 +2582,8 @@ mod action_category_tests {
             A::TupleWritten,
             A::TupleDeleted,
             A::OrphanedReferenceSkipped,
+            A::PasswordCompromisedRejected,
+            A::BreachCheckUnavailable,
         ] {
             assert_eq!(action_category(&a), "Security", "{a:?}");
         }
