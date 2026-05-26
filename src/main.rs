@@ -959,8 +959,8 @@ async fn run_serve(
             None
         }
     };
-    let _sms_otp_hmac_key = sms_otp_hmac_key; // reserved for OTP issuance (HEA-829)
-    let _sms_sender: SharedSmsSender = build_sms_sender(&config)?; // reserved for SMS MFA (HEA-829)
+    let sms_hmac_key_bytes: Option<Vec<u8>> = sms_otp_hmac_key.map(|s| s.into_bytes());
+    let sms_sender: SharedSmsSender = build_sms_sender(&config)?;
     if config.sms.transport == SmsTransport::Log && !config.dev_mode {
         warn!("sms.transport = log is active outside dev mode — no real SMS messages will be sent");
     }
@@ -1460,7 +1460,8 @@ async fn run_serve(
     .with_product_name(config.branding.product_name_or_default().to_string())
     .with_logo_url(web_logo_url)
     .with_default_realm(config.server.default_realm.clone())
-    .with_config(Arc::new(config.clone()));
+    .with_config(Arc::new(config.clone()))
+    .with_sms(sms_sender, sms_hmac_key_bytes);
 
     if !api_trusted_proxies.is_empty() {
         info!(count = api_trusted_proxies.len(), "loaded trusted_proxies");

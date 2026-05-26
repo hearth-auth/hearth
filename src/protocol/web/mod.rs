@@ -187,6 +187,12 @@ pub struct WebState {
     /// Whether to trust `X-Forwarded-Proto: https` for Secure-cookie
     /// decisions. Derived from `server.trust_forwarded_proto`.
     pub trust_forwarded_proto: bool,
+    /// SMS sender for OTP delivery. `None` when SMS is not configured.
+    pub sms: Option<crate::identity::sms::SharedSmsSender>,
+    /// Raw bytes of the HMAC-SHA256 key used to sign/verify SMS OTP codes.
+    /// Derived from `HEARTH_SMS_OTP_HMAC_KEY`. `None` in dev mode when the
+    /// Log transport is active (a deterministic dev key is substituted).
+    pub sms_otp_hmac_key: Option<Vec<u8>>,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -242,6 +248,8 @@ impl WebState {
             app_css_etag: etag_for_bytes(APP_CSS_FALLBACK),
             tls_enabled: false,
             trust_forwarded_proto: false,
+            sms: None,
+            sms_otp_hmac_key: None,
         }
     }
 
@@ -413,6 +421,22 @@ impl WebState {
     #[must_use]
     pub fn with_trust_forwarded_proto(mut self, trust: bool) -> Self {
         self.trust_forwarded_proto = trust;
+        self
+    }
+
+    /// Configures the SMS transport and HMAC key for OTP delivery.
+    ///
+    /// `hmac_key` is the raw bytes derived from `HEARTH_SMS_OTP_HMAC_KEY`.
+    /// When `hmac_key` is `None` (dev-mode Log transport), the handlers
+    /// substitute a deterministic dev key.
+    #[must_use]
+    pub fn with_sms(
+        mut self,
+        sender: crate::identity::sms::SharedSmsSender,
+        hmac_key: Option<Vec<u8>>,
+    ) -> Self {
+        self.sms = Some(sender);
+        self.sms_otp_hmac_key = hmac_key;
         self
     }
 
@@ -1428,6 +1452,18 @@ pub fn router(state: WebState) -> Router {
             "/required-action/UPDATE_PASSWORD",
             axum::routing::get(required_action::update_password_page)
                 .post(required_action::update_password_submit),
+        )
+        .route(
+            "/required-action/ENROLL_PHONE_OTP",
+            axum::routing::get(required_action::enroll_phone_otp_page),
+        )
+        .route(
+            "/required-action/ENROLL_PHONE_OTP/send",
+            axum::routing::post(required_action::enroll_phone_otp_send),
+        )
+        .route(
+            "/required-action/ENROLL_PHONE_OTP/verify",
+            axum::routing::post(required_action::enroll_phone_otp_verify_submit),
         )
         .route(
             "/required-action/{action}",

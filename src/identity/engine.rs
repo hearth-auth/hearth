@@ -3393,6 +3393,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             user.set_required_actions(actions);
         }
 
+        // 4c. Apply phone_number change if requested.
+        if let Some(ref phone) = request.phone_number {
+            user.set_phone_number(phone.clone());
+        }
+
+        // 4d. Apply phone_verified change if requested.
+        if let Some(verified) = request.phone_verified {
+            user.set_phone_verified(verified);
+        }
+
         // 5. Update timestamp
         user.set_updated_at(self.clock.now());
 
@@ -5187,6 +5197,63 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let token_pair = self.issue_tokens(realm_id, user.id(), session.id())?;
 
         // 5. Record device fingerprint on first successful login from this device.
+        if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
+            let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
+        }
+
+        Ok(crate::identity::oidc::PasswordGrantResponse {
+            access_token: token_pair.access_token().to_string(),
+            refresh_token: token_pair.refresh_token().to_string(),
+            token_type: "Bearer".to_string(),
+            expires_in: self.config.token.access_token_ttl_secs,
+        })
+    }
+
+    fn step_up_mfa_grant_token(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::oidc::StepUpMfaGrantRequest,
+    ) -> Result<crate::identity::oidc::PasswordGrantResponse, IdentityError> {
+        // 1. Look up user by email (timing-safe: dummy-hash on miss)
+        let user = match self.get_user_by_email(realm_id, &request.email)? {
+            Some(u) => u,
+            None => {
+                let dummy_pw = CleartextPassword::from_string(request.password.clone());
+                let _ = credentials::verify_hash(&dummy_pw, &self.dummy_hash);
+                return Err(IdentityError::InvalidCredential {
+                    reason: "verification failed".to_string(),
+                });
+            }
+        };
+
+        // 2. Re-verify password to prevent session fixation.
+        let pw = CleartextPassword::from_string(request.password.clone());
+        let matches = self.verify_password(realm_id, user.id(), &pw)?;
+        if !matches {
+            return Err(IdentityError::InvalidCredential {
+                reason: "verification failed".to_string(),
+            });
+        }
+
+        // 3. Verify MFA code (TOTP first; fall through to recovery code on mismatch).
+        match self.verify_totp(realm_id, user.id(), &request.mfa_code) {
+            Ok(()) => {}
+            Err(IdentityError::InvalidMfaCode) => {
+                // TOTP code didn't match — try as a recovery code.
+                self.verify_recovery_code(realm_id, user.id(), &request.mfa_code)?;
+            }
+            Err(e) => return Err(e),
+        }
+
+        // 4. Create session and issue token pair.
+        let session = self.create_session(
+            realm_id,
+            user.id(),
+            &crate::identity::SessionContext::default(),
+        )?;
+        let token_pair = self.issue_tokens(realm_id, user.id(), session.id())?;
+
+        // 5. Record device fingerprint — this device is now trusted.
         if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
             let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
         }
@@ -10294,9 +10361,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .ok_or(IdentityError::RealmNotFound)?;
         let cfg = &realm.config().adaptive_mfa;
 
-        // AC-10: disabled or no secret → skip immediately.
-        if !cfg.enabled || cfg.fingerprint_hmac_secret.is_empty() {
+        if !cfg.enabled {
             return Ok(DeviceFingerprintOutcome::Skipped);
+        }
+        // Fail-secure: enabled=true with an empty HMAC secret is a misconfiguration.
+        if cfg.fingerprint_hmac_secret.is_empty() {
+            return Err(IdentityError::Internal {
+                reason: "adaptive_mfa.enabled=true but fingerprint_hmac_secret is empty"
+                    .to_string(),
+            });
         }
 
         let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(

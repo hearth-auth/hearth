@@ -25,6 +25,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **ENROLL_PHONE_OTP required action (HEA-853)** — realms with `mfa_methods: [sms]`
+  now interrupt the OIDC and browser login flows for users who have no verified phone
+  number. The enrollment interstitial collects an E.164 phone number, sends a 6-digit
+  SMS OTP, and verifies the code before completing the flow. On success the phone number
+  is stored as verified and the action is cleared. Enumeration resistance: uniform
+  HTTP 200 responses, timing-safe sends, no notification to the existing holder of a
+  claimed number.
+
 - **SMS transport layer** — new `sms:` config block with three providers:
   `log` (dev default), `twilio` (Messaging REST API), and `awssns` (SNS
   Transactional tier, Signature Version 4). Fail-fast startup validation for

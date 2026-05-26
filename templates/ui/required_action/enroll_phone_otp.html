@@ -1,0 +1,37 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · Enroll phone number{% endblock %}
+{% block body %}
+<div class="mx-auto max-w-lg">
+  <div class="rounded-lg bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle">
+    <div class="mb-6">
+      <p class="font-mono text-[11px] uppercase tracking-[0.14em] text-ht-content-muted">Required action</p>
+      <h1 class="font-display text-xl font-medium text-ht-content-primary">Enroll your phone number</h1>
+      <p class="mt-1 text-sm text-ht-content-muted">
+        This application requires a verified phone number. Enter your number in international format
+        (e.g. <span class="font-mono">+15555550100</span>) and we'll send you a one-time code to confirm.
+      </p>
+    </div>
+
+    {% match error %}
+      {% when Some with (msg) %}
+        <div class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm text-danger-fg" role="alert">
+          <p class="font-medium">{{ msg }}</p>
+        </div>
+      {% when None %}
+    {% endmatch %}
+
+    <form method="post" action="/required-action/ENROLL_PHONE_OTP/send" class="space-y-5" data-testid="enroll-phone-form">
+      <div>
+        <label for="phone" class="block text-sm font-medium text-ht-content-secondary mb-1">Phone number</label>
+        <input id="phone" name="phone" type="tel" required autocomplete="tel"
+          placeholder="+15555550100"
+          class="mt-1 input" />
+      </div>
+      <button type="submit"
+        class="btn-ember w-full rounded-md px-4 py-2.5 text-sm font-medium">
+        Send verification code
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}

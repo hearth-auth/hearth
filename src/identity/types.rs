@@ -74,18 +74,24 @@ pub enum RequiredAction {
     /// Injected automatically by the adaptive-MFA engine when a login arrives
     /// from an unrecognised device and the user has no enrolled factor.
     EnrollMfa,
+    /// User must enroll a verified phone number via SMS OTP before proceeding.
+    ///
+    /// Injected automatically when a realm has `mfa_methods: ["sms"]` and the
+    /// user has no verified phone number on record.
+    EnrollPhoneOtp,
 }
 
 impl RequiredAction {
     /// Canonical execution priority. Lower numbers run first.
     ///
-    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`.
+    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_PHONE_OTP=4`.
     #[must_use]
     pub fn priority(self) -> u8 {
         match self {
             Self::VerifyEmail => 1,
             Self::UpdatePassword => 2,
             Self::EnrollMfa => 3,
+            Self::EnrollPhoneOtp => 4,
         }
     }
 
@@ -96,6 +102,7 @@ impl RequiredAction {
             Self::VerifyEmail => "VERIFY_EMAIL",
             Self::UpdatePassword => "UPDATE_PASSWORD",
             Self::EnrollMfa => "enroll-mfa",
+            Self::EnrollPhoneOtp => "ENROLL_PHONE_OTP",
         }
     }
 
@@ -105,6 +112,7 @@ impl RequiredAction {
             "VERIFY_EMAIL" => Some(Self::VerifyEmail),
             "UPDATE_PASSWORD" => Some(Self::UpdatePassword),
             "enroll-mfa" => Some(Self::EnrollMfa),
+            "ENROLL_PHONE_OTP" => Some(Self::EnrollPhoneOtp),
             _ => None,
         }
     }
@@ -130,6 +138,12 @@ pub struct User {
     /// Whether the user's email address has been verified. Absent in old records = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     email_verified: bool,
+    /// E.164 phone number. `None` when no phone has been enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phone_number: Option<String>,
+    /// Whether the stored phone number has been verified via OTP.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    phone_verified: bool,
     created_at: Timestamp,
     updated_at: Timestamp,
 }
@@ -157,6 +171,8 @@ impl User {
             status,
             required_actions,
             email_verified: false,
+            phone_number: None,
+            phone_verified: false,
             created_at,
             updated_at,
         }
@@ -255,6 +271,26 @@ impl User {
     /// Marks the user's email as verified. Used internally by the identity engine.
     pub(crate) fn set_email_verified(&mut self, verified: bool) {
         self.email_verified = verified;
+    }
+
+    /// Returns the user's enrolled phone number in E.164 format, or `None` if not set.
+    pub fn phone_number(&self) -> Option<&str> {
+        self.phone_number.as_deref()
+    }
+
+    /// Sets (or clears) the user's phone number. Used internally by the identity engine.
+    pub(crate) fn set_phone_number(&mut self, phone: Option<String>) {
+        self.phone_number = phone;
+    }
+
+    /// Returns whether the stored phone number has been verified via OTP.
+    pub fn phone_verified(&self) -> bool {
+        self.phone_verified
+    }
+
+    /// Marks the user's phone number as verified (or unverified). Used internally.
+    pub(crate) fn set_phone_verified(&mut self, verified: bool) {
+        self.phone_verified = verified;
     }
 
     /// Updates the `updated_at` timestamp.
@@ -479,6 +515,10 @@ pub struct UpdateUserRequest {
     pub attributes: Option<BTreeMap<String, String>>,
     /// Replace the required actions list. `Some([])` clears all actions; `None` leaves unchanged.
     pub required_actions: Option<Vec<RequiredAction>>,
+    /// Set the user's phone number in E.164 format. `Some(None)` clears the field; `None` leaves unchanged.
+    pub phone_number: Option<Option<String>>,
+    /// Set the phone-verified flag. `None` leaves unchanged.
+    pub phone_verified: Option<bool>,
 }
 
 // ===== Realm types =====
@@ -2148,6 +2188,10 @@ mod tests {
             serde_json::to_string(&RequiredAction::UpdatePassword).expect("serialize"),
             "\"UPDATE_PASSWORD\""
         );
+        assert_eq!(
+            serde_json::to_string(&RequiredAction::EnrollPhoneOtp).expect("serialize"),
+            "\"ENROLL_PHONE_OTP\""
+        );
     }
 
     #[test]
@@ -2157,6 +2201,93 @@ mod tests {
 
         let b: RequiredAction = serde_json::from_str("\"UPDATE_PASSWORD\"").expect("deserialize");
         assert_eq!(b, RequiredAction::UpdatePassword);
+
+        let c: RequiredAction = serde_json::from_str("\"ENROLL_PHONE_OTP\"").expect("deserialize");
+        assert_eq!(c, RequiredAction::EnrollPhoneOtp);
+    }
+
+    #[test]
+    fn enroll_phone_otp_priority_and_path_segment() {
+        assert_eq!(RequiredAction::EnrollPhoneOtp.priority(), 4);
+        assert_eq!(
+            RequiredAction::EnrollPhoneOtp.as_path_segment(),
+            "ENROLL_PHONE_OTP"
+        );
+        assert_eq!(
+            RequiredAction::from_path_segment("ENROLL_PHONE_OTP"),
+            Some(RequiredAction::EnrollPhoneOtp)
+        );
+    }
+
+    #[test]
+    fn user_phone_fields_default_none_on_legacy_record() {
+        let legacy_json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "email": "old@example.com",
+            "display_name": "Old User",
+            "first_name": "Old",
+            "last_name": "User",
+            "status": "Active",
+            "created_at": 1000000,
+            "updated_at": 1000000
+        }"#;
+        let user: User = serde_json::from_str(legacy_json).expect("deserialize");
+        assert!(
+            user.phone_number().is_none(),
+            "legacy user must have no phone"
+        );
+        assert!(
+            !user.phone_verified(),
+            "legacy user must not be phone-verified"
+        );
+    }
+
+    #[test]
+    fn user_phone_fields_round_trip() {
+        let now = Timestamp::from_micros(1_000_000);
+        let mut user = User::new(
+            UserId::generate(),
+            "alice@example.com".to_string(),
+            "Alice".to_string(),
+            "Alice".to_string(),
+            String::new(),
+            UserStatus::Active,
+            Vec::new(),
+            now,
+            now,
+        );
+        user.set_phone_number(Some("+15555550100".to_string()));
+        user.set_phone_verified(true);
+
+        let json = serde_json::to_string(&user).expect("serialize");
+        let back: User = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.phone_number(), Some("+15555550100"));
+        assert!(back.phone_verified());
+    }
+
+    #[test]
+    fn user_without_phone_omits_fields_in_json() {
+        let now = Timestamp::from_micros(1_000_000);
+        let user = User::new(
+            UserId::generate(),
+            "bob@example.com".to_string(),
+            "Bob".to_string(),
+            "Bob".to_string(),
+            String::new(),
+            UserStatus::Active,
+            Vec::new(),
+            now,
+            now,
+        );
+        let json = serde_json::to_string(&user).expect("serialize");
+        assert!(
+            !json.contains("phone_number"),
+            "absent phone must be omitted"
+        );
+        assert!(
+            !json.contains("phone_verified"),
+            "false phone_verified must be omitted"
+        );
     }
 
     #[test]
