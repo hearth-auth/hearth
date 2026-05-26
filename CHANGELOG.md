@@ -111,6 +111,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **gRPC cross-realm BFLA: realm management now requires system-realm admin token** — all five
+  realm-management gRPC handlers (`list_realms`, `get_realm`, `create_realm`, `update_realm`,
+  `delete_realm`) previously authenticated the caller but discarded the returned realm context
+  (`_auth`), allowing any legitimate realm-A admin to destroy or read realm B. Handlers now
+  enforce that the `x-realm-id` metadata header is the nil UUID (system realm); all other callers
+  receive `PermissionDenied` (HEA-799; OWASP API Top 10 — BFLA).
+
 - **VERIFY_EMAIL cross-user token substitution** — the `verify_email_confirm` handler now
   validates that the `UserId` bound to the submitted email-verification token matches the
   user in the RA session cookie.  Previously the handler discarded the returned user ID,
