@@ -8,7 +8,7 @@ use crate::protocol::proto::events::v1 as pb;
 use crate::protocol::proto::events::v1::audit_service_server::AuditService;
 
 use super::auth::authenticate_admin;
-use super::convert::identity_to_status;
+use super::convert::{audit_error_to_status, identity_to_status};
 use super::server::GrpcState;
 
 /// Implements [`AuditService`] by delegating to the injected [`AuditEngine`].
@@ -35,7 +35,7 @@ impl AuditService for AuditSvc {
             .state
             .audit
             .query(&query)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(audit_error_to_status)?;
         Ok(Response::new(pb::AuditEventPage {
             events: events.iter().map(pb::AuditEvent::from).collect(),
         }))
@@ -50,13 +50,13 @@ impl AuditService for AuditSvc {
             .state
             .audit
             .verify_integrity(&auth.realm_id, None, None)
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(audit_error_to_status)?;
         // Determine event count for ops visibility.
         let events = self
             .state
             .audit
             .query(&AuditQuery::for_realm(auth.realm_id))
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(audit_error_to_status)?;
         Ok(Response::new(pb::VerifyIntegrityResponse {
             ok,
             broken_at_event_id: None,

@@ -179,7 +179,12 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::ListRealmsRequest>,
     ) -> Result<Response<pb::RealmPage>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::permission_denied(
+                "realm management requires a system-realm admin token",
+            ));
+        }
         let body = req.into_inner();
         let limit = body.limit.unwrap_or(50) as usize;
         let page = self
@@ -194,7 +199,12 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::GetRealmRequest>,
     ) -> Result<Response<pb::Realm>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::permission_denied(
+                "realm management requires a system-realm admin token",
+            ));
+        }
         let body = req.into_inner();
         let realm_id = parse_realm_id(&body.id)?;
         let realm = self
@@ -210,7 +220,12 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::CreateRealmRequest>,
     ) -> Result<Response<pb::Realm>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::permission_denied(
+                "realm management requires a system-realm admin token",
+            ));
+        }
         let body: CreateRealmRequest = req.into_inner().into();
         let realm = self
             .state
@@ -221,10 +236,11 @@ impl IdentityAdminService for IdentityAdminSvc {
         // must see the failure so they can retry or rollback. The realm record
         // is already committed but the unsurfaced-failure path would leave the
         // realm permanently broken with no admin roles.
-        self.state
-            .rbac
-            .seed_realm(realm.id())
-            .map_err(|e| Status::internal(format!("RBAC seed failed: {e}")))?;
+        self.state.rbac.seed_realm(realm.id()).map_err(|e| {
+            let error_id = uuid::Uuid::new_v4();
+            tracing::error!(error = %e, %error_id, "RBAC realm seed failed");
+            Status::internal(format!("internal error [{error_id}]"))
+        })?;
         Ok(Response::new(pb::Realm::from(&realm)))
     }
 
@@ -232,7 +248,12 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::UpdateRealmCall>,
     ) -> Result<Response<pb::Realm>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::permission_denied(
+                "realm management requires a system-realm admin token",
+            ));
+        }
         let call = req.into_inner();
         let realm_id = parse_realm_id(&call.id)?;
         let body: UpdateRealmRequest = call
@@ -251,7 +272,12 @@ impl IdentityAdminService for IdentityAdminSvc {
         &self,
         req: Request<pb::DeleteRealmRequest>,
     ) -> Result<Response<pb::Empty>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        if !crate::identity::keys::is_system_realm(&auth.realm_id) {
+            return Err(Status::permission_denied(
+                "realm management requires a system-realm admin token",
+            ));
+        }
         let body = req.into_inner();
         let realm_id = parse_realm_id(&body.id)?;
         self.state

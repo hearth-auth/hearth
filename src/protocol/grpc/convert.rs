@@ -6,6 +6,7 @@
 use tonic::metadata::MetadataMap;
 use tonic::{Code, Status};
 
+use crate::audit::AuditError;
 use crate::core::RealmId;
 use crate::identity::IdentityError;
 use crate::rbac::RbacError;
@@ -148,6 +149,25 @@ pub fn rbac_to_status(err: RbacError) -> Status {
         RbacError::Serialization { .. } => {
             tracing::error!(error = %err, "rbac serialization error");
             Status::new(Code::Internal, "internal error")
+        }
+    }
+}
+
+/// Maps an [`AuditError`] to a [`tonic::Status`].
+///
+/// Storage and serialization failures are logged with a generated error ID so
+/// operators can correlate logs to the opaque caller-facing message; no
+/// internal detail is forwarded to the caller.
+#[must_use]
+pub fn audit_error_to_status(err: AuditError) -> Status {
+    match err {
+        AuditError::IntegrityViolation { .. } => {
+            Status::new(Code::DataLoss, "audit chain integrity violation")
+        }
+        AuditError::Storage(_) | AuditError::Serialization { .. } => {
+            let error_id = uuid::Uuid::new_v4();
+            tracing::error!(error = %err, %error_id, "internal audit gRPC error");
+            Status::new(Code::Internal, format!("internal error [{error_id}]"))
         }
     }
 }
