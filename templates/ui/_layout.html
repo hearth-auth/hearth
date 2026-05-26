@@ -256,6 +256,10 @@
           defer></script>
   <script src="/ui/static/htmx.min.js"
           integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"></script>
+  {# Hyperscript 0.9.13 — eval-free declarative scripting (HEA-824).
+     Replaces Alpine.js patterns so CSP can drop 'unsafe-eval'. #}
+  <script src="/ui/static/hyperscript.min.js"
+          integrity="sha384-5yQ5JTatiFEgeiEB4mfkRI3oTGtaNpbJGdcciZ4IEYFpLGt8yDsGAd7tKiMwnX9b"></script>
 
   {# Keyboard-shortcut overlay (global). Bound to `?` via the listener
      above; ESC closes. Uses x-cloak so it doesn't flash on first paint. #}

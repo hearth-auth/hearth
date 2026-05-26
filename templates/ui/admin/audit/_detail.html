@@ -102,10 +102,11 @@
           <div class="flex items-center justify-end pb-2">
             <button type="button"
                     title="Copy JSON"
-                    @click="
-                      navigator.clipboard.writeText($el.parentElement.nextElementSibling.textContent);
-                      $el.textContent = 'Copied';
-                      setTimeout(() => $el.textContent = 'Copy', 1500);"
+                    _="on click
+                         call navigator.clipboard.writeText(my parentElement's nextElementSibling's textContent)
+                         set my textContent to 'Copied'
+                         wait 1500ms
+                         set my textContent to 'Copy'"
                     class="rounded border border-strong bg-ht-surface-elevated px-2 py-0.5 font-mono text-xs text-ht-content-muted hover-bg-divider hover:text-ht-content-secondary transition-colors">
               Copy
             </button>

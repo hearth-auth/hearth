@@ -64,14 +64,14 @@
       <div>
         <div class="flex items-center gap-1">
           <label for="role" class="block text-sm font-medium text-ht-content-secondary">Role</label>
-          <span x-data="{ tip: false }" class="relative inline-flex">
-            <button type="button" @mouseenter="tip=true" @mouseleave="tip=false" @focus="tip=true" @blur="tip=false"
-                    class="ml-0.5 flex h-4 w-4 items-center justify-center rounded-full border border-divider bg-ht-surface-elevated text-ht-content-muted transition-colors hover:text-ht-content-secondary"
+          <span class="group relative inline-flex">
+            <button type="button"
+                    class="ml-0.5 flex h-4 w-4 items-center justify-center rounded-full border border-divider bg-ht-surface-elevated text-ht-content-muted transition-colors hover:text-ht-content-secondary focus:outline-none"
                     aria-label="About roles">
               <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
             </button>
-            <span x-show="tip" x-cloak role="tooltip"
-                  class="absolute left-6 top-1/2 z-50 w-64 -translate-y-1/2 rounded-md bg-ht-surface-raised p-3 text-xs text-ht-content-secondary shadow ring-1 ring-divider-subtle">
+            <span role="tooltip"
+                  class="pointer-events-none absolute left-6 top-1/2 z-50 hidden w-64 -translate-y-1/2 rounded-md bg-ht-surface-raised p-3 text-xs text-ht-content-secondary shadow ring-1 ring-divider-subtle group-hover:block group-focus-within:block">
               Roles bundle permissions into named sets. Admin grants full realm management. Member is a standard authenticated user with no admin access.
             </span>
           </span>

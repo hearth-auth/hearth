@@ -1,18 +1,25 @@
 {% for row in events %}
-{# Each row manages its own open/closed state independently via Alpine.js.
+{# Each row manages its own open/closed state independently via Hyperscript.
    The detail row below is a sibling <tr> rendered immediately after,
    hidden until the toggle is clicked — no HTMX round-trip needed since
    the full event payload is embedded in the server render. #}
-<tr class="border-b border-divider-subtle hover-bg-divider{% if row.action_high_severity %} border-l-2 border-l-amber-400/60{% endif %}"
-    x-data="{ open: false }"
-    :class="open ? 'bg-ht-surface-overlay' : ''">
+<tr class="border-b border-divider-subtle hover-bg-divider{% if row.action_high_severity %} border-l-2 border-l-amber-400/60{% endif %}">
   <td class="w-8 px-3 py-3">
     <button type="button"
-            @click="open = !open; $el.closest('tr').nextElementSibling.classList.toggle('hidden', !open)"
-            :aria-expanded="open"
-            :aria-label="open ? 'Collapse event detail' : 'Expand event detail'"
-            class="flex h-5 w-5 items-center justify-center rounded text-ht-content-muted transition-transform hover:text-ht-content-secondary focus:outline-none focus:ring-1 focus:ring-ht-content-brand"
-            :class="open ? 'rotate-90' : ''">
+            aria-expanded="false"
+            aria-label="Expand event detail"
+            _="on click
+                 toggle .bg-ht-surface-overlay on my closest <tr/>
+                 toggle .rotate-90 on me
+                 toggle .hidden on my closest <tr/>'s next <tr/>
+                 if @aria-expanded == 'false'
+                   set @aria-expanded to 'true'
+                   set @aria-label to 'Collapse event detail'
+                 else
+                   set @aria-expanded to 'false'
+                   set @aria-label to 'Expand event detail'
+                 end"
+            class="flex h-5 w-5 items-center justify-center rounded text-ht-content-muted transition-transform hover:text-ht-content-secondary focus:outline-none focus:ring-1 focus:ring-ht-content-brand">
       <svg class="h-3.5 w-3.5 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
     </button>
   </td>
