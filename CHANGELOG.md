@@ -23,6 +23,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Step-up MFA rate-limit gaps closed (HEA-836)** — three additional findings
+  from the SecurityAuditor re-review resolved: the pre-flight IP rate-limit check
+  now covers `grant_type=urn:hearth:params:grant-type:step-up-mfa` (previously
+  only `password` was guarded); `verify_recovery_code` now enforces the same
+  per-user 5-attempt MFA lockout as TOTP so recovery codes cannot bypass the
+  rate limit; failed MFA codes in the step-up handler now advance the IP-level
+  login-attempt counter so MFA failures feed back into adaptive IP blocking.
+
 - **Step-up MFA security hardening (HEA-836)** — five SecurityAuditor findings
   resolved: `enabled=true` with an empty `fingerprint_hmac_secret` now returns a
   hard configuration error instead of silently bypassing step-up (fail-secure);
