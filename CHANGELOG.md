@@ -31,6 +31,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Sensitive config fields wrapped in `SecretString` (HEA-869)** — `AdaptiveMfaConfig.fingerprint_hmac_secret`
+  and `BreachCheckConfig.hibp_api_key` were typed as `String` with `#[derive(Debug)]`, which exposed
+  their plaintext values in any `{:?}` output (tracing debug logs, assertion panics, `dbg!` macro).
+  Both fields are now `secrecy::SecretString`; `Debug` is implemented manually and emits `[REDACTED]`.
+  Call sites updated to call `.expose_secret()` only at the point of cryptographic use (CWE-532, High).
+
 - **Step-up MFA follow-up hardening (HEA-861)** — four deferred findings from the
   HEA-836 SecurityAuditor re-review resolved: (1) duplicate `record_device_fingerprint`
   call removed from the `Recognised` path (triple write on every recognised login);
