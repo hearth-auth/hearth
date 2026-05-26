@@ -122,8 +122,11 @@ A dedicated test module that actively tries to break security properties. These 
 | Replay attacks | Reused authorization codes, replayed session tokens, nonce reuse |
 | Input injection | Null bytes in usernames, unicode normalization attacks, oversized inputs, header injection |
 | Credential stuffing | Rate limiting under sustained credential guessing attempts |
+| Adaptive MFA bypass | Step-up cannot be skipped by changing source IP/UA to dodge the device fingerprint (`tests/step_up_mfa.rs::different_subnet_produces_different_fingerprint_and_triggers_step_up`) |
 
-These tests live in `tests/adversarial.rs` and are part of the standard CI test suite (not gated behind extended runs).
+These tests live in `tests/adversarial.rs`, `tests/federation_adversarial.rs`, `tests/token_adversarial.rs`, and (for adaptive MFA) `tests/step_up_mfa.rs`. All are part of the standard CI test suite (not gated behind extended runs).
+
+The adversarial fingerprint-bypass test is additionally wired as its own named CI gate in `.github/workflows/ci.yml` (job `quality`, step "Adversarial fingerprint-bypass gate"). The gate uses `cargo nextest --no-tests=fail` against an exact-name filter, so silent removal, rename, or `#[ignore]` of the test fails CI loudly rather than going green by absence (HEA-860).
 
 ### 7. Conformance Tests
 

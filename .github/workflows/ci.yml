@@ -192,6 +192,28 @@ jobs:
       - name: make check (clippy -D warnings + fmt --check + nextest --workspace)
         run: make check
 
+      # HEA-860 / HEA-836: explicit adversarial fingerprint-bypass gate.
+      #
+      # `make check` already runs the full nextest workspace, which includes
+      # this test. The explicit re-run below exists to:
+      #
+      #   1. surface it as a named CI step (visible in workflow summary +
+      #      branch-protected via `required-summary`),
+      #   2. assert via `--no-tests=fail` that the test still exists and is
+      #      not `#[ignore]`d — silent removal of an adaptive-MFA security
+      #      gate would otherwise still let CI go green.
+      #
+      # Cost is near-zero because the test binary was already compiled by
+      # the preceding `make check`. Keep this step exact-match (`test(=…)`):
+      # a substring filter would let a typo-renamed test silently satisfy
+      # the gate.
+      - name: Adversarial fingerprint-bypass gate (HEA-836 adaptive MFA)
+        run: |
+          PROTOC=protoc cargo nextest run \
+            --test step_up_mfa \
+            --no-tests=fail \
+            -E 'test(=different_subnet_produces_different_fingerprint_and_triggers_step_up)'
+
       - name: make css-check (rebuild Tailwind and fail if app.css drifts)
         run: make css-check
 
