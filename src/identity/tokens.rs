@@ -1102,6 +1102,7 @@ mod tests {
             groups: Vec::new(),
             permissions: Vec::new(),
             custom: BTreeMap::new(),
+            required_actions: Vec::new(),
         }
     }
 

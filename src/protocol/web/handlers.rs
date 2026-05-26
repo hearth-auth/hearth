@@ -3731,7 +3731,7 @@ pub async fn ra_update_password_submit(
 
             // More required actions remain — redirect to the next interstitial.
             if new_claims.token_type == crate::identity::tokens::REQUIRED_ACTION_TOKEN_TYPE {
-                let next = new_claims.required_actions.first().cloned();
+                let next = new_claims.required_actions.first().copied();
                 let path = match next {
                     Some(crate::identity::RequiredAction::VerifyEmail) => {
                         format!(

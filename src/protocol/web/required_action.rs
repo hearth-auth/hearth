@@ -375,7 +375,7 @@ pub async fn action_complete(
         .collect();
 
     if remaining.is_empty() {
-        if claims.browser_return_to.is_some() || claims.oidc_params.is_none() {
+        if claims.browser_return_to.is_some() {
             resume_browser_flow(
                 &state,
                 &realm,
@@ -383,16 +383,10 @@ pub async fn action_complete(
                 claims.browser_return_to,
                 secure,
             )
+        } else if let Some(oidc_params) = claims.oidc_params {
+            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
         } else {
-            // SAFETY: checked oidc_params.is_some() via the else branch.
-            #[allow(clippy::unwrap_used)]
-            resume_oidc_flow(
-                &state,
-                &realm,
-                &claims.sub,
-                claims.oidc_params.unwrap(),
-                secure,
-            )
+            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
         }
     } else {
         next_required_action(
@@ -674,7 +668,7 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
             .collect();
 
         return if remaining.is_empty() {
-            if claims.browser_return_to.is_some() || claims.oidc_params.is_none() {
+            if claims.browser_return_to.is_some() {
                 resume_browser_flow(
                     &state,
                     &realm,
@@ -682,16 +676,10 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
                     claims.browser_return_to,
                     secure,
                 )
+            } else if let Some(oidc_params) = claims.oidc_params {
+                resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
             } else {
-                // INVARIANT: oidc_params is Some when browser_return_to is None.
-                #[allow(clippy::unwrap_used)]
-                resume_oidc_flow(
-                    &state,
-                    &realm,
-                    &claims.sub,
-                    claims.oidc_params.unwrap(),
-                    secure,
-                )
+                resume_browser_flow(&state, &realm, &claims.sub, None, secure)
             }
         } else {
             next_required_action(
@@ -847,7 +835,7 @@ pub async fn verify_email_confirm(
                 .collect();
 
             if remaining.is_empty() {
-                if claims.browser_return_to.is_some() || claims.oidc_params.is_none() {
+                if claims.browser_return_to.is_some() {
                     resume_browser_flow(
                         &state,
                         &realm,
@@ -855,16 +843,10 @@ pub async fn verify_email_confirm(
                         claims.browser_return_to,
                         secure,
                     )
+                } else if let Some(oidc_params) = claims.oidc_params {
+                    resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
                 } else {
-                    // INVARIANT: oidc_params is Some when browser_return_to is None.
-                    #[allow(clippy::unwrap_used)]
-                    resume_oidc_flow(
-                        &state,
-                        &realm,
-                        &claims.sub,
-                        claims.oidc_params.unwrap(),
-                        secure,
-                    )
+                    resume_browser_flow(&state, &realm, &claims.sub, None, secure)
                 }
             } else {
                 next_required_action(
@@ -1043,7 +1025,7 @@ pub async fn update_password_submit(
         .collect();
 
     if remaining.is_empty() {
-        if claims.browser_return_to.is_some() || claims.oidc_params.is_none() {
+        if claims.browser_return_to.is_some() {
             resume_browser_flow(
                 &state,
                 &realm,
@@ -1051,16 +1033,10 @@ pub async fn update_password_submit(
                 claims.browser_return_to,
                 secure,
             )
+        } else if let Some(oidc_params) = claims.oidc_params {
+            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
         } else {
-            // INVARIANT: oidc_params is Some when browser_return_to is None.
-            #[allow(clippy::unwrap_used)]
-            resume_oidc_flow(
-                &state,
-                &realm,
-                &claims.sub,
-                claims.oidc_params.unwrap(),
-                secure,
-            )
+            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
         }
     } else {
         next_required_action(
