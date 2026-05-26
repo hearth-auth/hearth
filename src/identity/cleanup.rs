@@ -25,12 +25,17 @@ use crate::storage::StorageEngine;
 pub struct CleanupConfig {
     /// Whether periodic cleanup is enabled.
     pub enabled: bool,
-    /// Interval in seconds between cleanup sweeps. 0 disables the
-    /// background task even when `enabled` is true.
+    /// Interval in seconds between OAuth entity cleanup sweeps. 0 disables
+    /// the background task even when `enabled` is true.
     pub interval_secs: u64,
     /// Maximum entities to delete per type per sweep. Bounds worst-case
     /// sweep latency on the first run after feature enablement.
     pub max_per_type: usize,
+    /// Interval in seconds between device-fingerprint TTL sweeps.
+    ///
+    /// Default: 21 600 (6 hours). 0 disables the dfp sweeper even when
+    /// `enabled` is true.
+    pub dfp_sweeper_interval_secs: u64,
 }
 
 impl Default for CleanupConfig {
@@ -39,6 +44,7 @@ impl Default for CleanupConfig {
             enabled: true,
             interval_secs: 300,
             max_per_type: 1000,
+            dfp_sweeper_interval_secs: 21_600,
         }
     }
 }
@@ -131,6 +137,48 @@ pub(crate) fn sweep_expired(
     }
 
     stats
+}
+
+/// Eviction counts from a single device-fingerprint sweep of one realm.
+#[derive(Debug, Default, Clone)]
+pub struct FingerprintSweepStats {
+    /// Expired fingerprint entries deleted.
+    pub evicted: u64,
+    /// Active (non-expired) fingerprint entries observed after the sweep.
+    pub active: u64,
+}
+
+/// Scans all `dfp:user:*` keys in `realm_id` and deletes entries whose
+/// 8-byte little-endian i64 expiry (Unix seconds) is <= `now_secs`.
+///
+/// Returns [`FingerprintSweepStats`] on success. The caller should log any
+/// returned error at WARN level and continue — partial sweeps are safe
+/// because lazy expiry on the read path still handles stragglers.
+pub(crate) fn sweep_fingerprints(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<FingerprintSweepStats, crate::storage::StorageError> {
+    let prefix = keys::device_fp_global_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut stats = FingerprintSweepStats::default();
+    for entry in &entries {
+        if entry.value.len() != 8 {
+            continue;
+        }
+        #[allow(clippy::unwrap_used)]
+        // INVARIANT: length is checked to be exactly 8 above.
+        let expires_at = i64::from_le_bytes(entry.value.as_slice().try_into().unwrap());
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            stats.evicted += 1;
+        } else {
+            stats.active += 1;
+        }
+    }
+    Ok(stats)
 }
 
 // --- per-entity sweep helpers ---
@@ -657,5 +705,111 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(stats.total_deleted(), 10);
+    }
+
+    // --- device fingerprint sweep ---
+
+    const NOW_SECS: i64 = 1_700_000_000; // fixed base time in Unix seconds
+
+    /// Seed a fingerprint entry with the given expiry directly into storage.
+    fn seed_fingerprint(
+        s: &EmbeddedStorageEngine,
+        realm: &RealmId,
+        user_id: &crate::core::UserId,
+        tag: u8,
+        expires_at: i64,
+    ) {
+        let hmac_hex = format!("{tag:0>64x}");
+        let key = keys::encode_device_fp(user_id, &hmac_hex);
+        s.put(realm, &key, &expires_at.to_le_bytes())
+            .expect("put fingerprint");
+    }
+
+    #[test]
+    fn sweep_fingerprints_deletes_expired_keeps_active() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let user_a = crate::core::UserId::generate();
+        let user_b = crate::core::UserId::generate();
+
+        // Seed 3 expired entries (for two different users)
+        seed_fingerprint(&s, &realm, &user_a, 1, NOW_SECS - 1);
+        seed_fingerprint(&s, &realm, &user_a, 2, NOW_SECS - 3600);
+        seed_fingerprint(&s, &realm, &user_b, 3, NOW_SECS - 86400);
+
+        // Seed 2 live entries
+        seed_fingerprint(&s, &realm, &user_a, 4, NOW_SECS + 86400);
+        seed_fingerprint(&s, &realm, &user_b, 5, NOW_SECS + 7 * 86400);
+
+        let stats = sweep_fingerprints(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(stats.evicted, 3, "should delete 3 expired entries");
+        assert_eq!(stats.active, 2, "should observe 2 live entries");
+
+        // Verify exactly 2 entries remain in storage.
+        let prefix = keys::device_fp_global_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let remaining = s.scan(&realm, &prefix, &end).expect("scan after sweep");
+        assert_eq!(remaining.len(), 2, "only active entries must survive");
+    }
+
+    #[test]
+    fn sweep_fingerprints_empty_realm_is_ok() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let stats = sweep_fingerprints(&realm, &s, NOW_SECS).expect("sweep empty realm");
+        assert_eq!(stats.evicted, 0);
+        assert_eq!(stats.active, 0);
+    }
+
+    #[test]
+    fn sweep_fingerprints_all_active_nothing_deleted() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let user = crate::core::UserId::generate();
+
+        for tag in 0u8..4 {
+            seed_fingerprint(&s, &realm, &user, tag, NOW_SECS + 86400);
+        }
+
+        let stats = sweep_fingerprints(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(stats.evicted, 0);
+        assert_eq!(stats.active, 4);
+    }
+
+    #[test]
+    fn sweep_fingerprints_boundary_at_exactly_now_is_expired() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let user = crate::core::UserId::generate();
+
+        // Entry whose expiry == now (not strictly in the future) must be evicted.
+        seed_fingerprint(&s, &realm, &user, 1, NOW_SECS);
+
+        let stats = sweep_fingerprints(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(
+            stats.evicted, 1,
+            "entry expiring exactly at now must be evicted"
+        );
+        assert_eq!(stats.active, 0);
+    }
+
+    #[test]
+    fn sweep_fingerprints_isolated_across_realms() {
+        let (s, _dir) = storage();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        let user = crate::core::UserId::generate();
+
+        // Seed expired in realm_a, live in realm_b.
+        seed_fingerprint(&s, &realm_a, &user, 1, NOW_SECS - 1);
+        seed_fingerprint(&s, &realm_b, &user, 2, NOW_SECS + 86400);
+
+        let stats_a = sweep_fingerprints(&realm_a, &s, NOW_SECS).expect("sweep realm_a");
+        assert_eq!(stats_a.evicted, 1);
+        assert_eq!(stats_a.active, 0);
+
+        let stats_b = sweep_fingerprints(&realm_b, &s, NOW_SECS).expect("sweep realm_b");
+        assert_eq!(stats_b.evicted, 0);
+        assert_eq!(stats_b.active, 1, "realm_b entry must be untouched");
     }
 }

@@ -856,6 +856,7 @@ async fn run_serve(
     // Extract cleanup config before identity_config is consumed by the engine.
     let cleanup_enabled = identity_config.cleanup.enabled;
     let cleanup_interval_secs = identity_config.cleanup.interval_secs;
+    let dfp_sweeper_interval_secs = identity_config.cleanup.dfp_sweeper_interval_secs;
 
     // Build the RBAC engine before the identity engine — identity depends on rbac.
     let rbac_engine: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
@@ -1270,6 +1271,69 @@ async fn run_serve(
                         break;
                     }
                 }
+            }
+        });
+    }
+
+    // Background device-fingerprint TTL sweeper (GDPR proactive eviction).
+    if cleanup_enabled && dfp_sweeper_interval_secs > 0 {
+        let dfp_engine = Arc::clone(&identity_engine);
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(dfp_sweeper_interval_secs));
+            // Skip the immediate first tick so the server finishes warm-up.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let mut cursor = None::<String>;
+                let mut total_evicted: u64 = 0;
+                let mut total_active: u64 = 0;
+                loop {
+                    let page = match dfp_engine.list_realms(cursor.as_deref(), 100) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!(error = %e, "dfp_sweeper: realm enumeration failed, retrying next tick");
+                            break;
+                        }
+                    };
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    for realm in &page.items {
+                        match dfp_engine.sweep_expired_fingerprints(realm.id(), now_secs) {
+                            Ok((evicted, active)) => {
+                                total_evicted += evicted;
+                                total_active += active;
+                                if evicted > 0 {
+                                    info!(
+                                        realm = %realm.name(),
+                                        evicted,
+                                        active,
+                                        "dfp_sweeper: evicted expired fingerprints",
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    realm = %realm.name(),
+                                    error = %e,
+                                    "dfp_sweeper: sweep failed for realm",
+                                );
+                            }
+                        }
+                    }
+                    cursor = page.next_cursor;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                hearth::metrics::metrics()
+                    .dfp_sweeper_evicted_total
+                    .inc_by(total_evicted as f64);
+                hearth::metrics::metrics()
+                    .dfp_keys_active
+                    .set(total_active as f64);
             }
         });
     }

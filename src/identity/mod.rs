@@ -1590,6 +1590,17 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
     ) -> Result<crate::identity::cleanup::CleanupStats, IdentityError>;
 
+    /// Proactively evicts expired device-fingerprint entries from `realm_id`.
+    ///
+    /// Scans all `dfp:user:*` keys and deletes any whose 8-byte LE i64 expiry
+    /// (Unix seconds) is <= `now_secs`. Returns `(evicted, active)` counts.
+    /// Called by the background dfp sweeper task on a configurable interval.
+    fn sweep_expired_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        now_secs: i64,
+    ) -> Result<(u64, u64), IdentityError>;
+
     /// Probes the underlying storage engine for basic liveness.
     ///
     /// Performs a minimal read (`get` on a probe key) and returns `true`

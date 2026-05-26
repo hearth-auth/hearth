@@ -1326,6 +1326,16 @@ pub(crate) fn device_fp_scan_prefix(user_id: &UserId) -> Vec<u8> {
     format!("{DEVICE_FP_PREFIX}{}:", user_id.as_uuid()).into_bytes()
 }
 
+/// Returns the realm-wide device-fingerprint scan prefix.
+///
+/// Format: `dfp:user:`
+///
+/// Use with [`prefix_end`] to scan **all** fingerprints in a realm, across
+/// every user.  Intended for the proactive background sweeper.
+pub(crate) fn device_fp_global_scan_prefix() -> Vec<u8> {
+    DEVICE_FP_PREFIX.as_bytes().to_vec()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  SMS OTP keys
 // ─────────────────────────────────────────────────────────────────────────────

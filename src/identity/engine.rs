@@ -9966,6 +9966,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(stats)
     }
 
+    fn sweep_expired_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        now_secs: i64,
+    ) -> Result<(u64, u64), IdentityError> {
+        let stats =
+            crate::identity::cleanup::sweep_fingerprints(realm_id, self.storage.as_ref(), now_secs)
+                .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        Ok((stats.evicted, stats.active))
+    }
+
     // ===== SAML =====
 
     fn get_or_create_saml_signing_key(
