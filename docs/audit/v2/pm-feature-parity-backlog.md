@@ -313,8 +313,6 @@ Ordered by RICE × PM-specifiability (items that need no CTO arch sign-off go fi
 
 | Issue | Gap | Priority | Owner |
 |---|---|---|---|
-| TBD — HEA-829 | G-01: SMS / Phone MFA — PRD | High | PM → CTO |
-| TBD — HEA-830 | G-02: Adaptive MFA / breach-check — PRD | High | PM → CTO |
-| TBD — HEA-831 | G-03: Client scopes admin UI — PRD | Medium | PM → Engineer |
-
-*(Issue identifiers assigned after filing; see comment on [HEA-828](/HEA/issues/HEA-828).)*
+| [HEA-829](/HEA/issues/HEA-829) | G-01: SMS / Phone MFA — PRD | High | PM → CTO |
+| [HEA-830](/HEA/issues/HEA-830) | G-02: Adaptive MFA / breach-check — PRD | High | PM → CTO |
+| [HEA-831](/HEA/issues/HEA-831) | G-03: Client scopes admin UI — PRD | Medium | PM → Engineer |
