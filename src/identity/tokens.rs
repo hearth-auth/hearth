@@ -187,6 +187,13 @@ pub struct TokenClaims {
     /// interstitial handlers read this field to determine the next action page.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_actions: Vec<RequiredAction>,
+    /// Authentication Methods References (RFC 8176).
+    ///
+    /// Lists the authentication method(s) used during the session. Examples:
+    /// `"pwd"` (password), `"sms"` (SMS OTP), `"otp"` (TOTP), `"hwk"` (passkey).
+    /// Non-empty only when explicit MFA was performed during token issuance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub amr: Vec<String>,
     /// Declaratively-mapped custom claims emitted at the top level.
     #[serde(default, flatten)]
     pub custom: BTreeMap<String, serde_json::Value>,
@@ -513,6 +520,7 @@ impl SigningKey {
             groups: request.groups.to_vec(),
             permissions: request.permissions.to_vec(),
             required_actions: Vec::new(),
+            amr: Vec::new(),
             custom: request.custom.clone(),
         };
 
@@ -534,6 +542,7 @@ impl SigningKey {
             groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
+            amr: Vec::new(),
             custom: BTreeMap::new(),
         };
 
@@ -1103,6 +1112,7 @@ mod tests {
             permissions: Vec::new(),
             custom: BTreeMap::new(),
             required_actions: Vec::new(),
+            amr: Vec::new(),
         }
     }
 

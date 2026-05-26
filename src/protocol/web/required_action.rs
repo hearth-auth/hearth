@@ -462,6 +462,7 @@ pub fn resume_oidc_flow(
         code_challenge,
         code_challenge_method,
         oidc_params.nonce.clone(),
+        Vec::new(),
     ) {
         Ok(resp) => {
             let location = build_redirect_location(

@@ -113,6 +113,7 @@ pub(crate) fn proto_authorize_to_domain(
         code_challenge: r.code_challenge,
         code_challenge_method,
         nonce: r.nonce,
+        amr_values: Vec::new(),
     })
 }
 

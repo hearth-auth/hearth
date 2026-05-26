@@ -551,6 +551,11 @@ pub struct AuthorizationRequest {
     /// When nonce enforcement is enabled (`OidcConfig::enforce_nonces`),
     /// duplicate nonces are rejected.
     pub nonce: Option<String>,
+    /// Authentication Methods References (RFC 8176) established before code
+    /// issuance. Non-empty when an MFA challenge was successfully completed
+    /// (e.g. `["sms"]`). Propagated to `StoredAuthorizationCode.amr_values`
+    /// and then into the issued tokens at exchange time.
+    pub amr_values: Vec<String>,
 }
 
 /// Response from a successful authorization request.
@@ -689,6 +694,11 @@ pub(crate) struct StoredAuthorizationCode {
     /// Optional RFC 8707 resource indicator from the authorization request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resource: Option<String>,
+    /// Authentication Methods References (RFC 8176) established during the
+    /// authorization flow (e.g. `["sms"]` after a successful SMS MFA challenge).
+    /// Propagated verbatim to both access and ID token claims at exchange time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) amr_values: Vec<String>,
 }
 
 /// OIDC Discovery document (`OpenID` Connect Discovery 1.0).

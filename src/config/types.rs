@@ -1993,6 +1993,9 @@ impl RealmYamlConfig {
             breach_check: crate::identity::BreachCheckConfig::default(),
             // Adaptive MFA defaults to disabled; enable per-realm via admin API or YAML.
             adaptive_mfa: crate::identity::AdaptiveMfaConfig::default(),
+            // SMS OTP expiry and max-attempt config; `None` uses OTP module defaults.
+            sms_otp_expiry_seconds: None,
+            sms_otp_max_attempts: None,
         })
     }
 }

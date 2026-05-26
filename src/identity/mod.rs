@@ -1268,6 +1268,7 @@ pub trait IdentityEngine: Send + Sync {
         code_challenge: Option<String>,
         code_challenge_method: Option<CodeChallengeMethod>,
         nonce: Option<String>,
+        amr_values: Vec<String>,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     // ===== External IdP federation (Phase 2: Gap #5) =====
