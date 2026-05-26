@@ -7,6 +7,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **CSP hardened: `unsafe-eval` and `unsafe-inline` removed (HEA-850)** — Alpine.js
+  has been fully replaced by HTMX + Hyperscript across all ~40 admin templates.
+  Layout reactivity (sidebar toggle, realm nav tree, toast notifications, realm pill)
+  is now handled by vanilla JS classes (`SidebarManager`, `RealmNav`, `ToastManager`)
+  in `admin.js`. Template interactions use Hyperscript `_="..."` attributes, which are
+  eval-free. The CSP is now `script-src 'self'; style-src 'self'` with no unsafe
+  keywords. Resolves GAP-4 and GAP-5 from the original security audit.
+
 ### Added
 
 - **Device fingerprint proactive TTL sweeper (HEA-862)** — a background task now

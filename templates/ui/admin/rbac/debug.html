@@ -8,32 +8,29 @@
   </p>
 </div>
 
-<div x-data="{ tab: 'check' }">
+<div id="tabs-container">
 
   {# Tab bar #}
   <div class="mb-6 flex gap-1 border-b border-divider-subtle">
-    <button @click="tab = 'check'" type="button"
-            :class="tab === 'check' ? 'border-b-2 border-ht-content-brand text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary'"
-            class="px-4 py-2.5 text-sm font-medium transition-colors">
+    <button data-tab="check" type="button"
+            class="tab-btn border-b-2 border-ht-content-brand text-ht-content-primary px-4 py-2.5 text-sm font-medium transition-colors">
       Permission Check
     </button>
-    <button @click="tab = 'token'" type="button"
-            :class="tab === 'token' ? 'border-b-2 border-ht-content-brand text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary'"
-            class="px-4 py-2.5 text-sm font-medium transition-colors">
+    <button data-tab="token" type="button"
+            class="tab-btn text-ht-content-secondary hover:text-ht-content-primary px-4 py-2.5 text-sm font-medium transition-colors">
       Token Preview
     </button>
   </div>
 
   {# ── Permission Check tab ── #}
-  <div x-show="tab === 'check'">
-    <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle"
-         x-data="{ userId: '{{ user_id_input }}', showDropdown: false }"
-         @click.outside="showDropdown = false">
+  <div id="tab-check" class="tab-panel">
+    <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
       <form method="get" action="/ui/admin/realms/{{ realm_name }}/rbac/debug" class="space-y-4">
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <label class="relative block">
             <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">User (search by email/name, or paste UUID)</span>
-            <input type="text" name="user_id" x-model="userId" x-ref="userIdInput"
+            <input type="text" id="user-id-input" name="user_id"
+                   value="{{ user_id_input }}"
                    autocomplete="off"
                    placeholder="Type to search…"
                    hx-get="/ui/admin/realms/{{ realm_name }}/rbac/api/users/search"
@@ -41,12 +38,12 @@
                    hx-target="#user-id-options"
                    hx-swap="innerHTML"
                    hx-vals='js:{"q": event.target.value}'
-                   @focus="showDropdown = true"
-                   @input="showDropdown = true"
+                   _="on focus remove .hidden from #user-id-options
+                      on input remove .hidden from #user-id-options"
                    class="mt-1 input font-mono" />
-            <div x-show="showDropdown" x-cloak
-                 id="user-id-options"
-                 class="absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-y-auto rounded-md border border-divider-subtle bg-ht-surface-elevated shadow-lg empty:hidden"></div>
+            <div id="user-id-options"
+                 class="hidden absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-y-auto rounded-md border border-divider-subtle bg-ht-surface-elevated shadow-lg empty:hidden"
+                 _="on click elsewhere add .hidden to me"></div>
           </label>
           <label class="block">
             <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">Org ID (optional)</span>
@@ -105,37 +102,85 @@
   </div>
 
   {# ── Token Preview tab ── #}
-  <div x-show="tab === 'token'" x-data="tokenPreview"
+  <div id="tab-token" class="tab-panel hidden"
        data-preview-url="/ui/admin/realms/{{ realm_name }}/rbac/token-preview">
     <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <label class="block">
           <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">User ID (UUID or user_&lt;uuid&gt;)</span>
-          <input type="text" x-model="userId"
+          <input type="text" id="token-user-id"
                  class="mt-1 input"
                  placeholder="user_00000000-…" />
         </label>
       </div>
       <div class="mt-4 flex items-center gap-3">
-        <button @click="preview()" type="button"
-                class="rounded bg-ht-accent px-4 py-2 text-sm font-medium text-ht-surface-base hover:bg-ht-accent-hover"
-                :disabled="loading">
-          <span x-text="loading ? 'Loading…' : 'Preview token'"></span>
+        <button id="token-preview-btn" type="button"
+                class="rounded bg-ht-accent px-4 py-2 text-sm font-medium text-ht-surface-base hover:bg-ht-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
+          Preview token
         </button>
         <p class="text-xs text-ht-content-muted">Realm: <code class="font-mono">{{ realm_uuid }}</code></p>
       </div>
     </div>
 
-    <div x-show="result !== null" class="mt-6">
+    <div id="token-result" class="hidden mt-6">
       <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle overflow-hidden">
         <div class="border-b border-divider-subtle px-4 py-2.5">
           <span class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Claims preview (mock)</span>
         </div>
-        <pre x-text="result"
+        <pre id="token-result-pre"
              class="overflow-x-auto p-4 font-mono text-xs leading-relaxed text-ht-content-secondary whitespace-pre"></pre>
       </div>
     </div>
   </div>
 
 </div>
+<script>
+(function() {
+  var ACTIVE   = 'border-b-2 border-ht-content-brand text-ht-content-primary';
+  var INACTIVE = 'text-ht-content-secondary hover:text-ht-content-primary';
+
+  document.querySelectorAll('.tab-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var target = btn.dataset.tab;
+      document.querySelectorAll('.tab-btn').forEach(function(b) {
+        b.className = b.className
+          .replace('border-b-2 border-ht-content-brand text-ht-content-primary', '')
+          .replace('text-ht-content-secondary hover:text-ht-content-primary', '')
+          .trim();
+        b.className += ' ' + (b.dataset.tab === target ? ACTIVE : INACTIVE);
+      });
+      document.querySelectorAll('.tab-panel').forEach(function(panel) {
+        panel.classList.toggle('hidden', panel.id !== 'tab-' + target);
+      });
+    });
+  });
+
+  var previewBtn = document.getElementById('token-preview-btn');
+  var userIdEl   = document.getElementById('token-user-id');
+  var resultDiv  = document.getElementById('token-result');
+  var resultPre  = document.getElementById('token-result-pre');
+  var previewUrl = document.getElementById('tab-token').dataset.previewUrl;
+
+  previewBtn.addEventListener('click', function() {
+    var uid = userIdEl.value.trim();
+    if (!uid) return;
+    previewBtn.disabled = true;
+    previewBtn.textContent = 'Loading\u2026';
+    fetch(previewUrl + '?user_id=' + encodeURIComponent(uid))
+      .then(function(r) { return r.text(); })
+      .then(function(text) {
+        resultPre.textContent = text;
+        resultDiv.classList.remove('hidden');
+      })
+      .catch(function(err) {
+        resultPre.textContent = 'Error: ' + err.message;
+        resultDiv.classList.remove('hidden');
+      })
+      .finally(function() {
+        previewBtn.disabled = false;
+        previewBtn.textContent = 'Preview token';
+      });
+  });
+})();
+</script>
 {% endblock %}

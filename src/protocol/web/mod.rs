@@ -4,7 +4,7 @@
 //! state change flows through the identity, authorization, or audit
 //! engines. Templates live under `templates/ui/`, compiled into the
 //! binary by the askama derive macro; static assets (`htmx.min.js`,
-//! `alpine.min.js`, `admin.js`, fonts, `app.css`) are embedded via
+//! `admin.js`, `hyperscript.min.js`, fonts, `app.css`) are embedded via
 //! `include_bytes!`. No third-party script/font origins needed (HEA-630).
 //!
 //! # Submodules
@@ -1540,10 +1540,7 @@ fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
 
 /// HTMX v1.9.12 — pinned, checksum recorded in `assets/CHECKSUMS.txt`.
 const HTMX_JS: &[u8] = include_bytes!("assets/htmx.min.js");
-/// Alpine.js v3 — vendored so CSP can drop `cdn.jsdelivr.net` (HEA-630).
-const ALPINE_JS: &[u8] = include_bytes!("assets/alpine.min.js");
-/// Alpine component registrations for every `/ui/**` template (HEA-630).
-/// Extracting them here lets CSP use `script-src 'self'` without `unsafe-inline`.
+/// Admin UI vanilla-JS helpers (sidebar, realm nav, toasts, form init). Alpine-free (HEA-850).
 const ADMIN_JS: &[u8] = include_bytes!("assets/admin.js");
 /// Eval-free vanilla JS for WebAuthn (passkey) ceremonies (HEA-849).
 /// Replaces the `passkeyLogin` / `passkeyManager` / `passkeyRow` Alpine
@@ -1745,7 +1742,6 @@ async fn serve_static(
     // Other embedded assets are immutable for the life of this binary.
     let embedded: Option<(&[u8], &str)> = match file.as_str() {
         "htmx.min.js" => Some((HTMX_JS, "application/javascript; charset=utf-8")),
-        "alpine.min.js" => Some((ALPINE_JS, "application/javascript; charset=utf-8")),
         "admin.js" => Some((ADMIN_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
         "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),

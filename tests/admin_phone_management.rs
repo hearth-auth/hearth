@@ -399,7 +399,10 @@ async fn remove_phone_idempotent_when_no_phone_set() {
             ..Default::default()
         },
     );
-    assert!(result.is_ok(), "remove-phone when no phone must succeed");
+    assert!(
+        matches!(result, Ok(_)),
+        "remove-phone when no phone must succeed"
+    );
 }
 
 #[tokio::test]

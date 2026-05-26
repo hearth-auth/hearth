@@ -23,8 +23,7 @@
   <form method="post"
         action="/ui/admin/realms/{{ realm_name }}/organizations/new"
         autocomplete="off"
-        class="space-y-4"
-        x-data="{ name: '{{ form_name }}', slug: '{{ form_slug }}', slugTouched: {% if form_slug.is_empty() %}false{% else %}true{% endif %} }">
+        class="space-y-4">
     {% match csrf %}
       {% when Some with (token) %}
         <input type="hidden" name="_csrf" value="{{ token }}">
@@ -39,8 +38,7 @@
              required
              autofocus
              maxlength="80"
-             x-model="name"
-             @input="if (!slugTouched) slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63)"
+             value="{{ form_name }}"
              class="mt-1 input">
     </div>
 
@@ -52,8 +50,7 @@
              required
              minlength="3"
              maxlength="63"
-             x-model="slug"
-             @input="slugTouched = true"
+             value="{{ form_slug }}"
              class="mt-1 input font-mono">
       <p class="mt-1 text-xs text-ht-content-muted">3–63 characters, lowercase letters, digits, and hyphens. Auto-fills from the name until you edit it.</p>
     </div>
@@ -118,5 +115,18 @@
          class="text-sm font-medium text-ht-content-muted hover:text-ht-content-secondary">Cancel</a>
     </div>
   </form>
+  <script>
+  (function() {
+    var nameEl = document.getElementById('name');
+    var slugEl = document.getElementById('slug');
+    var slugTouched = {% if form_slug.is_empty() %}false{% else %}true{% endif %};
+    slugEl.addEventListener('input', function() { slugTouched = true; });
+    nameEl.addEventListener('input', function() {
+      if (!slugTouched) {
+        slugEl.value = nameEl.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
+      }
+    });
+  })();
+  </script>
 </div>
 {% endblock %}

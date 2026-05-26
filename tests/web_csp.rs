@@ -5,8 +5,8 @@
 //! - contains no third-party origins (cdn.jsdelivr.net, fonts.googleapis.com, etc.)
 //! - restricts `base-uri` to `'self'`
 //!
-//! Also verifies that the self-hosted assets (Alpine.js, admin.js, fonts) are
-//! served with the correct Content-Type.
+//! Also verifies that the self-hosted assets (admin.js, hyperscript.min.js, fonts) are
+//! served with the correct Content-Type, and that alpine.min.js is no longer served (HEA-850).
 
 mod common;
 
@@ -117,15 +117,14 @@ async fn get_csp(state: WebState, uri: &str) -> String {
 async fn csp_script_src_no_unsafe_inline_on_login() {
     let csp = get_csp(make_web_state(), "/ui/login").await;
     assert!(!csp.is_empty(), "CSP header must be present");
-    // style-src intentionally allows 'unsafe-inline' for Alpine.js x-show/x-cloak
-    // directives that inject inline style attributes. Script-src must never allow it.
-    let script_src = csp
-        .split(';')
-        .find(|d| d.trim().starts_with("script-src"))
-        .unwrap_or("");
+    // Alpine removed (HEA-850): neither unsafe-eval nor unsafe-inline should appear.
     assert!(
-        !script_src.contains("'unsafe-inline'"),
-        "script-src must not allow unsafe-inline: {csp}"
+        !csp.contains("'unsafe-eval'"),
+        "CSP must not allow unsafe-eval: {csp}"
+    );
+    assert!(
+        !csp.contains("'unsafe-inline'"),
+        "CSP must not allow unsafe-inline: {csp}"
     );
 }
 
@@ -169,7 +168,8 @@ async fn csp_frame_ancestors_none() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn alpine_js_served_from_self() {
+async fn alpine_js_not_served() {
+    // Alpine removed in HEA-850 — the route should now 404.
     let app = web::router(make_web_state());
     let resp = app
         .oneshot(
@@ -183,20 +183,9 @@ async fn alpine_js_served_from_self() {
 
     assert_eq!(
         resp.status(),
-        StatusCode::OK,
-        "alpine.min.js must be served"
+        StatusCode::NOT_FOUND,
+        "alpine.min.js must return 404 after removal"
     );
-    let ct = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    assert!(
-        ct.contains("javascript"),
-        "alpine.min.js must have JS content-type: {ct}"
-    );
-    let body = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
-    assert!(!body.is_empty(), "alpine.min.js body must not be empty");
 }
 
 #[tokio::test]
@@ -216,9 +205,9 @@ async fn admin_js_served_from_self() {
     let body = to_bytes(resp.into_body(), 1 << 20).await.expect("body");
     assert!(!body.is_empty(), "admin.js body must not be empty");
     assert!(
-        body.windows(b"Alpine.data".len())
-            .any(|w| w == b"Alpine.data"),
-        "admin.js must contain Alpine component registrations"
+        body.windows(b"SidebarManager".len())
+            .any(|w| w == b"SidebarManager"),
+        "admin.js must contain vanilla JS layout managers (not Alpine)"
     );
 }
 

@@ -12,30 +12,7 @@
     {% when None %}
   {% endmatch %}
 
-  <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/new" class="space-y-4"
-        x-data="{
-          email: '{{ form_email }}',
-          password: '',
-          emailDirty: false,
-          passwordDirty: false,
-          get emailValid() { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.email); },
-          get passwordStrength() {
-            const p = this.password;
-            let s = 0;
-            if (p.length >= 8)  s++;
-            if (p.length >= 12) s++;
-            if (/[A-Z]/.test(p)) s++;
-            if (/[0-9]/.test(p)) s++;
-            if (/[^A-Za-z0-9]/.test(p)) s++;
-            return Math.min(s, 4);
-          },
-          get strengthLabel() {
-            return ['Very weak','Weak','Fair','Strong','Very strong'][this.passwordStrength];
-          },
-          get strengthColor() {
-            return ['bg-danger','bg-warning','bg-warning','bg-teal-500','bg-success'][this.passwordStrength];
-          }
-        }">
+  <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/new" class="space-y-4">
     {% match csrf %}
       {% when Some with (token) %}
         <input type="hidden" name="_csrf" value="{{ token }}">
@@ -47,13 +24,10 @@
         Email <span class="text-danger-fg" aria-hidden="true">*</span>
       </label>
       <input type="email" id="email" name="email" required aria-required="true"
-             x-model="email" @blur="emailDirty = true"
              value="{{ form_email }}"
              autocomplete="off"
-             class="mt-1 input"
-             :class="emailDirty && !emailValid ? 'border-danger-fg' : ''">
-      <p x-show="emailDirty && !emailValid" x-cloak
-         class="mt-1 text-xs text-danger-fg">Enter a valid email address.</p>
+             class="mt-1 input">
+      <p id="email-error" class="hidden mt-1 text-xs text-danger-fg">Enter a valid email address.</p>
     </div>
 
     <div class="grid grid-cols-2 gap-4">
@@ -84,23 +58,18 @@
       </label>
       <input type="password" id="password" name="password" required aria-required="true"
              minlength="12" autocomplete="new-password"
-             x-model="password" @blur="passwordDirty = true"
              class="mt-1 input">
 
-      {# Strength meter — visible once the operator has started typing #}
-      <div x-show="password.length > 0" x-cloak class="mt-2 space-y-1">
+      {# Strength meter — shown once typing begins #}
+      <div id="pw-strength" class="hidden mt-2 space-y-1">
         <div class="flex h-1.5 gap-0.5 rounded-full overflow-hidden">
-          <template x-for="i in [1,2,3,4]" :key="i">
-            <div class="h-full flex-1 rounded-full transition-colors duration-200"
-                 :class="i <= passwordStrength ? strengthColor : 'bg-divider-strong'"></div>
-          </template>
+          <div class="h-full flex-1 rounded-full transition-colors duration-200 bg-divider-strong" data-strength-bar></div>
+          <div class="h-full flex-1 rounded-full transition-colors duration-200 bg-divider-strong" data-strength-bar></div>
+          <div class="h-full flex-1 rounded-full transition-colors duration-200 bg-divider-strong" data-strength-bar></div>
+          <div class="h-full flex-1 rounded-full transition-colors duration-200 bg-divider-strong" data-strength-bar></div>
         </div>
         <p class="text-xs text-ht-content-muted">
-          Strength: <span :class="{
-            'text-danger-fg': passwordStrength <= 1,
-            'text-warning-fg': passwordStrength === 2,
-            'text-success-fg': passwordStrength >= 3
-          }" x-text="strengthLabel"></span>
+          Strength: <span id="strength-label"></span>
         </p>
       </div>
 
@@ -111,18 +80,81 @@
       <p class="mt-1.5 text-xs text-ht-content-muted">Requires at least 12 characters.</p>
       {% endif %}
 
-      <p x-show="passwordDirty && password.length === 0" x-cloak
-         class="mt-1 text-xs text-danger-fg">Password is required.</p>
+      <p id="pw-error" class="hidden mt-1 text-xs text-danger-fg">Password is required.</p>
     </div>
 
     <div class="flex items-center gap-3 pt-2">
-      <button type="submit"
-              :disabled="emailDirty && !emailValid"
+      <button type="submit" id="create-user-submit"
               class="btn-ember rounded px-4 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
         Create user
       </button>
       <a href="/ui/admin/realms/{{ realm_name }}/users" class="text-sm font-medium text-ht-content-muted hover:text-ht-content-secondary">Cancel</a>
     </div>
   </form>
+  <script>
+  (function() {
+    var emailEl    = document.getElementById('email');
+    var emailError = document.getElementById('email-error');
+    var pwEl       = document.getElementById('password');
+    var pwStrength = document.getElementById('pw-strength');
+    var pwError    = document.getElementById('pw-error');
+    var submitBtn  = document.getElementById('create-user-submit');
+    var strengthLabel = document.getElementById('strength-label');
+    var bars = Array.from(document.querySelectorAll('[data-strength-bar]'));
+    var emailDirty = false, passwordDirty = false;
+
+    var STRENGTH_COLORS = ['bg-danger','bg-warning','bg-warning','bg-teal-500','bg-success'];
+    var STRENGTH_LABELS = [
+      {text:'Very weak', cls:'text-danger-fg'},
+      {text:'Weak',      cls:'text-danger-fg'},
+      {text:'Fair',      cls:'text-warning-fg'},
+      {text:'Strong',    cls:'text-teal-500'},
+      {text:'Very strong', cls:'text-success-fg'}
+    ];
+
+    function emailValid() {
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailEl.value);
+    }
+
+    function pwScore(p) {
+      var s = 0;
+      if (p.length >= 8)           s++;
+      if (p.length >= 12)          s++;
+      if (/[A-Z]/.test(p))         s++;
+      if (/[0-9]/.test(p))         s++;
+      if (/[^A-Za-z0-9]/.test(p)) s++;
+      return Math.min(s, 4);
+    }
+
+    function updateEmail() {
+      var valid = emailValid();
+      emailEl.classList.toggle('border-danger-fg', emailDirty && !valid);
+      emailError.classList.toggle('hidden', !(emailDirty && !valid));
+      submitBtn.disabled = emailDirty && !valid;
+    }
+
+    function updatePassword() {
+      var p = pwEl.value;
+      var show = p.length > 0;
+      pwStrength.classList.toggle('hidden', !show);
+      pwError.classList.toggle('hidden', !(passwordDirty && p.length === 0));
+      if (show) {
+        var score = pwScore(p);
+        var color = STRENGTH_COLORS[score];
+        bars.forEach(function(bar, i) {
+          bar.className = 'h-full flex-1 rounded-full transition-colors duration-200 ' + (i < score ? color : 'bg-divider-strong');
+        });
+        var lbl = STRENGTH_LABELS[score];
+        strengthLabel.textContent = lbl.text;
+        strengthLabel.className = lbl.cls;
+      }
+    }
+
+    emailEl.addEventListener('input', updateEmail);
+    emailEl.addEventListener('blur', function() { emailDirty = true; updateEmail(); });
+    pwEl.addEventListener('input', updatePassword);
+    pwEl.addEventListener('blur', function() { passwordDirty = true; updatePassword(); });
+  })();
+  </script>
 </div>
 {% endblock %}

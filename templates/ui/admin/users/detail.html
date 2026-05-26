@@ -137,7 +137,7 @@
 </div>
 
 {# Access across this realm — tabbed card #}
-<div class="mt-6 rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ tab: 'roles' }">
+<div class="mt-6 rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
   {# Card header #}
   <div class="flex flex-col gap-3 border-b border-divider-subtle px-6 pt-5 sm:flex-row sm:items-center sm:justify-between">
     <div>
@@ -152,45 +152,61 @@
     </div>
     {# Tab buttons #}
     <div class="flex gap-1 self-end sm:self-auto">
-      <button @click="tab = 'roles'" type="button"
-              :class="tab === 'roles' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
-              class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
+      <button type="button"
+              class="hs-tab-btn hs-tab-active rounded px-3 py-1.5 text-xs font-medium transition-colors"
+              _="on click
+                   remove .hs-tab-active from <.hs-tab-btn/>
+                   add .hs-tab-active to me
+                   add .hidden to <[data-tab-panel]/>
+                   remove .hidden from #roles-panel">
         Roles
       </button>
-      <button @click="tab = 'extra'" type="button"
-              :class="tab === 'extra' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
-              class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
+      <button type="button"
+              class="hs-tab-btn rounded px-3 py-1.5 text-xs font-medium transition-colors"
+              _="on click
+                   remove .hs-tab-active from <.hs-tab-btn/>
+                   add .hs-tab-active to me
+                   add .hidden to <[data-tab-panel]/>
+                   remove .hidden from #extra-panel">
         Extra Permissions
       </button>
-      <button @click="tab = 'effective'" type="button"
-              :class="tab === 'effective' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
-              class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
+      <button type="button"
+              class="hs-tab-btn rounded px-3 py-1.5 text-xs font-medium transition-colors"
+              _="on click
+                   remove .hs-tab-active from <.hs-tab-btn/>
+                   add .hs-tab-active to me
+                   add .hidden to <[data-tab-panel]/>
+                   remove .hidden from #effective-panel">
         Effective
       </button>
-      <button @click="tab = 'attrs'" type="button"
-              :class="tab === 'attrs' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
-              class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
+      <button type="button"
+              class="hs-tab-btn rounded px-3 py-1.5 text-xs font-medium transition-colors"
+              _="on click
+                   remove .hs-tab-active from <.hs-tab-btn/>
+                   add .hs-tab-active to me
+                   add .hidden to <[data-tab-panel]/>
+                   remove .hidden from #attrs-panel">
         Attributes
       </button>
     </div>
   </div>
 
   {# Roles tab #}
-  <div x-show="tab === 'roles'" class="p-6">
+  <div id="roles-panel" data-tab-panel class="p-6">
     <div id="roles-tab-content">
       {% include "ui/admin/users/_roles_tab.html" %}
     </div>
   </div>
 
   {# Extra Permissions tab #}
-  <div x-show="tab === 'extra'" class="p-6">
+  <div id="extra-panel" data-tab-panel class="p-6 hidden">
     <div id="permissions-tab-content">
       {% include "ui/admin/users/_permissions_tab.html" %}
     </div>
   </div>
 
   {# Effective Permissions tab #}
-  <div x-show="tab === 'effective'" class="p-6">
+  <div id="effective-panel" data-tab-panel class="p-6 hidden">
     {% if effective_permissions.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No effective permissions resolved for this user.</p>
     {% else %}
@@ -205,7 +221,7 @@
   </div>
 
   {# Attributes tab #}
-  <div x-show="tab === 'attrs'" class="p-6">
+  <div id="attrs-panel" data-tab-panel class="p-6 hidden">
     {% if attributes.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No attributes set on this user.</p>
     {% else %}
