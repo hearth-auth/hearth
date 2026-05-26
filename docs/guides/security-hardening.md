@@ -101,11 +101,12 @@ OAuth client secrets are stored as Argon2id hashes, not plaintext. Treat them li
 ### Device fingerprint HMAC secret
 
 Adaptive MFA (`adaptive_mfa.enabled = true` on a realm) derives a per-device fingerprint by
-computing `HMAC-SHA256(secret, "{user_id}:{ip_/24}:{user_agent_normalized}")` and storing the
-hex digest in the Redis device-recognition cache. The `fingerprint_hmac_secret` is the HMAC
-key for that derivation. **A weak or compromised secret allows an attacker who knows a
-victim's `{user_id, ip_/24, user_agent}` tuple to forge the fingerprint and bypass step-up
-MFA on an unrecognised device.** Treat it accordingly.
+computing `HMAC-SHA256(secret, "{user_id}:{ip_/24}:{user_agent_normalized}")` and storing
+the hex digest in Hearth's embedded key-value store under the key schema
+`dfp:user:{user_uuid}:{hmac_hex}` (see `src/identity/keys.rs`). The `fingerprint_hmac_secret`
+is the HMAC key for that derivation. **A weak or compromised secret allows an attacker who
+knows a victim's `{user_id, ip_/24, user_agent}` tuple to forge the fingerprint and bypass
+step-up MFA on an unrecognised device.** Treat it accordingly.
 
 **Scope:** the secret is **per-realm** — each realm has its own value. Rotating one realm's
 secret does not affect any other realm. There is no global Hearth-level fingerprint secret.
@@ -171,12 +172,16 @@ code path that would derive a fingerprint. There is no silent fail-open. See
 Use this procedure for scheduled rotation (recommended every 12 months) or in response to
 suspected compromise. Plan the rotation per-realm — there is no atomic multi-realm rotation.
 
-**Blast radius.** Rotating the secret invalidates every cached device fingerprint for that
-realm (the previous-secret HMAC no longer matches the new-secret HMAC). For the
-`recognition_window_days` window after rotation, every active user appears as an
-"unrecognised device" exactly once and is challenged with step-up MFA on their next login.
-This is the intended behaviour but causes a short-lived support-ticket spike — schedule
-rotations outside peak hours and pre-notify support.
+**Blast radius.** Rotating the secret renders every stored device fingerprint for that
+realm unreachable via normal lookup: the previous-secret HMAC and the new-secret HMAC
+produce different `hmac_hex` values, so the stored key (`dfp:user:{uuid}:{old_hmac}`) no
+longer matches what `derive_hmac(new_secret, …)` computes. For the `recognition_window_days`
+window after rotation, every active user appears as an "unrecognised device" exactly once
+and is challenged with step-up MFA on their next login. The stale `dfp:user:*` entries
+created under the old secret remain in the embedded KV but are unreachable and are removed
+by the background sweeper (`identity.cleanup.dfp_sweeper_interval_secs`, default 6 hours;
+see HEA-862). This is the intended behaviour but causes a short-lived support-ticket spike
+— schedule rotations outside peak hours and pre-notify support.
 
 **Pre-flight checklist**
 
@@ -280,29 +285,28 @@ rotations outside peak hours and pre-notify support.
    secret store version id, and the operator who performed the rotation.
 
 **Rollback.** If the new secret causes unexpected behaviour, restore the previous version
-in the secret store and repeat steps 3–4. The previous-version fingerprints rejoin the
-recognition cache automatically as users log in.
+in the secret store and repeat steps 3–4. Devices last recognised under the old secret
+become reachable again immediately (the stored `dfp:user:*` entries were never deleted —
+only orphaned by the HMAC key change), so users on previously-known devices stop being
+challenged for step-up MFA again.
 
-**Compromise response.** If you suspect the secret has leaked, run the rotation immediately
-and **additionally** invalidate the Redis device-recognition cache. The flush is **only
-required in the compromise path** — for scheduled rotation it is unnecessary, because
-old-HMAC fingerprints simply fail to match on next lookup and users are re-challenged
-naturally as they log in. The flush is also intentionally **realm-agnostic**: the Redis
-key schema is `dev:fp:{uid}:{hmac_hex}` (no realm prefix), so realm-scoped invalidation
-would require enumerating every UID belonging to the affected realm — complex, fragile,
-and unnecessarily conservative when a compromise has already happened. The full flush
-is the right default for incident response.
+**Compromise response.** If you suspect the secret has leaked, run the rotation
+immediately. **Cache invalidation is self-contained** — there is no separate flush step.
+Rotating the secret changes the HMAC derivation key, so every subsequent fingerprint
+lookup resolves to a different storage key (`dfp:user:{uuid}:{new_hmac}`) than what was
+stored with the old secret. Old entries become unreachable on first use of the new secret
+and are removed by the background sweeper (`identity.cleanup.dfp_sweeper_interval_secs`,
+default 6 hours; HEA-862). Device fingerprints live in Hearth's embedded key-value store,
+not Redis or another external cache — there is no `redis-cli` or equivalent flush command
+to run, and Hearth currently exposes no admin endpoint to force an immediate sweep.
+Attempting to use a Redis CLI in this position would silently succeed against an
+unrelated Redis instance, leaving you with false confidence during an active incident.
+Do not do that.
 
-The flush below invalidates the recognition cache across **all realms** in the Redis
-instance — make sure that is what you want before running it. The intent is to prevent
-an attacker from riding out the rotation on a stale, attacker-controlled fingerprint:
-
-```sh
-redis-cli --scan --pattern "dev:fp:*:*" | xargs -r redis-cli del
-```
-
-Combine with credential-stuffing rate-limit review (`security.rate_limiting`) and a forced
-session revoke for affected users.
+For forced immediate re-authentication of all users in the affected realm, revoke active
+sessions through the admin sessions endpoint and review credential-stuffing rate-limit
+metrics (`security.rate_limiting`). Tighten the rate-limit thresholds for the duration of
+the incident if attacker traffic is observed.
 
 ### SCIM bearer tokens
 
