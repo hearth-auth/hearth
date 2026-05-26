@@ -27,18 +27,28 @@
       {% else if t.status()|fmt("{:?}") == "Archived" %}
         {# Two-click permanent delete. Backend (admin_realm_delete) gates on
            Archived status; the second click triggers the actual destructive call. #}
-        <form method="post" action="/ui/admin/realms/{{ t.name() }}/delete"
-              x-data="{ confirm: false, timer: null }">
+        <form method="post" action="/ui/admin/realms/{{ t.name() }}/delete">
           {% match csrf %}
             {% when Some with (tok) %}
               <input type="hidden" name="_csrf" value="{{ tok }}">
             {% when None %}
           {% endmatch %}
-          <button @click.prevent="confirm ? $el.form.submit() : (confirm = true, timer = setTimeout(() => confirm = false, 4000))" type="button"
-                  :class="confirm ? 'bg-danger/[0.20] text-danger-fg' : 'text-ht-content-muted hover:text-danger-fg'"
-                  class="rounded-md px-2 py-1 text-xs font-medium">
-            <span x-text="confirm ? 'Confirm: delete permanently' : 'Delete permanently'"></span>
-          </button>
+          <button type="button"
+                  class="rounded-md px-2 py-1 text-xs font-medium text-ht-content-muted hover:text-danger-fg"
+                  _="on click
+                       if @data-confirming is 'yes'
+                         closest <form/>.submit()
+                       else
+                         set @data-confirming to 'yes'
+                         set @class to 'rounded-md px-2 py-1 text-xs font-medium bg-danger/[0.20] text-danger-fg'
+                         set my textContent to 'Confirm: delete permanently'
+                         wait 4s then
+                         if @data-confirming is 'yes'
+                           set @data-confirming to 'no'
+                           set @class to 'rounded-md px-2 py-1 text-xs font-medium text-ht-content-muted hover:text-danger-fg'
+                           set my textContent to 'Delete permanently'
+                         end
+                       end">Delete permanently</button>
         </form>
       {% endif %}
     </div>

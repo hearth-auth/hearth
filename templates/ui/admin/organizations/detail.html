@@ -242,14 +242,18 @@
             </form>
             <form method="post"
                   action="/ui/admin/realms/{{ realm_name }}/organizations/{{ org.id().as_uuid() }}/invitations/{{ inv.id().as_uuid() }}/revoke"
-                  x-data="{ confirm: false }"
                   class="inline">
               {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-              <button :type="confirm ? 'submit' : 'button'"
-                      @click="!confirm && (confirm = true)"
-                      :class="confirm ? 'btn-danger text-graphite-950' : 'text-ht-content-muted hover:text-danger-fg'"
-                      class="rounded px-2 py-1 text-xs font-medium transition-colors"
-                      x-text="confirm ? 'Confirm' : 'Revoke'"></button>
+              <button type="button"
+                      class="rounded px-2 py-1 text-xs font-medium transition-colors text-ht-content-muted hover:text-danger-fg"
+                      _="on click
+                           if @data-confirming is 'yes'
+                             closest <form/>.submit()
+                           else
+                             set @data-confirming to 'yes'
+                             set @class to 'btn-danger text-graphite-950 rounded px-2 py-1 text-xs font-medium transition-colors'
+                             set my textContent to 'Confirm'
+                           end">Revoke</button>
             </form>
           </div>
           {% endif %}
@@ -305,7 +309,7 @@
 
 {% if active_subtab == "danger" %}
 {# Danger zone — delete is gated by typing the org slug exactly. #}
-<div class="rounded-md border border-danger/30 bg-ht-surface-elevated p-6" x-data="{ showDialog: false, confirmText: '' }">
+<div class="rounded-md border border-danger/30 bg-ht-surface-elevated p-6">
   <h2 class="text-base font-semibold text-danger-fg">Danger zone</h2>
   <p class="mt-1 text-sm text-ht-content-secondary">
     Deleting this organization permanently removes
@@ -315,52 +319,61 @@
     <code class="rounded-sm bg-ht-surface-base px-1 font-mono text-ht-content-primary">{{ org.slug() }}</code>
     becomes available for re-registration immediately.
   </p>
-  <button @click="showDialog = true; confirmText = ''; $nextTick(() => $refs.slugInput.focus())" type="button"
+  <button type="button"
+          _="on click call #org-delete-dialog.showModal() then tell #org-slug-input to focus()"
           class="mt-4 btn-danger rounded px-4 py-2 text-sm font-semibold">
     Delete organization
   </button>
 
-  <div x-show="showDialog" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @keydown.escape.window="showDialog = false">
-    <div class="w-full max-w-md rounded-md bg-ht-surface-elevated p-6 shadow-md" @click.outside="showDialog = false">
-      <h3 class="text-lg font-semibold text-ht-content-primary">Delete organization?</h3>
-      <p class="mt-2 text-sm text-ht-content-secondary">
-        This will permanently delete <strong class="text-ht-content-primary">{{ org.name() }}</strong>,
-        its <strong class="text-ht-content-primary">{{ member_count }} member{% if member_count != 1 %}s{% endif %}</strong>,
-        and <strong class="text-ht-content-primary">{{ invitations.len() }} invitation{% if invitations.len() != 1 %}s{% endif %}</strong>.
-        This action cannot be undone.
-      </p>
-      <label class="mt-4 block text-xs font-medium text-ht-content-secondary">
-        Type <code class="rounded-sm bg-ht-surface-base px-1.5 py-0.5 font-mono text-ht-content-primary">{{ org.slug() }}</code> to confirm:
-      </label>
-      <form method="post"
-            action="/ui/admin/realms/{{ realm_name }}/organizations/{{ org.id().as_uuid() }}/delete"
-            @keydown.enter.prevent="if (confirmText === '{{ org.slug() }}') $el.submit()">
-        {% match csrf %}
-          {% when Some with (token) %}
-            <input type="hidden" name="_csrf" value="{{ token }}">
-          {% when None %}
-        {% endmatch %}
-        <input type="text"
-               x-ref="slugInput"
-               x-model="confirmText"
-               autocomplete="off"
-               aria-label="Confirm by typing the slug"
-               class="mt-2 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-danger focus:outline-none focus:shadow-focus">
-        <div class="mt-6 flex justify-end gap-3">
-          <button @click="showDialog = false" type="button"
-                  class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
-            Cancel
-          </button>
-          <button type="submit"
-                  :disabled="confirmText !== '{{ org.slug() }}'"
-                  :class="confirmText === '{{ org.slug() }}' ? 'btn-danger opacity-100' : 'btn-danger opacity-40 cursor-not-allowed'"
-                  class="rounded px-4 py-2 text-sm font-semibold transition-opacity">
-            Delete
-          </button>
-        </div>
-      </form>
-    </div>
-  </div>
+  <dialog id="org-delete-dialog"
+          class="w-full max-w-md rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50"
+          _="on click(event) if event.target is me call me.close() end">
+    <h3 class="text-lg font-semibold text-ht-content-primary">Delete organization?</h3>
+    <p class="mt-2 text-sm text-ht-content-secondary">
+      This will permanently delete <strong class="text-ht-content-primary">{{ org.name() }}</strong>,
+      its <strong class="text-ht-content-primary">{{ member_count }} member{% if member_count != 1 %}s{% endif %}</strong>,
+      and <strong class="text-ht-content-primary">{{ invitations.len() }} invitation{% if invitations.len() != 1 %}s{% endif %}</strong>.
+      This action cannot be undone.
+    </p>
+    <label class="mt-4 block text-xs font-medium text-ht-content-secondary">
+      Type <code class="rounded-sm bg-ht-surface-base px-1.5 py-0.5 font-mono text-ht-content-primary">{{ org.slug() }}</code> to confirm:
+    </label>
+    <form method="post"
+          action="/ui/admin/realms/{{ realm_name }}/organizations/{{ org.id().as_uuid() }}/delete">
+      {% match csrf %}
+        {% when Some with (token) %}
+          <input type="hidden" name="_csrf" value="{{ token }}">
+        {% when None %}
+      {% endmatch %}
+      <input type="text"
+             id="org-slug-input"
+             autocomplete="off"
+             aria-label="Confirm by typing the slug"
+             _="on input
+                  if my value is '{{ org.slug() }}'
+                    remove @disabled from #org-delete-btn
+                    set #org-delete-btn's @class to 'btn-danger opacity-100 rounded px-4 py-2 text-sm font-semibold transition-opacity'
+                  else
+                    set @disabled on #org-delete-btn
+                    set #org-delete-btn's @class to 'btn-danger opacity-40 cursor-not-allowed rounded px-4 py-2 text-sm font-semibold transition-opacity'
+                  end
+                on keydown[key=='Enter'] if my value is not '{{ org.slug() }}' halt the event end"
+             class="mt-2 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-danger focus:outline-none focus:shadow-focus">
+      <div class="mt-6 flex justify-end gap-3">
+        <button type="button"
+                _="on click call #org-delete-dialog.close()"
+                class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
+          Cancel
+        </button>
+        <button type="submit"
+                id="org-delete-btn"
+                disabled
+                class="btn-danger opacity-40 cursor-not-allowed rounded px-4 py-2 text-sm font-semibold transition-opacity">
+          Delete
+        </button>
+      </div>
+    </form>
+  </dialog>
 </div>
 {% endif %}
 {% endblock %}

@@ -471,37 +471,39 @@
 
 {# Danger zone — only shown for Archived realms #}
 {% if realm.status()|fmt("{:?}") == "Archived" %}
-<div class="mt-6 rounded-md border border-danger/30 bg-ht-surface-elevated p-6" x-data="{ showDialog: false }">
+<div class="mt-6 rounded-md border border-danger/30 bg-ht-surface-elevated p-6">
   <h2 class="text-base font-semibold text-danger-fg">Permanently delete</h2>
   <p class="mt-1 text-sm text-ht-content-secondary">This realm was removed from hearth.yaml. You can permanently delete all its data.</p>
-  <button @click="showDialog = true" type="button"
+  <button type="button"
+          _="on click call #realm-delete-dialog.showModal()"
           class="mt-4 btn-danger rounded px-4 py-2 text-sm font-semibold">
     Permanently delete
   </button>
 
-  <div x-show="showDialog" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @keydown.escape.window="showDialog = false">
-    <div class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md" @click.outside="showDialog = false">
-      <h3 class="text-lg font-semibold text-ht-content-primary">Delete realm?</h3>
-      <p class="mt-2 text-sm text-ht-content-muted">This will permanently delete <strong>{{ realm.name() }}</strong> and ALL its data. This action cannot be undone.</p>
-      <div class="mt-6 flex justify-end gap-3">
-        <button @click="showDialog = false" type="button"
-                class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
-          Cancel
+  <dialog id="realm-delete-dialog"
+          class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50"
+          _="on click(event) if event.target is me call me.close() end">
+    <h3 class="text-lg font-semibold text-ht-content-primary">Delete realm?</h3>
+    <p class="mt-2 text-sm text-ht-content-muted">This will permanently delete <strong>{{ realm.name() }}</strong> and ALL its data. This action cannot be undone.</p>
+    <div class="mt-6 flex justify-end gap-3">
+      <button type="button"
+              _="on click call #realm-delete-dialog.close()"
+              class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
+        Cancel
+      </button>
+      <form method="post" action="/ui/admin/realms/{{ realm.name() }}/delete">
+        {% match csrf %}
+          {% when Some with (token) %}
+            <input type="hidden" name="_csrf" value="{{ token }}">
+          {% when None %}
+        {% endmatch %}
+        <button type="submit"
+                class="btn-danger rounded px-4 py-2 text-sm font-semibold">
+          Delete
         </button>
-        <form method="post" action="/ui/admin/realms/{{ realm.name() }}/delete">
-          {% match csrf %}
-            {% when Some with (token) %}
-              <input type="hidden" name="_csrf" value="{{ token }}">
-            {% when None %}
-          {% endmatch %}
-          <button type="submit"
-                  class="btn-danger rounded px-4 py-2 text-sm font-semibold">
-            Delete
-          </button>
-        </form>
-      </div>
+      </form>
     </div>
-  </div>
+  </dialog>
 </div>
 {% endif %}
 {% endblock %}
