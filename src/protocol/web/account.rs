@@ -33,7 +33,7 @@ use qrcode::QrCode;
 use crate::core::{SessionId, Timestamp};
 use crate::identity::{CleartextPassword, IdentityError, RegistrationOptions};
 
-use super::auth::{clearing_cookies, verify_csrf_form_field, UiSession};
+use super::auth::{clearing_cookies, verify_csrf_form_field, CsrfToken, UiSession};
 use super::handlers::append_cookie;
 use super::handlers_common;
 use super::templates::{render, Flash};
@@ -874,6 +874,7 @@ pub struct PasskeyRegisterCompleteBody {
 pub async fn passkey_register_complete(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    _csrf: CsrfToken,
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<PasskeyRegisterCompleteBody>,
 ) -> Response {
@@ -995,6 +996,7 @@ pub struct RenamePasskeyBody {
 pub async fn passkey_rename(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    _csrf: CsrfToken,
     axum::extract::Path(cred_id_b64): axum::extract::Path<String>,
     axum::Json(body): axum::Json<RenamePasskeyBody>,
 ) -> Response {
