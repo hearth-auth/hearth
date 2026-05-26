@@ -429,6 +429,7 @@ async fn assign_action_emits_required_action_assigned_audit_event() {
 /// Admin of realm A must receive 403 when targeting a user in realm B.
 /// Regression for FINDING-2 from HEA-810: cross-realm BOLA in required-actions handler.
 #[tokio::test]
+#[allow(clippy::similar_names)]
 async fn cross_realm_patch_user_required_actions_is_forbidden() {
     let h = common::TestHarness::embedded().await.expect("harness");
 
@@ -471,6 +472,7 @@ async fn cross_realm_patch_user_required_actions_is_forbidden() {
 /// Admin of realm A must receive 403 when patching realm B's config.
 /// Regression for FINDING-2 from HEA-810: cross-realm BOLA in realm-config handler.
 #[tokio::test]
+#[allow(clippy::similar_names)]
 async fn cross_realm_patch_realm_config_is_forbidden() {
     let h = common::TestHarness::embedded().await.expect("harness");
 

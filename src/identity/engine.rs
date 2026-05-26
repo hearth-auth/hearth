@@ -1820,6 +1820,7 @@ impl EmbeddedIdentityEngine {
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
             permissions: claims.permissions.clone(),
+            required_actions: Vec::new(),
             custom: claims.custom.clone(),
         };
         let new_refresh_claims = TokenClaims {
@@ -1839,6 +1840,7 @@ impl EmbeddedIdentityEngine {
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
             permissions: claims.permissions.clone(),
+            required_actions: Vec::new(),
             custom: claims.custom.clone(),
         };
 
@@ -3011,6 +3013,126 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get_or_load_realm_signing_key(realm_id)
             .map_err(|_| crate::identity::ra_token::RaTokenError::InvalidSignature)?;
         crate::identity::ra_token::validate(token, key.public_key_bytes(), now)
+    }
+
+    fn validate_required_action_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        action: crate::identity::types::RequiredAction,
+    ) -> Result<crate::identity::tokens::TokenClaims, IdentityError> {
+        let claims = self.verify_token_signature_for_realm(realm_id, token)?;
+
+        if claims.token_type != crate::identity::tokens::REQUIRED_ACTION_TOKEN_TYPE {
+            return Err(IdentityError::InvalidToken);
+        }
+
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if now_secs >= claims.exp {
+            return Err(IdentityError::TokenExpired);
+        }
+
+        if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
+            return Err(IdentityError::InvalidToken);
+        }
+
+        if !claims.required_actions.contains(&action) {
+            return Err(IdentityError::InvalidToken);
+        }
+
+        Ok(claims)
+    }
+
+    fn complete_update_password(
+        &self,
+        realm_id: &RealmId,
+        ra_token: &str,
+        new_password: crate::identity::credentials::CleartextPassword,
+    ) -> Result<crate::identity::types::RequiredActionTokenResponse, IdentityError> {
+        use crate::identity::tokens::REQUIRED_ACTION_TOKEN_TYPE;
+        use crate::identity::types::{RequiredAction, RequiredActionTokenResponse};
+
+        let claims = self.validate_required_action_token(
+            realm_id,
+            ra_token,
+            RequiredAction::UpdatePassword,
+        )?;
+
+        let user_id = Self::parse_user_id_claim(&claims)?;
+
+        // Set the new password (enforces realm policy + Argon2id re-hash).
+        self.set_password(realm_id, &user_id, &new_password)?;
+
+        // Remove UPDATE_PASSWORD from the pending actions list.
+        let remaining: Vec<RequiredAction> = claims
+            .required_actions
+            .iter()
+            .filter(|&&a| a != RequiredAction::UpdatePassword)
+            .copied()
+            .collect();
+
+        self.update_user(
+            realm_id,
+            &user_id,
+            &crate::identity::types::UpdateUserRequest {
+                required_actions: Some(remaining.clone()),
+                ..Default::default()
+            },
+        )?;
+
+        if !remaining.is_empty() {
+            // More actions pending — issue a new short-lived RA token.
+            let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+            let now = self.clock.now();
+            let now_secs = now.as_micros() / 1_000_000;
+            let ra_claims = crate::identity::tokens::TokenClaims {
+                sub: claims.sub.clone(),
+                iss: self.realm_issuer_url(realm_id),
+                aud: crate::identity::tokens::Audience::single(self.config.token.audience.clone()),
+                exp: now_secs + 900, // 15-minute RA token TTL
+                iat: now_secs,
+                sid: claims.sid.clone(),
+                tid: claims.tid.clone(),
+                oid: None,
+                token_type: REQUIRED_ACTION_TOKEN_TYPE.to_string(),
+                jti: Some(uuid::Uuid::new_v4().to_string()),
+                fid: None,
+                scope: None,
+                nonce: None,
+                roles: Vec::new(),
+                groups: Vec::new(),
+                permissions: Vec::new(),
+                required_actions: remaining,
+                custom: Default::default(),
+            };
+            let access_token = signing_key.issue_token(&ra_claims)?;
+            return Ok(RequiredActionTokenResponse { access_token });
+        }
+
+        // All actions complete — create a session and issue a full-access token.
+        let session = self.create_session(
+            realm_id,
+            &user_id,
+            &crate::identity::types::SessionContext::default(),
+        )?;
+        let token_pair = self.issue_tokens(realm_id, &user_id, session.id())?;
+
+        Ok(RequiredActionTokenResponse {
+            access_token: token_pair.access_token().to_string(),
+        })
+    }
+
+    fn request_email_verification(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<(), IdentityError> {
+        // Issue the verification token (stores SHA-256 hash in storage).
+        // Email delivery requires the email service in WebState; the engine
+        // does not have access to it. Callers that need the email sent must
+        // use WebState::email directly after this call succeeds.
+        let _token = self.issue_email_verification_token(realm_id, user_id)?;
+        Ok(())
     }
 
     fn rotate_realm_signing_key(
@@ -4783,6 +4905,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             roles: access_roles,
             groups: access_groups,
             permissions: access_permissions,
+            required_actions: Vec::new(),
             custom: access_custom,
         };
         let refresh_claims = TokenClaims {
@@ -4802,6 +4925,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             roles: access_claims.roles.clone(),
             groups: access_claims.groups.clone(),
             permissions: access_claims.permissions.clone(),
+            required_actions: Vec::new(),
             custom: access_claims.custom.clone(),
         };
 
@@ -4868,6 +4992,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             roles: id_roles,
             groups: id_groups,
             permissions: id_permissions,
+            required_actions: Vec::new(),
             custom: id_custom,
         };
         let id_token =
@@ -5021,6 +5146,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             roles: Vec::new(),
             groups: Vec::new(),
             permissions: Vec::new(),
+            required_actions: Vec::new(),
             custom: std::collections::BTreeMap::new(),
         };
 
@@ -5265,6 +5391,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     roles: Vec::new(),
                     groups: Vec::new(),
                     permissions: Vec::new(),
+                    required_actions: Vec::new(),
                     custom: std::collections::BTreeMap::new(),
                 };
                 let signing_key = self.get_or_load_realm_signing_key(realm_id)?;

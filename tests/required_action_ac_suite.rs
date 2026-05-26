@@ -642,6 +642,7 @@ async fn verify_email_completion_emits_audit_event() {
 /// User B to clear their own VERIFY_EMAIL required-action using a token minted for
 /// User A.
 #[tokio::test]
+#[allow(clippy::similar_names)]
 async fn cross_user_verify_email_token_is_rejected() {
     let rig = build_rig(vec![]);
 

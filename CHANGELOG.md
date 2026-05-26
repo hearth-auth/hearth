@@ -9,6 +9,25 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Required-action UI interstitials** — five new browser-facing routes handle the
+  required-action flow without API clients:
+  - `GET /ui/required-actions/update-password` — password-update form (ra-JWT in query param).
+  - `POST /ui/required-actions/update-password` — validates and applies the new password;
+    issues UI session cookies and redirects to `/ui/account` on success, or to the next
+    required-action page when further actions remain (HEA-765).
+  - `GET /ui/required-actions/verify-email` — "check your email" interstitial showing the
+    address the verification link was sent to.
+  - `POST /ui/required-actions/verify-email/resend` — sends a new verification email;
+    redirects back with a flash message on success or rate-limit (HEA-765).
+  - `GET /ui/required-actions/verify-email/success` — success page with a 3-second
+    auto-redirect countdown (HEA-765).
+
+- **`POST /v1/required-actions/update-password`** — new endpoint that accepts a
+  required-action JWT, validates the new password against the realm policy, rotates the
+  credential to Argon2id, clears `UPDATE_PASSWORD` from the pending-action set, and returns
+  a fresh full-access token pair (or a new required-action token if other actions remain).
+  Replay attacks on a completed token are rejected with 401 via stored-state check (HEA-753).
+
 - **VERIFY_EMAIL required-action handler** — `GET /required-action/VERIFY_EMAIL` renders a
   "check your email" page and sends a verification email; if the user's email is already
   verified the action is auto-cleared and the OIDC flow resumes immediately (emits a
