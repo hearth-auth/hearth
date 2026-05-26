@@ -384,6 +384,14 @@ pub enum IdentityError {
     /// device with no enrolled factor. `RequiredAction::EnrollMfa` has been
     /// injected into the user's pending actions.
     EnrollMfaRequired,
+    /// The SMS OTP is invalid, expired, not found, or the maximum number of
+    /// verification attempts has been exceeded.
+    ///
+    /// Intentionally conflates all failure modes for enumeration resistance.
+    InvalidSmsOtp,
+    /// The phone number has exceeded the per-phone SMS resend limit for the
+    /// current 15-minute window.
+    SmsResendLimitExceeded,
 }
 
 impl fmt::Display for IdentityError {
@@ -556,6 +564,10 @@ impl fmt::Display for IdentityError {
                 f,
                 "MFA enrollment required: login from unrecognised device with no enrolled factor"
             ),
+            Self::InvalidSmsOtp => write!(f, "invalid or expired SMS OTP"),
+            Self::SmsResendLimitExceeded => {
+                write!(f, "SMS OTP resend limit exceeded for this phone number")
+            }
         }
     }
 }
@@ -654,7 +666,9 @@ impl std::error::Error for IdentityError {
             | Self::AuthMethodNotAllowed { .. }
             | Self::WebhookNotFound
             | Self::StepUpChallengeRequired
-            | Self::EnrollMfaRequired => None,
+            | Self::EnrollMfaRequired
+            | Self::InvalidSmsOtp
+            | Self::SmsResendLimitExceeded => None,
         }
     }
 }
@@ -1160,6 +1174,26 @@ mod tests {
         };
         let display = format!("{err}");
         assert!(display.starts_with("federation upstream error (github):"));
+    }
+
+    #[test]
+    fn display_invalid_sms_otp() {
+        let err = IdentityError::InvalidSmsOtp;
+        let display = format!("{err}");
+        assert!(display.contains("SMS OTP"), "got: {display}");
+    }
+
+    #[test]
+    fn display_sms_resend_limit_exceeded() {
+        let err = IdentityError::SmsResendLimitExceeded;
+        let display = format!("{err}");
+        assert!(display.contains("resend limit"), "got: {display}");
+    }
+
+    #[test]
+    fn sms_errors_have_no_source() {
+        assert!(IdentityError::InvalidSmsOtp.source().is_none());
+        assert!(IdentityError::SmsResendLimitExceeded.source().is_none());
     }
 
     #[test]

@@ -1326,6 +1326,53 @@ pub(crate) fn device_fp_scan_prefix(user_id: &UserId) -> Vec<u8> {
     format!("{DEVICE_FP_PREFIX}{}:", user_id.as_uuid()).into_bytes()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  SMS OTP keys
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Prefix for pending SMS OTP records.
+const SMS_PENDING_OTP_PREFIX: &str = "sms:pending_otp:";
+
+/// Prefix for per-phone SMS resend throttle counters.
+const SMS_RESEND_COUNT_PREFIX: &str = "sms:resend_count:";
+
+/// Encodes the storage key for a pending SMS OTP record.
+///
+/// Format: `sms:pending_otp:{nonce_hex}`
+///
+/// The nonce is a 128-bit CSPRNG value encoded as 32 lowercase hex characters.
+/// Value: JSON-serialized `StoredOtp`.
+pub(crate) fn encode_sms_pending_otp(nonce: &str) -> Vec<u8> {
+    format!("{SMS_PENDING_OTP_PREFIX}{nonce}").into_bytes()
+}
+
+/// Returns the scan prefix for all pending SMS OTP records in a realm.
+///
+/// Format: `sms:pending_otp:`
+#[allow(dead_code)]
+pub(crate) fn sms_pending_otp_scan_prefix() -> Vec<u8> {
+    SMS_PENDING_OTP_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the storage key for a per-phone SMS resend throttle counter.
+///
+/// Format: `sms:resend_count:{phone_hash8}`
+///
+/// `phone_hash8` is the first 8 hex characters of SHA-256(E.164 phone),
+/// derived by `otp::phone_resend_key_suffix`. Value: JSON-serialized
+/// `StoredResendCount` with a 15-minute TTL.
+pub(crate) fn encode_sms_resend_count(phone_hash8: &str) -> Vec<u8> {
+    format!("{SMS_RESEND_COUNT_PREFIX}{phone_hash8}").into_bytes()
+}
+
+/// Returns the scan prefix for all SMS resend counters in a realm.
+///
+/// Format: `sms:resend_count:`
+#[allow(dead_code)]
+pub(crate) fn sms_resend_count_scan_prefix() -> Vec<u8> {
+    SMS_RESEND_COUNT_PREFIX.as_bytes().to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -21,10 +21,9 @@ pub fn derive_fingerprint_key(
     user_id: &UserId,
     ip_prefix: &str,
     user_agent_normalized: &str,
-    secret: &[u8],
+    secret: &str,
 ) -> String {
-    let secret_str = std::str::from_utf8(secret).unwrap_or("");
     let hmac =
-        DeviceFingerprintStore::derive_hmac(secret_str, user_id, ip_prefix, user_agent_normalized);
+        DeviceFingerprintStore::derive_hmac(secret, user_id, ip_prefix, user_agent_normalized);
     format!("dev:fp:{}:{}", user_id.as_uuid(), hex::encode(hmac))
 }

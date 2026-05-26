@@ -1643,4 +1643,39 @@ pub trait IdentityEngine: Send + Sync {
         ip: &str,
         user_agent: &str,
     ) -> Result<(), IdentityError>;
+
+    // =========================================================================
+    // SMS OTP (HEA-829)
+    // =========================================================================
+
+    /// Issues a 6-digit SMS OTP to `phone` and returns the opaque nonce.
+    ///
+    /// Checks the per-phone resend throttle (15-minute window, max 5 sends),
+    /// generates a CSPRNG nonce and code via rejection sampling, stores
+    /// HMAC-SHA256(key, digits) under `sms:pending_otp:{nonce}`, and sends
+    /// the SMS. Returns `SmsResendLimitExceeded` on throttle breach.
+    fn issue_sms_otp(
+        &self,
+        realm_id: &RealmId,
+        phone: &str,
+        otp_hmac_key_bytes: &[u8],
+        sender: &dyn sms::SmsSender,
+        now_unix_ts: u64,
+    ) -> Result<String, IdentityError>;
+
+    /// Verifies an SMS OTP previously issued by `issue_sms_otp`.
+    ///
+    /// Loads the pending record, checks expiry and attempt count, increments
+    /// attempts, verifies HMAC in constant time via `ring::hmac::verify`.
+    /// On success deletes the record (replay prevention). Returns
+    /// `InvalidSmsOtp` for any failure (not-found, expired, wrong code,
+    /// exhausted).
+    fn verify_sms_otp(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        candidate_code: &str,
+        otp_hmac_key_bytes: &[u8],
+        now_unix_ts: u64,
+    ) -> Result<(), IdentityError>;
 }

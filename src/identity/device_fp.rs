@@ -67,19 +67,21 @@ impl DeviceFingerprintStore {
     /// Derives the HMAC-SHA256 fingerprint for a `(user_id, ip, user_agent)` triple.
     ///
     /// The IP address is normalised to its /24 subnet (IPv4) or /48 prefix (IPv6)
-    /// before hashing so minor address variance within a household or office
-    /// network does not produce a mismatch. Raw values are never stored.
+    /// and the User-Agent is normalised to major-version tokens only (e.g.
+    /// `Chrome/125.0.6422.112` → `Chrome/125`) before hashing.  Raw values are
+    /// never stored.
     ///
-    /// HMAC input: `user_id_bytes \x00 ip_subnet \x00 user_agent`
+    /// HMAC input: `user_id_bytes \x00 ip_subnet \x00 ua_normalized`
     pub fn derive_hmac(secret: &str, user_id: &UserId, ip: &str, user_agent: &str) -> [u8; 32] {
         let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
         let subnet = ip_subnet(ip);
-        let mut msg: Vec<u8> = Vec::with_capacity(16 + 1 + subnet.len() + 1 + user_agent.len());
+        let ua_norm = normalize_user_agent(user_agent);
+        let mut msg: Vec<u8> = Vec::with_capacity(16 + 1 + subnet.len() + 1 + ua_norm.len());
         msg.extend_from_slice(user_id.as_uuid().as_bytes());
         msg.push(0u8);
         msg.extend_from_slice(subnet.as_bytes());
         msg.push(0u8);
-        msg.extend_from_slice(user_agent.as_bytes());
+        msg.extend_from_slice(ua_norm.as_bytes());
         let tag = hmac::sign(&key, &msg);
         let mut out = [0u8; 32];
         out.copy_from_slice(tag.as_ref());
@@ -222,6 +224,31 @@ fn ip_subnet(ip: &str) -> String {
         }
         Err(_) => ip.to_string(),
     }
+}
+
+/// Normalise a User-Agent string to major-version tokens only.
+///
+/// Each `Name/M.minor.patch` token is reduced to `Name/M` so that minor
+/// browser updates do not produce a new fingerprint and trigger an unwanted
+/// step-up challenge.
+fn normalize_user_agent(ua: &str) -> String {
+    let mut out = String::with_capacity(ua.len());
+    for (i, token) in ua.split(' ').enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        if let Some(slash_pos) = token.find('/') {
+            let name = &token[..slash_pos];
+            let ver = &token[slash_pos + 1..];
+            let major = ver.split('.').next().unwrap_or(ver);
+            out.push_str(name);
+            out.push('/');
+            out.push_str(major);
+        } else {
+            out.push_str(token);
+        }
+    }
+    out
 }
 
 /// Returns the current time as Unix seconds (`i64`).

@@ -5154,23 +5154,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     return Err(IdentityError::StepUpChallengeRequired);
                 }
                 DeviceFingerprintOutcome::EnrollMfaRequired => {
-                    // No factor enrolled — inject EnrollMfa required action.
-                    let mut current_user = self
+                    // No factor enrolled — inject EnrollMfa required action via
+                    // update_user() so the write goes through the full audit +
+                    // validation pipeline and avoids a TOCTOU race on storage.put().
+                    let current_user = self
                         .get_user(realm_id, user.id())?
                         .ok_or(IdentityError::UserNotFound)?;
-                    let mut actions: Vec<RequiredAction> = current_user.required_actions().to_vec();
+                    let actions: Vec<RequiredAction> = current_user.required_actions().to_vec();
                     if !actions.contains(&RequiredAction::EnrollMfa) {
-                        actions.push(RequiredAction::EnrollMfa);
-                        current_user.set_required_actions(actions);
-                        let key = keys::encode_user_id(user.id());
-                        let bytes = serde_json::to_vec(&current_user).map_err(|e| {
-                            IdentityError::Serialization {
-                                reason: e.to_string(),
-                            }
-                        })?;
-                        self.storage
-                            .put(realm_id, &key, &bytes)
-                            .map_err(Self::storage_err)?;
+                        let mut new_actions = actions;
+                        new_actions.push(RequiredAction::EnrollMfa);
+                        self.update_user(
+                            realm_id,
+                            user.id(),
+                            &UpdateUserRequest {
+                                required_actions: Some(new_actions),
+                                ..Default::default()
+                            },
+                        )?;
                     }
                     return Err(IdentityError::EnrollMfaRequired);
                 }
@@ -10359,8 +10360,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get_realm(realm_id)?
             .ok_or(IdentityError::RealmNotFound)?;
         let cfg = &realm.config().adaptive_mfa;
-        if !cfg.enabled || cfg.fingerprint_hmac_secret.is_empty() {
+        if !cfg.enabled {
             return Ok(());
+        }
+        // Fail-secure: enabled=true with an empty HMAC secret is a misconfiguration.
+        if cfg.fingerprint_hmac_secret.is_empty() {
+            return Err(IdentityError::Internal {
+                reason: "adaptive_mfa.enabled=true but fingerprint_hmac_secret is empty"
+                    .to_string(),
+            });
         }
         let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
             &cfg.fingerprint_hmac_secret,
@@ -10370,6 +10378,173 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         );
         self.device_fp
             .record(realm_id, user_id, &hmac, cfg.recognition_window_days)
+    }
+
+    fn issue_sms_otp(
+        &self,
+        realm_id: &RealmId,
+        phone: &str,
+        otp_hmac_key_bytes: &[u8],
+        sender: &dyn crate::identity::sms::SmsSender,
+        now_unix_ts: u64,
+    ) -> Result<String, IdentityError> {
+        use crate::identity::sms::otp::{self as otp_mod, StoredResendCount};
+
+        // 1. Per-phone resend throttle check.
+        let resend_suffix = otp_mod::phone_resend_key_suffix(phone);
+        let resend_key = keys::encode_sms_resend_count(&resend_suffix);
+        let resend_raw = self
+            .storage
+            .get(realm_id, &resend_key)
+            .map_err(Self::storage_err)?;
+
+        let should_reset_window = match resend_raw {
+            None => true,
+            Some(ref bytes) => {
+                let resend: StoredResendCount =
+                    serde_json::from_slice(bytes).map_err(|e| IdentityError::Serialization {
+                        reason: e.to_string(),
+                    })?;
+                if resend.is_window_expired(now_unix_ts) {
+                    true
+                } else if resend.is_limit_reached() {
+                    return Err(IdentityError::SmsResendLimitExceeded);
+                } else {
+                    // Increment within current window.
+                    let mut updated = resend;
+                    updated.count = updated.count.saturating_add(1);
+                    let updated_bytes =
+                        serde_json::to_vec(&updated).map_err(|e| IdentityError::Serialization {
+                            reason: e.to_string(),
+                        })?;
+                    self.storage
+                        .put(realm_id, &resend_key, &updated_bytes)
+                        .map_err(Self::storage_err)?;
+                    false
+                }
+            }
+        };
+
+        if should_reset_window {
+            let fresh = StoredResendCount::new(now_unix_ts);
+            let fresh_bytes =
+                serde_json::to_vec(&fresh).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            self.storage
+                .put(realm_id, &resend_key, &fresh_bytes)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 2. Generate nonce + OTP, persist, send.
+        self.do_issue_sms_otp_inner(realm_id, phone, otp_hmac_key_bytes, sender, now_unix_ts)
+    }
+
+    fn verify_sms_otp(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        candidate_code: &str,
+        otp_hmac_key_bytes: &[u8],
+        now_unix_ts: u64,
+    ) -> Result<(), IdentityError> {
+        use crate::identity::sms::otp::StoredOtp;
+
+        let otp_key = keys::encode_sms_pending_otp(nonce);
+
+        // 1. Load the OTP record.
+        let bytes = self
+            .storage
+            .get(realm_id, &otp_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidSmsOtp)?;
+
+        let mut stored: StoredOtp =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        // 2. Check expiry (delete stale record and fail vaguely).
+        if stored.is_expired(now_unix_ts) {
+            let _ = self.storage.delete(realm_id, &otp_key);
+            return Err(IdentityError::InvalidSmsOtp);
+        }
+
+        // 3. Check attempt count (delete exhausted record and fail vaguely).
+        if stored.is_exhausted() {
+            let _ = self.storage.delete(realm_id, &otp_key);
+            return Err(IdentityError::InvalidSmsOtp);
+        }
+
+        // 4. Increment attempt count and persist before verification —
+        //    prevents a race where two concurrent requests both pass the check.
+        stored.attempt_count = stored.attempt_count.saturating_add(1);
+        let updated_bytes =
+            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &otp_key, &updated_bytes)
+            .map_err(Self::storage_err)?;
+
+        // 5. Constant-time HMAC verification.
+        let result = stored.verify(candidate_code, otp_hmac_key_bytes);
+
+        match result {
+            Ok(()) => {
+                // 6a. Delete the record to prevent replay.
+                self.storage
+                    .delete(realm_id, &otp_key)
+                    .map_err(Self::storage_err)?;
+                Ok(())
+            }
+            Err(e) => {
+                // 6b. If now exhausted, delete the record.
+                if stored.is_exhausted() {
+                    let _ = self.storage.delete(realm_id, &otp_key);
+                }
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Generates and stores a new OTP then dispatches the SMS.
+impl EmbeddedIdentityEngine {
+    fn do_issue_sms_otp_inner(
+        &self,
+        realm_id: &RealmId,
+        phone: &str,
+        otp_hmac_key_bytes: &[u8],
+        sender: &dyn crate::identity::sms::SmsSender,
+        now_unix_ts: u64,
+    ) -> Result<String, IdentityError> {
+        use crate::identity::sms::otp::{self as otp_mod, StoredOtp, OTP_EXPIRY_SECS};
+        use crate::identity::sms::SmsMessage;
+
+        let rng = ring::rand::SystemRandom::new();
+        let nonce = otp_mod::generate_otp_nonce(&rng)?;
+        let expiry_unix_ts = now_unix_ts.saturating_add(OTP_EXPIRY_SECS);
+        let (digits, stored) = StoredOtp::create(&rng, otp_hmac_key_bytes, expiry_unix_ts)?;
+
+        let otp_key = keys::encode_sms_pending_otp(&nonce);
+        let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &otp_key, &otp_bytes)
+            .map_err(Self::storage_err)?;
+
+        sender
+            .send(&SmsMessage {
+                to: phone.to_string(),
+                body: format!("Your verification code is: {}", digits.as_str()),
+            })
+            .map_err(|e| IdentityError::Internal {
+                reason: format!("SMS delivery failed: {e}"),
+            })?;
+
+        Ok(nonce)
     }
 }
 

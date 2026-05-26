@@ -13,6 +13,7 @@
 
 pub mod http;
 mod log;
+pub(crate) mod otp;
 mod sns;
 mod twilio;
 

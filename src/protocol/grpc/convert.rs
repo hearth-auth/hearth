@@ -117,6 +117,14 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             Code::PermissionDenied,
             "MFA enrollment required: login from unrecognised device".to_string(),
         ),
+        IdentityError::InvalidSmsOtp => (
+            Code::InvalidArgument,
+            "invalid or expired SMS OTP".to_string(),
+        ),
+        IdentityError::SmsResendLimitExceeded => (
+            Code::ResourceExhausted,
+            "SMS OTP resend limit exceeded".to_string(),
+        ),
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }

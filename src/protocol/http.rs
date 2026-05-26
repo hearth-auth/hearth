@@ -1542,6 +1542,10 @@ fn identity_error_to_response(
         IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
         IdentityError::StepUpChallengeRequired => (StatusCode::UNAUTHORIZED, "mfa_required"),
         IdentityError::EnrollMfaRequired => (StatusCode::FORBIDDEN, "mfa_enrollment_required"),
+        IdentityError::InvalidSmsOtp => (StatusCode::UNAUTHORIZED, "invalid_sms_otp"),
+        IdentityError::SmsResendLimitExceeded => {
+            (StatusCode::TOO_MANY_REQUESTS, "sms_resend_limit_exceeded")
+        }
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);

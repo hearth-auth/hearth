@@ -258,6 +258,8 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::AuthMethodNotAllowed { .. } => Some(AUTH_METHOD_NOT_ALLOWED),
         IdentityError::StepUpChallengeRequired => Some(STEP_UP_CHALLENGE_REQUIRED),
         IdentityError::EnrollMfaRequired => Some(ENROLL_MFA_REQUIRED),
+        IdentityError::InvalidSmsOtp => Some("invalid_sms_otp"),
+        IdentityError::SmsResendLimitExceeded => Some("sms_resend_limit_exceeded"),
 
         IdentityError::RealmNotFound
         | IdentityError::UserNotFound
