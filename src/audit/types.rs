@@ -231,6 +231,10 @@ pub enum AuditAction {
     /// enrollment redirect; the step-up event itself is informational.
     /// Metadata carries `user_id` and `reason` (e.g. `"unrecognised_device"`).
     StepUpMfaTriggered,
+    /// A step-up MFA challenge was successfully completed — the user passed
+    /// the MFA check after an unrecognised-device trigger.
+    /// Metadata carries `user_id`.
+    StepUpMfaCompleted,
     /// An SMS OTP was generated and sent to a user's phone to begin
     /// phone-number enrollment. Metadata carries `phone_suffix` (last 4 digits,
     /// never full number).
@@ -336,6 +340,7 @@ impl AuditAction {
             Self::PasswordCompromisedRejected,
             Self::BreachCheckUnavailable,
             Self::StepUpMfaTriggered,
+            Self::StepUpMfaCompleted,
             Self::SmsOtpEnrollmentStarted,
             Self::SmsOtpEnrollmentVerified,
             Self::SmsOtpEnrollmentFailed,
@@ -424,6 +429,7 @@ impl AuditAction {
             Self::PasswordCompromisedRejected => "password_compromised_rejected",
             Self::BreachCheckUnavailable => "breach_check_unavailable",
             Self::StepUpMfaTriggered => "step_up_mfa_triggered",
+            Self::StepUpMfaCompleted => "step_up_mfa_completed",
             Self::SmsOtpEnrollmentStarted => "sms_otp_enrollment_started",
             Self::SmsOtpEnrollmentVerified => "sms_otp_enrollment_verified",
             Self::SmsOtpEnrollmentFailed => "sms_otp_enrollment_failed",
@@ -513,6 +519,7 @@ impl std::str::FromStr for AuditAction {
             "password_compromised_rejected" => Ok(Self::PasswordCompromisedRejected),
             "breach_check_unavailable" => Ok(Self::BreachCheckUnavailable),
             "step_up_mfa_triggered" => Ok(Self::StepUpMfaTriggered),
+            "step_up_mfa_completed" => Ok(Self::StepUpMfaCompleted),
             "sms_otp_enrollment_started" => Ok(Self::SmsOtpEnrollmentStarted),
             "sms_otp_enrollment_verified" => Ok(Self::SmsOtpEnrollmentVerified),
             "sms_otp_enrollment_failed" => Ok(Self::SmsOtpEnrollmentFailed),
@@ -610,6 +617,7 @@ impl AuditAction {
             | Self::RequiredActionAutoCleared
             | Self::BreachCheckUnavailable
             | Self::StepUpMfaTriggered
+            | Self::StepUpMfaCompleted
             | Self::SmsOtpEnrollmentStarted
             | Self::SmsOtpEnrollmentVerified
             | Self::SmsMfaChallengeSucceeded => LogOnly,

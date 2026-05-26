@@ -5162,10 +5162,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             match outcome {
                 DeviceFingerprintOutcome::Skipped | DeviceFingerprintOutcome::Recognised => {
                     // Device is trusted or feature disabled — proceed normally.
-                    // Record/refresh the fingerprint TTL on a recognised hit.
-                    if matches!(outcome, DeviceFingerprintOutcome::Recognised) {
-                        let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
-                    }
+                    // check_and_refresh already refreshed the TTL on a recognised hit;
+                    // step-5 below handles recording on a first-seen device path.
                 }
                 DeviceFingerprintOutcome::StepUpRequired => {
                     // User has an enrolled factor — require MFA challenge.
@@ -5271,6 +5269,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // 5. Record device fingerprint — this device is now trusted.
         if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
             let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
+        }
+
+        // 6. Emit StepUpMfaCompleted so incident responders can correlate trigger → resolution.
+        let audit_ctx = AuditContext {
+            actor: Actor::User(user.id().clone()),
+            metadata: Some(serde_json::json!({
+                "user_id": user.id().as_uuid().to_string()
+            })),
+        };
+        if let Err(e) = self.record_audit(
+            realm_id,
+            Some(&audit_ctx),
+            AuditAction::StepUpMfaCompleted,
+            "user",
+            &user.id().as_uuid().to_string(),
+        ) {
+            tracing::warn!(error = %e, "StepUpMfaCompleted audit write failed — event lost");
         }
 
         Ok(crate::identity::oidc::PasswordGrantResponse {
@@ -10385,13 +10400,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if !cfg.enabled {
             return Ok(DeviceFingerprintOutcome::Skipped);
         }
-        // Fail-secure (BLK-2): enabled=true with empty HMAC secret is a misconfiguration
-        // that must surface as an error — silently skipping would issue tokens without
-        // the intended fingerprint gate (fail-open).
-        if cfg.fingerprint_hmac_secret.is_empty() {
+        // Fail-secure (BLK-2): enabled=true with empty or short HMAC secret is a
+        // misconfiguration that must surface as an error — silently skipping would issue
+        // tokens without the intended fingerprint gate (fail-open).
+        // NIST SP 800-107 recommends HMAC keys ≥ hash output length (32 bytes for SHA-256).
+        if cfg.fingerprint_hmac_secret.len() < 32 {
             return Err(IdentityError::Internal {
-                reason: "adaptive_mfa.enabled=true but fingerprint_hmac_secret is empty"
-                    .to_string(),
+                reason: format!(
+                    "adaptive_mfa.enabled=true but fingerprint_hmac_secret is too short ({} bytes, minimum 32)",
+                    cfg.fingerprint_hmac_secret.len()
+                ),
             });
         }
 
@@ -10421,13 +10439,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     actor: Actor::User(user_id.clone()),
                     metadata,
                 };
-                let _ = self.record_audit(
+                if let Err(e) = self.record_audit(
                     realm_id,
                     Some(&ctx),
                     AuditAction::StepUpMfaTriggered,
                     "user",
                     &user_id.as_uuid().to_string(),
-                );
+                ) {
+                    tracing::warn!(error = %e, "StepUpMfaTriggered audit write failed — event lost");
+                }
 
                 // AC-6 vs AC-8: check whether user has an enrolled MFA factor.
                 let has_mfa = self.mfa_enabled(realm_id, user_id).unwrap_or(false)

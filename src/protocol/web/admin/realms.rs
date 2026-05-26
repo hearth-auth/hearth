@@ -395,6 +395,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::PasswordCompromisedRejected => "Password Compromised Rejected",
         A::BreachCheckUnavailable => "Breach Check Unavailable",
         A::StepUpMfaTriggered => "Step-Up MFA Triggered",
+        A::StepUpMfaCompleted => "Step-Up MFA Completed",
         A::SmsOtpEnrollmentStarted => "SMS OTP Enrollment Started",
         A::SmsOtpEnrollmentVerified => "SMS OTP Enrollment Verified",
         A::SmsOtpEnrollmentFailed => "SMS OTP Enrollment Failed",
@@ -471,6 +472,7 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::PasswordCompromisedRejected
         | A::BreachCheckUnavailable
         | A::StepUpMfaTriggered
+        | A::StepUpMfaCompleted
         | A::SmsOtpEnrollmentStarted
         | A::SmsOtpEnrollmentVerified
         | A::SmsOtpEnrollmentFailed
