@@ -8,6 +8,16 @@
 # This is a STATIC source scan. Runtime log scrubbing is a separate concern handled per
 # docs/guides/security-hardening.md § "Device fingerprint HMAC secret".
 #
+# Known blind spots (documented; surface a CI follow-up if any of these stops being
+# acceptable):
+#   • Markdown files are skipped wholesale, not just comment lines. A real secret pasted
+#     inside a ```yaml fenced block in docs/ would not be caught here. Risk is low because
+#     Markdown is code-reviewed as documentation, but auditors should be aware.
+#   • Rust binding right-hand sides (e.g. `secret.to_string()`, `cfg.secret.clone()`) are
+#     trusted because they delegate to a value defined elsewhere. If the source binding
+#     is itself a literal, this script will not see it — the test author must use one of
+#     the ALLOW_LITERALS sentinels or move the value to an env-var binding.
+#
 # FAILS on any tracked file containing a `fingerprint_hmac_secret` assignment whose value
 # is anything other than:
 #   • empty string ("" or '')

@@ -143,9 +143,14 @@ time, never from a committed file. The supported chain is:
          fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
    ```
 
-   The substituted value lives only in memory inside the Hearth process — it is never
-   written back to disk and is never logged (the field is `skip_serializing_if = "is_empty"`
-   and absent from `Debug` output via the realm-config redaction layer).
+   The substituted value lives only in memory inside the Hearth process and is never
+   written back to disk. To prevent accidental disclosure through structured logs, the
+   field is held as a `secrecy::SecretString` and `AdaptiveMfaConfig` provides a custom
+   `Debug` impl that prints the field as `[REDACTED]` (see [HEA-869](/HEA/issues/HEA-869)).
+   Note that this protects only Hearth's own `tracing` output — the underlying value is
+   still present in the pod's environment block, so log aggregators that capture
+   `/proc/<pid>/environ` or systemd's `EnvironmentFile` content via diagnostics tooling
+   can still see it. Restrict that access at the platform layer.
 
 **Fail-secure behaviour.** When `adaptive_mfa.enabled = true` but the substituted secret is
 empty (env var unset → empty substitution + load warning), Hearth returns a hard
@@ -239,14 +244,28 @@ rotations outside peak hours and pre-notify support.
 
    (`grep` exits 0 on match, so the `&&` branch fires only on the failure case.)
 
-7. **Delete the temporary shell variable.**
+7. **Secondary verification — audit-event surface.** As a durable check that survives
+   `unset NEW_SECRET`, query the `StepUpMfaTriggered` audit event count for the rotated
+   realm and confirm a fresh spike correlated with the pod restart. The spike confirms the
+   new-secret HMAC is in effect (every previously-recognised device is briefly treated as
+   unrecognised). This gate is more reliable than log scraping once the shell variable is
+   gone and works equally well from monitoring dashboards.
+
+   ```sh
+   # Replace the example with your audit-query mechanism (Hearth admin API,
+   # SIEM, or the durable audit log) — the shape of the check is what matters.
+   hearth-admin audit-events --realm customer-portal --type StepUpMfaTriggered \
+     --since "$ROTATION_START_TS"
+   ```
+
+8. **Delete the temporary shell variable.**
 
    ```sh
    unset NEW_SECRET
    history -d $((HISTCMD-1)) 2>/dev/null || true
    ```
 
-8. **Mark the rotation in your audit log.** Hearth emits a `StepUpMfaTriggered` audit event
+9. **Mark the rotation in your audit log.** Hearth emits a `StepUpMfaTriggered` audit event
    whenever a user is challenged — the rotation window will show a spike in those events.
    Tag the operational change in your change-management system with the realm name, the new
    secret store version id, and the operator who performed the rotation.
@@ -256,8 +275,18 @@ in the secret store and repeat steps 3–4. The previous-version fingerprints re
 recognition cache automatically as users log in.
 
 **Compromise response.** If you suspect the secret has leaked, run the rotation immediately
-and additionally invalidate the realm's Redis device-recognition cache so attackers cannot
-ride out the rotation on a stale, attacker-controlled fingerprint:
+and **additionally** invalidate the Redis device-recognition cache. The flush is **only
+required in the compromise path** — for scheduled rotation it is unnecessary, because
+old-HMAC fingerprints simply fail to match on next lookup and users are re-challenged
+naturally as they log in. The flush is also intentionally **realm-agnostic**: the Redis
+key schema is `dev:fp:{uid}:{hmac_hex}` (no realm prefix), so realm-scoped invalidation
+would require enumerating every UID belonging to the affected realm — complex, fragile,
+and unnecessarily conservative when a compromise has already happened. The full flush
+is the right default for incident response.
+
+The flush below invalidates the recognition cache across **all realms** in the Redis
+instance — make sure that is what you want before running it. The intent is to prevent
+an attacker from riding out the rotation on a stale, attacker-controlled fingerprint:
 
 ```sh
 redis-cli --scan --pattern "dev:fp:*:*" | xargs -r redis-cli del
