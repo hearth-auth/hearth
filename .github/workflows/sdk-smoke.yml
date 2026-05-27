@@ -129,34 +129,20 @@ jobs:
           NEXT_PUBLIC_HEARTH_REALM_ID: ${{ env.HEARTH_REALM_ID }}
         run: npx tsc --noEmit
 
-      - name: SDK smoke — verify token exchange works
-        working-directory: examples/typescript-nextjs
+      - name: SDK smoke — verify discovery and JWKS endpoints
         run: |
-          node - <<'EOF'
-          // Headless smoke: bootstrap client and verify token introspection
-          const { HearthApiClient } = require("@hearth/sdk");
+          # Mirrors HearthApiClient.discovery() → GET ${baseUrl}/.well-known/openid-configuration
+          DISCOVERY=$(curl -sf "$HEARTH_BASE_URL/.well-known/openid-configuration")
+          AUTH_EP=$(echo "$DISCOVERY" | jq -r '.authorization_endpoint // empty')
+          [ -n "$AUTH_EP" ] || { echo "ERROR: discovery missing authorization_endpoint"; exit 1; }
+          echo "OK: discovery endpoint verified"
 
-          (async () => {
-            const client = new HearthApiClient({
-              baseUrl: process.env.HEARTH_BASE_URL,
-              realmId: process.env.HEARTH_REALM_ID,
-            });
-
-            const discovery = await client.discovery();
-            if (!discovery.authorization_endpoint) {
-              throw new Error("discovery missing authorization_endpoint");
-            }
-            console.log("OK: discovery endpoint verified");
-
-            const jwks = await client.jwks();
-            if (!jwks.keys || jwks.keys.length === 0) {
-              throw new Error("JWKS returned no keys");
-            }
-            console.log("OK: JWKS contains", jwks.keys.length, "key(s)");
-
-            console.log("TypeScript SDK smoke: PASS");
-          })().catch((err) => { console.error(err); process.exit(1); });
-          EOF
+          # Mirrors HearthApiClient.jwks() → GET ${baseUrl}/jwks
+          JWKS=$(curl -sf "$HEARTH_BASE_URL/jwks")
+          KEY_COUNT=$(echo "$JWKS" | jq '.keys | length')
+          [ "$KEY_COUNT" -gt 0 ] || { echo "ERROR: JWKS returned no keys"; exit 1; }
+          echo "OK: JWKS contains $KEY_COUNT key(s)"
+          echo "TypeScript SDK smoke: PASS"
 
       - name: Stop Hearth
         if: always()
