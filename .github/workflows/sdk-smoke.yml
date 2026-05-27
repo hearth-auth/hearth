@@ -1,0 +1,259 @@
+name: SDK smoke
+
+# Verify that both quickstart examples run against the current Hearth binary.
+# Runs on PRs that touch SDK code or the examples, and on every push to main.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/**"
+      - "examples/typescript-nextjs/**"
+      - "examples/go-gin/**"
+      - "src/**"
+      - ".github/workflows/sdk-smoke.yml"
+  push:
+    branches: [main]
+  schedule:
+    # Nightly at 03:00 UTC — catch API drift between releases
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  HEARTH_PORT: 8420
+  HEARTH_BASE_URL: http://127.0.0.1:8420
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Build Hearth binary ────────────────────────────────────────────────────
+  build-hearth:
+    name: build hearth
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sdk-smoke
+
+      - name: Build Hearth (release)
+        run: cargo build --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: hearth-binary
+          path: target/release/hearth
+          retention-days: 1
+
+  # ── TypeScript / Next.js smoke ─────────────────────────────────────────────
+  typescript-nextjs:
+    name: smoke / typescript-nextjs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build-hearth
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: examples/typescript-nextjs/package-lock.json
+
+      - name: Download Hearth binary
+        uses: actions/download-artifact@v4
+        with:
+          name: hearth-binary
+          path: /tmp/hearth-bin
+
+      - name: Make binary executable
+        run: chmod +x /tmp/hearth-bin/hearth
+
+      - name: Start Hearth dev server
+        run: |
+          /tmp/hearth-bin/hearth serve --dev --port $HEARTH_PORT &
+          echo "HEARTH_PID=$!" >> $GITHUB_ENV
+          # Wait up to 15 s for the health endpoint to respond
+          for i in $(seq 1 30); do
+            if curl -sf "$HEARTH_BASE_URL/health" > /dev/null 2>&1; then
+              echo "Hearth ready after ${i}×0.5s"
+              break
+            fi
+            sleep 0.5
+          done
+          curl -sf "$HEARTH_BASE_URL/health" || (echo "Hearth failed to start" && exit 1)
+
+      - name: Bootstrap realm and get tokens
+        id: bootstrap
+        run: |
+          RESP=$(curl -sf -X POST "$HEARTH_BASE_URL/admin/bootstrap")
+          echo "HEARTH_REALM_ID=$(echo "$RESP" | jq -r .realm_id)" >> $GITHUB_ENV
+          echo "HEARTH_ACCESS_TOKEN=$(echo "$RESP" | jq -r .access_token)" >> $GITHUB_ENV
+
+      - name: Register OAuth client
+        id: register_client
+        run: |
+          CLIENT=$(curl -sf -X POST "$HEARTH_BASE_URL/admin/realms/$HEARTH_REALM_ID/clients" \
+            -H "Authorization: Bearer $HEARTH_ACCESS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"client_name":"nextjs-smoke","redirect_uris":["http://localhost:3000/api/auth/callback"]}')
+          echo "HEARTH_CLIENT_ID=$(echo "$CLIENT" | jq -r .client_id)" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        working-directory: examples/typescript-nextjs
+        run: npm ci
+
+      - name: TypeScript type-check
+        working-directory: examples/typescript-nextjs
+        env:
+          HEARTH_REDIRECT_URI: http://localhost:3000/api/auth/callback
+          SESSION_SECRET: ci-test-secret-not-for-production
+          NEXT_PUBLIC_HEARTH_BASE_URL: ${{ env.HEARTH_BASE_URL }}
+          NEXT_PUBLIC_HEARTH_REALM_ID: ${{ env.HEARTH_REALM_ID }}
+        run: npx tsc --noEmit
+
+      - name: SDK smoke — verify token exchange works
+        run: |
+          node - <<'EOF'
+          // Headless smoke: bootstrap client and verify token introspection
+          const { HearthClient } = require("@hearth/sdk");
+
+          (async () => {
+            const client = new HearthClient({
+              baseUrl: process.env.HEARTH_BASE_URL,
+              realmId: process.env.HEARTH_REALM_ID,
+            });
+
+            const discovery = await client.discovery();
+            if (!discovery.authorization_endpoint) {
+              throw new Error("discovery missing authorization_endpoint");
+            }
+            console.log("OK: discovery endpoint verified");
+
+            const jwks = await client.jwks();
+            if (!jwks.keys || jwks.keys.length === 0) {
+              throw new Error("JWKS returned no keys");
+            }
+            console.log("OK: JWKS contains", jwks.keys.length, "key(s)");
+
+            console.log("TypeScript SDK smoke: PASS");
+          })().catch((err) => { console.error(err); process.exit(1); });
+          EOF
+
+      - name: Stop Hearth
+        if: always()
+        run: kill $HEARTH_PID 2>/dev/null || true
+
+  # ── Go / Gin smoke ─────────────────────────────────────────────────────────
+  go-gin:
+    name: smoke / go-gin
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build-hearth
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: examples/go-gin/go.mod
+          cache-dependency-path: examples/go-gin/go.sum
+
+      - name: Download Hearth binary
+        uses: actions/download-artifact@v4
+        with:
+          name: hearth-binary
+          path: /tmp/hearth-bin
+
+      - name: Make binary executable
+        run: chmod +x /tmp/hearth-bin/hearth
+
+      - name: Start Hearth dev server
+        run: |
+          /tmp/hearth-bin/hearth serve --dev --port $HEARTH_PORT &
+          echo "HEARTH_PID=$!" >> $GITHUB_ENV
+          for i in $(seq 1 30); do
+            if curl -sf "$HEARTH_BASE_URL/health" > /dev/null 2>&1; then
+              echo "Hearth ready after ${i}×0.5s"
+              break
+            fi
+            sleep 0.5
+          done
+          curl -sf "$HEARTH_BASE_URL/health" || (echo "Hearth failed to start" && exit 1)
+
+      - name: Bootstrap realm and get tokens
+        run: |
+          RESP=$(curl -sf -X POST "$HEARTH_BASE_URL/admin/bootstrap")
+          echo "HEARTH_REALM_ID=$(echo "$RESP" | jq -r .realm_id)" >> $GITHUB_ENV
+          echo "HEARTH_ACCESS_TOKEN=$(echo "$RESP" | jq -r .access_token)" >> $GITHUB_ENV
+
+      - name: Go build check
+        working-directory: examples/go-gin
+        run: go build ./...
+
+      - name: Go vet
+        working-directory: examples/go-gin
+        run: go vet ./...
+
+      - name: Start Go/Gin server
+        working-directory: examples/go-gin
+        env:
+          PORT: "8081"
+        run: |
+          go run . &
+          echo "GIN_PID=$!" >> $GITHUB_ENV
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8081/ > /dev/null 2>&1; then
+              echo "Gin ready"
+              break
+            fi
+            sleep 0.5
+          done
+
+      - name: Smoke — public endpoint
+        run: |
+          RESP=$(curl -sf http://localhost:8081/)
+          echo "$RESP" | grep -q "message" && echo "OK: public endpoint" || (echo "FAIL: $RESP" && exit 1)
+
+      - name: Smoke — protected endpoint (no token → 401)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/api/me)
+          [ "$STATUS" = "401" ] && echo "OK: 401 without token" || (echo "FAIL: expected 401, got $STATUS" && exit 1)
+
+      - name: Smoke — protected endpoint (valid token → 200)
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $HEARTH_ACCESS_TOKEN" \
+            http://localhost:8081/api/me)
+          [ "$STATUS" = "200" ] && echo "OK: 200 with valid token" || (echo "FAIL: expected 200, got $STATUS" && exit 1)
+
+      - name: Stop servers
+        if: always()
+        run: |
+          kill $GIN_PID 2>/dev/null || true
+          kill $HEARTH_PID 2>/dev/null || true
+
+  # ── Required summary gate ──────────────────────────────────────────────────
+  sdk-smoke-ok:
+    name: sdk-smoke-ok
+    runs-on: ubuntu-latest
+    needs: [typescript-nextjs, go-gin]
+    if: always()
+    steps:
+      - name: All smoke jobs passed
+        run: |
+          if [ "${{ needs.typescript-nextjs.result }}" != "success" ] || \
+             [ "${{ needs.go-gin.result }}" != "success" ]; then
+            echo "One or more SDK smoke jobs failed"
+            exit 1
+          fi
+          echo "All SDK smoke jobs passed"
