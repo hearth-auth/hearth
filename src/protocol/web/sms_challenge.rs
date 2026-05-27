@@ -576,24 +576,27 @@ mod tests {
             response_type: "code".to_string(),
         };
 
-        let cookie_header = issue_sms_mfa_cookie(&secret, &user_id, &s).unwrap();
+        let cookie_header = issue_sms_mfa_cookie(&secret, &user_id, &s)
+            .expect("issue_sms_mfa_cookie should succeed");
         // Extract the cookie value from the Set-Cookie header string.
         let value = cookie_header
             .strip_prefix(&format!("{SMS_MFA_COOKIE}="))
-            .unwrap()
+            .expect("cookie header should start with cookie name")
             .split(';')
             .next()
-            .unwrap()
+            .expect("split should yield at least one segment")
             .to_string();
 
         // Build a fake header map with the cookie.
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_str(&format!("{SMS_MFA_COOKIE}={value}")).unwrap(),
+            axum::http::HeaderValue::from_str(&format!("{SMS_MFA_COOKIE}={value}"))
+                .expect("cookie value should be a valid header value"),
         );
 
-        let decoded = read_sms_mfa_cookie(&secret, &user_id, &headers).unwrap();
+        let decoded = read_sms_mfa_cookie(&secret, &user_id, &headers)
+            .expect("read_sms_mfa_cookie should succeed");
         assert_eq!(decoded.otp_nonce, "test-nonce-abc");
         assert_eq!(decoded.masked_phone, "+1***-***-1234");
         assert_eq!(decoded.scope, "openid profile");
@@ -620,19 +623,21 @@ mod tests {
             response_type: "code".to_string(),
         };
 
-        let cookie_header = issue_sms_mfa_cookie(&secret, &user_a, &s).unwrap();
+        let cookie_header = issue_sms_mfa_cookie(&secret, &user_a, &s)
+            .expect("issue_sms_mfa_cookie should succeed");
         let value = cookie_header
             .strip_prefix(&format!("{SMS_MFA_COOKIE}="))
-            .unwrap()
+            .expect("cookie header should start with cookie name")
             .split(';')
             .next()
-            .unwrap()
+            .expect("split should yield at least one segment")
             .to_string();
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_str(&format!("{SMS_MFA_COOKIE}={value}")).unwrap(),
+            axum::http::HeaderValue::from_str(&format!("{SMS_MFA_COOKIE}={value}"))
+                .expect("cookie value should be a valid header value"),
         );
 
         // user_a's cookie must not validate under user_b.

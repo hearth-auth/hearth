@@ -1328,12 +1328,17 @@ async fn run_serve(
                         break;
                     }
                 }
+                // Realistic eviction/active counts never approach 2^53, so the
+                // u64 → f64 conversion is lossless in practice. Prometheus
+                // counter/gauge APIs accept f64 only.
+                #[allow(clippy::cast_precision_loss)]
+                let evicted_f64 = total_evicted as f64;
+                #[allow(clippy::cast_precision_loss)]
+                let active_f64 = total_active as f64;
                 hearth::metrics::metrics()
                     .dfp_sweeper_evicted_total
-                    .inc_by(total_evicted as f64);
-                hearth::metrics::metrics()
-                    .dfp_keys_active
-                    .set(total_active as f64);
+                    .inc_by(evicted_f64);
+                hearth::metrics::metrics().dfp_keys_active.set(active_f64);
             }
         });
     }

@@ -240,7 +240,9 @@ mod tests {
         let client = HibpClient::with_transport(Arc::new(StubTransport {
             body: "1E4C9B93F3F0682250B6CF8331B7EE68FD8:9545824",
         }));
-        assert!(client.is_pwned(b"password", None).unwrap());
+        assert!(client
+            .is_pwned(b"password", None)
+            .expect("is_pwned should succeed"));
     }
 
     #[test]
@@ -248,7 +250,9 @@ mod tests {
         let client = HibpClient::with_transport(Arc::new(StubTransport {
             body: "ABCDE00000000000000000000000000000:1",
         }));
-        assert!(!client.is_pwned(b"password", None).unwrap());
+        assert!(!client
+            .is_pwned(b"password", None)
+            .expect("is_pwned should succeed"));
     }
 
     #[test]
@@ -266,13 +270,20 @@ mod tests {
         struct PrefixCapture(std::sync::Mutex<String>);
         impl HibpTransport for PrefixCapture {
             fn get_range(&self, prefix: &str, _api_key: Option<&str>) -> Result<String, HibpError> {
-                *self.0.lock().unwrap() = prefix.to_string();
+                *self.0.lock().expect("mutex should not be poisoned") = prefix.to_string();
                 Ok(String::new())
             }
         }
         let captured = Arc::new(PrefixCapture(std::sync::Mutex::new(String::new())));
         let client = HibpClient::with_transport(Arc::clone(&captured) as Arc<dyn HibpTransport>);
         let _ = client.is_pwned(b"password", None);
-        assert_eq!(captured.0.lock().unwrap().len(), 5);
+        assert_eq!(
+            captured
+                .0
+                .lock()
+                .expect("mutex should not be poisoned")
+                .len(),
+            5
+        );
     }
 }

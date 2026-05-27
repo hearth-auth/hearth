@@ -68,6 +68,8 @@ mod tests {
 
     #[test]
     fn log_sender_default_constructs() {
+        // Intentionally exercises the `Default` impl on the unit struct.
+        #[allow(clippy::default_constructed_unit_structs)]
         let sender = LoggingSmsSender::default();
         assert!(sender.send(&test_message()).is_ok());
     }
