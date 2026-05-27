@@ -99,6 +99,7 @@ fn bench_auth_code_exchange(c: &mut Criterion) {
                         code_challenge: None,
                         code_challenge_method: None,
                         nonce: None,
+                        amr_values: vec![],
                     },
                 )
                 .expect("authorize");

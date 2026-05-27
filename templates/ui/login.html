@@ -1,12 +1,14 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Sign in{% endblock %}
 {% block body %}
-<div x-data="passkeyLogin"
+<div id="passkey-login-root"
      data-begin-url="{{ passkey_begin_url }}"
      data-complete-url="{{ passkey_complete_url }}"
      data-unavailable-msg="{{ passkey_unavailable_error }}"
      data-cancelled-msg="{{ passkey_cancelled_error }}"
      data-failed-msg="{{ passkey_failed_error }}"
+     data-authenticating-label="{{ passkey_authenticating_label }}"
+     data-sign-in-label="{{ passkey_sign_in_label }}"
      class="rounded-md bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle">
   <div class="mb-6 flex items-center justify-center">
     <a href="/ui" class="flex items-center" aria-label="Home" data-crawl-skip>
@@ -45,11 +47,10 @@
     {% when None %}
   {% endmatch %}
 
-  {# Passkey JS error #}
-  <div x-show="passkeyError" x-cloak
+  {# Passkey JS error — shown by passkey.js when a ceremony fails #}
+  <div id="passkey-error" hidden
        class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg"
-       role="alert"
-       x-text="passkeyError"></div>
+       role="alert"></div>
 
   {# ────────────────────────────────────────────────────────────────────── #}
   {# Phase 1 — Email + password                                            #}
@@ -164,34 +165,30 @@
   </div>
   {% endif %}
 
-  {# Passkey sign-in (phase 1 only, requires JS) #}
-  <template x-if="passkeyAvailable">
-    <div class="mt-4">
-      <div class="relative my-4">
-        <div class="absolute inset-0 flex items-center">
-          <div class="w-full border-t border-divider-subtle"></div>
-        </div>
-        <div class="relative flex justify-center text-xs">
-          <span class="bg-ht-surface-elevated px-2 text-ht-content-muted">{{ or_label }}</span>
-        </div>
+  {# Passkey sign-in (phase 1 only, requires JS).
+     Hidden by default; passkey.js reveals #passkey-section when
+     PublicKeyCredential is available on this device. #}
+  <div id="passkey-section" hidden class="mt-4">
+    <div class="relative my-4">
+      <div class="absolute inset-0 flex items-center">
+        <div class="w-full border-t border-divider-subtle"></div>
       </div>
-      <button @click="authenticatePasskey()" :disabled="authenticating"
-              class="w-full rounded border border-divider bg-ht-surface px-4 py-2.5 text-sm font-medium text-ht-content-primary hover:bg-ht-surface-hover transition-colors flex items-center justify-center gap-2 focus:outline-none focus-visible:ring-1 focus-visible:ring-ht-content-brand disabled:opacity-60">
-        <template x-if="authenticating">
-          <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-          </svg>
-        </template>
-        <template x-if="!authenticating">
-          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/>
-          </svg>
-        </template>
-        <span x-text="authenticating ? '{{ passkey_authenticating_label }}' : '{{ passkey_sign_in_label }}'"></span>
-      </button>
+      <div class="relative flex justify-center text-xs">
+        <span class="bg-ht-surface-elevated px-2 text-ht-content-muted">{{ or_label }}</span>
+      </div>
     </div>
-  </template>
+    <button id="passkey-btn"
+            class="w-full rounded border border-divider bg-ht-surface px-4 py-2.5 text-sm font-medium text-ht-content-primary hover:bg-ht-surface-hover transition-colors flex items-center justify-center gap-2 focus:outline-none focus-visible:ring-1 focus-visible:ring-ht-content-brand disabled:opacity-60">
+      <svg id="passkey-spinner" class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true" hidden>
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+      </svg>
+      <svg id="passkey-icon" class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/>
+      </svg>
+      <span id="passkey-label">{{ passkey_sign_in_label }}</span>
+    </button>
+  </div>
 
   {% if show_register %}
   <div class="mt-4 text-center text-sm font-medium">

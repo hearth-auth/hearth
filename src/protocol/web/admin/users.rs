@@ -43,8 +43,8 @@ struct UserListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rows-only partial returned when the user list is filtered live via
@@ -116,8 +116,8 @@ pub async fn admin_users_list(
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Err(e) => {
@@ -189,8 +189,8 @@ pub async fn admin_admin_users_list(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Err(e) => {
@@ -227,8 +227,8 @@ struct UserNewTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/users/new`.
@@ -263,8 +263,8 @@ pub async fn admin_user_create_form(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -355,8 +355,8 @@ pub async fn admin_user_create_submit(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         })
     };
 
@@ -461,6 +461,10 @@ struct UserDetailTemplate {
     user_id: String,
     sessions: Vec<UserSessionRow>,
     mfa_enabled: bool,
+    /// Masked phone number for display (e.g. `+1***-***-1234`), or `None` if not set.
+    masked_phone: Option<String>,
+    /// Whether the user's enrolled phone number has been verified.
+    phone_verified: bool,
     webauthn_credentials: Vec<WebAuthnCredRow>,
     org_memberships: Vec<OrgMembershipRow>,
     flash_message: Option<String>,
@@ -499,8 +503,8 @@ struct UserDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Template for the Roles tab HTMX partial.
@@ -593,6 +597,9 @@ pub async fn admin_user_detail(
         .mfa_enabled(target.id(), &uid)
         .unwrap_or(false);
 
+    let masked_phone = user.masked_phone_number();
+    let phone_verified = user.phone_verified();
+
     let raw_creds = state
         .identity
         .list_webauthn_credentials(target.id(), &uid)
@@ -644,6 +651,9 @@ pub async fn admin_user_detail(
         "role_unassigned" => "Role removed.".to_string(),
         "permission_granted" => "Permission granted.".to_string(),
         "permission_revoked" => "Permission revoked.".to_string(),
+        "phone_removed" => {
+            "Phone number removed. User will be prompted to re-enrol on next login.".to_string()
+        }
         other => other.to_string(),
     });
 
@@ -735,6 +745,8 @@ pub async fn admin_user_detail(
         realm_name: target.0.name().to_string(),
         sessions,
         mfa_enabled,
+        masked_phone,
+        phone_verified,
         webauthn_credentials,
         org_memberships,
         flash_message,
@@ -759,8 +771,8 @@ pub async fn admin_user_detail(
         narrow: false,
         product_name: state.product_name_for(target.id()),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -837,6 +849,72 @@ pub async fn admin_user_disable_mfa(
     .into_response()
 }
 
+/// `POST /ui/admin/realms/:realm/users/:id/remove-phone`
+///
+/// Clears the user's enrolled phone number, marks it unverified, and adds
+/// `ENROLL_PHONE_OTP` to the user's required actions so they are prompted
+/// to re-enrol on next login. Idempotent — succeeds even when no phone is set.
+pub async fn admin_user_remove_phone(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(session): RequireAdmin,
+    target: TargetRealm,
+    AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
+    FriendlyForm(form): FriendlyForm<CsrfOnlyForm>,
+) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
+    let uid = match user_id.parse::<uuid::Uuid>() {
+        Ok(u) => crate::core::UserId::new(u),
+        Err(_) => return super::handlers_common::not_found("User not found"),
+    };
+
+    let redirect_base = format!("/ui/admin/realms/{}/users/{user_id}", target.0.name());
+
+    // Fetch current user to build the new required_actions list.
+    let current_user = match state.identity.get_user(target.id(), &uid) {
+        Ok(Some(u)) => u,
+        Ok(None) => return super::handlers_common::not_found("User not found"),
+        Err(e) => {
+            tracing::warn!(error = %e, "get_user failed in remove_phone");
+            return super::handlers_common::server_error();
+        }
+    };
+
+    // Build the new required_actions: preserve existing, add ENROLL_PHONE_OTP if absent.
+    let mut new_actions: Vec<crate::identity::RequiredAction> =
+        current_user.required_actions().to_vec();
+    if !new_actions.contains(&crate::identity::RequiredAction::EnrollPhoneOtp) {
+        new_actions.push(crate::identity::RequiredAction::EnrollPhoneOtp);
+    }
+
+    let req = crate::identity::UpdateUserRequest {
+        phone_number: Some(None), // clear
+        phone_verified: Some(false),
+        required_actions: Some(new_actions),
+        ..Default::default()
+    };
+
+    match state.identity.update_user(target.id(), &uid, &req) {
+        Ok(_) => {
+            tracing::info!(
+                user_id = %uid,
+                admin = %session.user_email,
+                "admin removed phone number"
+            );
+            Redirect::to(&format!("{redirect_base}?flash=phone_removed")).into_response()
+        }
+        Err(crate::identity::IdentityError::UserNotFound) => {
+            super::handlers_common::not_found("User not found")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "update_user failed in remove_phone");
+            super::handlers_common::server_error()
+        }
+    }
+}
+
 /// Template showing new recovery codes after an admin reset.
 #[derive(askama::Template)]
 #[template(path = "ui/admin/mfa_codes_reset.html")]
@@ -853,8 +931,8 @@ struct AdminMfaCodesResetTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `POST /ui/admin/users/:id/reset-mfa-codes` — regenerates recovery codes for the user.
@@ -895,8 +973,8 @@ pub async fn admin_user_reset_mfa_codes(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             };
             render(&tmpl)
         }
@@ -1023,8 +1101,8 @@ struct UserEditTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// View model for a user's organization membership (displayed on user edit page).
@@ -1098,8 +1176,8 @@ pub async fn admin_user_edit_form(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Ok(None) => super::handlers_common::not_found("User not found"),
@@ -1169,6 +1247,8 @@ pub async fn admin_user_edit_submit(
         status,
         attributes: Some(attributes),
         required_actions: None,
+        phone_number: None,
+        phone_verified: None,
     };
 
     match state.identity.update_user(target.id(), &uid, &req) {
@@ -1346,8 +1426,8 @@ fn render_edit_error(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         None => super::handlers_common::not_found("User not found"),
@@ -1421,8 +1501,8 @@ struct SessionListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query params for the sessions list page. Extends pagination with an
@@ -1563,8 +1643,8 @@ pub async fn admin_sessions_list(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Err(e) => {
@@ -1709,8 +1789,8 @@ struct AdminUserConsentsTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/users/{id}/applications` — lists every OAuth consent the
@@ -1764,11 +1844,10 @@ pub async fn admin_user_consents_list(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: String::new(),
-        realm_theme_css: None,
+        realm_theme_url: None,
+        inline_theme_css: None,
     };
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 
@@ -2342,6 +2421,8 @@ pub async fn admin_users_bulk_action(
                 attributes: None,
                 status: Some(UserStatus::Disabled),
                 required_actions: None,
+                phone_number: None,
+                phone_verified: None,
             };
             for uid in &user_ids {
                 if let Err(e) = state.identity.update_user(target.id(), uid, &req) {
@@ -2429,8 +2510,8 @@ struct UserImportTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms/{realm}/users/import`
@@ -2453,8 +2534,8 @@ pub async fn admin_users_import_form(
         narrow: false,
         product_name: state.product_name_for(target.id()),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -2539,8 +2620,8 @@ pub async fn admin_users_import_submit(
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             });
         }
     };
@@ -2561,8 +2642,8 @@ pub async fn admin_users_import_submit(
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             });
         }
     };
@@ -2581,8 +2662,8 @@ pub async fn admin_users_import_submit(
             narrow: false,
             product_name: state.product_name_for(target.id()),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         });
     }
 
@@ -2693,6 +2774,8 @@ fn process_csv_import(
                     status: None,
                     email: None,
                     required_actions: None,
+                    phone_number: None,
+                    phone_verified: None,
                 };
                 if let Err(e) = state.identity.update_user(realm_id, user.id(), &req) {
                     tracing::warn!(error = %e, email = %email, "import update failed");

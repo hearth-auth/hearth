@@ -9,6 +9,174 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`make ci-local-full`** — full container reproduction of PR-blocking GHA
+  workflows via `nektos/act`; catches workflow-file errors and toolchain drift
+  that the host-side `ci-local-fast` cannot. Targets 10–15 min cold on a
+  developer's host. See `CONTRIBUTING.md` for install instructions and
+  known-skipped workflows ([HEA-891](/HEA/issues/HEA-891)).
+- **`make ci-local-fast`** — single target that runs the seven PR-blocking CI
+  checks on the developer's host in ~5 min cold: `test-quality`, `check`
+  (clippy + fmt + nextest), `css-check`, `proto-check`, `cargo deny`,
+  `sdk-conformance`, and `sdk-smoke-local` (HEA-890).
+- **`make sdk-smoke-local`** — builds hearth (debug), boots `--dev` on a random
+  free port, runs TypeScript/Next.js and Go/Gin SDK example smokes, then tears
+  down. Mirrors the `sdk-smoke` CI workflow without requiring Docker (HEA-890).
+
+### Fixed
+
+- **Admin sidebar chevron icon (HEA-886)** — the realm-tree expand chevron in
+  the admin sidebar was rendered as `<polyline points="M9 18 15 12 9 6">` —
+  path-language passed to a polyline element silently produced no output. The
+  helper now dispatches `d` for `<path>` and `points` for `<polyline>`/
+  `<polygon>` based on the requested SVG tag.
+
+### Security
+
+- **CSP `script-src 'self'`: 10 inline `<script>` blocks extracted (HEA-886)** —
+  Per-page inline scripts in admin templates (`groups/new`, `webhooks/new`,
+  `settings/editor`, `users/import`, `users/list`, `users/new`,
+  `organizations/new`, `organizations/edit`, `rbac/debug`) and the dev
+  mailcatcher (`dev/mail_detail`) now load from cacheable external files under
+  `/ui/static/admin/*.js` and `/ui/static/dev/mail-detail.js`. Template-rendered
+  values are passed via `data-*` attributes (e.g. `data-slug-touched`,
+  `data-test-ping-url`, `data-total-users`). The dev mail detail page also
+  loses its inline `onclick="showTab(...)"` and `onsubmit="return confirm(...)"`
+  handlers in favour of `addEventListener`-based dispatch. CSP stays
+  `script-src 'self'` (no nonce, no `'unsafe-inline'`).
+
+- **GDPR Art.17: device fingerprint erasure cascade + admin API (HEA-875)** — `delete_user`
+  now cascades to all `dfp:user:{uid}:*` storage entries so right-to-erasure is complete.
+  New endpoint `DELETE /admin/users/{id}/device-fingerprints` (AC-11) lets operators satisfy
+  DSAR erasure requests without deleting the entire account; returns `{"erased": N}` and
+  emits a `DeviceFingerprintsErased` audit event. Also fixed: `derive_fingerprint_key` helper
+  was producing keys with the stale `dev:fp:` prefix instead of the correct `dfp:user:` prefix.
+
+- **CSP regression fix: inline styles eliminated (HEA-876)** — Two regressions from the
+  HEA-850 `style-src 'self'` hardening are resolved. Theme CSS is now served via external
+  `<link>` tags (`/ui/static/theme.css`, `/ui/static/realm-theme/{id}`) instead of inline
+  `<style>` blocks. HTMX's startup `insertAdjacentHTML` style injection for `.htmx-indicator`
+  is suppressed with `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>`;
+  indicator styles are declared in `app.css` instead.
+
+- **CSP hardened: `unsafe-eval` and `unsafe-inline` removed (HEA-850)** — Alpine.js
+  has been fully replaced by HTMX + Hyperscript across all ~40 admin templates.
+  Layout reactivity (sidebar toggle, realm nav tree, toast notifications, realm pill)
+  is now handled by vanilla JS classes (`SidebarManager`, `RealmNav`, `ToastManager`)
+  in `admin.js`. Template interactions use Hyperscript `_="..."` attributes, which are
+  eval-free. The CSP is now `script-src 'self'; style-src 'self'` with no unsafe
+  keywords. Resolves GAP-4 and GAP-5 from the original security audit.
+
+### Added
+
+- **Device fingerprint proactive TTL sweeper (HEA-862)** — a background task now
+  runs every 6 hours (configurable via `identity.cleanup.dfp_sweeper_interval_secs`)
+  and evicts expired `dfp:user:*` storage entries across all realms. This satisfies
+  the GDPR 30-day retention window for users who stop logging in. Two new Prometheus
+  metrics are exported: `hearth_dfp_sweeper_evicted_total` (cumulative counter of
+  evicted entries) and `hearth_dfp_keys_active` (gauge, sampled per sweep). Errors
+  are logged at `WARN` level and do not crash the process.
+
+- **SMS MFA realm config (HEA-855)** — `RealmConfig` gains two new optional fields:
+  `sms_otp_expiry_seconds` (override default OTP lifetime per realm) and
+  `sms_otp_max_attempts` (override maximum guess attempts per realm). Both are
+  configurable via `PATCH /admin/realms/{realm}/config` (JSON API) and the admin
+  realm settings UI. `"sms"` is now a valid value in the `mfa_methods` array.
+
+- **Admin user phone management (HEA-855)** — the admin user detail page now shows
+  the user's phone number in masked form (`+1***-***-1234`) alongside its verification
+  status. A **Remove Phone** button clears the number and automatically adds
+  `ENROLL_PHONE_OTP` to the user's required actions so they are prompted to
+  re-enroll on next login. Exposed as `POST /ui/admin/realms/{realm}/users/{id}/remove-phone`.
+
+### Security
+
+- **Sensitive config fields wrapped in `SecretString` (HEA-869)** — `AdaptiveMfaConfig.fingerprint_hmac_secret`
+  and `BreachCheckConfig.hibp_api_key` were typed as `String` with `#[derive(Debug)]`, which exposed
+  their plaintext values in any `{:?}` output (tracing debug logs, assertion panics, `dbg!` macro).
+  Both fields are now `secrecy::SecretString`; `Debug` is implemented manually and emits `[REDACTED]`.
+  Call sites updated to call `.expose_secret()` only at the point of cryptographic use (CWE-532, High).
+
+- **Step-up MFA follow-up hardening (HEA-861)** — four deferred findings from the
+  HEA-836 SecurityAuditor re-review resolved: (1) duplicate `record_device_fingerprint`
+  call removed from the `Recognised` path (triple write on every recognised login);
+  (2) silent `let _ =` discard on `StepUpMfaTriggered` audit replaced with
+  `tracing::warn` so broken audit pipelines surface in logs; (3) `StepUpMfaCompleted`
+  audit event added to `step_up_mfa_grant_token` on success, enabling
+  trigger → resolution correlation; (4) `fingerprint_hmac_secret` minimum-length
+  guard tightened to ≥ 32 bytes (NIST SP 800-107 / SHA-256 output length) — secrets
+  shorter than 32 bytes with `adaptive_mfa.enabled=true` now fail-secure with a
+  configuration error.
+
+- **Step-up MFA rate-limit gaps closed (HEA-836)** — three additional findings
+  from the SecurityAuditor re-review resolved: the pre-flight IP rate-limit check
+  now covers `grant_type=urn:hearth:params:grant-type:step-up-mfa` (previously
+  only `password` was guarded); `verify_recovery_code` now enforces the same
+  per-user 5-attempt MFA lockout as TOTP so recovery codes cannot bypass the
+  rate limit; failed MFA codes in the step-up handler now advance the IP-level
+  login-attempt counter so MFA failures feed back into adaptive IP blocking.
+
+- **Step-up MFA security hardening (HEA-836)** — five SecurityAuditor findings
+  resolved: `enabled=true` with an empty `fingerprint_hmac_secret` now returns a
+  hard configuration error instead of silently bypassing step-up (fail-secure);
+  non-UTF-8 HMAC secret degradation to empty string removed at the type level;
+  `EnrollMfaRequired` path now uses `update_user()` (atomic read-modify-write)
+  instead of a direct `storage.put()` that was subject to a TOCTOU race;
+  User-Agent is normalised to major version only before HMAC so minor browser
+  auto-updates no longer trigger spurious step-up challenges.
+
+- **Step-up MFA completion endpoint (HEA-836)** — added
+  `grant_type=urn:hearth:params:grant-type:step-up-mfa` token endpoint that
+  re-verifies the user's password, validates TOTP (or recovery code), records
+  the device fingerprint as trusted, and issues a full token pair.  Without this
+  endpoint users with enrolled MFA on an unrecognised device received 401 forever.
+
+- **Phone number PII masking in SMS transport logs (HEA-857)** — all three SMS
+  transports (Twilio, AWS SNS, Log) now emit only the masked form of the recipient
+  phone number in tracing output (`+***4567` instead of the full E.164 number),
+  satisfying AC 3.5.2. The `mask_phone` helper lives in `src/identity/sms/mod.rs`.
+
+- **CSP GAP-4 remediation (HEA-824)** — vendored Hyperscript 0.9.13 as the
+  eval-free replacement for Alpine.js; tooltip patterns migrated to pure CSS
+  (`group-hover`/`group-focus-within`); audit row expand and migrations accordion
+  migrated to Hyperscript. Documented the `unsafe-eval` trade-off with threat-model
+  rationale in `docs/security/csp.md`. Remaining Alpine components tracked for
+  removal in child issues; `unsafe-eval` removal from CSP blocked until complete.
+
+- **WebAuthn Alpine components migrated to eval-free vanilla JS (HEA-849)** —
+  `passkeyLogin`, `passkeyManager`, and `passkeyRow` Alpine components replaced
+  with `passkey.js`, a plain IIFE that wires WebAuthn ceremonies to static DOM
+  elements via `id` / `data-*` selectors. All three WebAuthn POST calls now
+  include `X-CSRF-Token` from the layout `<meta name="csrf">` tag (previously
+  absent). No change to the WebAuthn ceremony logic or server API contract.
+
+### Added
+
+- **ENROLL_PHONE_OTP required action (HEA-853)** — realms with `mfa_methods: [sms]`
+  now interrupt the OIDC and browser login flows for users who have no verified phone
+  number. The enrollment interstitial collects an E.164 phone number, sends a 6-digit
+  SMS OTP, and verifies the code before completing the flow. On success the phone number
+  is stored as verified and the action is cleared. Enumeration resistance: uniform
+  HTTP 200 responses, timing-safe sends, no notification to the existing holder of a
+  claimed number.
+
+- **SMS transport layer** — new `sms:` config block with three providers:
+  `log` (dev default), `twilio` (Messaging REST API), and `awssns` (SNS
+  Transactional tier, Signature Version 4). Fail-fast startup validation for
+  missing Twilio / SNS credentials. `HEARTH_SMS_OTP_HMAC_KEY` env var is
+  required in production to cryptographically bind OTP codes to the server
+  instance (HEA-851).
+
+- **Adaptive step-up MFA on unrecognised device** — when `adaptive_mfa.enabled = true` on a
+  realm, the `password_grant_token` ROPC flow checks an HMAC-SHA256 fingerprint of
+  `(user_id, IP /24 subnet, User-Agent)` against a rolling recognition window stored in the
+  embedded WAL. Unknown devices return `HEARTH_STEP_UP_CHALLENGE_REQUIRED` (HTTP 401) for
+  users with an enrolled factor, or `HEARTH_ENROLL_MFA_REQUIRED` (HTTP 403) for users without
+  one (injecting `RequiredAction::EnrollMfa` on the user record). Recognised devices continue
+  normally with TTL refresh. A `StepUpMfaTriggered` audit event is emitted on every
+  unrecognised-device login attempt. Empty HMAC secrets or disabled config skip the check
+  (fail-open). gRPC surfaces both errors via `UNAUTHENTICATED` and `PERMISSION_DENIED`
+  respectively (HEA-836).
+
 - **Required-action UI interstitials** — five new browser-facing routes handle the
   required-action flow without API clients:
   - `GET /ui/required-actions/update-password` — password-update form (ra-JWT in query param).

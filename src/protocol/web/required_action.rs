@@ -71,8 +71,8 @@ struct ActionPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rendered by `GET /required-action/UPDATE_PASSWORD` (and re-rendered on validation failure).
@@ -91,8 +91,8 @@ struct UpdatePasswordPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `application/x-www-form-urlencoded` body for `POST /required-action/UPDATE_PASSWORD`.
@@ -108,6 +108,7 @@ fn action_label(action: &str) -> &'static str {
     match action {
         "VERIFY_EMAIL" => "Verify your email address",
         "UPDATE_PASSWORD" => "Update your password",
+        "ENROLL_PHONE_OTP" => "Enroll your phone number",
         _ => "Complete required action",
     }
 }
@@ -135,6 +136,11 @@ pub fn required_action_check(
     let user = state.identity.get_user(realm, user_id).ok().flatten()?;
 
     let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
+
+    // Dynamic injection: if the realm requires SMS MFA and the user has no
+    // verified phone, ensure ENROLL_PHONE_OTP is in the pending actions list.
+    inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
+
     if actions.is_empty() {
         return None;
     }
@@ -203,6 +209,11 @@ pub fn required_action_check_browser(
     let user = state.identity.get_user(realm, user_id).ok().flatten()?;
 
     let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
+
+    // Dynamic injection: if the realm requires SMS MFA and the user has no
+    // verified phone, ensure ENROLL_PHONE_OTP is in the pending actions list.
+    inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
+
     if actions.is_empty() {
         return None;
     }
@@ -316,8 +327,8 @@ pub async fn action_page(
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -451,6 +462,7 @@ pub fn resume_oidc_flow(
         code_challenge,
         code_challenge_method,
         oidc_params.nonce.clone(),
+        Vec::new(),
     ) {
         Ok(resp) => {
             let location = build_redirect_location(
@@ -530,6 +542,63 @@ pub fn next_required_action(
 }
 
 // ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Dynamically injects `ENROLL_PHONE_OTP` when a realm requires SMS MFA and
+/// the user has no verified phone number.
+///
+/// Persists the action to the user record so subsequent `required_actions()`
+/// reads see it. Idempotent: no-op if already present or not applicable.
+fn inject_enroll_phone_otp_if_needed(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    user: &crate::identity::User,
+    actions: &mut Vec<RequiredAction>,
+) {
+    if user.phone_verified() {
+        return;
+    }
+    if actions.contains(&RequiredAction::EnrollPhoneOtp) {
+        return;
+    }
+    let sms_required = state
+        .identity
+        .get_realm(realm)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().mfa_methods.clone())
+        .map(|methods| methods.iter().any(|m| m == "sms"))
+        .unwrap_or(false);
+
+    if !sms_required {
+        return;
+    }
+
+    actions.push(RequiredAction::EnrollPhoneOtp);
+
+    // Persist so the RA-JWT and future checks agree on the list.
+    let mut persisted = user.required_actions().to_vec();
+    if !persisted.contains(&RequiredAction::EnrollPhoneOtp) {
+        persisted.push(RequiredAction::EnrollPhoneOtp);
+        if let Err(e) = state.identity.update_user(
+            realm,
+            user_id,
+            &UpdateUserRequest {
+                required_actions: Some(persisted),
+                ..Default::default()
+            },
+        ) {
+            tracing::warn!(
+                error = %e,
+                "inject_enroll_phone_otp_if_needed: failed to persist ENROLL_PHONE_OTP"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
 
@@ -552,8 +621,8 @@ struct VerifyEmailPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rendered by `GET /required-action/VERIFY_EMAIL/confirm` when the token is
@@ -571,8 +640,8 @@ struct VerifyEmailExpiredTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query parameters for `GET /required-action/VERIFY_EMAIL/confirm`.
@@ -736,8 +805,8 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -880,8 +949,8 @@ fn render_verify_email_expired(state: &Arc<WebState>) -> Response {
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -1068,10 +1137,380 @@ fn render_update_password_form(state: &Arc<WebState>, error: Option<&str>) -> Re
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
+}
+
+// ---------------------------------------------------------------------------
+// GET /required-action/ENROLL_PHONE_OTP
+// ---------------------------------------------------------------------------
+
+/// Rendered by `GET /required-action/ENROLL_PHONE_OTP`.
+#[derive(Template)]
+#[template(path = "ui/required_action/enroll_phone_otp.html")]
+struct EnrollPhoneOtpPageTemplate {
+    error: Option<String>,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// Rendered by `POST /required-action/ENROLL_PHONE_OTP/send` on success.
+#[derive(Template)]
+#[template(path = "ui/required_action/enroll_phone_otp_verify.html")]
+struct EnrollPhoneOtpVerifyTemplate {
+    /// Masked display of the phone (e.g. `+1•••••0100`).
+    masked_phone: String,
+    /// Raw phone (for hidden form fields).
+    phone: String,
+    /// Opaque nonce returned by `issue_sms_otp`; `None` in rate-limited renders.
+    nonce: Option<String>,
+    error: Option<String>,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_PHONE_OTP/send`.
+#[derive(Debug, Deserialize)]
+pub struct EnrollPhoneOtpSendForm {
+    #[serde(default)]
+    pub phone: String,
+}
+
+/// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_PHONE_OTP/verify`.
+#[derive(Debug, Deserialize)]
+pub struct EnrollPhoneOtpVerifyForm {
+    #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
+    pub phone: String,
+    #[serde(default)]
+    pub code: String,
+}
+
+/// Renders the phone-number input form.
+pub async fn enroll_phone_otp_page(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    if read_ra_cookie(&headers).is_none() {
+        return handlers_common::bad_request("No active required-action session");
+    }
+    render_enroll_phone_page(&state, None)
+}
+
+/// Sends an SMS OTP to the supplied E.164 phone number and renders the
+/// code-entry form.
+///
+/// Enumeration resistance (AC 3.5.3): always returns 200 with the code-entry
+/// form regardless of whether the phone is already registered to another user.
+/// The OTP simply won't verify on the complete step, yielding a generic error.
+pub async fn enroll_phone_otp_send(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<EnrollPhoneOtpSendForm>,
+) -> Response {
+    if read_ra_cookie(&headers).is_none() {
+        return handlers_common::bad_request("No active required-action session");
+    }
+
+    let phone = form.phone.trim().to_string();
+
+    // Basic E.164 validation: must start with '+' and contain 7-15 digits.
+    if !is_e164(&phone) {
+        return render_enroll_phone_page(
+            &state,
+            Some("Enter a valid international phone number (e.g. +15555550100)."),
+        );
+    }
+
+    let Some(sms_sender) = state.sms.as_ref() else {
+        tracing::warn!("enroll_phone_otp_send: SMS transport not configured");
+        return render_enroll_phone_page(
+            &state,
+            Some("SMS delivery is not configured. Contact your administrator."),
+        );
+    };
+
+    let hmac_key = sms_otp_hmac_key_bytes(&state);
+    let now_ts = now_unix_ts();
+
+    let nonce = match state.identity.issue_sms_otp(
+        &extract_realm_from_ra_cookie(&headers),
+        &phone,
+        &hmac_key,
+        sms_sender.as_ref(),
+        now_ts,
+    ) {
+        Ok(n) => n,
+        Err(crate::identity::IdentityError::SmsResendLimitExceeded) => {
+            return render_enroll_phone_verify(
+                &state,
+                // Return the verify page with a warning rather than blocking —
+                // the real OTP was already sent recently (rate limit window).
+                &phone,
+                None,
+                Some("A code was recently sent to this number. Please wait before requesting another."),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "enroll_phone_otp_send: issue_sms_otp failed");
+            return render_enroll_phone_page(
+                &state,
+                Some("Failed to send verification code. Please try again."),
+            );
+        }
+    };
+
+    render_enroll_phone_verify(&state, &phone, Some(&nonce), None)
+}
+
+/// Verifies the submitted OTP code, stores the phone as verified, clears
+/// `ENROLL_PHONE_OTP` from the user's required actions, and advances the flow.
+pub async fn enroll_phone_otp_verify_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<EnrollPhoneOtpVerifyForm>,
+) -> Response {
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return Redirect::to("/").into_response();
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let secure = state.is_secure_request(&headers);
+
+    let phone = form.phone.trim().to_string();
+    if !is_e164(&phone) || form.nonce.is_empty() || form.code.is_empty() {
+        return render_enroll_phone_verify(
+            &state,
+            &phone,
+            Some(&form.nonce),
+            Some("Invalid submission."),
+        );
+    }
+
+    let hmac_key = sms_otp_hmac_key_bytes(&state);
+    let now_ts = now_unix_ts();
+
+    match state
+        .identity
+        .verify_sms_otp(&realm, &form.nonce, &form.code, &hmac_key, now_ts)
+    {
+        Ok(()) => {}
+        Err(_) => {
+            return render_enroll_phone_verify(
+                &state,
+                &phone,
+                Some(&form.nonce),
+                Some("That code is incorrect or has expired. Try again or request a new code."),
+            );
+        }
+    }
+
+    // OTP verified — store phone number as verified and clear ENROLL_PHONE_OTP.
+    let updated_actions: Vec<RequiredAction> = claims
+        .pending_actions
+        .iter()
+        .filter(|&&a| a != RequiredAction::EnrollPhoneOtp)
+        .copied()
+        .collect();
+
+    if let Err(e) = state.identity.update_user(
+        &realm,
+        &user_id,
+        &UpdateUserRequest {
+            phone_number: Some(Some(phone.clone())),
+            phone_verified: Some(true),
+            required_actions: Some(updated_actions.clone()),
+            ..Default::default()
+        },
+    ) {
+        tracing::warn!(error = %e, "enroll_phone_otp_verify_submit: update_user failed");
+        return handlers_common::server_error();
+    }
+
+    if let Err(e) = state.audit.append(&CreateAuditEvent {
+        realm_id: realm.clone(),
+        actor: user_id.as_uuid().to_string(),
+        action: AuditAction::RequiredActionCompleted,
+        resource_type: "user".to_string(),
+        resource_id: user_id.as_uuid().to_string(),
+        metadata: Some(serde_json::json!({ "action_type": "ENROLL_PHONE_OTP" })),
+    }) {
+        tracing::warn!(error = %e, "enroll_phone_otp_verify_submit: audit append failed");
+    }
+
+    if updated_actions.is_empty() {
+        if claims.browser_return_to.is_some() {
+            resume_browser_flow(
+                &state,
+                &realm,
+                &claims.sub,
+                claims.browser_return_to,
+                secure,
+            )
+        } else if let Some(oidc_params) = claims.oidc_params {
+            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
+        } else {
+            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
+        }
+    } else {
+        next_required_action(
+            &state,
+            &realm,
+            &claims.sub,
+            updated_actions,
+            claims.oidc_params,
+            claims.browser_return_to,
+            secure,
+            now,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ENROLL_PHONE_OTP helpers
+// ---------------------------------------------------------------------------
+
+fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Response {
+    let tmpl = EnrollPhoneOtpPageTemplate {
+        error: error.map(str::to_string),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    };
+    render(&tmpl)
+}
+
+fn render_enroll_phone_verify(
+    state: &Arc<WebState>,
+    phone: &str,
+    nonce: Option<&str>,
+    error: Option<&str>,
+) -> Response {
+    let tmpl = EnrollPhoneOtpVerifyTemplate {
+        masked_phone: mask_phone(phone),
+        phone: phone.to_string(),
+        nonce: nonce.map(str::to_string),
+        error: error.map(str::to_string),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    };
+    render(&tmpl)
+}
+
+/// Masks a phone number for display: keeps the country code and last 4 digits.
+/// E.g. `"+15555550100"` → `"+1•••••0100"`.
+fn mask_phone(phone: &str) -> String {
+    if phone.len() <= 5 {
+        return phone.to_string();
+    }
+    let visible_suffix = &phone[phone.len() - 4..];
+    let prefix_end = phone.find(|c: char| c.is_ascii_digit()).unwrap_or(1) + 1;
+    let country_code = &phone[..prefix_end];
+    let dots = "•".repeat(phone.len() - prefix_end - 4);
+    format!("{country_code}{dots}{visible_suffix}")
+}
+
+/// Returns true when `s` is a syntactically valid E.164 number:
+/// starts with '+', followed by 7–15 ASCII digits, no spaces.
+fn is_e164(s: &str) -> bool {
+    if !s.starts_with('+') {
+        return false;
+    }
+    let digits = &s[1..];
+    digits.len() >= 7 && digits.len() <= 15 && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Returns the HMAC key bytes to use for OTP operations.
+///
+/// Falls back to a deterministic dev key when the key is not configured
+/// (Log transport, dev mode only).
+fn sms_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
+    state
+        .sms_otp_hmac_key
+        .clone()
+        .unwrap_or_else(|| b"hearth-dev-sms-otp-key-not-for-production".to_vec())
+}
+
+/// Extracts the realm from the RA session cookie without full JWT verification
+/// (used to provide a `RealmId` to `issue_sms_otp` before full token validation).
+fn extract_realm_from_ra_cookie(headers: &HeaderMap) -> RealmId {
+    read_ra_cookie(headers)
+        .as_deref()
+        .and_then(ra_token::extract_realm_unchecked)
+        .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+        .map(RealmId::new)
+        .unwrap_or_else(|| {
+            // Should not happen; caller already verified the cookie exists.
+            tracing::warn!("extract_realm_from_ra_cookie: falling back to nil realm");
+            RealmId::new(uuid::Uuid::nil())
+        })
+}
+
+fn now_unix_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn read_ra_cookie(headers: &HeaderMap) -> Option<String> {

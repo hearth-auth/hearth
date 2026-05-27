@@ -102,6 +102,7 @@ fn authorize_and_exchange(
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize");

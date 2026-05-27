@@ -13,7 +13,7 @@
 
     {% match password_error %}
       {% when Some with (msg) %}
-        <div class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert">{{ msg }}</div>
+        <div id="password-change-error" class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert">{{ msg }}</div>
       {% when None %}
     {% endmatch %}
 
@@ -107,22 +107,18 @@
   </div>
 
   {# ── Passkeys card ── #}
-  <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle" x-data="passkeyManager">
+  <div id="passkey-manager" class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-base font-semibold text-ht-content-primary">Passkeys</h2>
-      <button @click="registerPasskey()" type="button"
-              :disabled="registering"
+      <button id="passkey-register-btn" type="button"
               class="inline-flex items-center gap-1.5 rounded border border-strong bg-ht-surface-elevated px-3 py-1.5 text-sm font-medium text-ht-content-secondary hover-bg-divider disabled:opacity-50">
-        <template x-if="registering">
-          <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-        </template>
-        <span x-text="registering ? 'Registering...' : 'Register a passkey'"></span>
+        <svg id="passkey-register-spinner" class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true" hidden><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+        <span id="passkey-register-label">Register a passkey</span>
       </button>
     </div>
 
-    <template x-if="error">
-      <div class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert" x-text="error"></div>
-    </template>
+    <div id="passkey-register-error" hidden
+         class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert"></div>
 
     <table class="w-full">
       <thead>
@@ -136,28 +132,24 @@
       <tbody>
         {% for c in passkey_credentials %}
         <tr class="border-b border-divider-faint"
-            x-data="passkeyRow('{{ c.id_b64url }}')"
+            data-passkey-row="{{ c.id_b64url }}"
             data-initial-name="{{ c.name_display }}">
           <td class="px-3 py-2">
-            <template x-if="!editing">
-              <div class="flex items-center gap-2">
-                <span x-text="displayName" class="text-sm text-ht-content-secondary"></span>
-                <button @click="startEdit()" type="button"
-                        title="Rename"
-                        class="text-ht-content-muted hover:text-ht-content-secondary">
-                  <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                </button>
-              </div>
-            </template>
-            <template x-if="editing">
-              <div class="flex items-center gap-1.5">
-                <input x-model="draftName" @keydown.enter="saveEdit()" @keydown.escape="cancelEdit()"
-                       class="rounded border border-strong bg-ht-surface px-2 py-0.5 text-sm text-ht-content-primary focus:outline-none focus:ring-1 focus:ring-ht-brand-deep"
-                       style="width:14rem" autofocus />
-                <button @click="saveEdit()" type="button" class="text-xs text-ht-content-brand hover:text-ht-brand-deep">Save</button>
-                <button @click="cancelEdit()" type="button" class="text-xs text-ht-content-muted hover:text-ht-content-secondary">Cancel</button>
-              </div>
-            </template>
+            {# View mode — shown by default; passkey.js fills in .passkey-name #}
+            <div class="passkey-view-mode flex items-center gap-2">
+              <span class="passkey-name text-sm text-ht-content-secondary"></span>
+              <button type="button" class="passkey-start-edit text-ht-content-muted hover:text-ht-content-secondary"
+                      title="Rename">
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              </button>
+            </div>
+            {# Edit mode — hidden by default; passkey.js toggles via showEdit() #}
+            <div class="passkey-edit-mode flex items-center gap-1.5" hidden>
+              <input class="passkey-edit-input rounded border border-strong bg-ht-surface px-2 py-0.5 text-sm text-ht-content-primary focus:outline-none focus:ring-1 focus:ring-ht-brand-deep"
+                     class="w-56" />
+              <button type="button" class="passkey-save text-xs text-ht-content-brand hover:text-ht-brand-deep">Save</button>
+              <button type="button" class="passkey-cancel text-xs text-ht-content-muted hover:text-ht-content-secondary">Cancel</button>
+            </div>
           </td>
           <td class="px-3 py-2 text-sm text-ht-content-muted">
             {% if c.algorithm == -7 %}ES256{% else if c.algorithm == -257 %}RS256{% else %}{{ c.algorithm }}{% endif %}

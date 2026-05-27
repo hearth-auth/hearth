@@ -8,7 +8,7 @@
     </div>
     {% if !read_only %}
     <button type="button"
-            @click="preview()"
+            id="raw-preview-top"
             class="inline-flex items-center gap-1.5 rounded border border-strong px-3 py-1 text-xs font-medium text-ht-content-secondary hover-bg-divider">
       <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
       Preview diff
@@ -18,10 +18,9 @@
 
   {# Editor area — sunken background for code feel.
      Syntax highlighting via textarea-overlay: a transparent <textarea> sits on
-     top of a <pre> mirror; `yamlHighlight()` (defined in editor.html scripts)
-     copies the textarea content into the mirror after each keystroke and
-     applies regex-based YAML coloring. Native textarea handles all input;
-     mirror handles all visual color. No vendor JS deps. #}
+     top of a <pre> mirror; highlightYaml() copies the textarea content into the
+     mirror after each keystroke and applies regex-based YAML coloring.
+     Native textarea handles all input; mirror handles all visual color. #}
   <div class="relative border-y border-divider-subtle bg-ht-surface-raised">
     <form id="apply-form" method="post" action="/ui/admin/settings/editor/apply">
       {% match csrf %}
@@ -34,16 +33,12 @@
          caret aligns. aria-hidden because it's purely decorative. #}
       <pre id="yaml-mirror" aria-hidden="true"
            class="yaml-mirror pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre px-6 py-4 font-mono text-sm leading-relaxed"
-           style="tab-size: 2; -moz-tab-size: 2;"></pre>
+           ></pre>
       <textarea id="yaml-editor" name="yaml"
                 {% if read_only %}readonly{% endif %}
                 spellcheck="false"
                 wrap="off"
-                @input="syncMirror()"
-                @scroll="syncMirrorScroll()"
-                x-init="$nextTick(() => { syncMirror(); syncMirrorScroll(); })"
                 class="yaml-editor relative block w-full resize-y border-0 bg-transparent px-6 py-4 font-mono text-sm leading-relaxed text-transparent caret-ht-content-primary placeholder:text-ht-content-muted focus:outline-none"
-                style="tab-size: 2; -moz-tab-size: 2;"
                 rows="32">{{ yaml_content }}</textarea>
     </form>
   </div>
@@ -60,7 +55,7 @@
               class="rounded border border-strong px-3 py-1.5 text-xs font-medium text-ht-content-secondary hover-bg-divider">
         Reset
       </button>
-      <button type="button" @click="preview()"
+      <button type="button" id="raw-preview-bottom"
               class="rounded border border-strong px-3 py-1.5 text-xs font-medium text-ht-content-secondary hover-bg-divider">
         Preview Diff
       </button>

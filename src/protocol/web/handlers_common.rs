@@ -22,8 +22,8 @@ pub(crate) struct NotFoundTemplate {
     pub(crate) narrow: bool,
     pub(crate) product_name: String,
     pub(crate) logo_url: String,
-    pub(crate) theme_css: String,
-    pub(crate) realm_theme_css: Option<String>,
+    pub(crate) realm_theme_url: Option<String>,
+    pub(crate) inline_theme_css: Option<String>,
 }
 
 impl NotFoundTemplate {
@@ -39,8 +39,8 @@ impl NotFoundTemplate {
             narrow: true,
             product_name: "Hearth".to_string(),
             logo_url: super::DEFAULT_LOGO_URL.to_string(),
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -58,8 +58,8 @@ pub(crate) struct ForbiddenTemplate {
     pub(crate) narrow: bool,
     pub(crate) product_name: String,
     pub(crate) logo_url: String,
-    pub(crate) theme_css: String,
-    pub(crate) realm_theme_css: Option<String>,
+    pub(crate) realm_theme_url: Option<String>,
+    pub(crate) inline_theme_css: Option<String>,
 }
 
 impl ForbiddenTemplate {
@@ -74,8 +74,8 @@ impl ForbiddenTemplate {
             narrow: true,
             product_name: "Hearth".to_string(),
             logo_url: super::DEFAULT_LOGO_URL.to_string(),
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -93,8 +93,8 @@ pub(crate) struct ServerErrorTemplate {
     pub(crate) narrow: bool,
     pub(crate) product_name: String,
     pub(crate) logo_url: String,
-    pub(crate) theme_css: String,
-    pub(crate) realm_theme_css: Option<String>,
+    pub(crate) realm_theme_url: Option<String>,
+    pub(crate) inline_theme_css: Option<String>,
 }
 
 impl ServerErrorTemplate {
@@ -109,8 +109,8 @@ impl ServerErrorTemplate {
             narrow: true,
             product_name: "Hearth".to_string(),
             logo_url: super::DEFAULT_LOGO_URL.to_string(),
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -166,8 +166,8 @@ pub(crate) fn not_found_authed(
             narrow: true,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         },
         StatusCode::NOT_FOUND,
     )

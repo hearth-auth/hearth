@@ -213,6 +213,55 @@ pub enum AuditAction {
     /// (e.g. `"email_already_verified"`). Used to self-heal data-migration
     /// artifacts where a required action was added spuriously.
     RequiredActionAutoCleared,
+    /// A password-set or password-change was rejected because the candidate
+    /// password appeared in a known HIBP data breach.
+    ///
+    /// Failure policy: `FailOperation` (the credential was NOT stored).
+    /// Metadata carries `user_id`.
+    PasswordCompromisedRejected,
+    /// The HIBP breach-check API was unavailable (timeout or network error).
+    ///
+    /// Failure policy: `LogOnly`. The password was accepted (fail-open).
+    /// Metadata carries `user_id` and `reason`.
+    BreachCheckUnavailable,
+    /// Adaptive MFA step-up was triggered because the login arrived from an
+    /// unrecognised device or IP subnet.
+    ///
+    /// Failure policy: `LogOnly` — the login continues with an MFA challenge or
+    /// enrollment redirect; the step-up event itself is informational.
+    /// Metadata carries `user_id` and `reason` (e.g. `"unrecognised_device"`).
+    StepUpMfaTriggered,
+    /// A step-up MFA challenge was successfully completed — the user passed
+    /// the MFA check after an unrecognised-device trigger.
+    /// Metadata carries `user_id`.
+    StepUpMfaCompleted,
+    /// An SMS OTP was generated and sent to a user's phone to begin
+    /// phone-number enrollment. Metadata carries `phone_suffix` (last 4 digits,
+    /// never full number).
+    SmsOtpEnrollmentStarted,
+    /// A user successfully verified their phone number via SMS OTP during
+    /// enrollment. Metadata carries `phone_suffix`.
+    SmsOtpEnrollmentVerified,
+    /// A phone enrollment SMS OTP verification attempt failed (wrong code,
+    /// expired, or max attempts). Metadata carries `phone_suffix` and
+    /// `reason` (`"wrong_code"` / `"expired"` / `"exhausted"`).
+    SmsOtpEnrollmentFailed,
+    /// An SMS MFA challenge was satisfied — the user entered the correct OTP
+    /// during the OIDC login pipeline. Metadata carries `user_id`.
+    SmsMfaChallengeSucceeded,
+    /// An SMS MFA challenge attempt failed (wrong code or expired).
+    /// Metadata carries `user_id` and `reason`.
+    SmsMfaChallengeFailed,
+    /// An SMS MFA challenge was locked because the maximum number of
+    /// incorrect attempts was exceeded. Metadata carries `user_id` and
+    /// `attempt_count`.
+    SmsMfaLocked,
+    /// All device fingerprints for a user were erased — either as part of
+    /// `delete_user` (GDPR Art. 17 cascade) or via the admin erasure API
+    /// (`DELETE /admin/users/{id}/device-fingerprints`).
+    ///
+    /// Metadata carries `user_id` and `count` (number of records removed).
+    DeviceFingerprintsErased,
 }
 
 impl AuditAction {
@@ -294,6 +343,17 @@ impl AuditAction {
             Self::RequiredActionRemoved,
             Self::RequiredActionCompleted,
             Self::RequiredActionAutoCleared,
+            Self::PasswordCompromisedRejected,
+            Self::BreachCheckUnavailable,
+            Self::StepUpMfaTriggered,
+            Self::StepUpMfaCompleted,
+            Self::SmsOtpEnrollmentStarted,
+            Self::SmsOtpEnrollmentVerified,
+            Self::SmsOtpEnrollmentFailed,
+            Self::SmsMfaChallengeSucceeded,
+            Self::SmsMfaChallengeFailed,
+            Self::SmsMfaLocked,
+            Self::DeviceFingerprintsErased,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -373,6 +433,17 @@ impl AuditAction {
             Self::RequiredActionRemoved => "required_action_removed",
             Self::RequiredActionCompleted => "required_action_completed",
             Self::RequiredActionAutoCleared => "required_action_auto_cleared",
+            Self::PasswordCompromisedRejected => "password_compromised_rejected",
+            Self::BreachCheckUnavailable => "breach_check_unavailable",
+            Self::StepUpMfaTriggered => "step_up_mfa_triggered",
+            Self::StepUpMfaCompleted => "step_up_mfa_completed",
+            Self::SmsOtpEnrollmentStarted => "sms_otp_enrollment_started",
+            Self::SmsOtpEnrollmentVerified => "sms_otp_enrollment_verified",
+            Self::SmsOtpEnrollmentFailed => "sms_otp_enrollment_failed",
+            Self::SmsMfaChallengeSucceeded => "sms_mfa_challenge_succeeded",
+            Self::SmsMfaChallengeFailed => "sms_mfa_challenge_failed",
+            Self::SmsMfaLocked => "sms_mfa_locked",
+            Self::DeviceFingerprintsErased => "device_fingerprints_erased",
         }
     }
 }
@@ -453,6 +524,17 @@ impl std::str::FromStr for AuditAction {
             "required_action_removed" => Ok(Self::RequiredActionRemoved),
             "required_action_completed" => Ok(Self::RequiredActionCompleted),
             "required_action_auto_cleared" => Ok(Self::RequiredActionAutoCleared),
+            "password_compromised_rejected" => Ok(Self::PasswordCompromisedRejected),
+            "breach_check_unavailable" => Ok(Self::BreachCheckUnavailable),
+            "step_up_mfa_triggered" => Ok(Self::StepUpMfaTriggered),
+            "step_up_mfa_completed" => Ok(Self::StepUpMfaCompleted),
+            "sms_otp_enrollment_started" => Ok(Self::SmsOtpEnrollmentStarted),
+            "sms_otp_enrollment_verified" => Ok(Self::SmsOtpEnrollmentVerified),
+            "sms_otp_enrollment_failed" => Ok(Self::SmsOtpEnrollmentFailed),
+            "sms_mfa_challenge_succeeded" => Ok(Self::SmsMfaChallengeSucceeded),
+            "sms_mfa_challenge_failed" => Ok(Self::SmsMfaChallengeFailed),
+            "sms_mfa_locked" => Ok(Self::SmsMfaLocked),
+            "device_fingerprints_erased" => Ok(Self::DeviceFingerprintsErased),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -541,7 +623,13 @@ impl AuditAction {
             | Self::RequiredActionAssigned
             | Self::RequiredActionRemoved
             | Self::RequiredActionCompleted
-            | Self::RequiredActionAutoCleared => LogOnly,
+            | Self::RequiredActionAutoCleared
+            | Self::BreachCheckUnavailable
+            | Self::StepUpMfaTriggered
+            | Self::StepUpMfaCompleted
+            | Self::SmsOtpEnrollmentStarted
+            | Self::SmsOtpEnrollmentVerified
+            | Self::SmsMfaChallengeSucceeded => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
@@ -561,7 +649,12 @@ impl AuditAction {
             | Self::ScimGroupDeleted
             | Self::RoleRevoked
             | Self::ClientConsentRevoked
-            | Self::LoginLocked => FailOperation,
+            | Self::LoginLocked
+            | Self::PasswordCompromisedRejected
+            | Self::SmsOtpEnrollmentFailed
+            | Self::SmsMfaChallengeFailed
+            | Self::SmsMfaLocked
+            | Self::DeviceFingerprintsErased => FailOperation,
         }
     }
 }

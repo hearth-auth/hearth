@@ -162,6 +162,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Free disk space (Rust debug builds need ~12 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h
+
       - name: Setup Rust toolchain + buf + tailwind (HEA-676 reusable)
         uses: ./.github/actions/setup-rust
         with:

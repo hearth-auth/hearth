@@ -61,37 +61,83 @@
       <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Updated</dt>
       <dd class="mt-1 text-sm text-ht-content-muted">{{ updated_at_display }}</dd>
     </div>
+    {% match masked_phone %}
+      {% when Some with (phone) %}
+      <div>
+        <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Phone</dt>
+        <dd class="mt-1 flex items-center gap-2 text-sm text-ht-content-primary">
+          <span>{{ phone }}</span>
+          {% if phone_verified %}
+            <span class="inline-flex items-center rounded-full bg-success/[0.12] px-1.5 py-0.5 text-xs font-medium text-success-fg">Verified</span>
+          {% else %}
+            <span class="inline-flex items-center rounded-full bg-warning/[0.12] px-1.5 py-0.5 text-xs font-medium text-warning-fg">Unverified</span>
+          {% endif %}
+        </dd>
+      </div>
+      {% when None %}
+    {% endmatch %}
   </dl>
 </div>
 
 {# Actions bar #}
 <div class="mt-6 rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
   <div class="flex flex-wrap items-center gap-3">
-    <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/reset-password"
-          x-data="{ confirm: false, timer: null }"
-          @reset-confirm.window="clearTimeout(timer); confirm = false">
+    <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/reset-password">
       {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-      <button @click.prevent="confirm ? $el.form.submit() : (confirm = true, timer = setTimeout(() => confirm = false, 4000))" type="button"
-              :class="confirm ? 'btn-ember' : 'border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider'"
-              class="rounded px-3 py-1.5 text-sm font-medium">
-        <span x-text="confirm ? 'Confirm: send reset email to {{ user.email() }}' : 'Send password reset'"></span>
-      </button>
+      <button type="button"
+              class="rounded px-3 py-1.5 text-sm font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
+              _="on click
+                   if @data-confirming is 'yes'
+                     call (closest <form/>).submit()
+                   else
+                     set @data-confirming to 'yes'
+                     set @class to 'btn-ember rounded px-3 py-1.5 text-sm font-medium'
+                     set my textContent to 'Confirm: send reset email to {{ user.email() }}'
+                     wait 4s then
+                     if @data-confirming is 'yes'
+                       set @data-confirming to 'no'
+                       set @class to 'rounded px-3 py-1.5 text-sm font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider'
+                       set my textContent to 'Send password reset'
+                     end
+                   end">Send password reset</button>
     </form>
     {% if mfa_enabled %}
-    <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/disable-mfa" x-data="{ confirm: false }">
+    <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/disable-mfa">
       {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-      <button @click.prevent="confirm ? $el.form.submit() : (confirm = true)" type="button"
-              :class="confirm ? 'btn-danger' : 'border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider'"
-              class="rounded px-3 py-1.5 text-sm font-medium">
-        <span x-text="confirm ? 'Confirm disable MFA' : 'Disable MFA'"></span>
-      </button>
+      <button type="button"
+              class="rounded px-3 py-1.5 text-sm font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
+              _="on click
+                   if @data-confirming is 'yes'
+                     call (closest <form/>).submit()
+                   else
+                     set @data-confirming to 'yes'
+                     set @class to 'btn-danger rounded px-3 py-1.5 text-sm font-medium'
+                     set my textContent to 'Confirm disable MFA'
+                   end">Disable MFA</button>
     </form>
     {% endif %}
+    {% match masked_phone %}
+      {% when Some with (_) %}
+      <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/remove-phone">
+        {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
+        <button type="button"
+                class="rounded px-3 py-1.5 text-sm font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
+                _="on click
+                     if @data-confirming is 'yes'
+                       call (closest <form/>).submit()
+                     else
+                       set @data-confirming to 'yes'
+                       set @class to 'btn-danger rounded px-3 py-1.5 text-sm font-medium'
+                       set my textContent to 'Confirm remove phone'
+                     end">Remove phone</button>
+      </form>
+      {% when None %}
+    {% endmatch %}
   </div>
 </div>
 
 {# Access across this realm — tabbed card #}
-<div class="mt-6 rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ tab: 'roles' }">
+<div class="mt-6 rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
   {# Card header #}
   <div class="flex flex-col gap-3 border-b border-divider-subtle px-6 pt-5 sm:flex-row sm:items-center sm:justify-between">
     <div>
@@ -106,45 +152,61 @@
     </div>
     {# Tab buttons #}
     <div class="flex gap-1 self-end sm:self-auto">
-      <button @click="tab = 'roles'" type="button"
-              :class="tab === 'roles' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
-              class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
+      <button type="button"
+              class="hs-tab-btn hs-tab-active rounded px-3 py-1.5 text-xs font-medium transition-colors"
+              _="on click
+                   remove .hs-tab-active from <.hs-tab-btn/>
+                   add .hs-tab-active to me
+                   add .hidden to <[data-tab-panel]/>
+                   remove .hidden from #roles-panel">
         Roles
       </button>
-      <button @click="tab = 'extra'" type="button"
-              :class="tab === 'extra' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
-              class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
+      <button type="button"
+              class="hs-tab-btn rounded px-3 py-1.5 text-xs font-medium transition-colors"
+              _="on click
+                   remove .hs-tab-active from <.hs-tab-btn/>
+                   add .hs-tab-active to me
+                   add .hidden to <[data-tab-panel]/>
+                   remove .hidden from #extra-panel">
         Extra Permissions
       </button>
-      <button @click="tab = 'effective'" type="button"
-              :class="tab === 'effective' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
-              class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
+      <button type="button"
+              class="hs-tab-btn rounded px-3 py-1.5 text-xs font-medium transition-colors"
+              _="on click
+                   remove .hs-tab-active from <.hs-tab-btn/>
+                   add .hs-tab-active to me
+                   add .hidden to <[data-tab-panel]/>
+                   remove .hidden from #effective-panel">
         Effective
       </button>
-      <button @click="tab = 'attrs'" type="button"
-              :class="tab === 'attrs' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
-              class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
+      <button type="button"
+              class="hs-tab-btn rounded px-3 py-1.5 text-xs font-medium transition-colors"
+              _="on click
+                   remove .hs-tab-active from <.hs-tab-btn/>
+                   add .hs-tab-active to me
+                   add .hidden to <[data-tab-panel]/>
+                   remove .hidden from #attrs-panel">
         Attributes
       </button>
     </div>
   </div>
 
   {# Roles tab #}
-  <div x-show="tab === 'roles'" class="p-6">
+  <div id="roles-panel" data-tab-panel class="p-6">
     <div id="roles-tab-content">
       {% include "ui/admin/users/_roles_tab.html" %}
     </div>
   </div>
 
   {# Extra Permissions tab #}
-  <div x-show="tab === 'extra'" class="p-6">
+  <div id="extra-panel" data-tab-panel class="p-6 hidden">
     <div id="permissions-tab-content">
       {% include "ui/admin/users/_permissions_tab.html" %}
     </div>
   </div>
 
   {# Effective Permissions tab #}
-  <div x-show="tab === 'effective'" class="p-6">
+  <div id="effective-panel" data-tab-panel class="p-6 hidden">
     {% if effective_permissions.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No effective permissions resolved for this user.</p>
     {% else %}
@@ -159,7 +221,7 @@
   </div>
 
   {# Attributes tab #}
-  <div x-show="tab === 'attrs'" class="p-6">
+  <div id="attrs-panel" data-tab-panel class="p-6 hidden">
     {% if attributes.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No attributes set on this user.</p>
     {% else %}
@@ -321,37 +383,38 @@
 </div>
 
 {# Danger zone #}
-<div class="mt-6 rounded-md border border-danger/30 bg-ht-surface-elevated p-6" x-data="{ showDialog: false }">
+<div class="mt-6 rounded-md border border-danger/30 bg-ht-surface-elevated p-6">
   <h2 class="text-base font-semibold text-danger-fg">Danger zone</h2>
   <p class="mt-1 text-sm text-ht-content-secondary">Deleting this user is permanent and cannot be undone.</p>
-  <button @click="showDialog = true" type="button"
+  <button type="button"
+          _="on click call #user-delete-dialog.showModal()"
           class="mt-4 btn-danger rounded px-4 py-2 text-sm font-semibold">
     Delete user
   </button>
 
-  {# Confirm dialog #}
-  <div x-show="showDialog" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @keydown.escape.window="showDialog = false">
-    <div class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md" @click.outside="showDialog = false">
-      <h3 class="text-lg font-semibold text-ht-content-primary">Delete user?</h3>
-      <p class="mt-2 text-sm text-ht-content-muted">This will permanently delete <strong>{{ user.display_name() }}</strong>. This action cannot be undone.</p>
-      <div class="mt-6 flex justify-end gap-3">
-        <button @click="showDialog = false" type="button"
-                class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
-          Cancel
+  <dialog id="user-delete-dialog"
+          class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50"
+          _="on click(event) if event.target is me call me.close() end">
+    <h3 class="text-lg font-semibold text-ht-content-primary">Delete user?</h3>
+    <p class="mt-2 text-sm text-ht-content-muted">This will permanently delete <strong>{{ user.display_name() }}</strong>. This action cannot be undone.</p>
+    <div class="mt-6 flex justify-end gap-3">
+      <button type="button"
+              _="on click call #user-delete-dialog.close()"
+              class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
+        Cancel
+      </button>
+      <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/delete">
+        {% match csrf %}
+          {% when Some with (token) %}
+            <input type="hidden" name="_csrf" value="{{ token }}">
+          {% when None %}
+        {% endmatch %}
+        <button type="submit"
+                class="btn-danger rounded px-4 py-2 text-sm font-semibold">
+          Delete
         </button>
-        <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/delete">
-          {% match csrf %}
-            {% when Some with (token) %}
-              <input type="hidden" name="_csrf" value="{{ token }}">
-            {% when None %}
-          {% endmatch %}
-          <button type="submit"
-                  class="btn-danger rounded px-4 py-2 text-sm font-semibold">
-            Delete
-          </button>
-        </form>
-      </div>
+      </form>
     </div>
-  </div>
+  </dialog>
 </div>
 {% endblock %}

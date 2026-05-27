@@ -7,10 +7,13 @@
 pub mod claims_config;
 pub(crate) mod cleanup;
 pub(crate) mod credentials;
+pub mod device_fingerprint;
+pub mod device_fp;
 pub mod email;
 mod engine;
 pub mod error;
 pub mod federation;
+pub mod hibp;
 pub(crate) mod keys;
 pub(crate) mod magic_link;
 pub mod migration;
@@ -18,6 +21,7 @@ pub mod oidc;
 pub mod onboarding;
 pub mod ra_token;
 pub mod reconcile;
+pub mod sms;
 pub mod tokens;
 pub(crate) mod totp;
 mod types;
@@ -40,8 +44,13 @@ pub use oidc::{
     ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel, CodeChallengeMethod,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     IntrospectionResponse, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
-    PasswordGrantRequest, PasswordGrantResponse, RegisterClientRequest, TokenExchangeRequest,
-    TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest, UserInfoResponse,
+    PasswordGrantRequest, PasswordGrantResponse, RegisterClientRequest, StepUpMfaGrantRequest,
+    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
+    UserInfoResponse,
+};
+pub use sms::{
+    LoggingSmsSender, SharedSmsSender, SmsError, SmsMessage, SmsSecret, SmsSender, SnsSmsSender,
+    StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use tokens::{
     decode_claims_unverified, validate_token_with_time, verify_token_signature, IssueTokenRequest,
@@ -49,11 +58,11 @@ pub use tokens::{
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
-    canonicalize_scopes, AttributeDefinition, AttributeDefinitions, AttributeType, BulkResult,
-    ConsentDecision, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
-    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, CreateWebhookRequest,
-    CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest, InvitationStatus,
-    MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
+    canonicalize_scopes, AdaptiveMfaConfig, AttributeDefinition, AttributeDefinitions,
+    AttributeType, BreachCheckConfig, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
+    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
+    CreateWebhookRequest, CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest,
+    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
@@ -262,6 +271,20 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// Returns `IdentityError::UserNotFound` if the user does not exist.
     fn delete_user(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError>;
+
+    /// Deletes all device fingerprints for a user (GDPR Art. 17 / AC-11).
+    ///
+    /// Used by the admin erasure endpoint
+    /// (`DELETE /admin/users/{id}/device-fingerprints`) to satisfy DSAR
+    /// erasure demands without deleting the entire account.
+    ///
+    /// Returns the number of fingerprint records removed. Does not error if
+    /// the user has no fingerprints — returns `Ok(0)`.
+    fn delete_user_device_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<usize, IdentityError>;
 
     /// Sets (or replaces) the password for a user.
     ///
@@ -532,6 +555,18 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         request: &PasswordGrantRequest,
+    ) -> Result<PasswordGrantResponse, IdentityError>;
+
+    /// Completes a step-up MFA challenge and issues tokens (HEA-836).
+    ///
+    /// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
+    /// Re-verifies the user's password, validates the MFA code (TOTP or
+    /// recovery), records the device fingerprint as trusted, and returns a
+    /// full token pair.
+    fn step_up_mfa_grant_token(
+        &self,
+        realm_id: &RealmId,
+        request: &StepUpMfaGrantRequest,
     ) -> Result<PasswordGrantResponse, IdentityError>;
 
     /// Issues an access token via the Client Credentials Grant (RFC 6749 §4.4).
@@ -1247,6 +1282,7 @@ pub trait IdentityEngine: Send + Sync {
         code_challenge: Option<String>,
         code_challenge_method: Option<CodeChallengeMethod>,
         nonce: Option<String>,
+        amr_values: Vec<String>,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     // ===== External IdP federation (Phase 2: Gap #5) =====
@@ -1568,6 +1604,17 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
     ) -> Result<crate::identity::cleanup::CleanupStats, IdentityError>;
 
+    /// Proactively evicts expired device-fingerprint entries from `realm_id`.
+    ///
+    /// Scans all `dfp:user:*` keys and deletes any whose 8-byte LE i64 expiry
+    /// (Unix seconds) is <= `now_secs`. Returns `(evicted, active)` counts.
+    /// Called by the background dfp sweeper task on a configurable interval.
+    fn sweep_expired_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        now_secs: i64,
+    ) -> Result<(u64, u64), IdentityError>;
+
     /// Probes the underlying storage engine for basic liveness.
     ///
     /// Performs a minimal read (`get` on a probe key) and returns `true`
@@ -1597,4 +1644,77 @@ pub trait IdentityEngine: Send + Sync {
     /// The caller is responsible for encrypting the bytes before writing
     /// them to an archive. Used exclusively by the backup exporter.
     fn export_realm_signing_key_pkcs8(&self, realm_id: &RealmId) -> Result<Vec<u8>, IdentityError>;
+
+    // ===== Adaptive MFA — device fingerprint (HEA-839) =====
+
+    /// Checks whether the device described by `(ip, user_agent)` is recognised
+    /// for this user in this realm.
+    ///
+    /// If the realm's `adaptive_mfa.enabled` is `false`, or if the
+    /// `fingerprint_hmac_secret` is empty, returns
+    /// [`DeviceFingerprintOutcome::Skipped`] immediately.
+    ///
+    /// On an unrecognised device:
+    /// - If the user has an enrolled MFA factor → [`DeviceFingerprintOutcome::StepUpRequired`].
+    /// - If the user has **no** enrolled factor → [`DeviceFingerprintOutcome::EnrollMfaRequired`].
+    ///
+    /// The TTL of an existing recognised fingerprint is refreshed in-place on
+    /// every call (AC-9 rolling window).
+    ///
+    /// An audit event (`StepUpMfaTriggered`) is emitted on every step-up.
+    fn check_device_fingerprint(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<device_fp::DeviceFingerprintOutcome, IdentityError>;
+
+    /// Records `(ip, user_agent)` as a trusted device for this user, resetting
+    /// the rolling window to `realm.config.adaptive_mfa.recognition_window_days`.
+    ///
+    /// Call this after a successful step-up MFA challenge to mark the device.
+    /// No-ops when adaptive MFA is disabled or the HMAC secret is empty.
+    fn record_device_fingerprint(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        ip: &str,
+        user_agent: &str,
+    ) -> Result<(), IdentityError>;
+
+    // =========================================================================
+    // SMS OTP (HEA-829)
+    // =========================================================================
+
+    /// Issues a 6-digit SMS OTP to `phone` and returns the opaque nonce.
+    ///
+    /// Checks the per-phone resend throttle (15-minute window, max 5 sends),
+    /// generates a CSPRNG nonce and code via rejection sampling, stores
+    /// HMAC-SHA256(key, digits) under `sms:pending_otp:{nonce}`, and sends
+    /// the SMS. Returns `SmsResendLimitExceeded` on throttle breach.
+    fn issue_sms_otp(
+        &self,
+        realm_id: &RealmId,
+        phone: &str,
+        otp_hmac_key_bytes: &[u8],
+        sender: &dyn sms::SmsSender,
+        now_unix_ts: u64,
+    ) -> Result<String, IdentityError>;
+
+    /// Verifies an SMS OTP previously issued by `issue_sms_otp`.
+    ///
+    /// Loads the pending record, checks expiry and attempt count, increments
+    /// attempts, verifies HMAC in constant time via `ring::hmac::verify`.
+    /// On success deletes the record (replay prevention). Returns
+    /// `InvalidSmsOtp` for any failure (not-found, expired, wrong code,
+    /// exhausted).
+    fn verify_sms_otp(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        candidate_code: &str,
+        otp_hmac_key_bytes: &[u8],
+        now_unix_ts: u64,
+    ) -> Result<(), IdentityError>;
 }

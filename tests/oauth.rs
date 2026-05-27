@@ -284,6 +284,7 @@ async fn refresh_token_rotation_e2e() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize");
@@ -388,6 +389,7 @@ async fn conformance_rfc7662_introspection_response() {
                 code_challenge_method: Some(CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize");
@@ -697,6 +699,7 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
                 code_challenge_method: Some(hearth::identity::CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect_err("authorize on archived client must fail");
@@ -734,6 +737,7 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
                 code_challenge_method: Some(hearth::identity::CodeChallengeMethod::S256),
                 nonce: None,
                 resource: None,
+                amr_values: Vec::new(),
             },
         )
         .expect("authorize on restored client must succeed");
@@ -798,6 +802,7 @@ async fn password_grant_success() {
                 email: user.email().to_string(),
                 password: password.to_string(),
                 scope: None,
+                ..Default::default()
             },
         )
         .expect("password_grant_token should succeed");
@@ -827,6 +832,7 @@ async fn password_grant_wrong_password_returns_invalid_credential() {
             email: user.email().to_string(),
             password: "wrong".to_string(),
             scope: None,
+            ..Default::default()
         },
     );
     assert!(
@@ -846,6 +852,7 @@ async fn password_grant_unknown_email_returns_invalid_credential() {
             email: "nobody@nowhere.invalid".to_string(),
             password: "anything".to_string(),
             scope: None,
+            ..Default::default()
         },
     );
     assert!(

@@ -295,8 +295,9 @@ async fn realm_theme_not_found_returns_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// Theme CSS set via `with_theme_css` appears inlined in a `<style>` tag
-/// in the rendered login page HTML — NOT as an external `<link>`.
+/// Theme CSS is served via a CSP-compliant `<link rel="stylesheet">` tag
+/// pointing to `/ui/static/theme.css` — NOT inlined in a `<style>` tag.
+/// This satisfies a strict `style-src 'self'` CSP without `'unsafe-inline'`.
 #[tokio::test]
 async fn theme_css_inlined_in_html_page() {
     let css = ":root { --ht-content-brand: 0 200 100; }".to_string();
@@ -313,17 +314,18 @@ async fn theme_css_inlined_in_html_page() {
     let body = body_bytes(resp, 64 * 1024).await;
     let html = std::str::from_utf8(&body).expect("UTF-8 html");
 
-    // The CSS MUST appear inside a <style> tag, not as a <link> to theme.css
+    // CSP compliance: theme CSS is loaded via <link> tag, never inlined in <style>
     assert!(
-        html.contains("<style>:root { --ht-content-brand: 0 200 100; }</style>"),
-        "theme CSS not found inline in HTML.\n\
-         Looking for: <style>{css}</style>\n\
+        html.contains(r#"<link rel="stylesheet" href="/ui/static/theme.css">"#),
+        "expected <link rel=\"stylesheet\" href=\"/ui/static/theme.css\"> not found in HTML.\n\
          Head section:\n{}",
         &html[..html.find("</head>").unwrap_or(500.min(html.len()))]
     );
     assert!(
-        !html.contains(r#"href="/ui/static/theme.css""#),
-        "theme.css should NOT be loaded via <link> tag anymore"
+        !html.contains("<style>"),
+        "theme CSS must NOT be inlined in a <style> tag (violates strict style-src CSP)\n\
+         Head section:\n{}",
+        &html[..html.find("</head>").unwrap_or(500.min(html.len()))]
     );
 }
 

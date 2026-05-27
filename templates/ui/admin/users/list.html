@@ -58,43 +58,22 @@
 
 {# Bulk-action wrapper: the <form> covers both the action bar and the table so
    row checkboxes (`name="ids"`) submit together. Confirmation prevents
-   accidental destructive actions (Loss Aversion + Forgiveness heuristics). #}
-<form method="post"
+   accidental destructive actions. #}
+<form id="bulk-form"
+      method="post"
       action="{{ list_url }}/bulk-action"
-      x-data="{
-        selected: 0,
-        action: '',
-        confirmPending: false,
-        allChecked: false,
-        idsCsv: '',
-        updateCount() {
-          let checked = $el.querySelectorAll('input.row-check:checked');
-          this.selected = checked.length;
-          this.idsCsv = Array.from(checked).map(c => c.value).join(',');
-          this.confirmPending = false;
-        },
-        submit() {
-          if (!this.action) return;
-          if (['deactivate'].includes(this.action) && !this.confirmPending) {
-            this.confirmPending = true;
-            return;
-          }
-          $root.submit();
-        }
-      }"
+      data-total-users="{{ users.len() }}"
       class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
   {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-  <input type="hidden" name="ids" :value="idsCsv">
-  <input type="hidden" name="bulk_action" :value="action">
+  <input type="hidden" id="bulk-ids" name="ids" value="">
+  <input type="hidden" id="bulk-action-input" name="bulk_action" value="">
 
   {# Toolbar #}
   <div class="flex items-center justify-between gap-3 border-b border-divider-subtle px-4 py-2 min-h-[2.75rem]">
-    <span class="font-mono text-xs text-ht-content-muted"
-          x-text="selected === 0 ? '{{ users.len() }} user{% if users.len() != 1 %}s{% endif %}' : selected + ' selected'"></span>
-    <div class="flex items-center gap-2" x-show="selected > 0" x-cloak>
+    <span id="bulk-count-label" class="font-mono text-xs text-ht-content-muted">{{ users.len() }} user{% if users.len() != 1 %}s{% endif %}</span>
+    <div id="bulk-toolbar" class="hidden flex items-center gap-2">
       {# Action picker #}
-      <select x-model="action"
-              @change="confirmPending = false"
+      <select id="bulk-action-select"
               class="rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-xs text-ht-content-secondary focus:border-ht-content-brand focus:outline-none">
         <option value="">Choose action…</option>
         <option value="assign_role">Assign Role</option>
@@ -103,17 +82,12 @@
         <option value="export">Export Selected</option>
       </select>
 
-      {# Confirm / Apply button — text and colour change when a destructive
-         action requires confirmation (two-click pattern from orgs). #}
+      {# Confirm / Apply button — turns danger on destructive actions (two-click pattern) #}
       <button type="button"
-              @click="submit()"
-              x-show="action !== ''"
-              :disabled="!action"
-              :class="confirmPending
-                ? 'btn-danger text-graphite-950'
-                : 'border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider'"
-              x-text="confirmPending ? 'Confirm deactivate' : 'Apply'"
-              class="rounded px-3 py-1 text-xs font-semibold transition-colors disabled:opacity-40"></button>
+              id="bulk-apply-btn"
+              class="hidden rounded px-3 py-1 text-xs font-semibold transition-colors disabled:opacity-40 border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider">
+        Apply
+      </button>
     </div>
   </div>
 
@@ -124,11 +98,8 @@
         <tr class="border-b border-divider bg-ht-surface-elevated">
           <th class="w-8 px-4 py-3">
             <input type="checkbox"
+                   id="select-all-check"
                    aria-label="Select all"
-                   x-model="allChecked"
-                   @change="
-                     $root.querySelectorAll('input.row-check').forEach(c => { c.checked = allChecked });
-                     updateCount();"
                    class="h-4 w-4 rounded border-divider bg-ht-surface-elevated">
           </th>
           <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Email</th>
@@ -159,4 +130,5 @@
 {% endif %}
 
 {% endif %}{# end else: !users.is_empty() || !search_query.is_empty() #}
+<script src="/ui/static/admin/users-list.js" defer></script>
 {% endblock %}

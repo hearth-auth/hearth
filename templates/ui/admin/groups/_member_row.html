@@ -25,14 +25,18 @@
     <form hx-post="/ui/admin/realms/{{ realm_name }}/groups/{{ group_id }}/members/{{ m.member_kind }}/{{ m.member_id_uuid }}/remove"
           hx-target="#member-{{ m.member_kind }}-{{ m.member_id_uuid }}"
           hx-swap="outerHTML"
-          x-data="{ confirm: false }"
           class="inline-block">
       {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-      <button :type="confirm ? 'submit' : 'button'"
-              @click="!confirm && (confirm = true)"
-              :class="confirm ? 'btn-danger' : 'border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider'"
-              class="rounded px-2 py-1 text-xs font-medium"
-              x-text="confirm ? 'Confirm' : 'Remove'"></button>
+      <button type="button"
+              class="rounded px-2 py-1 text-xs font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
+              _="on click
+                   if @data-confirming is 'yes'
+                     call (closest <form/>).submit()
+                   else
+                     set @data-confirming to 'yes'
+                     set @class to 'btn-danger rounded px-2 py-1 text-xs font-medium'
+                     set my textContent to 'Confirm'
+                   end">Remove</button>
     </form>
   </td>
 </tr>

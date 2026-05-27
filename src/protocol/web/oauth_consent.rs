@@ -149,8 +149,8 @@ struct ConsentTemplate {
     flash: Option<super::templates::Flash>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +260,20 @@ async fn authorize_get_impl(
         return ra_response;
     }
 
+    // 4b. SMS MFA challenge intercept: fires when the realm requires SMS MFA
+    //     and the user has a verified phone number (enrollment was enforced
+    //     above by the RA interceptor).
+    if let Some(sms_response) = super::sms_challenge::sms_mfa_challenge_check(
+        state,
+        realm,
+        &session.user_id,
+        q,
+        headers,
+        now,
+    ) {
+        return sms_response;
+    }
+
     // 5. Canonicalize requested scopes once for consent matching.
     let requested_scopes = canonicalize_scopes(
         q.scope
@@ -301,6 +315,7 @@ async fn authorize_get_impl(
             optional(&q.code_challenge),
             code_challenge_method,
             optional(&q.nonce),
+            Vec::new(),
         );
     }
 
@@ -410,7 +425,7 @@ pub async fn consent_page(
         .collect();
 
     let admin = super::handlers::is_admin(state.as_ref(), &session);
-    let mut tmpl = ConsentTemplate {
+    let tmpl = ConsentTemplate {
         client_name: client.client_name().to_string(),
         client_logo_url: client.client_logo_url().map(str::to_string),
         scopes,
@@ -424,10 +439,9 @@ pub async fn consent_page(
         flash: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
-    tmpl.theme_css.clone_from(&state.theme_css);
     render(&tmpl)
 }
 
@@ -570,6 +584,7 @@ pub async fn consent_submit(
                 pending.code_challenge.clone(),
                 method,
                 pending.nonce.clone(),
+                Vec::new(),
             );
             append_cookie(&mut response, &clear_cookie);
             response
@@ -710,7 +725,7 @@ fn peek_pending(
 /// Issues an authorization code by calling into the engine and redirects
 /// the user-agent to `redirect_uri?code=...&state=...`.
 #[allow(clippy::too_many_arguments)]
-fn issue_code_and_redirect(
+pub(super) fn issue_code_and_redirect(
     state: &Arc<WebState>,
     realm: &RealmId,
     user_id: &UserId,
@@ -721,6 +736,7 @@ fn issue_code_and_redirect(
     code_challenge: Option<String>,
     code_challenge_method: Option<CodeChallengeMethod>,
     nonce: Option<String>,
+    amr_values: Vec<String>,
 ) -> Response {
     match state.identity.issue_authorization_code(
         realm,
@@ -732,6 +748,7 @@ fn issue_code_and_redirect(
         code_challenge,
         code_challenge_method,
         nonce,
+        amr_values,
     ) {
         Ok(resp) => {
             // RFC 9207: include iss= in authorization response to prevent mix-up attacks
@@ -753,7 +770,7 @@ fn issue_code_and_redirect(
 }
 
 /// Builds a redirect URI with OAuth error parameters (RFC 6749 §4.1.2.1).
-fn redirect_with_oauth_error(
+pub(super) fn redirect_with_oauth_error(
     redirect_uri: &str,
     error: &str,
     description: &str,
@@ -772,7 +789,7 @@ fn redirect_with_oauth_error(
 
 /// Appends query parameters to a URI, choosing `?` vs `&` based on
 /// whether the base already has a query string.
-fn append_query(base: &str, params: &[(&str, &str)]) -> String {
+pub(super) fn append_query(base: &str, params: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(base.len() + 64);
     out.push_str(base);
     let mut first = !base.contains('?');

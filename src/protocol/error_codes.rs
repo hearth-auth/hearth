@@ -44,6 +44,10 @@ pub const MFA_INVALID_CODE: &str = "HEARTH_MFA_INVALID_CODE";
 pub const MFA_NOT_ENABLED: &str = "HEARTH_MFA_NOT_ENABLED";
 /// MFA is already enrolled; disable before re-enrolling.
 pub const MFA_ALREADY_ENABLED: &str = "HEARTH_MFA_ALREADY_ENABLED";
+/// Adaptive step-up: login from unrecognised device, enrolled factor must be presented.
+pub const STEP_UP_CHALLENGE_REQUIRED: &str = "HEARTH_STEP_UP_CHALLENGE_REQUIRED";
+/// Adaptive step-up: login from unrecognised device with no enrolled factor; enrollment required.
+pub const ENROLL_MFA_REQUIRED: &str = "HEARTH_ENROLL_MFA_REQUIRED";
 
 // ── WebAuthn / Passkeys ───────────────────────────────────────────────────────
 
@@ -82,6 +86,8 @@ pub const EMAIL_UNVERIFIED: &str = "HEARTH_EMAIL_UNVERIFIED";
 pub const PASSWORD_EXPIRED: &str = "HEARTH_PASSWORD_EXPIRED";
 /// New password matches a previously used password.
 pub const PASSWORD_REUSED: &str = "HEARTH_PASSWORD_REUSED";
+/// New password has appeared in a known HIBP data breach.
+pub const PASSWORD_COMPROMISED: &str = "HEARTH_PASSWORD_COMPROMISED";
 /// Authentication method is not permitted by realm policy.
 pub const AUTH_METHOD_NOT_ALLOWED: &str = "HEARTH_AUTH_METHOD_NOT_ALLOWED";
 
@@ -248,7 +254,12 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::UserNotVerified => Some(EMAIL_UNVERIFIED),
         IdentityError::PasswordExpired => Some(PASSWORD_EXPIRED),
         IdentityError::PasswordReused => Some(PASSWORD_REUSED),
+        IdentityError::PasswordCompromised => Some(PASSWORD_COMPROMISED),
         IdentityError::AuthMethodNotAllowed { .. } => Some(AUTH_METHOD_NOT_ALLOWED),
+        IdentityError::StepUpChallengeRequired => Some(STEP_UP_CHALLENGE_REQUIRED),
+        IdentityError::EnrollMfaRequired => Some(ENROLL_MFA_REQUIRED),
+        IdentityError::InvalidSmsOtp => Some("invalid_sms_otp"),
+        IdentityError::SmsResendLimitExceeded => Some("sms_resend_limit_exceeded"),
 
         IdentityError::RealmNotFound
         | IdentityError::UserNotFound
@@ -541,6 +552,7 @@ mod tests {
             EMAIL_UNVERIFIED,
             PASSWORD_EXPIRED,
             PASSWORD_REUSED,
+            PASSWORD_COMPROMISED,
             AUTH_METHOD_NOT_ALLOWED,
             NOT_FOUND,
             SESSION_NOT_FOUND,
@@ -581,6 +593,8 @@ mod tests {
             DUPLICATE_SCIM_EXTERNAL_ID,
             FORBIDDEN,
             SYSTEM_REALM_PROTECTED,
+            STEP_UP_CHALLENGE_REQUIRED,
+            ENROLL_MFA_REQUIRED,
         ];
         for code in codes {
             assert!(

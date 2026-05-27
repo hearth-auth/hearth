@@ -21,8 +21,8 @@ struct AppListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/applications`.
@@ -50,8 +50,8 @@ pub async fn admin_apps_list(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_clients failed");
@@ -79,8 +79,8 @@ struct AppDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/applications/:id`.
@@ -109,8 +109,8 @@ pub async fn admin_app_detail(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Ok(None) => super::handlers_common::not_found("Application not found"),
         Err(e) => {
@@ -161,8 +161,8 @@ pub async fn admin_app_regenerate_secret(
                     narrow: false,
                     product_name: state.product_name.clone(),
                     logo_url: state.logo_url.clone(),
-                    theme_css: state.theme_css.clone(),
-                    realm_theme_css: state.realm_theme_css(),
+                    realm_theme_url: state.realm_theme_url(),
+                    inline_theme_css: state.inline_theme_css(),
                 }),
                 _ => Redirect::to(&format!(
                     "/ui/admin/realms/{}/applications/{}",
@@ -242,8 +242,8 @@ struct AppNewTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl AppNewTemplate {
@@ -272,8 +272,8 @@ impl AppNewTemplate {
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }
     }
 }
@@ -477,8 +477,8 @@ struct AppEditTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl AppEditTemplate {
@@ -533,8 +533,8 @@ impl AppEditTemplate {
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }
     }
 }

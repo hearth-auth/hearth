@@ -551,6 +551,11 @@ pub struct AuthorizationRequest {
     /// When nonce enforcement is enabled (`OidcConfig::enforce_nonces`),
     /// duplicate nonces are rejected.
     pub nonce: Option<String>,
+    /// Authentication Methods References (RFC 8176) established before code
+    /// issuance. Non-empty when an MFA challenge was successfully completed
+    /// (e.g. `["sms"]`). Propagated to `StoredAuthorizationCode.amr_values`
+    /// and then into the issued tokens at exchange time.
+    pub amr_values: Vec<String>,
 }
 
 /// Response from a successful authorization request.
@@ -689,6 +694,11 @@ pub(crate) struct StoredAuthorizationCode {
     /// Optional RFC 8707 resource indicator from the authorization request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resource: Option<String>,
+    /// Authentication Methods References (RFC 8176) established during the
+    /// authorization flow (e.g. `["sms"]` after a successful SMS MFA challenge).
+    /// Propagated verbatim to both access and ID token claims at exchange time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) amr_values: Vec<String>,
 }
 
 /// OIDC Discovery document (`OpenID` Connect Discovery 1.0).
@@ -924,6 +934,11 @@ pub(crate) struct StoredGrantFamily {
     /// to preserve the resource binding across refresh token rotations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) resources: Vec<crate::core::Uri>,
+    /// AMR values from the original authorization grant (RFC 8176).
+    /// Stored here so they are preserved across all refresh rotations
+    /// without needing to embed them in the refresh token itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) amr_values: Vec<String>,
 }
 
 // ===== Token Revocation (RFC 7009) =====
@@ -1156,6 +1171,7 @@ mod tests {
             used: false,
             nonce: Some("test-nonce-abc".to_string()),
             resource: None,
+            amr_values: Vec::new(),
         };
 
         let json = serde_json::to_string(&code).expect("serialize");
@@ -1211,7 +1227,7 @@ mod tests {
 /// Identifies the end-user by email address. The client_id is used for
 /// per-client rate limiting only; no client authentication is required for
 /// public clients.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PasswordGrantRequest {
     /// The user's email address.
     pub email: String,
@@ -1219,6 +1235,16 @@ pub struct PasswordGrantRequest {
     pub password: String,
     /// Optional OAuth scope (space-delimited). Passed through to the token.
     pub scope: Option<String>,
+    /// Client IP address for device-fingerprint step-up MFA.
+    ///
+    /// Pass the value of `X-Forwarded-For` / peer address after proxy normalisation.
+    /// When `None`, adaptive MFA is skipped (behaves as if feature is disabled for
+    /// this request). Falls back to `"unknown"` prefix in the HMAC input.
+    pub client_ip: Option<String>,
+    /// Raw `User-Agent` header value for device-fingerprint step-up MFA.
+    ///
+    /// When `None`, adaptive MFA uses an empty string for the UA component.
+    pub user_agent: Option<String>,
 }
 
 /// Response from a successful ROPC grant — mirrors `OidcTokenResponse`.
@@ -1244,4 +1270,25 @@ impl PasswordGrantResponse {
     pub fn refresh_token(&self) -> &str {
         &self.refresh_token
     }
+}
+
+/// Request to complete a step-up MFA challenge issued during ROPC login.
+///
+/// Used with `grant_type = urn:hearth:params:grant-type:step-up-mfa`.
+/// The caller re-supplies the password and adds an `mfa_code`; both are
+/// verified before tokens are issued and the device fingerprint is recorded.
+#[derive(Debug)]
+pub struct StepUpMfaGrantRequest {
+    /// The user's email address.
+    pub email: String,
+    /// The user's plaintext password (re-verified to prevent session fixation).
+    pub password: String,
+    /// TOTP code or recovery code presented by the user.
+    pub mfa_code: String,
+    /// Optional OAuth scope (space-delimited).
+    pub scope: Option<String>,
+    /// Client IP address — used to record the trusted device fingerprint.
+    pub client_ip: Option<String>,
+    /// Raw `User-Agent` header value — used to record the trusted device fingerprint.
+    pub user_agent: Option<String>,
 }

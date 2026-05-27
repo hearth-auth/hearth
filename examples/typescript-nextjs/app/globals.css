@@ -1,0 +1,5 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; padding: 2rem; max-width: 720px; margin: auto; }
+a { color: #0070f3; }
+button { cursor: pointer; padding: 0.5rem 1.25rem; font-size: 1rem; border: none; border-radius: 6px; background: #0070f3; color: white; }
+pre { background: #f4f4f4; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }

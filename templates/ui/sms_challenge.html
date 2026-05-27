@@ -1,0 +1,48 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · Verify your identity{% endblock %}
+{% block body %}
+<div class="mx-auto max-w-lg">
+  <div class="rounded-lg bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle">
+    <div class="mb-6 flex flex-col items-center text-center">
+      <div class="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-accent/[0.12]">
+        <svg class="h-6 w-6 text-accent" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 8.25h3m-3 4.5h3m-6-4.5h.008v.008H7.5v-.008zm0 4.5h.008v.008H7.5v-.008z" />
+        </svg>
+      </div>
+      <p class="font-mono text-[11px] uppercase tracking-[0.14em] text-ht-content-muted">Two-factor authentication</p>
+      <h1 class="font-display text-xl font-medium text-ht-content-primary">Enter your verification code</h1>
+      <p class="mt-2 text-sm text-ht-content-muted">
+        A 6-digit code was sent to
+        <span class="font-medium text-ht-content-secondary">{{ masked_phone }}</span>.
+        Enter it below to continue.
+      </p>
+    </div>
+
+    {% match error %}
+      {% when Some with (msg) %}
+        <div class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm text-danger-fg" role="alert">
+          <p class="font-medium">{{ msg }}</p>
+        </div>
+      {% when None %}
+    {% endmatch %}
+
+    <form method="post" action="/ui/sms-challenge" class="space-y-5" data-testid="sms-challenge-form">
+      {% match csrf %}
+        {% when Some with (token) %}
+          <input type="hidden" name="_csrf" value="{{ token }}" />
+        {% when None %}
+      {% endmatch %}
+      <div>
+        <label for="code" class="block text-sm font-medium text-ht-content-secondary mb-1">Verification code</label>
+        <input id="code" name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"
+          required autocomplete="one-time-code" placeholder="000000"
+          class="mt-1 input tracking-widest text-center text-lg" autofocus />
+      </div>
+      <button type="submit"
+        class="btn-ember w-full rounded-md px-4 py-2.5 text-sm font-medium">
+        Verify
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}

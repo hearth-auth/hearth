@@ -19,40 +19,10 @@
   {% when None %}
 {% endmatch %}
 
-<div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle"
-     x-data="{
-       file: null,
-       fileName: '',
-       headers: [],
-       mapping: { email: '', name: '', role: '' },
-       dragOver: false,
-       step: 'upload',
+<div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
 
-       handleFile(f) {
-         if (!f) return;
-         this.file = f;
-         this.fileName = f.name;
-         const reader = new FileReader();
-         reader.onload = (e) => {
-           const firstLine = e.target.result.split('\n')[0] || '';
-           this.headers = firstLine.split(',').map(h => h.trim().replace(/^['\"]|['\"]$/g, ''));
-           const guess = (candidates) => candidates.find(c => this.headers.map(h => h.toLowerCase()).includes(c)) || '';
-           this.mapping.email = this.headers.find(h => h.toLowerCase().includes('email')) || '';
-           this.mapping.name  = this.headers.find(h => h.toLowerCase().includes('name'))  || '';
-           this.mapping.role  = this.headers.find(h => h.toLowerCase().includes('role'))  || '';
-           this.step = 'map';
-         };
-         reader.readAsText(f);
-       },
-
-       onDrop(e) {
-         this.dragOver = false;
-         const f = e.dataTransfer.files[0];
-         if (f) this.handleFile(f);
-       }
-     }">
-
-  <form method="post"
+  <form id="import-form"
+        method="post"
         action="{{ list_url }}/import"
         enctype="multipart/form-data"
         class="space-y-6">
@@ -63,12 +33,9 @@
     {% endmatch %}
 
     {# Step 1 — file drop zone #}
-    <div x-show="step === 'upload'">
-      <div class="relative flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-divider px-8 py-14 text-center transition-colors"
-           :class="dragOver ? 'border-ht-content-brand bg-ht-surface-overlay' : 'hover:border-divider-strong'"
-           @dragover.prevent="dragOver = true"
-           @dragleave="dragOver = false"
-           @drop.prevent="onDrop($event)">
+    <div id="step-upload">
+      <div id="drop-zone"
+           class="relative flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-divider px-8 py-14 text-center transition-colors hover:border-divider-strong">
         <svg class="h-10 w-10 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
           <polyline points="17 8 12 3 7 8"/>
@@ -78,29 +45,28 @@
           <p class="text-sm font-medium text-ht-content-secondary">
             Drag and drop a CSV file here, or
             <button type="button"
-                    @click="$refs.fileInput.click()"
+                    id="browse-btn"
                     class="text-ht-content-brand hover:text-ht-brand-deep underline underline-offset-2">
               browse
             </button>
           </p>
           <p class="mt-1 text-xs text-ht-content-muted">First row must be a header. Supported columns: email, name, role.</p>
         </div>
-        <input x-ref="fileInput"
+        <input id="csv-file-input"
                type="file"
                name="csv_file"
                accept=".csv,text/csv"
-               class="sr-only"
-               @change="handleFile($event.target.files[0])">
+               class="sr-only">
       </div>
     </div>
 
     {# Step 2 — column mapping (shown after file parsed) #}
-    <div x-show="step === 'map'" x-cloak class="space-y-5">
+    <div id="step-map" class="hidden space-y-5">
       <div class="flex items-center gap-3 rounded-sm bg-ht-surface-base px-4 py-3 ring-1 ring-divider-subtle">
         <svg class="h-4 w-4 shrink-0 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-        <span class="min-w-0 truncate font-mono text-xs text-ht-content-secondary" x-text="fileName"></span>
+        <span id="file-name-label" class="min-w-0 truncate font-mono text-xs text-ht-content-secondary"></span>
         <button type="button"
-                @click="step = 'upload'; file = null; fileName = ''; headers = [];"
+                id="change-file-btn"
                 class="ml-auto shrink-0 text-xs text-ht-content-muted hover:text-ht-content-secondary">
           Change file
         </button>
@@ -112,14 +78,8 @@
           <label class="block text-sm font-medium text-ht-content-secondary">
             Email column <span class="text-danger-fg">*</span>
           </label>
-          <select name="col_email"
-                  x-model="mapping.email"
-                  required
-                  class="mt-1 input">
+          <select id="col-email" name="col_email" required class="mt-1 input">
             <option value="">Select column…</option>
-            <template x-for="h in headers" :key="h">
-              <option :value="h" :selected="mapping.email === h" x-text="h"></option>
-            </template>
           </select>
           <p class="mt-1 text-xs text-ht-content-muted">Required. Used as the unique identifier.</p>
         </div>
@@ -129,13 +89,8 @@
           <label class="block text-sm font-medium text-ht-content-secondary">
             Name column <span class="text-ht-content-muted">(optional)</span>
           </label>
-          <select name="col_name"
-                  x-model="mapping.name"
-                  class="mt-1 input">
+          <select id="col-name" name="col_name" class="mt-1 input">
             <option value="">None</option>
-            <template x-for="h in headers" :key="h">
-              <option :value="h" :selected="mapping.name === h" x-text="h"></option>
-            </template>
           </select>
         </div>
 
@@ -144,13 +99,8 @@
           <label class="block text-sm font-medium text-ht-content-secondary">
             Role column <span class="text-ht-content-muted">(optional)</span>
           </label>
-          <select name="col_role"
-                  x-model="mapping.role"
-                  class="mt-1 input">
+          <select id="col-role" name="col_role" class="mt-1 input">
             <option value="">None</option>
-            <template x-for="h in headers" :key="h">
-              <option :value="h" :selected="mapping.role === h" x-text="h"></option>
-            </template>
           </select>
         </div>
       </div>
@@ -164,7 +114,8 @@
 
       <div class="flex items-center gap-3 pt-1">
         <button type="submit"
-                :disabled="!mapping.email"
+                id="import-submit-btn"
+                disabled
                 class="btn-ember rounded px-4 py-2 text-sm font-semibold disabled:opacity-40">
           Import
         </button>
@@ -182,4 +133,5 @@
     Download template CSV
   </a>
 </p>
+<script src="/ui/static/admin/users-import.js" defer></script>
 {% endblock %}

@@ -244,6 +244,13 @@ const CONFIG_SNAPSHOT_KEY: &str = "config:snapshot:v1";
 /// Prefix for user-to-sessions index keys.
 const SESSION_USER_PREFIX: &str = "ses:user:";
 
+/// Prefix for device-fingerprint records.
+///
+/// Format: `dfp:user:{user_uuid}:{hmac_hex}` → 8-byte little-endian i64 (Unix seconds expiry).
+/// Stored under the realm to which the user belongs. Scan by `dfp:user:{uuid}:` to enumerate
+/// all fingerprints for one user.
+const DEVICE_FP_PREFIX: &str = "dfp:user:";
+
 /// Encodes the primary key for a user record.
 ///
 /// Format: `usr:id:{uuid}`
@@ -1297,6 +1304,83 @@ pub(crate) fn encode_attempt_tracker(user_id: &UserId) -> Vec<u8> {
 /// Format: `rl:user:`
 pub(crate) fn attempt_tracker_scan_prefix() -> Vec<u8> {
     ATTEMPT_TRACKER_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes a device-fingerprint storage key.
+///
+/// Format: `dfp:user:{user_uuid}:{hmac_hex}`
+///
+/// `hmac_hex` is the lower-case hex encoding of the 32-byte HMAC-SHA256 output.
+/// The compound key supports scanning all fingerprints for a user and O(1)
+/// existence checks for a specific fingerprint.
+pub(crate) fn encode_device_fp(user_id: &UserId, hmac_hex: &str) -> Vec<u8> {
+    format!("{DEVICE_FP_PREFIX}{}:{hmac_hex}", user_id.as_uuid()).into_bytes()
+}
+
+/// Returns the per-user device-fingerprint scan prefix.
+///
+/// Format: `dfp:user:{user_uuid}:`
+///
+/// Use with [`prefix_end`] to scan all fingerprints for a given user.
+pub(crate) fn device_fp_scan_prefix(user_id: &UserId) -> Vec<u8> {
+    format!("{DEVICE_FP_PREFIX}{}:", user_id.as_uuid()).into_bytes()
+}
+
+/// Returns the realm-wide device-fingerprint scan prefix.
+///
+/// Format: `dfp:user:`
+///
+/// Use with [`prefix_end`] to scan **all** fingerprints in a realm, across
+/// every user.  Intended for the proactive background sweeper.
+pub(crate) fn device_fp_global_scan_prefix() -> Vec<u8> {
+    DEVICE_FP_PREFIX.as_bytes().to_vec()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  SMS OTP keys
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Prefix for pending SMS OTP records.
+const SMS_PENDING_OTP_PREFIX: &str = "sms:pending_otp:";
+
+/// Prefix for per-phone SMS resend throttle counters.
+const SMS_RESEND_COUNT_PREFIX: &str = "sms:resend_count:";
+
+/// Encodes the storage key for a pending SMS OTP record.
+///
+/// Format: `sms:pending_otp:{nonce_hex}`
+///
+/// The nonce is a 128-bit CSPRNG value encoded as 32 lowercase hex characters.
+/// Value: JSON-serialized `StoredOtp`.
+pub(crate) fn encode_sms_pending_otp(nonce: &str) -> Vec<u8> {
+    format!("{SMS_PENDING_OTP_PREFIX}{nonce}").into_bytes()
+}
+
+/// Returns the scan prefix for all pending SMS OTP records in a realm.
+///
+/// Format: `sms:pending_otp:`
+#[allow(dead_code)]
+pub(crate) fn sms_pending_otp_scan_prefix() -> Vec<u8> {
+    SMS_PENDING_OTP_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the storage key for a per-phone SMS resend throttle counter.
+///
+/// Format: `sms:resend_count:{phone_hash8}`
+///
+/// `phone_hash8` is the first 8 hex characters of SHA-256(E.164 phone),
+/// derived by `otp::phone_resend_key_suffix`. Value: JSON-serialized
+/// `StoredResendCount` with a 15-minute TTL.
+pub(crate) fn encode_sms_resend_count(phone_hash8: &str) -> Vec<u8> {
+    format!("{SMS_RESEND_COUNT_PREFIX}{phone_hash8}").into_bytes()
+}
+
+/// Returns the scan prefix for all SMS resend counters in a realm.
+///
+/// Format: `sms:resend_count:`
+#[allow(dead_code)]
+pub(crate) fn sms_resend_count_scan_prefix() -> Vec<u8> {
+    SMS_RESEND_COUNT_PREFIX.as_bytes().to_vec()
 }
 
 #[cfg(test)]

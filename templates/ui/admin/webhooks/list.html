@@ -51,8 +51,7 @@
       </thead>
       <tbody>
         {% for wh in webhooks %}
-        <tr class="border-b border-divider-subtle hover-bg-divider"
-            x-data="{ confirmDelete: false }">
+        <tr class="border-b border-divider-subtle hover-bg-divider">
           <td class="px-4 py-3">
             <span class="font-mono text-sm text-ht-content-primary break-all">{{ wh.url }}</span>
           </td>
@@ -102,16 +101,21 @@
               <form method="post" action="/ui/admin/realms/{{ realm_name }}/webhooks/{{ wh.id }}/delete" class="inline">
                 {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
                 <button type="button"
-                        @click="
-                          if (!confirmDelete) {
-                            confirmDelete = true;
-                            setTimeout(() => confirmDelete = false, 4000);
-                            return;
-                          }
-                          $el.closest('form').submit();"
-                        :class="confirmDelete ? 'text-danger-fg font-medium' : 'text-ht-content-muted hover:text-danger-fg'"
-                        x-text="confirmDelete ? 'Confirm delete' : 'Delete'"
-                        class="text-sm transition-colors"></button>
+                        class="text-sm transition-colors text-ht-content-muted hover:text-danger-fg"
+                        _="on click
+                             if @data-confirming is 'yes'
+                               call (closest <form/>).submit()
+                             else
+                               set @data-confirming to 'yes'
+                               set @class to 'text-sm transition-colors text-danger-fg font-medium'
+                               set my textContent to 'Confirm delete'
+                               wait 4s then
+                               if @data-confirming is 'yes'
+                                 set @data-confirming to 'no'
+                                 set @class to 'text-sm transition-colors text-ht-content-muted hover:text-danger-fg'
+                                 set my textContent to 'Delete'
+                               end
+                             end">Delete</button>
               </form>
             </div>
           </td>

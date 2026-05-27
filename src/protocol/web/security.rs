@@ -84,19 +84,17 @@ where
                 "referrer-policy",
                 "strict-origin-when-cross-origin",
             );
-            // Alpine.js v3 needs 'unsafe-eval' for directive expressions
-            // (:class="…", x-show="…"). All scripts are self-hosted; no
-            // third-party origins remain. Fonts are self-hosted (HEA-630).
-            // Alpine also injects inline style attributes for x-show/x-cloak
-            // (e.g. style="display: none;") — 'unsafe-inline' on style-src is
-            // required for those to take effect. Inline styles carry low risk
-            // compared to inline scripts; XSS is still blocked by script-src.
+            // Alpine.js removed (HEA-850): 'unsafe-eval' and 'unsafe-inline'
+            // are no longer needed. All layout reactivity is handled by
+            // vanilla JS classes in admin.js; template interactions use
+            // Hyperscript `_="..."` attributes (eval-free). Fonts and scripts
+            // are self-hosted (HEA-630).
             insert(
                 headers,
                 "content-security-policy",
                 "default-src 'self'; \
-                 script-src 'self' 'unsafe-eval'; \
-                 style-src 'self' 'unsafe-inline'; \
+                 script-src 'self'; \
+                 style-src 'self'; \
                  font-src 'self'; \
                  img-src 'self' data:; \
                  connect-src 'self'; \

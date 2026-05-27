@@ -4,7 +4,7 @@
 //! state change flows through the identity, authorization, or audit
 //! engines. Templates live under `templates/ui/`, compiled into the
 //! binary by the askama derive macro; static assets (`htmx.min.js`,
-//! `alpine.min.js`, `admin.js`, fonts, `app.css`) are embedded via
+//! `admin.js`, `hyperscript.min.js`, fonts, `app.css`) are embedded via
 //! `include_bytes!`. No third-party script/font origins needed (HEA-630).
 //!
 //! # Submodules
@@ -62,6 +62,7 @@ pub mod realm_resolver;
 pub mod required_action;
 pub mod saml;
 pub mod security;
+pub mod sms_challenge;
 pub(crate) mod templates;
 pub mod themes;
 
@@ -187,6 +188,12 @@ pub struct WebState {
     /// Whether to trust `X-Forwarded-Proto: https` for Secure-cookie
     /// decisions. Derived from `server.trust_forwarded_proto`.
     pub trust_forwarded_proto: bool,
+    /// SMS sender for OTP delivery. `None` when SMS is not configured.
+    pub sms: Option<crate::identity::sms::SharedSmsSender>,
+    /// Raw bytes of the HMAC-SHA256 key used to sign/verify SMS OTP codes.
+    /// Derived from `HEARTH_SMS_OTP_HMAC_KEY`. `None` in dev mode when the
+    /// Log transport is active (a deterministic dev key is substituted).
+    pub sms_otp_hmac_key: Option<Vec<u8>>,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -242,6 +249,8 @@ impl WebState {
             app_css_etag: etag_for_bytes(APP_CSS_FALLBACK),
             tls_enabled: false,
             trust_forwarded_proto: false,
+            sms: None,
+            sms_otp_hmac_key: None,
         }
     }
 
@@ -345,6 +354,15 @@ impl WebState {
         self
     }
 
+    /// Returns the global theme CSS for inline embedding when non-empty.
+    ///
+    /// Always returns `None` — theme CSS is served as an external stylesheet at
+    /// `/ui/static/theme.css` so the CSP `style-src 'self'` directive is not
+    /// weakened with `'unsafe-inline'`.
+    pub fn inline_theme_css(&self) -> Option<String> {
+        None
+    }
+
     /// Sets the global theme CSS (named theme + optional custom CSS).
     /// Served at `GET /ui/static/theme.css`. Also computes and caches the
     /// `ETag` for conditional-request support.
@@ -416,6 +434,22 @@ impl WebState {
         self
     }
 
+    /// Configures the SMS transport and HMAC key for OTP delivery.
+    ///
+    /// `hmac_key` is the raw bytes derived from `HEARTH_SMS_OTP_HMAC_KEY`.
+    /// When `hmac_key` is `None` (dev-mode Log transport), the handlers
+    /// substitute a deterministic dev key.
+    #[must_use]
+    pub fn with_sms(
+        mut self,
+        sender: crate::identity::sms::SharedSmsSender,
+        hmac_key: Option<Vec<u8>>,
+    ) -> Self {
+        self.sms = Some(sender);
+        self.sms_otp_hmac_key = hmac_key;
+        self
+    }
+
     /// Returns `true` when cookies issued for this request should carry the
     /// `Secure` attribute.
     ///
@@ -442,7 +476,7 @@ impl WebState {
     /// the process-global `current_realm` cache. Prefer this in pre-auth
     /// handlers where the realm is resolved from the URL or cookie.
     #[must_use]
-    pub fn realm_theme_css_for(&self, realm_id: &RealmId) -> Option<String> {
+    pub fn realm_theme_url_for(&self, realm_id: &RealmId) -> Option<String> {
         let id = realm_id.as_uuid().to_string();
         self.realm_themes.get(&id).cloned()
     }
@@ -477,16 +511,21 @@ impl WebState {
         self.current_realm.read().ok().and_then(|g| g.clone())
     }
 
-    /// Returns the per-realm theme CSS for the currently-pinned realm,
-    /// or `None` if no per-realm theme is configured.
+    /// Returns the external CSS URL for the per-realm theme, or `None` if the
+    /// realm has no theme configured.
     ///
-    /// Used by all authenticated handlers to populate `realm_theme_css`
-    /// in template structs, enabling inline per-realm CSS overrides.
+    /// Used by all authenticated handlers to populate `realm_theme_url` in
+    /// template structs. The URL points to `/ui/static/realm-theme/{uuid}`,
+    /// which is served without inline injection and satisfies `style-src 'self'`.
     #[must_use]
-    pub fn realm_theme_css(&self) -> Option<String> {
+    pub fn realm_theme_url(&self) -> Option<String> {
         let realm_id = self.current_realm()?;
         let id = realm_id.as_uuid().to_string();
-        self.realm_themes.get(&id).cloned()
+        if self.realm_themes.contains_key(&id) {
+            Some(format!("/ui/static/realm-theme/{id}"))
+        } else {
+            None
+        }
     }
 }
 
@@ -913,6 +952,12 @@ pub fn router(state: WebState) -> Router {
             "/oauth/consent",
             axum::routing::get(oauth_consent::consent_page).post(oauth_consent::consent_submit),
         )
+        // --- SMS MFA challenge interstitial ---
+        .route(
+            "/sms-challenge",
+            axum::routing::get(sms_challenge::sms_challenge_get)
+                .post(sms_challenge::sms_challenge_post),
+        )
         // --- First-run onboarding wizard ---
         .route(
             "/admin/onboarding",
@@ -998,6 +1043,10 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/realms/{realm}/users/{id}/disable-mfa",
             axum::routing::post(admin::admin_user_disable_mfa),
+        )
+        .route(
+            "/admin/realms/{realm}/users/{id}/remove-phone",
+            axum::routing::post(admin::admin_user_remove_phone),
         )
         .route(
             "/admin/realms/{realm}/users/{id}/reset-mfa-codes",
@@ -1430,6 +1479,18 @@ pub fn router(state: WebState) -> Router {
                 .post(required_action::update_password_submit),
         )
         .route(
+            "/required-action/ENROLL_PHONE_OTP",
+            axum::routing::get(required_action::enroll_phone_otp_page),
+        )
+        .route(
+            "/required-action/ENROLL_PHONE_OTP/send",
+            axum::routing::post(required_action::enroll_phone_otp_send),
+        )
+        .route(
+            "/required-action/ENROLL_PHONE_OTP/verify",
+            axum::routing::post(required_action::enroll_phone_otp_verify_submit),
+        )
+        .route(
             "/required-action/{action}",
             axum::routing::get(required_action::action_page).post(required_action::action_complete),
         )
@@ -1493,14 +1554,28 @@ fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
 
 /// HTMX v1.9.12 — pinned, checksum recorded in `assets/CHECKSUMS.txt`.
 const HTMX_JS: &[u8] = include_bytes!("assets/htmx.min.js");
-/// Alpine.js v3 — vendored so CSP can drop `cdn.jsdelivr.net` (HEA-630).
-const ALPINE_JS: &[u8] = include_bytes!("assets/alpine.min.js");
-/// Alpine component registrations for every `/ui/**` template (HEA-630).
-/// Extracting them here lets CSP use `script-src 'self'` without `unsafe-inline`.
+/// Admin UI vanilla-JS helpers (sidebar, realm nav, toasts, form init). Alpine-free (HEA-850).
 const ADMIN_JS: &[u8] = include_bytes!("assets/admin.js");
+/// Eval-free vanilla JS for WebAuthn (passkey) ceremonies (HEA-849).
+/// Replaces the `passkeyLogin` / `passkeyManager` / `passkeyRow` Alpine
+/// components so these pages no longer require `unsafe-eval` in the CSP.
+const PASSKEY_JS: &[u8] = include_bytes!("assets/passkey.js");
 /// Global Alpine.js component registrations and keyboard shortcuts, extracted
 /// from inline `<script>` tags so the CSP can omit `unsafe-inline`.
 const LAYOUT_JS: &[u8] = include_bytes!("assets/layout.js");
+/// Hyperscript 0.9.13 — eval-free declarative scripting library (HEA-824).
+/// Used to replace Alpine.js patterns that require `unsafe-eval` in CSP.
+const HYPERSCRIPT_JS: &[u8] = include_bytes!("assets/hyperscript.min.js");
+/// Per-page admin scripts extracted from inline `<script>` blocks so the CSP
+/// can stay `script-src 'self'` (HEA-886).
+const ADMIN_SLUG_SYNC_JS: &[u8] = include_bytes!("assets/admin/slug-sync.js");
+const ADMIN_WEBHOOKS_NEW_JS: &[u8] = include_bytes!("assets/admin/webhooks-new.js");
+const ADMIN_USERS_IMPORT_JS: &[u8] = include_bytes!("assets/admin/users-import.js");
+const ADMIN_USERS_LIST_JS: &[u8] = include_bytes!("assets/admin/users-list.js");
+const ADMIN_USERS_NEW_JS: &[u8] = include_bytes!("assets/admin/users-new.js");
+const ADMIN_RBAC_DEBUG_JS: &[u8] = include_bytes!("assets/admin/rbac-debug.js");
+/// Standalone dev-mailcatcher detail-page script (HEA-886).
+const DEV_MAIL_DETAIL_JS: &[u8] = include_bytes!("assets/dev/mail-detail.js");
 /// Self-hosted Fraunces upright woff2 (HEA-630).
 const FONT_FRAUNCES: &[u8] = include_bytes!("assets/fonts/fraunces-latin.woff2");
 /// Self-hosted Fraunces italic woff2 (HEA-630).
@@ -1691,9 +1766,27 @@ async fn serve_static(
     // Other embedded assets are immutable for the life of this binary.
     let embedded: Option<(&[u8], &str)> = match file.as_str() {
         "htmx.min.js" => Some((HTMX_JS, "application/javascript; charset=utf-8")),
-        "alpine.min.js" => Some((ALPINE_JS, "application/javascript; charset=utf-8")),
         "admin.js" => Some((ADMIN_JS, "application/javascript; charset=utf-8")),
+        "admin/slug-sync.js" => Some((ADMIN_SLUG_SYNC_JS, "application/javascript; charset=utf-8")),
+        "admin/webhooks-new.js" => Some((
+            ADMIN_WEBHOOKS_NEW_JS,
+            "application/javascript; charset=utf-8",
+        )),
+        "admin/users-import.js" => Some((
+            ADMIN_USERS_IMPORT_JS,
+            "application/javascript; charset=utf-8",
+        )),
+        "admin/users-list.js" => {
+            Some((ADMIN_USERS_LIST_JS, "application/javascript; charset=utf-8"))
+        }
+        "admin/users-new.js" => Some((ADMIN_USERS_NEW_JS, "application/javascript; charset=utf-8")),
+        "admin/rbac-debug.js" => {
+            Some((ADMIN_RBAC_DEBUG_JS, "application/javascript; charset=utf-8"))
+        }
+        "dev/mail-detail.js" => Some((DEV_MAIL_DETAIL_JS, "application/javascript; charset=utf-8")),
+        "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
         "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
+        "hyperscript.min.js" => Some((HYPERSCRIPT_JS, "application/javascript; charset=utf-8")),
         "favicon.svg" => Some((FAVICON_SVG, "image/svg+xml")),
         "img/hearth-wide-web.svg" => Some((HEARTH_WIDE_SVG, "image/svg+xml")),
         "img/hearth-icon.svg" => Some((HEARTH_ICON_SVG, "image/svg+xml")),
@@ -1756,6 +1849,10 @@ mod tests {
         // Compile-time embedded — check lengths so future drops to zero bytes
         // (e.g. a broken build.rs) surface as a test failure.
         assert!(HTMX_JS.len() > 1024, "htmx.min.js seems too small");
+        assert!(
+            HYPERSCRIPT_JS.len() > 1024,
+            "hyperscript.min.js seems too small"
+        );
         assert!(
             APP_CSS_FALLBACK.len() > 64,
             "app.css fallback seems too small"

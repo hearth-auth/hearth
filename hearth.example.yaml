@@ -195,6 +195,35 @@ email:
   # Directory containing Tera templates that override the compiled defaults.
   # templates_dir: "./templates/email"
 
+# --- SMS (OTP / transactional) ----------------------------------------------
+# Outbound SMS for OTP codes and transactional messages.
+# Supported: log | twilio | awssns
+#
+# REQUIRED env var: HEARTH_SMS_OTP_HMAC_KEY
+#   Must be set in the environment (not here). Required when transport is not
+#   'log' or when running outside --dev mode. Generate with:
+#     openssl rand -hex 32
+
+sms:
+  transport: log        # default: log (no network I/O)
+
+  # --- Twilio -----------------------------------------------------------------
+  # sms:
+  #   transport: twilio
+  #   twilio:
+  #     account_sid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  #     auth_token: "${TWILIO_AUTH_TOKEN}"   # load from env via ${VAR}
+  #     from: "+15550001111"                 # E.164 or Messaging Service SID
+
+  # --- AWS SNS ----------------------------------------------------------------
+  # sms:
+  #   transport: awssns
+  #   aws_sns:
+  #     region: "us-east-1"
+  #     access_key_id: "${AWS_ACCESS_KEY_ID}"
+  #     secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+  #     sender_id: "MyBrand"    # optional, up to 11 alphanumeric chars
+
 # --- OIDC / OAuth 2.0 -------------------------------------------------------
 # Controls the OIDC Discovery document and authorization code behaviour.
 

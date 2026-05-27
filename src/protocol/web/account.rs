@@ -33,7 +33,7 @@ use qrcode::QrCode;
 use crate::core::{SessionId, Timestamp};
 use crate::identity::{CleartextPassword, IdentityError, RegistrationOptions};
 
-use super::auth::{clearing_cookies, verify_csrf_form_field, UiSession};
+use super::auth::{clearing_cookies, verify_csrf_form_field, CsrfToken, UiSession};
 use super::handlers::append_cookie;
 use super::handlers_common;
 use super::templates::{render, Flash};
@@ -65,8 +65,8 @@ struct AccountIndexTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// A row in the passkey credentials table on the account page.
@@ -108,8 +108,8 @@ impl AccountIndexTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -132,8 +132,8 @@ pub async fn account_index(State(state): State<Arc<WebState>>, session: UiSessio
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
+    tmpl.inline_theme_css = state.inline_theme_css();
     render(&tmpl)
 }
 
@@ -238,8 +238,8 @@ fn render_with_password_error(state: &Arc<WebState>, session: &UiSession, msg: &
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
+    tmpl.inline_theme_css = state.inline_theme_css();
     render(&tmpl)
 }
 
@@ -261,8 +261,8 @@ fn render_with_flash(state: &Arc<WebState>, session: &UiSession, flash: Flash) -
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
+    tmpl.inline_theme_css = state.inline_theme_css();
     render(&tmpl)
 }
 
@@ -347,8 +347,8 @@ struct TotpEnrollTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl TotpEnrollTemplate {
@@ -381,8 +381,8 @@ impl TotpEnrollTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -414,8 +414,9 @@ pub async fn totp_enroll_form(State(state): State<Arc<WebState>>, session: UiSes
             state.product_name.clone(),
             state.logo_url.clone(),
         );
-        tmpl.theme_css.clone_from(&state.theme_css);
-        tmpl.realm_theme_css = state.realm_theme_css();
+        tmpl.realm_theme_url = state.realm_theme_url();
+        tmpl.inline_theme_css = state.inline_theme_css();
+        tmpl.inline_theme_css = state.inline_theme_css();
         return render(&tmpl);
     }
 
@@ -448,8 +449,9 @@ pub async fn totp_enroll_form(State(state): State<Arc<WebState>>, session: UiSes
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            tmpl.theme_css.clone_from(&state.theme_css);
-            tmpl.realm_theme_css = state.realm_theme_css();
+            tmpl.realm_theme_url = state.realm_theme_url();
+            tmpl.inline_theme_css = state.inline_theme_css();
+            tmpl.inline_theme_css = state.inline_theme_css();
             render(&tmpl)
         }
         Err(IdentityError::MfaAlreadyEnabled) => {
@@ -465,8 +467,9 @@ pub async fn totp_enroll_form(State(state): State<Arc<WebState>>, session: UiSes
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            tmpl.theme_css.clone_from(&state.theme_css);
-            tmpl.realm_theme_css = state.realm_theme_css();
+            tmpl.realm_theme_url = state.realm_theme_url();
+            tmpl.inline_theme_css = state.inline_theme_css();
+            tmpl.inline_theme_css = state.inline_theme_css();
             render(&tmpl)
         }
         Err(e) => {
@@ -483,8 +486,9 @@ pub async fn totp_enroll_form(State(state): State<Arc<WebState>>, session: UiSes
                 state.product_name.clone(),
                 state.logo_url.clone(),
             );
-            tmpl.theme_css.clone_from(&state.theme_css);
-            tmpl.realm_theme_css = state.realm_theme_css();
+            tmpl.realm_theme_url = state.realm_theme_url();
+            tmpl.inline_theme_css = state.inline_theme_css();
+            tmpl.inline_theme_css = state.inline_theme_css();
             render(&tmpl)
         }
     }
@@ -674,8 +678,8 @@ pub async fn totp_regenerate_codes(
     // form but we pass empty secret/uri so only the recovery codes section
     // is meaningful. The template's activate form is a no-op here since the
     // user is already enrolled.
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
+    tmpl.inline_theme_css = state.inline_theme_css();
     render(&tmpl)
 }
 
@@ -705,8 +709,9 @@ fn render_totp_error(state: &Arc<WebState>, session: &UiSession, msg: &str) -> R
             state.product_name.clone(),
             state.logo_url.clone(),
         );
-        tmpl.theme_css.clone_from(&state.theme_css);
-        tmpl.realm_theme_css = state.realm_theme_css();
+        tmpl.realm_theme_url = state.realm_theme_url();
+        tmpl.inline_theme_css = state.inline_theme_css();
+        tmpl.inline_theme_css = state.inline_theme_css();
         return render(&tmpl);
     }
 
@@ -725,8 +730,8 @@ fn render_totp_error(state: &Arc<WebState>, session: &UiSession, msg: &str) -> R
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
+    tmpl.inline_theme_css = state.inline_theme_css();
     render(&tmpl)
 }
 
@@ -874,6 +879,7 @@ pub struct PasskeyRegisterCompleteBody {
 pub async fn passkey_register_complete(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    _csrf: CsrfToken,
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<PasskeyRegisterCompleteBody>,
 ) -> Response {
@@ -995,6 +1001,7 @@ pub struct RenamePasskeyBody {
 pub async fn passkey_rename(
     State(state): State<Arc<WebState>>,
     session: UiSession,
+    _csrf: CsrfToken,
     axum::extract::Path(cred_id_b64): axum::extract::Path<String>,
     axum::Json(body): axum::Json<RenamePasskeyBody>,
 ) -> Response {
@@ -1057,8 +1064,8 @@ struct AccountSessionsTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl AccountSessionsTemplate {
@@ -1080,8 +1087,8 @@ impl AccountSessionsTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -1097,8 +1104,8 @@ pub async fn sessions_index(State(state): State<Arc<WebState>>, session: UiSessi
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
+    tmpl.inline_theme_css = state.inline_theme_css();
     render(&tmpl)
 }
 

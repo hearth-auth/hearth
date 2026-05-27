@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::config::{Config, EmailTransport, EnvVarWarningKind, ValidationIssue};
+use hearth::config::{Config, EmailTransport, EnvVarWarningKind, SmsTransport, ValidationIssue};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::email::mailcatcher::{
     generate_password, MailcatcherSender, MailcatcherState,
@@ -19,6 +19,9 @@ use hearth::identity::email::{
     MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender, SharedEmailSender,
 };
 use hearth::identity::onboarding::{self, OnboardingService};
+use hearth::identity::sms::{
+    LoggingSmsSender, SharedSmsSender, SmsSecret, SnsSmsSender, TwilioSmsSender,
+};
 use hearth::identity::{
     CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, OidcConfig,
     RateLimitConfig, TokenConfig,
@@ -853,6 +856,7 @@ async fn run_serve(
     // Extract cleanup config before identity_config is consumed by the engine.
     let cleanup_enabled = identity_config.cleanup.enabled;
     let cleanup_interval_secs = identity_config.cleanup.interval_secs;
+    let dfp_sweeper_interval_secs = identity_config.cleanup.dfp_sweeper_interval_secs;
 
     // Build the RBAC engine before the identity engine — identity depends on rbac.
     let rbac_engine: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
@@ -940,6 +944,27 @@ async fn run_serve(
     // Email sender + service (default: log transport — stderr at WARN level).
     let email_sender: SharedEmailSender = build_email_sender(&config, mailcatcher_state.as_ref())?;
     let email_service = Arc::new(build_email_service(email_sender, &config)?);
+
+    // SMS sender (default: log transport).
+    // HEARTH_SMS_OTP_HMAC_KEY is required in production so OTP codes are
+    // cryptographically bound to the server; the Log transport in dev mode
+    // skips the check to avoid friction during local development.
+    let sms_otp_hmac_key: Option<String> = match std::env::var("HEARTH_SMS_OTP_HMAC_KEY") {
+        Ok(key) if !key.is_empty() => Some(key),
+        Ok(_) | Err(_) => {
+            if config.sms.transport != SmsTransport::Log || !config.dev_mode {
+                return Err("HEARTH_SMS_OTP_HMAC_KEY environment variable is required \
+                     when sms.transport is not 'log' or when running in production mode"
+                    .into());
+            }
+            None
+        }
+    };
+    let sms_hmac_key_bytes: Option<Vec<u8>> = sms_otp_hmac_key.map(|s| s.into_bytes());
+    let sms_sender: SharedSmsSender = build_sms_sender(&config)?;
+    if config.sms.transport == SmsTransport::Log && !config.dev_mode {
+        warn!("sms.transport = log is active outside dev mode — no real SMS messages will be sent");
+    }
 
     // Ensure a first-run setup token exists BEFORE realm reconciliation.
     // Reconciliation may auto-create realms from YAML config, which would
@@ -1250,6 +1275,74 @@ async fn run_serve(
         });
     }
 
+    // Background device-fingerprint TTL sweeper (GDPR proactive eviction).
+    if cleanup_enabled && dfp_sweeper_interval_secs > 0 {
+        let dfp_engine = Arc::clone(&identity_engine);
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(dfp_sweeper_interval_secs));
+            // Skip the immediate first tick so the server finishes warm-up.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let mut cursor = None::<String>;
+                let mut total_evicted: u64 = 0;
+                let mut total_active: u64 = 0;
+                loop {
+                    let page = match dfp_engine.list_realms(cursor.as_deref(), 100) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!(error = %e, "dfp_sweeper: realm enumeration failed, retrying next tick");
+                            break;
+                        }
+                    };
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    for realm in &page.items {
+                        match dfp_engine.sweep_expired_fingerprints(realm.id(), now_secs) {
+                            Ok((evicted, active)) => {
+                                total_evicted += evicted;
+                                total_active += active;
+                                if evicted > 0 {
+                                    info!(
+                                        realm = %realm.name(),
+                                        evicted,
+                                        active,
+                                        "dfp_sweeper: evicted expired fingerprints",
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    realm = %realm.name(),
+                                    error = %e,
+                                    "dfp_sweeper: sweep failed for realm",
+                                );
+                            }
+                        }
+                    }
+                    cursor = page.next_cursor;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                // Realistic eviction/active counts never approach 2^53, so the
+                // u64 → f64 conversion is lossless in practice. Prometheus
+                // counter/gauge APIs accept f64 only.
+                #[allow(clippy::cast_precision_loss)]
+                let evicted_f64 = total_evicted as f64;
+                #[allow(clippy::cast_precision_loss)]
+                let active_f64 = total_active as f64;
+                hearth::metrics::metrics()
+                    .dfp_sweeper_evicted_total
+                    .inc_by(evicted_f64);
+                hearth::metrics::metrics().dfp_keys_active.set(active_f64);
+            }
+        });
+    }
+
     // Background periodic SST compaction.
     if config.storage.compaction.enabled && config.storage.compaction.interval_secs > 0 {
         let storage_engine = Arc::clone(&inner_storage);
@@ -1436,7 +1529,8 @@ async fn run_serve(
     .with_product_name(config.branding.product_name_or_default().to_string())
     .with_logo_url(web_logo_url)
     .with_default_realm(config.server.default_realm.clone())
-    .with_config(Arc::new(config.clone()));
+    .with_config(Arc::new(config.clone()))
+    .with_sms(sms_sender, sms_hmac_key_bytes);
 
     if !api_trusted_proxies.is_empty() {
         info!(count = api_trusted_proxies.len(), "loaded trusted_proxies");
@@ -1813,6 +1907,45 @@ fn build_email_sender(
                 ApiKey::new(mt.api_key.clone()),
                 from.clone(),
                 mt.inbox_id,
+            ))
+        }
+    })
+}
+
+/// Builds the outbound SMS sender from configuration.
+///
+/// Returns the appropriate transport adapter based on the configured
+/// `sms.transport`. Fails if the transport config is structurally invalid.
+fn build_sms_sender(config: &Config) -> Result<SharedSmsSender, Box<dyn std::error::Error>> {
+    use hearth::identity::sms::http::UreqSmsTransport;
+
+    Ok(match config.sms.transport {
+        SmsTransport::Log => Arc::new(LoggingSmsSender::new()),
+        SmsTransport::Twilio => {
+            let tw = config
+                .sms
+                .twilio
+                .as_ref()
+                .ok_or("sms.twilio block is required for twilio transport")?;
+            Arc::new(TwilioSmsSender::new(
+                UreqSmsTransport,
+                tw.account_sid.clone(),
+                SmsSecret::new(tw.auth_token.clone()),
+                tw.from.clone(),
+            ))
+        }
+        SmsTransport::AwsSns => {
+            let sns = config
+                .sms
+                .aws_sns
+                .as_ref()
+                .ok_or("sms.aws_sns block is required for awssns transport")?;
+            Arc::new(SnsSmsSender::new(
+                UreqSmsTransport,
+                sns.region.clone(),
+                sns.access_key_id.clone(),
+                SmsSecret::new(sns.secret_access_key.clone()),
+                sns.sender_id.clone(),
             ))
         }
     })

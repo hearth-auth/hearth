@@ -20,8 +20,8 @@ struct RealmListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms`.
@@ -43,8 +43,8 @@ pub async fn admin_realms_list(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_realms failed");
@@ -104,8 +104,8 @@ struct RealmDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms/{realm}`.
@@ -144,8 +144,8 @@ pub async fn admin_realm_detail(
                 narrow: false,
                 product_name,
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Ok(None) => super::handlers_common::not_found("Realm not found"),
@@ -392,6 +392,17 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::RequiredActionRemoved => "Required Action Removed",
         A::RequiredActionCompleted => "Required Action Completed",
         A::RequiredActionAutoCleared => "Required Action Auto-Cleared",
+        A::PasswordCompromisedRejected => "Password Compromised Rejected",
+        A::BreachCheckUnavailable => "Breach Check Unavailable",
+        A::StepUpMfaTriggered => "Step-Up MFA Triggered",
+        A::StepUpMfaCompleted => "Step-Up MFA Completed",
+        A::SmsOtpEnrollmentStarted => "SMS OTP Enrollment Started",
+        A::SmsOtpEnrollmentVerified => "SMS OTP Enrollment Verified",
+        A::SmsOtpEnrollmentFailed => "SMS OTP Enrollment Failed",
+        A::SmsMfaChallengeSucceeded => "SMS MFA Challenge Succeeded",
+        A::SmsMfaChallengeFailed => "SMS MFA Challenge Failed",
+        A::SmsMfaLocked => "SMS MFA Locked",
+        A::DeviceFingerprintsErased => "Device Fingerprints Erased",
     }
 }
 
@@ -451,14 +462,25 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::GroupMemberRemoved
         | A::GroupMemberRoleChanged => "Organization",
         // Security — RBAC role assignments, direct user permissions,
-        // raw authz tuples, and integrity-watchdog events.
+        // raw authz tuples, integrity-watchdog events, and breach-check outcomes.
         A::RoleAssigned
         | A::RoleRevoked
         | A::UserPermissionGranted
         | A::UserPermissionRevoked
         | A::TupleWritten
         | A::TupleDeleted
-        | A::OrphanedReferenceSkipped => "Security",
+        | A::OrphanedReferenceSkipped
+        | A::PasswordCompromisedRejected
+        | A::BreachCheckUnavailable
+        | A::StepUpMfaTriggered
+        | A::StepUpMfaCompleted
+        | A::SmsOtpEnrollmentStarted
+        | A::SmsOtpEnrollmentVerified
+        | A::SmsOtpEnrollmentFailed
+        | A::SmsMfaChallengeSucceeded
+        | A::SmsMfaChallengeFailed
+        | A::SmsMfaLocked
+        | A::DeviceFingerprintsErased => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
         // backup/restore, and internal cleanup jobs.
         A::RealmCreated
@@ -821,8 +843,8 @@ struct AuditListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rows-only partial returned when the audit filter is triggered via HTMX.
@@ -959,8 +981,8 @@ pub async fn admin_audit_list(
                     narrow: false,
                     product_name: state.product_name.clone(),
                     logo_url: state.logo_url.clone(),
-                    theme_css: state.theme_css.clone(),
-                    realm_theme_css: state.realm_theme_css(),
+                    realm_theme_url: state.realm_theme_url(),
+                    inline_theme_css: state.inline_theme_css(),
                 })
             }
         }
@@ -1001,8 +1023,8 @@ pub async fn admin_audit_verify_integrity(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Ok(false) => render(&AuditListTemplate {
             events: Vec::new(),
@@ -1029,8 +1051,8 @@ pub async fn admin_audit_verify_integrity(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "audit verify_integrity failed");
@@ -1410,8 +1432,8 @@ struct SystemInfoTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/settings` — read-only system information page.
@@ -1430,8 +1452,8 @@ pub async fn admin_system_info(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1457,8 +1479,8 @@ struct ConfigEditorTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Template for the diff preview partial.
@@ -1471,8 +1493,8 @@ struct DiffPreviewTemplate {
     error: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Form data for config editor actions.
@@ -1524,8 +1546,8 @@ pub async fn admin_config_editor(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1557,8 +1579,8 @@ pub async fn admin_config_editor_preview(
         error: validation_error,
         product_name: String::new(),
         logo_url: String::new(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: None,
+        realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 
@@ -1693,8 +1715,8 @@ fn render_config_editor_with_flash(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1757,8 +1779,8 @@ pub async fn admin_config_editor_visual_preview(
                 error: Some(e),
                 product_name: String::new(),
                 logo_url: String::new(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: None,
+                realm_theme_url: None,
+                inline_theme_css: None,
             });
         }
     };
@@ -1782,8 +1804,8 @@ pub async fn admin_config_editor_visual_preview(
         error: validation_error,
         product_name: String::new(),
         logo_url: String::new(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: None,
+        realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 
@@ -2237,9 +2259,8 @@ pub async fn admin_realm_admin_revoke(
 
 /// Request body for `PATCH /admin/realms/{realm}/config`.
 ///
-/// Only `default_required_actions` is exposed in v1. Future fields may be
-/// added without breaking existing callers because unknown JSON keys are
-/// silently ignored by `serde`.
+/// All fields are optional — send only the keys you want to change.
+/// Unknown JSON keys are silently ignored by `serde`.
 #[derive(Debug, Deserialize)]
 pub struct PatchRealmConfigBody {
     /// Replaces the realm's full `default_required_actions` list.
@@ -2247,13 +2268,26 @@ pub struct PatchRealmConfigBody {
     /// Pass an empty array (`[]`) to clear the default. All strings must
     /// be valid v1 action types (`"VERIFY_EMAIL"`, `"UPDATE_PASSWORD"`);
     /// unknown values return 400.
+    #[serde(default)]
     pub default_required_actions: Vec<String>,
+    /// Replaces the realm's allowed MFA methods list (e.g. `["totp","sms"]`).
+    ///
+    /// `null` / absent leaves the field unchanged. Pass `[]` to clear.
+    /// The value `"sms"` enables SMS OTP as an MFA method for this realm.
+    pub mfa_methods: Option<Vec<String>>,
+    /// Per-realm SMS OTP expiry in seconds. `null` clears the override
+    /// (reverts to the engine default of 600 s).
+    pub sms_otp_expiry_seconds: Option<u64>,
+    /// Per-realm SMS OTP maximum verification attempts. `null` clears
+    /// the override (reverts to the engine default of 5).
+    pub sms_otp_max_attempts: Option<u32>,
 }
 
 /// `PATCH /admin/realms/{realm}/config`
 ///
-/// Replaces the realm's `default_required_actions` list. The change only
-/// affects users created after this call; existing users are unmodified.
+/// Updates mutable realm config fields. Currently exposed:
+/// `default_required_actions`, `mfa_methods`, `sms_otp_expiry_seconds`,
+/// `sms_otp_max_attempts`.
 ///
 /// Requires realm-admin token; returns 403 otherwise.
 /// Unknown action type strings return 400.
@@ -2282,9 +2316,27 @@ pub async fn admin_api_realm_config_patch(
         }
     }
 
-    // Build updated config: take existing config, replace default_required_actions.
+    // Build updated config: start from existing, apply only provided fields.
     let mut config = target.0.config().clone();
     config.default_required_actions = actions;
+    if let Some(methods) = body.mfa_methods {
+        config.mfa_methods = if methods.is_empty() {
+            None
+        } else {
+            Some(methods)
+        };
+    }
+    // `serde_json` deserializes absent fields as `None`; we use a sentinel
+    // `Option<Option<T>>` pattern isn't needed here — the caller either omits
+    // the field (None → leave unchanged) or passes a value (Some(v) → set).
+    // Passing JSON `null` is not supported for these numeric fields; omit to
+    // leave unchanged.
+    if let Some(v) = body.sms_otp_expiry_seconds {
+        config.sms_otp_expiry_seconds = Some(v);
+    }
+    if let Some(v) = body.sms_otp_max_attempts {
+        config.sms_otp_max_attempts = Some(v);
+    }
 
     match state.identity.update_realm(
         target.id(),
@@ -2576,6 +2628,14 @@ mod action_category_tests {
             A::TupleWritten,
             A::TupleDeleted,
             A::OrphanedReferenceSkipped,
+            A::PasswordCompromisedRejected,
+            A::BreachCheckUnavailable,
+            A::SmsOtpEnrollmentStarted,
+            A::SmsOtpEnrollmentVerified,
+            A::SmsOtpEnrollmentFailed,
+            A::SmsMfaChallengeSucceeded,
+            A::SmsMfaChallengeFailed,
+            A::SmsMfaLocked,
         ] {
             assert_eq!(action_category(&a), "Security", "{a:?}");
         }

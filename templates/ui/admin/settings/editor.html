@@ -10,10 +10,8 @@
 </nav>
 {% endblock %}
 {% block body %}
-{# SSR default view — always painted on first load, no JS required.
-   Gives operators a readable config even when JS is blocked (e.g. CSP issues).
-   Alpine removes this element in x-init so JS-enabled users see the
-   full interactive editor without a flash of duplicate content. #}
+{# SSR default view — shown before JS initialises. ConfigEditor.init() hides
+   this element and reveals the interactive editor. #}
 <div id="ssr-editor-fallback">
   <div class="mb-6">
     <h1 class="font-display text-2xl font-medium text-ht-content-primary">Config Editor</h1>
@@ -43,10 +41,7 @@
         {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
         <textarea name="yaml" class="hidden">{{ yaml_content }}</textarea>
         <p class="flex-1 text-xs text-ht-content-muted">JavaScript required for the diff preview and visual editor. Raw apply still works without JS.</p>
-        <button type="submit"
-                class="btn-ember rounded px-3 py-1.5 text-xs font-semibold">
-          Apply Changes
-        </button>
+        <button type="submit" class="btn-ember rounded px-3 py-1.5 text-xs font-semibold">Apply Changes</button>
       </form>
     </div>
     {% endif %}
@@ -54,7 +49,9 @@
 </div>
 
 <script type="application/json" id="config-editor-data">{{ config_json|safe }}</script>
-<div x-data="configEditor()" x-cloak x-init="$nextTick(function(){ var f = document.getElementById('ssr-editor-fallback'); if (f) f.style.display = 'none'; })">
+<div id="config-editor-root" class="hidden"
+     data-read-only="{% if read_only %}true{% else %}false{% endif %}">
+
   {# Header with mode tabs #}
   <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
     <div>
@@ -68,10 +65,12 @@
       </p>
       {# Mode toggle #}
       <div class="mt-3 inline-flex rounded-sm border border-divider overflow-hidden">
-        <button @click="mode = 'visual'" :class="mode === 'visual' ? 'bg-divider text-ht-content-primary' : 'text-ht-content-secondary hover-bg-divider'" class="px-3 py-1.5 text-xs font-medium transition-colors">
+        <button id="mode-visual-btn" type="button"
+                class="px-3 py-1.5 text-xs font-medium transition-colors bg-divider text-ht-content-primary">
           Visual
         </button>
-        <button @click="mode = 'raw'" :class="mode === 'raw' ? 'bg-divider text-ht-content-primary' : 'text-ht-content-secondary hover-bg-divider'" class="border-l border-divider px-3 py-1.5 text-xs font-medium transition-colors">
+        <button id="mode-raw-btn" type="button"
+                class="border-l border-divider px-3 py-1.5 text-xs font-medium transition-colors text-ht-content-secondary hover-bg-divider">
           Raw YAML
         </button>
       </div>
@@ -80,7 +79,7 @@
       <a href="/ui/admin/settings" class="inline-flex items-center gap-1.5 rounded border border-strong bg-ht-surface-elevated px-3 py-1.5 text-sm font-medium text-ht-content-secondary hover-bg-divider">
         System Info
       </a>
-      <button @click="openExport()"
+      <button id="export-btn" type="button"
               class="inline-flex items-center gap-1.5 rounded border border-strong bg-ht-surface-elevated px-3 py-1.5 text-sm font-medium text-ht-content-secondary hover-bg-divider">
         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
         Export YAML
@@ -95,34 +94,11 @@
   {% endmatch %}
 
   {# ── Visual Editor ── #}
-  <div x-show="mode === 'visual'" x-transition>
+  <div id="visual-editor-panel">
     <div class="flex gap-6">
-      {# Section sidebar nav #}
-      <nav class="w-44 shrink-0 space-y-1">
+      {# Section sidebar nav — populated by ConfigEditor._buildSidebar() #}
+      <nav id="config-sections-nav" class="w-44 shrink-0 space-y-1">
         <p class="mb-2 font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-ht-content-muted">Sections</p>
-        <template x-for="sec in sections" :key="sec.key">
-          <button @click="activeSection = sec.key; activeRealm = null"
-                  :class="activeSection === sec.key && !activeRealm ? 'bg-divider text-ht-content-primary' : 'text-ht-content-secondary hover-bg-divider hover:text-ht-content-primary'"
-                  class="block w-full rounded-md px-2 py-1.5 text-left text-sm font-medium transition-colors"
-                  x-text="sec.label"></button>
-        </template>
-
-        {# Realms section #}
-        <div class="mt-4 border-t border-divider-subtle pt-3">
-          <p class="mb-2 font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-ht-content-muted">Realms</p>
-          <template x-for="rk in realmKeys" :key="rk">
-            <button @click="activeSection = 'realm'; activeRealm = rk"
-                    :class="activeSection === 'realm' && activeRealm === rk ? 'bg-divider text-ht-content-primary' : 'text-ht-content-secondary hover-bg-divider hover:text-ht-content-primary'"
-                    class="block w-full rounded-md px-2 py-1.5 text-left text-sm font-medium transition-colors"
-                    x-text="rk"></button>
-          </template>
-          {% if !read_only %}
-          <button @click="addRealm()" class="mt-1 flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-teal-fg hover-bg-divider">
-            <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            Add Realm
-          </button>
-          {% endif %}
-        </div>
       </nav>
 
       {# Main form area #}
@@ -133,28 +109,24 @@
       </div>
     </div>
 
-    {# Validation result banners (visual mode) #}
-    <div x-show="validationPassed" x-cloak x-transition.opacity
-         class="mt-4 flex items-center gap-2 rounded-md bg-success/[0.08] px-4 py-2.5 ring-1 ring-success/20">
+    {# Validation success banner #}
+    <div id="validation-success"
+         class="hidden mt-4 flex items-center gap-2 rounded-md bg-success/[0.08] px-4 py-2.5 ring-1 ring-success/20">
       <svg class="h-4 w-4 shrink-0 text-success-fg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
       <p class="text-xs font-medium text-success-fg">Configuration is valid. Ready to apply.</p>
     </div>
-    <div x-show="Object.keys(errors).length > 0" x-cloak
-         class="mt-4 rounded-md bg-danger/[0.08] px-4 py-2.5 ring-1 ring-danger/20">
+
+    {# Validation errors banner #}
+    <div id="validation-errors"
+         class="hidden mt-4 rounded-md bg-danger/[0.08] px-4 py-2.5 ring-1 ring-danger/20">
       <div class="flex items-center gap-2">
         <svg class="h-4 w-4 shrink-0 text-danger-fg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         <p class="text-xs font-medium text-danger-fg">
-          <span x-text="Object.keys(errors).length"></span> validation error(s).
-          <span x-show="Object.keys(errors).some(k => hasInlineError(k))">Fix highlighted fields before applying.</span>
+          <span id="error-count"></span> validation error(s).
+          <span id="error-inline-hint" class="hidden">Fix highlighted fields before applying.</span>
         </p>
       </div>
-      {# List errors that don't have a visible inline error element #}
-      <template x-for="[key, msg] in Object.entries(errors).filter(([k]) => !hasInlineError(k))" :key="key">
-        <div class="mt-1.5 ml-6 flex items-start gap-1.5 text-xs text-danger-fg">
-          <code class="shrink-0 rounded-sm bg-danger/[0.12] px-1 py-0.5 font-mono text-[11px]" x-text="key"></code>
-          <span x-text="msg"></span>
-        </div>
-      </template>
+      <div id="orphan-errors"></div>
     </div>
 
     {# Action bar (visual mode) #}
@@ -164,23 +136,21 @@
         Validated before applying. Server/storage changes require a restart.
       </p>
       <div class="flex items-center gap-3">
-        <button @click="reset()" type="button"
+        <button id="reset-btn" type="button"
                 class="rounded border border-strong px-3 py-1.5 text-xs font-medium text-ht-content-secondary hover-bg-divider">
           Reset
         </button>
-        <button @click="preview()" type="button"
+        <button id="preview-btn" type="button"
                 class="rounded border border-strong px-3 py-1.5 text-xs font-medium text-ht-content-secondary hover-bg-divider">
           Preview Diff
         </button>
-        <button @click="validate()" type="button" :disabled="validating"
+        <button id="validate-btn" type="button"
                 class="rounded border border-strong px-3 py-1.5 text-xs font-medium text-ht-content-secondary hover-bg-divider disabled:opacity-50">
-          <span x-show="!validating">Validate</span>
-          <span x-show="validating">Checking…</span>
+          Validate
         </button>
-        <button @click="apply()" type="button" :disabled="saving"
+        <button id="apply-btn" type="button"
                 class="btn-ember rounded px-3 py-1.5 text-xs font-semibold disabled:opacity-50">
-          <span x-show="!saving">Apply Changes</span>
-          <span x-show="saving">Applying…</span>
+          Apply Changes
         </button>
       </div>
     </div>
@@ -188,7 +158,7 @@
   </div>
 
   {# ── Raw YAML Editor ── #}
-  <div x-show="mode === 'raw'" x-transition x-effect="mode === 'raw' && $nextTick(() => { syncMirror(); syncMirrorScroll(); })">
+  <div id="raw-editor-panel" class="hidden">
     {% include "ui/admin/settings/_raw_editor.html" %}
   </div>
 
@@ -196,54 +166,45 @@
   <div id="diff-output" class="mt-4"></div>
 
   {# ── Export YAML Modal ── #}
-  <div x-show="showingExport" x-cloak
-       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
-       @keydown.escape.window="showingExport = false">
-    <div class="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg bg-ht-surface-elevated shadow-xl ring-1 ring-divider-subtle"
-         @click.outside="showingExport = false"
-         x-transition>
+  <div id="export-modal"
+       class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div id="export-modal-panel"
+         class="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg bg-ht-surface-elevated shadow-xl ring-1 ring-divider-subtle">
       {# Header #}
       <div class="flex items-center justify-between border-b border-divider px-6 py-4">
         <div class="flex items-center gap-2">
           <svg class="h-4 w-4 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           <h2 class="text-lg font-semibold text-ht-content-primary">hearth.yaml</h2>
         </div>
-        <button type="button" @click="showingExport = false"
+        <button type="button" id="export-close-btn"
                 class="text-ht-content-muted hover:text-ht-content-secondary">&times;</button>
       </div>
 
       {# YAML content #}
       <div class="flex-1 overflow-y-auto px-6 py-4">
-        {# Loading spinner #}
-        <div x-show="exportLoading" class="flex items-center justify-center py-12">
+        <div id="export-loading" class="flex items-center justify-center py-12">
           <svg class="h-6 w-6 animate-spin text-ht-content-muted" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
           <span class="ml-2 text-sm text-ht-content-muted">Generating YAML…</span>
         </div>
-        <div x-show="!exportLoading" class="rounded-md bg-ht-surface-base ring-1 ring-divider-subtle overflow-x-auto">
+        <div id="export-content" class="hidden rounded-md bg-ht-surface-base ring-1 ring-divider-subtle overflow-x-auto">
           <pre class="p-4 font-mono text-xs leading-relaxed"><code id="export-yaml-highlighted"></code></pre>
         </div>
       </div>
 
       {# Footer #}
       <div class="flex items-center justify-end gap-3 border-t border-divider px-6 py-3">
-        <button @click="showingExport = false" type="button"
+        <button id="export-close-btn-footer" type="button"
                 class="rounded border border-strong px-3 py-1.5 text-xs font-medium text-ht-content-secondary hover-bg-divider">
           Close
         </button>
-        <button @click="copyExport()" type="button"
-                class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-semibold transition-colors"
-                :class="exportCopied ? 'bg-success/20 text-success-fg' : 'btn-ember'">
-          <template x-if="!exportCopied">
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-          </template>
-          <template x-if="exportCopied">
-            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-          </template>
-          <span x-text="exportCopied ? 'Copied!' : 'Copy'"></span>
+        <button id="export-copy-btn" type="button"
+                class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-semibold transition-colors btn-ember">
+          <svg id="export-copy-icon" class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <svg id="export-check-icon" class="hidden h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          <span id="export-copy-label">Copy</span>
         </button>
       </div>
     </div>
   </div>
 </div>
-
 {% endblock %}

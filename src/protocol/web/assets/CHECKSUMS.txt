@@ -8,3 +8,9 @@ htmx.min.js
   version: 1.9.12
   upstream: https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js
   sha256:   449317ade7881e949510db614991e195c3a099c4c791c24dacec55f9f4a2a452
+
+hyperscript.min.js
+  version: 0.9.13
+  upstream: https://unpkg.com/hyperscript.org@0.9.13/dist/_hyperscript.min.js
+  sha256:   e232d23e386080ae7694dbb06827f25a05a33ffb62ec262c20e35762cfb18978
+  sri-sha384: sha384-5yQ5JTatiFEgeiEB4mfkRI3oTGtaNpbJGdcciZ4IEYFpLGt8yDsGAd7tKiMwnX9b

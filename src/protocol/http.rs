@@ -29,7 +29,9 @@ use crate::audit::{AuditEngine, CreateAuditEvent};
 use crate::cluster::ClusterEngine;
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
 use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
-use crate::identity::{IdentityEngine, PasswordGrantRequest, UpdateRealmRequest};
+use crate::identity::{
+    IdentityEngine, PasswordGrantRequest, StepUpMfaGrantRequest, UpdateRealmRequest,
+};
 use crate::protocol::admin_auth::{
     AdminRateLimiter, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
 };
@@ -425,6 +427,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::get(admin_get_user)
                 .patch(admin_update_user)
                 .delete(admin_delete_user),
+        )
+        .route(
+            "/users/{id}/device-fingerprints",
+            axum::routing::delete(admin_delete_user_device_fingerprints),
         )
         .route(
             "/realms",
@@ -1090,6 +1096,9 @@ struct HttpTokenRequest {
     username: Option<String>,
     #[serde(default)]
     password: Option<String>,
+    // Step-up MFA completion (HEA-836)
+    #[serde(default)]
+    mfa_code: Option<String>,
 }
 
 /// HTTP request body for token revocation (RFC 7009).
@@ -1532,11 +1541,20 @@ fn identity_error_to_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "password was recently used",
         ),
+        IdentityError::PasswordCompromised => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "password_compromised")
+        }
         IdentityError::AuditFailure { .. } => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal error: audit record failed",
         ),
         IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
+        IdentityError::StepUpChallengeRequired => (StatusCode::UNAUTHORIZED, "mfa_required"),
+        IdentityError::EnrollMfaRequired => (StatusCode::FORBIDDEN, "mfa_enrollment_required"),
+        IdentityError::InvalidSmsOtp => (StatusCode::UNAUTHORIZED, "invalid_sms_otp"),
+        IdentityError::SmsResendLimitExceeded => {
+            (StatusCode::TOO_MANY_REQUESTS, "sms_resend_limit_exceeded")
+        }
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);
@@ -1800,12 +1818,12 @@ async fn token_exchange_impl(
 
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the ROPC password grant.
+    // Per-IP rate limiting for the ROPC password grant and step-up-mfa grant.
     // In production traffic goes through a reverse proxy so the real IP
     // arrives via X-Forwarded-For; FALLBACK_PEER is used when ConnectInfo is
     // unavailable (e.g. tower::ServiceExt::oneshot in tests).
     let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
-    if grant_type == "password"
+    if (grant_type == "password" || grant_type == "urn:hearth:params:grant-type:step-up-mfa")
         && state
             .identity
             .check_ip_login_rate_limit(&realm_id, &client_ip)
@@ -1999,6 +2017,11 @@ async fn token_exchange_impl(
                 email,
                 password,
                 scope: body.scope,
+                client_ip: Some(client_ip.clone()),
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
             };
             let realm_str = realm_id.as_uuid().to_string();
             match state.identity.password_grant_token(&realm_id, &request) {
@@ -2024,6 +2047,58 @@ async fn token_exchange_impl(
                     | crate::identity::IdentityError::RateLimited),
                 ) => {
                     // Record the failed attempt against the IP for credential failures.
+                    state
+                        .identity
+                        .record_ip_login_attempt(&realm_id, &client_ip);
+                    identity_error_to_response(e).into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
+        "urn:hearth:params:grant-type:step-up-mfa" => {
+            let (Some(email), Some(password), Some(mfa_code)) =
+                (body.username, body.password, body.mfa_code)
+            else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "username, password, and mfa_code required for step-up-mfa grant"})),
+                )
+                    .into_response();
+            };
+            let request = StepUpMfaGrantRequest {
+                email,
+                password,
+                mfa_code,
+                scope: body.scope,
+                client_ip: Some(client_ip.clone()),
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+            };
+            let realm_str = realm_id.as_uuid().to_string();
+            match state.identity.step_up_mfa_grant_token(&realm_id, &request) {
+                Ok(response) => {
+                    crate::metrics::metrics()
+                        .tokens_issued_total
+                        .with_label_values(&[realm_str.as_str(), "step_up_mfa"])
+                        .inc();
+                    crate::metrics::metrics().active_sessions.inc();
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "access_token": response.access_token(),
+                            "refresh_token": response.refresh_token(),
+                            "token_type": response.token_type,
+                            "expires_in": response.expires_in,
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(
+                    ref e @ (crate::identity::IdentityError::InvalidCredential { .. }
+                    | crate::identity::IdentityError::RateLimited),
+                ) => {
                     state
                         .identity
                         .record_ip_login_attempt(&realm_id, &client_ip);
@@ -2873,6 +2948,57 @@ async fn admin_delete_user(
     }
 }
 
+/// Admin: erase all device fingerprints for a user (GDPR Art. 17 / AC-11).
+///
+/// `DELETE /admin/users/{id}/device-fingerprints`
+///
+/// Satisfies DSAR erasure requests for biometric/device-signal data without
+/// requiring deletion of the entire user account.  Returns `{ "erased": N }`.
+async fn admin_delete_user_device_fingerprints(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+
+    let user_uuid: uuid::Uuid = match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    let user_id = UserId::new(user_uuid);
+
+    match state
+        .identity
+        .delete_user_device_fingerprints(&auth.realm_id, &user_id)
+    {
+        Ok(erased) => {
+            let _ = state.audit.append(&CreateAuditEvent {
+                realm_id: auth.realm_id.clone(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::DeviceFingerprintsErased,
+                resource_type: "user".to_string(),
+                resource_id: user_uuid.to_string(),
+                metadata: Some(serde_json::json!({
+                    "via": "admin_api",
+                    "count": erased,
+                })),
+            });
+            (StatusCode::OK, Json(serde_json::json!({"erased": erased}))).into_response()
+        }
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
 /// HTTP request body for bulk user operations.
 #[derive(Debug, Deserialize)]
 struct HttpBulkUsersRequest {
@@ -3352,6 +3478,24 @@ async fn admin_patch_realm_config(
 
     let mut config = realm.config().clone();
     config.default_required_actions = actions;
+
+    // Optional fields: apply only when present in the JSON body.
+    if let Some(methods) = body["mfa_methods"].as_array() {
+        let strs: Vec<String> = methods
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        config.mfa_methods = if strs.is_empty() { None } else { Some(strs) };
+    }
+    if let Some(v) = body["sms_otp_expiry_seconds"].as_u64() {
+        config.sms_otp_expiry_seconds = Some(v);
+    }
+    if let Some(v) = body["sms_otp_max_attempts"].as_u64() {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            config.sms_otp_max_attempts = Some(v as u32);
+        }
+    }
 
     match state.identity.update_realm(
         &realm_id,
@@ -5768,10 +5912,10 @@ async fn realm_token_exchange(
     }
     let grant_type = body.grant_type.as_deref().unwrap_or("authorization_code");
 
-    // Per-IP rate limiting for the ROPC password grant.
+    // Per-IP rate limiting for the ROPC password grant and step-up-mfa grant.
     // Real IP arrives via X-Forwarded-For in production; FALLBACK_PEER used in tests.
     let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
-    if grant_type == "password"
+    if (grant_type == "password" || grant_type == "urn:hearth:params:grant-type:step-up-mfa")
         && state
             .identity
             .check_ip_login_rate_limit(&realm_id, &client_ip)
@@ -5913,8 +6057,57 @@ async fn realm_token_exchange(
                 email,
                 password,
                 scope: body.scope,
+                client_ip: Some(client_ip.clone()),
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
             };
             match state.identity.password_grant_token(&realm_id, &request) {
+                Ok(response) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "access_token": response.access_token(),
+                        "refresh_token": response.refresh_token(),
+                        "token_type": response.token_type,
+                        "expires_in": response.expires_in,
+                    })),
+                )
+                    .into_response(),
+                Err(
+                    ref e @ (crate::identity::IdentityError::InvalidCredential { .. }
+                    | crate::identity::IdentityError::RateLimited),
+                ) => {
+                    state
+                        .identity
+                        .record_ip_login_attempt(&realm_id, &client_ip);
+                    identity_error_to_response(e).into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
+        "urn:hearth:params:grant-type:step-up-mfa" => {
+            let (Some(email), Some(password), Some(mfa_code)) =
+                (body.username, body.password, body.mfa_code)
+            else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "username, password, and mfa_code required for step-up-mfa grant"})),
+                )
+                    .into_response();
+            };
+            let request = StepUpMfaGrantRequest {
+                email,
+                password,
+                mfa_code,
+                scope: body.scope,
+                client_ip: Some(client_ip.clone()),
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+            };
+            match state.identity.step_up_mfa_grant_token(&realm_id, &request) {
                 Ok(response) => (
                     StatusCode::OK,
                     Json(serde_json::json!({

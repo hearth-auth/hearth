@@ -1,7 +1,9 @@
 //! Identity domain types: users, realms, requests, and status.
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::core::{
     ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
@@ -69,18 +71,29 @@ pub enum RequiredAction {
     VerifyEmail,
     /// User must set a new password before proceeding.
     UpdatePassword,
+    /// User must enroll an MFA factor before proceeding.
+    ///
+    /// Injected automatically by the adaptive-MFA engine when a login arrives
+    /// from an unrecognised device and the user has no enrolled factor.
+    EnrollMfa,
+    /// User must enroll a verified phone number via SMS OTP before proceeding.
+    ///
+    /// Injected automatically when a realm has `mfa_methods: ["sms"]` and the
+    /// user has no verified phone number on record.
+    EnrollPhoneOtp,
 }
 
 impl RequiredAction {
     /// Canonical execution priority. Lower numbers run first.
     ///
-    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`. Used to sort pending actions
-    /// into a deterministic order regardless of storage insertion order.
+    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_PHONE_OTP=4`.
     #[must_use]
     pub fn priority(self) -> u8 {
         match self {
             Self::VerifyEmail => 1,
             Self::UpdatePassword => 2,
+            Self::EnrollMfa => 3,
+            Self::EnrollPhoneOtp => 4,
         }
     }
 
@@ -90,14 +103,18 @@ impl RequiredAction {
         match self {
             Self::VerifyEmail => "VERIFY_EMAIL",
             Self::UpdatePassword => "UPDATE_PASSWORD",
+            Self::EnrollMfa => "enroll-mfa",
+            Self::EnrollPhoneOtp => "ENROLL_PHONE_OTP",
         }
     }
 
-    /// Parse from a URL path segment (case-sensitive, SCREAMING_SNAKE_CASE).
+    /// Parse from a URL path segment (case-sensitive).
     pub fn from_path_segment(s: &str) -> Option<Self> {
         match s {
             "VERIFY_EMAIL" => Some(Self::VerifyEmail),
             "UPDATE_PASSWORD" => Some(Self::UpdatePassword),
+            "enroll-mfa" => Some(Self::EnrollMfa),
+            "ENROLL_PHONE_OTP" => Some(Self::EnrollPhoneOtp),
             _ => None,
         }
     }
@@ -123,6 +140,12 @@ pub struct User {
     /// Whether the user's email address has been verified. Absent in old records = false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     email_verified: bool,
+    /// E.164 phone number. `None` when no phone has been enrolled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phone_number: Option<String>,
+    /// Whether the stored phone number has been verified via OTP.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    phone_verified: bool,
     created_at: Timestamp,
     updated_at: Timestamp,
 }
@@ -150,6 +173,8 @@ impl User {
             status,
             required_actions,
             email_verified: false,
+            phone_number: None,
+            phone_verified: false,
             created_at,
             updated_at,
         }
@@ -250,10 +275,57 @@ impl User {
         self.email_verified = verified;
     }
 
+    /// Returns the user's enrolled phone number in E.164 format, or `None` if not set.
+    pub fn phone_number(&self) -> Option<&str> {
+        self.phone_number.as_deref()
+    }
+
+    /// Returns the phone number masked for display in admin UIs (e.g. `+1***-***-1234`).
+    ///
+    /// Shows the `+` sign and the first country-code digit, then `***-***-`, then the
+    /// last four digits. Returns `None` when no phone is enrolled. Phone numbers shorter
+    /// than 6 E.164 characters return `"****"` instead of a structured mask.
+    ///
+    /// The raw number is never included — callers MUST NOT log or trace the return value
+    /// as it still conveys partial PII.
+    pub fn masked_phone_number(&self) -> Option<String> {
+        self.phone_number.as_deref().map(mask_phone_number)
+    }
+
+    /// Sets (or clears) the user's phone number. Used internally by the identity engine.
+    pub(crate) fn set_phone_number(&mut self, phone: Option<String>) {
+        self.phone_number = phone;
+    }
+
+    /// Returns whether the stored phone number has been verified via OTP.
+    pub fn phone_verified(&self) -> bool {
+        self.phone_verified
+    }
+
+    /// Marks the user's phone number as verified (or unverified). Used internally.
+    pub(crate) fn set_phone_verified(&mut self, verified: bool) {
+        self.phone_verified = verified;
+    }
+
     /// Updates the `updated_at` timestamp.
     pub(crate) fn set_updated_at(&mut self, ts: Timestamp) {
         self.updated_at = ts;
     }
+}
+
+/// Masks an E.164 phone number for admin display.
+///
+/// Shows `+{first digit}***-***-{last 4}`. For numbers shorter than 6 chars,
+/// returns `"****"`. This function is intentionally not public — go through
+/// `User::masked_phone_number()`.
+fn mask_phone_number(phone: &str) -> String {
+    let chars: Vec<char> = phone.chars().collect();
+    if chars.len() < 6 {
+        return "****".to_string();
+    }
+    let prefix: String = chars[..2].iter().collect();
+    let suffix: String = chars[chars.len() - 4..].iter().collect();
+    format!("{prefix}***-***-{suffix}")
 }
 
 /// Device and network context captured at session creation time.
@@ -472,6 +544,10 @@ pub struct UpdateUserRequest {
     pub attributes: Option<BTreeMap<String, String>>,
     /// Replace the required actions list. `Some([])` clears all actions; `None` leaves unchanged.
     pub required_actions: Option<Vec<RequiredAction>>,
+    /// Set the user's phone number in E.164 format. `Some(None)` clears the field; `None` leaves unchanged.
+    pub phone_number: Option<Option<String>>,
+    /// Set the phone-verified flag. `None` leaves unchanged.
+    pub phone_verified: Option<bool>,
 }
 
 // ===== Realm types =====
@@ -679,8 +755,13 @@ pub struct RealmConfig {
     pub web_theme_name: Option<String>,
     /// Whether MFA is required for all users in this realm.
     pub mfa_required: Option<bool>,
-    /// Allowed MFA methods (e.g. `["totp", "webauthn"]`).
+    /// Allowed MFA methods (e.g. `["totp", "webauthn", "sms"]`).
     pub mfa_methods: Option<Vec<String>>,
+    /// Per-realm SMS OTP expiry in seconds. `None` falls back to the module default (600 s / 10 min).
+    pub sms_otp_expiry_seconds: Option<u64>,
+    /// Per-realm SMS OTP maximum verification attempts before the record is discarded.
+    /// `None` falls back to the module default (5).
+    pub sms_otp_max_attempts: Option<u32>,
     /// Allowed authentication methods (e.g. `["password", "magic_link", "passkey"]`).
     pub allowed_auth_methods: Option<Vec<String>>,
     /// Password complexity policy.
@@ -757,6 +838,166 @@ pub struct RealmConfig {
     /// field deserialize to `[]` via serde default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_required_actions: Vec<RequiredAction>,
+    /// HIBP k-anonymity breach-check configuration.
+    ///
+    /// Existing realms deserialised without this field get the safe migration
+    /// default (`enabled = false`). Newly provisioned realms should set
+    /// `enabled = true` explicitly in their configuration.
+    #[serde(default)]
+    pub breach_check: BreachCheckConfig,
+    /// Adaptive (risk-based) MFA configuration.
+    ///
+    /// Existing realms deserialised without this field get the safe migration
+    /// default (`enabled = false`). Set `enabled = true` and supply a
+    /// `fingerprint_hmac_secret` to activate device-recognition step-up.
+    #[serde(default)]
+    pub adaptive_mfa: AdaptiveMfaConfig,
+}
+
+// ── SecretString serde helpers ────────────────────────────────────────────────
+//
+// Used by BreachCheckConfig and AdaptiveMfaConfig to safely round-trip secret
+// fields through storage without relying on SecretString's missing Serialize impl.
+mod secret_string_serde {
+    use secrecy::{ExposeSecret, SecretString};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(secret.expose_secret())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SecretString, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::Deserialize;
+        let val = String::deserialize(deserializer)?;
+        Ok(SecretString::new(val))
+    }
+}
+
+fn is_empty_secret(s: &SecretString) -> bool {
+    s.expose_secret().is_empty()
+}
+
+fn default_secret_string() -> SecretString {
+    SecretString::new(String::new())
+}
+
+/// Configuration for the HIBP Pwned Passwords k-anonymity breach-check.
+///
+/// Only the first 5 hex characters of the SHA-1 hash are sent to the HIBP
+/// Range API — no plaintext password or full hash leaves the process.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BreachCheckConfig {
+    /// When `true`, every password-set or password-change call queries the HIBP
+    /// Range API before accepting the new credential.
+    pub enabled: bool,
+    /// Request timeout for the HIBP API in milliseconds.
+    ///
+    /// Defaults to 3000 ms. On timeout the call fails-open (password accepted,
+    /// `BreachCheckUnavailable` audit event emitted).
+    pub timeout_ms: u64,
+    /// Optional HIBP API key. When non-empty, sent as the `hibp-api-key` header.
+    /// Required for paid HIBP Enterprise plans.
+    #[serde(
+        default = "default_secret_string",
+        skip_serializing_if = "is_empty_secret",
+        serialize_with = "secret_string_serde::serialize",
+        deserialize_with = "secret_string_serde::deserialize"
+    )]
+    pub hibp_api_key: SecretString,
+}
+
+impl fmt::Debug for BreachCheckConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BreachCheckConfig")
+            .field("enabled", &self.enabled)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("hibp_api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PartialEq for BreachCheckConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.timeout_ms == other.timeout_ms
+            && self.hibp_api_key.expose_secret() == other.hibp_api_key.expose_secret()
+    }
+}
+
+impl Default for BreachCheckConfig {
+    fn default() -> Self {
+        Self {
+            // Safe migration default: disabled so existing realms are unaffected.
+            enabled: false,
+            timeout_ms: 3000,
+            hibp_api_key: SecretString::new(String::new()),
+        }
+    }
+}
+
+/// Adaptive MFA configuration for a realm.
+///
+/// Controls device-fingerprint–based step-up MFA injection. When `enabled`,
+/// every login from an unrecognised device triggers a step-up challenge or
+/// an MFA-enrollment required-action. Only the HMAC output is stored —
+/// never raw IP or User-Agent strings (AC-11 / GDPR).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AdaptiveMfaConfig {
+    /// Whether adaptive MFA is active for this realm.
+    ///
+    /// Defaults to `false` for existing realms (safe migration default).
+    /// New realms should set this to `true` explicitly.
+    pub enabled: bool,
+    /// Number of days a recognised device is trusted before requiring re-verification.
+    pub recognition_window_days: u32,
+    /// HMAC-SHA256 key used to derive device fingerprints.
+    ///
+    /// Should be at least 32 bytes of cryptographically-random data. When empty,
+    /// the feature behaves as if `enabled = false` to prevent accidentally
+    /// treating every device as unrecognised due to a trivially-guessable key.
+    #[serde(
+        default = "default_secret_string",
+        skip_serializing_if = "is_empty_secret",
+        serialize_with = "secret_string_serde::serialize",
+        deserialize_with = "secret_string_serde::deserialize"
+    )]
+    pub fingerprint_hmac_secret: SecretString,
+}
+
+impl fmt::Debug for AdaptiveMfaConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdaptiveMfaConfig")
+            .field("enabled", &self.enabled)
+            .field("recognition_window_days", &self.recognition_window_days)
+            .field("fingerprint_hmac_secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PartialEq for AdaptiveMfaConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.recognition_window_days == other.recognition_window_days
+            && self.fingerprint_hmac_secret.expose_secret()
+                == other.fingerprint_hmac_secret.expose_secret()
+    }
+}
+
+impl Default for AdaptiveMfaConfig {
+    fn default() -> Self {
+        Self {
+            // Safe migration default: disabled so existing realms are unaffected.
+            enabled: false,
+            recognition_window_days: 30,
+            fingerprint_hmac_secret: SecretString::new(String::new()),
+        }
+    }
 }
 
 /// A realm record.
@@ -2061,6 +2302,10 @@ mod tests {
             serde_json::to_string(&RequiredAction::UpdatePassword).expect("serialize"),
             "\"UPDATE_PASSWORD\""
         );
+        assert_eq!(
+            serde_json::to_string(&RequiredAction::EnrollPhoneOtp).expect("serialize"),
+            "\"ENROLL_PHONE_OTP\""
+        );
     }
 
     #[test]
@@ -2070,6 +2315,93 @@ mod tests {
 
         let b: RequiredAction = serde_json::from_str("\"UPDATE_PASSWORD\"").expect("deserialize");
         assert_eq!(b, RequiredAction::UpdatePassword);
+
+        let c: RequiredAction = serde_json::from_str("\"ENROLL_PHONE_OTP\"").expect("deserialize");
+        assert_eq!(c, RequiredAction::EnrollPhoneOtp);
+    }
+
+    #[test]
+    fn enroll_phone_otp_priority_and_path_segment() {
+        assert_eq!(RequiredAction::EnrollPhoneOtp.priority(), 4);
+        assert_eq!(
+            RequiredAction::EnrollPhoneOtp.as_path_segment(),
+            "ENROLL_PHONE_OTP"
+        );
+        assert_eq!(
+            RequiredAction::from_path_segment("ENROLL_PHONE_OTP"),
+            Some(RequiredAction::EnrollPhoneOtp)
+        );
+    }
+
+    #[test]
+    fn user_phone_fields_default_none_on_legacy_record() {
+        let legacy_json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "email": "old@example.com",
+            "display_name": "Old User",
+            "first_name": "Old",
+            "last_name": "User",
+            "status": "Active",
+            "created_at": 1000000,
+            "updated_at": 1000000
+        }"#;
+        let user: User = serde_json::from_str(legacy_json).expect("deserialize");
+        assert!(
+            user.phone_number().is_none(),
+            "legacy user must have no phone"
+        );
+        assert!(
+            !user.phone_verified(),
+            "legacy user must not be phone-verified"
+        );
+    }
+
+    #[test]
+    fn user_phone_fields_round_trip() {
+        let now = Timestamp::from_micros(1_000_000);
+        let mut user = User::new(
+            UserId::generate(),
+            "alice@example.com".to_string(),
+            "Alice".to_string(),
+            "Alice".to_string(),
+            String::new(),
+            UserStatus::Active,
+            Vec::new(),
+            now,
+            now,
+        );
+        user.set_phone_number(Some("+15555550100".to_string()));
+        user.set_phone_verified(true);
+
+        let json = serde_json::to_string(&user).expect("serialize");
+        let back: User = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.phone_number(), Some("+15555550100"));
+        assert!(back.phone_verified());
+    }
+
+    #[test]
+    fn user_without_phone_omits_fields_in_json() {
+        let now = Timestamp::from_micros(1_000_000);
+        let user = User::new(
+            UserId::generate(),
+            "bob@example.com".to_string(),
+            "Bob".to_string(),
+            "Bob".to_string(),
+            String::new(),
+            UserStatus::Active,
+            Vec::new(),
+            now,
+            now,
+        );
+        let json = serde_json::to_string(&user).expect("serialize");
+        assert!(
+            !json.contains("phone_number"),
+            "absent phone must be omitted"
+        );
+        assert!(
+            !json.contains("phone_verified"),
+            "false phone_verified must be omitted"
+        );
     }
 
     #[test]
@@ -2136,6 +2468,106 @@ mod tests {
             !json.contains("required_actions"),
             "empty required_actions must be omitted to keep records compact"
         );
+    }
+
+    // ── mask_phone_number / User::masked_phone_number ──────────────────────
+
+    #[test]
+    fn masked_phone_matches_ac_example() {
+        // AC 3.5.2: masked display MUST be `+1***-***-1234` for `+15555551234`.
+        assert_eq!(mask_phone_number("+15555551234"), "+1***-***-1234");
+    }
+
+    #[test]
+    fn masked_phone_uk_number() {
+        // Verifies that the mask works for multi-digit country codes too.
+        assert_eq!(mask_phone_number("+441234567890"), "+4***-***-7890");
+    }
+
+    #[test]
+    fn masked_phone_short_number_returns_stars() {
+        assert_eq!(mask_phone_number("+123"), "****");
+        assert_eq!(mask_phone_number("+12"), "****");
+    }
+
+    #[test]
+    fn user_masked_phone_number_returns_none_when_no_phone() {
+        let now = Timestamp::from_micros(1_000_000);
+        let user = User::new(
+            UserId::generate(),
+            "alice@example.com".to_string(),
+            "Alice".to_string(),
+            "Alice".to_string(),
+            String::new(),
+            UserStatus::Active,
+            Vec::new(),
+            now,
+            now,
+        );
+        assert!(user.masked_phone_number().is_none());
+    }
+
+    #[test]
+    fn user_masked_phone_number_masks_enrolled_phone() {
+        let now = Timestamp::from_micros(1_000_000);
+        let mut user = User::new(
+            UserId::generate(),
+            "alice@example.com".to_string(),
+            "Alice".to_string(),
+            "Alice".to_string(),
+            String::new(),
+            UserStatus::Active,
+            Vec::new(),
+            now,
+            now,
+        );
+        user.set_phone_number(Some("+15555551234".to_string()));
+        assert_eq!(
+            user.masked_phone_number(),
+            Some("+1***-***-1234".to_string())
+        );
+    }
+
+    // ── RealmConfig sms_otp fields ─────────────────────────────────────────
+
+    #[test]
+    fn realm_config_sms_otp_fields_default_none() {
+        let config = RealmConfig::default();
+        assert!(config.sms_otp_expiry_seconds.is_none());
+        assert!(config.sms_otp_max_attempts.is_none());
+    }
+
+    #[test]
+    fn realm_config_sms_otp_fields_roundtrip() {
+        let config = RealmConfig {
+            sms_otp_expiry_seconds: Some(300),
+            sms_otp_max_attempts: Some(3),
+            ..RealmConfig::default()
+        };
+        let json = serde_json::to_string(&config).expect("serialize");
+        let back: RealmConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.sms_otp_expiry_seconds, Some(300));
+        assert_eq!(back.sms_otp_max_attempts, Some(3));
+    }
+
+    #[test]
+    fn realm_config_sms_otp_fields_absent_in_legacy_json() {
+        // Records stored before these fields were added must deserialize cleanly.
+        let legacy_json = r#"{"name": "test", "status": "Active"}"#;
+        let config: RealmConfig = serde_json::from_str(legacy_json).unwrap_or_default();
+        assert!(config.sms_otp_expiry_seconds.is_none());
+        assert!(config.sms_otp_max_attempts.is_none());
+    }
+
+    #[test]
+    fn realm_config_mfa_methods_accepts_sms_value() {
+        let config = RealmConfig {
+            mfa_methods: Some(vec!["sms".to_string()]),
+            ..RealmConfig::default()
+        };
+        let json = serde_json::to_string(&config).expect("serialize");
+        let back: RealmConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.mfa_methods, Some(vec!["sms".to_string()]));
     }
 
     #[test]
