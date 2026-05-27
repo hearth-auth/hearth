@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -156,6 +156,27 @@ cluster-route-check:
 
 ## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate + cluster route check (merge).
 ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster-route-check
+
+## Host-side reproduction of PR-blocking CI checks (~5 min cold).
+## Mirrors the seven checks that gate every PR: test-quality, check (clippy+fmt+nextest),
+## css-check, proto-check, cargo deny, sdk-conformance, and sdk-smoke.
+## For full reproduction including workflow files and matrix legs: make ci-local-full
+ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
+	@echo "==> test-quality"              && $(MAKE) test-quality
+	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
+	@echo "==> css-check"                && $(MAKE) css-check
+	@echo "==> proto-check"              && $(MAKE) proto-check
+	@echo "==> cargo deny"               && cargo deny check
+	@echo "==> sdk-conformance"          && bash scripts/check-sdk-conformance.sh
+	@echo "==> sdk-smoke-local"          && $(MAKE) sdk-smoke-local
+	@echo ""
+	@echo "ci-local-fast OK. For full reproduction (workflow files, toolchain drift),"
+	@echo "run: make ci-local-full"
+
+## Build hearth, boot --dev on a random free port, run TS + Go SDK example
+## smoke checks, then tear down. Called by ci-local-fast; safe to run standalone.
+sdk-smoke-local: ## Build hearth, boot --dev, run TS + Go SDK examples, tear down
+	@bash scripts/sdk-smoke-local.sh
 
 ## Run Hearth in local dev mode with persistent storage (./data/dev).
 ## Data survives restarts. Use `make dev-reset` to wipe it.

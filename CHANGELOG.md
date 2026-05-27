@@ -7,6 +7,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **`make ci-local-fast`** — single target that runs the seven PR-blocking CI
+  checks on the developer's host in ~5 min cold: `test-quality`, `check`
+  (clippy + fmt + nextest), `css-check`, `proto-check`, `cargo deny`,
+  `sdk-conformance`, and `sdk-smoke-local` (HEA-890).
+- **`make sdk-smoke-local`** — builds hearth (debug), boots `--dev` on a random
+  free port, runs TypeScript/Next.js and Go/Gin SDK example smokes, then tears
+  down. Mirrors the `sdk-smoke` CI workflow without requiring Docker (HEA-890).
+
 ### Fixed
 
 - **Admin sidebar chevron icon (HEA-886)** — the realm-tree expand chevron in
