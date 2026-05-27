@@ -42,6 +42,7 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 | `make ui-test-visual` | Visual regression baselines; `UPDATE=1` locks new snapshots |
 | `make ui-test-cross-browser` | Smoke + flows + regression on Chromium, Firefox, WebKit |
 | `make ci-local-fast` | Host-side mirror of PR-blocking CI (7 checks, ~5 min) — run before push |
+| `make ci-local-full` | Full container reproduction via `act` (~10-15 min) — use when `ci-local-fast` passes but CI fails, or when editing workflow files |
 | `make sdk-smoke-local` | Build hearth, boot `--dev`, run TS + Go SDK example smokes, tear down |
 
 ### UI Test Pre-commit Workflow

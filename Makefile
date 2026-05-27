@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -172,6 +172,17 @@ ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo ""
 	@echo "ci-local-fast OK. For full reproduction (workflow files, toolchain drift),"
 	@echo "run: make ci-local-full"
+
+## Full container reproduction of PR-blocking GHA workflows via nektos/act (~10-15 min cold).
+## Requires act: brew install act | mise install act | gh extension install nektos/gh-act
+## Catches bugs ci-local-fast cannot: workflow-file errors, toolchain drift, missing install steps.
+## See CONTRIBUTING.md § "Full container CI reproduction (ci-local-full)" for details.
+ci-local-full: ## Run PR-blocking workflows in containers via act (~10-15 min)
+	@command -v act >/dev/null || { echo "act not found. Install: 'brew install act' or 'mise install act'"; exit 1; }
+	act pull_request \
+	  -W .github/workflows/ci.yml \
+	  -W .github/workflows/sdk-smoke.yml \
+	  --artifact-server-path /tmp/act-artifacts
 
 ## Build hearth, boot --dev on a random free port, run TS + Go SDK example
 ## smoke checks, then tear down. Called by ci-local-fast; safe to run standalone.

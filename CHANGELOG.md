@@ -9,6 +9,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`make ci-local-full`** — full container reproduction of PR-blocking GHA
+  workflows via `nektos/act`; catches workflow-file errors and toolchain drift
+  that the host-side `ci-local-fast` cannot. Targets 10–15 min cold on a
+  developer's host. See `CONTRIBUTING.md` for install instructions and
+  known-skipped workflows ([HEA-891](/HEA/issues/HEA-891)).
 - **`make ci-local-fast`** — single target that runs the seven PR-blocking CI
   checks on the developer's host in ~5 min cold: `test-quality`, `check`
   (clippy + fmt + nextest), `css-check`, `proto-check`, `cargo deny`,
