@@ -3,15 +3,15 @@
    The detail row below is a sibling <tr> rendered immediately after,
    hidden until the toggle is clicked — no HTMX round-trip needed since
    the full event payload is embedded in the server render. #}
-<tr class="border-b border-divider-subtle hover-bg-divider{% if row.action_high_severity %} border-l-2 border-l-amber-400/60{% endif %}">
+<tr data-audit-row class="border-b border-divider-subtle hover-bg-divider{% if row.action_high_severity %} border-l-2 border-l-amber-400/60{% endif %}">
   <td class="w-8 px-3 py-3">
     <button type="button"
             aria-expanded="false"
             aria-label="Expand event detail"
             _="on click
-                 toggle .bg-ht-surface-overlay on my closest <tr/>
+                 toggle .bg-ht-surface-overlay on my closest @data-audit-row
                  toggle .rotate-90 on me
-                 toggle .hidden on my closest <tr/>'s next <tr/>
+                 toggle .hidden on my closest @data-audit-row's nextElementSibling
                  if @aria-expanded == 'false'
                    set @aria-expanded to 'true'
                    set @aria-label to 'Collapse event detail'
