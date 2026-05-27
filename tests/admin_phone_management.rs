@@ -399,8 +399,9 @@ async fn remove_phone_idempotent_when_no_phone_set() {
             ..Default::default()
         },
     );
+    // AUDIT: justified-weak-assert: remove_phone returns Result<User, _>; Ok(_) is required
     assert!(
-        matches!(result, Ok(())),
+        matches!(result, Ok(_)),
         "remove-phone when no phone must succeed"
     );
 }

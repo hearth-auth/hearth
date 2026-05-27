@@ -11,7 +11,7 @@
             _="on click
                  toggle .bg-ht-surface-overlay on my closest @data-audit-row
                  toggle .rotate-90 on me
-                 toggle .hidden on my closest @data-audit-row's nextElementSibling
+                 toggle .hidden on my closest @data-audit-row's next <[data-audit-detail]/>
                  if @aria-expanded == 'false'
                    set @aria-expanded to 'true'
                    set @aria-label to 'Collapse event detail'
@@ -69,7 +69,7 @@
     {% endif %}
   </td>
 </tr>
-<tr class="hidden border-b border-divider-subtle bg-ht-surface-overlay">
+<tr data-audit-detail class="hidden border-b border-divider-subtle bg-ht-surface-overlay">
   <td colspan="6" class="px-6 py-4">
     {% include "ui/admin/audit/_detail.html" %}
   </td>
