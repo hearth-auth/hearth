@@ -96,7 +96,7 @@ make ci-local-full   # ~10–15 min cold; exits 0 means CI would pass
 
 | Flag | What it does |
 |------|--------------|
-| `--platform ubuntu-latest=catthehacker/ubuntu:act-22.04-full` | Uses a pre-built image with protoc, buf, Node, Go — no re-install overhead |
+| `--platform ubuntu-latest=ghcr.io/catthehacker/ubuntu:full-22.04` | Uses a pre-built image with protoc, buf, Node, Go — no re-install overhead |
 | `--bind` | Mounts the host workspace instead of copying it; file writes are visible on the host |
 | `--container-architecture linux/amd64` | Forces x86\_64 inside the container |
 | `--artifact-server-path /tmp/act-artifacts` | Captures workflow upload-artifact outputs locally |
