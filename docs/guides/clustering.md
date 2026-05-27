@@ -93,10 +93,16 @@ Bootstrapping initializes the cluster's initial membership. Do this **once** —
 2. Wait until all nodes are listening (check logs for `"Raft peer gRPC server starting (mTLS)"`).
 3. Call the bootstrap endpoint on **one** designated bootstrap node:
 
+> **System-realm token required.** Cluster admin endpoints are gated to the system realm
+> (the nil UUID). Your admin token must carry `X-Realm-ID: 00000000-0000-0000-0000-000000000000`.
+> Tokens issued against a tenant realm return `403 Forbidden` even if the user is an admin.
+> Obtain a system-realm admin token with `POST /admin/bootstrap` (dev) or via your bootstrap
+> token in `hearth.yaml`.
+
 ```bash
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/bootstrap \
   -H "Authorization: Bearer <admin-token>" \
-  -H "X-Realm-ID: <realm-uuid>"
+  -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000"
 ```
 
 This sends the initial membership list (derived from the node's `peers` + its own `node_id`) to `openraft`'s `initialize()`. The cluster holds an election and begins accepting writes within one election timeout (~1.5–3 seconds).
@@ -122,7 +128,7 @@ This sends the initial membership list (derived from the node's `peers` + its ow
 ```bash
 curl -s http://10.0.0.1:8420/admin/cluster/status \
   -H "Authorization: Bearer <admin-token>" \
-  -H "X-Realm-ID: <realm-uuid>"
+  -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000"
 ```
 
 **Expected response (`200 OK`):**
@@ -196,7 +202,7 @@ Before shutting down a node, initiate a **Raft leadership transfer** to avoid a 
 # Transfer leadership before stopping the process
 curl -s -X POST http://10.0.0.1:8420/admin/cluster/transfer-leadership \
   -H "Authorization: Bearer <admin-token>" \
-  -H "X-Realm-ID: <realm-uuid>"
+  -H "X-Realm-ID: 00000000-0000-0000-0000-000000000000"
 
 # Then stop the process
 systemctl stop hearth
