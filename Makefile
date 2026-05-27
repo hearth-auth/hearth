@@ -181,6 +181,7 @@ ci-local-full: ## Run PR-blocking workflows in containers via act (~10-15 min)
 	@command -v gh >/dev/null || { echo "gh CLI not found. Install: https://cli.github.com"; exit 1; }
 	@gh extension list 2>/dev/null | grep -q 'nektos/gh-act' || { echo "gh-act extension not found. Install: 'gh extension install nektos/gh-act'"; exit 1; }
 	gh act pull_request \
+	  --verbose \
 	  -W .github/workflows/ci.yml \
 	  -W .github/workflows/sdk-smoke.yml \
 	  --artifact-server-path /tmp/act-artifacts
