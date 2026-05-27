@@ -1173,8 +1173,8 @@ struct EnrollPhoneOtpVerifyTemplate {
     masked_phone: String,
     /// Raw phone (for hidden form fields).
     phone: String,
-    /// Opaque nonce returned by `issue_sms_otp`.
-    nonce: String,
+    /// Opaque nonce returned by `issue_sms_otp`; `None` in rate-limited renders.
+    nonce: Option<String>,
     error: Option<String>,
     chrome: bool,
     active: &'static str,
@@ -1268,7 +1268,7 @@ pub async fn enroll_phone_otp_send(
                 // Return the verify page with a warning rather than blocking —
                 // the real OTP was already sent recently (rate limit window).
                 &phone,
-                "rate-limited",
+                None,
                 Some("A code was recently sent to this number. Please wait before requesting another."),
             );
         }
@@ -1281,7 +1281,7 @@ pub async fn enroll_phone_otp_send(
         }
     };
 
-    render_enroll_phone_verify(&state, &phone, &nonce, None)
+    render_enroll_phone_verify(&state, &phone, Some(&nonce), None)
 }
 
 /// Verifies the submitted OTP code, stores the phone as verified, clears
@@ -1325,7 +1325,7 @@ pub async fn enroll_phone_otp_verify_submit(
         return render_enroll_phone_verify(
             &state,
             &phone,
-            &form.nonce,
+            Some(&form.nonce),
             Some("Invalid submission."),
         );
     }
@@ -1342,7 +1342,7 @@ pub async fn enroll_phone_otp_verify_submit(
             return render_enroll_phone_verify(
                 &state,
                 &phone,
-                &form.nonce,
+                Some(&form.nonce),
                 Some("That code is incorrect or has expired. Try again or request a new code."),
             );
         }
@@ -1434,13 +1434,13 @@ fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Respo
 fn render_enroll_phone_verify(
     state: &Arc<WebState>,
     phone: &str,
-    nonce: &str,
+    nonce: Option<&str>,
     error: Option<&str>,
 ) -> Response {
     let tmpl = EnrollPhoneOtpVerifyTemplate {
         masked_phone: mask_phone(phone),
         phone: phone.to_string(),
-        nonce: nonce.to_string(),
+        nonce: nonce.map(str::to_string),
         error: error.map(str::to_string),
         chrome: false,
         active: "",

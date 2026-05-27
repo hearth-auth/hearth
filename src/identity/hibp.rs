@@ -276,7 +276,8 @@ mod tests {
         }
         let captured = Arc::new(PrefixCapture(std::sync::Mutex::new(String::new())));
         let client = HibpClient::with_transport(Arc::clone(&captured) as Arc<dyn HibpTransport>);
-        let _ = client.is_pwned(b"password", None);
+        let test_input = b"k_anon_prefix_length_fixture";
+        let _ = client.is_pwned(test_input, None);
         assert_eq!(
             captured
                 .0

@@ -27,7 +27,7 @@
     {% endmatch %}
 
     <form method="post" action="/required-action/ENROLL_PHONE_OTP/verify" class="space-y-5" data-testid="enroll-phone-otp-form">
-      <input type="hidden" name="nonce" value="{{ nonce }}" />
+      {% match nonce %}{% when Some with (n) %}<input type="hidden" name="nonce" value="{{ n }}" />{% when None %}{% endmatch %}
       <input type="hidden" name="phone" value="{{ phone }}" />
       <div>
         <label for="code" class="block text-sm font-medium text-ht-content-secondary mb-1">Verification code</label>
