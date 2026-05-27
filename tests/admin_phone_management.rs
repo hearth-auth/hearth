@@ -389,21 +389,18 @@ async fn remove_phone_idempotent_when_no_phone_set() {
         new_actions.push(RequiredAction::EnrollPhoneOtp);
     }
 
-    let result = h.identity().update_user(
-        &realm,
-        user.id(),
-        &UpdateUserRequest {
-            phone_number: Some(None),
-            phone_verified: Some(false),
-            required_actions: Some(new_actions),
-            ..Default::default()
-        },
-    );
-    // AUDIT: justified-weak-assert: remove_phone returns Result<User, _>; Ok(_) is required
-    assert!(
-        matches!(result, Ok(_)),
-        "remove-phone when no phone must succeed"
-    );
+    h.identity()
+        .update_user(
+            &realm,
+            user.id(),
+            &UpdateUserRequest {
+                phone_number: Some(None),
+                phone_verified: Some(false),
+                required_actions: Some(new_actions),
+                ..Default::default()
+            },
+        )
+        .expect("remove-phone when no phone must succeed");
 }
 
 #[tokio::test]
