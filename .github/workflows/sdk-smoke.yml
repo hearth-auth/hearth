@@ -130,6 +130,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: SDK smoke — verify token exchange works
+        working-directory: examples/typescript-nextjs
         run: |
           node - <<'EOF'
           // Headless smoke: bootstrap client and verify token introspection
