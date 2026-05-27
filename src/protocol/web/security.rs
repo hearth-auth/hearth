@@ -94,7 +94,7 @@ where
                 "content-security-policy",
                 "default-src 'self'; \
                  script-src 'self'; \
-                 style-src 'self' 'unsafe-inline'; \
+                 style-src 'self'; \
                  font-src 'self'; \
                  img-src 'self' data:; \
                  connect-src 'self'; \
