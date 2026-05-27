@@ -1,4 +1,4 @@
-import { HearthClient, createHearth } from "@hearth/sdk";
+import { HearthApiClient, createHearth } from "@hearth/sdk";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const HEARTH_BASE_URL = process.env.HEARTH_BASE_URL!;
@@ -8,7 +8,7 @@ export const CLIENT_ID = process.env.HEARTH_CLIENT_ID!;
 export const REDIRECT_URI = process.env.HEARTH_REDIRECT_URI!;
 
 // Low-level HTTP client: token exchange, admin ops, JWKS retrieval.
-export const hearthClient = new HearthClient({
+export const hearthClient = new HearthApiClient({
   baseUrl: HEARTH_BASE_URL,
   realmId: HEARTH_REALM_ID,
 });

@@ -133,10 +133,10 @@ jobs:
         run: |
           node - <<'EOF'
           // Headless smoke: bootstrap client and verify token introspection
-          const { HearthClient } = require("@hearth/sdk");
+          const { HearthApiClient } = require("@hearth/sdk");
 
           (async () => {
-            const client = new HearthClient({
+            const client = new HearthApiClient({
               baseUrl: process.env.HEARTH_BASE_URL,
               realmId: process.env.HEARTH_REALM_ID,
             });

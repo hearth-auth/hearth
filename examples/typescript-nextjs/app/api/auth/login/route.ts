@@ -35,7 +35,7 @@ export async function GET() {
   });
 
   // Build the authorization URL — redirect the browser to Hearth's login page.
-  const authUrl = new URL(discovery.authorization_endpoint);
+  const authUrl = new URL(discovery.authorization_endpoint as string);
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("client_id", CLIENT_ID);
   authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
