@@ -30,6 +30,7 @@ struct GroupListTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 pub async fn admin_groups_list(
@@ -81,6 +82,7 @@ pub async fn admin_groups_list(
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_groups failed");
@@ -113,6 +115,7 @@ struct GroupNewTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/groups/new`.
@@ -138,6 +141,7 @@ pub async fn admin_group_create_form(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -215,6 +219,7 @@ pub async fn admin_group_create_submit(
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
     }
@@ -370,6 +375,7 @@ struct GroupDetailTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query params for the group-detail page (sub-tab selection).
@@ -519,6 +525,7 @@ pub async fn admin_group_detail(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -627,6 +634,7 @@ struct GroupEditTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/groups/:id/edit`.
@@ -662,6 +670,7 @@ pub async fn admin_group_edit_form(
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Ok(None) => super::handlers_common::not_found("Group not found"),
@@ -750,6 +759,7 @@ pub async fn admin_group_edit_submit(
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
     }

@@ -56,6 +56,7 @@ struct ConsentsIndexTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl ConsentsIndexTemplate {
@@ -78,6 +79,7 @@ impl ConsentsIndexTemplate {
             product_name,
             logo_url,
             realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -98,6 +100,7 @@ struct AccountApplicationsTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +127,7 @@ pub async fn account_applications(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 

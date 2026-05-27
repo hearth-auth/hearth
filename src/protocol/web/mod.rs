@@ -354,6 +354,18 @@ impl WebState {
         self
     }
 
+    /// Returns the global theme CSS for inline embedding when non-empty.
+    ///
+    /// When the CSS is non-empty the layout template embeds it as a `<style>`
+    /// block instead of emitting the external `<link>` to `/ui/static/theme.css`.
+    pub fn inline_theme_css(&self) -> Option<String> {
+        if self.theme_css.is_empty() {
+            None
+        } else {
+            Some(self.theme_css.clone())
+        }
+    }
+
     /// Sets the global theme CSS (named theme + optional custom CSS).
     /// Served at `GET /ui/static/theme.css`. Also computes and caches the
     /// `ETag` for conditional-request support.

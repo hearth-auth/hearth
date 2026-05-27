@@ -9,7 +9,10 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="stylesheet" href="/ui/static/app.css">
-  <link rel="stylesheet" href="/ui/static/theme.css">
+  {% match inline_theme_css %}
+    {% when Some with (css) %}<style>{{ css }}</style>
+    {% when None %}<link rel="stylesheet" href="/ui/static/theme.css">
+  {% endmatch %}
   {% if let Some(url) = realm_theme_url %}<link rel="stylesheet" href="{{ url }}">{% endif %}
   {# Disable HTMX's inline <style> injection for .htmx-indicator (HEA-876);
      indicator styles are declared in app.css instead. #}

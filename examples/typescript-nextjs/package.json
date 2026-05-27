@@ -8,7 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
-    "@hearth/sdk": "*",
+    "@hearth/sdk": "file:../../sdks/typescript",
     "jose": "^5.0.0",
     "next": "^14.2.0",
     "react": "^18.3.0",
