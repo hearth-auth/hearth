@@ -6,14 +6,7 @@
   <title>Hearth Mailcatcher · {{ email.subject }}</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/ui/static/app.css">
-  <script>
-    function showTab(tab) {
-      ['html','text','headers'].forEach(function(t) {
-        document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
-        document.getElementById('btn-' + t).setAttribute('aria-selected', t === tab ? 'true' : 'false');
-      });
-    }
-  </script>
+  <script src="/ui/static/mail.js" defer></script>
 </head>
 <body class="min-h-screen bg-ht-surface-base text-ht-content-primary">
 
@@ -58,15 +51,15 @@
 
     {# Tab bar #}
     <div class="border-b border-white/6" role="tablist">
-      <button id="btn-html" role="tab" aria-selected="true" onclick="showTab('html')"
+      <button id="btn-html" role="tab" aria-selected="true"
               class="px-4 py-2 text-sm font-medium border-b-2 border-transparent [&[aria-selected=true]]:border-ht-content-brand [&[aria-selected=true]]:text-ht-content-primary text-ht-content-muted hover:text-ht-content-secondary transition-colors">
         HTML
       </button>
-      <button id="btn-text" role="tab" aria-selected="false" onclick="showTab('text')"
+      <button id="btn-text" role="tab" aria-selected="false"
               class="px-4 py-2 text-sm font-medium border-b-2 border-transparent [&[aria-selected=true]]:border-ht-content-brand [&[aria-selected=true]]:text-ht-content-primary text-ht-content-muted hover:text-ht-content-secondary transition-colors">
         Plain text
       </button>
-      <button id="btn-headers" role="tab" aria-selected="false" onclick="showTab('headers')"
+      <button id="btn-headers" role="tab" aria-selected="false"
               class="px-4 py-2 text-sm font-medium border-b-2 border-transparent [&[aria-selected=true]]:border-ht-content-brand [&[aria-selected=true]]:text-ht-content-primary text-ht-content-muted hover:text-ht-content-secondary transition-colors">
         Headers
       </button>

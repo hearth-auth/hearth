@@ -1552,6 +1552,9 @@ const PASSKEY_JS: &[u8] = include_bytes!("assets/passkey.js");
 /// Global Alpine.js component registrations and keyboard shortcuts, extracted
 /// from inline `<script>` tags so the CSP can omit `unsafe-inline`.
 const LAYOUT_JS: &[u8] = include_bytes!("assets/layout.js");
+/// Dev mailcatcher tab-switcher — extracted from mail_detail.html inline script
+/// so CSP `script-src 'self'` is satisfied on dev mail pages (HEA-886).
+const MAIL_JS: &[u8] = include_bytes!("assets/mail.js");
 /// Hyperscript 0.9.13 — eval-free declarative scripting library (HEA-824).
 /// Used to replace Alpine.js patterns that require `unsafe-eval` in CSP.
 const HYPERSCRIPT_JS: &[u8] = include_bytes!("assets/hyperscript.min.js");
@@ -1749,6 +1752,7 @@ async fn serve_static(
         "admin.js" => Some((ADMIN_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
         "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
+        "mail.js" => Some((MAIL_JS, "application/javascript; charset=utf-8")),
         "hyperscript.min.js" => Some((HYPERSCRIPT_JS, "application/javascript; charset=utf-8")),
         "favicon.svg" => Some((FAVICON_SVG, "image/svg+xml")),
         "img/hearth-wide-web.svg" => Some((HEARTH_WIDE_SVG, "image/svg+xml")),
