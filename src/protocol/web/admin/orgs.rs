@@ -80,6 +80,7 @@ struct OrgListTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/organizations`.
@@ -137,6 +138,7 @@ pub async fn admin_orgs_list(
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_organizations failed");
@@ -171,6 +173,7 @@ struct OrgNewTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/organizations/new`.
@@ -205,6 +208,7 @@ pub async fn admin_org_create_form(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -340,6 +344,7 @@ pub async fn admin_org_create_submit(
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "create_organization failed");
@@ -361,6 +366,7 @@ pub async fn admin_org_create_submit(
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
     }
@@ -411,6 +417,7 @@ struct OrgDetailTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query params for org detail page (flash messages via PRG).
@@ -542,6 +549,7 @@ pub async fn admin_org_detail(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     });
     if had_flash {
         if let Ok(value) =
@@ -584,6 +592,7 @@ struct OrgEditTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/organizations/:id/edit`.
@@ -643,6 +652,7 @@ pub async fn admin_org_edit_form(
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Ok(None) => super::handlers_common::not_found("Organization not found"),
@@ -935,6 +945,7 @@ struct MemberPickerRowsTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Template for a single member row (`<tbody>`). Included by `detail.html` in the
@@ -1019,6 +1030,7 @@ pub async fn admin_org_member_picker(
         product_name: String::new(),
         logo_url: String::new(),
         realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 
@@ -1666,6 +1678,7 @@ struct UserSearchResultsTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/api/users/search?q=...` — returns HTML fragment for HTMX.
@@ -1692,6 +1705,7 @@ pub async fn admin_api_user_search(
         product_name: String::new(),
         logo_url: String::new(),
         realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 

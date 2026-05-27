@@ -150,6 +150,7 @@ struct ConsentTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +440,7 @@ pub async fn consent_page(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }

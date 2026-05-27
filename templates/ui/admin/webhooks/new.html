@@ -25,6 +25,8 @@
         method="post"
         action="/ui/admin/realms/{{ realm_name }}/webhooks/new"
         autocomplete="off"
+        data-webhook-form
+        data-test-ping-url="/ui/admin/realms/{{ realm_name }}/webhooks/test-ping"
         class="space-y-5">
     {% match csrf %}
       {% when Some with (token) %}
@@ -142,65 +144,5 @@
     </div>
   </form>
 </div>
-<script>
-(function() {
-  var secretEl   = document.getElementById('secret');
-  var toggleBtn  = document.getElementById('toggle-secret');
-  var showIcon   = document.getElementById('secret-show-icon');
-  var hideIcon   = document.getElementById('secret-hide-icon');
-
-  toggleBtn.addEventListener('click', function() {
-    var visible = secretEl.type === 'text';
-    secretEl.type = visible ? 'password' : 'text';
-    toggleBtn.setAttribute('aria-label', visible ? 'Reveal secret' : 'Hide secret');
-    showIcon.classList.toggle('hidden', !visible);
-    hideIcon.classList.toggle('hidden', visible);
-  });
-
-  var testBtn     = document.getElementById('test-endpoint-btn');
-  var playIcon    = document.getElementById('test-play-icon');
-  var spinner     = document.getElementById('test-spinner');
-  var btnLabel    = document.getElementById('test-btn-label');
-  var resultDiv   = document.getElementById('test-result');
-  var resultInner = document.getElementById('test-result-inner');
-  var successIcon = document.getElementById('test-success-icon');
-  var failIcon    = document.getElementById('test-failure-icon');
-  var resultLabel = document.getElementById('test-result-label');
-  var resultMsg   = document.getElementById('test-result-message');
-
-  testBtn.addEventListener('click', function() {
-    var url    = document.getElementById('url').value;
-    var secret = secretEl.value;
-    testBtn.disabled = true;
-    playIcon.classList.add('hidden');
-    spinner.classList.remove('hidden');
-    btnLabel.textContent = 'Sending\u2026';
-    resultDiv.classList.add('hidden');
-
-    fetch('/ui/admin/realms/{{ realm_name }}/webhooks/test-ping', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-      body: JSON.stringify({ url: url, secret: secret })
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(d) { showResult(d); })
-    .catch(function() { showResult({ success: false, message: 'Request failed' }); });
-
-    function showResult(d) {
-      testBtn.disabled = false;
-      spinner.classList.add('hidden');
-      playIcon.classList.remove('hidden');
-      btnLabel.textContent = 'Test endpoint';
-
-      resultInner.className = 'flex items-start gap-2 rounded-sm px-4 py-3 text-sm ' +
-        (d.success ? 'bg-success/[0.12] text-success-fg' : 'bg-danger/[0.12] text-danger-fg');
-      successIcon.classList.toggle('hidden', !d.success);
-      failIcon.classList.toggle('hidden', !!d.success);
-      resultLabel.textContent = d.success ? 'Ping delivered' : 'Delivery failed';
-      resultMsg.textContent   = d.message || '';
-      resultDiv.classList.remove('hidden');
-    }
-  });
-})();
-</script>
+<script src="/ui/static/admin/webhooks-new.js" defer></script>
 {% endblock %}

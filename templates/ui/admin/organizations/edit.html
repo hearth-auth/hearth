@@ -97,18 +97,18 @@
       {% endfor %}
     </div>
     {% else %}
-    <div>
+    <div data-attr-rows>
       <h3 class="mb-2 text-sm font-semibold text-ht-content-secondary">Attributes</h3>
       <div id="attr-rows" class="space-y-2">
         {% for (k, v) in form_attributes %}
         <div class="flex gap-2 items-center attr-row">
           <input type="text" name="attr_key" value="{{ k }}" placeholder="key" class="input flex-1">
           <input type="text" name="attr_val" value="{{ v }}" placeholder="value" class="input flex-1">
-          <button type="button" data-remove-row class="text-ht-content-muted hover:text-danger-fg text-sm px-2">&#x2715;</button>
+          <button type="button" data-remove-attr-row class="text-ht-content-muted hover:text-danger-fg text-sm px-2">&#x2715;</button>
         </div>
         {% endfor %}
       </div>
-      <button type="button" id="add-attr-row" class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
+      <button type="button" data-add-attr-row class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
     </div>
     <script>
     (function() {

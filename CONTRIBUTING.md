@@ -64,6 +64,62 @@ Run `make tailwind-install` once after cloning to download the Tailwind
 CLI. If it's missing the hook fails with instructions. CI runs
 `make css-check` as a belt-and-suspenders guard.
 
+## Full container CI reproduction (ci-local-full)
+
+`make ci-local-full` runs the PR-blocking GitHub Actions workflows inside
+containers via [nektos/act](https://github.com/nektos/act). It catches
+failures that `make ci-local-fast` cannot — workflow-file errors, toolchain
+drift, and missing install steps — because the workflow YAML files themselves
+execute inside the same Ubuntu runner image CI uses.
+
+**Install `act`** (one-time):
+
+```sh
+brew install act           # macOS
+mise install act           # mise users (version pinned in .tool-versions)
+gh extension install nektos/gh-act  # GitHub CLI extension
+```
+
+**Run:**
+
+```sh
+make ci-local-full   # ~10–15 min cold; exits 0 means CI would pass
+```
+
+**When to run:**
+
+- `make ci-local-fast` passes locally but the PR's CI fails.
+- You edited `.github/workflows/*.yml` or `.github/actions/*`.
+- You changed toolchain pinning (Rust version, Node version, Go version).
+
+**Configuration** lives in `.actrc` at the repo root. Key options:
+
+| Flag | What it does |
+|------|--------------|
+| `--platform ubuntu-latest=ghcr.io/catthehacker/ubuntu:full-22.04` | Uses a pre-built image with protoc, buf, Node, Go — no re-install overhead |
+| `--bind` | Mounts the host workspace instead of copying it; file writes are visible on the host |
+| `--container-architecture linux/amd64` | Forces x86\_64 inside the container |
+| `--artifact-server-path /tmp/act-artifacts` | Captures workflow upload-artifact outputs locally |
+
+**Apple Silicon note:** `--container-architecture linux/amd64` forces x86\_64
+emulation via Rosetta/QEMU on Apple Silicon Macs. Wall-time is higher
+(potentially 30–45 min). This is a deliberate trade-off: `ci-local-full` is a
+deep verification pass, not a per-commit gate.
+
+**Skipped workflows** — the following are intentionally excluded because they
+are scheduled, tag-triggered, OIDC-gated, or purely informational:
+
+| Workflow | Reason skipped |
+|----------|----------------|
+| `release.yml` | Tag-triggered; requires OIDC secrets |
+| `docs-site.yml` | Informational; not PR-blocking |
+| `security.yml` (CodeQL) | Scheduled; requires OIDC/GitHub token |
+| `bench-regression.yml` | Needs a saved main-branch baseline; runs post-merge |
+| `ui-nightly.yml` | Nightly cron only |
+| `fuzz.yml` | Long-running; not PR-blocking |
+
+---
+
 ## Before you commit
 
 Before opening a PR, make sure all Rust checks pass locally:

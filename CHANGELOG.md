@@ -33,6 +33,65 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`make ci-local-full`** — full container reproduction of PR-blocking GHA
+  workflows via `nektos/act`; catches workflow-file errors and toolchain drift
+  that the host-side `ci-local-fast` cannot. Targets 10–15 min cold on a
+  developer's host. See `CONTRIBUTING.md` for install instructions and
+  known-skipped workflows ([HEA-891](/HEA/issues/HEA-891)).
+- **`make ci-local-fast`** — single target that runs the seven PR-blocking CI
+  checks on the developer's host in ~5 min cold: `test-quality`, `check`
+  (clippy + fmt + nextest), `css-check`, `proto-check`, `cargo deny`,
+  `sdk-conformance`, and `sdk-smoke-local` (HEA-890).
+- **`make sdk-smoke-local`** — builds hearth (debug), boots `--dev` on a random
+  free port, runs TypeScript/Next.js and Go/Gin SDK example smokes, then tears
+  down. Mirrors the `sdk-smoke` CI workflow without requiring Docker (HEA-890).
+
+### Fixed
+
+- **Admin sidebar chevron icon (HEA-886)** — the realm-tree expand chevron in
+  the admin sidebar was rendered as `<polyline points="M9 18 15 12 9 6">` —
+  path-language passed to a polyline element silently produced no output. The
+  helper now dispatches `d` for `<path>` and `points` for `<polyline>`/
+  `<polygon>` based on the requested SVG tag.
+
+### Security
+
+- **CSP `script-src 'self'`: 10 inline `<script>` blocks extracted (HEA-886)** —
+  Per-page inline scripts in admin templates (`groups/new`, `webhooks/new`,
+  `settings/editor`, `users/import`, `users/list`, `users/new`,
+  `organizations/new`, `organizations/edit`, `rbac/debug`) and the dev
+  mailcatcher (`dev/mail_detail`) now load from cacheable external files under
+  `/ui/static/admin/*.js` and `/ui/static/dev/mail-detail.js`. Template-rendered
+  values are passed via `data-*` attributes (e.g. `data-slug-touched`,
+  `data-test-ping-url`, `data-total-users`). The dev mail detail page also
+  loses its inline `onclick="showTab(...)"` and `onsubmit="return confirm(...)"`
+  handlers in favour of `addEventListener`-based dispatch. CSP stays
+  `script-src 'self'` (no nonce, no `'unsafe-inline'`).
+
+- **GDPR Art.17: device fingerprint erasure cascade + admin API (HEA-875)** — `delete_user`
+  now cascades to all `dfp:user:{uid}:*` storage entries so right-to-erasure is complete.
+  New endpoint `DELETE /admin/users/{id}/device-fingerprints` (AC-11) lets operators satisfy
+  DSAR erasure requests without deleting the entire account; returns `{"erased": N}` and
+  emits a `DeviceFingerprintsErased` audit event. Also fixed: `derive_fingerprint_key` helper
+  was producing keys with the stale `dev:fp:` prefix instead of the correct `dfp:user:` prefix.
+
+- **CSP regression fix: inline styles eliminated (HEA-876)** — Two regressions from the
+  HEA-850 `style-src 'self'` hardening are resolved. Theme CSS is now served via external
+  `<link>` tags (`/ui/static/theme.css`, `/ui/static/realm-theme/{id}`) instead of inline
+  `<style>` blocks. HTMX's startup `insertAdjacentHTML` style injection for `.htmx-indicator`
+  is suppressed with `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>`;
+  indicator styles are declared in `app.css` instead.
+
+- **CSP hardened: `unsafe-eval` and `unsafe-inline` removed (HEA-850)** — Alpine.js
+  has been fully replaced by HTMX + Hyperscript across all ~40 admin templates.
+  Layout reactivity (sidebar toggle, realm nav tree, toast notifications, realm pill)
+  is now handled by vanilla JS classes (`SidebarManager`, `RealmNav`, `ToastManager`)
+  in `admin.js`. Template interactions use Hyperscript `_="..."` attributes, which are
+  eval-free. The CSP is now `script-src 'self'; style-src 'self'` with no unsafe
+  keywords. Resolves GAP-4 and GAP-5 from the original security audit.
+
+### Added
+
 - **Device fingerprint proactive TTL sweeper (HEA-862)** — a background task now
   runs every 6 hours (configurable via `identity.cleanup.dfp_sweeper_interval_secs`)
   and evicts expired `dfp:user:*` storage entries across all realms. This satisfies

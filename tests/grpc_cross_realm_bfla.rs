@@ -34,7 +34,7 @@ struct BflaRig {
     sys_token: String,
     sys_realm_id: RealmId,
     /// A second realm created so get/update/delete have a target.
-    realm_b_id: RealmId,
+    victim_realm_id: RealmId,
     svc: IdentityAdminSvc,
 }
 
@@ -125,7 +125,7 @@ async fn setup() -> BflaRig {
         .to_string();
 
     // ---- realm B (victim realm) ----
-    let realm_b_id = h.create_realm();
+    let victim_realm_id = h.create_realm();
 
     let state = GrpcState::new(
         h.identity_arc(),
@@ -141,7 +141,7 @@ async fn setup() -> BflaRig {
         realm_a_id,
         sys_token,
         sys_realm_id,
-        realm_b_id,
+        victim_realm_id,
         svc,
     }
 }
@@ -193,7 +193,7 @@ async fn get_realm_rejects_non_system_realm_admin() {
         .svc
         .get_realm(req_with(
             pb::GetRealmRequest {
-                id: rig.realm_b_id.as_uuid().to_string(),
+                id: rig.victim_realm_id.as_uuid().to_string(),
             },
             &rig.realm_a_token,
             &rig.realm_a_id,
@@ -236,7 +236,7 @@ async fn update_realm_rejects_non_system_realm_admin() {
         .svc
         .update_realm(req_with(
             pb::UpdateRealmCall {
-                id: rig.realm_b_id.as_uuid().to_string(),
+                id: rig.victim_realm_id.as_uuid().to_string(),
                 body: Some(pb::UpdateRealmRequest {
                     name: Some("hijacked".into()),
                     status: None,
@@ -262,7 +262,7 @@ async fn delete_realm_rejects_non_system_realm_admin() {
         .svc
         .delete_realm(req_with(
             pb::DeleteRealmRequest {
-                id: rig.realm_b_id.as_uuid().to_string(),
+                id: rig.victim_realm_id.as_uuid().to_string(),
             },
             &rig.realm_a_token,
             &rig.realm_a_id,
@@ -307,7 +307,7 @@ async fn system_realm_admin_can_get_realm() {
         .svc
         .get_realm(req_with(
             pb::GetRealmRequest {
-                id: rig.realm_b_id.as_uuid().to_string(),
+                id: rig.victim_realm_id.as_uuid().to_string(),
             },
             &rig.sys_token,
             &rig.sys_realm_id,

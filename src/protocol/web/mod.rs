@@ -354,6 +354,15 @@ impl WebState {
         self
     }
 
+    /// Returns the global theme CSS for inline embedding when non-empty.
+    ///
+    /// Always returns `None` — theme CSS is served as an external stylesheet at
+    /// `/ui/static/theme.css` so the CSP `style-src 'self'` directive is not
+    /// weakened with `'unsafe-inline'`.
+    pub fn inline_theme_css(&self) -> Option<String> {
+        None
+    }
+
     /// Sets the global theme CSS (named theme + optional custom CSS).
     /// Served at `GET /ui/static/theme.css`. Also computes and caches the
     /// `ETag` for conditional-request support.
@@ -1557,6 +1566,16 @@ const LAYOUT_JS: &[u8] = include_bytes!("assets/layout.js");
 /// Hyperscript 0.9.13 — eval-free declarative scripting library (HEA-824).
 /// Used to replace Alpine.js patterns that require `unsafe-eval` in CSP.
 const HYPERSCRIPT_JS: &[u8] = include_bytes!("assets/hyperscript.min.js");
+/// Per-page admin scripts extracted from inline `<script>` blocks so the CSP
+/// can stay `script-src 'self'` (HEA-886).
+const ADMIN_SLUG_SYNC_JS: &[u8] = include_bytes!("assets/admin/slug-sync.js");
+const ADMIN_WEBHOOKS_NEW_JS: &[u8] = include_bytes!("assets/admin/webhooks-new.js");
+const ADMIN_USERS_IMPORT_JS: &[u8] = include_bytes!("assets/admin/users-import.js");
+const ADMIN_USERS_LIST_JS: &[u8] = include_bytes!("assets/admin/users-list.js");
+const ADMIN_USERS_NEW_JS: &[u8] = include_bytes!("assets/admin/users-new.js");
+const ADMIN_RBAC_DEBUG_JS: &[u8] = include_bytes!("assets/admin/rbac-debug.js");
+/// Standalone dev-mailcatcher detail-page script (HEA-886).
+const DEV_MAIL_DETAIL_JS: &[u8] = include_bytes!("assets/dev/mail-detail.js");
 /// Self-hosted Fraunces upright woff2 (HEA-630).
 const FONT_FRAUNCES: &[u8] = include_bytes!("assets/fonts/fraunces-latin.woff2");
 /// Self-hosted Fraunces italic woff2 (HEA-630).
@@ -1748,6 +1767,23 @@ async fn serve_static(
     let embedded: Option<(&[u8], &str)> = match file.as_str() {
         "htmx.min.js" => Some((HTMX_JS, "application/javascript; charset=utf-8")),
         "admin.js" => Some((ADMIN_JS, "application/javascript; charset=utf-8")),
+        "admin/slug-sync.js" => Some((ADMIN_SLUG_SYNC_JS, "application/javascript; charset=utf-8")),
+        "admin/webhooks-new.js" => Some((
+            ADMIN_WEBHOOKS_NEW_JS,
+            "application/javascript; charset=utf-8",
+        )),
+        "admin/users-import.js" => Some((
+            ADMIN_USERS_IMPORT_JS,
+            "application/javascript; charset=utf-8",
+        )),
+        "admin/users-list.js" => {
+            Some((ADMIN_USERS_LIST_JS, "application/javascript; charset=utf-8"))
+        }
+        "admin/users-new.js" => Some((ADMIN_USERS_NEW_JS, "application/javascript; charset=utf-8")),
+        "admin/rbac-debug.js" => {
+            Some((ADMIN_RBAC_DEBUG_JS, "application/javascript; charset=utf-8"))
+        }
+        "dev/mail-detail.js" => Some((DEV_MAIL_DETAIL_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
         "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
         "hyperscript.min.js" => Some((HYPERSCRIPT_JS, "application/javascript; charset=utf-8")),

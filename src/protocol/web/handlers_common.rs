@@ -23,6 +23,7 @@ pub(crate) struct NotFoundTemplate {
     pub(crate) product_name: String,
     pub(crate) logo_url: String,
     pub(crate) realm_theme_url: Option<String>,
+    pub(crate) inline_theme_css: Option<String>,
 }
 
 impl NotFoundTemplate {
@@ -39,6 +40,7 @@ impl NotFoundTemplate {
             product_name: "Hearth".to_string(),
             logo_url: super::DEFAULT_LOGO_URL.to_string(),
             realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -57,6 +59,7 @@ pub(crate) struct ForbiddenTemplate {
     pub(crate) product_name: String,
     pub(crate) logo_url: String,
     pub(crate) realm_theme_url: Option<String>,
+    pub(crate) inline_theme_css: Option<String>,
 }
 
 impl ForbiddenTemplate {
@@ -72,6 +75,7 @@ impl ForbiddenTemplate {
             product_name: "Hearth".to_string(),
             logo_url: super::DEFAULT_LOGO_URL.to_string(),
             realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -90,6 +94,7 @@ pub(crate) struct ServerErrorTemplate {
     pub(crate) product_name: String,
     pub(crate) logo_url: String,
     pub(crate) realm_theme_url: Option<String>,
+    pub(crate) inline_theme_css: Option<String>,
 }
 
 impl ServerErrorTemplate {
@@ -105,6 +110,7 @@ impl ServerErrorTemplate {
             product_name: "Hearth".to_string(),
             logo_url: super::DEFAULT_LOGO_URL.to_string(),
             realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -161,6 +167,7 @@ pub(crate) fn not_found_authed(
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         },
         StatusCode::NOT_FOUND,
     )

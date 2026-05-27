@@ -21,6 +21,7 @@ struct RealmListTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms`.
@@ -43,6 +44,7 @@ pub async fn admin_realms_list(
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_realms failed");
@@ -103,6 +105,7 @@ struct RealmDetailTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms/{realm}`.
@@ -142,6 +145,7 @@ pub async fn admin_realm_detail(
                 product_name,
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Ok(None) => super::handlers_common::not_found("Realm not found"),
@@ -840,6 +844,7 @@ struct AuditListTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rows-only partial returned when the audit filter is triggered via HTMX.
@@ -977,6 +982,7 @@ pub async fn admin_audit_list(
                     product_name: state.product_name.clone(),
                     logo_url: state.logo_url.clone(),
                     realm_theme_url: state.realm_theme_url(),
+                    inline_theme_css: state.inline_theme_css(),
                 })
             }
         }
@@ -1018,6 +1024,7 @@ pub async fn admin_audit_verify_integrity(
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Ok(false) => render(&AuditListTemplate {
             events: Vec::new(),
@@ -1045,6 +1052,7 @@ pub async fn admin_audit_verify_integrity(
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "audit verify_integrity failed");
@@ -1425,6 +1433,7 @@ struct SystemInfoTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/settings` — read-only system information page.
@@ -1444,6 +1453,7 @@ pub async fn admin_system_info(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1470,6 +1480,7 @@ struct ConfigEditorTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Template for the diff preview partial.
@@ -1483,6 +1494,7 @@ struct DiffPreviewTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Form data for config editor actions.
@@ -1535,6 +1547,7 @@ pub async fn admin_config_editor(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1567,6 +1580,7 @@ pub async fn admin_config_editor_preview(
         product_name: String::new(),
         logo_url: String::new(),
         realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 
@@ -1702,6 +1716,7 @@ fn render_config_editor_with_flash(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1765,6 +1780,7 @@ pub async fn admin_config_editor_visual_preview(
                 product_name: String::new(),
                 logo_url: String::new(),
                 realm_theme_url: None,
+                inline_theme_css: None,
             });
         }
     };
@@ -1789,6 +1805,7 @@ pub async fn admin_config_editor_visual_preview(
         product_name: String::new(),
         logo_url: String::new(),
         realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 

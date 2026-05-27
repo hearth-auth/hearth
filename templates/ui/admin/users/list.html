@@ -62,6 +62,7 @@
 <form id="bulk-form"
       method="post"
       action="{{ list_url }}/bulk-action"
+      data-total-users="{{ users.len() }}"
       class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
   {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
   <input type="hidden" id="bulk-ids" name="ids" value="">
@@ -129,76 +130,5 @@
 {% endif %}
 
 {% endif %}{# end else: !users.is_empty() || !search_query.is_empty() #}
-<script>
-(function() {
-  var form        = document.getElementById('bulk-form');
-  if (!form) return;
-  var idsInput    = document.getElementById('bulk-ids');
-  var actionInput = document.getElementById('bulk-action-input');
-  var toolbar     = document.getElementById('bulk-toolbar');
-  var countLabel  = document.getElementById('bulk-count-label');
-  var actionSel   = document.getElementById('bulk-action-select');
-  var applyBtn    = document.getElementById('bulk-apply-btn');
-  var selectAll   = document.getElementById('select-all-check');
-  var TOTAL       = {{ users.len() }};
-  var confirmPending = false;
-
-  function getChecked() {
-    return Array.from(form.querySelectorAll('input.row-check:checked'));
-  }
-
-  function updateCount() {
-    var checked = getChecked();
-    var n = checked.length;
-    idsInput.value = checked.map(function(c) { return c.value; }).join(',');
-    countLabel.textContent = n === 0
-      ? (TOTAL + ' user' + (TOTAL === 1 ? '' : 's'))
-      : (n + ' selected');
-    toolbar.classList.toggle('hidden', n === 0);
-    confirmPending = false;
-    resetApplyBtn();
-  }
-
-  function resetApplyBtn() {
-    applyBtn.className = 'rounded px-3 py-1 text-xs font-semibold transition-colors disabled:opacity-40 border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider';
-    applyBtn.textContent = 'Apply';
-  }
-
-  actionSel.addEventListener('change', function() {
-    confirmPending = false;
-    resetApplyBtn();
-    applyBtn.classList.toggle('hidden', actionSel.value === '');
-  });
-
-  applyBtn.addEventListener('click', function() {
-    var action = actionSel.value;
-    if (!action) return;
-    if (action === 'deactivate' && !confirmPending) {
-      confirmPending = true;
-      applyBtn.className = 'rounded px-3 py-1 text-xs font-semibold transition-colors btn-danger text-graphite-950';
-      applyBtn.textContent = 'Confirm deactivate';
-      return;
-    }
-    actionInput.value = action;
-    form.submit();
-  });
-
-  selectAll.addEventListener('change', function() {
-    form.querySelectorAll('input.row-check').forEach(function(c) {
-      c.checked = selectAll.checked;
-    });
-    updateCount();
-  });
-
-  form.addEventListener('change', function(e) {
-    if (e.target.classList.contains('row-check')) {
-      var all = form.querySelectorAll('input.row-check');
-      var allChecked = Array.from(all).every(function(c) { return c.checked; });
-      selectAll.checked = allChecked;
-      selectAll.indeterminate = !allChecked && getChecked().length > 0;
-      updateCount();
-    }
-  });
-})();
-</script>
+<script src="/ui/static/admin/users-list.js" defer></script>
 {% endblock %}

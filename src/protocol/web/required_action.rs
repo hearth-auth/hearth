@@ -72,6 +72,7 @@ struct ActionPageTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rendered by `GET /required-action/UPDATE_PASSWORD` (and re-rendered on validation failure).
@@ -91,6 +92,7 @@ struct UpdatePasswordPageTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `application/x-www-form-urlencoded` body for `POST /required-action/UPDATE_PASSWORD`.
@@ -326,6 +328,7 @@ pub async fn action_page(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -619,6 +622,7 @@ struct VerifyEmailPageTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rendered by `GET /required-action/VERIFY_EMAIL/confirm` when the token is
@@ -637,6 +641,7 @@ struct VerifyEmailExpiredTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query parameters for `GET /required-action/VERIFY_EMAIL/confirm`.
@@ -801,6 +806,7 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -944,6 +950,7 @@ fn render_verify_email_expired(state: &Arc<WebState>) -> Response {
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -1131,6 +1138,7 @@ fn render_update_password_form(state: &Arc<WebState>, error: Option<&str>) -> Re
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -1154,6 +1162,7 @@ struct EnrollPhoneOtpPageTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rendered by `POST /required-action/ENROLL_PHONE_OTP/send` on success.
@@ -1164,8 +1173,8 @@ struct EnrollPhoneOtpVerifyTemplate {
     masked_phone: String,
     /// Raw phone (for hidden form fields).
     phone: String,
-    /// Opaque nonce returned by `issue_sms_otp`.
-    nonce: String,
+    /// Opaque nonce returned by `issue_sms_otp`; `None` in rate-limited renders.
+    nonce: Option<String>,
     error: Option<String>,
     chrome: bool,
     active: &'static str,
@@ -1177,6 +1186,7 @@ struct EnrollPhoneOtpVerifyTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_PHONE_OTP/send`.
@@ -1258,7 +1268,7 @@ pub async fn enroll_phone_otp_send(
                 // Return the verify page with a warning rather than blocking —
                 // the real OTP was already sent recently (rate limit window).
                 &phone,
-                "rate-limited",
+                None,
                 Some("A code was recently sent to this number. Please wait before requesting another."),
             );
         }
@@ -1271,7 +1281,7 @@ pub async fn enroll_phone_otp_send(
         }
     };
 
-    render_enroll_phone_verify(&state, &phone, &nonce, None)
+    render_enroll_phone_verify(&state, &phone, Some(&nonce), None)
 }
 
 /// Verifies the submitted OTP code, stores the phone as verified, clears
@@ -1315,7 +1325,7 @@ pub async fn enroll_phone_otp_verify_submit(
         return render_enroll_phone_verify(
             &state,
             &phone,
-            &form.nonce,
+            Some(&form.nonce),
             Some("Invalid submission."),
         );
     }
@@ -1332,7 +1342,7 @@ pub async fn enroll_phone_otp_verify_submit(
             return render_enroll_phone_verify(
                 &state,
                 &phone,
-                &form.nonce,
+                Some(&form.nonce),
                 Some("That code is incorrect or has expired. Try again or request a new code."),
             );
         }
@@ -1416,6 +1426,7 @@ fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Respo
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -1423,13 +1434,13 @@ fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Respo
 fn render_enroll_phone_verify(
     state: &Arc<WebState>,
     phone: &str,
-    nonce: &str,
+    nonce: Option<&str>,
     error: Option<&str>,
 ) -> Response {
     let tmpl = EnrollPhoneOtpVerifyTemplate {
         masked_phone: mask_phone(phone),
         phone: phone.to_string(),
-        nonce: nonce.to_string(),
+        nonce: nonce.map(str::to_string),
         error: error.map(str::to_string),
         chrome: false,
         active: "",
@@ -1441,6 +1452,7 @@ fn render_enroll_phone_verify(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }

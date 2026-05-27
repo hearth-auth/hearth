@@ -101,7 +101,7 @@ class RealmNav {
         + (isCurrent ? 'text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary');
 
       const chevronSvg = this._svg(
-        'M9 18 15 12 9 6', 'polyline',
+        'M9 18 15 12 9 6', 'path',
         'h-3 w-3 shrink-0 transition-transform' + (isCurrent ? ' rotate-90' : '')
       );
       const realmIcon = this._bldgSvg();
@@ -150,7 +150,7 @@ class RealmNav {
     this.container.appendChild(list);
   }
 
-  _svg(points, tag, cls) {
+  _svg(geometry, tag, cls) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('fill', 'none');
@@ -160,7 +160,7 @@ class RealmNav {
     svg.setAttribute('stroke-linejoin', 'round');
     svg.setAttribute('class', cls);
     const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-    el.setAttribute('points', points);
+    el.setAttribute(tag === 'path' ? 'd' : 'points', geometry);
     svg.appendChild(el);
     return svg;
   }
@@ -1348,4 +1348,15 @@ document.addEventListener('DOMContentLoaded', () => {
   initRolesTab(document.querySelector('[data-roles-tab]'));
   initPasswordStrength();
   initAttrRows();
+  initConfigEditor();
 });
+
+// =========================================================================
+// initConfigEditor — wire up #config-editor-root if present (settings page)
+// =========================================================================
+
+function initConfigEditor() {
+  const root = document.getElementById('config-editor-root');
+  if (!root) return;
+  new ConfigEditor().init(root);
+}

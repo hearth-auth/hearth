@@ -41,6 +41,7 @@ struct RbacDebugTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query parameters for the RBAC debugger.
@@ -159,6 +160,7 @@ pub async fn admin_rbac_debug(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -267,6 +269,7 @@ struct RbacScopesTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/rbac/scopes` — read-only list of registered scope bundles.
@@ -325,6 +328,7 @@ pub async fn admin_rbac_scopes(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -721,6 +725,7 @@ struct RbacPermissionsTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Row data for a permission in the permissions list template.
@@ -851,6 +856,7 @@ pub async fn admin_rbac_permissions(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -881,6 +887,7 @@ struct RoleNewTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl RoleNewTemplate {
@@ -902,6 +909,7 @@ impl RoleNewTemplate {
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }
     }
 }
@@ -1043,6 +1051,7 @@ struct RoleDetailTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms/{realm}/rbac/roles/{id}`
@@ -1077,6 +1086,7 @@ pub async fn admin_role_detail(
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Ok(None) => super::handlers_common::not_found("Role not found"),
@@ -1111,6 +1121,7 @@ struct RoleEditTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl RoleEditTemplate {
@@ -1151,6 +1162,7 @@ impl RoleEditTemplate {
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }
     }
 }
@@ -1346,6 +1358,7 @@ struct RbacRolesTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/rbac/roles` — list of defined roles with links to detail.
@@ -1398,6 +1411,7 @@ pub async fn admin_rbac_roles(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1434,6 +1448,7 @@ struct RealmClaimsTemplate {
     product_name: String,
     logo_url: String,
     realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 // =========================================================================
@@ -1507,5 +1522,6 @@ pub async fn admin_realm_claims(
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
         realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
