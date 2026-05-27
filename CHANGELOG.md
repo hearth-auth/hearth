@@ -7,7 +7,27 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Fixed
+
+- **Admin sidebar chevron icon (HEA-886)** — the realm-tree expand chevron in
+  the admin sidebar was rendered as `<polyline points="M9 18 15 12 9 6">` —
+  path-language passed to a polyline element silently produced no output. The
+  helper now dispatches `d` for `<path>` and `points` for `<polyline>`/
+  `<polygon>` based on the requested SVG tag.
+
 ### Security
+
+- **CSP `script-src 'self'`: 10 inline `<script>` blocks extracted (HEA-886)** —
+  Per-page inline scripts in admin templates (`groups/new`, `webhooks/new`,
+  `settings/editor`, `users/import`, `users/list`, `users/new`,
+  `organizations/new`, `organizations/edit`, `rbac/debug`) and the dev
+  mailcatcher (`dev/mail_detail`) now load from cacheable external files under
+  `/ui/static/admin/*.js` and `/ui/static/dev/mail-detail.js`. Template-rendered
+  values are passed via `data-*` attributes (e.g. `data-slug-touched`,
+  `data-test-ping-url`, `data-total-users`). The dev mail detail page also
+  loses its inline `onclick="showTab(...)"` and `onsubmit="return confirm(...)"`
+  handlers in favour of `addEventListener`-based dispatch. CSP stays
+  `script-src 'self'` (no nonce, no `'unsafe-inline'`).
 
 - **GDPR Art.17: device fingerprint erasure cascade + admin API (HEA-875)** — `delete_user`
   now cascades to all `dfp:user:{uid}:*` storage entries so right-to-erasure is complete.
