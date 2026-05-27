@@ -28,7 +28,7 @@ func main() {
 	port := getenv("PORT", "8080")
 
 	client := hearth.NewClient(baseURL, realmID)
-	jwksURL := fmt.Sprintf("%s/realms/%s/jwks", baseURL, realmID)
+	jwksURL := fmt.Sprintf("%s/.well-known/jwks.json", baseURL)
 
 	ctx := context.Background()
 

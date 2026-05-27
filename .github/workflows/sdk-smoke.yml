@@ -109,8 +109,9 @@ jobs:
       - name: Register OAuth client
         id: register_client
         run: |
-          CLIENT=$(curl -sf -X POST "$HEARTH_BASE_URL/admin/realms/$HEARTH_REALM_ID/clients" \
+          CLIENT=$(curl -sf -X POST "$HEARTH_BASE_URL/admin/applications" \
             -H "Authorization: Bearer $HEARTH_ACCESS_TOKEN" \
+            -H "X-Realm-ID: $HEARTH_REALM_ID" \
             -H "Content-Type: application/json" \
             -d '{"client_name":"nextjs-smoke","redirect_uris":["http://localhost:3000/api/auth/callback"]}')
           echo "HEARTH_CLIENT_ID=$(echo "$CLIENT" | jq -r .client_id)" >> $GITHUB_ENV

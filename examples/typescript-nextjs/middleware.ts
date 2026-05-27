@@ -6,7 +6,7 @@ const HEARTH_REALM_ID = process.env.HEARTH_REALM_ID!;
 
 // Edge-compatible JWKS (jose fetches and caches keys).
 const JWKS = createRemoteJWKSet(
-  new URL(`${HEARTH_BASE_URL}/realms/${HEARTH_REALM_ID}/jwks`),
+  new URL(`${HEARTH_BASE_URL}/.well-known/jwks.json`),
 );
 
 // Protect every route under /dashboard.

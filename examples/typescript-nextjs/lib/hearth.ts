@@ -16,7 +16,7 @@ export const hearthClient = new HearthClient({
 // JWKS set for server-side token verification.
 // createRemoteJWKSet caches the keys and re-fetches on a key miss.
 export const JWKS = createRemoteJWKSet(
-  new URL(`${HEARTH_BASE_URL}/realms/${HEARTH_REALM_ID}/jwks`),
+  new URL(`${HEARTH_BASE_URL}/.well-known/jwks.json`),
 );
 
 export async function verifyAccessToken(token: string) {
