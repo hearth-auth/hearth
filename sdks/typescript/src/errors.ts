@@ -116,3 +116,40 @@ export class AuthorizationModeMismatchError extends HearthSdkError {
     super(message);
   }
 }
+
+/**
+ * Thrown when a token's `sv` claim is below the minimum accepted session
+ * version for the session (RFC HEA-930 § 8).
+ *
+ * Resource servers should translate this into an HTTP 401 response.
+ */
+export class SessionVersionRevokedError extends HearthSdkError {
+  constructor(
+    public readonly sessionId: string,
+    public readonly tokenSv: bigint,
+    public readonly minSv: bigint,
+    message = `Session version revoked: sid=${sessionId}, sv=${tokenSv} < min=${minSv}`,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Thrown when the session-version cache has not been refreshed within
+ * `staleThresholdMs` (RFC HEA-930 § 8.1).
+ *
+ * When `onStale` is `"reject"`, resource servers should translate this into
+ * an HTTP 401 response with `error=session_version_cache_stale`.
+ * When `onStale` is `"introspect"`, catch this error and fall back to the
+ * introspection endpoint.
+ */
+export class SessionVersionCacheStaleError extends HearthSdkError {
+  constructor(
+    /** Cache age in milliseconds, or -1 if the cache has never been seeded. */
+    public readonly ageMs: number,
+    public readonly onStale: "reject" | "introspect" = "reject",
+    message = `Session version cache stale: age=${ageMs < 0 ? "never seeded" : `${ageMs}ms`}`,
+  ) {
+    super(message);
+  }
+}

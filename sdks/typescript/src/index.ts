@@ -19,6 +19,8 @@ export {
   HearthSdkError,
   IntrospectionError,
   JWKSFetchError,
+  SessionVersionCacheStaleError,
+  SessionVersionRevokedError,
   TokenAudienceError,
   TokenExpiredError,
   TokenInvalidError,
@@ -67,6 +69,7 @@ export type {
   PageResponse,
   RegisterClientParams,
   Realm,
+  SessionVersionConfig,
   TokenExchangeParams,
   TokenResponse,
   UpdateRealmParams,
@@ -74,3 +77,4 @@ export type {
   User,
   UserInfoResponse,
 } from "./types.js";
+export { SessionVersionCache } from "./session-version-cache.js";

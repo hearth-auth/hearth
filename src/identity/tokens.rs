@@ -215,6 +215,15 @@ pub struct TokenClaims {
     /// Non-empty only when explicit MFA was performed during token issuance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub amr: Vec<String>,
+    /// Session-version claim (RFC: HEA-930).
+    ///
+    /// Present only in access tokens issued while `session_version.enabled = true`
+    /// for the realm. Resource servers check `sv >= min_accepted_sv[sid]`
+    /// using a locally-cached version map polled from the delta feed.
+    /// Absent for client-credentials tokens (sessionless) and for realms
+    /// where `session_version.enabled = false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sv: Option<u64>,
     /// Declaratively-mapped custom claims emitted at the top level.
     #[serde(default, flatten)]
     pub custom: BTreeMap<String, serde_json::Value>,
@@ -611,6 +620,7 @@ impl SigningKey {
             permissions: request.permissions.to_vec(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            sv: request.sv,
             custom: request.custom.clone(),
         };
 
@@ -635,6 +645,7 @@ impl SigningKey {
             permissions: Vec::new(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            sv: None, // sv is never present on refresh tokens
             custom: BTreeMap::new(),
         };
 
@@ -688,6 +699,11 @@ pub struct IssueTokenRequest<'a> {
     /// JWK thumbprint for DPoP binding (RFC 9449). When set, the issued
     /// access token will carry a `cnf.jkt` claim.
     pub dpop_jkt: Option<String>,
+    /// Current session version for the `sv` claim (HEA-930).
+    ///
+    /// `Some(n)` when `session_version.enabled = true` for the realm and
+    /// this is an access token bound to a session. `None` otherwise.
+    pub sv: Option<u64>,
 }
 
 /// Validates a JWT's signature and returns the decoded claims.
@@ -1262,6 +1278,7 @@ mod tests {
             custom: BTreeMap::new(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            sv: None,
         }
     }
 
@@ -1413,6 +1430,7 @@ mod tests {
                 custom: BTreeMap::new(),
                 resource: None,
                 dpop_jkt: None,
+                sv: None,
             })
             .expect("issue pair");
 
@@ -1453,6 +1471,7 @@ mod tests {
                 custom: BTreeMap::new(),
                 resource: None,
                 dpop_jkt: None,
+                sv: None,
             })
             .expect("reissue pair");
 

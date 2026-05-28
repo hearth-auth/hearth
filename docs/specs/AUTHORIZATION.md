@@ -903,14 +903,234 @@ and a `### Security` entry in `CHANGELOG.md`.
 
 ---
 
-## 14. Cross-references
+## 14. Session-version (`sv`) revocation
+
+> **Implemented — HEA-930.** The design RFC lives at [`SESSION_VERSION_RFC.md`](./SESSION_VERSION_RFC.md).
+> Operator how-to: [`docs/guides/session-version-revocation.md`](../guides/session-version-revocation.md).
+
+Hearth's default `embedded` mode uses **eventually-consistent revocation**: a revoked session stops granting new tokens immediately, but access tokens already issued remain valid until expiry (bounded by `access_token_ttl`, typically 15–60 min). This is the standard trade-off in stateless JWT systems and is acceptable for the vast majority of use cases.
+
+For operators that need tighter bounds — sub-second revocation freshness without forcing a network call on every request — the `sv` (session-version) mechanism provides a hybrid:
+
+1. **A `sv` claim is embedded in issued JWTs.** The server maintains a monotonically-increasing `u64` version per session. Revocation-triggering events (logout, admin revoke, password change, role/group change) increment the version.
+2. **Resource servers maintain a local `min_version[session_id]` cache**, refreshed by polling a compact delta feed (`GET /oauth/session-versions?since=<seq>`). Token validation adds one `HashMap` lookup (~10 ns) to the existing signature check.
+3. **No per-request network hop.** The cache is refreshed in the background. The freshness window equals the poll interval (default: 5 s, operator-configurable).
+4. **Fail-closed guarantee.** If the cache is staler than `stale_threshold`, the resource server rejects sv-bearing tokens rather than silently accepting them. The resource server may optionally fall back to per-request introspection instead.
+
+This is opt-in per realm (`session_version.enabled: true` in config). Tokens without `sv` (issued before the feature is enabled or while it is disabled) are validated by the existing path unchanged — backward compatible.
+
+See [`SESSION_VERSION_RFC.md`](./SESSION_VERSION_RFC.md) for the full design, including claim shape, storage key layout, delta-feed wire format, push vs. pull tradeoff, DPoP/MFA interaction, and SDK contract.
+
+---
+
+## 15. Permission-delivery modes
+
+An `OAuthClient` carries an `access_token_authorization` field (type
+`AccessTokenAuthorization`, source: `src/identity/oidc.rs`) that controls how RBAC data
+reaches resource servers. The default is `embedded` for full backward compatibility with
+clients registered before HEA-922.
+
+### 15.1 Mode summary
+
+| Mode | JWT payload | Live RBAC endpoint | Freshness | Hot-path impact |
+|---|---|---|---|---|
+| `embedded` (default) | Carries `roles`, `groups`, `permissions` | None required | As-of-issuance (stale up to TTL) | Zero — all validation in-process |
+| `introspection` | Identity claims only | `POST /realms/{realm}/introspect` | Current — session liveness re-verified | Off hot path; one network round-trip |
+| `decision` | Identity claims only | `POST /oauth/authorize` | Current — session liveness re-verified | Off hot path; one network round-trip per permission |
+
+The `embedded` mode preserves the Hearth hot-path invariant: token validation requires
+zero heap allocations, no syscalls, and no network calls. See
+[`ARCHITECTURE.md § 3`](./ARCHITECTURE.md) for the normative hot-path rules.
+
+`introspection` and `decision` add one network round-trip per resource-server request.
+Both endpoints are **off the Hearth hot path** — they validate the token signature,
+expiry, and session liveness in-process before resolving live RBAC.
+
+### 15.2 Wire shapes
+
+#### `embedded` — JWT claim payload
+
+```json
+{
+  "sub":         "user_<uuid>",
+  "iss":         "https://auth.example.com",
+  "aud":         ["my-app"],
+  "exp":         1234567890,
+  "iat":         1234564290,
+  "tid":         "<realm-uuid>",
+  "roles":       ["docs-editor"],
+  "groups":      ["engineering"],
+  "permissions": ["docs.edit", "docs.view"]
+}
+```
+
+Resource servers verify the Ed25519 signature with JWKS and read claims locally.
+
+#### `introspection` — `POST /realms/{realm_id}/introspect`
+
+**Request:** JSON body with client credentials via HTTP Basic Auth or body fields.
+
+```
+POST /realms/<realm_id>/introspect
+Content-Type: application/json
+Authorization: Basic <base64(client_id:client_secret)>
+
+{ "token": "<access_token>", "token_type_hint": "access_token" }
+```
+
+**Response (active):**
+```json
+{
+  "active":      true,
+  "sub":         "user_<uuid>",
+  "client_id":   "<client-uuid>",
+  "scope":       "openid docs",
+  "exp":         1234567890,
+  "iss":         "https://auth.example.com",
+  "mode":        "introspection",
+  "permissions": ["docs.edit", "docs.view"],
+  "roles":       ["docs-editor"],
+  "groups":      ["engineering"]
+}
+```
+
+**Response (inactive):** `{ "active": false }` — all other fields omitted (RFC 7662 §2.2).
+
+The `permissions`, `roles`, and `groups` fields are present only for
+`introspection` and `decision` clients; `embedded` clients receive an introspection
+response without those fields (claims were already embedded at issuance).
+
+#### `decision` — `POST /oauth/authorize`
+
+**Request:** Bearer token in `Authorization` header; JSON body with permission to check.
+
+```
+POST /oauth/authorize
+Authorization: Bearer <access_token>
+X-Realm-ID: <realm-uuid>
+Content-Type: application/json
+
+{
+  "permission":      "docs.edit",
+  "organization_id": "org_<uuid>",
+  "resource":        "https://docs.example.com/doc/42"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `permission` | string | **MUST** | Permission string to check. |
+| `organization_id` | string | MAY | Org ID (`org_…`) for org-scoped assignment lookup. |
+| `resource` | string | MAY | RFC 8707 resource URI. |
+
+**Response — always HTTP 200:**
+```json
+{ "allowed": true }
+```
+or
+```json
+{ "allowed": false }
+```
+
+The endpoint MUST return HTTP 200 for every valid request. Non-200 responses indicate a
+caller error (e.g. `400` when `permission` field is absent).
+
+### 15.3 Security rules (normative)
+
+**All modes:**
+- Tokens MUST be signed with Ed25519. `alg: none` and symmetric algorithms MUST be rejected.
+- Tokens MUST carry matching `iss`, `aud`, `tid` for the target realm. Cross-realm tokens
+  MUST NOT be accepted.
+
+**`embedded` mode:**
+- Resource servers MUST verify `exp`, `iat`, and signature on every request.
+- Resource servers MUST accept that RBAC claims reflect the user's state at issuance.
+  Claims become stale after role/group changes until the next token issuance.
+- JWKS MUST be refreshed when signature verification fails (rotate on 401).
+
+**`introspection` mode:**
+- Resource servers MUST authenticate to `/introspect` with valid client credentials on
+  every call.
+- Resource servers MUST treat `active: false` as a deny. No fields other than `active`
+  MUST be inspected on an inactive response.
+- Introspection responses SHOULD NOT be cached — caching defeats the freshness guarantee.
+
+**`decision` mode:**
+- The `allowed: false` outcome MUST be treated as a deny regardless of cause. The endpoint
+  never distinguishes between an invalid token, expired session, missing permission, or
+  internal error. This is the **fail-closed** guarantee.
+- Client-credential tokens (no user context) are always denied. Decision mode is for
+  user tokens only.
+- `organization_id` MUST be provided for org-scoped permission checks; omitting it checks
+  realm-level assignments only.
+- Resource servers MUST NOT cache decision responses across requests.
+
+### 15.4 Refresh-token revocation caveat
+
+Revoking a refresh token or session does **not** immediately invalidate already-issued
+access tokens.
+
+| Mode | Revocation propagation |
+|---|---|
+| `embedded` | Stale permissions persist until `access_token_ttl` expires (default 15 min). |
+| `introspection` | Reflected within the next `/introspect` call — session liveness re-checked. |
+| `decision` | Reflected within the next `/oauth/authorize` call — session liveness re-checked. |
+
+For tighter revocation bounds in `embedded` mode, configure a shorter `access_token_ttl`
+or enable session-version (`sv`) revocation — see
+[§ 14](#14-session-version-sv-revocation) and the
+[operator guide](../guides/session-version-revocation.md).
+
+### 15.5 Latency targets
+
+Benchmark targets (from `benches/oauth.rs`):
+- Token introspection (`/introspect`): p50 < 50 μs, p99 < 500 μs.
+- Client credentials issuance: p50 < 500 μs, p99 < 2 ms.
+
+`POST /oauth/authorize` is a single token-validate + RBAC-resolve call; its cost is
+comparable to introspection. No separate benchmark target is published for Phase A; this
+is tracked as a known gap for Phase B.
+
+### 15.6 Client configuration
+
+Set `access_token_authorization` on the client record via the admin API:
+
+```bash
+# Register with decision mode
+curl -X POST http://127.0.0.1:8420/admin/clients \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "X-Realm-ID: <realm-uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Docs API",
+    "redirect_uris": [],
+    "grant_types": ["client_credentials"],
+    "access_token_authorization": "decision"
+  }'
+
+# Update existing client to introspection
+curl -X PATCH http://127.0.0.1:8420/admin/clients/<client-id> \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "X-Realm-ID: <realm-uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{ "access_token_authorization": "introspection" }'
+```
+
+See [`docs/guides/permission-delivery.md`](../guides/permission-delivery.md) for the full
+operator guide including a decision tree, mode comparison, and Keycloak mapping.
+
+---
+
+## 16. Cross-references
 
 - [`ARCHITECTURE.md § 1`](./ARCHITECTURE.md) — module placement (`src/rbac/` as a peer of `src/identity/`).
 - [`ARCHITECTURE.md § 3`](./ARCHITECTURE.md) — hot path rules (RBAC resolution is OFF the hot path; token claim reads are on it).
 - [`ARCHITECTURE.md § 4.2`](./ARCHITECTURE.md) — wire protocol rules.
+- [`ARCHITECTURE.md § 4.2.1`](./ARCHITECTURE.md) — authorization HTTP & gRPC surface; `/oauth/authorize` and `/introspect` are off the hot path.
 - [`ARCHITECTURE.md § 5`](./ARCHITECTURE.md) — error policy; `RbacError` follows the standard pattern.
 - [`ARCHITECTURE.md § 7`](./ARCHITECTURE.md) — multi-tenancy invariants.
 - [`CONFIGURATION.md`](./CONFIGURATION.md) — declarative YAML for realms, roles, permissions, groups, scopes.
 - [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md) — enumerated test checklist.
 - [`AGENT_AUTH.md`](./AGENT_AUTH.md) — how agent-specific authorization layers on top.
 - [`IMPLEMENTATION_ORDER.md`](./IMPLEMENTATION_ORDER.md) — where RBAC work falls in the build sequence.
+- [`docs/guides/permission-delivery.md`](../guides/permission-delivery.md) — operator how-to guide for mode selection.

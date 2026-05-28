@@ -33,6 +33,8 @@ pub enum IdentityError {
     /// Intentionally conflates not-found, expired, and revoked for
     /// enumeration resistance — callers cannot distinguish the three.
     SessionNotFound,
+    /// Session-version feature is not enabled for this realm.
+    SessionVersionDisabled,
     /// The token is invalid (malformed, bad signature, unsupported algorithm).
     ///
     /// Intentionally vague to prevent information leakage about why
@@ -441,6 +443,9 @@ impl fmt::Display for IdentityError {
                 write!(f, "invalid credential: {reason}")
             }
             Self::SessionNotFound => write!(f, "session not found"),
+            Self::SessionVersionDisabled => {
+                write!(f, "session versioning is not enabled for this realm")
+            }
             Self::InvalidToken => write!(f, "invalid token"),
             Self::TokenExpired => write!(f, "token expired"),
             Self::SigningError { reason } => write!(f, "signing error: {reason}"),
@@ -725,7 +730,8 @@ impl std::error::Error for IdentityError {
             | Self::DPopProofReplay
             | Self::DPopBindingMismatch
             | Self::DPopNonceInvalid
-            | Self::JwtBearerAssertionInvalid { .. } => None,
+            | Self::JwtBearerAssertionInvalid { .. }
+            | Self::SessionVersionDisabled => None,
         }
     }
 }

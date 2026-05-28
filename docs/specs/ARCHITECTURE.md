@@ -163,7 +163,25 @@ Summary of the surface this document is responsible for:
 - **Admin endpoints** under `/admin/roles`, `/admin/groups`, `/admin/users/{id}/roles`, `/admin/groups/{id}/members`, `/admin/groups/{id}/roles` — full CRUD and introspection. Gated by the `hearth.admin` permission. See [AUTHORIZATION.md § 8.2](./AUTHORIZATION.md).
 - **gRPC `RbacAdminService`** — mirror of the admin HTTP surface for service-to-service callers. No service-to-service `Check` RPC; callers decode the JWT locally.
 
-There is no public "check permission now" endpoint. Permission resolution happens at token-issue time; consumers read the resulting claims. This is the same pattern every mainstream JWT-based identity system uses (Auth0, Clerk, Keycloak, Okta).
+#### Permission-delivery modes and hot-path designation
+
+`OAuthClient.access_token_authorization` controls how RBAC data reaches resource
+servers. There are three modes; see [AUTHORIZATION.md § 15](./AUTHORIZATION.md) for the
+normative specification.
+
+**Hot-path designation:**
+
+| Endpoint | Path classification | Reason |
+|---|---|---|
+| Token signature verify + claim read (embedded mode) | **Hot path** | In-process; zero allocations, zero syscalls, no network. |
+| `POST /introspect` | **Off hot path** | Validates signature + session liveness then resolves live RBAC in-process; cost is one network round-trip at the resource server. |
+| `POST /oauth/authorize` | **Off hot path** | Validates token + resolves live RBAC in-process for one permission; cost is one network round-trip at the resource server. |
+
+`embedded` mode preserves the hot-path invariant defined in [§ 3.1](#31-definition): token
+validation requires zero heap allocations, no syscalls, and no `.await` on I/O.
+`introspection` and `decision` modes are off the hot path — they each perform in-process
+token validation and RBAC resolution before responding, but the round-trip latency is
+dominated by the resource server's outbound call, not by Hearth's internal processing.
 
 ### 4.3 API Versioning
 

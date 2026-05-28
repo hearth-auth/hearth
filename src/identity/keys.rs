@@ -19,6 +19,26 @@ use crate::core::{
     ClientId, IdpId, InvitationId, OrganizationId, RealmId, SessionId, UserId, WebhookId,
 };
 
+// ───────────────────────────────────────────────────────────────────────
+// ssv: (session-version) key namespace
+// Kept separate from ses: so the hot-path session lookup is unaffected.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Prefix for per-session version counters.
+///
+/// Format: `ssv:sid:{session_uuid}` → 8 bytes little-endian u64
+const SSV_SESSION_PREFIX: &str = "ssv:sid:";
+
+/// Key for the realm-scoped monotonic bump-sequence counter.
+///
+/// Format: `ssv:seq` → 8 bytes little-endian u64
+const SSV_SEQ_KEY: &str = "ssv:seq";
+
+/// Prefix for delta log entries (append-only, TTL-bounded).
+///
+/// Format: `ssv:delta:{seq:020}` → JSON `SvDeltaEntry`
+const SSV_DELTA_PREFIX: &str = "ssv:delta:";
+
 /// Prefix for user primary keys.
 const USER_ID_PREFIX: &str = "usr:id:";
 
@@ -1415,6 +1435,43 @@ pub(crate) fn encode_par_request(request_uri_id: &str) -> Vec<u8> {
 #[allow(dead_code)]
 pub(crate) fn par_scan_prefix() -> Vec<u8> {
     PAR_PREFIX.as_bytes().to_vec()
+}
+
+// ===== Session-version key encoding =====
+
+/// Encodes the per-session version counter key.
+///
+/// Format: `ssv:sid:{session_uuid}`
+pub(crate) fn encode_ssv_session(session_id: &SessionId) -> Vec<u8> {
+    format!("{SSV_SESSION_PREFIX}{}", session_id.as_uuid()).into_bytes()
+}
+
+/// Returns the realm-scoped monotonic sequence counter key.
+///
+/// Format: `ssv:seq`
+pub(crate) fn ssv_seq_key() -> Vec<u8> {
+    SSV_SEQ_KEY.as_bytes().to_vec()
+}
+
+/// Encodes a delta log entry key for the given sequence number.
+///
+/// Format: `ssv:delta:{seq:020}` — zero-padded for lexicographic ordering.
+pub(crate) fn encode_ssv_delta(seq: u64) -> Vec<u8> {
+    format!("{SSV_DELTA_PREFIX}{seq:020}").into_bytes()
+}
+
+/// Returns the scan prefix for all per-session version counter keys.
+///
+/// Format: `ssv:sid:`
+pub(crate) fn encode_ssv_session_prefix() -> Vec<u8> {
+    SSV_SESSION_PREFIX.as_bytes().to_vec()
+}
+
+/// Returns the scan prefix for all delta log entries.
+///
+/// Format: `ssv:delta:`
+pub(crate) fn ssv_delta_scan_prefix() -> Vec<u8> {
+    SSV_DELTA_PREFIX.as_bytes().to_vec()
 }
 
 #[cfg(test)]

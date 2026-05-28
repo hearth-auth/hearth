@@ -128,6 +128,86 @@ type MePermissionsResponse struct {
 	Scope       string   `json:"scope"`
 }
 
+// AccessTokenAuthorizationMode controls how the SDK and middleware verify
+// permissions for a given resource server client.
+//
+// Must be configured explicitly — the middleware will NOT silently fall back
+// from one mode to another based on what claims happen to be present in the
+// token.
+type AccessTokenAuthorizationMode string
+
+const (
+	// ModeEmbedded uses JWT claims decoded locally. Zero network calls.
+	// Requires the client to be registered with access_token_authorization=embedded.
+	ModeEmbedded AccessTokenAuthorizationMode = "embedded"
+
+	// ModeIntrospection calls POST /introspect on each request.
+	// The server re-resolves live RBAC and echoes the configured mode.
+	// Requires ClientID + ClientSecret in MiddlewareConfig.
+	ModeIntrospection AccessTokenAuthorizationMode = "introspection"
+
+	// ModeDecision calls POST /oauth/authorize on each request.
+	// The server performs a per-request permission decision and returns allowed/denied.
+	// Fail-closed: network errors result in denial.
+	ModeDecision AccessTokenAuthorizationMode = "decision"
+)
+
+// IntrospectRequest contains parameters for token introspection (RFC 7662).
+type IntrospectRequest struct {
+	// Token is the access token to introspect. Required.
+	Token string `json:"token"`
+	// TokenTypeHint optionally hints at the token type.
+	TokenTypeHint string `json:"token_type_hint,omitempty"`
+	// ClientID is the authenticating resource-server client. Required.
+	ClientID string `json:"client_id"`
+	// ClientSecret is the client secret for confidential clients.
+	ClientSecret string `json:"client_secret,omitempty"`
+}
+
+// IntrospectResponse is the RFC 7662 introspection response returned by POST /introspect.
+type IntrospectResponse struct {
+	// Active indicates whether the token is currently valid.
+	Active bool `json:"active"`
+	// Scope is the space-separated scope string.
+	Scope string `json:"scope,omitempty"`
+	// ClientID is the client that was issued this token.
+	ClientID string `json:"client_id,omitempty"`
+	// Sub is the subject (user or client) of the token.
+	Sub string `json:"sub,omitempty"`
+	// Exp is the expiration time (Unix seconds).
+	Exp int64 `json:"exp,omitempty"`
+	// Iat is the issued-at time (Unix seconds).
+	Iat int64 `json:"iat,omitempty"`
+	// TokenType describes the token type.
+	TokenType string `json:"token_type,omitempty"`
+	// Iss is the issuer.
+	Iss string `json:"iss,omitempty"`
+	// Mode is the access-token authorization mode echoed from the issuing client.
+	Mode string `json:"mode,omitempty"`
+	// Permissions is the live-resolved permission set (Introspection/Decision modes only).
+	Permissions []string `json:"permissions,omitempty"`
+	// Roles is the live-resolved role set.
+	Roles []string `json:"roles,omitempty"`
+	// Groups is the live-resolved group set.
+	Groups []string `json:"groups,omitempty"`
+}
+
+// CheckPermissionRequest contains parameters for POST /oauth/authorize (decision endpoint).
+type CheckPermissionRequest struct {
+	// Permission is the permission string to check. Required.
+	Permission string `json:"permission"`
+	// OrganizationID scopes the check to a specific organization.
+	OrganizationID string `json:"organization_id,omitempty"`
+	// Resource is an optional RFC 8707 resource indicator.
+	Resource string `json:"resource,omitempty"`
+}
+
+// CheckPermissionResponse is returned by POST /oauth/authorize.
+type CheckPermissionResponse struct {
+	// Allowed indicates whether the token holder has the requested permission.
+	Allowed bool `json:"allowed"`
+}
+
 // APIError represents an error from the Hearth API.
 type APIError struct {
 	StatusCode int

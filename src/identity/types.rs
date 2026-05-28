@@ -852,6 +852,48 @@ pub struct RealmConfig {
     /// `fingerprint_hmac_secret` to activate device-recognition step-up.
     #[serde(default)]
     pub adaptive_mfa: AdaptiveMfaConfig,
+    /// Session-version (`sv`) revocation tracking.
+    ///
+    /// When enabled, access tokens carry an `sv` claim that resource servers
+    /// check against a locally-cached minimum version polled from the delta
+    /// feed. Defaults to disabled for backward compatibility.
+    #[serde(default)]
+    pub session_version: SessionVersionConfig,
+}
+
+/// Per-realm session-version (`sv`) tracking configuration.
+///
+/// Controls whether the `sv` claim is included in access tokens and whether
+/// the delta-feed and snapshot endpoints are active for this realm.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionVersionConfig {
+    /// Enable session-version claim emission and delta log.
+    ///
+    /// `false` (default) — no `sv` claim in tokens, no delta log written,
+    /// feed endpoints return 404.
+    #[serde(default)]
+    pub enabled: bool,
+    /// How long delta log entries are retained, in seconds.
+    ///
+    /// Resource servers that fall further behind must fetch the full snapshot
+    /// to recover. Defaults to 3 600 s (1 hour).
+    #[serde(default = "SessionVersionConfig::default_delta_retention_seconds")]
+    pub delta_retention_seconds: u64,
+}
+
+impl SessionVersionConfig {
+    fn default_delta_retention_seconds() -> u64 {
+        3600
+    }
+}
+
+impl Default for SessionVersionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            delta_retention_seconds: Self::default_delta_retention_seconds(),
+        }
+    }
 }
 
 // ── SecretString serde helpers ────────────────────────────────────────────────

@@ -38,6 +38,23 @@ pub use types::{
 use crate::core::{OrganizationId, RealmId, Uri, UserId};
 use crate::identity::ClientTrustLevel;
 
+/// Callback trait used by [`RbacEngine`] to bump session versions when
+/// role or group membership changes make standing tokens stale.
+///
+/// Defined here (in the `rbac` crate) and implemented by the identity
+/// engine to avoid a circular import: `identity` already imports `rbac`,
+/// so the implementation direction is safe. The RBAC engine holds an
+/// `OnceLock<Arc<dyn SvBumper>>` injected at startup.
+///
+/// All implementations are best-effort: bump failures are logged but
+/// must not abort the RBAC write.
+pub trait SvBumper: Send + Sync {
+    /// Bumps the session-version counter for every active session owned
+    /// by `user_id` within the given realm. No-op when sv is disabled for
+    /// the realm.
+    fn bump_user_sessions(&self, realm_id: &RealmId, user_id: &UserId);
+}
+
 /// Trait defining the claims-based RBAC engine interface.
 ///
 /// All methods are realm-scoped: every operation takes a `&RealmId`

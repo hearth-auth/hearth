@@ -14,6 +14,29 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Session-version (`sv`) revocation** — access tokens now carry an `sv` claim (monotonic
+  `u64`) when `session_version.enabled = true` in the realm config. Resource servers can
+  poll the delta feed to detect revoked sessions without waiting for token expiry. The `sv`
+  counter is bumped automatically on: logout, admin session revoke, password change, role
+  assignment/unassignment, and group membership add/remove. New endpoints:
+  - `GET /oauth/session-versions?realm=<id>&since=<seq>` — paginated delta feed; returns
+    `null` when `since` is behind the retention window (`delta_retention_seconds`, default
+    3600). Requires `hearth.sv_feed` or `hearth.admin` permission.
+  - `GET /oauth/session-versions/snapshot?realm=<id>` — gzip-compressed full snapshot of
+    current per-session minimum `sv` values.
+  - `POST /admin/sessions/{id}/sv-bump` — admin: force-bump a single session.
+  - `POST /admin/realms/{id}/sv-bump-all` — admin: force-bump every tracked session in the
+    realm (returns count).
+  The `hearth.sv_feed` permission is seeded in all new realms via `seed_realm`. When
+  `session_version.enabled = false` (default) the claim is omitted and all sv endpoints
+  return 404 (HEA-932).
+
+- **Session-version revocation operator guide (HEA-934)** — new how-to at
+  `docs/guides/session-version-revocation.md` covering: when to enable `sv`, poll interval
+  and stale threshold tradeoffs, bump trigger table, `sv-bump-all` use cases, fail-closed
+  behavior (`reject` vs `introspect` fallback), DPoP/MFA interaction notes, and delta feed
+  reference. `AUTHORIZATION.md` § 14 updated from roadmap placeholder to implemented status.
+
 - **Admin UI client form exposes `access_token_authorization` mode** — the application
   create and edit forms in the Admin UI now include a Permission delivery mode picker
   (`Embedded`, `Introspection`, `Decision`) bound to `OAuthClient.access_token_authorization`.

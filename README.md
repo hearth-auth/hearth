@@ -83,6 +83,7 @@ Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home t
 - Claims-based RBAC: roles, nested groups, per-realm and per-org role assignments
 - Effective permissions resolved at token-issue time and embedded in the JWT (`roles`, `groups`, `permissions`)
 - `GET /v1/me/permissions` for live introspection; SDK helpers for local `hasPermission` / `hasRole` checks
+- Three permission-delivery modes per client: `embedded` (default, stateless), `introspection` (live RBAC via `/introspect`), `decision` (per-request allow/deny via `POST /oauth/authorize`) — see [Permission-delivery modes guide](docs/guides/permission-delivery.md)
 
 **Multi-tenancy**
 - Realm-isolated keyspace (every key prefixed with `RealmId`)

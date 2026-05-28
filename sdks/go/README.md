@@ -402,6 +402,94 @@ type APIError struct {
 }
 ```
 
+## Authorization modes (HEA-921 / HEA-922)
+
+Hearth supports three strategies for checking permissions on resource servers.
+Each `OAuthClient` is configured with an `access_token_authorization` mode;
+the SDK middleware must be configured with the **same** mode — mismatches are
+always rejected, never silently downgraded.
+
+### `ModeEmbedded` (default)
+
+Permissions are baked into the JWT at issuance. The middleware decodes
+claims locally with zero network overhead.
+
+```go
+mw := hearth.RequirePermission(client, "docs.edit", hearth.MiddlewareConfig{
+    ExpectedMode: hearth.ModeEmbedded,
+})
+http.Handle("/docs", mw(docsHandler))
+```
+
+### `ModeDecision`
+
+Each request calls `POST /oauth/authorize` for a live per-request decision.
+Fail-closed: network errors deny the request.
+
+```go
+mw := hearth.RequirePermission(client, "docs.edit", hearth.MiddlewareConfig{
+    ExpectedMode: hearth.ModeDecision,
+})
+http.Handle("/docs", mw(docsHandler))
+```
+
+You can also call the decision endpoint directly:
+
+```go
+resp, err := client.CheckPermission(ctx, accessToken, hearth.CheckPermissionRequest{
+    Permission:     "docs.edit",
+    OrganizationID: "org_123", // optional: scope to an org
+})
+if err == nil && resp.Allowed {
+    // authorized
+}
+```
+
+### `ModeIntrospection`
+
+Each request calls `POST /introspect` (RFC 7662). The server re-resolves live
+RBAC and echoes the configured mode back in the response. If the echoed mode
+does not match `ExpectedMode` the middleware returns `403` without falling back
+to a local check.
+
+```go
+mw := hearth.RequirePermission(client, "docs.edit", hearth.MiddlewareConfig{
+    ExpectedMode: hearth.ModeIntrospection,
+    ClientID:     "my-resource-server",
+    ClientSecret: os.Getenv("RS_SECRET"),
+})
+http.Handle("/docs", mw(docsHandler))
+```
+
+Direct introspection call:
+
+```go
+resp, err := client.Introspect(ctx, hearth.IntrospectRequest{
+    Token:        accessToken,
+    ClientID:     "my-resource-server",
+    ClientSecret: os.Getenv("RS_SECRET"),
+})
+if err == nil && resp.Active {
+    fmt.Println("live permissions:", resp.Permissions)
+}
+```
+
+### Custom token extraction and denial
+
+```go
+mw := hearth.RequirePermission(client, "api.write", hearth.MiddlewareConfig{
+    ExpectedMode: hearth.ModeEmbedded,
+    TokenExtractor: func(r *http.Request) string {
+        return r.Header.Get("X-Api-Token") // custom header
+    },
+    OnDenied: func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusUnauthorized)
+        _, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+    },
+})
+```
+
 ## Troubleshooting
 
 **`DiscoveryError`** — verify `IssuerURL` is reachable and returns a valid `/.well-known/openid-configuration`.
