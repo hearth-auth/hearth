@@ -13,6 +13,7 @@ export type { IntrospectionResult } from "./introspect.js";
 
 // §4 — Claims API
 export { VerifiedToken } from "./token.js";
+export type { AccessTokenAuthorizationMode } from "./token.js";
 
 // §5 — Error taxonomy
 export {
@@ -25,8 +26,14 @@ export {
   TokenClaimsError,
   IntrospectionError,
   MiddlewareError,
+  AuthorizationModeError,
+  AuthorizeError,
 } from "./errors.js";
 
 // §6 — Middleware
 export { hearthMiddleware, hearthFastifyHook } from "./middleware.js";
 export type { MiddlewareOptions } from "./middleware.js";
+
+// §7 — Decision client (POST /oauth/authorize)
+export { AuthorizeClient } from "./authorize.js";
+export type { AuthorizeOptions, AuthorizeResult } from "./authorize.js";

@@ -3,6 +3,7 @@
 import { IntrospectionError } from "./errors.js";
 import type { ResolvedConfig } from "./config.js";
 import type { OidcDiscovery } from "./discovery.js";
+import type { AccessTokenAuthorizationMode } from "./token.js";
 
 /** RFC 7662 introspection response — required fields per spec §3. */
 export interface IntrospectionResult {
@@ -13,6 +14,17 @@ export interface IntrospectionResult {
   exp?: number;
   iat?: number;
   scope?: string;
+  /**
+   * Access-token authorization mode echoed from the server (HEA-922).
+   * Present when the introspecting client has a non-Embedded mode configured.
+   */
+  mode?: AccessTokenAuthorizationMode;
+  /** Live permissions — populated for Introspection/Decision mode clients. */
+  permissions?: string[];
+  /** Live roles — populated for Introspection/Decision mode clients. */
+  roles?: string[];
+  /** Live group slugs — populated for Introspection/Decision mode clients. */
+  groups?: string[];
   /** Catch-all for non-standard claims returned by the server. */
   extra: Record<string, unknown>;
 }
@@ -76,7 +88,7 @@ export class IntrospectionClient {
       throw new IntrospectionError("Introspection response is not valid JSON", { cause: err });
     }
 
-    const { active, sub, iss, aud, exp, iat, scope, ...rest } = raw;
+    const { active, sub, iss, aud, exp, iat, scope, mode, permissions, roles, groups, ...rest } = raw;
     return {
       active: Boolean(active),
       sub: typeof sub === "string" ? sub : undefined,
@@ -85,6 +97,10 @@ export class IntrospectionClient {
       exp: typeof exp === "number" ? exp : undefined,
       iat: typeof iat === "number" ? iat : undefined,
       scope: typeof scope === "string" ? scope : undefined,
+      mode: typeof mode === "string" ? mode as AccessTokenAuthorizationMode : undefined,
+      permissions: Array.isArray(permissions) ? permissions.filter((p): p is string => typeof p === "string") : undefined,
+      roles: Array.isArray(roles) ? roles.filter((r): r is string => typeof r === "string") : undefined,
+      groups: Array.isArray(groups) ? groups.filter((g): g is string => typeof g === "string") : undefined,
       extra: rest,
     };
   }

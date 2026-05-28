@@ -37,6 +37,24 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `docs/specs/ARCHITECTURE.md` §4.2.1 updated to classify `/introspect` and
   `POST /oauth/authorize` as off-hot-path.
 
+- **Node SDK: `authorize()` + mode-aware middleware (HEA-924)** — the Node.js server SDK
+  at `sdks/node/` now exposes the three permission-delivery modes introduced in HEA-922:
+  - `HearthClient.authorize(token, permission, opts?)` — calls `POST /oauth/authorize` for
+    Decision-mode resource servers. Fail-closed: returns `{ allowed: false }` on any network
+    or server error. Pass `realm_id` in `HearthConfig` to include `X-Realm-ID`.
+  - `IntrospectionResult` extended with `mode`, `permissions`, `roles`, and `groups` fields
+    populated by Hearth for Introspection/Decision clients.
+  - `hearthMiddleware` / `hearthFastifyHook` accept `expectedMode` (`"embedded"` |
+    `"introspection"` | `"decision"`). MUST NOT silently fall back to a different mode when
+    `permissions` is absent from the JWT — absence of `permissions` never changes authorization
+    behavior unless `expectedMode` is changed. Fail-closed: network errors on `/introspect`
+    or `/oauth/authorize` result in 403.
+  - Mode-echo validation: in `introspection` mode, if the server echoes a different
+    `mode` than `expectedMode`, the request is rejected (fail-closed 403).
+  New exports: `AccessTokenAuthorizationMode`, `AuthorizationModeError`, `AuthorizeError`,
+  `AuthorizeClient`, `AuthorizeOptions`, `AuthorizeResult`.
+  New config fields: `realm_id`, `authorize_endpoint`.
+
 - **TypeScript SDK: `authorize()` + mode-aware middleware (HEA-923)** — the TypeScript SDK
   at `sdks/typescript/` now exposes the three permission-delivery modes introduced in HEA-922:
   - `HearthClient.authorize(token, permission, opts?)` — calls `POST /oauth/authorize` for
