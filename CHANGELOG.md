@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Required-actions bypass via ROPC closed (HEA-905)** — `password_grant_token` now checks
+  `user.required_actions()` after credential verification and returns `RequiredActionsBlocking`
+  when any actions are pending. HTTP surface maps this to `400 {"error":"required_actions_pending",
+  "actions":[...]}`. Previously only the browser-path interstitial enforced this gate, allowing
+  clients using the direct password grant to obtain valid access tokens despite pending
+  `UPDATE_PASSWORD`, `VERIFY_EMAIL`, or `ENROLL_PHONE_OTP` requirements.
+
 - **GDPR Art.17: device fingerprint erasure cascade + admin API (HEA-875)** — `delete_user`
   now cascades to all `dfp:user:{uid}:*` storage entries so right-to-erasure is complete.
   New endpoint `DELETE /admin/users/{id}/device-fingerprints` (AC-11) lets operators satisfy

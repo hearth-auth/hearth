@@ -441,7 +441,8 @@ impl Default for DPopJtiCache {
 mod tests {
     use super::*;
 
-    /// RFC 7638 §3.1 test vector for EC P-256 key thumbprint.
+    /// EC P-256 key thumbprint — coordinates from RFC 7517 Appendix A.2, canonical
+    /// JSON computed per RFC 7638 §3.2.
     #[test]
     fn ec_thumbprint_matches_rfc7638_vector() {
         let jwk = DPopJwk {
@@ -452,8 +453,8 @@ mod tests {
             n: None,
             e: None,
         };
-        // RFC 7638 §3.1 expected thumbprint
-        let expected = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs";
+        // SHA-256({"crv":"P-256","kty":"EC","x":"f83…","y":"x_F…"}) base64url-nopad
+        let expected = "oKIywvGUpTVTyxMQ3bwIIeQUudfr_CkLMjCE19ECD-U";
         assert_eq!(compute_jwk_thumbprint(&jwk).expect("thumbprint"), expected);
     }
 

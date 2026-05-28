@@ -75,6 +75,7 @@ fn setup_oauth() -> (
                 client_id: client.client_id().clone(),
                 client_secret: secret.to_string(),
                 scope: Some("read write".to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("client_credentials_token");
@@ -119,6 +120,7 @@ fn bench_client_credentials(c: &mut Criterion) {
                     client_id: client_id.clone(),
                     client_secret: secret.clone(),
                     scope: Some("read".to_string()),
+                    dpop_jkt: None,
                 },
             );
             assert!(result.is_ok());

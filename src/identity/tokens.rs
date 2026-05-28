@@ -116,6 +116,13 @@ struct JwtHeader {
     kid: String,
 }
 
+/// Confirmation claim (RFC 7800 §3.1) — carries the JWK thumbprint for DPoP binding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CnfClaim {
+    /// JWK thumbprint (RFC 7638) of the client's proof-of-possession key.
+    pub jkt: String,
+}
+
 /// JWT claims (payload).
 ///
 /// Contains standard claims plus Hearth-specific claims for session
@@ -167,6 +174,13 @@ pub struct TokenClaims {
     /// authorization request, the ID token MUST include it unmodified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+    /// DPoP confirmation claim (RFC 7800 / RFC 9449).
+    ///
+    /// Present only on DPoP-bound access tokens. Contains the JWK thumbprint
+    /// of the client key used to prove possession. Resource servers MUST
+    /// require a matching DPoP proof when this field is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<CnfClaim>,
     /// Role names the subject holds in this realm (and, if `oid` is
     /// present, in that organization). Informational; authoritative
     /// authorization reads exclusively from `permissions`.
@@ -516,6 +530,9 @@ impl SigningKey {
             fid: None,
             scope: None,
             nonce: None,
+            cnf: request.dpop_jkt.as_deref().map(|jkt| CnfClaim {
+                jkt: jkt.to_string(),
+            }),
             roles: request.roles.to_vec(),
             groups: request.groups.to_vec(),
             permissions: request.permissions.to_vec(),
@@ -538,6 +555,7 @@ impl SigningKey {
             fid: None,
             scope: None,
             nonce: None,
+            cnf: None, // DPoP binding is on access tokens only
             roles: Vec::new(),
             groups: Vec::new(),
             permissions: Vec::new(),
@@ -590,6 +608,9 @@ pub struct IssueTokenRequest<'a> {
     /// Optional RFC 8707 resource indicator. When present, the resource URI
     /// is appended to the `aud` claim as a second entry.
     pub resource: Option<&'a Uri>,
+    /// JWK thumbprint for DPoP binding (RFC 9449). When set, the issued
+    /// access token will carry a `cnf.jkt` claim.
+    pub dpop_jkt: Option<String>,
 }
 
 /// Validates a JWT's signature and returns the decoded claims.
@@ -1107,6 +1128,7 @@ mod tests {
             fid: None,
             scope: None,
             nonce: None,
+            cnf: None,
             roles: Vec::new(),
             groups: Vec::new(),
             permissions: Vec::new(),
@@ -1262,6 +1284,7 @@ mod tests {
                 permissions: &[],
                 custom: BTreeMap::new(),
                 resource: None,
+                dpop_jkt: None,
             })
             .expect("issue pair");
 
@@ -1300,6 +1323,7 @@ mod tests {
                 permissions: &[],
                 custom: BTreeMap::new(),
                 resource: None,
+                dpop_jkt: None,
             })
             .expect("reissue pair");
 

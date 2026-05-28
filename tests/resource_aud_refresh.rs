@@ -114,6 +114,7 @@ fn authorize_and_exchange(
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("exchange code")

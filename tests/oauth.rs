@@ -99,6 +99,7 @@ async fn client_credentials_full_flow() {
                 client_id: client.client_id().clone(),
                 client_secret: "super-secret-value-123!".to_string(),
                 scope: Some("read write".to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("client credentials token");
@@ -298,6 +299,7 @@ async fn refresh_token_rotation_e2e() {
                 code: auth_resp.code().to_string(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("exchange code");
@@ -403,6 +405,7 @@ async fn conformance_rfc7662_introspection_response() {
                 code: auth.code().to_string(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
             },
         )
         .expect("exchange");
