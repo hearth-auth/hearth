@@ -213,6 +213,28 @@ pub struct TokenClaims {
     pub custom: BTreeMap<String, serde_json::Value>,
 }
 
+/// Minimal JWT claims for RFC 7523 JWT Bearer assertion validation.
+///
+/// Client-issued assertions only carry standard JWT claims — they do not
+/// have Hearth-specific fields such as `sid`, `tid`, or `token_type`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JwtAssertionClaims {
+    /// Issuer — MUST equal the `client_id` per RFC 7523 §3.
+    pub iss: String,
+    /// Subject — the principal on whose behalf the token is issued.
+    pub sub: String,
+    /// Audience — MUST contain the token endpoint URI.
+    pub aud: Audience,
+    /// Expiration time (Unix seconds).
+    pub exp: i64,
+    /// JWT ID for replay prevention (RFC 7523 §3 recommends inclusion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
+    /// Issued-at time (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iat: Option<i64>,
+}
+
 /// A pair of access and refresh tokens.
 #[derive(Debug, Clone)]
 pub struct TokenPair {
@@ -429,6 +451,38 @@ impl SigningKey {
         let signing_input = format!("{header_b64}.{claims_b64}");
         let sig = self.sign(signing_input.as_bytes());
         let sig_b64 = URL_SAFE_NO_PAD.encode(&sig);
+
+        Ok(format!("{signing_input}.{sig_b64}"))
+    }
+
+    /// Issues a JWT bearer assertion for use with the RFC 7523 grant.
+    ///
+    /// The resulting JWT is signed with this key and contains only the
+    /// [`JwtAssertionClaims`] payload.  Clients building machine-to-machine
+    /// integrations call this to generate the `assertion` parameter before
+    /// posting to the token endpoint.
+    pub fn issue_assertion_jwt(
+        &self,
+        claims: &JwtAssertionClaims,
+    ) -> Result<String, IdentityError> {
+        let header = JwtHeader {
+            alg: JWT_ALGORITHM.to_string(),
+            typ: JWT_TYPE.to_string(),
+            kid: self.key_id.clone(),
+        };
+
+        let header_json =
+            serde_json::to_vec(&header).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let claims_json = serde_json::to_vec(claims).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(&header_json);
+        let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let sig_b64 = URL_SAFE_NO_PAD.encode(self.sign(signing_input.as_bytes()));
 
         Ok(format!("{signing_input}.{sig_b64}"))
     }
@@ -681,6 +735,55 @@ pub fn validate_token_with_time(
     if now_secs >= claims.exp {
         return Err(IdentityError::TokenExpired);
     }
+    Ok(claims)
+}
+
+/// Validates a JWT bearer assertion's Ed25519 signature and returns the decoded claims.
+///
+/// Performs:
+/// 1. Header parsing — rejects any algorithm other than `EdDSA`
+/// 2. Ed25519 signature verification against the provided public key bytes
+/// 3. Claims decoding into [`JwtAssertionClaims`]
+///
+/// Does NOT check expiration or audience — callers must perform those checks.
+/// The `typ` header is not enforced so that client-issued assertions that
+/// omit or customise it remain accepted.
+pub fn verify_assertion_signature(
+    token: &str,
+    public_key_bytes: &[u8],
+) -> Result<JwtAssertionClaims, IdentityError> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(IdentityError::InvalidToken);
+    }
+
+    // Reject any algorithm other than EdDSA — no HS*, no RS*, no alg:none.
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let header: JwtHeader =
+        serde_json::from_slice(&header_bytes).map_err(|_| IdentityError::InvalidToken)?;
+    if header.alg != JWT_ALGORITHM {
+        return Err(IdentityError::InvalidToken);
+    }
+
+    // Verify Ed25519 signature
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let public_key = signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
+    public_key
+        .verify(signing_input.as_bytes(), &sig_bytes)
+        .map_err(|_| IdentityError::InvalidToken)?;
+
+    // Decode claims
+    let claims_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let claims: JwtAssertionClaims =
+        serde_json::from_slice(&claims_bytes).map_err(|_| IdentityError::InvalidToken)?;
+
     Ok(claims)
 }
 

@@ -13,11 +13,11 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use base64::Engine as _;
-use hearth::identity::{CreateRealmRequest, IdentityEngine, RegisterClientRequest};
+use hearth::identity::{ClientTrustLevel, CreateRealmRequest, RegisterClientRequest};
 use hearth::protocol::http::{router, AppState};
 use ring::{
     rand::SystemRandom,
-    signature::{self, EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING},
+    signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING},
 };
 use tower::ServiceExt as _;
 
@@ -126,6 +126,7 @@ async fn setup_realm_and_client(harness: &common::TestHarness) -> (String, Strin
                 grant_types: vec!["client_credentials".to_string()],
                 require_consent: false,
                 client_logo_url: None,
+                trust_level: ClientTrustLevel::FirstParty,
                 ..Default::default()
             },
         )

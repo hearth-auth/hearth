@@ -197,6 +197,14 @@ pub struct OAuthClient {
     /// only if it matches one of these registered values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     post_logout_redirect_uris: Vec<String>,
+    /// Base64url-encoded raw Ed25519 public key for JWT bearer assertion
+    /// validation (RFC 7523).
+    ///
+    /// When set, this client may authenticate using
+    /// `urn:ietf:params:oauth:grant-type:jwt-bearer`.  The key is stored as
+    /// raw 32 bytes encoded with base64url (no PEM wrapping).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assertion_public_key: Option<String>,
 }
 
 fn default_require_consent() -> bool {
@@ -406,6 +414,18 @@ impl OAuthClient {
         self.post_logout_redirect_uris = uris;
     }
 
+    /// Returns the base64url-encoded Ed25519 public key for JWT bearer
+    /// assertion validation, if one has been registered.
+    pub fn assertion_public_key(&self) -> Option<&str> {
+        self.assertion_public_key.as_deref()
+    }
+
+    /// Sets the assertion public key.  `None` clears it, disabling the
+    /// `jwt-bearer` grant for this client.
+    pub(crate) fn set_assertion_public_key(&mut self, key: Option<String>) {
+        self.assertion_public_key = key;
+    }
+
     /// Returns the client's lifecycle status.
     pub fn status(&self) -> ApplicationStatus {
         self.status
@@ -459,6 +479,11 @@ pub struct UpdateClientRequest {
     pub post_logout_redirect_uris: Option<Vec<String>>,
     /// New lifecycle status. Used to archive or restore a client.
     pub status: Option<ApplicationStatus>,
+    /// Ed25519 assertion public key for JWT bearer grant (RFC 7523).
+    ///
+    /// Pass `Some(Some(key_b64url))` to set, `Some(None)` to clear.
+    /// `None` leaves the current value unchanged.
+    pub assertion_public_key: Option<Option<String>>,
 }
 
 // ===== RP-Initiated Logout =====
@@ -854,6 +879,23 @@ pub struct ClientCredentialsRequest {
     pub client_id: ClientId,
     /// The client secret for authentication.
     pub client_secret: String,
+    /// Requested scope (space-delimited).
+    pub scope: Option<String>,
+    /// JWK thumbprint for DPoP binding (RFC 9449).
+    pub dpop_jkt: Option<String>,
+}
+
+/// Request for the JWT Bearer Grant (RFC 7523).
+///
+/// The client authenticates by presenting a self-signed JWT `assertion`
+/// instead of a client secret.  The assertion MUST be signed with the
+/// Ed25519 private key whose public key is registered on the client.
+#[derive(Debug, Clone)]
+pub struct JwtBearerRequest {
+    /// The client requesting tokens.
+    pub client_id: ClientId,
+    /// The signed JWT bearer assertion.
+    pub assertion: String,
     /// Requested scope (space-delimited).
     pub scope: Option<String>,
     /// JWK thumbprint for DPoP binding (RFC 9449).

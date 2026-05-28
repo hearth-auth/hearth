@@ -7,6 +7,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **DPoP (Demonstrating Proof-of-Possession — RFC 9449)** — token endpoints now
+  validate DPoP proof JWTs (`alg`, `jwk`, `htu`, `htm`, `iat`, `jti`). Access tokens
+  issued with a proof carry `cnf.jkt` (JWK thumbprint) binding. Replay prevention via
+  in-process JTI cache with TTL-based eviction. Stateless HMAC-SHA256 nonce generation
+  with 5-minute sliding windows. `DPoP-Nonce` header returned on every token response.
+  `dpop_signing_alg_values_supported: [ES256, EdDSA]` added to OIDC discovery (HEA-907).
+
 ### Security
 
 - **Required-actions bypass via ROPC closed (HEA-905)** — `password_grant_token` now checks
