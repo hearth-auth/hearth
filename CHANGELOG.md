@@ -62,8 +62,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   eval-free. The CSP is now `script-src 'self'; style-src 'self'` with no unsafe
   keywords. Resolves GAP-4 and GAP-5 from the original security audit.
 
-### Added
-
 - **Pushed Authorization Request endpoint (RFC 9126, HEA-906)** — `POST /as/par` (global)
   and `POST /{realm}/as/par` (realm-scoped) accept authorization parameters from clients and
   return a `request_uri` with a 90-second TTL. The `request_uri` is single-use; replaying it

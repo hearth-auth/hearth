@@ -2,6 +2,8 @@
 
 Hearth supports multi-node Raft consensus for high availability and horizontal read scaling. In cluster mode, writes go through Raft log replication before being acknowledged; reads are served locally by followers as long as replication lag is within the configured threshold.
 
+> **Early access — not production-validated.** The Raft clustering implementation is complete and wired (`src/cluster/` + `openraft`), but no 3-node deployment has been chaos-tested under production load. For v1.0 deployments, single-node mode is recommended unless you are comfortable operating software at this validation level. HA clustering is the primary Phase 2 focus. Feedback from early cluster operators is welcome.
+
 **Single-node mode is the default.** Omit the `cluster:` YAML section entirely if you do not need HA. There is zero overhead — no extra port, no Raft log, no election timers.
 
 ---

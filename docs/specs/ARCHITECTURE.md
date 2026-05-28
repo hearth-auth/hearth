@@ -518,9 +518,9 @@ These crates are pre-approved and need no additional justification:
 | CLI | `clap` | Derive-based |
 | Lock-free concurrency | `crossbeam-epoch`, `arc-swap` | |
 | Memory-mapped I/O | `memmap2` | |
-| Raft consensus | `openraft` | Phase 2+ |
-| HTTP framework | TBD | MUST be `tower`-compatible |
-| Time handling | TBD | |
+| Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; not yet production-validated at scale |
+| HTTP framework | `axum` | `tower`-compatible |
+| Time handling | `std::time`, `tokio::time` | |
 | Testing | `proptest`, `criterion`, `insta`, `madsim` | Test-only |
 | HTTP client (test) | `reqwest` | Test-only |
 
