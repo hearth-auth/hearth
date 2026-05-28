@@ -33,6 +33,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Pushed Authorization Request endpoint (RFC 9126, HEA-906)** — `POST /as/par` (global)
+  and `POST /{realm}/as/par` (realm-scoped) accept authorization parameters from clients and
+  return a `request_uri` with a 90-second TTL. The `request_uri` is single-use; replaying it
+  returns `invalid_request`. PKCE (`S256`) is required for public clients. The OIDC discovery
+  document now includes `pushed_authorization_request_endpoint`. Expired PAR entries are
+  removed by the periodic background sweeper (`CleanupStats.par_requests_deleted`).
+
 - **`make ci-local-full`** — full container reproduction of PR-blocking GHA
   workflows via `nektos/act`; catches workflow-file errors and toolchain drift
   that the host-side `ci-local-fast` cannot. Targets 10–15 min cold on a

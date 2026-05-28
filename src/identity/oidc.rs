@@ -602,6 +602,9 @@ pub struct TokenExchangeRequest {
     pub redirect_uri: String,
     /// PKCE code verifier (required if `code_challenge` was sent during authorization).
     pub code_verifier: Option<String>,
+    /// JWK thumbprint for DPoP binding (RFC 9449). When present, the issued access token
+    /// will carry a `cnf.jkt` claim and `token_type` will be `DPoP`.
+    pub dpop_jkt: Option<String>,
 }
 
 /// Response from a successful token exchange.
@@ -762,6 +765,84 @@ pub struct OidcDiscoveryDocument {
     /// Whether back-channel logout tokens include a `sid` claim.
     #[serde(default)]
     pub backchannel_logout_session_supported: bool,
+    /// URL of the pushed authorization request endpoint (RFC 9126).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_authorization_request_endpoint: Option<String>,
+    /// DPoP signing algorithms supported (RFC 9449 §5.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dpop_signing_alg_values_supported: Vec<String>,
+}
+
+// ===== Pushed Authorization Requests (RFC 9126) =====
+
+/// Request to push authorization parameters to the PAR endpoint.
+///
+/// Returns a `request_uri` that the client passes to `/authorize` instead
+/// of the full parameter set.
+#[derive(Debug, Clone)]
+pub struct PushedAuthorizationRequest {
+    /// The client making the request.
+    pub client_id: ClientId,
+    /// The redirect URI to use after authorization.
+    pub redirect_uri: String,
+    /// Space-delimited scope string.
+    pub scope: String,
+    /// CSRF protection state value.
+    pub state: String,
+    /// RFC 8707 resource indicator.
+    pub resource: Option<String>,
+    /// Must be "code".
+    pub response_type: String,
+    /// PKCE S256 code challenge (required for public clients).
+    pub code_challenge: Option<String>,
+    /// Code challenge method — only S256 is accepted.
+    pub code_challenge_method: Option<CodeChallengeMethod>,
+    /// OIDC nonce claim to bind to the ID token.
+    pub nonce: Option<String>,
+}
+
+/// Response from a successful PAR push (RFC 9126 §2.2).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PushedAuthorizationResponse {
+    /// URN referencing the stored authorization parameters.
+    pub request_uri: String,
+    /// Seconds until the `request_uri` expires.
+    pub expires_in: i64,
+}
+
+/// Stored PAR entry — persisted under `oauth:par:{uuid}`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct StoredPushedAuthorizationRequest {
+    /// The UUID portion of the `request_uri`.
+    pub(crate) request_uri_id: String,
+    /// The client that pushed the request.
+    pub(crate) client_id: ClientId,
+    /// The redirect URI from the push.
+    pub(crate) redirect_uri: String,
+    /// Space-delimited scope.
+    pub(crate) scope: String,
+    /// CSRF state.
+    pub(crate) state: String,
+    /// RFC 8707 resource indicator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resource: Option<String>,
+    /// Response type.
+    pub(crate) response_type: String,
+    /// PKCE S256 code challenge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) code_challenge: Option<String>,
+    /// PKCE code challenge method.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) code_challenge_method: Option<CodeChallengeMethod>,
+    /// OIDC nonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) nonce: Option<String>,
+    /// When this entry was created.
+    pub(crate) created_at: Timestamp,
+    /// When this entry expires (created_at + 90 s).
+    pub(crate) expires_at: Timestamp,
+    /// Whether the `request_uri` has already been consumed.
+    pub(crate) used: bool,
 }
 
 // ===== Client Credentials Grant =====
@@ -775,6 +856,8 @@ pub struct ClientCredentialsRequest {
     pub client_secret: String,
     /// Requested scope (space-delimited).
     pub scope: Option<String>,
+    /// JWK thumbprint for DPoP binding (RFC 9449).
+    pub dpop_jkt: Option<String>,
 }
 
 /// Response from a client credentials grant.
@@ -1212,6 +1295,8 @@ mod tests {
             end_session_endpoint: Some("https://hearth.local/end_session".to_string()),
             backchannel_logout_supported: false,
             backchannel_logout_session_supported: false,
+            pushed_authorization_request_endpoint: None,
+            dpop_signing_alg_values_supported: Vec::new(),
         };
 
         let json = serde_json::to_string(&doc).expect("serialize");

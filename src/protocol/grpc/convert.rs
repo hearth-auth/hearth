@@ -117,6 +117,17 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             Code::PermissionDenied,
             "MFA enrollment required: login from unrecognised device".to_string(),
         ),
+        IdentityError::RequiredActionsBlocking { actions } => (
+            Code::FailedPrecondition,
+            format!(
+                "required actions pending: {}",
+                actions
+                    .iter()
+                    .map(|a| crate::protocol::convert::identity::required_action_to_wire(*a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
         IdentityError::InvalidSmsOtp => (
             Code::InvalidArgument,
             "invalid or expired SMS OTP".to_string(),
@@ -124,6 +135,20 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::SmsResendLimitExceeded => (
             Code::ResourceExhausted,
             "SMS OTP resend limit exceeded".to_string(),
+        ),
+        IdentityError::InvalidPushedAuthorizationRequest => (
+            Code::InvalidArgument,
+            "invalid, expired, or already used request_uri".to_string(),
+        ),
+        IdentityError::InvalidDPopProof { .. } => {
+            (Code::Unauthenticated, "invalid DPoP proof".to_string())
+        }
+        IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => {
+            (Code::Unauthenticated, "DPoP nonce required".to_string())
+        }
+        IdentityError::DPopBindingMismatch => (
+            Code::Unauthenticated,
+            "DPoP key binding mismatch".to_string(),
         ),
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }

@@ -16,7 +16,9 @@
 
 use crate::core::{Clock, RealmId, Timestamp};
 use crate::identity::keys;
-use crate::identity::oidc::{StoredDeviceCode, StoredGrantFamily};
+use crate::identity::oidc::{
+    StoredDeviceCode, StoredGrantFamily, StoredPushedAuthorizationRequest,
+};
 use crate::identity::types::PendingAuthorizationRequest;
 use crate::storage::StorageEngine;
 
@@ -60,6 +62,8 @@ pub struct CleanupStats {
     pub pending_tickets_deleted: u64,
     /// Grant families swept.
     pub grant_families_deleted: u64,
+    /// Pushed authorization requests swept.
+    pub par_requests_deleted: u64,
     /// Number of entity-type sweeps that encountered an error.
     pub errors: u64,
 }
@@ -71,6 +75,7 @@ impl CleanupStats {
             + self.device_codes_deleted
             + self.pending_tickets_deleted
             + self.grant_families_deleted
+            + self.par_requests_deleted
     }
 }
 
@@ -132,6 +137,18 @@ pub(crate) fn sweep_expired(
                 realm = %realm_id,
                 error = %e,
                 "cleanup: grant family sweep failed"
+            );
+        }
+    }
+
+    match sweep_par_requests(realm_id, storage, now, config.max_per_type) {
+        Ok(n) => stats.par_requests_deleted = n,
+        Err(e) => {
+            stats.errors += 1;
+            tracing::warn!(
+                realm = %realm_id,
+                error = %e,
+                "cleanup: PAR request sweep failed"
             );
         }
     }
@@ -314,6 +331,37 @@ fn sweep_grant_families(
         })?;
 
         if now >= family.expires_at {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+
+    Ok(deleted)
+}
+
+fn sweep_par_requests(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now: Timestamp,
+    max_per_type: usize,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::par_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        if deleted >= max_per_type as u64 {
+            break;
+        }
+        let par: StoredPushedAuthorizationRequest =
+            serde_json::from_slice(&entry.value).map_err(|e| {
+                crate::storage::StorageError::DeserializationFailed {
+                    reason: format!("cleanup: failed to deserialize PAR request: {e}"),
+                }
+            })?;
+
+        if now >= par.expires_at {
             storage.delete(realm_id, &entry.key)?;
             deleted += 1;
         }
@@ -702,9 +750,10 @@ mod tests {
             device_codes_deleted: 2,
             pending_tickets_deleted: 3,
             grant_families_deleted: 4,
+            par_requests_deleted: 5,
             ..Default::default()
         };
-        assert_eq!(stats.total_deleted(), 10);
+        assert_eq!(stats.total_deleted(), 15);
     }
 
     // --- device fingerprint sweep ---

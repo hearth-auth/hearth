@@ -1383,6 +1383,20 @@ pub(crate) fn sms_resend_count_scan_prefix() -> Vec<u8> {
     SMS_RESEND_COUNT_PREFIX.as_bytes().to_vec()
 }
 
+/// Prefix for Pushed Authorization Request entries (RFC 9126).
+const PAR_PREFIX: &str = "oauth:par:";
+
+/// Encodes the storage key for a PAR entry by its UUID.
+pub(crate) fn encode_par_request(request_uri_id: &str) -> Vec<u8> {
+    format!("{PAR_PREFIX}{request_uri_id}").into_bytes()
+}
+
+/// Scan prefix for all PAR entries in a realm.
+#[allow(dead_code)]
+pub(crate) fn par_scan_prefix() -> Vec<u8> {
+    PAR_PREFIX.as_bytes().to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

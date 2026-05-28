@@ -9,6 +9,7 @@ pub(crate) mod cleanup;
 pub(crate) mod credentials;
 pub mod device_fingerprint;
 pub mod device_fp;
+pub mod dpop;
 pub mod email;
 mod engine;
 pub mod error;
@@ -44,7 +45,8 @@ pub use oidc::{
     ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel, CodeChallengeMethod,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     IntrospectionResponse, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
-    PasswordGrantRequest, PasswordGrantResponse, RegisterClientRequest, StepUpMfaGrantRequest,
+    PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
+    PushedAuthorizationResponse, RegisterClientRequest, StepUpMfaGrantRequest,
     TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
     UserInfoResponse,
 };
@@ -53,8 +55,9 @@ pub use sms::{
     StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use tokens::{
-    decode_claims_unverified, validate_token_with_time, verify_token_signature, IssueTokenRequest,
-    Jwk, JwksDocument, SigningKey, TokenClaims, TokenConfig, TokenPair, REQUIRED_ACTION_TOKEN_TYPE,
+    decode_claims_unverified, validate_token_with_time, verify_token_signature, CnfClaim,
+    IssueTokenRequest, Jwk, JwksDocument, SigningKey, TokenClaims, TokenConfig, TokenPair,
+    REQUIRED_ACTION_TOKEN_TYPE,
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
@@ -626,6 +629,28 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// For access tokens: extracts session ID and revokes the session.
     /// For refresh tokens: looks up the grant family and marks it revoked.
+    /// Pushes authorization parameters to the PAR endpoint (RFC 9126).
+    ///
+    /// Validates the client, redirect URI, and PKCE (required for public
+    /// clients), then stores the parameters under a 90-second TTL.
+    /// Returns a `request_uri` the client passes to `/authorize`.
+    fn push_authorization_request(
+        &self,
+        realm_id: &RealmId,
+        request: &PushedAuthorizationRequest,
+    ) -> Result<PushedAuthorizationResponse, IdentityError>;
+
+    /// Consumes a stored PAR entry identified by its `request_uri`.
+    ///
+    /// Returns the stored parameters on success. The entry is atomically
+    /// marked used; subsequent calls return `InvalidPushedAuthorizationRequest`.
+    #[allow(private_interfaces)]
+    fn consume_par(
+        &self,
+        realm_id: &RealmId,
+        request_uri: &str,
+    ) -> Result<oidc::StoredPushedAuthorizationRequest, IdentityError>;
+
     fn revoke_token(
         &self,
         realm_id: &RealmId,

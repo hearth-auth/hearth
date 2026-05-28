@@ -142,6 +142,7 @@ pub(crate) fn proto_token_exchange_to_domain(
         code: r.code.clone(),
         redirect_uri: r.redirect_uri.clone(),
         code_verifier: r.code_verifier.clone(),
+        dpop_jkt: None,
     })
 }
 
@@ -172,6 +173,7 @@ pub(crate) fn proto_client_creds_to_domain(
         ),
         client_secret: r.client_secret.clone(),
         scope: r.scope.clone(),
+        dpop_jkt: None,
     })
 }
 

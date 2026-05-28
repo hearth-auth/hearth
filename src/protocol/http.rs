@@ -117,6 +117,10 @@ pub struct AppState {
     /// When `None`, all `/admin/cluster/*` endpoints return `503 Service
     /// Unavailable` rather than panicking.
     pub cluster: Option<Arc<ClusterEngine>>,
+    /// In-memory JTI replay cache for DPoP proofs (RFC 9449 §11.1).
+    pub dpop_jti_cache: Arc<crate::identity::dpop::DPopJtiCache>,
+    /// 32-byte HMAC secret for stateless DPoP nonce generation.
+    pub dpop_nonce_secret: [u8; 32],
 }
 
 impl AppState {
@@ -138,6 +142,8 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
+            dpop_jti_cache: Arc::new(crate::identity::dpop::DPopJtiCache::new()),
+            dpop_nonce_secret: [0u8; 32], // overridden in production via config
         }
     }
 
@@ -161,6 +167,8 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
+            dpop_jti_cache: Arc::new(crate::identity::dpop::DPopJtiCache::new()),
+            dpop_nonce_secret: [0u8; 32],
         }
     }
 
@@ -186,6 +194,8 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
+            dpop_jti_cache: Arc::new(crate::identity::dpop::DPopJtiCache::new()),
+            dpop_nonce_secret: [0u8; 32],
         }
     }
 
@@ -580,6 +590,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/authorize", axum::routing::post(authorize))
         .route(
+            "/as/par",
+            axum::routing::post(pushed_authorization_request)
+                .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
+        )
+        .route(
             "/token",
             axum::routing::post(token_exchange).options(token_preflight),
         )
@@ -651,6 +666,11 @@ pub fn router(state: Arc<AppState>) -> Router {
                 )
                 .route("/.well-known/jwks.json", axum::routing::get(realm_jwks))
                 .route("/authorize", axum::routing::post(realm_authorize))
+                .route(
+                    "/as/par",
+                    axum::routing::post(realm_pushed_authorization_request)
+                        .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
+                )
                 .route(
                     "/token",
                     axum::routing::post(realm_token_exchange).options(realm_token_preflight),
@@ -1388,6 +1408,24 @@ fn identity_error_to_response(
 ) -> (StatusCode, Json<serde_json::Value>) {
     use crate::identity::IdentityError;
 
+    // RequiredActionsBlocking carries a structured payload — handle before the
+    // flat (status, message) match so we can embed the actions array.
+    if let IdentityError::RequiredActionsBlocking { actions } = err {
+        let action_strs: Vec<&str> = actions
+            .iter()
+            .map(|a| crate::protocol::convert::identity::required_action_to_wire(*a))
+            .collect();
+        let error_code = crate::protocol::error_codes::for_identity_error(err);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "required_actions_pending",
+                "error_code": error_code,
+                "actions": action_strs,
+            })),
+        );
+    }
+
     let (status, message) = match err {
         IdentityError::RealmNotFound | IdentityError::UserNotFound => {
             (StatusCode::NOT_FOUND, "not found")
@@ -1551,10 +1589,22 @@ fn identity_error_to_response(
         IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
         IdentityError::StepUpChallengeRequired => (StatusCode::UNAUTHORIZED, "mfa_required"),
         IdentityError::EnrollMfaRequired => (StatusCode::FORBIDDEN, "mfa_enrollment_required"),
+        // Handled by the early return above; this arm satisfies exhaustiveness.
+        IdentityError::RequiredActionsBlocking { .. } => {
+            (StatusCode::BAD_REQUEST, "required_actions_pending")
+        }
         IdentityError::InvalidSmsOtp => (StatusCode::UNAUTHORIZED, "invalid_sms_otp"),
         IdentityError::SmsResendLimitExceeded => {
             (StatusCode::TOO_MANY_REQUESTS, "sms_resend_limit_exceeded")
         }
+        IdentityError::InvalidPushedAuthorizationRequest => {
+            (StatusCode::BAD_REQUEST, "invalid_request")
+        }
+        IdentityError::InvalidDPopProof { .. } => (StatusCode::UNAUTHORIZED, "invalid_dpop_proof"),
+        IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => {
+            (StatusCode::UNAUTHORIZED, "use_dpop_nonce")
+        }
+        IdentityError::DPopBindingMismatch => (StatusCode::UNAUTHORIZED, "invalid_token"),
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);
@@ -1766,6 +1816,111 @@ async fn authorize(
     }
 }
 
+/// HTTP request body for a Pushed Authorization Request (RFC 9126).
+#[derive(Debug, serde::Deserialize)]
+struct HttpParRequest {
+    client_id: String,
+    redirect_uri: String,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    state: String,
+    resource: Option<String>,
+    #[serde(default = "default_response_type")]
+    response_type: String,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    nonce: Option<String>,
+}
+
+fn default_response_type() -> String {
+    "code".to_string()
+}
+
+/// Push authorization parameters (RFC 9126) — header-realm variant.
+async fn pushed_authorization_request(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<HttpParRequest>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
+    par_handler(&state, &realm_id, body).await.into_response()
+}
+
+/// Push authorization parameters (RFC 9126) — realm-scoped via path.
+async fn realm_pushed_authorization_request(
+    State(state): State<Arc<AppState>>,
+    Path(realm_name): Path<String>,
+    Json(body): Json<HttpParRequest>,
+) -> impl IntoResponse {
+    let realm_id = match resolve_realm_by_name(&state, &realm_name) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    par_handler(&state, &realm_id, body).await.into_response()
+}
+
+async fn par_handler(
+    state: &AppState,
+    realm_id: &crate::core::RealmId,
+    body: HttpParRequest,
+) -> impl IntoResponse {
+    use crate::identity::{CodeChallengeMethod, PushedAuthorizationRequest};
+
+    let client_id = match body.client_id.parse::<uuid::Uuid>() {
+        Ok(u) => crate::core::ClientId::new(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_client", "error_description": "invalid client_id"})),
+            )
+                .into_response();
+        }
+    };
+
+    let code_challenge_method = match body.code_challenge_method.as_deref() {
+        Some("S256") => Some(CodeChallengeMethod::S256),
+        Some(m) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_request", "error_description": format!("unsupported code_challenge_method: {m}")})),
+            )
+                .into_response();
+        }
+        None => None,
+    };
+
+    let request = PushedAuthorizationRequest {
+        client_id,
+        redirect_uri: body.redirect_uri,
+        scope: body.scope,
+        state: body.state,
+        resource: body.resource,
+        response_type: body.response_type,
+        code_challenge: body.code_challenge,
+        code_challenge_method,
+        nonce: body.nonce,
+    };
+
+    match state
+        .identity
+        .push_authorization_request(realm_id, &request)
+    {
+        Ok(resp) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "request_uri": resp.request_uri,
+                "expires_in": resp.expires_in,
+            })),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
 /// Exchange an authorization code or refresh token for tokens.
 ///
 /// Requires `X-Realm-ID` header.
@@ -1790,6 +1945,17 @@ async fn token_exchange(
     if let (Some(ref realm_id), Some(ref client_id)) = (&maybe_realm_id, &maybe_client_id) {
         apply_cors_to_response(&mut resp, &state, realm_id, client_id, &headers);
     }
+
+    // RFC 9449 §9: always return DPoP-Nonce so clients can use it in the next proof.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let nonce = crate::identity::dpop::current_dpop_nonce(&state.dpop_nonce_secret, now_secs);
+    if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
+        resp.headers_mut().insert("DPoP-Nonce", val);
+    }
+
     resp
 }
 
@@ -1835,6 +2001,49 @@ async fn token_exchange_impl(
         return make_ip_rate_limit_response(retry_after as u32);
     }
 
+    // Extract and validate DPoP proof if present (RFC 9449).
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let dpop_jkt: Option<String> =
+        if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
+            let expected_htu = state.identity.oidc_discovery().token_endpoint.clone();
+            match crate::identity::dpop::validate_dpop_proof(
+                proof,
+                "POST",
+                &expected_htu,
+                now_secs,
+                None,
+            ) {
+                Ok(validated) => {
+                    if let Some(ref nonce) = validated.nonce {
+                        if !crate::identity::dpop::is_valid_dpop_nonce(
+                            &state.dpop_nonce_secret,
+                            nonce,
+                            now_secs,
+                        ) {
+                            return identity_error_to_response(
+                                &crate::identity::error::IdentityError::DPopNonceInvalid,
+                            )
+                            .into_response();
+                        }
+                    }
+                    if let Err(e) = state.dpop_jti_cache.check_and_insert(
+                        &validated.jti,
+                        now_secs,
+                        crate::identity::dpop::DPOP_MAX_AGE_SECS,
+                    ) {
+                        return identity_error_to_response(&e).into_response();
+                    }
+                    Some(validated.jkt)
+                }
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            }
+        } else {
+            None
+        };
+
     match grant_type {
         "authorization_code" => {
             let (Some(code), Some(redirect_uri)) = (body.code, body.redirect_uri) else {
@@ -1852,7 +2061,7 @@ async fn token_exchange_impl(
                 code_verifier: body.code_verifier,
             };
 
-            let request = match proto_token_exchange_to_domain(&proto_req) {
+            let mut request = match proto_token_exchange_to_domain(&proto_req) {
                 Ok(r) => r,
                 Err(msg) => {
                     return (
@@ -1862,6 +2071,7 @@ async fn token_exchange_impl(
                         .into_response();
                 }
             };
+            request.dpop_jkt = dpop_jkt.clone();
 
             match state
                 .identity
@@ -1876,11 +2086,11 @@ async fn token_exchange_impl(
                         ])
                         .inc();
                     crate::metrics::metrics().active_sessions.inc();
-                    (
-                        StatusCode::OK,
-                        Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),
-                    )
-                        .into_response()
+                    let mut token_resp = pb::OidcTokenResponse::from(&response);
+                    if dpop_jkt.is_some() {
+                        token_resp.token_type = "DPoP".to_string();
+                    }
+                    (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
                 }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
@@ -1922,7 +2132,7 @@ async fn token_exchange_impl(
                 scope: body.scope,
             };
 
-            let request = match proto_client_creds_to_domain(&proto_req) {
+            let mut request = match proto_client_creds_to_domain(&proto_req) {
                 Ok(r) => r,
                 Err(msg) => {
                     return (
@@ -1932,6 +2142,7 @@ async fn token_exchange_impl(
                         .into_response();
                 }
             };
+            request.dpop_jkt = dpop_jkt.clone();
 
             let realm_str = realm_id.as_uuid().to_string();
             match state.identity.client_credentials_token(&realm_id, &request) {
@@ -1944,13 +2155,11 @@ async fn token_exchange_impl(
                         .tokens_issued_total
                         .with_label_values(&[realm_str.as_str(), "client_credentials"])
                         .inc();
-                    (
-                        StatusCode::OK,
-                        Json(proto_to_rest_json(&pb::ClientCredentialsResponse::from(
-                            &response,
-                        ))),
-                    )
-                        .into_response()
+                    let mut cc_resp = pb::ClientCredentialsResponse::from(&response);
+                    if dpop_jkt.is_some() {
+                        cc_resp.token_type = "DPoP".to_string();
+                    }
+                    (StatusCode::OK, Json(proto_to_rest_json(&cc_resp))).into_response()
                 }
                 Err(e) => {
                     crate::metrics::metrics()
@@ -5898,7 +6107,7 @@ async fn realm_token_exchange(
     Path(realm_name): Path<String>,
     headers: HeaderMap,
     Json(body): Json<HttpTokenRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
@@ -5926,7 +6135,52 @@ async fn realm_token_exchange(
             .ip_login_retry_after_secs(&realm_id, &client_ip);
         return make_ip_rate_limit_response(retry_after as u32);
     }
-    match grant_type {
+
+    // Extract and validate DPoP proof if present (RFC 9449).
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let dpop_jkt: Option<String> =
+        if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
+            let base_issuer = state.identity.oidc_discovery().issuer;
+            let expected_htu = format!("{base_issuer}/realms/{realm_name}/token");
+            match crate::identity::dpop::validate_dpop_proof(
+                proof,
+                "POST",
+                &expected_htu,
+                now_secs,
+                None,
+            ) {
+                Ok(validated) => {
+                    if let Some(ref nonce) = validated.nonce {
+                        if !crate::identity::dpop::is_valid_dpop_nonce(
+                            &state.dpop_nonce_secret,
+                            nonce,
+                            now_secs,
+                        ) {
+                            return identity_error_to_response(
+                                &crate::identity::error::IdentityError::DPopNonceInvalid,
+                            )
+                            .into_response();
+                        }
+                    }
+                    if let Err(e) = state.dpop_jti_cache.check_and_insert(
+                        &validated.jti,
+                        now_secs,
+                        crate::identity::dpop::DPOP_MAX_AGE_SECS,
+                    ) {
+                        return identity_error_to_response(&e).into_response();
+                    }
+                    Some(validated.jkt)
+                }
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            }
+        } else {
+            None
+        };
+
+    let mut resp = match grant_type {
         "authorization_code" => {
             let (Some(code), Some(redirect_uri)) = (body.code, body.redirect_uri) else {
                 return (
@@ -5941,7 +6195,7 @@ async fn realm_token_exchange(
                 redirect_uri,
                 code_verifier: body.code_verifier,
             };
-            let request = match proto_token_exchange_to_domain(&proto_req) {
+            let mut request = match proto_token_exchange_to_domain(&proto_req) {
                 Ok(r) => r,
                 Err(msg) => {
                     return (
@@ -5951,15 +6205,18 @@ async fn realm_token_exchange(
                         .into_response()
                 }
             };
+            request.dpop_jkt = dpop_jkt.clone();
             match state
                 .identity
                 .exchange_authorization_code(&realm_id, &request)
             {
-                Ok(response) => (
-                    StatusCode::OK,
-                    Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),
-                )
-                    .into_response(),
+                Ok(response) => {
+                    let mut token_resp = pb::OidcTokenResponse::from(&response);
+                    if dpop_jkt.is_some() {
+                        token_resp.token_type = "DPoP".to_string();
+                    }
+                    (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
+                }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
@@ -5991,7 +6248,7 @@ async fn realm_token_exchange(
                 client_secret: body.client_secret.unwrap_or_default(),
                 scope: body.scope,
             };
-            let request = match proto_client_creds_to_domain(&proto_req) {
+            let mut request = match proto_client_creds_to_domain(&proto_req) {
                 Ok(r) => r,
                 Err(msg) => {
                     return (
@@ -6001,12 +6258,17 @@ async fn realm_token_exchange(
                         .into_response()
                 }
             };
+            request.dpop_jkt = dpop_jkt.clone();
             match state.identity.client_credentials_token(&realm_id, &request) {
                 Ok(response) => {
                     let resp = pb::OidcTokenResponse {
                         access_token: response.access_token().to_string(),
                         id_token: String::new(),
-                        token_type: "Bearer".to_string(),
+                        token_type: if dpop_jkt.is_some() {
+                            "DPoP".to_string()
+                        } else {
+                            "Bearer".to_string()
+                        },
                         expires_in: response.expires_in(),
                         refresh_token: String::new(),
                     };
@@ -6135,7 +6397,15 @@ async fn realm_token_exchange(
             Json(serde_json::json!({"error": format!("unsupported grant_type: {other}")})),
         )
             .into_response(),
+    };
+
+    // RFC 9449 §9: always return DPoP-Nonce so clients can use it in the next proof.
+    let nonce = crate::identity::dpop::current_dpop_nonce(&state.dpop_nonce_secret, now_secs);
+    if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
+        resp.headers_mut().insert("DPoP-Nonce", val);
     }
+
+    resp
 }
 
 async fn realm_token_revocation(
