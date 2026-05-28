@@ -9,6 +9,8 @@ use crate::types::*;
 /// Client for Hearth OAuth flows, userinfo, and RBAC predicates.
 ///
 /// RBAC predicate methods decode the JWT locally — no network call needed.
+/// Clone is cheap: the inner [`reqwest::Client`] is reference-counted.
+#[derive(Clone)]
 pub struct HearthClient {
     base_url: String,
     realm_id: String,
@@ -173,6 +175,104 @@ impl HearthClient {
             .await?;
         Self::check(&resp)?;
         Ok(resp.json().await?)
+    }
+
+    /// Call `POST /introspect` and return the live token state (RFC 7662).
+    ///
+    /// Requires `client_id` + `client_secret` for HTTP Basic Auth per RFC 7662 §2.1.
+    ///
+    /// # Cache policy
+    /// Do **not** cache the response — RFC 7662 §2.1 prohibits it.
+    pub async fn introspect(
+        &self,
+        token: &str,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Result<IntrospectionResponse, HearthError> {
+        let resp = self
+            .http
+            .post(format!("{}/introspect", self.base_url))
+            .basic_auth(client_id, Some(client_secret))
+            .form(&[("token", token)])
+            .send()
+            .await?;
+        Self::check(&resp)?;
+        Ok(resp.json().await?)
+    }
+
+    /// Mode-aware permission check.
+    ///
+    /// Behaviour by mode:
+    /// - [`AccessTokenAuthorization::Embedded`] — decodes the JWT locally and checks
+    ///   `permissions[]`.  No network call.
+    /// - [`AccessTokenAuthorization::Introspection`] — calls `POST /introspect`, validates
+    ///   the echoed mode matches `Introspection`, then checks live `permissions[]`.
+    ///   Requires `client_credentials` in `opts`.
+    /// - [`AccessTokenAuthorization::Decision`] — calls `POST /oauth/authorize` with the
+    ///   bearer token.  Fail-closed: any network or server error returns
+    ///   [`HearthError::AuthorizationFailed`].
+    ///
+    /// **Mode is always explicit** — absence of `permissions` in the JWT is **never** used
+    /// to infer mode (HEA-921 design constraint).
+    pub async fn check_permission(
+        &self,
+        token: &str,
+        permission: &str,
+        mode: AccessTokenAuthorization,
+        opts: CheckPermissionOpts,
+    ) -> Result<bool, HearthError> {
+        match mode {
+            AccessTokenAuthorization::Embedded => Self::has_permission(token, permission),
+            AccessTokenAuthorization::Introspection => {
+                let (cid, csec) =
+                    opts.client_credentials
+                        .ok_or_else(|| HearthError::ConfigurationError {
+                            message: "Introspection mode requires client_credentials in CheckPermissionOpts".into(),
+                        })?;
+                let resp = self.introspect(token, &cid, &csec).await?;
+                if !resp.active {
+                    return Ok(false);
+                }
+                // Validate the server echoes the expected mode (fail if mismatched).
+                if let Some(echoed) = resp.mode {
+                    if echoed != AccessTokenAuthorization::Introspection {
+                        return Err(HearthError::ModeMismatch {
+                            expected: AccessTokenAuthorization::Introspection,
+                            actual: echoed,
+                        });
+                    }
+                }
+                Ok(resp.permissions.iter().any(|p| p == permission))
+            }
+            AccessTokenAuthorization::Decision => {
+                let body = serde_json::json!({
+                    "permission": permission,
+                    "organization_id": opts.organization_id,
+                    "resource": opts.resource,
+                });
+                let resp = self
+                    .http
+                    .post(format!("{}/oauth/authorize", self.base_url))
+                    .bearer_auth(token)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| HearthError::AuthorizationFailed {
+                        reason: format!("network error: {e}"),
+                    })?;
+                if !resp.status().is_success() {
+                    return Err(HearthError::AuthorizationFailed {
+                        reason: format!("HTTP {}", resp.status()),
+                    });
+                }
+                let check: PermissionCheckResponse = resp.json().await.map_err(|e| {
+                    HearthError::AuthorizationFailed {
+                        reason: format!("JSON decode: {e}"),
+                    }
+                })?;
+                Ok(check.allowed)
+            }
+        }
     }
 
     pub async fn jwks(&self) -> Result<JwksDocument, HearthError> {
