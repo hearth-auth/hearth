@@ -47,14 +47,15 @@ All example URLs use `auth.example.com`.
 | 30 | Public OAuth client — SPA | [Part 8](#part-8--rbac--oauth) |
 | 31 | Confidential OAuth client — M2M | [Part 8](#part-8--rbac--oauth) |
 | 32 | First-party SSO — no consent | [Part 8](#part-8--rbac--oauth) |
-| 33 | SCIM provisioning | [Part 9](#part-9--enterprise-integrations) |
-| 34 | SAML SP registration | [Part 9](#part-9--enterprise-integrations) |
-| 35 | Custom claim mappings | [Part 9](#part-9--enterprise-integrations) |
-| 36 | Production observability | [Part 9](#part-9--enterprise-integrations) |
-| 37 | Storage tuning | [Part 9](#part-9--enterprise-integrations) |
-| 38 | Custom branding | [Part 10](#part-10--branding--complex-scenarios) |
-| 39 | High-security / financial services | [Part 10](#part-10--branding--complex-scenarios) |
-| 40 | Full enterprise kitchen sink | [Part 10](#part-10--branding--complex-scenarios) |
+| 33 | Decision-mode client with `POST /oauth/authorize` | [Part 8](#part-8--rbac--oauth) |
+| 34 | SCIM provisioning | [Part 9](#part-9--enterprise-integrations) |
+| 35 | SAML SP registration | [Part 9](#part-9--enterprise-integrations) |
+| 36 | Custom claim mappings | [Part 9](#part-9--enterprise-integrations) |
+| 37 | Production observability | [Part 9](#part-9--enterprise-integrations) |
+| 38 | Storage tuning | [Part 9](#part-9--enterprise-integrations) |
+| 39 | Custom branding | [Part 10](#part-10--branding--complex-scenarios) |
+| 40 | High-security / financial services | [Part 10](#part-10--branding--complex-scenarios) |
+| 41 | Full enterprise kitchen sink | [Part 10](#part-10--branding--complex-scenarios) |
 
 ---
 
@@ -1242,9 +1243,84 @@ realms:
 
 ---
 
+### Example 33 — Decision-mode client with `POST /oauth/authorize`
+
+**Audience:** operators deploying a backend microservice where permission changes must
+take effect immediately, without waiting for a token refresh cycle. Typical use cases:
+financial services, healthcare, or any flow where access can be revoked mid-session.
+
+In decision mode, Hearth issues JWTs that carry only identity claims. The resource server
+calls `POST /oauth/authorize` on every protected request to get a live binary allow/deny.
+
+```yaml
+oidc:
+  issuer: "https://auth.example.com"
+
+realms:
+  acme:
+    permissions:
+      - name: payment.initiate
+        display_name: "Initiate Payments"
+        category: finance
+      - name: payment.approve
+        display_name: "Approve Payments"
+        category: finance
+
+    roles:
+      - name: payment-initiator
+        permissions: [payment.initiate]
+      - name: payment-approver
+        permissions: [payment.approve]
+        parents: [payment-initiator]     # approvers can also initiate
+
+    applications:
+      payments-service:
+        name: "Payments Service"
+        confidential: true
+        client_secret: "${PAYMENTS_CLIENT_SECRET}"
+        grant_types:
+          - client_credentials
+        access_token_authorization: decision
+```
+
+The resource server (pseudocode) verifies each incoming request like this:
+
+```bash
+# Resource server checks permission before processing a payment
+curl -X POST https://auth.example.com/oauth/authorize \
+  -H "Authorization: Bearer ${REQUEST_ACCESS_TOKEN}" \
+  -H "X-Realm-ID: ${REALM_UUID}" \
+  -H "Content-Type: application/json" \
+  -d '{"permission": "payment.initiate"}'
+# → {"allowed": true}  or  {"allowed": false}
+```
+
+For org-scoped checks (user must have the permission within a specific org context):
+
+```bash
+curl -X POST https://auth.example.com/oauth/authorize \
+  -H "Authorization: Bearer ${REQUEST_ACCESS_TOKEN}" \
+  -H "X-Realm-ID: ${REALM_UUID}" \
+  -H "Content-Type: application/json" \
+  -d '{"permission": "payment.initiate", "organization_id": "${ORG_UUID}"}'
+```
+
+Key notes for resource server implementors:
+
+- **Fail-closed:** any non-`{"allowed": true}` response — including network errors, timeouts,
+  and `5xx` — MUST be treated as a denial. Never fail open.
+- **Circuit-break:** wrap the call in a circuit breaker with a short timeout (e.g. 200 ms) to
+  prevent a Hearth slowdown from stalling your entire request path.
+- **Do not cache:** the purpose of decision mode is zero-latency revocation. Caching
+  `allowed: true` even briefly undermines that guarantee.
+- **Not for browsers:** `POST /oauth/authorize` is an internal endpoint. Route only
+  service-to-service traffic to it; do not expose it to the internet.
+
+---
+
 ## Part 9 — Enterprise Integrations
 
-### Example 33 — SCIM provisioning
+### Example 34 — SCIM provisioning
 
 **Audience:** operators whose enterprise customers provision and de-provision user accounts
 from an identity provider (Okta, Azure AD, Workday) using the SCIM 2.0 protocol.
@@ -1281,7 +1357,7 @@ realms:
 
 ---
 
-### Example 34 — SAML SP registration
+### Example 35 — SAML SP registration
 
 **Audience:** operators who need Hearth to act as a SAML Identity Provider, issuing SAML
 assertions to external service providers (Salesforce, Workday, internal wikis, etc.).
@@ -1322,7 +1398,7 @@ realms:
 
 ---
 
-### Example 35 — Custom claim mappings
+### Example 36 — Custom claim mappings
 
 **Audience:** operators who need to add, rename, or gate custom claims in access tokens,
 ID tokens, or the UserInfo endpoint beyond Hearth's default claim set.
@@ -1386,7 +1462,7 @@ realms:
 
 ---
 
-### Example 36 — Production observability
+### Example 37 — Production observability
 
 **Audience:** operators deploying Hearth in a production environment with a centralized log
 aggregator, distributed tracing collector, and ops alerting.
@@ -1421,7 +1497,7 @@ onboarding:
 
 ---
 
-### Example 37 — Storage tuning
+### Example 38 — Storage tuning
 
 **Audience:** operators sizing the hot tier and compaction schedule for production workloads,
 or moving data to a non-default path.
@@ -1450,7 +1526,7 @@ storage:
 
 ## Part 10 — Branding & Complex Scenarios
 
-### Example 38 — Custom branding
+### Example 39 — Custom branding
 
 **Audience:** operators who want to replace Hearth's default logo and theme with their own
 product branding, with per-realm overrides for multi-surface deployments.
@@ -1488,7 +1564,7 @@ realms:
 
 ---
 
-### Example 39 — High-security / financial services
+### Example 40 — High-security / financial services
 
 **Audience:** operators in regulated industries (finance, healthcare, government) who need
 short-lived tokens, strict password policy, mandatory MFA, invite-only registration, and
@@ -1557,7 +1633,7 @@ observability:
 
 ---
 
-### Example 40 — Full enterprise kitchen sink
+### Example 41 — Full enterprise kitchen sink
 
 **Audience:** operators who need to validate a complete production configuration covering
 multiple realms, MFA, social login, SCIM, SAML, custom RBAC, branding, SMTP, TLS, and

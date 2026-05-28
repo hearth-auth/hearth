@@ -541,6 +541,70 @@ SigningKey::issue_token_pair(claims)
 
 A scope value NOT mapped in realm config results in an empty intersection — the token is issued with zero permissions. A missing `scope` parameter means "no narrowing"; the full resolved set is embedded.
 
+### 7.4 Token authorization modes
+
+Every `OAuthClient` carries an `access_token_authorization` field that governs which RBAC claims, if any, are embedded in the issued token. Three modes are defined:
+
+| Mode | Enum value | JWT RBAC claims | Authorization call required |
+|------|------------|----------------|-----------------------------|
+| `embedded` | `EMBEDDED` (default) | `roles`, `groups`, `permissions` | None |
+| `introspection` | `INTROSPECTION` | None | `POST /realms/{realm}/introspect` |
+| `decision` | `DECISION` | None | `POST /oauth/authorize` |
+
+#### 7.4.1 Embedded mode
+
+This is the default. RBAC is resolved via `resolve_permissions` at token issuance time (see §3). The resulting claim set is embedded in the JWT. Resource servers verify the JWT signature locally and read claims from the token — no network call at authorization time.
+
+Constraints:
+- MUST be the default for all clients where `access_token_authorization` is omitted.
+- Permission changes take effect at the next token refresh (bounded by `access_token_ttl`).
+- JWT size limits (§2.6) apply; token issuance fails if the resolved set exceeds them.
+
+#### 7.4.2 Introspection mode
+
+When a client is in `introspection` mode, issued JWTs carry only standard identity claims (`sub`, `tid`, `sid`, `iss`, `exp`, `iat`, `jti`, `scope`). The RBAC claim fields (`roles`, `groups`, `permissions`) are OMITTED from the token.
+
+Resource servers MUST call `POST /realms/{realm}/introspect` to obtain current RBAC data. Hearth resolves live permissions at introspection time and includes them in the response body alongside standard RFC 7662 fields, **only** when the introspecting client (`client_id` in HTTP Basic Auth) itself has `access_token_authorization: introspection`. Introspecting clients in `embedded` mode receive a standard RFC 7662 response without RBAC extension fields.
+
+Resource server contract:
+1. Forward the bearer token in the `token` form-parameter.
+2. Authenticate with `client_id` and `client_secret` via HTTP Basic Auth.
+3. Treat `active: false` or any network error as a denial.
+4. Authorize the request using the `permissions` field in the response body.
+
+#### 7.4.3 Decision mode
+
+When a client is in `decision` mode, issued JWTs carry only standard identity claims. Resource servers MUST call `POST /oauth/authorize` once per protected request.
+
+**Request shape:**
+```http
+POST /oauth/authorize
+Authorization: Bearer <access_token>
+X-Realm-ID: <realm_uuid>
+Content-Type: application/json
+
+{
+  "permission": "docs.edit",
+  "organization_id": "<org_uuid>",   // optional: for org-scoped checks
+  "resource": "<resource_uri>"        // optional: RFC 8707 audience check
+}
+```
+
+**Response shape:**
+```json
+{ "allowed": true }
+```
+
+Failure-mode contract (MUST be implemented by all resource servers using this mode):
+
+- HTTP 200 with `{"allowed": false}` — permission not held, token invalid, token expired, session revoked, or internal resolution error.
+- HTTP 400 — missing `permission` field. Treat as a client programming error; deny the request.
+- HTTP 5xx — transient server failure. Resource servers SHOULD deny the request and SHOULD NOT retry in the hot path to avoid cascading failures.
+
+**Fail-closed invariant:** Hearth MUST return `{"allowed": false}` — never `{"allowed": true}` — when any of the following are true: signature invalid, token expired, session revoked, token on the JTI blocklist, subject does not hold the requested permission after live resolution.
+
+**Security requirement:** `POST /oauth/authorize` MUST be treated as an internal service endpoint. Operators MUST NOT expose it to public internet or browser clients. Resource servers SHOULD implement a circuit breaker or timeout so a Hearth slowdown does not stall all protected requests indefinitely.
+
 ---
 
 ## 8. HTTP and gRPC API

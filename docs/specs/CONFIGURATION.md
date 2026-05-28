@@ -461,6 +461,8 @@ Declarative OAuth 2.0 client definitions. Keyed by a **slug** (used to derive a 
 | `grant_types` | list | `["authorization_code"]` | Allowed grant types: `authorization_code`, `client_credentials`, `refresh_token`, `device_code`. |
 | `confidential` | bool | `false` | Whether this is a confidential client (has a client secret). |
 | `client_secret` | string | — | Client secret. Supports `${ENV_VAR}` substitution. **Required** when `confidential: true`. Hashed with Argon2id before storage. |
+| `access_token_authorization` | string | `embedded` | Controls how resource servers resolve RBAC permissions for tokens issued to this client. One of: `embedded`, `introspection`, `decision`. See [Token Authorization Modes](../guides/rbac.md#token-authorization-modes). |
+| `require_consent` | bool | `true` | Whether users must approve the OAuth consent screen before tokens are issued. Set `false` only for first-party clients you control. |
 
 Reconciliation:
 - New slug → client **created** with deterministic UUID
@@ -484,6 +486,7 @@ realms:
         client_secret: "${API_CLIENT_SECRET}"
         grant_types:
           - client_credentials
+        access_token_authorization: embedded    # embedded (default) | introspection | decision
 ```
 
 ### `realms.<name>.organizations`

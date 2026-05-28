@@ -2,7 +2,9 @@
 
 **Audience:** developers and operators who need to create roles, assign permissions, manage groups, and understand how authorization claims appear in Hearth JWTs.
 
-Hearth uses **claims-based RBAC**: permissions are resolved at token-issue time and embedded in the JWT. Downstream services read permissions synchronously from the verified token — no network call to Hearth at authorization time.
+Hearth uses **claims-based RBAC**: permissions are resolved at token-issue time and — by default — embedded directly in the JWT as the `permissions` claim. Downstream services read permissions synchronously from the verified token with no network call to Hearth.
+
+Two additional modes (`introspection`, `decision`) let resource servers resolve permissions live per-request instead of trusting the JWT claims. See [Token Authorization Modes](#token-authorization-modes) below for when to use each strategy.
 
 ## Concepts
 
@@ -231,6 +233,106 @@ curl -X POST http://127.0.0.1:8420/token \
 ```
 
 If `docs` scope is configured to map to `{docs.view, docs.edit}`, the issued token's `permissions` claim is intersected with that set regardless of what the user was assigned.
+
+---
+
+## Token Authorization Modes
+
+Every `OAuthClient` carries an `access_token_authorization` field that controls how resource servers verify permissions for tokens issued to that client. Choose the mode that fits your consistency and network budget.
+
+| Mode | Value | JWT carries | Resource server call |
+|------|-------|-------------|----------------------|
+| **Embedded** (default) | `embedded` | Full RBAC claims (`roles`, `groups`, `permissions`) | None — read from token |
+| **Introspection** | `introspection` | Identity claims only (`sub`, `tid`, etc.) | `POST /realms/{realm}/introspect` |
+| **Decision** | `decision` | Identity claims only | `POST /oauth/authorize` |
+
+### Embedded mode (default)
+
+Permissions are resolved once at issuance and baked into the JWT. Resource servers verify the JWT signature locally and read claims synchronously — no network hop, sub-millisecond authorization.
+
+**Trade-offs:** Permission changes take effect only on the next token refresh (bounded by `access_token_ttl`). For most applications this lag (default 15 minutes) is acceptable.
+
+### Introspection mode
+
+The issued JWT carries only identity claims. When a resource server needs to authorize a request, it calls `POST /realms/{realm}/introspect` with the bearer token. Hearth resolves live RBAC and returns the full claim set in the response.
+
+```bash
+curl -X POST https://auth.example.com/realms/acme/introspect \
+  -u "<client_id>:<client_secret>" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "token=<access_token>"
+```
+
+Response (RFC 7662 + Hearth RBAC extensions):
+```json
+{
+  "active": true,
+  "sub": "user_01HXYZ...",
+  "permissions": ["docs.view", "docs.edit"],
+  "roles": ["docs-admin"],
+  "groups": ["leads"],
+  "exp": 1700000900
+}
+```
+
+Hearth includes RBAC claims in introspection responses **only** when the requesting client (`client_id` in Basic Auth) has `access_token_authorization: introspection` configured. Clients in `embedded` mode receive standard RFC 7662 responses without RBAC fields.
+
+**Trade-offs:** Permissions are always current — revocation and role changes take effect on the next introspection call. The network cost is one Hearth call per resource-server request.
+
+### Decision mode
+
+The issued JWT carries only identity claims. Resource servers call `POST /oauth/authorize` once per request with the bearer token and the exact permission to check. Hearth returns a binary allow/deny decision.
+
+```bash
+curl -X POST https://auth.example.com/oauth/authorize \
+  -H "Authorization: Bearer <access_token>" \
+  -H "X-Realm-ID: <realm_uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{"permission": "docs.edit"}'
+```
+
+Response:
+```json
+{ "allowed": true }
+```
+
+Optional fields in the request body:
+
+| Field | Description |
+|-------|-------------|
+| `permission` | **Required.** Permission string to check (e.g. `"docs.edit"`). |
+| `organization_id` | Optional org UUID for org-scoped permission checks. |
+| `resource` | Optional RFC 8707 resource URI for audience-scoped checks. |
+
+**Fail-closed behaviour:** The endpoint returns `{"allowed": false}` on every failure path — invalid token, expired token, session revocation, missing permission, or internal resolution error. Only a valid token with the specific permission resolves to `{"allowed": true}`. Missing `permission` field returns `400 Bad Request`.
+
+**Security note:** Treat `POST /oauth/authorize` as an internal endpoint. Expose it only to your own services; it MUST NOT be reachable from public internet or browser clients. Rate-limit or circuit-break callers to prevent cascading failures if Hearth is slow or unavailable.
+
+**Trade-offs:** Maximum consistency — decisions reflect permission state at call time. Every protected request requires a network round-trip to Hearth. Use when revocation latency must be zero (e.g. financial, healthcare).
+
+### Configuring a client's mode
+
+Via Admin API (`PUT /admin/applications/{id}`):
+```bash
+curl -X PUT https://auth.example.com/admin/applications/<client_uuid> \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "X-Realm-ID: <realm_uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{"access_token_authorization": "decision"}'
+```
+
+Via `hearth.yaml`:
+```yaml
+realms:
+  acme:
+    applications:
+      billing-service:
+        name: "Billing Service"
+        confidential: true
+        client_secret: "${BILLING_SECRET}"
+        grant_types: [client_credentials]
+        access_token_authorization: decision
+```
 
 ---
 

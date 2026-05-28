@@ -336,6 +336,140 @@ All values are stored as UTF-8 strings. The `type` field controls how the Admin 
 
 ---
 
+## OAuth Applications
+
+OAuth clients (applications) are managed under the `/admin/applications` prefix. Clients declared in `hearth.yaml` (via `realms.<name>.applications`) are also reflected here but MUST be edited in YAML — the API refuses mutations on YAML-managed clients.
+
+### List applications
+
+`GET /admin/applications`
+
+Returns a paginated list of clients.
+
+**Query parameters:**
+
+| Parameter | Description |
+|---|---|
+| `cursor` | Opaque pagination cursor |
+| `limit` | Page size, 1–100 (default 20) |
+
+---
+
+### Register application
+
+`POST /admin/applications`
+
+Creates a new OAuth client. Body fields:
+
+| Field | Required | Description |
+|---|---|---|
+| `client_name` | ✅ | Human-readable name |
+| `redirect_uris` | — | Allowed redirect URIs (required for `authorization_code` clients) |
+| `grant_types` | — | Array: `authorization_code`, `client_credentials`, `refresh_token`, `device_code` |
+| `client_secret` | — | Client secret (omit for public clients). Argon2id-hashed before storage. |
+| `access_token_authorization` | — | Authorization mode: `"EMBEDDED"` (default), `"INTROSPECTION"`, `"DECISION"` |
+
+The `access_token_authorization` field controls how resource servers resolve permissions for tokens issued to this client. See [Token Authorization Modes](rbac.md#token-authorization-modes) for semantics.
+
+```bash
+curl -X POST https://auth.example.com/admin/applications \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "X-Realm-ID: <realm_uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Billing Service",
+    "grant_types": ["client_credentials"],
+    "client_secret": "long-random-secret",
+    "access_token_authorization": "DECISION"
+  }'
+```
+
+Returns the created client object with a generated `client_id`.
+
+---
+
+### Get application
+
+`GET /admin/applications/{id}`
+
+Returns a single client by UUID.
+
+---
+
+### Update application
+
+`PUT /admin/applications/{id}`
+
+Updates a client. All fields are optional; omitted fields are unchanged.
+
+| Field | Description |
+|---|---|
+| `client_name` | New display name |
+| `redirect_uris` | Replacement redirect URI list |
+| `grant_types` | Replacement grant-type list |
+| `backchannel_logout_uri` | Back-channel logout URI; `null` clears it |
+| `frontchannel_logout_uri` | Front-channel logout URI; `null` clears it |
+| `post_logout_redirect_uris` | Replacement post-logout redirect list |
+| `require_consent` | Whether to show the OAuth consent screen |
+| `access_token_authorization` | `"embedded"`, `"introspection"`, or `"decision"` |
+
+```bash
+# Switch a client to decision mode
+curl -X PUT https://auth.example.com/admin/applications/<client_uuid> \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "X-Realm-ID: <realm_uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{"access_token_authorization": "decision"}'
+```
+
+---
+
+### Delete application
+
+`DELETE /admin/applications/{id}`
+
+Permanently deletes the client. Active sessions for this client are not immediately revoked; tokens expire at their natural TTL.
+
+---
+
+### POST /oauth/authorize — per-request permission decision
+
+`POST /oauth/authorize`
+
+Per-request binary authorization decision for clients configured with `access_token_authorization: decision`. Resource servers call this endpoint to determine whether the bearer-token holder has a specific permission, resolved live against current RBAC state.
+
+**Headers:**
+
+| Header | Description |
+|---|---|
+| `Authorization: Bearer <access_token>` | Token issued to the end-user or service account |
+| `X-Realm-ID: <realm_uuid>` | Realm to resolve permissions in |
+
+**Request body (JSON):**
+
+| Field | Required | Description |
+|---|---|---|
+| `permission` | ✅ | Permission string to check (e.g. `"docs.edit"`) |
+| `organization_id` | — | Org UUID for org-scoped permission checks |
+| `resource` | — | RFC 8707 resource URI for audience-scoped checks |
+
+**Response 200:**
+```json
+{ "allowed": true }
+```
+or
+```json
+{ "allowed": false }
+```
+
+**Fail-closed:** Every failure path — missing bearer token, expired token, revoked session, resolution error — returns `{"allowed": false}` with HTTP 200. Only a valid, non-revoked token where the subject holds `permission` returns `{"allowed": true}`.
+
+**Error:** Missing `permission` field returns `400 Bad Request`.
+
+> This endpoint is intended for internal service-to-service calls. Do not expose it to public internet or browser clients.
+
+---
+
 ## Identity Providers (Federation)
 
 Federation connectors (Google, GitHub, Microsoft, Apple, generic OIDC, SAML) are **not managed through the Admin API or Admin UI**. They are declared in `hearth.yaml` and reconciled at startup.
