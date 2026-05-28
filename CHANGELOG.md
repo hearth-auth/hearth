@@ -7,7 +7,43 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Changed
+
+- **License** — re-licensed from AGPL-3.0-only (dual-license) to Apache-2.0. `LICENSE-COMMERCIAL`
+  and `NOTICE` dual-license overlay removed. `LICENSE` now contains the Apache 2.0 text (HEA-912).
+
+### Added
+
+- **Org-scoped group paths in OIDC token claims** — tokens issued in an organization
+  context now carry an `org_groups` claim (`Vec<String>`) alongside the existing flat
+  `groups` claim. Each entry uses the `/org-slug/group-name` path format, matching
+  Keycloak 26.6 conventions and enabling downstream services to determine org-membership
+  context in multi-org tenancy scenarios. The flat `groups` claim is preserved unchanged
+  for backward compatibility. Tokens without an org context do not emit `org_groups`
+  (HEA-909).
+
+- **JWT Bearer Token Grant (RFC 7523)** — clients can now authenticate using a self-signed
+  Ed25519 JWT assertion instead of a client secret. Register a 32-byte base64url-encoded
+  Ed25519 public key on any `OAuthClient` via `assertion_public_key`. The grant type
+  `urn:ietf:params:oauth:grant-type:jwt-bearer` is now listed in OIDC discovery
+  `grant_types_supported`. JTI replay prevention is enforced per-realm. Supported on both
+  `POST /token` and `POST /realms/{realm}/token` endpoints (HEA-908).
+
+- **DPoP (Demonstrating Proof-of-Possession — RFC 9449)** — token endpoints now
+  validate DPoP proof JWTs (`alg`, `jwk`, `htu`, `htm`, `iat`, `jti`). Access tokens
+  issued with a proof carry `cnf.jkt` (JWK thumbprint) binding. Replay prevention via
+  in-process JTI cache with TTL-based eviction. Stateless HMAC-SHA256 nonce generation
+  with 5-minute sliding windows. `DPoP-Nonce` header returned on every token response.
+  `dpop_signing_alg_values_supported: [ES256, EdDSA]` added to OIDC discovery (HEA-907).
+
 ### Security
+
+- **Required-actions bypass via ROPC closed (HEA-905)** — `password_grant_token` now checks
+  `user.required_actions()` after credential verification and returns `RequiredActionsBlocking`
+  when any actions are pending. HTTP surface maps this to `400 {"error":"required_actions_pending",
+  "actions":[...]}`. Previously only the browser-path interstitial enforced this gate, allowing
+  clients using the direct password grant to obtain valid access tokens despite pending
+  `UPDATE_PASSWORD`, `VERIFY_EMAIL`, or `ENROLL_PHONE_OTP` requirements.
 
 - **GDPR Art.17: device fingerprint erasure cascade + admin API (HEA-875)** — `delete_user`
   now cascades to all `dfp:user:{uid}:*` storage entries so right-to-erasure is complete.
@@ -31,7 +67,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   eval-free. The CSP is now `script-src 'self'; style-src 'self'` with no unsafe
   keywords. Resolves GAP-4 and GAP-5 from the original security audit.
 
-### Added
+- **Pushed Authorization Request endpoint (RFC 9126, HEA-906)** — `POST /as/par` (global)
+  and `POST /{realm}/as/par` (realm-scoped) accept authorization parameters from clients and
+  return a `request_uri` with a 90-second TTL. The `request_uri` is single-use; replaying it
+  returns `invalid_request`. PKCE (`S256`) is required for public clients. The OIDC discovery
+  document now includes `pushed_authorization_request_endpoint`. Expired PAR entries are
+  removed by the periodic background sweeper (`CleanupStats.par_requests_deleted`).
 
 - **`make ci-local-full`** — full container reproduction of PR-blocking GHA
   workflows via `nektos/act`; catches workflow-file errors and toolchain drift
@@ -913,7 +954,7 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 ### Changed
 
 - **Authorization engine** — replaced Zanzibar/relationship-tuple engine with claims-based RBAC; permissions are now embedded in JWTs at issuance time rather than checked at request time.
-- **License** — promoted to AGPL-3.0-only (`LICENSE`) for OpenSSF machine-detectability; commercial licensing available (see `docs/vision/VISION.md`).
+- **License** — Apache-2.0 (`LICENSE`).
 - **Admin handler organization** — split `admin.rs` (~10 000 lines) into seven per-entity submodules for maintainability.
 - **OIDC `iss` claim source** — now reads from `config.oidc.issuer` (not `config.token.issuer`) so the ID token issuer always matches the discovery document (OIDC Core §2 compliance).
 - **Storage `put_batch` API** — all multi-record writes (user import, audit chain) go through a single WAL frame with CRC; a crash mid-batch leaves no partial state on replay.

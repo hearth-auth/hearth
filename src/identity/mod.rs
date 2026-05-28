@@ -9,6 +9,7 @@ pub(crate) mod cleanup;
 pub(crate) mod credentials;
 pub mod device_fingerprint;
 pub mod device_fp;
+pub mod dpop;
 pub mod email;
 mod engine;
 pub mod error;
@@ -43,8 +44,9 @@ pub use oidc::{
     fuzz_parse_token_exchange, ApplicationStatus, AuthorizationRequest, AuthorizationResponse,
     ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel, CodeChallengeMethod,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
-    IntrospectionResponse, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
-    PasswordGrantRequest, PasswordGrantResponse, RegisterClientRequest, StepUpMfaGrantRequest,
+    IntrospectionResponse, JwtBearerRequest, OAuthClient, OidcConfig, OidcDiscoveryDocument,
+    OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
+    PushedAuthorizationResponse, RegisterClientRequest, StepUpMfaGrantRequest,
     TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
     UserInfoResponse,
 };
@@ -53,8 +55,9 @@ pub use sms::{
     StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use tokens::{
-    decode_claims_unverified, validate_token_with_time, verify_token_signature, IssueTokenRequest,
-    Jwk, JwksDocument, SigningKey, TokenClaims, TokenConfig, TokenPair, REQUIRED_ACTION_TOKEN_TYPE,
+    decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
+    verify_token_signature, CnfClaim, IssueTokenRequest, Jwk, JwksDocument, JwtAssertionClaims,
+    SigningKey, TokenClaims, TokenConfig, TokenPair, REQUIRED_ACTION_TOKEN_TYPE,
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
@@ -580,6 +583,18 @@ pub trait IdentityEngine: Send + Sync {
         request: &ClientCredentialsRequest,
     ) -> Result<ClientCredentialsResponse, IdentityError>;
 
+    /// Issues an access token via the JWT Bearer Grant (RFC 7523).
+    ///
+    /// Validates the JWT assertion against the client's registered Ed25519
+    /// public key, enforces RFC 7523 §3 claim constraints (`iss`, `aud`,
+    /// `exp`), and prevents JTI replay.  Issues a sessionless access token
+    /// analogous to the client credentials grant.
+    fn jwt_bearer_token(
+        &self,
+        realm_id: &RealmId,
+        request: &JwtBearerRequest,
+    ) -> Result<ClientCredentialsResponse, IdentityError>;
+
     /// Authenticates an OAuth confidential client using its client secret.
     ///
     /// Returns `Ok(())` only when the client exists in the target realm,
@@ -626,6 +641,28 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// For access tokens: extracts session ID and revokes the session.
     /// For refresh tokens: looks up the grant family and marks it revoked.
+    /// Pushes authorization parameters to the PAR endpoint (RFC 9126).
+    ///
+    /// Validates the client, redirect URI, and PKCE (required for public
+    /// clients), then stores the parameters under a 90-second TTL.
+    /// Returns a `request_uri` the client passes to `/authorize`.
+    fn push_authorization_request(
+        &self,
+        realm_id: &RealmId,
+        request: &PushedAuthorizationRequest,
+    ) -> Result<PushedAuthorizationResponse, IdentityError>;
+
+    /// Consumes a stored PAR entry identified by its `request_uri`.
+    ///
+    /// Returns the stored parameters on success. The entry is atomically
+    /// marked used; subsequent calls return `InvalidPushedAuthorizationRequest`.
+    #[allow(private_interfaces)]
+    fn consume_par(
+        &self,
+        realm_id: &RealmId,
+        request_uri: &str,
+    ) -> Result<oidc::StoredPushedAuthorizationRequest, IdentityError>;
+
     fn revoke_token(
         &self,
         realm_id: &RealmId,

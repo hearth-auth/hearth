@@ -38,7 +38,7 @@ in config loading) add further caveats.
 - Two ignores present, each with rationale:
   - `RUSTSEC-2025-0141` (`bincode` via `madsim`, simulation-only) — `deny.toml:2-6`
   - `RUSTSEC-2025-0134` (`rustls-pemfile 2.x` transitive via `tonic`) — `deny.toml:7-10`
-- License allowlist: Apache-2.0, MIT, BSD-2/3, MPL-2.0, ISC, AGPL-3.0-only + minor others — `deny.toml:13-26`
+- License allowlist: Apache-2.0, MIT, BSD-2/3, MPL-2.0, ISC + minor others — `deny.toml:13-25`
 - `bans.wildcards = "deny"` enforced — `deny.toml:30`
 
 ### 3. Security scanning workflows: CodeQL, Trivy, OSV Scanner — all SHA-pinned

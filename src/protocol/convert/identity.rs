@@ -28,6 +28,10 @@ impl From<&domain::User> for pb::User {
 }
 
 /// Returns the canonical wire-format string for a `RequiredAction`.
+pub(crate) fn required_action_to_wire(action: RequiredAction) -> &'static str {
+    required_action_to_str(action)
+}
+
 fn required_action_to_str(action: RequiredAction) -> &'static str {
     match action {
         RequiredAction::VerifyEmail => "VERIFY_EMAIL",

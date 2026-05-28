@@ -48,6 +48,8 @@ pub const MFA_ALREADY_ENABLED: &str = "HEARTH_MFA_ALREADY_ENABLED";
 pub const STEP_UP_CHALLENGE_REQUIRED: &str = "HEARTH_STEP_UP_CHALLENGE_REQUIRED";
 /// Adaptive step-up: login from unrecognised device with no enrolled factor; enrollment required.
 pub const ENROLL_MFA_REQUIRED: &str = "HEARTH_ENROLL_MFA_REQUIRED";
+/// Token issuance blocked: user has one or more pending required actions.
+pub const REQUIRED_ACTIONS_PENDING: &str = "HEARTH_REQUIRED_ACTIONS_PENDING";
 
 // ── WebAuthn / Passkeys ───────────────────────────────────────────────────────
 
@@ -61,6 +63,8 @@ pub const WEBAUTHN_CREDENTIAL_NOT_FOUND: &str = "HEARTH_WEBAUTHN_CREDENTIAL_NOT_
 pub const INVALID_ATTESTATION: &str = "HEARTH_INVALID_ATTESTATION";
 /// Assertion provided during authentication is invalid.
 pub const INVALID_ASSERTION: &str = "HEARTH_INVALID_ASSERTION";
+/// JWT bearer assertion (RFC 7523) is invalid, expired, replayed, or has wrong claims.
+pub const JWT_BEARER_ASSERTION_INVALID: &str = "HEARTH_JWT_BEARER_ASSERTION_INVALID";
 
 // ── Device authorization flow ─────────────────────────────────────────────────
 
@@ -244,6 +248,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::WebAuthnCredentialNotFound => Some(WEBAUTHN_CREDENTIAL_NOT_FOUND),
         IdentityError::InvalidAttestation { .. } => Some(INVALID_ATTESTATION),
         IdentityError::InvalidAssertion { .. } => Some(INVALID_ASSERTION),
+        IdentityError::JwtBearerAssertionInvalid { .. } => Some(JWT_BEARER_ASSERTION_INVALID),
 
         IdentityError::AuthorizationPending => Some(AUTHORIZATION_PENDING),
         IdentityError::SlowDown => Some(SLOW_DOWN),
@@ -258,6 +263,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::AuthMethodNotAllowed { .. } => Some(AUTH_METHOD_NOT_ALLOWED),
         IdentityError::StepUpChallengeRequired => Some(STEP_UP_CHALLENGE_REQUIRED),
         IdentityError::EnrollMfaRequired => Some(ENROLL_MFA_REQUIRED),
+        IdentityError::RequiredActionsBlocking { .. } => Some(REQUIRED_ACTIONS_PENDING),
         IdentityError::InvalidSmsOtp => Some("invalid_sms_otp"),
         IdentityError::SmsResendLimitExceeded => Some("sms_resend_limit_exceeded"),
 
@@ -331,6 +337,12 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
 
         IdentityError::Unauthorized => Some(FORBIDDEN),
         IdentityError::SystemRealmProtected { .. } => Some(SYSTEM_REALM_PROTECTED),
+
+        IdentityError::InvalidPushedAuthorizationRequest => Some("invalid_request"),
+
+        IdentityError::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
+        IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => Some("use_dpop_nonce"),
+        IdentityError::DPopBindingMismatch => Some("invalid_token"),
 
         // 5xx — do not leak internal detail
         IdentityError::SigningError { .. }

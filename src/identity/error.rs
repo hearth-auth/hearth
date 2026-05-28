@@ -384,6 +384,12 @@ pub enum IdentityError {
     /// device with no enrolled factor. `RequiredAction::EnrollMfa` has been
     /// injected into the user's pending actions.
     EnrollMfaRequired,
+    /// One or more required actions are pending for this user.  Token
+    /// issuance is blocked until all actions are completed.
+    RequiredActionsBlocking {
+        /// The actions the user must complete.
+        actions: Vec<crate::identity::types::RequiredAction>,
+    },
     /// The SMS OTP is invalid, expired, not found, or the maximum number of
     /// verification attempts has been exceeded.
     ///
@@ -392,6 +398,33 @@ pub enum IdentityError {
     /// The phone number has exceeded the per-phone SMS resend limit for the
     /// current 15-minute window.
     SmsResendLimitExceeded,
+    /// The pushed `request_uri` is not found, already used, or expired.
+    ///
+    /// Intentionally conflates all failure modes (RFC 9126 §2.3 enumeration
+    /// resistance guidance).
+    InvalidPushedAuthorizationRequest,
+    /// The DPoP proof JWT is invalid (bad signature, wrong alg, missing claims,
+    /// wrong htu/htm, expired, private key in header, etc.).
+    InvalidDPopProof {
+        /// Human-readable description of the specific failure (never user-visible).
+        reason: String,
+    },
+    /// The DPoP proof JTI has already been seen — replay attack detected.
+    DPopProofReplay,
+    /// The access token carries a `cnf.jkt` binding but the DPoP proof's JWK
+    /// thumbprint does not match.
+    DPopBindingMismatch,
+    /// The `nonce` in the DPoP proof does not match the server-issued nonce.
+    DPopNonceInvalid,
+    /// A JWT bearer assertion (RFC 7523) is invalid.
+    ///
+    /// Covers: bad signature, expired `exp`, replayed `jti`, wrong `iss` or
+    /// `aud`, missing registered public key.  The message is safe for client
+    /// logs — it MUST NOT contain sensitive data.
+    JwtBearerAssertionInvalid {
+        /// Machine-readable reason string.
+        reason: String,
+    },
 }
 
 impl fmt::Display for IdentityError {
@@ -564,9 +597,26 @@ impl fmt::Display for IdentityError {
                 f,
                 "MFA enrollment required: login from unrecognised device with no enrolled factor"
             ),
+            Self::RequiredActionsBlocking { actions } => {
+                write!(f, "token blocked: pending required actions: {actions:?}")
+            }
             Self::InvalidSmsOtp => write!(f, "invalid or expired SMS OTP"),
             Self::SmsResendLimitExceeded => {
                 write!(f, "SMS OTP resend limit exceeded for this phone number")
+            }
+            Self::InvalidPushedAuthorizationRequest => {
+                write!(f, "invalid, expired, or already used request_uri")
+            }
+            Self::InvalidDPopProof { reason } => {
+                write!(f, "invalid DPoP proof: {reason}")
+            }
+            Self::DPopProofReplay => write!(f, "DPoP proof JTI already used"),
+            Self::DPopBindingMismatch => {
+                write!(f, "DPoP proof key does not match token cnf.jkt binding")
+            }
+            Self::DPopNonceInvalid => write!(f, "DPoP proof nonce invalid or expired"),
+            Self::JwtBearerAssertionInvalid { reason } => {
+                write!(f, "invalid JWT bearer assertion: {reason}")
             }
         }
     }
@@ -667,8 +717,15 @@ impl std::error::Error for IdentityError {
             | Self::WebhookNotFound
             | Self::StepUpChallengeRequired
             | Self::EnrollMfaRequired
+            | Self::RequiredActionsBlocking { .. }
             | Self::InvalidSmsOtp
-            | Self::SmsResendLimitExceeded => None,
+            | Self::SmsResendLimitExceeded
+            | Self::InvalidPushedAuthorizationRequest
+            | Self::InvalidDPopProof { .. }
+            | Self::DPopProofReplay
+            | Self::DPopBindingMismatch
+            | Self::DPopNonceInvalid
+            | Self::JwtBearerAssertionInvalid { .. } => None,
         }
     }
 }

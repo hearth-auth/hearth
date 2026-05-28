@@ -1849,9 +1849,11 @@ impl EmbeddedIdentityEngine {
             nonce: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
+            org_groups: claims.org_groups.clone(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: family.amr_values.clone(),
+            cnf: None,
             custom: claims.custom.clone(),
         };
         let new_refresh_claims = TokenClaims {
@@ -1870,9 +1872,11 @@ impl EmbeddedIdentityEngine {
             nonce: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
+            org_groups: Vec::new(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            cnf: None,
             custom: claims.custom.clone(),
         };
 
@@ -2260,6 +2264,7 @@ impl EmbeddedIdentityEngine {
                 "refresh_token".to_string(),
                 "client_credentials".to_string(),
                 "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
             ],
             registration_endpoint: Some(format!("{issuer}/register")),
             device_authorization_endpoint: Some(format!("{issuer}/device/authorize")),
@@ -2270,6 +2275,8 @@ impl EmbeddedIdentityEngine {
             end_session_endpoint: Some(format!("{issuer}/end_session")),
             backchannel_logout_supported: true,
             backchannel_logout_session_supported: true,
+            pushed_authorization_request_endpoint: Some(format!("{issuer}/as/par")),
+            dpop_signing_alg_values_supported: vec!["ES256".to_string(), "EdDSA".to_string()],
         }
     }
 
@@ -2920,6 +2927,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
+        // 8f. Delete all JWT bearer assertion JTIs (replay store).
+        let jb_jti_prefix = keys::jwt_bearer_jti_scan_prefix();
+        let jb_jti_end = keys::prefix_end(&jb_jti_prefix);
+        let jb_jtis = self
+            .storage
+            .scan(realm_id, &jb_jti_prefix, &jb_jti_end)
+            .map_err(Self::storage_err)?;
+        if !jb_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for entry in &jb_jtis {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
         // 9. Delete realm signing key (check existence first so we can attribute
         //    cascade work even when only the signing key survives a prior crash).
         let key_storage_key = keys::encode_realm_signing_key(realm_id);
@@ -3133,9 +3156,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 nonce: None,
                 roles: Vec::new(),
                 groups: Vec::new(),
+                org_groups: Vec::new(),
                 permissions: Vec::new(),
                 required_actions: remaining,
                 amr: Vec::new(),
+                cnf: None,
                 custom: Default::default(),
             };
             let access_token = signing_key.issue_token(&ra_claims)?;
@@ -4268,6 +4293,42 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         let oid_ref = ctx.oid.as_deref();
 
+        // Resolve the org slug for org_groups path construction. A storage
+        // miss or parse failure is non-fatal: the token is still issued without
+        // org_groups rather than hard-failing a login.
+        let org_slug_owned: Option<String> = if let Some(oid_str) = oid_ref {
+            match oid_str.parse::<crate::core::OrganizationId>() {
+                Ok(org_id) => match self.get_organization(realm_id, &org_id) {
+                    Ok(Some(org)) => Some(org.slug().to_string()),
+                    Ok(None) => {
+                        tracing::warn!(
+                            oid = oid_str,
+                            "org not found during token issuance; org_groups omitted"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            oid = oid_str,
+                            error = %e,
+                            "org lookup failed during token issuance; org_groups omitted"
+                        );
+                        None
+                    }
+                },
+                Err(_) => {
+                    tracing::warn!(
+                        oid = oid_str,
+                        "oid is not a valid OrganizationId; org_groups omitted"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let org_slug_ref = org_slug_owned.as_deref();
+
         let (roles, groups, permissions, custom) = self.apply_claim_profile(
             realm_id,
             &user,
@@ -4303,6 +4364,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             issuer_override: Some(realm_issuer),
             roles: &roles,
             groups: &groups,
+            org_slug: org_slug_ref,
             permissions: if permissions.is_empty() {
                 &perm_strs
             } else {
@@ -4310,6 +4372,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             },
             custom,
             resource: ctx.resource.as_ref(),
+            dpop_jkt: None, // set at HTTP layer when DPoP proof is validated
         })
     }
 
@@ -4550,15 +4613,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Validate client name (non-empty, length limit)
         let client_name = validation::validate_client_name(&request.client_name)?;
 
-        // Redirect URIs are optional for `client_credentials` and device_code grants.
-        // For all other grant types, at least one is required.
+        // Redirect URIs are optional for M2M grants (client_credentials, device_code,
+        // jwt-bearer). For all other grant types, at least one is required.
         let has_client_credentials = request
             .grant_types
             .contains(&"client_credentials".to_string());
         let has_device_code = request
             .grant_types
             .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
-        if request.redirect_uris.is_empty() && !has_client_credentials && !has_device_code {
+        let has_jwt_bearer = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
+        if request.redirect_uris.is_empty()
+            && !has_client_credentials
+            && !has_device_code
+            && !has_jwt_bearer
+        {
             return Err(IdentityError::InvalidInput {
                 reason: "at least one redirect URI is required".to_string(),
             });
@@ -5004,9 +5074,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: access_roles,
             groups: access_groups,
+            org_groups: Vec::new(),
             permissions: access_permissions,
             required_actions: Vec::new(),
             amr: stored_code.amr_values.clone(),
+            cnf: request
+                .dpop_jkt
+                .as_deref()
+                .map(|jkt| crate::identity::tokens::CnfClaim {
+                    jkt: jkt.to_string(),
+                }),
             custom: access_custom,
         };
         let refresh_claims = TokenClaims {
@@ -5025,9 +5102,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: access_claims.roles.clone(),
             groups: access_claims.groups.clone(),
+            org_groups: Vec::new(),
             permissions: access_claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            cnf: None,
             custom: access_claims.custom.clone(),
         };
 
@@ -5094,9 +5173,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: stored_code.nonce.clone(),
             roles: id_roles,
             groups: id_groups,
+            org_groups: Vec::new(),
             permissions: id_permissions,
             required_actions: Vec::new(),
             amr: stored_code.amr_values.clone(),
+            cnf: None,
             custom: id_custom,
         };
         let id_token =
@@ -5166,7 +5247,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
-        // 3. Adaptive step-up MFA check (HEA-836).
+        // 3a. Block token issuance when required actions are pending (HEA-905).
+        //     Checked after password verification so the error is only reachable
+        //     by a caller who knows the password — no enumeration risk.
+        if !user.required_actions().is_empty() {
+            return Err(IdentityError::RequiredActionsBlocking {
+                actions: user.required_actions().to_vec(),
+            });
+        }
+
+        // 3b. Adaptive step-up MFA check (HEA-836).
         //    Only runs when the request carries IP/UA context (ROPC via HTTP).
         if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
             use crate::identity::device_fp::DeviceFingerprintOutcome;
@@ -5378,9 +5468,163 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: Vec::new(),
             groups: Vec::new(),
+            org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            cnf: request
+                .dpop_jkt
+                .as_deref()
+                .map(|jkt| crate::identity::tokens::CnfClaim {
+                    jkt: jkt.to_string(),
+                }),
+            custom: std::collections::BTreeMap::new(),
+        };
+
+        let access_token =
+            signing_key
+                .issue_token(&access_claims)
+                .map_err(|e| IdentityError::SigningError {
+                    reason: format!("failed to issue access token: {e}"),
+                })?;
+
+        Ok(crate::identity::oidc::ClientCredentialsResponse::new(
+            access_token,
+            "Bearer".to_string(),
+            self.config.token.access_token_ttl_secs,
+            scope,
+        ))
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        skip(self, request),
+        fields(
+            hearth_realm_id = %realm_id,
+            hearth_oauth_client_id = %request.client_id,
+            hearth_oauth_grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        )
+    )]
+    fn jwt_bearer_token(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::oidc::JwtBearerRequest,
+    ) -> Result<crate::identity::oidc::ClientCredentialsResponse, IdentityError> {
+        // 1. Load client
+        let client_key = keys::encode_oauth_client(&request.client_id);
+        let client_bytes = self
+            .storage
+            .get(realm_id, &client_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidClient)?;
+        let client: OAuthClient =
+            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        // 2. Verify grant type is allowed for this client
+        if !client
+            .grant_types()
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string())
+        {
+            return Err(IdentityError::UnsupportedGrantType);
+        }
+
+        // 3. Resolve the registered assertion public key (base64url raw 32-byte Ed25519)
+        let pk_b64 = client.assertion_public_key().ok_or_else(|| {
+            IdentityError::JwtBearerAssertionInvalid {
+                reason: "no assertion public key registered for this client".to_string(),
+            }
+        })?;
+        let pk_bytes = URL_SAFE_NO_PAD.decode(pk_b64).map_err(|_| {
+            IdentityError::JwtBearerAssertionInvalid {
+                reason: "client has an invalid assertion public key".to_string(),
+            }
+        })?;
+
+        // 4. Verify assertion JWT signature (EdDSA only, rejects alg:none, HMAC, etc.)
+        let assertion_claims = tokens::verify_assertion_signature(&request.assertion, &pk_bytes)
+            .map_err(|_| IdentityError::JwtBearerAssertionInvalid {
+                reason: "assertion signature verification failed".to_string(),
+            })?;
+
+        // 5. Validate RFC 7523 §3 required claims
+        let now = self.clock.now();
+        let now_secs = now.as_micros() / 1_000_000;
+
+        // iss MUST equal the client_id (RFC 7523 §3 requirement)
+        if assertion_claims.iss != request.client_id.to_string() {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "iss claim must equal the client_id".to_string(),
+            });
+        }
+
+        // exp MUST be in the future
+        if now_secs >= assertion_claims.exp {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "assertion has expired".to_string(),
+            });
+        }
+
+        // aud MUST contain this realm's issuer URL (the token endpoint base)
+        let expected_aud = self.realm_issuer_url(realm_id);
+        if !assertion_claims.aud.contains(&expected_aud) {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "aud claim does not match the token endpoint issuer".to_string(),
+            });
+        }
+
+        // 6. JTI replay prevention — store each consumed JTI per-realm
+        if let Some(jti) = &assertion_claims.jti {
+            let jti_key = keys::encode_jwt_bearer_jti(jti);
+            if self
+                .storage
+                .get(realm_id, &jti_key)
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
+                return Err(IdentityError::JwtBearerAssertionInvalid {
+                    reason: "assertion jti has already been used (replay)".to_string(),
+                });
+            }
+            self.storage
+                .put(realm_id, &jti_key, b"1")
+                .map_err(Self::storage_err)?;
+        }
+
+        // 7. Validate requested scope against the client's declared scopes
+        self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
+
+        // 8. Issue sessionless access token (same pattern as client_credentials)
+        let iat = now_secs;
+        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+        let scope = request.scope.clone();
+        let access_claims = TokenClaims {
+            sub: assertion_claims.sub,
+            iss: self.config.token.issuer.clone(),
+            aud: Audience::single(self.config.token.audience.clone()),
+            exp: iat + self.config.token.access_token_ttl_secs,
+            iat,
+            sid: "none".to_string(),
+            tid: realm_id.to_string(),
+            oid: None,
+            token_type: "access".to_string(),
+            jti: Some(uuid::Uuid::new_v4().to_string()),
+            fid: None,
+            scope: scope.clone(),
+            nonce: None,
+            roles: Vec::new(),
+            groups: Vec::new(),
+            org_groups: Vec::new(),
+            permissions: Vec::new(),
+            required_actions: Vec::new(),
+            amr: vec!["jwtbearer".to_string()],
+            cnf: request
+                .dpop_jkt
+                .as_deref()
+                .map(|jkt| crate::identity::tokens::CnfClaim {
+                    jkt: jkt.to_string(),
+                }),
             custom: std::collections::BTreeMap::new(),
         };
 
@@ -5624,9 +5868,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     nonce: None,
                     roles: Vec::new(),
                     groups: Vec::new(),
+                    org_groups: Vec::new(),
                     permissions: Vec::new(),
                     required_actions: Vec::new(),
                     amr: Vec::new(),
+                    cnf: None,
                     custom: std::collections::BTreeMap::new(),
                 };
                 let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
@@ -5650,6 +5896,132 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 ))
             }
         }
+    }
+
+    fn push_authorization_request(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::oidc::PushedAuthorizationRequest,
+    ) -> Result<crate::identity::oidc::PushedAuthorizationResponse, IdentityError> {
+        use crate::identity::keys;
+        use crate::identity::oidc::{CodeChallengeMethod, StoredPushedAuthorizationRequest};
+
+        self.require_active_realm(realm_id)?;
+
+        if request.response_type != "code" {
+            return Err(IdentityError::InvalidInput {
+                reason: "response_type must be 'code'".to_string(),
+            });
+        }
+        if request.state.is_empty() {
+            return Err(IdentityError::InvalidInput {
+                reason: "state must not be empty".to_string(),
+            });
+        }
+
+        let client = self
+            .get_client(realm_id, &request.client_id)?
+            .ok_or(IdentityError::ClientNotFound)?;
+
+        if !client.redirect_uris().contains(&request.redirect_uri) {
+            return Err(IdentityError::InvalidRedirectUri);
+        }
+
+        let pkce_required =
+            !client.is_confidential() || self.config.oidc.require_pkce_for_confidential_clients;
+        if pkce_required && request.code_challenge.is_none() {
+            return Err(IdentityError::InvalidInput {
+                reason: "PKCE is required (code_challenge with S256 must be supplied)".to_string(),
+            });
+        }
+        if request.code_challenge.is_some()
+            && !matches!(
+                request.code_challenge_method,
+                Some(CodeChallengeMethod::S256)
+            )
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: "code_challenge requires code_challenge_method=S256".to_string(),
+            });
+        }
+
+        let now = self.clock.now();
+        let ttl_secs: i64 = 90;
+        let expires_at = now.add_micros(ttl_secs * 1_000_000);
+        let request_uri_id = uuid::Uuid::new_v4().to_string();
+
+        let stored = StoredPushedAuthorizationRequest {
+            request_uri_id: request_uri_id.clone(),
+            client_id: request.client_id.clone(),
+            redirect_uri: request.redirect_uri.clone(),
+            scope: request.scope.clone(),
+            state: request.state.clone(),
+            resource: request.resource.clone(),
+            response_type: request.response_type.clone(),
+            code_challenge: request.code_challenge.clone(),
+            code_challenge_method: request.code_challenge_method.clone(),
+            nonce: request.nonce.clone(),
+            created_at: now,
+            expires_at,
+            used: false,
+        };
+
+        let key = keys::encode_par_request(&request_uri_id);
+        let value = serde_json::to_vec(&stored).map_err(|e| IdentityError::Internal {
+            reason: format!("failed to serialize PAR request: {e}"),
+        })?;
+        self.storage
+            .put(realm_id, &key, &value)
+            .map_err(Self::storage_err)?;
+
+        Ok(crate::identity::oidc::PushedAuthorizationResponse {
+            request_uri: format!("urn:ietf:params:oauth:request_uri:{request_uri_id}"),
+            expires_in: ttl_secs,
+        })
+    }
+
+    #[allow(private_interfaces)]
+    fn consume_par(
+        &self,
+        realm_id: &RealmId,
+        request_uri: &str,
+    ) -> Result<crate::identity::oidc::StoredPushedAuthorizationRequest, IdentityError> {
+        use crate::identity::keys;
+
+        const URN_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
+        let request_uri_id = request_uri
+            .strip_prefix(URN_PREFIX)
+            .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
+
+        let key = keys::encode_par_request(request_uri_id);
+        let raw = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
+
+        let mut stored: crate::identity::oidc::StoredPushedAuthorizationRequest =
+            serde_json::from_slice(&raw).map_err(|e| IdentityError::Internal {
+                reason: format!("failed to deserialize PAR request: {e}"),
+            })?;
+
+        if stored.used {
+            return Err(IdentityError::InvalidPushedAuthorizationRequest);
+        }
+        let now = self.clock.now();
+        if now >= stored.expires_at {
+            return Err(IdentityError::InvalidPushedAuthorizationRequest);
+        }
+
+        stored.used = true;
+        let updated = serde_json::to_vec(&stored).map_err(|e| IdentityError::Internal {
+            reason: format!("failed to serialize updated PAR request: {e}"),
+        })?;
+        self.storage
+            .put(realm_id, &key, &updated)
+            .map_err(Self::storage_err)?;
+
+        Ok(stored)
     }
 
     fn revoke_token(
@@ -7415,6 +7787,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Some(status) = request.status {
             client.set_status(status);
         }
+        if let Some(pk) = &request.assertion_public_key {
+            // Validate base64url decodes to exactly 32 bytes (Ed25519 public key)
+            if let Some(key_str) = pk {
+                let decoded =
+                    URL_SAFE_NO_PAD
+                        .decode(key_str)
+                        .map_err(|_| IdentityError::InvalidInput {
+                            reason: "assertion_public_key must be base64url-encoded".to_string(),
+                        })?;
+                if decoded.len() != 32 {
+                    return Err(IdentityError::InvalidInput {
+                        reason: "assertion_public_key must be a 32-byte Ed25519 public key"
+                            .to_string(),
+                    });
+                }
+            }
+            client.set_assertion_public_key(pk.clone());
+        }
 
         let updated_bytes =
             serde_json::to_vec(&client).map_err(|e| IdentityError::Serialization {
@@ -8204,7 +8594,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let has_device_code = request
             .grant_types
             .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
-        if request.redirect_uris.is_empty() && !has_client_credentials && !has_device_code {
+        let has_jwt_bearer = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
+        if request.redirect_uris.is_empty()
+            && !has_client_credentials
+            && !has_device_code
+            && !has_jwt_bearer
+        {
             return Err(IdentityError::InvalidInput {
                 reason: "at least one redirect URI is required".to_string(),
             });
@@ -12146,6 +12543,7 @@ mod tests {
                     code: auth_response.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
                 },
             )
             .expect("exchange code");
@@ -12205,6 +12603,7 @@ mod tests {
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
             },
         );
         assert!(result1.is_ok(), "first exchange should succeed");
@@ -12217,6 +12616,7 @@ mod tests {
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
             },
         );
         assert!(
@@ -12264,6 +12664,7 @@ mod tests {
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
             },
         );
         assert!(
@@ -12336,6 +12737,7 @@ mod tests {
                     code: auth_response.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
                 },
             )
             .expect("first exchange");
@@ -12348,6 +12750,7 @@ mod tests {
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
             },
         );
         assert!(
@@ -13790,6 +14193,7 @@ mod tests {
                     client_id: client.client_id().clone(),
                     client_secret: secret.clone(),
                     scope: Some("read write".to_string()),
+                    dpop_jkt: None,
                 },
             )
             .expect("client_credentials_token should succeed");
@@ -13820,6 +14224,7 @@ mod tests {
                 client_id: client.client_id().clone(),
                 client_secret: "wrong-secret".to_string(),
                 scope: None,
+                dpop_jkt: None,
             },
         );
 
@@ -13858,6 +14263,7 @@ mod tests {
                 client_id: client.client_id().clone(),
                 client_secret: "anything".to_string(),
                 scope: None,
+                dpop_jkt: None,
             },
         );
 
@@ -13968,6 +14374,7 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
                 },
             )
             .expect("exchange code");
@@ -14082,6 +14489,7 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
                 },
             )
             .expect("exchange code");
@@ -14197,6 +14605,7 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
                 },
             )
             .expect("exchange code");
@@ -14377,6 +14786,7 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
                 },
             )
             .expect("exchange");
@@ -14448,6 +14858,7 @@ mod tests {
                 client_id: client.client_id().clone(),
                 client_secret: "wrong-secret-456".to_string(),
                 scope: None,
+                dpop_jkt: None,
             },
         );
         assert!(
@@ -14462,6 +14873,7 @@ mod tests {
                 client_id: client.client_id().clone(),
                 client_secret: String::new(),
                 scope: None,
+                dpop_jkt: None,
             },
         );
         assert!(
@@ -14477,6 +14889,7 @@ mod tests {
                 client_id: fake_client_id,
                 client_secret: "any-secret".to_string(),
                 scope: None,
+                dpop_jkt: None,
             },
         );
         assert!(
@@ -14607,6 +15020,7 @@ mod tests {
                         code: auth.code().to_string(),
                         redirect_uri: "https://app.example.com/cb".to_string(),
                         code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                        dpop_jkt: None,
                     }).expect("exchange");
 
                     access_tokens.push(tokens.access_token().to_string());
@@ -14718,6 +15132,7 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
                 }).expect("exchange");
 
                 let mut current_refresh = tokens.refresh_token().to_string();
@@ -15701,6 +16116,7 @@ mod tests {
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
                 },
             )
             .expect("exchange");
@@ -16420,6 +16836,159 @@ mod tests {
         assert!(
             matches!(ip_rate_result, Err(IdentityError::RateLimited)),
             "IP should be rate-limited after step-up MFA failure, got: {ip_rate_result:?}"
+        );
+    }
+
+    // ===== PAR (RFC 9126) unit tests =====
+    //
+    // These live here rather than in tests/par.rs because `consume_par`
+    // returns `StoredPushedAuthorizationRequest` which is pub(crate).
+
+    fn par_setup_engine_and_public_client() -> (
+        tempfile::TempDir,
+        EmbeddedIdentityEngine,
+        Arc<FakeClock>,
+        RealmId,
+        crate::identity::oidc::OAuthClient,
+    ) {
+        use crate::identity::oidc::RegisterClientRequest;
+        let (dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = engine
+            .register_client(
+                &realm,
+                &RegisterClientRequest {
+                    client_name: "PAR Public Client".to_string(),
+                    redirect_uris: vec!["https://example.com/callback".to_string()],
+                    client_secret: None,
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: false,
+                    client_logo_url: None,
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+        (dir, engine, clock, realm, client)
+    }
+
+    fn par_pkce_challenge() -> (String, String) {
+        use data_encoding::BASE64URL_NOPAD;
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = BASE64URL_NOPAD
+            .encode(ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes()).as_ref());
+        (verifier.to_string(), challenge)
+    }
+
+    fn par_request(
+        client_id: crate::core::ClientId,
+        challenge: &str,
+    ) -> crate::identity::oidc::PushedAuthorizationRequest {
+        crate::identity::oidc::PushedAuthorizationRequest {
+            client_id,
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: "openid".to_string(),
+            state: "state-xyz".to_string(),
+            resource: None,
+            response_type: "code".to_string(),
+            code_challenge: Some(challenge.to_string()),
+            code_challenge_method: Some(crate::identity::oidc::CodeChallengeMethod::S256),
+            nonce: None,
+        }
+    }
+
+    #[test]
+    fn par_consume_happy_path_marks_used() {
+        let (_dir, engine, _clock, realm, client) = par_setup_engine_and_public_client();
+        let (_, challenge) = par_pkce_challenge();
+
+        let resp = engine
+            .push_authorization_request(
+                &realm,
+                &par_request(client.client_id().clone(), &challenge),
+            )
+            .expect("push");
+        let stored = engine
+            .consume_par(&realm, &resp.request_uri)
+            .expect("first consume must succeed");
+
+        assert_eq!(stored.state, "state-xyz");
+        assert!(
+            stored.used,
+            "stored entry must be marked used after consume"
+        );
+    }
+
+    #[test]
+    fn par_single_use_enforced() {
+        let (_dir, engine, _clock, realm, client) = par_setup_engine_and_public_client();
+        let (_, challenge) = par_pkce_challenge();
+
+        let resp = engine
+            .push_authorization_request(
+                &realm,
+                &par_request(client.client_id().clone(), &challenge),
+            )
+            .expect("push");
+
+        engine
+            .consume_par(&realm, &resp.request_uri)
+            .expect("first consume");
+        let second = engine.consume_par(&realm, &resp.request_uri);
+        assert!(
+            matches!(
+                second,
+                Err(IdentityError::InvalidPushedAuthorizationRequest)
+            ),
+            "second consume must be rejected as replay, got: {second:?}"
+        );
+    }
+
+    #[test]
+    fn par_expired_rejected() {
+        let (_dir, engine, clock, realm, client) = par_setup_engine_and_public_client();
+        let (_, challenge) = par_pkce_challenge();
+
+        let resp = engine
+            .push_authorization_request(
+                &realm,
+                &par_request(client.client_id().clone(), &challenge),
+            )
+            .expect("push");
+
+        clock.advance(91 * 1_000_000); // 91 seconds past the 90-second TTL
+
+        let result = engine.consume_par(&realm, &resp.request_uri);
+        assert!(
+            matches!(
+                result,
+                Err(IdentityError::InvalidPushedAuthorizationRequest)
+            ),
+            "expired request_uri must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn par_unknown_uri_rejected() {
+        let (_dir, engine, _clock, realm, _client) = par_setup_engine_and_public_client();
+        let bogus = "urn:ietf:params:oauth:request_uri:00000000-0000-0000-0000-000000000000";
+        assert!(
+            matches!(
+                engine.consume_par(&realm, bogus),
+                Err(IdentityError::InvalidPushedAuthorizationRequest)
+            ),
+            "unknown request_uri must return InvalidPushedAuthorizationRequest"
+        );
+    }
+
+    #[test]
+    fn par_malformed_uri_prefix_rejected() {
+        let (_dir, engine, _clock, realm, _client) = par_setup_engine_and_public_client();
+        assert!(
+            matches!(
+                engine.consume_par(&realm, "not-a-urn"),
+                Err(IdentityError::InvalidPushedAuthorizationRequest)
+            ),
+            "malformed request_uri must return InvalidPushedAuthorizationRequest"
         );
     }
 }

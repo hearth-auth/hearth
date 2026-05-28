@@ -632,6 +632,7 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
                 code: auth_resp.code().to_string(),
                 redirect_uri: "http://localhost/callback".into(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
             },
         )
         .expect_err("should fail");

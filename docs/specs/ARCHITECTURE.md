@@ -497,7 +497,7 @@ src/storage/
 
 - Adding a new dependency MUST be justified in the PR description: what it provides, why a hand-written solution is not appropriate, and its maintenance status (last release, bus factor, known issues).
 - All new dependencies MUST pass `cargo-audit` with no known vulnerabilities.
-- All new dependencies MUST be reviewed for license compatibility. Acceptable: Apache 2.0, MIT, BSD, MPL-2.0. Not acceptable: GPL, AGPL, SSPL. (Note: this refers to *dependency* licenses. Hearth itself is AGPL-3.0 licensed with a commercial option. AGPL/GPL dependencies are banned because they would complicate the commercial license track.)
+- All new dependencies MUST be reviewed for license compatibility. Acceptable: Apache 2.0, MIT, BSD, MPL-2.0. Not acceptable: GPL, AGPL, SSPL. (Hearth is Apache-2.0; copyleft dependencies are banned because they would impose incompatible downstream obligations.)
 - Dependencies MUST NOT introduce a C/C++ build toolchain requirement unless absolutely necessary (`ring` is acceptable; a dependency requiring `cmake` is suspect).
 
 ### 15.2 Approved Crates
@@ -518,9 +518,9 @@ These crates are pre-approved and need no additional justification:
 | CLI | `clap` | Derive-based |
 | Lock-free concurrency | `crossbeam-epoch`, `arc-swap` | |
 | Memory-mapped I/O | `memmap2` | |
-| Raft consensus | `openraft` | Phase 2+ |
-| HTTP framework | TBD | MUST be `tower`-compatible |
-| Time handling | TBD | |
+| Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; not yet production-validated at scale |
+| HTTP framework | `axum` | `tower`-compatible |
+| Time handling | `std::time`, `tokio::time` | |
 | Testing | `proptest`, `criterion`, `insta`, `madsim` | Test-only |
 | HTTP client (test) | `reqwest` | Test-only |
 
