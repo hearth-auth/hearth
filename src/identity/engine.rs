@@ -4329,11 +4329,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         };
         let org_slug_ref = org_slug_owned.as_deref();
 
+        // For Introspection/Decision modes, omit RBAC claims from the JWT:
+        // permissions are sourced live via /introspect or /oauth/authorize.
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let authz_mode = effective_client.access_token_authorization();
+        let access_resolved = if authz_mode == AccessTokenAuthorization::Embedded {
+            &resolved
+        } else {
+            &crate::rbac::ResolvedPermissions::default()
+        };
+        let empty_perm_strs: Vec<String> = Vec::new();
+
         let (roles, groups, permissions, custom) = self.apply_claim_profile(
             realm_id,
             &user,
             effective_client,
-            &resolved,
+            access_resolved,
             &ctx.granted_scopes,
             oid_ref,
             ClaimTarget::AccessToken,
@@ -4354,6 +4365,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             ..self.config.token.clone()
         };
         let realm_issuer = self.realm_issuer_url(realm_id);
+        let effective_perms = if authz_mode == AccessTokenAuthorization::Embedded {
+            if permissions.is_empty() {
+                &perm_strs
+            } else {
+                &permissions
+            }
+        } else {
+            &empty_perm_strs
+        };
         self.signing_key.issue_token_pair(&IssueTokenRequest {
             sub: &user_id.to_string(),
             sid: &session_id.to_string(),
@@ -4362,14 +4382,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             now,
             config: &effective_token_cfg,
             issuer_override: Some(realm_issuer),
-            roles: &roles,
-            groups: &groups,
-            org_slug: org_slug_ref,
-            permissions: if permissions.is_empty() {
-                &perm_strs
+            roles: if authz_mode == AccessTokenAuthorization::Embedded {
+                &roles
             } else {
-                &permissions
+                &[]
             },
+            groups: if authz_mode == AccessTokenAuthorization::Embedded {
+                &groups
+            } else {
+                &[]
+            },
+            org_slug: org_slug_ref,
+            permissions: effective_perms,
             custom,
             resource: ctx.resource.as_ref(),
             dpop_jkt: None, // set at HTTP layer when DPoP proof is validated
@@ -4689,6 +4713,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         client.set_trust_level(request.trust_level);
         client.set_declared_scopes(request.declared_scopes.clone());
         client.set_consent_spans_orgs(request.consent_spans_orgs);
+        client.set_access_token_authorization(request.access_token_authorization);
 
         // Serialize and persist
         let client_bytes =
@@ -4993,12 +5018,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             })?;
         let granted_scopes: BTreeSet<String> =
             scope_value.split_whitespace().map(str::to_string).collect();
+
+        // For non-Embedded modes, strip RBAC claims from the access token.
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let authz_mode = client.access_token_authorization();
+        let empty_resolved = crate::rbac::ResolvedPermissions::default();
+        let access_resolved = if authz_mode == AccessTokenAuthorization::Embedded {
+            &resolved
+        } else {
+            &empty_resolved
+        };
+
         let (access_roles, access_groups, access_permissions, access_custom) = self
             .apply_claim_profile(
                 realm_id,
                 &user,
                 &client,
-                &resolved,
+                access_resolved,
                 &granted_scopes,
                 None,
                 ClaimTarget::AccessToken,
@@ -6186,7 +6222,49 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        // 6. Active — return metadata
+        // 6. Look up the introspecting client's authorization mode and, for
+        // Introspection/Decision clients, emit live RBAC data so resource
+        // servers have a single authoritative source for permissions.
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let authz_mode = request
+            .introspecting_client_id
+            .as_ref()
+            .and_then(|cid| self.get_client(realm_id, cid).ok().flatten())
+            .map(|c| c.access_token_authorization())
+            .unwrap_or(AccessTokenAuthorization::Embedded);
+
+        let (live_permissions, live_roles, live_groups) =
+            if authz_mode != AccessTokenAuthorization::Embedded {
+                // Parse user_id from sub — client-credential tokens use a client
+                // UUID as sub, which won't parse as a UserId; they get no live data.
+                let sub_str = &claims.sub;
+                let user_uuid_str = sub_str.strip_prefix("user_").unwrap_or(sub_str);
+                if let Ok(user_uuid) = uuid::Uuid::parse_str(user_uuid_str) {
+                    let user_id = crate::core::UserId::new(user_uuid);
+                    let org_id: Option<crate::core::OrganizationId> =
+                        claims.oid.as_deref().and_then(|o| {
+                            uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
+                                .ok()
+                                .map(crate::core::OrganizationId::new)
+                        });
+                    let resolved_live = self
+                        .rbac
+                        .resolve_permissions(&user_id, realm_id, org_id.as_ref(), None)
+                        .unwrap_or_default();
+                    let perms: Vec<String> = resolved_live
+                        .permissions
+                        .iter()
+                        .map(|p| p.as_str().to_string())
+                        .collect();
+                    (perms, resolved_live.roles, resolved_live.groups)
+                } else {
+                    (vec![], vec![], vec![])
+                }
+            } else {
+                (vec![], vec![], vec![])
+            };
+
+        // 7. Active — return metadata
         Ok(IntrospectionResponse {
             active: true,
             scope: claims.scope,
@@ -6197,6 +6275,96 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             token_type: Some(claims.token_type),
             iss: Some(claims.iss),
             aud: Some(claims.aud.base().to_string()),
+            mode: Some(authz_mode),
+            permissions: live_permissions,
+            roles: live_roles,
+            groups: live_groups,
+        })
+    }
+
+    fn decide_token_permission(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::oidc::DecidePermissionRequest,
+    ) -> Result<crate::identity::oidc::DecidePermissionResponse, IdentityError> {
+        use crate::identity::oidc::DecidePermissionResponse;
+        use crate::rbac::Permission;
+
+        // Validate signature + realm binding — fail-closed on any error.
+        let Ok(claims) = self.verify_token_signature_for_realm(realm_id, &request.token) else {
+            return Ok(DecidePermissionResponse { allowed: false });
+        };
+        if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
+        if !claims.aud.contains(&self.config.token.audience) {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
+
+        // Expiry check.
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if now_secs >= claims.exp || claims.iat > now_secs + CLOCK_SKEW_SECS {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
+
+        // Session / JTI revocation check.
+        if claims.sid != "none" {
+            let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
+            if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
+                if self.get_session(realm_id, &SessionId::new(uuid))?.is_none() {
+                    return Ok(DecidePermissionResponse { allowed: false });
+                }
+            }
+        } else if let Some(ref jti) = claims.jti {
+            let jti_key = keys::encode_revoked_jti(jti);
+            if self
+                .storage
+                .get(realm_id, &jti_key)
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
+                return Ok(DecidePermissionResponse { allowed: false });
+            }
+        }
+
+        // Parse user from sub — client-credential tokens are never allowed
+        // through the decision endpoint (no user context to check against).
+        let sub_str = &claims.sub;
+        let user_uuid_str = sub_str.strip_prefix("user_").unwrap_or(sub_str);
+        let user_uuid = match uuid::Uuid::parse_str(user_uuid_str) {
+            Ok(u) => u,
+            Err(_) => return Ok(DecidePermissionResponse { allowed: false }),
+        };
+        let user_id = crate::core::UserId::new(user_uuid);
+
+        // Validate requested permission string.
+        let Ok(permission) = Permission::new(&request.permission) else {
+            return Ok(DecidePermissionResponse { allowed: false });
+        };
+
+        // Parse optional org scoping.
+        let org_id: Option<crate::core::OrganizationId> =
+            request.organization_id.as_deref().and_then(|o| {
+                uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
+                    .ok()
+                    .map(crate::core::OrganizationId::new)
+            });
+
+        // Apply scope narrowing from the token if present.
+        let scope_str = claims.scope.as_deref();
+        let scope_single = scope_str.filter(|s| s.split_whitespace().count() == 1);
+
+        let resolved =
+            match self
+                .rbac
+                .resolve_permissions(&user_id, realm_id, org_id.as_ref(), scope_single)
+            {
+                Ok(r) => r,
+                Err(_) => return Ok(DecidePermissionResponse { allowed: false }),
+            };
+
+        Ok(DecidePermissionResponse {
+            allowed: resolved.permissions.contains(&permission),
         })
     }
 
@@ -7804,6 +7972,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 }
             }
             client.set_assertion_public_key(pk.clone());
+        }
+        if let Some(mode) = request.access_token_authorization {
+            client.set_access_token_authorization(mode);
         }
 
         let updated_bytes =
@@ -14651,6 +14822,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: tokens.access_token().to_string(),
                     token_type_hint: None,
+                    introspecting_client_id: None,
                 },
             )
             .expect("introspect should succeed");
@@ -14694,6 +14866,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: tokens.access_token().to_string(),
                     token_type_hint: None,
+                    introspecting_client_id: None,
                 },
             )
             .expect("introspect should succeed");
@@ -14714,6 +14887,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: "not-a-valid-token".to_string(),
                     token_type_hint: None,
+                    introspecting_client_id: None,
                 },
             )
             .expect("introspect should succeed even for invalid tokens");
@@ -15063,6 +15237,7 @@ mod tests {
                         &TokenIntrospectionRequest {
                             token: token.clone(),
                             token_type_hint: None,
+                            introspecting_client_id: None,
                         },
                     ).expect("introspect");
                     if resp.active {
@@ -15154,6 +15329,7 @@ mod tests {
                         &TokenIntrospectionRequest {
                             token: current_refresh.clone(),
                             token_type_hint: None,
+                            introspecting_client_id: None,
                         },
                     ).expect("introspect current");
                     prop_assert!(resp.active, "current refresh token must be active at rotation {}", i);
@@ -16220,6 +16396,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: tokens.access_token().to_string(),
                     token_type_hint: Some("access_token".to_string()),
+                    introspecting_client_id: None,
                 },
             )
             .expect("real introspection");
@@ -16244,6 +16421,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: forged_token,
                     token_type_hint: Some("access_token".to_string()),
+                    introspecting_client_id: None,
                 },
             )
             .expect("forged introspection should not error");

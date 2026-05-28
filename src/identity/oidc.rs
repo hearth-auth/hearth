@@ -110,6 +110,8 @@ pub struct RegisterClientRequest {
     pub declared_scopes: Vec<String>,
     /// Whether a realm-scoped consent can cover all org contexts.
     pub consent_spans_orgs: bool,
+    /// Access-token authorization mode. Defaults to `Embedded`.
+    pub access_token_authorization: AccessTokenAuthorization,
 }
 
 impl Default for RegisterClientRequest {
@@ -130,8 +132,24 @@ impl Default for RegisterClientRequest {
             trust_level: ClientTrustLevel::ThirdParty,
             declared_scopes: Vec::new(),
             consent_spans_orgs: false,
+            access_token_authorization: AccessTokenAuthorization::Embedded,
         }
     }
+}
+
+/// Controls how access-token authorization data is exposed to resource servers.
+///
+/// Defaults to `Embedded` for backward compatibility with existing clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessTokenAuthorization {
+    /// Permissions, roles, and groups are embedded in the JWT at issuance (default).
+    #[default]
+    Embedded,
+    /// JWT carries only identity claims; resource servers call `/introspect` for live data.
+    Introspection,
+    /// JWT carries only identity claims; resource servers call `POST /oauth/authorize` per-request.
+    Decision,
 }
 
 /// A registered OAuth 2.0 client.
@@ -205,6 +223,9 @@ pub struct OAuthClient {
     /// raw 32 bytes encoded with base64url (no PEM wrapping).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assertion_public_key: Option<String>,
+    /// Controls how access-token authorization data is exposed to resource servers.
+    #[serde(default)]
+    access_token_authorization: AccessTokenAuthorization,
 }
 
 fn default_require_consent() -> bool {
@@ -237,6 +258,7 @@ impl OAuthClient {
             frontchannel_logout_uri: None,
             post_logout_redirect_uris: Vec::new(),
             assertion_public_key: None,
+            access_token_authorization: AccessTokenAuthorization::Embedded,
         }
     }
 
@@ -267,6 +289,7 @@ impl OAuthClient {
             frontchannel_logout_uri: None,
             post_logout_redirect_uris: Vec::new(),
             assertion_public_key: None,
+            access_token_authorization: AccessTokenAuthorization::Embedded,
         }
     }
 
@@ -438,6 +461,16 @@ impl OAuthClient {
         self.status = status;
     }
 
+    /// Returns the access-token authorization mode configured for this client.
+    pub fn access_token_authorization(&self) -> AccessTokenAuthorization {
+        self.access_token_authorization
+    }
+
+    /// Sets the access-token authorization mode.
+    pub(crate) fn set_access_token_authorization(&mut self, mode: AccessTokenAuthorization) {
+        self.access_token_authorization = mode;
+    }
+
     /// Returns `true` if this client was provisioned from YAML configuration.
     ///
     /// YAML-managed clients have deterministic UUID v5 identifiers (derived
@@ -486,6 +519,8 @@ pub struct UpdateClientRequest {
     /// Pass `Some(Some(key_b64url))` to set, `Some(None)` to clear.
     /// `None` leaves the current value unchanged.
     pub assertion_public_key: Option<Option<String>>,
+    /// New access-token authorization mode. `None` leaves unchanged.
+    pub access_token_authorization: Option<AccessTokenAuthorization>,
 }
 
 // ===== RP-Initiated Logout =====
@@ -1088,6 +1123,12 @@ pub struct TokenIntrospectionRequest {
     pub token: String,
     /// Optional hint about the token type.
     pub token_type_hint: Option<String>,
+    /// The client that authenticated for this introspection call.
+    ///
+    /// When present, the engine looks up this client's `access_token_authorization`
+    /// mode and includes live RBAC claims in the response for
+    /// `Introspection` and `Decision` clients.
+    pub introspecting_client_id: Option<crate::core::ClientId>,
 }
 
 /// Response from token introspection (RFC 7662).
@@ -1119,6 +1160,18 @@ pub struct IntrospectionResponse {
     /// Audience of the token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aud: Option<String>,
+    /// Access-token authorization mode configured on the issuing client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<AccessTokenAuthorization>,
+    /// Live permission strings (Introspection/Decision mode only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<String>,
+    /// Live role names (Introspection/Decision mode only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+    /// Live group slugs (Introspection/Decision mode only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 impl IntrospectionResponse {
@@ -1137,8 +1190,34 @@ impl IntrospectionResponse {
             token_type: None,
             iss: None,
             aud: None,
+            mode: None,
+            permissions: Vec::new(),
+            roles: Vec::new(),
+            groups: Vec::new(),
         }
     }
+}
+
+// ===== Decision Endpoint (HEA-922) =====
+
+/// Request body for `POST /oauth/authorize` — the per-request decision endpoint.
+#[derive(Debug, Clone)]
+pub struct DecidePermissionRequest {
+    /// Bearer access token presented by the resource server.
+    pub token: String,
+    /// Permission to check (e.g. `"docs.write"`).
+    pub permission: String,
+    /// Optional organization scope for org-scoped permission checks.
+    pub organization_id: Option<String>,
+    /// Optional resource URI for RFC 8707 audience-scoped checks.
+    pub resource: Option<String>,
+}
+
+/// Response from `POST /oauth/authorize`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecidePermissionResponse {
+    /// Whether the token holder has the requested permission.
+    pub allowed: bool,
 }
 
 // ===== UserInfo (OIDC Core §5.3) =====

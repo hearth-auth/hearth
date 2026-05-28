@@ -40,12 +40,23 @@ message OidcTokenResponse {
   string refresh_token = 5;
 }
 
+// Controls how access-token authorization data is exposed to resource servers.
+enum AccessTokenAuthorization {
+  // Permissions, roles, and groups are embedded in the JWT at issuance (default).
+  EMBEDDED = 0;
+  // JWT carries only identity claims; resource servers call /introspect.
+  INTROSPECTION = 1;
+  // JWT carries only identity claims; resource servers call POST /oauth/authorize.
+  DECISION = 2;
+}
+
 // Request to register a new OAuth 2.0 client.
 message RegisterClientRequest {
   string client_name = 1;
   repeated string redirect_uris = 2;
   optional string client_secret = 3;
   repeated string grant_types = 4;
+  AccessTokenAuthorization access_token_authorization = 5;
 }
 
 // Request to update an existing OAuth 2.0 client.
@@ -53,6 +64,7 @@ message UpdateClientRequest {
   optional string client_name = 1;
   repeated string redirect_uris = 2;
   repeated string grant_types = 3;
+  optional AccessTokenAuthorization access_token_authorization = 4;
 }
 
 // A registered OAuth 2.0 client.
@@ -63,6 +75,7 @@ message OAuthClient {
   int64 created_at = 4;
   bool is_confidential = 5;
   repeated string grant_types = 6;
+  AccessTokenAuthorization access_token_authorization = 7;
 }
 
 // A cursor-based page of OAuth clients.
@@ -124,6 +137,22 @@ message IntrospectionResponse {
   optional string token_type = 7;
   optional string iss = 8;
   optional string aud = 9;
+  optional AccessTokenAuthorization mode = 10;
+  repeated string permissions = 11;
+  repeated string roles = 12;
+  repeated string groups = 13;
+}
+
+// Request for the per-request permission decision endpoint (HEA-922).
+message TokenDecisionRequest {
+  string permission = 1;
+  optional string organization_id = 2;
+  optional string resource = 3;
+}
+
+// Response from the decision endpoint.
+message TokenDecisionResponse {
+  bool allowed = 1;
 }
 
 // Response from the UserInfo endpoint (OIDC Core s5.3).
@@ -241,4 +270,6 @@ service OAuthService {
   rpc DeviceAuthorize(DeviceAuthorizationRequest) returns (DeviceAuthorizationResponse);
   rpc ClientCredentials(ClientCredentialsRequest) returns (ClientCredentialsResponse);
   rpc RegisterClient(RegisterClientRequest) returns (OAuthClient);
+  // Per-request permission decision endpoint (HEA-922). Requires bearer auth.
+  rpc Decide(TokenDecisionRequest) returns (TokenDecisionResponse);
 }

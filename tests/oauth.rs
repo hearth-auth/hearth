@@ -116,6 +116,7 @@ async fn client_credentials_full_flow() {
             &hearth::identity::TokenIntrospectionRequest {
                 token: token_resp.access_token().to_string(),
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect token");
@@ -143,6 +144,7 @@ async fn client_credentials_full_flow() {
             &hearth::identity::TokenIntrospectionRequest {
                 token: token_resp.access_token().to_string(),
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect after revocation");
@@ -418,6 +420,7 @@ async fn conformance_rfc7662_introspection_response() {
             &TokenIntrospectionRequest {
                 token: tokens.access_token().to_string(),
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect active token");
@@ -473,6 +476,7 @@ async fn conformance_rfc7662_introspection_response() {
             &TokenIntrospectionRequest {
                 token: "this-is-not-a-valid-token".to_string(),
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect invalid token should succeed per RFC 7662");
