@@ -92,3 +92,17 @@ class IntrospectionError(HearthSdkError):
     def __init__(self, message: str, cause: Optional[Exception] = None):
         self.cause = cause
         super().__init__(message)
+
+
+class AuthorizationModeMismatchError(HearthSdkError):
+    """Raised when the introspection response echoes a mode that does not match the configured mode.
+
+    Per spec §15.3: middleware MUST reject the request rather than silently falling back.
+    """
+
+    def __init__(self, expected: str, actual: str):
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f'Authorization mode mismatch: expected "{expected}", got "{actual}"'
+        )
