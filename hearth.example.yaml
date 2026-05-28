@@ -325,6 +325,16 @@ oidc:
 #       rate_limit:
 #         max_failed_logins: 5
 #         lockout_duration: "15m"
+#       # Adaptive (risk-based) step-up MFA — see HEA-836.
+#       # When enabled, unrecognised device/IP combinations trigger an extra
+#       # MFA challenge. The HMAC secret derives device fingerprints and MUST
+#       # be supplied from the environment — never commit a plaintext value.
+#       # See docs/guides/security-hardening.md#device-fingerprint-hmac-secret
+#       # for generation, storage, and rotation procedures.
+#       adaptive_mfa:
+#         enabled: true
+#         recognition_window_days: 30                                       # default: 30
+#         fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
 #
 #   internal-tools:
 #     session_ttl: "8h"

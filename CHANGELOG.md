@@ -7,6 +7,30 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **GDPR Art.17: device fingerprint erasure cascade + admin API (HEA-875)** — `delete_user`
+  now cascades to all `dfp:user:{uid}:*` storage entries so right-to-erasure is complete.
+  New endpoint `DELETE /admin/users/{id}/device-fingerprints` (AC-11) lets operators satisfy
+  DSAR erasure requests without deleting the entire account; returns `{"erased": N}` and
+  emits a `DeviceFingerprintsErased` audit event. Also fixed: `derive_fingerprint_key` helper
+  was producing keys with the stale `dev:fp:` prefix instead of the correct `dfp:user:` prefix.
+
+- **CSP regression fix: inline styles eliminated (HEA-876)** — Two regressions from the
+  HEA-850 `style-src 'self'` hardening are resolved. Theme CSS is now served via external
+  `<link>` tags (`/ui/static/theme.css`, `/ui/static/realm-theme/{id}`) instead of inline
+  `<style>` blocks. HTMX's startup `insertAdjacentHTML` style injection for `.htmx-indicator`
+  is suppressed with `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>`;
+  indicator styles are declared in `app.css` instead.
+
+- **CSP hardened: `unsafe-eval` and `unsafe-inline` removed (HEA-850)** — Alpine.js
+  has been fully replaced by HTMX + Hyperscript across all ~40 admin templates.
+  Layout reactivity (sidebar toggle, realm nav tree, toast notifications, realm pill)
+  is now handled by vanilla JS classes (`SidebarManager`, `RealmNav`, `ToastManager`)
+  in `admin.js`. Template interactions use Hyperscript `_="..."` attributes, which are
+  eval-free. The CSP is now `script-src 'self'; style-src 'self'` with no unsafe
+  keywords. Resolves GAP-4 and GAP-5 from the original security audit.
+
 ### Added
 
 - **`make ci-local-full`** — full container reproduction of PR-blocking GHA
@@ -75,6 +99,20 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   metrics are exported: `hearth_dfp_sweeper_evicted_total` (cumulative counter of
   evicted entries) and `hearth_dfp_keys_active` (gauge, sampled per sweep). Errors
   are logged at `WARN` level and do not crash the process.
+
+- **Device fingerprint HMAC secrets pipeline (HEA-858)** — operator guidance, Helm
+  wiring, and CI guard for the per-realm `adaptive_mfa.fingerprint_hmac_secret`
+  introduced by HEA-836. `hearth.example.yaml` now documents the
+  `${HEARTH_REALM_<NAME>_FINGERPRINT_HMAC_SECRET}` env-substitution pattern;
+  `deploy/helm/hearth/values.yaml` documents the matching `secret.env` naming
+  convention; `docs/guides/security-hardening.md` adds a "Device fingerprint HMAC
+  secret" section with generation, storage, and a step-by-step rotation runbook
+  (including blast-radius notes — rotation invalidates the per-realm device
+  recognition cache, briefly increasing step-up MFA challenges). A new CI guard
+  (`scripts/check-secret-hygiene.sh`, run from the `filter` job on every PR)
+  fails the build if any tracked file contains a `fingerprint_hmac_secret`
+  literal that is not an empty string, a `${VAR}` substitution, or a documented
+  test sentinel.
 
 - **SMS MFA realm config (HEA-855)** — `RealmConfig` gains two new optional fields:
   `sms_otp_expiry_seconds` (override default OTP lifetime per realm) and

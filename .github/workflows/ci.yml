@@ -138,6 +138,12 @@ jobs:
             echo "| docs-only | ${{ steps.filter.outputs.docs-only }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # HEA-858: static guard against committing real secret material.
+      # Runs on every PR (including doc-only) because a secret can leak via any
+      # tracked file type, and the scan completes in well under a second.
+      - name: Secret hygiene (fingerprint_hmac_secret literals)
+        run: bash scripts/check-secret-hygiene.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:
