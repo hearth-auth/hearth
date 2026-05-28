@@ -388,6 +388,7 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         trust_level,
         declared_scopes,
         consent_spans_orgs: false,
+        access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
     }
 }
 
@@ -702,6 +703,7 @@ pub async fn admin_app_edit_submit(
         post_logout_redirect_uris: None,
         status: None,
         assertion_public_key: None,
+        access_token_authorization: None,
     };
 
     let realm_name = target.0.name().to_string();

@@ -239,6 +239,7 @@ async fn alg_none_on_introspect_returns_inactive() {
             &TokenIntrospectionRequest {
                 token: forged,
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect must not error");
@@ -352,6 +353,7 @@ async fn hs256_forgery_on_introspect_returns_inactive() {
             &TokenIntrospectionRequest {
                 token: forged,
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect must not error");
@@ -463,6 +465,7 @@ async fn expired_token_introspects_inactive() {
             &TokenIntrospectionRequest {
                 token: pair.access_token().to_string(),
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect must not error");
@@ -561,6 +564,7 @@ async fn cross_realm_replay_on_introspect_returns_inactive() {
             &TokenIntrospectionRequest {
                 token: pair.access_token().to_string(),
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect must not error");
@@ -661,6 +665,7 @@ async fn revoked_session_token_introspects_inactive() {
             &TokenIntrospectionRequest {
                 token: pair.access_token().to_string(),
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect must not error");
@@ -795,6 +800,7 @@ async fn future_iat_introspects_inactive() {
             &TokenIntrospectionRequest {
                 token: pair.access_token().to_string(),
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect must not error");
@@ -1072,6 +1078,7 @@ async fn wrong_aud_introspects_inactive() {
             &TokenIntrospectionRequest {
                 token: pair.access_token().to_string(),
                 token_type_hint: None,
+                introspecting_client_id: None,
             },
         )
         .expect("introspect must not error");

@@ -8,6 +8,14 @@ use crate::protocol::proto::identity::v1 as pb;
 
 impl From<&domain::OAuthClient> for pb::OAuthClient {
     fn from(c: &domain::OAuthClient) -> Self {
+        use domain::AccessTokenAuthorization;
+        let mode = match c.access_token_authorization() {
+            AccessTokenAuthorization::Embedded => pb::AccessTokenAuthorization::Embedded as i32,
+            AccessTokenAuthorization::Introspection => {
+                pb::AccessTokenAuthorization::Introspection as i32
+            }
+            AccessTokenAuthorization::Decision => pb::AccessTokenAuthorization::Decision as i32,
+        };
         Self {
             client_id: c.client_id().as_uuid().to_string(),
             client_name: c.client_name().to_string(),
@@ -15,6 +23,7 @@ impl From<&domain::OAuthClient> for pb::OAuthClient {
             created_at: c.created_at().as_micros(),
             is_confidential: c.is_confidential(),
             grant_types: c.grant_types().to_vec(),
+            access_token_authorization: mode,
         }
     }
 }
@@ -33,6 +42,15 @@ pub(crate) fn client_page_to_proto(
 
 impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
     fn from(r: pb::RegisterClientRequest) -> Self {
+        use domain::AccessTokenAuthorization;
+        let access_token_authorization =
+            match pb::AccessTokenAuthorization::try_from(r.access_token_authorization) {
+                Ok(pb::AccessTokenAuthorization::Introspection) => {
+                    AccessTokenAuthorization::Introspection
+                }
+                Ok(pb::AccessTokenAuthorization::Decision) => AccessTokenAuthorization::Decision,
+                _ => AccessTokenAuthorization::Embedded,
+            };
         Self {
             client_name: r.client_name,
             redirect_uris: r.redirect_uris,
@@ -48,6 +66,7 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             trust_level: domain::ClientTrustLevel::FirstParty,
             declared_scopes: Vec::new(),
             consent_spans_orgs: false,
+            access_token_authorization,
         }
     }
 }
@@ -79,6 +98,18 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
             post_logout_redirect_uris: None,
             status: None,
             assertion_public_key: None,
+            access_token_authorization: r.access_token_authorization.map(|v| {
+                use domain::AccessTokenAuthorization;
+                match pb::AccessTokenAuthorization::try_from(v) {
+                    Ok(pb::AccessTokenAuthorization::Introspection) => {
+                        AccessTokenAuthorization::Introspection
+                    }
+                    Ok(pb::AccessTokenAuthorization::Decision) => {
+                        AccessTokenAuthorization::Decision
+                    }
+                    _ => AccessTokenAuthorization::Embedded,
+                }
+            }),
         }
     }
 }
@@ -223,6 +254,7 @@ impl From<pb::TokenIntrospectionRequest> for domain::TokenIntrospectionRequest {
         Self {
             token: r.token,
             token_type_hint: r.token_type_hint,
+            introspecting_client_id: None,
         }
     }
 }
@@ -231,6 +263,14 @@ impl From<pb::TokenIntrospectionRequest> for domain::TokenIntrospectionRequest {
 
 impl From<&domain::IntrospectionResponse> for pb::IntrospectionResponse {
     fn from(r: &domain::IntrospectionResponse) -> Self {
+        use domain::AccessTokenAuthorization;
+        let mode = r.mode.map(|m| match m {
+            AccessTokenAuthorization::Embedded => pb::AccessTokenAuthorization::Embedded as i32,
+            AccessTokenAuthorization::Introspection => {
+                pb::AccessTokenAuthorization::Introspection as i32
+            }
+            AccessTokenAuthorization::Decision => pb::AccessTokenAuthorization::Decision as i32,
+        });
         Self {
             active: r.active,
             scope: r.scope.clone(),
@@ -241,6 +281,10 @@ impl From<&domain::IntrospectionResponse> for pb::IntrospectionResponse {
             token_type: r.token_type.clone(),
             iss: r.iss.clone(),
             aud: r.aud.clone(),
+            mode,
+            permissions: r.permissions.clone(),
+            roles: r.roles.clone(),
+            groups: r.groups.clone(),
         }
     }
 }
@@ -344,6 +388,7 @@ mod tests {
             redirect_uris: vec!["https://app.example.com/cb".to_string()],
             client_secret: Some("secret123".to_string()),
             grant_types: vec![],
+            access_token_authorization: 0, // Embedded
         };
         let domain = domain::RegisterClientRequest::from(proto);
         assert_eq!(domain.client_name, "My App");

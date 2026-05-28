@@ -141,6 +141,7 @@ fn bench_token_introspection(c: &mut Criterion) {
                 &TokenIntrospectionRequest {
                     token: access_token.clone(),
                     token_type_hint: None,
+                    introspecting_client_id: None,
                 },
             );
             assert!(result.is_ok());

@@ -468,6 +468,7 @@ async fn introspection_returns_inactive_for_tampered_payload() {
             &TokenIntrospectionRequest {
                 token: tampered,
                 token_type_hint: Some("access_token".to_string()),
+                introspecting_client_id: None,
             },
         )
         .expect("introspect token");

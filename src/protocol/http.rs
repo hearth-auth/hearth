@@ -626,6 +626,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::post(magic_link_request)
                 .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
         )
+        .route(
+            "/oauth/authorize",
+            axum::routing::post(oauth_decide_permission)
+                .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
+        )
         .route("/oauth/consents", axum::routing::get(self_list_consents))
         .route(
             "/oauth/consents/{client_id}",
@@ -2465,6 +2470,7 @@ async fn token_introspection(
     let request = crate::identity::TokenIntrospectionRequest {
         token: body.token,
         token_type_hint: body.token_type_hint,
+        introspecting_client_id: Some(client_id.clone()),
     };
 
     let mut resp = match state.identity.introspect_token(&realm_id, &request) {
@@ -2477,6 +2483,67 @@ async fn token_introspection(
     };
     apply_cors_to_response(&mut resp, &state, &realm_id, &client_id, &headers);
     resp
+}
+
+// === Decision Endpoint (HEA-922) ===
+
+/// POST `/oauth/authorize` — per-request permission decision for Decision-mode clients.
+///
+/// Validates the bearer token and resolves live RBAC to decide whether the
+/// token holder has the requested permission.  Fail-closed: invalid tokens,
+/// missing permissions, or resolution errors all return `allowed: false`.
+async fn oauth_decide_permission(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
+
+    let token = match headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        Some(t) => t.to_string(),
+        None => {
+            return (StatusCode::OK, Json(serde_json::json!({"allowed": false}))).into_response()
+        }
+    };
+
+    let permission = match body.get("permission").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "permission field required"})),
+            )
+                .into_response()
+        }
+    };
+
+    let organization_id = body
+        .get("organization_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let resource = body
+        .get("resource")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let request = crate::identity::oidc::DecidePermissionRequest {
+        token,
+        permission,
+        organization_id,
+        resource,
+    };
+
+    match state.identity.decide_token_permission(&realm_id, &request) {
+        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
 }
 
 // === Device Authorization (RFC 8628) ===
@@ -4301,6 +4368,8 @@ struct AdminUpdateClientBody {
     /// Whether user consent is required for this client. `true` for
     /// third-party apps; `false` for trusted first-party clients.
     require_consent: Option<bool>,
+    /// Access-token authorization mode. `null`/omitted leaves unchanged.
+    access_token_authorization: Option<String>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -4340,6 +4409,12 @@ async fn admin_update_client(
         }
     };
 
+    use crate::identity::oidc::AccessTokenAuthorization;
+    let access_token_authorization = body.access_token_authorization.as_deref().map(|s| match s {
+        "introspection" => AccessTokenAuthorization::Introspection,
+        "decision" => AccessTokenAuthorization::Decision,
+        _ => AccessTokenAuthorization::Embedded,
+    });
     let request = crate::identity::UpdateClientRequest {
         client_name: body.client_name,
         redirect_uris: if body.redirect_uris.is_empty() {
@@ -4356,6 +4431,7 @@ async fn admin_update_client(
         frontchannel_logout_uri: body.frontchannel_logout_uri,
         post_logout_redirect_uris: body.post_logout_redirect_uris,
         require_consent: body.require_consent,
+        access_token_authorization,
         ..Default::default()
     };
 
@@ -6558,6 +6634,7 @@ async fn realm_token_introspection(
     let request = crate::identity::TokenIntrospectionRequest {
         token,
         token_type_hint: None,
+        introspecting_client_id: None,
     };
     match state.identity.introspect_token(&realm_id, &request) {
         Ok(info) => (
@@ -6715,6 +6792,7 @@ async fn realm_register_client_dynamic(
             "email".to_string(),
         ],
         consent_spans_orgs: false,
+        access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
     };
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {

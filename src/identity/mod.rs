@@ -41,8 +41,9 @@ pub use engine::{
 pub use error::IdentityError;
 pub use magic_link::MagicLinkResponse;
 pub use oidc::{
-    fuzz_parse_token_exchange, ApplicationStatus, AuthorizationRequest, AuthorizationResponse,
-    ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel, CodeChallengeMethod,
+    fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,
+    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel,
+    CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     IntrospectionResponse, JwtBearerRequest, OAuthClient, OidcConfig, OidcDiscoveryDocument,
     OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
@@ -678,6 +679,19 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         request: &TokenIntrospectionRequest,
     ) -> Result<IntrospectionResponse, IdentityError>;
+
+    /// Evaluates whether the bearer token holder has a specific permission
+    /// (`POST /oauth/authorize` — decision endpoint, HEA-922).
+    ///
+    /// Validates the token (signature, expiry, session, revocation), resolves
+    /// the subject's live RBAC permissions, and returns `allowed: true` only
+    /// when the resolved set contains the requested permission.  Fail-closed:
+    /// any validation or resolution error returns `allowed: false`.
+    fn decide_token_permission(
+        &self,
+        realm_id: &RealmId,
+        request: &oidc::DecidePermissionRequest,
+    ) -> Result<oidc::DecidePermissionResponse, IdentityError>;
 
     // ===== MFA / TOTP (Step 23) =====
 

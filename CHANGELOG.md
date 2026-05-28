@@ -29,6 +29,22 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `grant_types_supported`. JTI replay prevention is enforced per-realm. Supported on both
   `POST /token` and `POST /realms/{realm}/token` endpoints (HEA-908).
 
+- **Three access-token authorization modes (HEA-922)** — `OAuthClient` now has an
+  `access_token_authorization` field with three modes:
+  - `embedded` (default) — RBAC claims (`permissions`, `roles`, `groups`) are embedded in
+    the JWT at issuance, enabling fully stateless validation by resource servers.
+  - `introspection` — JWT carries only identity claims; resource servers call
+    `POST /realms/{realm}/introspect` for live RBAC data. The introspection response
+    now includes `mode`, `permissions`, `roles`, and `groups` fields for
+    Introspection/Decision clients.
+  - `decision` — JWT carries only identity claims; resource servers call the new
+    `POST /oauth/authorize` endpoint per-request for a binary allow/deny answer.
+  The `POST /oauth/authorize` endpoint validates the bearer token (signature, expiry,
+  session liveness) and then resolves live RBAC to check the requested permission.
+  Fails closed on any validation error. Admin API and gRPC `OAuthService.Decide` rpc
+  updated accordingly. Existing clients without an explicit mode default to `embedded`
+  for full backward compatibility.
+
 - **DPoP (Demonstrating Proof-of-Possession — RFC 9449)** — token endpoints now
   validate DPoP proof JWTs (`alg`, `jwk`, `htu`, `htm`, `iat`, `jti`). Access tokens
   issued with a proof carry `cnf.jkt` (JWK thumbprint) binding. Replay prevention via

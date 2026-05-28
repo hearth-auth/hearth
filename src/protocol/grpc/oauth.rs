@@ -141,4 +141,34 @@ impl OAuthService for OAuthSvc {
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::OAuthClient::from(&client)))
     }
+
+    async fn decide(
+        &self,
+        req: Request<pb::TokenDecisionRequest>,
+    ) -> Result<Response<pb::TokenDecisionResponse>, Status> {
+        let realm_id = extract_realm_id(req.metadata())?;
+        // Bearer token expected in `authorization` metadata.
+        let token = req
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .ok_or_else(|| Status::unauthenticated("bearer token required"))?
+            .to_string();
+        let body = req.into_inner();
+        let domain_req = domain::oidc::DecidePermissionRequest {
+            token,
+            permission: body.permission,
+            organization_id: body.organization_id,
+            resource: body.resource,
+        };
+        let resp = self
+            .state
+            .identity
+            .decide_token_permission(&realm_id, &domain_req)
+            .map_err(identity_to_status)?;
+        Ok(Response::new(pb::TokenDecisionResponse {
+            allowed: resp.allowed,
+        }))
+    }
 }
