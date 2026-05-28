@@ -65,6 +65,9 @@ const USER_CODE_PREFIX: &str = "oauth:ucode:";
 /// Prefix for revoked token JTI storage (sessionless token revocation).
 const REVOKED_JTI_PREFIX: &str = "oauth:revjti:";
 
+/// Prefix for JWT bearer assertion JTI replay store (RFC 7523).
+const JWT_BEARER_JTI_PREFIX: &str = "oauth:jb-jti:";
+
 /// Prefix for OAuth consent record storage.
 const OAUTH_CONSENT_PREFIX: &str = "oauth:consent:";
 
@@ -625,6 +628,23 @@ pub(crate) fn password_reset_scan_prefix() -> Vec<u8> {
 /// that cannot be revoked via session revocation.
 pub(crate) fn encode_revoked_jti(jti: &str) -> Vec<u8> {
     format!("{REVOKED_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Encodes the storage key for a consumed JWT bearer assertion JTI.
+///
+/// Format: `oauth:jb-jti:{jti}`
+///
+/// Used for JWT bearer (RFC 7523) JTI replay prevention.  Stored per-realm;
+/// survives engine restarts; pruned only on realm deletion.
+pub(crate) fn encode_jwt_bearer_jti(jti: &str) -> Vec<u8> {
+    format!("{JWT_BEARER_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all JWT bearer assertion JTIs in a realm.
+///
+/// Used during cascade realm deletion to purge the replay store.
+pub(crate) fn jwt_bearer_jti_scan_prefix() -> Vec<u8> {
+    JWT_BEARER_JTI_PREFIX.as_bytes().to_vec()
 }
 
 // ===== OAuth consent key encoding =====

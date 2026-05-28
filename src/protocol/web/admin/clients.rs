@@ -701,6 +701,7 @@ pub async fn admin_app_edit_submit(
         frontchannel_logout_uri: None,
         post_logout_redirect_uris: None,
         status: None,
+        assertion_public_key: None,
     };
 
     let realm_name = target.0.name().to_string();

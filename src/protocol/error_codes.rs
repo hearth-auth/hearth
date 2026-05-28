@@ -63,6 +63,8 @@ pub const WEBAUTHN_CREDENTIAL_NOT_FOUND: &str = "HEARTH_WEBAUTHN_CREDENTIAL_NOT_
 pub const INVALID_ATTESTATION: &str = "HEARTH_INVALID_ATTESTATION";
 /// Assertion provided during authentication is invalid.
 pub const INVALID_ASSERTION: &str = "HEARTH_INVALID_ASSERTION";
+/// JWT bearer assertion (RFC 7523) is invalid, expired, replayed, or has wrong claims.
+pub const JWT_BEARER_ASSERTION_INVALID: &str = "HEARTH_JWT_BEARER_ASSERTION_INVALID";
 
 // ── Device authorization flow ─────────────────────────────────────────────────
 
@@ -246,6 +248,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::WebAuthnCredentialNotFound => Some(WEBAUTHN_CREDENTIAL_NOT_FOUND),
         IdentityError::InvalidAttestation { .. } => Some(INVALID_ATTESTATION),
         IdentityError::InvalidAssertion { .. } => Some(INVALID_ASSERTION),
+        IdentityError::JwtBearerAssertionInvalid { .. } => Some(JWT_BEARER_ASSERTION_INVALID),
 
         IdentityError::AuthorizationPending => Some(AUTHORIZATION_PENDING),
         IdentityError::SlowDown => Some(SLOW_DOWN),

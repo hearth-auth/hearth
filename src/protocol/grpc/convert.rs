@@ -140,6 +140,9 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             Code::InvalidArgument,
             "invalid, expired, or already used request_uri".to_string(),
         ),
+        IdentityError::JwtBearerAssertionInvalid { .. } => {
+            (Code::InvalidArgument, "invalid_grant".to_string())
+        }
         IdentityError::InvalidDPopProof { .. } => {
             (Code::Unauthenticated, "invalid DPoP proof".to_string())
         }

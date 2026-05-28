@@ -2262,6 +2262,7 @@ impl EmbeddedIdentityEngine {
                 "refresh_token".to_string(),
                 "client_credentials".to_string(),
                 "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
             ],
             registration_endpoint: Some(format!("{issuer}/register")),
             device_authorization_endpoint: Some(format!("{issuer}/device/authorize")),
@@ -2921,6 +2922,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             cascade_work_done = true;
             self.storage
                 .delete(&sys_realm, &saml_key_storage_key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 8f. Delete all JWT bearer assertion JTIs (replay store).
+        let jb_jti_prefix = keys::jwt_bearer_jti_scan_prefix();
+        let jb_jti_end = keys::prefix_end(&jb_jti_prefix);
+        let jb_jtis = self
+            .storage
+            .scan(realm_id, &jb_jti_prefix, &jb_jti_end)
+            .map_err(Self::storage_err)?;
+        if !jb_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for entry in &jb_jtis {
+            self.storage
+                .delete(realm_id, &entry.key)
                 .map_err(Self::storage_err)?;
         }
 
@@ -5428,6 +5445,152 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         ))
     }
 
+    #[tracing::instrument(
+        level = "info",
+        skip(self, request),
+        fields(
+            hearth_realm_id = %realm_id,
+            hearth_oauth_client_id = %request.client_id,
+            hearth_oauth_grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        )
+    )]
+    fn jwt_bearer_token(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::oidc::JwtBearerRequest,
+    ) -> Result<crate::identity::oidc::ClientCredentialsResponse, IdentityError> {
+        // 1. Load client
+        let client_key = keys::encode_oauth_client(&request.client_id);
+        let client_bytes = self
+            .storage
+            .get(realm_id, &client_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidClient)?;
+        let client: OAuthClient =
+            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        // 2. Verify grant type is allowed for this client
+        if !client
+            .grant_types()
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string())
+        {
+            return Err(IdentityError::UnsupportedGrantType);
+        }
+
+        // 3. Resolve the registered assertion public key (base64url raw 32-byte Ed25519)
+        let pk_b64 = client.assertion_public_key().ok_or_else(|| {
+            IdentityError::JwtBearerAssertionInvalid {
+                reason: "no assertion public key registered for this client".to_string(),
+            }
+        })?;
+        let pk_bytes = URL_SAFE_NO_PAD.decode(pk_b64).map_err(|_| {
+            IdentityError::JwtBearerAssertionInvalid {
+                reason: "client has an invalid assertion public key".to_string(),
+            }
+        })?;
+
+        // 4. Verify assertion JWT signature (EdDSA only, rejects alg:none, HMAC, etc.)
+        let assertion_claims = tokens::verify_assertion_signature(&request.assertion, &pk_bytes)
+            .map_err(|_| IdentityError::JwtBearerAssertionInvalid {
+                reason: "assertion signature verification failed".to_string(),
+            })?;
+
+        // 5. Validate RFC 7523 §3 required claims
+        let now = self.clock.now();
+        let now_secs = now.as_micros() / 1_000_000;
+
+        // iss MUST equal the client_id (RFC 7523 §3 requirement)
+        if assertion_claims.iss != request.client_id.to_string() {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "iss claim must equal the client_id".to_string(),
+            });
+        }
+
+        // exp MUST be in the future
+        if now_secs >= assertion_claims.exp {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "assertion has expired".to_string(),
+            });
+        }
+
+        // aud MUST contain this realm's issuer URL (the token endpoint base)
+        let expected_aud = self.realm_issuer_url(realm_id);
+        if !assertion_claims.aud.contains(&expected_aud) {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "aud claim does not match the token endpoint issuer".to_string(),
+            });
+        }
+
+        // 6. JTI replay prevention — store each consumed JTI per-realm
+        if let Some(jti) = &assertion_claims.jti {
+            let jti_key = keys::encode_jwt_bearer_jti(jti);
+            if self
+                .storage
+                .get(realm_id, &jti_key)
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
+                return Err(IdentityError::JwtBearerAssertionInvalid {
+                    reason: "assertion jti has already been used (replay)".to_string(),
+                });
+            }
+            self.storage
+                .put(realm_id, &jti_key, b"1")
+                .map_err(Self::storage_err)?;
+        }
+
+        // 7. Validate requested scope against the client's declared scopes
+        self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
+
+        // 8. Issue sessionless access token (same pattern as client_credentials)
+        let iat = now_secs;
+        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+        let scope = request.scope.clone();
+        let access_claims = TokenClaims {
+            sub: assertion_claims.sub,
+            iss: self.config.token.issuer.clone(),
+            aud: Audience::single(self.config.token.audience.clone()),
+            exp: iat + self.config.token.access_token_ttl_secs,
+            iat,
+            sid: "none".to_string(),
+            tid: realm_id.to_string(),
+            oid: None,
+            token_type: "access".to_string(),
+            jti: Some(uuid::Uuid::new_v4().to_string()),
+            fid: None,
+            scope: scope.clone(),
+            nonce: None,
+            roles: Vec::new(),
+            groups: Vec::new(),
+            permissions: Vec::new(),
+            required_actions: Vec::new(),
+            amr: vec!["jwtbearer".to_string()],
+            cnf: request
+                .dpop_jkt
+                .as_deref()
+                .map(|jkt| crate::identity::tokens::CnfClaim {
+                    jkt: jkt.to_string(),
+                }),
+            custom: std::collections::BTreeMap::new(),
+        };
+
+        let access_token =
+            signing_key
+                .issue_token(&access_claims)
+                .map_err(|e| IdentityError::SigningError {
+                    reason: format!("failed to issue access token: {e}"),
+                })?;
+
+        Ok(crate::identity::oidc::ClientCredentialsResponse::new(
+            access_token,
+            "Bearer".to_string(),
+            self.config.token.access_token_ttl_secs,
+            scope,
+        ))
+    }
+
     fn device_authorize(
         &self,
         realm_id: &RealmId,
@@ -7570,6 +7733,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         if let Some(status) = request.status {
             client.set_status(status);
+        }
+        if let Some(pk) = &request.assertion_public_key {
+            // Validate base64url decodes to exactly 32 bytes (Ed25519 public key)
+            if let Some(key_str) = pk {
+                let decoded =
+                    URL_SAFE_NO_PAD
+                        .decode(key_str)
+                        .map_err(|_| IdentityError::InvalidInput {
+                            reason: "assertion_public_key must be base64url-encoded".to_string(),
+                        })?;
+                if decoded.len() != 32 {
+                    return Err(IdentityError::InvalidInput {
+                        reason: "assertion_public_key must be a 32-byte Ed25519 public key"
+                            .to_string(),
+                    });
+                }
+            }
+            client.set_assertion_public_key(pk.clone());
         }
 
         let updated_bytes =

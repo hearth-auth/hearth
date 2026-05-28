@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **JWT Bearer Token Grant (RFC 7523)** — clients can now authenticate using a self-signed
+  Ed25519 JWT assertion instead of a client secret. Register a 32-byte base64url-encoded
+  Ed25519 public key on any `OAuthClient` via `assertion_public_key`. The grant type
+  `urn:ietf:params:oauth:grant-type:jwt-bearer` is now listed in OIDC discovery
+  `grant_types_supported`. JTI replay prevention is enforced per-realm. Supported on both
+  `POST /token` and `POST /realms/{realm}/token` endpoints (HEA-908).
+
 - **DPoP (Demonstrating Proof-of-Possession — RFC 9449)** — token endpoints now
   validate DPoP proof JWTs (`alg`, `jwk`, `htu`, `htm`, `iat`, `jti`). Access tokens
   issued with a proof carry `cnf.jkt` (JWK thumbprint) binding. Replay prevention via

@@ -416,6 +416,15 @@ pub enum IdentityError {
     DPopBindingMismatch,
     /// The `nonce` in the DPoP proof does not match the server-issued nonce.
     DPopNonceInvalid,
+    /// A JWT bearer assertion (RFC 7523) is invalid.
+    ///
+    /// Covers: bad signature, expired `exp`, replayed `jti`, wrong `iss` or
+    /// `aud`, missing registered public key.  The message is safe for client
+    /// logs — it MUST NOT contain sensitive data.
+    JwtBearerAssertionInvalid {
+        /// Machine-readable reason string.
+        reason: String,
+    },
 }
 
 impl fmt::Display for IdentityError {
@@ -606,6 +615,9 @@ impl fmt::Display for IdentityError {
                 write!(f, "DPoP proof key does not match token cnf.jkt binding")
             }
             Self::DPopNonceInvalid => write!(f, "DPoP proof nonce invalid or expired"),
+            Self::JwtBearerAssertionInvalid { reason } => {
+                write!(f, "invalid JWT bearer assertion: {reason}")
+            }
         }
     }
 }
@@ -712,7 +724,8 @@ impl std::error::Error for IdentityError {
             | Self::InvalidDPopProof { .. }
             | Self::DPopProofReplay
             | Self::DPopBindingMismatch
-            | Self::DPopNonceInvalid => None,
+            | Self::DPopNonceInvalid
+            | Self::JwtBearerAssertionInvalid { .. } => None,
         }
     }
 }

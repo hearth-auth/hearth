@@ -236,6 +236,7 @@ impl OAuthClient {
             backchannel_logout_uri: None,
             frontchannel_logout_uri: None,
             post_logout_redirect_uris: Vec::new(),
+            assertion_public_key: None,
         }
     }
 
@@ -265,6 +266,7 @@ impl OAuthClient {
             backchannel_logout_uri: None,
             frontchannel_logout_uri: None,
             post_logout_redirect_uris: Vec::new(),
+            assertion_public_key: None,
         }
     }
 

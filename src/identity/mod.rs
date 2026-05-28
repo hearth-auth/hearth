@@ -44,8 +44,8 @@ pub use oidc::{
     fuzz_parse_token_exchange, ApplicationStatus, AuthorizationRequest, AuthorizationResponse,
     ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel, CodeChallengeMethod,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
-    IntrospectionResponse, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
-    PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
+    IntrospectionResponse, JwtBearerRequest, OAuthClient, OidcConfig, OidcDiscoveryDocument,
+    OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
     PushedAuthorizationResponse, RegisterClientRequest, StepUpMfaGrantRequest,
     TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
     UserInfoResponse,
@@ -55,9 +55,9 @@ pub use sms::{
     StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use tokens::{
-    decode_claims_unverified, validate_token_with_time, verify_token_signature, CnfClaim,
-    IssueTokenRequest, Jwk, JwksDocument, SigningKey, TokenClaims, TokenConfig, TokenPair,
-    REQUIRED_ACTION_TOKEN_TYPE,
+    decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
+    verify_token_signature, CnfClaim, IssueTokenRequest, Jwk, JwksDocument, JwtAssertionClaims,
+    SigningKey, TokenClaims, TokenConfig, TokenPair, REQUIRED_ACTION_TOKEN_TYPE,
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
@@ -581,6 +581,18 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         request: &ClientCredentialsRequest,
+    ) -> Result<ClientCredentialsResponse, IdentityError>;
+
+    /// Issues an access token via the JWT Bearer Grant (RFC 7523).
+    ///
+    /// Validates the JWT assertion against the client's registered Ed25519
+    /// public key, enforces RFC 7523 §3 claim constraints (`iss`, `aud`,
+    /// `exp`), and prevents JTI replay.  Issues a sessionless access token
+    /// analogous to the client credentials grant.
+    fn jwt_bearer_token(
+        &self,
+        realm_id: &RealmId,
+        request: &JwtBearerRequest,
     ) -> Result<ClientCredentialsResponse, IdentityError>;
 
     /// Authenticates an OAuth confidential client using its client secret.

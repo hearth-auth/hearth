@@ -78,6 +78,7 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
             frontchannel_logout_uri: None,
             post_logout_redirect_uris: None,
             status: None,
+            assertion_public_key: None,
         }
     }
 }
