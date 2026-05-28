@@ -426,6 +426,7 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 | `password_policy` | object | — | Password complexity requirements (see below). |
 | `token` | object | — | Per-realm token TTL overrides. |
 | `rate_limit` | object | — | Per-realm rate limit overrides. |
+| `adaptive_mfa` | object | — | Risk-based step-up MFA using device fingerprinting. See below. |
 
 #### `realms.<name>.auth.password_policy`
 
@@ -449,6 +450,28 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 |-------|------|---------|-------------|
 | `max_failed_logins` | integer | — | Maximum failed login attempts before lockout. |
 | `lockout_duration` | duration | — | How long to lock out after exceeding max failed logins. |
+
+#### `realms.<name>.auth.adaptive_mfa`
+
+When enabled, Hearth computes a per-device fingerprint from `{user_id, ip_/24, user_agent_normalized}` using HMAC-SHA256. Devices that have not been seen within `recognition_window_days` trigger an additional MFA challenge — a step-up — regardless of the realm's base `mfa_required` setting.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable risk-based step-up MFA for this realm. When `true`, `fingerprint_hmac_secret` is required. |
+| `recognition_window_days` | integer | `30` | Days a recognised device fingerprint remains valid. After this window expires the device is treated as unrecognised again and triggers a fresh MFA challenge. |
+| `fingerprint_hmac_secret` | string | — | **Required when `enabled: true`.** HMAC-SHA256 key for deriving device fingerprints. Must be at least 32 bytes. Supply via an environment variable — never commit a plaintext value. |
+
+```yaml
+realms:
+  customer-portal:
+    auth:
+      adaptive_mfa:
+        enabled: true
+        recognition_window_days: 30   # default: 30
+        fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
+```
+
+> **Key management:** See [Device fingerprint HMAC secret](../guides/security-hardening.md#device-fingerprint-hmac-secret) for key generation, minimum-length enforcement, Kubernetes injection, and the 9-step rotation runbook.
 
 ### `realms.<name>.applications`
 
@@ -742,4 +765,6 @@ Every field's default value at a glance.
 | `auth` | `session_ttl` | `"24h"` |
 | `auth` | `mfa_required` | `false` |
 | `auth` | `passkey_requires_mfa` | `false` |
+| `realms.<name>.auth.adaptive_mfa` | `enabled` | `false` |
+| `realms.<name>.auth.adaptive_mfa` | `recognition_window_days` | `30` |
 | `onboarding` | `enabled` | `true` |
