@@ -43,6 +43,19 @@ class HearthClient(
     httpTimeoutMs: Long = DEFAULT_HTTP_TIMEOUT_MS,
     /** When set, `aud` must contain this value during [verifyToken]. Defaults to [clientId]. */
     private val expectedAudience: String? = null,
+    /**
+     * Realm ID sent as `X-Realm-ID` on realm-scoped endpoints (e.g. [checkPermission]).
+     *
+     * Required when calling [checkPermission] (Decision mode, HEA-922).
+     */
+    val realmId: String? = null,
+    /**
+     * Expected access-token authorization mode for this resource server (HEA-922).
+     *
+     * When set, [introspect] validates the `mode` field echoed in the server response
+     * and throws [AuthorizationModeMismatchError] on mismatch.
+     */
+    val expectedMode: AccessTokenAuthorizationMode? = null,
 ) {
     val issuerUrl: String
 
@@ -155,11 +168,60 @@ class HearthClient(
     /**
      * Introspects [token] per RFC 7662. Results are never cached.
      *
-     * @throws ConfigurationError  when clientId/clientSecret are not set
-     * @throws IntrospectionError  when the endpoint is unreachable or returns an error
+     * When [expectedMode] is configured on this client, validates the `mode` field echoed
+     * in the server response and throws [AuthorizationModeMismatchError] on mismatch.
+     *
+     * @throws ConfigurationError              when clientId/clientSecret are not set
+     * @throws IntrospectionError              when the endpoint is unreachable or returns an error
+     * @throws AuthorizationModeMismatchError  when the echoed mode does not match [expectedMode]
      */
-    suspend fun introspect(token: String): IntrospectionResult =
-        introspectionClient().introspect(token)
+    suspend fun introspect(token: String): IntrospectionResult {
+        val result = introspectionClient().introspect(token)
+        val expected = expectedMode
+        if (expected != null && result.mode != null && result.mode != expected.value) {
+            throw AuthorizationModeMismatchError(expected.value, result.mode)
+        }
+        return result
+    }
+
+    // ── Permission decision endpoint (HEA-922) ────────────────────────────────
+
+    /**
+     * Calls `POST /oauth/authorize` to determine whether the token holder has
+     * a specific permission (Decision mode, HEA-922).
+     *
+     * This is the network call underlying [AccessTokenAuthorizationMode.DECISION] middleware.
+     * Fail-closed: any error (network, 4xx, 5xx) returns `false`.
+     *
+     * @param token          Bearer token to authorize.
+     * @param permission     Permission string to check (e.g. `"docs.write"`).
+     * @param organizationId Optional organization scope for the check.
+     * @param resource       Optional resource scope for the check.
+     * @throws ConfigurationError when [realmId] is not set.
+     */
+    suspend fun checkPermission(
+        token: String,
+        permission: String,
+        organizationId: String? = null,
+        resource: String? = null,
+    ): Boolean {
+        val rid = realmId
+            ?: throw ConfigurationError("realmId is required for checkPermission (decision mode)")
+        return try {
+            val resp: CheckPermissionResponse = httpClient.post(
+                url = "$issuerUrl/oauth/authorize",
+                payload = CheckPermissionRequest(permission, organizationId, resource),
+                headers = mapOf(
+                    "X-Realm-ID" to rid,
+                    "Authorization" to "Bearer $token",
+                ),
+            )
+            resp.allowed
+        } catch (_: Exception) {
+            // Fail-closed per spec: network errors, 4xx, 5xx all deny.
+            false
+        }
+    }
 
     // ── OAuth flows ────────────────────────────────────────────────────────────
 

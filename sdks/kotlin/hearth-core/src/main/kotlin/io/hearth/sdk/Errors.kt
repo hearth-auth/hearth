@@ -50,3 +50,20 @@ class ApiError(
     message: String,
     cause: Throwable? = null,
 ) : HearthException(message, cause)
+
+/**
+ * Thrown when the `mode` field echoed in an introspection response does not match
+ * the SDK's configured expectation (HEA-922).
+ *
+ * Per design constraint: mode must be validated explicitly; the SDK MUST NOT silently
+ * tolerate a server returning a different mode than the one configured for this resource server.
+ */
+class AuthorizationModeMismatchError(
+    val expected: String,
+    val actual: String,
+    message: String = "Authorization mode mismatch: expected \"$expected\", got \"$actual\"",
+) : HearthException(message)
+
+/** POST /oauth/authorize endpoint unreachable or returned a non-2xx response. */
+class AuthorizeError(message: String, cause: Throwable? = null) :
+    HearthException(message, cause)
