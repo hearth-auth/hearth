@@ -457,7 +457,7 @@ realms:
           client_secret: "${GOOGLE_CLIENT_SECRET}"
 ```
 
-- Register your OAuth app at <https://console.cloud.google.com> and set the redirect URI to
+- Register your OAuth app at [https://console.cloud.google.com](https://console.cloud.google.com) and set the redirect URI to
   `https://auth.example.com/v1/federation/callback`.
 - `link_existing_accounts: confirm` (the default) requires the user to authenticate with their
   existing password before Hearth links the Google identity to their account.
