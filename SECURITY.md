@@ -10,7 +10,7 @@ Hearth is pre-1.0. Security fixes are applied to the `main` branch only. Once 1.
 
 Use one of the following channels:
 
-- **GitHub Security Advisories (preferred):** Use the "Report a vulnerability" button on the [Security tab](https://github.com/therecluse26/hearth/security/advisories/new) of this repository. This opens a private, encrypted channel between you and the maintainers. No GitHub account is required.
+- **GitHub Security Advisories (preferred):** Use the "Report a vulnerability" button on the [Security tab](https://github.com/hearth-auth/hearth/security/advisories/new) of this repository. This opens a private, encrypted channel between you and the maintainers. No GitHub account is required.
 - **Email:** therecluse26@protonmail.com — PGP key available on request.
 
 ### What to include
@@ -105,7 +105,7 @@ Every Hearth release binary and SBOM is signed via **cosign keyless signing** us
 | Field | Value |
 |-------|-------|
 | `--certificate-oidc-issuer` | `https://token.actions.githubusercontent.com` |
-| `--certificate-identity-regexp` | `^https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$` |
+| `--certificate-identity-regexp` | `^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$` |
 
 Every release also ships a **SLSA L1 provenance document** (`hearth.intoto.jsonl`) and a **CycloneDX SBOM** (`hearth-sbom.cdx.json`).
 

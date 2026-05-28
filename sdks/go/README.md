@@ -1,6 +1,6 @@
 # Hearth Go SDK
 
-Go client for the [Hearth](https://github.com/therecluse26/hearth) identity API.
+Go client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 
 > **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/sdk-spec.md).
 
