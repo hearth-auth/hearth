@@ -262,7 +262,7 @@ async fn jwt_bearer_jti_replay_rejected() {
             &JwtBearerRequest {
                 client_id: client.client_id().clone(),
                 assertion: assertion.clone(),
-                scope: None,
+                scope: Some("read".to_string()),
                 dpop_jkt: None,
             },
         )

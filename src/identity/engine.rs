@@ -4573,15 +4573,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Validate client name (non-empty, length limit)
         let client_name = validation::validate_client_name(&request.client_name)?;
 
-        // Redirect URIs are optional for `client_credentials` and device_code grants.
-        // For all other grant types, at least one is required.
+        // Redirect URIs are optional for M2M grants (client_credentials, device_code,
+        // jwt-bearer). For all other grant types, at least one is required.
         let has_client_credentials = request
             .grant_types
             .contains(&"client_credentials".to_string());
         let has_device_code = request
             .grant_types
             .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
-        if request.redirect_uris.is_empty() && !has_client_credentials && !has_device_code {
+        let has_jwt_bearer = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
+        if request.redirect_uris.is_empty()
+            && !has_client_credentials
+            && !has_device_code
+            && !has_jwt_bearer
+        {
             return Err(IdentityError::InvalidInput {
                 reason: "at least one redirect URI is required".to_string(),
             });
@@ -8541,7 +8548,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let has_device_code = request
             .grant_types
             .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
-        if request.redirect_uris.is_empty() && !has_client_credentials && !has_device_code {
+        let has_jwt_bearer = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
+        if request.redirect_uris.is_empty()
+            && !has_client_credentials
+            && !has_device_code
+            && !has_jwt_bearer
+        {
             return Err(IdentityError::InvalidInput {
                 reason: "at least one redirect URI is required".to_string(),
             });
