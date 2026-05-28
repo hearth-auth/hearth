@@ -14,6 +14,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Admin UI client form exposes `access_token_authorization` mode** — the application
+  create and edit forms in the Admin UI now include a Permission delivery mode picker
+  (`Embedded`, `Introspection`, `Decision`) bound to `OAuthClient.access_token_authorization`.
+  The client list and detail pages display the current mode. A warning banner appears when
+  `Decision` mode is selected on a public (SPA/mobile) client (HEA-931).
+
 - **Org-scoped group paths in OIDC token claims** — tokens issued in an organization
   context now carry an `org_groups` claim (`Vec<String>`) alongside the existing flat
   `groups` claim. Each entry uses the `/org-slug/group-name` path format, matching

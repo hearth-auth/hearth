@@ -233,6 +233,7 @@ struct AppNewTemplate {
     form_require_consent: bool,
     form_declared_scopes: String,
     form_client_logo_url: String,
+    form_access_token_authorization: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -263,6 +264,7 @@ impl AppNewTemplate {
             form_require_consent: true,
             form_declared_scopes: String::new(),
             form_client_logo_url: String::new(),
+            form_access_token_authorization: "embedded".to_string(),
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -318,6 +320,8 @@ pub struct AppCreateForm {
     pub declared_scopes: String,
     #[serde(default)]
     pub client_logo_url: String,
+    #[serde(default)]
+    pub access_token_authorization: String,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -377,6 +381,13 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         Some(form.client_logo_url.clone())
     };
 
+    use crate::identity::oidc::AccessTokenAuthorization;
+    let access_token_authorization = match form.access_token_authorization.as_str() {
+        "introspection" => AccessTokenAuthorization::Introspection,
+        "decision" => AccessTokenAuthorization::Decision,
+        _ => AccessTokenAuthorization::Embedded,
+    };
+
     RegisterClientRequest {
         client_name: form.client_name.clone(),
         redirect_uris,
@@ -388,7 +399,7 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         trust_level,
         declared_scopes,
         consent_spans_orgs: false,
-        access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
+        access_token_authorization,
     }
 }
 
@@ -437,6 +448,7 @@ pub async fn admin_app_create_submit(
             tpl.form_require_consent = form.require_consent == "1";
             tpl.form_declared_scopes = form.declared_scopes.clone();
             tpl.form_client_logo_url = form.client_logo_url.clone();
+            tpl.form_access_token_authorization = form.access_token_authorization.clone();
             render(&tpl)
         }
         Err(e) => {
@@ -469,6 +481,7 @@ struct AppEditTemplate {
     form_require_consent: bool,
     form_declared_scopes: String,
     form_client_logo_url: String,
+    form_access_token_authorization: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -510,6 +523,14 @@ impl AppEditTemplate {
         let slug = app.slug().to_string();
         let require_consent = app.require_consent();
 
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let access_token_authorization_mode = match app.access_token_authorization() {
+            AccessTokenAuthorization::Introspection => "introspection",
+            AccessTokenAuthorization::Decision => "decision",
+            _ => "embedded",
+        }
+        .to_string();
+
         Self {
             app,
             error: None,
@@ -525,6 +546,7 @@ impl AppEditTemplate {
             form_require_consent: require_consent,
             form_declared_scopes: declared_scopes,
             form_client_logo_url: client_logo_url,
+            form_access_token_authorization: access_token_authorization_mode,
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -601,6 +623,8 @@ pub struct AppEditForm {
     pub declared_scopes: String,
     #[serde(default)]
     pub client_logo_url: String,
+    #[serde(default)]
+    pub access_token_authorization: String,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -684,6 +708,13 @@ pub async fn admin_app_edit_submit(
         Some(form.slug.clone())
     };
 
+    use crate::identity::oidc::AccessTokenAuthorization;
+    let access_token_authorization = Some(match form.access_token_authorization.as_str() {
+        "introspection" => AccessTokenAuthorization::Introspection,
+        "decision" => AccessTokenAuthorization::Decision,
+        _ => AccessTokenAuthorization::Embedded,
+    });
+
     let req = UpdateClientRequest {
         client_name: if form.client_name.is_empty() {
             None
@@ -703,7 +734,7 @@ pub async fn admin_app_edit_submit(
         post_logout_redirect_uris: None,
         status: None,
         assertion_public_key: None,
-        access_token_authorization: None,
+        access_token_authorization,
     };
 
     let realm_name = target.0.name().to_string();
@@ -727,6 +758,7 @@ pub async fn admin_app_edit_submit(
                     let mut tpl = AppEditTemplate::from_client(app, realm_name, &session, &state);
                     tpl.error = Some(reason);
                     tpl.form_client_name = form.client_name.clone();
+                    tpl.form_access_token_authorization = form.access_token_authorization.clone();
                     render(&tpl)
                 }
                 _ => super::handlers_common::server_error(),
