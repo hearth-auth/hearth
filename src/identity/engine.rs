@@ -1849,6 +1849,7 @@ impl EmbeddedIdentityEngine {
             nonce: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
+            org_groups: claims.org_groups.clone(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: family.amr_values.clone(),
@@ -1871,6 +1872,7 @@ impl EmbeddedIdentityEngine {
             nonce: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
+            org_groups: Vec::new(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: Vec::new(),
@@ -3154,6 +3156,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 nonce: None,
                 roles: Vec::new(),
                 groups: Vec::new(),
+                org_groups: Vec::new(),
                 permissions: Vec::new(),
                 required_actions: remaining,
                 amr: Vec::new(),
@@ -4290,6 +4293,42 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         let oid_ref = ctx.oid.as_deref();
 
+        // Resolve the org slug for org_groups path construction. A storage
+        // miss or parse failure is non-fatal: the token is still issued without
+        // org_groups rather than hard-failing a login.
+        let org_slug_owned: Option<String> = if let Some(oid_str) = oid_ref {
+            match oid_str.parse::<crate::core::OrganizationId>() {
+                Ok(org_id) => match self.get_organization(realm_id, &org_id) {
+                    Ok(Some(org)) => Some(org.slug().to_string()),
+                    Ok(None) => {
+                        tracing::warn!(
+                            oid = oid_str,
+                            "org not found during token issuance; org_groups omitted"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            oid = oid_str,
+                            error = %e,
+                            "org lookup failed during token issuance; org_groups omitted"
+                        );
+                        None
+                    }
+                },
+                Err(_) => {
+                    tracing::warn!(
+                        oid = oid_str,
+                        "oid is not a valid OrganizationId; org_groups omitted"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let org_slug_ref = org_slug_owned.as_deref();
+
         let (roles, groups, permissions, custom) = self.apply_claim_profile(
             realm_id,
             &user,
@@ -4325,6 +4364,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             issuer_override: Some(realm_issuer),
             roles: &roles,
             groups: &groups,
+            org_slug: org_slug_ref,
             permissions: if permissions.is_empty() {
                 &perm_strs
             } else {
@@ -5034,6 +5074,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: access_roles,
             groups: access_groups,
+            org_groups: Vec::new(),
             permissions: access_permissions,
             required_actions: Vec::new(),
             amr: stored_code.amr_values.clone(),
@@ -5061,6 +5102,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: access_claims.roles.clone(),
             groups: access_claims.groups.clone(),
+            org_groups: Vec::new(),
             permissions: access_claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: Vec::new(),
@@ -5131,6 +5173,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: stored_code.nonce.clone(),
             roles: id_roles,
             groups: id_groups,
+            org_groups: Vec::new(),
             permissions: id_permissions,
             required_actions: Vec::new(),
             amr: stored_code.amr_values.clone(),
@@ -5425,6 +5468,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: Vec::new(),
             groups: Vec::new(),
+            org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
             amr: Vec::new(),
@@ -5571,6 +5615,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: Vec::new(),
             groups: Vec::new(),
+            org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
             amr: vec!["jwtbearer".to_string()],
@@ -5823,6 +5868,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     nonce: None,
                     roles: Vec::new(),
                     groups: Vec::new(),
+                    org_groups: Vec::new(),
                     permissions: Vec::new(),
                     required_actions: Vec::new(),
                     amr: Vec::new(),

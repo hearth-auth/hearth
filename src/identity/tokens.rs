@@ -190,6 +190,13 @@ pub struct TokenClaims {
     /// Informational; see `permissions` for the authoritative set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// Org-scoped group paths, present only when the token is issued in an
+    /// organization context. Each entry is `/org-slug/group-name`, matching
+    /// the Keycloak 26.6 `groups` path convention for multi-org tenancy.
+    /// Downstream services should prefer these paths over the flat `groups`
+    /// claim when determining org-membership context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub org_groups: Vec<String>,
     /// Flat, de-duplicated, sorted permission set resolved at token-issue
     /// time. Client and server authorization checks read exclusively from
     /// this field.
@@ -570,6 +577,17 @@ impl SigningKey {
             None => Audience::single(&request.config.audience),
         };
 
+        // Build org-scoped group paths when the token is in an org context.
+        // Format: `/org-slug/group-name` — mirrors Keycloak 26.6 path convention.
+        let org_groups: Vec<String> = match request.org_slug {
+            Some(slug) if !request.groups.is_empty() => request
+                .groups
+                .iter()
+                .map(|g| format!("/{slug}/{g}"))
+                .collect(),
+            _ => Vec::new(),
+        };
+
         let access_claims = TokenClaims {
             sub: request.sub.to_string(),
             iss: iss.clone(),
@@ -589,6 +607,7 @@ impl SigningKey {
             }),
             roles: request.roles.to_vec(),
             groups: request.groups.to_vec(),
+            org_groups: org_groups.clone(),
             permissions: request.permissions.to_vec(),
             required_actions: Vec::new(),
             amr: Vec::new(),
@@ -612,6 +631,7 @@ impl SigningKey {
             cnf: None, // DPoP binding is on access tokens only
             roles: Vec::new(),
             groups: Vec::new(),
+            org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
             amr: Vec::new(),
@@ -654,6 +674,9 @@ pub struct IssueTokenRequest<'a> {
     pub roles: &'a [String],
     /// Resolved group slugs to embed. Empty Vec is legal.
     pub groups: &'a [String],
+    /// Organization slug, used to build `org_groups` paths (`/slug/group`).
+    /// Must be `Some` when `oid` is `Some` and the token carries groups.
+    pub org_slug: Option<&'a str>,
     /// Resolved flat permission set. Empty Vec is legal. Caller is
     /// responsible for enforcing size caps per `AUTHORIZATION.md § 2.6`.
     pub permissions: &'a [String],
@@ -1234,6 +1257,7 @@ mod tests {
             cnf: None,
             roles: Vec::new(),
             groups: Vec::new(),
+            org_groups: Vec::new(),
             permissions: Vec::new(),
             custom: BTreeMap::new(),
             required_actions: Vec::new(),
@@ -1384,6 +1408,7 @@ mod tests {
                 issuer_override: None,
                 roles: &[],
                 groups: &[],
+                org_slug: None,
                 permissions: &[],
                 custom: BTreeMap::new(),
                 resource: None,
@@ -1423,6 +1448,7 @@ mod tests {
                 issuer_override: None,
                 roles: &[],
                 groups: &[],
+                org_slug: None,
                 permissions: &[],
                 custom: BTreeMap::new(),
                 resource: None,

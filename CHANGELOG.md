@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Org-scoped group paths in OIDC token claims** — tokens issued in an organization
+  context now carry an `org_groups` claim (`Vec<String>`) alongside the existing flat
+  `groups` claim. Each entry uses the `/org-slug/group-name` path format, matching
+  Keycloak 26.6 conventions and enabling downstream services to determine org-membership
+  context in multi-org tenancy scenarios. The flat `groups` claim is preserved unchanged
+  for backward compatibility. Tokens without an org context do not emit `org_groups`
+  (HEA-909).
+
 - **JWT Bearer Token Grant (RFC 7523)** — clients can now authenticate using a self-signed
   Ed25519 JWT assertion instead of a client secret. Register a 32-byte base64url-encoded
   Ed25519 public key on any `OAuthClient` via `assertion_public_key`. The grant type
