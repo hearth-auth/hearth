@@ -1,4 +1,4 @@
-[![CI](https://github.com/therecluse26/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/therecluse26/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/therecluse26/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/therecluse26/hearth) [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0) [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) ![pre-1.0](https://img.shields.io/badge/status-pre--1.0-yellow)
+[![CI](https://github.com/therecluse26/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/therecluse26/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/therecluse26/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/therecluse26/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) ![pre-1.0](https://img.shields.io/badge/status-pre--1.0-yellow)
 
 # Hearth — a purpose-built identity database
 
@@ -65,7 +65,7 @@ Hearth resolves effective permissions at token-issue time and embeds them direct
 
 ### Your data, your rules
 
-AGPL-3.0-only, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home telemetry. Your users' data stays on your infrastructure.
+Apache 2.0, self-hosted, no per-seat pricing, no vendor lock-in, no phone-home telemetry. Your users' data stays on your infrastructure.
 
 ---
 
@@ -570,8 +570,9 @@ That's enough. Restart Hearth and the realm's login page shows a "Sign in with G
 | `apple` | OIDC | Apple Sign-In endpoints; no userinfo (claims inline in the ID token) |
 | `github` | OAuth2 | `/login/oauth/authorize` + `/login/oauth/access_token` + `/user`; email via `/user/emails` when private |
 | `oidc` | OIDC | No preset — operator supplies `issuer`, `authorization_endpoint`, `token_endpoint`, `jwks_uri`, `scopes` explicitly |
+| `saml` | SAML 2.0 | No preset — operator supplies `entity_id`, `sso_url`, `certificate`; Hearth acts as SP. See the [Federation guide](docs/guides/federation.md) for full config |
 
-`type: oidc` is the escape hatch for any provider not in the preset list (Okta, Auth0, Keycloak, Zitadel, on-prem Azure AD B2C, …).
+`type: oidc` is the escape hatch for any OIDC/OAuth2 provider not in the preset list (Okta, Auth0, Keycloak, Zitadel, on-prem Azure AD B2C, …). `type: saml` federates to enterprise IdPs (Okta, Azure AD, ADFS, PingFederate) over SAML 2.0.
 
 ### Account linking
 
@@ -857,7 +858,7 @@ See the [full Auth0 migration guide](docs/guides/migrating-from-auth0.md) for bu
 
 Dependencies flow strictly downward; `identity/` is the only layer allowed to call `rbac/` (to resolve permissions at token-issue time).
 
-**Guides:** [Getting Started](docs/guides/getting-started.md) · [Concepts](docs/guides/concepts.md) · [RBAC](docs/guides/rbac.md) · [SCIM Provisioning](docs/guides/scim-provisioning.md) · [Webhooks](docs/guides/webhooks.md) · [Organizations](docs/guides/organizations.md) · [Client-Scoped Roles](docs/guides/client-scoped-roles.md) · [Clustering & HA](docs/guides/clustering.md) · [Troubleshooting](docs/guides/troubleshooting.md) · [Migrating from Keycloak](docs/guides/migrating-from-keycloak.md) · [Migrating from Auth0](docs/guides/migrating-from-auth0.md)
+**Guides:** [Getting Started](docs/guides/getting-started.md) · [Concepts](docs/guides/concepts.md) · [RBAC](docs/guides/rbac.md) · [Federation & Social Login](docs/guides/federation.md) · [SCIM Provisioning](docs/guides/scim-provisioning.md) · [Webhooks](docs/guides/webhooks.md) · [Organizations](docs/guides/organizations.md) · [Client-Scoped Roles](docs/guides/client-scoped-roles.md) · [Clustering & HA](docs/guides/clustering.md) · [Troubleshooting](docs/guides/troubleshooting.md) · [Migrating from Keycloak](docs/guides/migrating-from-keycloak.md) · [Migrating from Auth0](docs/guides/migrating-from-auth0.md)
 
 ---
 
@@ -869,4 +870,4 @@ After cloning, run `make setup` to install the repo-managed git hooks, then `mak
 
 ## License
 
-AGPL-3.0-only (see [`LICENSE`](LICENSE)). Commercial licenses are available for organizations that need different terms — see [`NOTICE`](NOTICE) for the dual-licensing overview and [`LICENSE-COMMERCIAL`](LICENSE-COMMERCIAL) for commercial terms.
+Apache-2.0 (see [`LICENSE`](LICENSE)).

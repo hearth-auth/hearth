@@ -7,6 +7,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Changed
+
+- **License** — re-licensed from AGPL-3.0-only (dual-license) to Apache-2.0. `LICENSE-COMMERCIAL`
+  and `NOTICE` dual-license overlay removed. `LICENSE` now contains the Apache 2.0 text (HEA-912).
+
 ### Added
 
 - **Org-scoped group paths in OIDC token claims** — tokens issued in an organization
@@ -949,7 +954,7 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 ### Changed
 
 - **Authorization engine** — replaced Zanzibar/relationship-tuple engine with claims-based RBAC; permissions are now embedded in JWTs at issuance time rather than checked at request time.
-- **License** — promoted to AGPL-3.0-only (`LICENSE`) for OpenSSF machine-detectability; commercial licensing available (see `docs/vision/VISION.md`).
+- **License** — Apache-2.0 (`LICENSE`).
 - **Admin handler organization** — split `admin.rs` (~10 000 lines) into seven per-entity submodules for maintainability.
 - **OIDC `iss` claim source** — now reads from `config.oidc.issuer` (not `config.token.issuer`) so the ID token issuer always matches the discovery document (OIDC Core §2 compliance).
 - **Storage `put_batch` API** — all multi-record writes (user import, audit chain) go through a single WAL frame with CRC; a crash mid-batch leaves no partial state on replay.
