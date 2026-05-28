@@ -29,6 +29,30 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `grant_types_supported`. JTI replay prevention is enforced per-realm. Supported on both
   `POST /token` and `POST /realms/{realm}/token` endpoints (HEA-908).
 
+- **Permission-delivery modes guide (HEA-929)** — new operator how-to at
+  `docs/guides/permission-delivery.md` covering `embedded`, `introspection`, and `decision`
+  modes: decision tree, latency tradeoff table, wire-shape examples, security rules per mode,
+  and Keycloak comparison table. `docs/specs/AUTHORIZATION.md` extended with normative
+  §15 (wire shapes, security rules, revocation caveat, latency targets, client config).
+  `docs/specs/ARCHITECTURE.md` §4.2.1 updated to classify `/introspect` and
+  `POST /oauth/authorize` as off-hot-path.
+
+- **TypeScript SDK: `authorize()` + mode-aware middleware (HEA-923)** — the TypeScript SDK
+  at `sdks/typescript/` now exposes the three permission-delivery modes introduced in HEA-922:
+  - `HearthClient.authorize(token, permission, opts?)` — calls `POST /oauth/authorize` for
+    Decision-mode resource servers. Fail-closed: returns `false` on any network or server error.
+    Requires `realmId` in `HearthClientConfig`.
+  - `HearthClient.introspect(token)` — wraps RFC 7662 introspection with optional mode-echo
+    validation. Throws `AuthorizationModeMismatchError` when `expectedMode` is configured and
+    the server returns a different `mode` field.
+  - `requirePermission(permission, opts)` — framework-agnostic middleware factory. Takes an
+    explicit `mode` (`"embedded"` | `"introspection"` | `"decision"`); MUST NOT silently fall
+    back to a different mode when `permissions` is absent from the JWT. Returns a
+    `(token: string) => Promise<boolean>` checker.
+  New exports: `AccessTokenAuthorizationMode`, `AuthorizePermissionOptions`,
+  `AuthorizationModeMismatchError`, `requirePermission`, `PermissionChecker`,
+  `RequirePermissionOptions`.
+
 - **Three access-token authorization modes (HEA-922)** — `OAuthClient` now has an
   `access_token_authorization` field with three modes:
   - `embedded` (default) — RBAC claims (`permissions`, `roles`, `groups`) are embedded in

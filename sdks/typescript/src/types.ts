@@ -143,3 +143,14 @@ export interface MePermissionsResponse {
   permissions: string[];
   scope: string;
 }
+
+/** The three permission delivery modes introduced in HEA-922. */
+export type AccessTokenAuthorizationMode = "embedded" | "introspection" | "decision";
+
+/** Options for a per-request permission decision call to `POST /oauth/authorize`. */
+export interface AuthorizePermissionOptions {
+  /** Constrain the decision to a specific organization. */
+  organizationId?: string;
+  /** Constrain the decision to a specific resource. */
+  resource?: string;
+}

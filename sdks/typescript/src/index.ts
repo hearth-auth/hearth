@@ -13,6 +13,7 @@ export type {
 
 // Error types (spec §5).
 export {
+  AuthorizationModeMismatchError,
   ConfigurationError,
   DiscoveryError,
   HearthSdkError,
@@ -24,6 +25,10 @@ export {
   TokenIssuerError,
   TokenNotYetValidError,
 } from "./errors.js";
+
+// Mode-aware middleware (HEA-923).
+export { requirePermission } from "./middleware.js";
+export type { PermissionChecker, RequirePermissionOptions } from "./middleware.js";
 
 // Claims API (spec §4).
 export { Claims } from "./claims.js";
@@ -48,7 +53,9 @@ export {
 } from "./react.js";
 export type { HearthProviderProps } from "./react.js";
 export type {
+  AccessTokenAuthorizationMode,
   AuthorizeParams,
+  AuthorizePermissionOptions,
   AuthorizeResponse,
   BootstrapResponse,
   CreateRealmParams,

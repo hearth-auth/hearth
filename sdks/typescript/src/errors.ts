@@ -98,3 +98,21 @@ export class IntrospectionError extends HearthSdkError {
     super(message);
   }
 }
+
+/**
+ * Thrown when the `mode` field echoed in an introspection response does not
+ * match the SDK's configured `expectedMode`.
+ *
+ * Per HEA-923 design constraint: mode must be validated explicitly; the SDK
+ * MUST NOT silently tolerate a server returning a different mode than the one
+ * configured for the resource server.
+ */
+export class AuthorizationModeMismatchError extends HearthSdkError {
+  constructor(
+    public readonly expected: string,
+    public readonly actual: string,
+    message = `Authorization mode mismatch: expected "${expected}", got "${actual}"`,
+  ) {
+    super(message);
+  }
+}
