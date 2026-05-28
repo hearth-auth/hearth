@@ -61,7 +61,7 @@
 #   (Admin role, or a fine-grained PAT with that scope).
 #
 # Repo:
-#   Defaults to therecluse26/hearth. Override with HEARTH_OWNER / HEARTH_REPO
+#   Defaults to hearth-auth/hearth. Override with HEARTH_OWNER / HEARTH_REPO
 #   for fork testing.
 
 set -euo pipefail

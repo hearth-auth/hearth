@@ -2,7 +2,7 @@
 
 > **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/sdk-spec.md).
 
-Rust SDK for the [Hearth](https://github.com/therecluse26/hearth) identity platform.
+Rust SDK for the [Hearth](https://github.com/hearth-auth/hearth) identity platform.
 
 ## Installation
 

@@ -35,7 +35,7 @@ brew install slsa-verifier
 
 ## Verify a binary with cosign
 
-Download the binary, its `.sig`, and its `.pem` from the [GitHub Releases page](https://github.com/therecluse26/hearth/releases), then run:
+Download the binary, its `.sig`, and its `.pem` from the [GitHub Releases page](https://github.com/hearth-auth/hearth/releases), then run:
 
 ```bash
 VERSION=v0.1.0   # replace with the release tag
@@ -45,7 +45,7 @@ cosign verify-blob \
   --certificate         "${ARTIFACT}.pem" \
   --signature           "${ARTIFACT}.sig" \
   --certificate-identity-regexp \
-    '^https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
+    '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
   --certificate-oidc-issuer \
     'https://token.actions.githubusercontent.com' \
   "${ARTIFACT}"
@@ -66,7 +66,7 @@ cosign verify-blob \
   --certificate         hearth-sbom.cdx.json.pem \
   --signature           hearth-sbom.cdx.json.sig \
   --certificate-identity-regexp \
-    '^https://github\.com/therecluse26/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
+    '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
   --certificate-oidc-issuer \
     'https://token.actions.githubusercontent.com' \
   hearth-sbom.cdx.json
@@ -79,7 +79,7 @@ Download `hearth.intoto.jsonl` from the release assets, then:
 ```bash
 slsa-verifier verify-artifact \
   --provenance-path hearth.intoto.jsonl \
-  --source-uri     github.com/therecluse26/hearth \
+  --source-uri     github.com/hearth-auth/hearth \
   --source-tag     "$VERSION" \
   "${ARTIFACT}"
 ```
@@ -98,7 +98,7 @@ openssl x509 -in "${ARTIFACT}.pem" -noout -text \
 You should see a URI extension containing the full workflow path, for example:
 
 ```
-URI:https://github.com/therecluse26/hearth/.github/workflows/release.yml@refs/tags/v0.1.0
+URI:https://github.com/hearth-auth/hearth/.github/workflows/release.yml@refs/tags/v0.1.0
 ```
 
 ## Inspect the transparency log entry

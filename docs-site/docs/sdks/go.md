@@ -260,7 +260,7 @@ page, err := admin.ListUsers(ctx, 50)
 ## Runnable example
 
 A complete Go/Gin server lives at
-[`examples/go-gin/`](https://github.com/therecluse26/hearth/tree/main/examples/go-gin).
+[`examples/go-gin/`](https://github.com/hearth-auth/hearth/tree/main/examples/go-gin).
 It demonstrates JWT middleware, RBAC route guards, automatic JWKS refresh, and a
 dev bootstrap flow — all runnable with `go run .`.
 
@@ -268,4 +268,4 @@ dev bootstrap flow — all runnable with `go run .`.
 
 - [RBAC guide](../rbac.md) — roles, groups, permissions, and JWT claim structure
 - [Admin API guide](../admin-api.md) — managing users and clients programmatically
-- [Go type reference](https://github.com/therecluse26/hearth/blob/main/sdks/go/README.md) — full type list
+- [Go type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/go/README.md) — full type list

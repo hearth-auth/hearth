@@ -257,7 +257,7 @@ Hearth's admin UI and update your application's `HEARTH_CLIENT_SECRET`.
 
 ## Further reading
 
-- [Keycloak migration CLI reference](https://github.com/therecluse26/hearth/blob/main/docs/specs/IMPLEMENTATION_ORDER.md) — `hearth migrate keycloak` flags
+- [Keycloak migration CLI reference](https://github.com/hearth-auth/hearth/blob/main/docs/specs/IMPLEMENTATION_ORDER.md) — `hearth migrate keycloak` flags
 - [RBAC guide](../rbac.md) — Hearth role/permission model in depth
 - [TypeScript SDK quickstart](./typescript.md)
 - [Go SDK quickstart](./go.md)

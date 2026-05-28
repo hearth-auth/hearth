@@ -244,7 +244,7 @@ try {
 ## Runnable example
 
 A complete Next.js 14 (App Router) example lives at
-[`examples/typescript-nextjs/`](https://github.com/therecluse26/hearth/tree/main/examples/typescript-nextjs).
+[`examples/typescript-nextjs/`](https://github.com/hearth-auth/hearth/tree/main/examples/typescript-nextjs).
 It covers the full PKCE flow, Edge middleware route protection, and React RBAC
 hooks — all runnable with `npm run dev`.
 
@@ -252,4 +252,4 @@ hooks — all runnable with `npm run dev`.
 
 - [RBAC guide](../rbac.md) — roles, groups, permissions, and JWT claim structure
 - [Admin API guide](../admin-api.md) — managing users and clients programmatically
-- [TypeScript type reference](https://github.com/therecluse26/hearth/blob/main/sdks/typescript/README.md) — full interface list
+- [TypeScript type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/typescript/README.md) — full interface list

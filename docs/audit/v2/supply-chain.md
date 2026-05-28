@@ -116,7 +116,7 @@ direct `ls` output. The stale index data is what v1 likely relied on.
 
 ### F2. "Cosign keyless verification works on a tag" — **NOT VERIFIABLE**
 
-> v1 claimed: keyless OIDC identity `https://github.com/therecluse26/hearth/.github/workflows/release.yml@refs/tags/v*`
+> v1 claimed: keyless OIDC identity `https://github.com/hearth-auth/hearth/.github/workflows/release.yml@refs/tags/v*`
 
 **Current code shows:** No release.yml → no signing step → no cosign artifacts to verify.
 Verification cannot be exercised against a real tag.

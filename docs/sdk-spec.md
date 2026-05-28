@@ -1,7 +1,7 @@
 # Hearth SDK Common Specification
 
 > **Canonical reference.** This document is the board-approved specification for all Hearth client SDKs.  
-> Generated from [HEA-332](https://github.com/therecluse26/hearth) — do not edit without board approval.
+> Generated from [HEA-332](https://github.com/hearth-auth/hearth) — do not edit without board approval.
 
 > **Pre-release note (board, 2026-05-15):** Hearth has not shipped yet. Breaking changes are fully acceptable during all remediation phases. No backward-compatibility work, deprecation periods, or migration guides are required.
 
