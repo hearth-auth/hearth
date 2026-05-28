@@ -53,7 +53,7 @@ fn make_assertion(
 ) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("system time before UNIX epoch")
         .as_secs() as i64;
     let claims = JwtAssertionClaims {
         iss: client_id.to_string(),
@@ -337,7 +337,7 @@ async fn jwt_bearer_wrong_issuer_rejected() {
         aud: Audience::single(issuer),
         exp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system time before UNIX epoch")
             .as_secs() as i64
             + 60,
         jti: Some(uuid::Uuid::new_v4().to_string()),
