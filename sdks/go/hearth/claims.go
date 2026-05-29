@@ -3,6 +3,7 @@ package hearth
 import (
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
@@ -19,24 +20,33 @@ type Claims struct {
 	expiry      int64
 	issuedAt    int64
 	jwtID       string
+	scope       string
 	scopes      []string
 	roles       []string
 	permissions []string
+	groups      []string
+	orgID       string
+	orgGroups   []string
+	tokenType   string
 	raw         map[string]json.RawMessage
 }
 
 // rawClaims is the internal JSON shape of a Hearth JWT payload.
 type rawClaims struct {
-	Sub         string          `json:"sub"`
-	Iss         string          `json:"iss"`
-	Aud         audClaim        `json:"aud"`
-	Exp         int64           `json:"exp"`
-	Iat         int64           `json:"iat"`
-	Jti         string          `json:"jti"`
-	Scope       string          `json:"scope"`
-	Roles       []string        `json:"roles"`
-	Permissions []string        `json:"permissions"`
-	Extra       json.RawMessage `json:"-"`
+	Sub             string          `json:"sub"`
+	Iss             string          `json:"iss"`
+	Aud             audClaim        `json:"aud"`
+	Exp             int64           `json:"exp"`
+	Iat             int64           `json:"iat"`
+	Jti             string          `json:"jti"`
+	Scope           string          `json:"scope"`
+	Roles           []string        `json:"roles"`
+	Permissions     []string        `json:"permissions"`
+	Groups          []string        `json:"groups"`
+	OID             string          `json:"oid"`
+	OrgGroups       []string        `json:"org_groups"`
+	TokenType       string          `json:"token_type"`
+	Extra           json.RawMessage `json:"-"`
 }
 
 // audClaim handles both single-string and array-of-string aud values.
@@ -91,15 +101,23 @@ func ParseClaims(token string) (*Claims, error) {
 		expiry:      rc.Exp,
 		issuedAt:    rc.Iat,
 		jwtID:       rc.Jti,
+		scope:       rc.Scope,
 		scopes:      scopes,
 		roles:       rc.Roles,
 		permissions: rc.Permissions,
+		groups:      rc.Groups,
+		orgID:       rc.OID,
+		orgGroups:   rc.OrgGroups,
+		tokenType:   rc.TokenType,
 		raw:         rawMap,
 	}, nil
 }
 
 // Subject returns the sub (subject) claim.
 func (c *Claims) Subject() string { return c.subject }
+
+// Scope returns the raw space-delimited scope string from the scope claim.
+func (c *Claims) Scope() string { return c.scope }
 
 // Issuer returns the iss (issuer) claim.
 func (c *Claims) Issuer() string { return c.issuer }
@@ -131,37 +149,41 @@ func (c *Claims) HasRole(role string) bool { return hasRole(c.roles, role) }
 // Spec §4 predicate — delegates to the unexported hasPermission helper.
 func (c *Claims) HasPermission(perm string) bool { return hasPermission(c.permissions, perm) }
 
+// InGroup reports whether the token's groups claim contains the given group ID.
+// Returns false when the claim is absent — never errors.
+func (c *Claims) InGroup(groupID string) bool {
+	return slices.Contains(c.groups, groupID)
+}
+
+// InOrg reports whether the token's oid claim matches the given org ID.
+// Returns false when the claim is absent or orgID is empty — never errors.
+func (c *Claims) InOrg(orgID string) bool {
+	return orgID != "" && c.orgID == orgID
+}
+
+// TokenType returns the token_type claim value ("access", "refresh", or
+// "required_action"). Returns an empty string when the claim is absent.
+func (c *Claims) TokenType() string { return c.tokenType }
+
+// OrganizationId returns the oid claim value, or an empty string when absent.
+func (c *Claims) OrganizationId() string { return c.orgID }
+
+// OrgGroups returns the org_groups claim (Keycloak-style group paths scoped to
+// the organization). Returns nil when the claim is absent — never errors.
+func (c *Claims) OrgGroups() []string { return c.orgGroups }
+
 // Get returns a raw JSON message for the given claim key, or nil if absent.
 func (c *Claims) Get(key string) json.RawMessage { return c.raw[key] }
 
 // hasScope is an unexported predicate used by Claims.HasScope (spec §4).
-func hasScope(scopes []string, scope string) bool {
-	for _, s := range scopes {
-		if s == scope {
-			return true
-		}
-	}
-	return false
-}
+func hasScope(scopes []string, scope string) bool { return slices.Contains(scopes, scope) }
 
 // hasRole is an unexported predicate used by Claims.HasRole (spec §4).
-func hasRole(roles []string, role string) bool {
-	for _, r := range roles {
-		if r == role {
-			return true
-		}
-	}
-	return false
-}
+func hasRole(roles []string, role string) bool { return slices.Contains(roles, role) }
 
 // hasPermission is an unexported predicate used by Claims.HasPermission (spec §4).
 func hasPermission(permissions []string, perm string) bool {
-	for _, p := range permissions {
-		if p == perm {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(permissions, perm)
 }
 
 func splitScope(scope string) []string {

@@ -208,6 +208,87 @@ type CheckPermissionResponse struct {
 	Allowed bool `json:"allowed"`
 }
 
+// ListOptions controls pagination for list endpoints (spec §12).
+type ListOptions struct {
+	// Limit is the maximum number of items to return. The server applies its
+	// own default when Limit is zero.
+	Limit int
+	// Cursor is an opaque continuation token from a previous PageResponse.
+	// Leave empty to start from the beginning.
+	Cursor string
+}
+
+// CreateClientRequest contains parameters for creating an OAuth client via the admin API.
+type CreateClientRequest struct {
+	ClientName   string   `json:"client_name"`
+	RedirectURIs []string `json:"redirect_uris"`
+	GrantTypes   []string `json:"grant_types,omitempty"`
+}
+
+// UpdateClientRequest contains parameters for updating an OAuth client via the admin API.
+type UpdateClientRequest struct {
+	ClientName   *string  `json:"client_name,omitempty"`
+	RedirectURIs []string `json:"redirect_uris,omitempty"`
+}
+
+// Role represents a realm-level role definition.
+type Role struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	CreatedAt   int64  `json:"created_at,omitempty"`
+	UpdatedAt   int64  `json:"updated_at,omitempty"`
+}
+
+// CreateRoleRequest contains parameters for creating a role via the admin API.
+type CreateRoleRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// UpdateRoleRequest contains parameters for updating a role via the admin API.
+type UpdateRoleRequest struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+}
+
+// Group represents a realm-level group definition.
+type Group struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedAt int64  `json:"created_at,omitempty"`
+	UpdatedAt int64  `json:"updated_at,omitempty"`
+}
+
+// CreateGroupRequest contains parameters for creating a group via the admin API.
+type CreateGroupRequest struct {
+	Name string `json:"name"`
+}
+
+// UpdateGroupRequest contains parameters for updating a group via the admin API.
+type UpdateGroupRequest struct {
+	Name *string `json:"name,omitempty"`
+}
+
+// OrgMember represents an organization membership record.
+type OrgMember struct {
+	UserID    string `json:"user_id"`
+	OrgID     string `json:"org_id"`
+	Role      string `json:"role"`
+	CreatedAt int64  `json:"created_at,omitempty"`
+}
+
+// AddOrgMemberRequest contains parameters for adding a member to an organization.
+type AddOrgMemberRequest struct {
+	UserID string `json:"user_id"`
+	Role   string `json:"role,omitempty"`
+}
+
+// UpdateOrgMemberRequest contains parameters for updating an org membership.
+type UpdateOrgMemberRequest struct {
+	Role *string `json:"role,omitempty"`
+}
+
 // APIError represents an error from the Hearth API.
 type APIError struct {
 	StatusCode int
