@@ -15,6 +15,9 @@
 //! - PKJ-07: tampered signature rejected
 //! - PKJ-08: no assertion public key registered → rejected
 //! - PKJ-09: discovery advertises `private_key_jwt` in token_endpoint_auth_methods_supported
+//! - PKJ-10: assertion without jti rejected (replay prevention is mandatory)
+//! - PKJ-11: assertion with lifetime > 5 min rejected (max-lifetime enforcement)
+//! - PKJ-12: private_key_jwt client without assertion bypassed auth code exchange → rejected
 
 mod common;
 
@@ -645,5 +648,201 @@ async fn discovery_advertises_private_key_jwt_auth_method() {
             .contains(&"private_key_jwt".to_string()),
         "discovery must advertise private_key_jwt in token_endpoint_auth_methods_supported, got: {:?}",
         discovery.token_endpoint_auth_methods_supported
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PKJ-10: assertion without jti rejected (replay prevention is mandatory)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn assertion_without_jti_rejected() {
+    let env = setup_cc_client().await;
+    let aud = token_endpoint_aud(&env.harness, &env.realm);
+
+    // Omit jti entirely — the server must reject rather than silently skip replay protection.
+    let claims = JwtAssertionClaims {
+        iss: env.client_id.to_string(),
+        sub: env.client_id.to_string(),
+        aud: Audience::single(aud),
+        exp: now_secs() + 60,
+        jti: None,
+        iat: Some(now_secs()),
+    };
+    let assertion = env
+        .auth_key
+        .issue_assertion_jwt(&claims)
+        .expect("sign assertion");
+
+    let err = env
+        .harness
+        .identity()
+        .client_credentials_token(
+            &env.realm,
+            &ClientCredentialsRequest {
+                client_id: env.client_id.clone(),
+                client_secret: None,
+                client_assertion_type: Some(CLIENT_ASSERTION_TYPE.to_string()),
+                client_assertion: Some(assertion),
+                scope: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect_err("jti-less assertion must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidClientAssertion { .. }),
+        "expected InvalidClientAssertion, got: {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PKJ-11: assertion with lifetime > 5 min rejected (max-lifetime enforcement)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn assertion_excessive_lifetime_rejected() {
+    let env = setup_cc_client().await;
+    let aud = token_endpoint_aud(&env.harness, &env.realm);
+
+    // exp = now + 301 seconds — just over the 5-minute ceiling.
+    let assertion = make_assertion(
+        &env.auth_key,
+        &env.client_id.to_string(),
+        &aud,
+        301,
+        Some(uuid::Uuid::new_v4().to_string()),
+    );
+
+    let err = env
+        .harness
+        .identity()
+        .client_credentials_token(
+            &env.realm,
+            &ClientCredentialsRequest {
+                client_id: env.client_id.clone(),
+                client_secret: None,
+                client_assertion_type: Some(CLIENT_ASSERTION_TYPE.to_string()),
+                client_assertion: Some(assertion),
+                scope: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect_err("assertion with lifetime > 5 min must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidClientAssertion { .. }),
+        "expected InvalidClientAssertion, got: {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PKJ-12: private_key_jwt client bypasses assertion in auth code flow → rejected
+// ---------------------------------------------------------------------------
+// Attack: attacker captures the authorization code and replays it without
+// providing client_assertion_type, hoping the server skips client auth.
+// The client is registered with ONLY an assertion_public_key and no client_secret,
+// so it has no other authentication channel.
+
+#[tokio::test]
+async fn auth_code_exchange_without_assertion_rejected_for_pkjwt_client() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("pkjwt-bypass-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+
+    let auth_key = SigningKey::generate().expect("generate key");
+    let pk_b64 = URL_SAFE_NO_PAD.encode(auth_key.public_key_bytes());
+
+    // Register with NO client_secret — private_key_jwt is the only auth channel.
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "PKJ Auth-Only Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                trust_level: ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    harness
+        .identity()
+        .update_client(
+            &realm,
+            client.client_id(),
+            &UpdateClientRequest {
+                assertion_public_key: Some(Some(pk_b64)),
+                ..Default::default()
+            },
+        )
+        .expect("set assertion_public_key");
+
+    let user_id = harness
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: format!("user-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Test User".to_string(),
+                ..CreateUserRequest::default()
+            },
+        )
+        .expect("create user")
+        .id()
+        .clone();
+
+    let auth = harness
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                response_type: "code".to_string(),
+                scope: "openid".to_string(),
+                state: "s".to_string(),
+                nonce: None,
+                code_challenge: Some(pkce_challenge(PKCE_VERIFIER)),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                resource: None,
+                user_id: user_id.clone(),
+                amr_values: vec![],
+            },
+        )
+        .expect("authorize");
+
+    // Attempt the exchange WITHOUT providing client_assertion_type or client_assertion.
+    let err = harness
+        .identity()
+        .exchange_authorization_code(
+            &realm,
+            &TokenExchangeRequest {
+                client_id: client.client_id().clone(),
+                code: auth.code().to_string(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                code_verifier: Some(PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect_err("private_key_jwt client must authenticate — no assertion should be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidClientAssertion { .. }),
+        "expected InvalidClientAssertion, got: {err:?}"
     );
 }

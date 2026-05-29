@@ -2987,6 +2987,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
+        // 8h. Delete all JAR (RFC 9101) signed request object JTIs (replay store).
+        let jar_jti_prefix = keys::jar_jti_scan_prefix();
+        let jar_jti_end = keys::prefix_end(&jar_jti_prefix);
+        let jar_jtis = self
+            .storage
+            .scan(realm_id, &jar_jti_prefix, &jar_jti_end)
+            .map_err(Self::storage_err)?;
+        if !jar_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for entry in &jar_jtis {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
         // 9. Delete realm signing key (check existence first so we can attribute
         //    cascade work even when only the signing key survives a prior crash).
         let key_storage_key = keys::encode_realm_signing_key(realm_id);
@@ -5124,7 +5140,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidAuthorizationCode);
         }
 
-        // 6b. Authenticate the client if a private_key_jwt assertion was provided
+        // 6b. Authenticate the client if a private_key_jwt assertion was provided.
+        // If no assertion is supplied, we must still block private_key_jwt-only clients
+        // (those with an assertion_public_key but no client_secret_hash) from silently
+        // bypassing client authentication.
         const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
         if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
             let assertion = request.client_assertion.as_deref().ok_or_else(|| {
@@ -5134,6 +5153,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 }
             })?;
             self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
+        } else {
+            // No assertion presented — reject if the client is registered for private_key_jwt
+            // (has an assertion_public_key but no client_secret_hash). Such clients have no
+            // other authentication channel and must present an assertion on every request.
+            let client_key = keys::encode_oauth_client(&request.client_id);
+            if let Some(client_bytes) = self
+                .storage
+                .get(realm_id, &client_key)
+                .map_err(Self::storage_err)?
+            {
+                if let Ok(client) = serde_json::from_slice::<OAuthClient>(&client_bytes) {
+                    if client.assertion_public_key().is_some()
+                        && client.client_secret_hash().is_none()
+                    {
+                        return Err(IdentityError::InvalidClientAssertion {
+                            reason: "client_assertion is required for private_key_jwt clients"
+                                .to_string(),
+                        });
+                    }
+                }
+            }
         }
 
         // 7. Validate PKCE if code_challenge was present
@@ -5947,6 +5987,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
+        // exp MUST NOT be more than 5 minutes in the future (FAPI / RFC 7523 best practice).
+        // Unbounded lifetimes defeat replay protection when jti is absent.
+        const MAX_ASSERTION_LIFETIME_SECS: i64 = 300;
+        if claims.exp - now_secs > MAX_ASSERTION_LIFETIME_SECS {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "assertion lifetime exceeds 5 minutes".to_string(),
+            });
+        }
+
         // aud MUST contain this realm's token endpoint URL
         let expected_aud = self.realm_issuer_url(realm_id);
         if !claims.aud.contains(&expected_aud) {
@@ -5955,23 +6004,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
+        // jti MUST be present — RFC 7523 §3 SHOULD, upgraded to MUST here for replay
+        // prevention. Without jti, any intercepted assertion is replayable for its full
+        // validity window.
+        let jti = claims
+            .jti
+            .as_ref()
+            .ok_or_else(|| IdentityError::InvalidClientAssertion {
+                reason: "jti claim is required for private_key_jwt assertions".to_string(),
+            })?;
+
         // JTI replay protection — each JTI may only be used once per realm.
-        if let Some(ref jti) = claims.jti {
-            let jti_key = keys::encode_client_assertion_jti(jti);
-            if self
-                .storage
-                .get(realm_id, &jti_key)
-                .map_err(Self::storage_err)?
-                .is_some()
-            {
-                return Err(IdentityError::InvalidClientAssertion {
-                    reason: "assertion jti has already been used (replay)".to_string(),
-                });
-            }
-            self.storage
-                .put(realm_id, &jti_key, b"1")
-                .map_err(Self::storage_err)?;
+        let jti_key = keys::encode_client_assertion_jti(jti);
+        if self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "assertion jti has already been used (replay)".to_string(),
+            });
         }
+        self.storage
+            .put(realm_id, &jti_key, b"1")
+            .map_err(Self::storage_err)?;
 
         Ok(())
     }
@@ -6064,6 +6121,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // 5. Verify signature based on key type.
         match alg {
             "EdDSA" => {
+                if selected.crv.as_deref() != Some("Ed25519") {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "EdDSA JWK must have crv=Ed25519".to_string(),
+                    });
+                }
                 let x_b64 = selected
                     .x
                     .as_deref()
@@ -6120,15 +6182,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
-        // 8. Validate aud contains the realm issuer URL (authorization endpoint or issuer).
+        // 8. Validate aud contains the realm issuer URL — exact match required (RFC 9101 §4).
         let expected_aud = self.realm_issuer_url(realm_id);
         let aud_ok = match &claims.aud {
-            crate::identity::tokens::Audience::Single(s) => {
-                s == &expected_aud || s.starts_with(&expected_aud)
-            }
-            crate::identity::tokens::Audience::Multi(v) => v
-                .iter()
-                .any(|a| a == &expected_aud || a.starts_with(&expected_aud)),
+            crate::identity::tokens::Audience::Single(s) => s == &expected_aud,
+            crate::identity::tokens::Audience::Multi(v) => v.iter().any(|a| a == &expected_aud),
         };
         if !aud_ok {
             return Err(IdentityError::InvalidJar {
@@ -6143,6 +6201,37 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 reason: "request object has expired".to_string(),
             });
         }
+
+        // 10. Validate nbf is not in the future if present (RFC 7519 §4.1.5).
+        if let Some(nbf) = claims.nbf {
+            if now_secs < nbf {
+                return Err(IdentityError::InvalidJar {
+                    reason: "request object is not yet valid (nbf)".to_string(),
+                });
+            }
+        }
+
+        // 11. JTI replay prevention — RFC 9101 §4 requires jti.
+        let jti = claims
+            .jti
+            .as_deref()
+            .ok_or_else(|| IdentityError::InvalidJar {
+                reason: "jti claim is required in signed request objects".to_string(),
+            })?;
+        let jti_key = keys::encode_jar_jti(jti);
+        if self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::InvalidJar {
+                reason: "jti has already been used (replay)".to_string(),
+            });
+        }
+        self.storage
+            .put(realm_id, &jti_key, b"1")
+            .map_err(Self::storage_err)?;
 
         Ok(claims)
     }

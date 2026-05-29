@@ -1,12 +1,16 @@
 //! Conformance tests for JAR (JWT Authorization Requests) — RFC 9101.
 //!
 //! Exercises `verify_jar` and `push_authorization_request` with a `request=`
-//! field via the public `IdentityEngine` surface. Five scenarios:
+//! field via the public `IdentityEngine` surface. Nine scenarios:
 //! 1. Valid signed JAR accepted
 //! 2. Tampered signature rejected
 //! 3. `alg:none` rejected
 //! 4. Wrong `aud` claim rejected
 //! 5. Expired JAR rejected
+//! 6. Missing `jti` rejected (RFC 9101 §4 requires jti)
+//! 7. Replayed `jti` rejected
+//! 8. `nbf` in the future rejected
+//! 9. `crv != Ed25519` OKP key rejected
 
 use std::sync::Arc;
 
@@ -101,9 +105,11 @@ fn jwks_json(pub_bytes: &[u8]) -> String {
 
 /// Signs a JAR JWT using the given PKCS#8 key bytes.
 ///
-/// `override_alg` replaces the `alg` claim in the header (use to test wrong-alg paths).
-/// `override_aud` replaces the `aud` claim (use to test wrong-aud paths).
-/// `override_exp` replaces the `exp` claim (use to test expiry paths).
+/// - `override_alg` replaces the `alg` header claim (test wrong-alg paths).
+/// - `override_aud` replaces the `aud` claim (test wrong-aud paths).
+/// - `override_exp` replaces the `exp` claim (test expiry paths).
+/// - `jti` — `Some(v)` includes `"jti": v`; `None` omits it entirely (test missing-jti path).
+/// - `nbf` — when `Some(v)`, sets the `nbf` claim.
 fn sign_jar(
     pkcs8_bytes: &[u8],
     client_id: &str,
@@ -111,6 +117,8 @@ fn sign_jar(
     override_alg: Option<&str>,
     override_aud: Option<&str>,
     override_exp: Option<i64>,
+    jti: Option<&str>,
+    nbf: Option<i64>,
 ) -> String {
     let alg = override_alg.unwrap_or("EdDSA");
     let aud = override_aud.unwrap_or(issuer);
@@ -126,7 +134,7 @@ fn sign_jar(
         BASE64URL_NOPAD
             .encode(ring::digest::digest(&ring::digest::SHA256, PKCE_VERIFIER.as_bytes()).as_ref())
     };
-    let claims = serde_json::json!({
+    let mut claims = serde_json::json!({
         "iss": client_id,
         "aud": aud,
         "exp": exp,
@@ -139,6 +147,12 @@ fn sign_jar(
         "code_challenge": pkce_challenge,
         "code_challenge_method": "S256"
     });
+    if let Some(j) = jti {
+        claims["jti"] = serde_json::Value::String(j.to_string());
+    }
+    if let Some(n) = nbf {
+        claims["nbf"] = serde_json::Value::Number(n.into());
+    }
 
     let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("serialize header"));
     let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("serialize claims"));
@@ -197,7 +211,16 @@ fn jar_valid_signed_request_object_accepted() {
     let client_id = client.client_id().clone();
     let cid_str = client_id.to_string();
 
-    let jar = sign_jar(&pkcs8, &cid_str, &env.issuer, None, None, None);
+    let jar = sign_jar(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        None,
+        None,
+        None,
+        Some("jti-valid-1"),
+        None,
+    );
     let req = par_with_jar(client_id, jar);
 
     let resp = env
@@ -223,7 +246,16 @@ fn jar_tampered_signature_rejected() {
     let client_id = client.client_id().clone();
     let cid_str = client_id.to_string();
 
-    let jar = sign_jar(&pkcs8, &cid_str, &env.issuer, None, None, None);
+    let jar = sign_jar(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        None,
+        None,
+        None,
+        Some("jti-tampered-1"),
+        None,
+    );
 
     // Flip the last byte of the signature part.
     let parts: Vec<&str> = jar.split('.').collect();
@@ -259,7 +291,16 @@ fn jar_alg_none_rejected() {
     let cid_str = client_id.to_string();
 
     // Build a "none" JWT: valid-looking header but alg=none, empty signature.
-    let jar = sign_jar(&pkcs8, &cid_str, &env.issuer, Some("none"), None, None);
+    let jar = sign_jar(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        Some("none"),
+        None,
+        None,
+        Some("jti-none-1"),
+        None,
+    );
     // Strip the real signature and replace with empty string (alg:none format).
     let parts: Vec<&str> = jar.split('.').collect();
     let none_jwt = format!("{}.{}.", parts[0], parts[1]);
@@ -293,6 +334,8 @@ fn jar_wrong_aud_rejected() {
         None,
         Some("https://attacker.example/"),
         None,
+        Some("jti-wrong-aud-1"),
+        None,
     );
     let req = par_with_jar(client_id, jar);
 
@@ -319,7 +362,16 @@ fn jar_expired_rejected() {
 
     // exp = 1 second before the fake clock's "now"
     let past_exp = EPOCH_MICROS / 1_000_000 - 1;
-    let jar = sign_jar(&pkcs8, &cid_str, &env.issuer, None, None, Some(past_exp));
+    let jar = sign_jar(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        None,
+        None,
+        Some(past_exp),
+        Some("jti-expired-1"),
+        None,
+    );
     let req = par_with_jar(client_id, jar);
 
     let err = env
@@ -330,5 +382,152 @@ fn jar_expired_rejected() {
     assert!(
         matches!(err, IdentityError::InvalidJar { .. }),
         "expected InvalidJar for expired token, got {err:?}"
+    );
+}
+
+/// Scenario 6 — JAR without `jti` is rejected (RFC 9101 §4 requires jti).
+#[test]
+fn jar_missing_jti_rejected() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let jwks = jwks_json(&pub_bytes);
+    let client = register_client_with_jwks(&env, &jwks);
+    let client_id = client.client_id().clone();
+    let cid_str = client_id.to_string();
+
+    // Pass None to omit jti entirely.
+    let jar = sign_jar(&pkcs8, &cid_str, &env.issuer, None, None, None, None, None);
+    let req = par_with_jar(client_id, jar);
+
+    let err = env
+        .engine
+        .push_authorization_request(&env.realm, &req)
+        .expect_err("JAR without jti must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidJar { .. }),
+        "expected InvalidJar for missing jti, got {err:?}"
+    );
+}
+
+/// Scenario 7 — replaying the same `jti` is rejected.
+#[test]
+fn jar_jti_replay_rejected() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let jwks = jwks_json(&pub_bytes);
+    let client = register_client_with_jwks(&env, &jwks);
+    let client_id = client.client_id().clone();
+    let cid_str = client_id.to_string();
+
+    // First use — must succeed.
+    let jar1 = sign_jar(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        None,
+        None,
+        None,
+        Some("replay-jti-1"),
+        None,
+    );
+    let req1 = par_with_jar(client_id.clone(), jar1);
+    env.engine
+        .push_authorization_request(&env.realm, &req1)
+        .expect("first JAR with this jti must be accepted");
+
+    // Second use of the same jti — must be rejected.
+    let jar2 = sign_jar(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        None,
+        None,
+        None,
+        Some("replay-jti-1"),
+        None,
+    );
+    let req2 = par_with_jar(client_id, jar2);
+    let err = env
+        .engine
+        .push_authorization_request(&env.realm, &req2)
+        .expect_err("replayed jti must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidJar { .. }),
+        "expected InvalidJar for replayed jti, got {err:?}"
+    );
+}
+
+/// Scenario 8 — `nbf` in the future is rejected.
+#[test]
+fn jar_nbf_in_future_rejected() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let jwks = jwks_json(&pub_bytes);
+    let client = register_client_with_jwks(&env, &jwks);
+    let client_id = client.client_id().clone();
+    let cid_str = client_id.to_string();
+
+    // nbf = 60 seconds after the fake clock's "now"
+    let future_nbf = EPOCH_MICROS / 1_000_000 + 60;
+    let jar = sign_jar(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        None,
+        None,
+        None,
+        Some("jti-nbf-1"),
+        Some(future_nbf),
+    );
+    let req = par_with_jar(client_id, jar);
+
+    let err = env
+        .engine
+        .push_authorization_request(&env.realm, &req)
+        .expect_err("JAR with future nbf must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidJar { .. }),
+        "expected InvalidJar for future nbf, got {err:?}"
+    );
+}
+
+/// Scenario 9 — OKP key with `crv != Ed25519` is rejected.
+#[test]
+fn jar_wrong_crv_rejected() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+
+    // Register the client with a JWKS that has crv=Ed448 instead of Ed25519.
+    let x = URL_SAFE_NO_PAD.encode(&pub_bytes);
+    let bad_crv_jwks = format!(
+        r#"{{"keys":[{{"kty":"OKP","crv":"Ed448","alg":"EdDSA","kid":"{TEST_KID}","x":"{x}"}}]}}"#
+    );
+    let client = register_client_with_jwks(&env, &bad_crv_jwks);
+    let client_id = client.client_id().clone();
+    let cid_str = client_id.to_string();
+
+    let jar = sign_jar(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        None,
+        None,
+        None,
+        Some("jti-crv-1"),
+        None,
+    );
+    let req = par_with_jar(client_id, jar);
+
+    let err = env
+        .engine
+        .push_authorization_request(&env.realm, &req)
+        .expect_err("EdDSA JWK with crv=Ed448 must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidJar { .. }),
+        "expected InvalidJar for crv=Ed448, got {err:?}"
     );
 }
