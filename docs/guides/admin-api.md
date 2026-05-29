@@ -91,6 +91,24 @@ GET /admin/users?attr=department:engineering&status=active
 
 Returns a single user record by UUID.
 
+```json
+{
+  "id": "<uuid>",
+  "email": "alice@example.com",
+  "display_name": "Alice Example",
+  "first_name": "Alice",
+  "last_name": "Example",
+  "status": "active",
+  "email_verified": true,
+  "required_actions": ["UPDATE_PASSWORD"],
+  "attributes": { "department": "engineering" },
+  "created_at": 1715000000000000,
+  "updated_at": 1715000100000000
+}
+```
+
+`required_actions` is omitted from the response when the array is empty. Possible values: `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, `ENROLL_PHONE_OTP`.
+
 ---
 
 ### Create user
@@ -143,6 +161,39 @@ Accepts an array of user objects (same schema as create). Returns a summary of c
 `GET /admin/users/export`
 
 Downloads all users as NDJSON (`Content-Disposition: attachment`). Accepts the same filter parameters as list users.
+
+---
+
+### Required actions
+
+`PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`
+
+Adds or removes required actions on a specific user. The body uses a diff model — only the listed actions are changed; omitted ones are left as-is.
+
+**Body:**
+
+```json
+{
+  "add": ["VERIFY_EMAIL", "UPDATE_PASSWORD"],
+  "remove": []
+}
+```
+
+Both `add` and `remove` accept any combination of `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, and `ENROLL_PHONE_OTP`. Unknown action strings return `400`. Duplicates in `add` are silently ignored.
+
+**Response (200 OK):** The updated user object (same shape as `GET /admin/users/{id}`).
+
+**Error responses:**
+
+| Status | Cause |
+|---|---|
+| `400` | Unknown action string or malformed body |
+| `401` | Missing or invalid admin token |
+| `404` | User or realm not found |
+
+Each change emits an audit event. Assignments are logged as `RequiredActionAssigned`; removals as `RequiredActionRemoved`.
+
+→ See [Required actions guide](required-actions.md) for realm-level defaults, the OIDC interception flow, and Keycloak migration notes.
 
 ---
 
