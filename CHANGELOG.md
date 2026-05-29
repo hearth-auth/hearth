@@ -80,6 +80,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **ReDoS fix in Node SDK error sanitizer** — replaced the backtracking regex in
+  `sdks/node/src/errors.ts` `sanitize()` with a linear O(n) charcode scan; a crafted
+  input like `eyJeyJeyJ…` (no dots) caused O(n²) regex backtracking in V8 on any
+  `HearthError` message containing JWT-shaped tokens (HEA-958, CodeQL CWE-1333).
+
 - **Patch example project vulnerabilities (Groups C + D)** — upgraded Go example
   (`examples/go-gin`) via `go get -u ./...`: `gin` 1.10→1.12, `golang.org/x/crypto`
   0.29→0.52, `net` 0.25→0.55, plus all transitive stdlib-linked deps. Upgraded

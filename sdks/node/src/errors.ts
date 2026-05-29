@@ -2,10 +2,46 @@
 
 const REDACTED = "[redacted]";
 
+// Charcode ranges for base64url alphabet — used by sanitize() to avoid a backtracking regex.
+function isB64UrlCode(code: number): boolean {
+  return (code >= 65 && code <= 90)   // A-Z
+    || (code >= 97 && code <= 122)    // a-z
+    || (code >= 48 && code <= 57)     // 0-9
+    || code === 95                    // _
+    || code === 45;                   // -
+}
+
 function sanitize(value: string): string {
-  // Redact JWTs: header must start with eyJ (base64url of '{'), and we require all three segments.
-  // This avoids false-positive redaction of domain names like "wrong.example.com".
-  return value.replace(/eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]*/g, REDACTED);
+  // Linear O(n) scan — redacts JWT-shaped tokens (eyJ<seg>.<seg>.<seg>) without a
+  // backtracking regex (which is ReDoS-vulnerable on crafted inputs like "eyJeyJeyJ…").
+  let out = "";
+  let i = 0;
+  while (i < value.length) {
+    if (value[i] === "e" && value[i + 1] === "y" && value[i + 2] === "J") {
+      const start = i;
+      i += 3;
+      while (i < value.length && isB64UrlCode(value.charCodeAt(i))) i++;
+      if (i < value.length && value[i] === ".") {
+        const dot1 = i++;
+        const seg2Start = i;
+        while (i < value.length && isB64UrlCode(value.charCodeAt(i))) i++;
+        if (i > seg2Start && i < value.length && value[i] === ".") {
+          i++;
+          while (i < value.length && isB64UrlCode(value.charCodeAt(i))) i++;
+          out += REDACTED;
+          continue;
+        }
+        // Two-segment prefix — not a JWT; emit up to and including the dot, re-scan remainder.
+        out += value.slice(start, dot1 + 1);
+        i = dot1 + 1;
+        continue;
+      }
+      out += value.slice(start, i);
+      continue;
+    }
+    out += value[i++];
+  }
+  return out;
 }
 
 /** Base class for all @hearth/node errors. Messages are sanitized to remove tokens/secrets. */
