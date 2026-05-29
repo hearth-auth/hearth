@@ -74,7 +74,7 @@ Reports land in `tests/ui/reports/`:
 
 **Build prerequisites:**
 - `PROTOC` env var must point to `protoc` (or set `make PROTOC=protoc check`).
-- `buf` is optional unless editing `proto/**/*.proto`.
+- `buf` is **required** — install via `brew install bufbuild/buf/buf` or https://buf.build/docs/installation. The pre-commit hook and CI both invoke it.
 - `ui/tailwindcss` must be present for CSS changes (`make tailwind-install`).
 - `hearth.yaml` is **gitignored** — copy from `hearth.example.yaml`.
 
@@ -100,6 +100,7 @@ Read these before writing code. They are the canonical source of truth:
 - `docs/specs/TESTING.md` — eight testing layers, TDD workflow, tooling, CI tiers.
 - `docs/specs/TEST_SCENARIOS.md` — granular checkbox-tracked scenario checklist.
 - `docs/specs/IMPLEMENTATION_ORDER.md` — **mandatory build sequence.** Do not skip ahead.
+- `docs/specs/PROTO.md` — **proto authoring guide.** RPC naming, `google.api.http` conventions, `json_name`, backward-compat rules. Read before touching `proto/`.
 - `docs/vision/VISION.md` — design rationale, performance targets, competitive positioning.
 - `docs/specs/THEME.md` — mandatory design theme for all UI code.
 

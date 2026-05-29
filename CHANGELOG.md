@@ -9,6 +9,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Proto governance gates (HEA-973)** — `buf` is now required and governed across the full
+  development workflow. `buf lint` and `buf format` run in the pre-commit hook whenever
+  `.proto` files are staged (format → lint → regenerate, atomic commit). A dedicated
+  `.github/workflows/proto.yml` CI job runs `buf lint`, `buf format --diff --exit-code`, and
+  `buf breaking --against main` on every proto-touching PR. New Makefile targets:
+  `make proto-format` (in-place reformat), `make proto-format-check` (CI drift gate).
+  `docs/specs/PROTO.md` documents RPC naming conventions, `google.api.http` bindings,
+  `json_name` usage, backward-compatibility rules, and pre-existing lint exceptions.
+
 - **OpenAPI 3.0 spec served from binary (HEA-972)** — `GET /openapi.json` and
   `GET /openapi.yaml` now serve a merged OpenAPI 3.0 spec; `GET /docs` serves Swagger UI.
   All 63 proto RPCs annotated with `google.api.http` bindings; `docs/api/openapi.json` is the
