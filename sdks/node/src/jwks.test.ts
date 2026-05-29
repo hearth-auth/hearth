@@ -25,6 +25,8 @@ function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     introspection_endpoint: null,
     http_timeout: HTTP_TIMEOUT_DEFAULT_MS,
     clock_skew_seconds: CLOCK_SKEW_DEFAULT_S,
+    realm_id: null,
+    authorize_endpoint: null,
     ...overrides,
   };
 }
