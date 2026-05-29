@@ -19,6 +19,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **JAR JTI replay store now expires entries (HEA-1009)** — JAR (RFC 9101) JTI entries
+  were previously stored indefinitely, allowing unbounded storage growth for any
+  authenticated client. Each entry now carries an 8-byte expiry timestamp
+  (`claims.exp + 60 s clock-skew margin`) and is purged by the existing periodic
+  cleanup sweeper (`sweep_expired`). Replay prevention is unaffected — the read-path
+  check is value-format agnostic.
+
 - **FAPI 2.0 profile mutation now guarded against client_secret retention (HEA-1021)** —
   `update_client` rejected the `profile → Fapi2` transition if the existing client already
   held a `client_secret_hash`, closing a gap where a Standard confidential client could be
