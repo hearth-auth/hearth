@@ -16,6 +16,18 @@ export interface IntrospectionResult {
   scope?: string;
   /** OAuth client that requested the token (when active and present). */
   client_id?: string;
+  /**
+   * Access-token authorization mode echoed from the issuing client config.
+   * Present only when the Hearth server is HEA-922+.
+   * Values: `"embedded"` | `"introspection"` | `"decision"`.
+   */
+  mode?: string;
+  /** Live permission strings (present in introspection/decision mode). */
+  permissions?: string[];
+  /** Live role names (present in introspection/decision mode). */
+  roles?: string[];
+  /** Live group slugs (present in introspection/decision mode). */
+  groups?: string[];
   /** All non-standard claims. */
   [key: string]: unknown;
 }

@@ -61,6 +61,98 @@ fun main() = runBlocking {
 | `introspectionEndpointOverride` | String | No | Override the discovered introspection URL |
 | `httpTimeoutMs` | Long | No | Timeout for all HTTP calls. Default: 10 000 ms |
 | `expectedAudience` | String | No | Required `aud` value. Defaults to `clientId` |
+| `realmId` | String | Conditional | Required for `checkPermission()` (Decision mode) |
+| `expectedMode` | `AccessTokenAuthorizationMode` | No | When set, `introspect()` validates the echoed mode and throws `AuthorizationModeMismatchError` on mismatch |
+
+---
+
+## Permission Authorization (HEA-922)
+
+Hearth supports three permission delivery modes. The mode is configured **explicitly** —
+the SDK never silently falls back from one mode to another based on claim presence.
+
+| Mode | Strategy | Network calls |
+|------|----------|---------------|
+| `EMBEDDED` | Decode `permissions` claim locally from JWT | None |
+| `INTROSPECTION` | Call `POST /introspect`; server re-resolves live RBAC | 1 per request |
+| `DECISION` | Call `POST /oauth/authorize`; server returns `allowed` | 1 per request |
+
+### `checkPermission()` — Decision mode
+
+```kotlin
+val client = HearthClient(
+    issuerUrl    = "https://auth.example.com",
+    realmId      = "realm-id",
+    clientId     = "my-service",
+    clientSecret = "secret",
+)
+
+val allowed = client.checkPermission(
+    token      = bearerToken,
+    permission = "docs.write",
+)
+```
+
+Fail-closed: any network or server error returns `false`.
+
+### `requirePermission()` — Mode-aware middleware gate
+
+```kotlin
+import io.hearth.sdk.*
+
+val checker = requirePermission(
+    "docs.write",
+    RequirePermissionOptions(
+        mode   = AccessTokenAuthorizationMode.EMBEDDED,
+        client = client,
+    ),
+)
+
+// In any coroutine context (Ktor, Spring, etc.):
+val token = request.header("Authorization")?.removePrefix("Bearer ") ?: ""
+if (!checker.check(token)) {
+    // respond 403 Forbidden
+}
+```
+
+#### Ktor example
+
+```kotlin
+get("/docs") {
+    val token = call.request.header("Authorization")?.removePrefix("Bearer ") ?: ""
+    if (!checker.check(token)) {
+        call.respond(HttpStatusCode.Forbidden)
+        return@get
+    }
+    call.respond(getDocs())
+}
+```
+
+#### Spring WebFlux example
+
+```kotlin
+// HandlerFilterFunction:
+val token = request.headers().firstHeader("Authorization")?.removePrefix("Bearer ") ?: ""
+return if (checker.check(token)) {
+    next.handle(request)
+} else {
+    ServerResponse.status(403).build()
+}
+```
+
+### Mode-mismatch detection
+
+When using Introspection mode, the SDK validates the `mode` field echoed by the server.
+If the server echoes a different mode (e.g. "embedded" on a misconfigured deployment),
+`requirePermission` throws `AuthorizationModeMismatchError`:
+
+```kotlin
+try {
+    checker.check(token)
+} catch (e: AuthorizationModeMismatchError) {
+    println("Server mode mismatch: expected ${e.expected}, got ${e.actual}")
+}
+```
 
 ---
 
@@ -202,6 +294,8 @@ All errors extend `HearthException`:
 | `TokenAudienceError` | `aud` does not contain expected audience |
 | `IntrospectionError` | Introspection endpoint unreachable or returned error |
 | `ApiError` | Admin/OAuth API returned non-2xx |
+| `AuthorizationModeMismatchError` | Introspection echoed a mode different from the configured `expectedMode` |
+| `AuthorizeError` | `POST /oauth/authorize` endpoint unreachable or returned non-2xx |
 
 ```kotlin
 try {

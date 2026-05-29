@@ -178,6 +178,41 @@ data class IntrospectionResult(
     val aud: kotlinx.serialization.json.JsonElement? = null,
     val scope: String? = null,
     @SerialName("client_id") val clientId: String? = null,
+    /** Access-token authorization mode echoed from the server (HEA-922). */
+    val mode: String? = null,
+    /** Live-resolved permission set returned in Introspection/Decision modes (HEA-922). */
+    val permissions: List<String> = emptyList(),
     /** All non-standard claims captured from the server response. */
     val extra: Map<String, kotlinx.serialization.json.JsonElement> = emptyMap(),
+)
+
+// ── Permission delivery modes (HEA-922) ───────────────────────────────────────
+
+/**
+ * Controls how the SDK and middleware evaluate permissions on incoming requests.
+ *
+ * The mode is explicit — the SDK NEVER silently falls back from one mode to another
+ * based on what claims happen to be present in the token.
+ */
+enum class AccessTokenAuthorizationMode(val value: String) {
+    /** Decode JWT claims locally; no network call. */
+    EMBEDDED("embedded"),
+    /** Call POST /introspect on each request; server re-resolves live RBAC. */
+    INTROSPECTION("introspection"),
+    /** Call POST /oauth/authorize on each request. Fail-closed on network errors. */
+    DECISION("decision"),
+}
+
+/** Request body for POST /oauth/authorize (decision endpoint, HEA-922). */
+@Serializable
+data class CheckPermissionRequest(
+    val permission: String,
+    @SerialName("organization_id") val organizationId: String? = null,
+    val resource: String? = null,
+)
+
+/** Response from POST /oauth/authorize. */
+@Serializable
+data class CheckPermissionResponse(
+    val allowed: Boolean,
 )

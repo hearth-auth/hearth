@@ -22,6 +22,7 @@ pub mod oidc;
 pub mod onboarding;
 pub mod ra_token;
 pub mod reconcile;
+pub mod session_version;
 pub mod sms;
 pub mod tokens;
 pub(crate) mod totp;
@@ -51,6 +52,7 @@ pub use oidc::{
     TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
     UserInfoResponse,
 };
+pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
     LoggingSmsSender, SharedSmsSender, SmsError, SmsMessage, SmsSecret, SmsSender, SnsSmsSender,
     StubSmsHttpTransport, TwilioSmsSender,
@@ -70,8 +72,8 @@ pub use types::{
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
-    RequiredActionTokenResponse, Session, SessionContext, UpdateOrganizationRequest,
-    UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
+    RequiredActionTokenResponse, Session, SessionContext, SessionVersionConfig,
+    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -1768,4 +1770,36 @@ pub trait IdentityEngine: Send + Sync {
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
     ) -> Result<(), IdentityError>;
+
+    // ------- Session-version feed -------
+
+    /// Returns delta entries with `seq > since` (up to `limit`).
+    ///
+    /// Returns `None` when `since` is older than the retention window;
+    /// callers must fall back to [`Self::sv_snapshot`].
+    fn sv_list_deltas(
+        &self,
+        realm_id: &RealmId,
+        since: u64,
+        limit: usize,
+    ) -> Result<Option<SvDeltaResponse>, IdentityError>;
+
+    /// Returns a point-in-time snapshot of `{session_id → min_sv}` for the realm.
+    fn sv_snapshot(&self, realm_id: &RealmId) -> Result<SvSnapshotResponse, IdentityError>;
+
+    /// Manually bumps the session version for a single session.
+    ///
+    /// Returns `IdentityError::SessionVersionDisabled` when the feature is
+    /// off for the realm.
+    fn sv_bump_session(
+        &self,
+        realm_id: &RealmId,
+        session_id: &SessionId,
+    ) -> Result<u64, IdentityError>;
+
+    /// Bumps all active sessions in the realm (admin operation).
+    ///
+    /// Returns `IdentityError::SessionVersionDisabled` when the feature is
+    /// off for the realm.
+    fn sv_bump_all(&self, realm_id: &RealmId) -> Result<usize, IdentityError>;
 }

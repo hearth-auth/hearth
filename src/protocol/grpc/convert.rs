@@ -164,6 +164,10 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             tracing::error!(error = %err, "internal gRPC error");
             (Code::Internal, "internal error".to_string())
         }
+        IdentityError::SessionVersionDisabled => (
+            Code::NotFound,
+            "session versioning disabled for realm".to_string(),
+        ),
     };
     Status::new(code, msg)
 }

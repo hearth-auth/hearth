@@ -71,3 +71,25 @@ export class MiddlewareError extends HearthError {
     super(message, options);
   }
 }
+
+/**
+ * Thrown when the introspection response echoes an `access_token_authorization` mode
+ * that does not match the SDK's configured `expectedMode`.
+ */
+export class AuthorizationModeError extends HearthError {
+  readonly expected: string;
+  readonly actual: string;
+
+  constructor(expected: string, actual: string, options?: { cause?: unknown }) {
+    super(`Expected authorization mode "${expected}" but server echoed "${actual}"`, options);
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+/** Thrown when the `POST /oauth/authorize` request cannot be made (misconfiguration). */
+export class AuthorizeError extends HearthError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+  }
+}

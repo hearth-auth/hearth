@@ -137,6 +137,44 @@
       <p class="mt-1 text-xs text-ht-content-muted pl-6">Show the OAuth consent screen before issuing authorization codes. Uncheck only for trusted first-party clients.</p>
     </div>
 
+    <fieldset class="space-y-2">
+      <legend class="text-sm font-medium text-ht-content-secondary">Permission delivery mode</legend>
+      <p class="mb-2 text-xs text-ht-content-muted">Controls how roles, groups, and permissions reach resource servers.</p>
+      <label class="flex cursor-pointer items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
+        <input type="radio" name="access_token_authorization" value="embedded"
+               {% if form_access_token_authorization == "embedded" %}checked{% endif %}
+               class="mt-0.5 h-4 w-4 text-ht-content-brand">
+        <span>
+          <span class="block text-sm font-medium text-ht-content-primary">Embedded <span class="ml-1 text-xs font-normal text-ht-content-muted">(default)</span></span>
+          <span class="block text-xs text-ht-content-muted">Permissions are baked into the JWT at issuance — no extra network call needed by the resource server.</span>
+        </span>
+      </label>
+      <label class="flex cursor-pointer items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
+        <input type="radio" name="access_token_authorization" value="introspection"
+               {% if form_access_token_authorization == "introspection" %}checked{% endif %}
+               class="mt-0.5 h-4 w-4 text-ht-content-brand">
+        <span>
+          <span class="block text-sm font-medium text-ht-content-primary">Introspection</span>
+          <span class="block text-xs text-ht-content-muted">JWT carries no permission claims; the resource server calls <code class="rounded-sm bg-ht-surface-base px-1 py-0.5 font-mono">/introspect</code> to fetch live permissions.</span>
+        </span>
+      </label>
+      <label class="flex cursor-pointer items-start gap-3 rounded border border-divider bg-ht-bg-base px-4 py-3 has-[:checked]:border-brand has-[:checked]:bg-brand/[0.04]">
+        <input type="radio" name="access_token_authorization" value="decision"
+               {% if form_access_token_authorization == "decision" %}checked{% endif %}
+               class="mt-0.5 h-4 w-4 text-ht-content-brand">
+        <span>
+          <span class="block text-sm font-medium text-ht-content-primary">Decision</span>
+          <span class="block text-xs text-ht-content-muted">Resource server calls <code class="rounded-sm bg-ht-surface-base px-1 py-0.5 font-mono">/authorize</code> for a per-request allow/deny decision with full live context.</span>
+        </span>
+      </label>
+      {% if form_access_token_authorization == "decision" && form_client_type == "public" %}
+      <div class="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/[0.08] px-4 py-3">
+        <svg class="mt-0.5 h-4 w-4 shrink-0 text-warning-fg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <p class="text-sm text-warning-fg">Decision mode on a public client leaks the authorization endpoint to untrusted code. Consider using Introspection or upgrading to a confidential client.</p>
+      </div>
+      {% endif %}
+    </fieldset>
+
     <div>
       <label for="declared_scopes" class="block text-sm font-medium text-ht-content-secondary">Declared scopes <span class="text-ht-content-muted">(optional)</span></label>
       <input type="text" id="declared_scopes" name="declared_scopes"

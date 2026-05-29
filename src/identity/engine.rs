@@ -26,6 +26,7 @@ use crate::identity::credentials::{self, CleartextPassword, CredentialConfig, St
 use crate::identity::device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore};
 use crate::identity::error::IdentityError;
 use crate::identity::keys;
+use crate::identity::session_version::SessionVersionStore;
 /// Encodes bytes as lowercase hexadecimal.
 fn hex_encode(bytes: &[u8]) -> String {
     bytes
@@ -413,6 +414,12 @@ pub struct EmbeddedIdentityEngine {
     /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
     /// timestamps. Shared across all realms — storage is realm-scoped internally.
     device_fp: Arc<DeviceFingerprintStore>,
+    /// Session-version store for the `sv` claim (HEA-930).
+    ///
+    /// Provides bump, delta-feed, and snapshot operations on the `ssv:` key
+    /// namespace. Shared with the `SvBumper` trait implementation so the RBAC
+    /// engine can trigger bumps without importing from the identity layer.
+    sv_store: Arc<SessionVersionStore>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -623,6 +630,10 @@ impl EmbeddedIdentityEngine {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
         let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage)?);
         let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
+        let sv_store = Arc::new(SessionVersionStore::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        ));
         let engine = Self {
             storage,
             clock,
@@ -648,6 +659,7 @@ impl EmbeddedIdentityEngine {
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
+            sv_store,
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
@@ -787,6 +799,10 @@ impl EmbeddedIdentityEngine {
     ) -> Self {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
         let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
+        let sv_store = Arc::new(SessionVersionStore::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        ));
         let engine = Self {
             storage,
             clock,
@@ -812,6 +828,7 @@ impl EmbeddedIdentityEngine {
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
+            sv_store,
         };
         // Best-effort: if seeding fails here, tests that expect a system
         // realm will notice and surface it. `new()` panics on failure; this
@@ -1855,6 +1872,7 @@ impl EmbeddedIdentityEngine {
             amr: family.amr_values.clone(),
             cnf: None,
             custom: claims.custom.clone(),
+            sv: claims.sv,
         };
         let new_refresh_claims = TokenClaims {
             sub: user_id.to_string(),
@@ -1878,6 +1896,7 @@ impl EmbeddedIdentityEngine {
             amr: Vec::new(),
             cnf: None,
             custom: claims.custom.clone(),
+            sv: None,
         };
 
         let new_access = signing_key.issue_token(&new_access_claims)?;
@@ -3162,6 +3181,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 amr: Vec::new(),
                 cnf: None,
                 custom: Default::default(),
+                sv: None,
             };
             let access_token = signing_key.issue_token(&ra_claims)?;
             return Ok(RequiredActionTokenResponse { access_token });
@@ -3921,7 +3941,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             "credential",
             &user_id.as_uuid().to_string(),
         )?;
-        self.set_password(realm_id, user_id, new_password)
+        self.set_password(realm_id, user_id, new_password)?;
+        // Bump sv for all active sessions — password change is a security event.
+        let retention = self.sv_retention_secs(realm_id);
+        if let Err(e) = self.bump_user_sv_inner(realm_id, user_id, retention) {
+            tracing::warn!(realm=%realm_id, user=%user_id.as_uuid(), error=%e, "sv bump on password change failed");
+        }
+        Ok(())
     }
 
     fn create_session(
@@ -4045,6 +4071,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Bump session version if sv tracking is enabled for this realm.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if realm.config().session_version.enabled {
+                let retention = realm.config().session_version.delta_retention_seconds;
+                if let Err(e) = self.sv_store.bump(realm_id, session_id, retention) {
+                    tracing::warn!(
+                        session = %session_id.as_uuid(),
+                        error = %e,
+                        "sv bump failed on session revoke"
+                    );
                 }
             }
         }
@@ -4374,6 +4414,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         } else {
             &empty_perm_strs
         };
+        // Embed sv claim when session-version tracking is enabled for this realm.
+        let sv_claim = self.get_realm(realm_id).ok().flatten().and_then(|realm| {
+            if realm.config().session_version.enabled {
+                Some(self.get_session_sv(realm_id, session_id))
+            } else {
+                None
+            }
+        });
         self.signing_key.issue_token_pair(&IssueTokenRequest {
             sub: &user_id.to_string(),
             sid: &session_id.to_string(),
@@ -4397,6 +4445,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             custom,
             resource: ctx.resource.as_ref(),
             dpop_jkt: None, // set at HTTP layer when DPoP proof is validated
+            sv: sv_claim,
         })
     }
 
@@ -5094,6 +5143,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             None => Audience::single(self.config.token.audience.clone()),
         };
 
+        let sv_claim = {
+            let enabled = self
+                .get_realm(realm_id)
+                .ok()
+                .flatten()
+                .map(|r| r.config().session_version.enabled)
+                .unwrap_or(false);
+            if enabled {
+                Some(self.get_session_sv(realm_id, session.id()))
+            } else {
+                None
+            }
+        };
         let access_claims = TokenClaims {
             sub: stored_code.user_id.to_string(),
             iss: self.config.token.issuer.clone(),
@@ -5121,6 +5183,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     jkt: jkt.to_string(),
                 }),
             custom: access_custom,
+            sv: sv_claim,
         };
         let refresh_claims = TokenClaims {
             sub: stored_code.user_id.to_string(),
@@ -5144,6 +5207,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             amr: Vec::new(),
             cnf: None,
             custom: access_claims.custom.clone(),
+            sv: None,
         };
 
         let access_token =
@@ -5215,6 +5279,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             amr: stored_code.amr_values.clone(),
             cnf: None,
             custom: id_custom,
+            sv: None,
         };
         let id_token =
             signing_key
@@ -5515,6 +5580,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     jkt: jkt.to_string(),
                 }),
             custom: std::collections::BTreeMap::new(),
+            sv: None, // sessionless — no sv
         };
 
         let access_token =
@@ -5662,6 +5728,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     jkt: jkt.to_string(),
                 }),
             custom: std::collections::BTreeMap::new(),
+            sv: None, // JWT bearer — sessionless
         };
 
         let access_token =
@@ -5910,6 +5977,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     amr: Vec::new(),
                     cnf: None,
                     custom: std::collections::BTreeMap::new(),
+                    sv: None,
                 };
                 let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
                 let id_token = signing_key.issue_token(&id_token_claims).map_err(|e| {
@@ -11235,6 +11303,54 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
     }
+
+    fn sv_list_deltas(
+        &self,
+        realm_id: &RealmId,
+        since: u64,
+        limit: usize,
+    ) -> Result<Option<crate::identity::session_version::SvDeltaResponse>, IdentityError> {
+        self.sv_store.list_deltas(realm_id, since, limit)
+    }
+
+    fn sv_snapshot(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<crate::identity::session_version::SvSnapshotResponse, IdentityError> {
+        self.sv_store.snapshot(realm_id)
+    }
+
+    fn sv_bump_session(
+        &self,
+        realm_id: &RealmId,
+        session_id: &SessionId,
+    ) -> Result<u64, IdentityError> {
+        let retention = self.sv_retention_secs(realm_id);
+        let enabled = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Err(IdentityError::SessionVersionDisabled);
+        }
+        self.sv_store.bump(realm_id, session_id, retention)
+    }
+
+    fn sv_bump_all(&self, realm_id: &RealmId) -> Result<usize, IdentityError> {
+        let retention = self.sv_retention_secs(realm_id);
+        let enabled = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Err(IdentityError::SessionVersionDisabled);
+        }
+        self.sv_store.bump_all(realm_id, retention)
+    }
 }
 
 /// Generates and stores a new OTP then dispatches the SMS.
@@ -11297,6 +11413,56 @@ fn classify_phc_algorithm(phc: &str) -> Option<crate::identity::credentials::Pas
         Some(PasswordAlgorithm::Pbkdf2Sha256)
     } else {
         None
+    }
+}
+
+impl EmbeddedIdentityEngine {
+    /// Returns the current session-version for `session_id`, or `1` if not tracked.
+    pub(crate) fn get_session_sv(&self, realm_id: &RealmId, session_id: &SessionId) -> u64 {
+        self.sv_store.get_version(realm_id, session_id).unwrap_or(1)
+    }
+
+    /// Bumps session versions for all active sessions of `user_id`.
+    pub(crate) fn bump_user_sv_inner(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        retention_secs: u64,
+    ) -> Result<usize, IdentityError> {
+        self.sv_store
+            .bump_user_sessions(realm_id, user_id, retention_secs)
+    }
+
+    /// Returns the sv `delta_retention_seconds` config for a realm, or 3600 as default.
+    pub(crate) fn sv_retention_secs(&self, realm_id: &RealmId) -> u64 {
+        self.get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.delta_retention_seconds)
+            .unwrap_or(3600)
+    }
+}
+
+impl crate::rbac::SvBumper for EmbeddedIdentityEngine {
+    fn bump_user_sessions(&self, realm_id: &RealmId, user_id: &UserId) {
+        let enabled = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        let retention = self.sv_retention_secs(realm_id);
+        if let Err(e) = self.bump_user_sv_inner(realm_id, user_id, retention) {
+            tracing::warn!(
+                realm = %realm_id,
+                user = %user_id.as_uuid(),
+                error = %e,
+                "sv bump_user_sessions failed (rbac trigger)"
+            );
+        }
     }
 }
 

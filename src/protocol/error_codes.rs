@@ -273,6 +273,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         | IdentityError::WebhookNotFound
         | IdentityError::ConsentNotFound => Some(NOT_FOUND),
         IdentityError::SessionNotFound => Some(SESSION_NOT_FOUND),
+        IdentityError::SessionVersionDisabled => Some("session_version_disabled"),
 
         IdentityError::RealmSuspended => Some(REALM_SUSPENDED),
 
