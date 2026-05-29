@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Concurrent session limits (HEA-971)** — `RealmConfig` gains `max_concurrent_sessions: Option<u32>`
+  and `session_over_limit_policy: SessionLimitPolicy` (`reject_new` | `evict_oldest`, default
+  `evict_oldest`). When the limit is reached, `RejectNew` returns HTTP 429 / gRPC
+  `RESOURCE_EXHAUSTED` with error code `session_limit_exceeded`; `EvictOldest` revokes the
+  oldest active session and allows the new one. Configurable globally under `[session]`
+  (`session_max_concurrent`, `session_over_limit_policy`) and per-realm in `hearth.yaml`.
+  Each enforcement writes a `session_limit_enforced` audit event (HEA-971).
+
 - **Kotlin SDK spec conformance (HEA-964)** — `Claims` gains four new accessors:
   `inOrg(o)`, `tokenType()`, `organizationId()`, `orgGroups()`; new `RequiredActionError`
   with `requiredActions: List<String>` and optional `redirectUri`; `requirePermission`

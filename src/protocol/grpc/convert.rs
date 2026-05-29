@@ -104,7 +104,8 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::PasswordReused => (Code::FailedPrecondition, err.to_string()),
         IdentityError::RateLimited
         | IdentityError::MemberLimitReached
-        | IdentityError::TokenTooLarge { .. } => (Code::ResourceExhausted, err.to_string()),
+        | IdentityError::TokenTooLarge { .. }
+        | IdentityError::SessionLimitExceeded { .. } => (Code::ResourceExhausted, err.to_string()),
         IdentityError::PasswordCompromised => (
             Code::InvalidArgument,
             "password has appeared in a known data breach".to_string(),

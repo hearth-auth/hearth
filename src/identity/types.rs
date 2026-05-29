@@ -859,6 +859,14 @@ pub struct RealmConfig {
     /// feed. Defaults to disabled for backward compatibility.
     #[serde(default)]
     pub session_version: SessionVersionConfig,
+    /// Maximum number of concurrent active (non-revoked, non-expired) sessions
+    /// per user in this realm. `None` means unlimited (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_sessions: Option<u32>,
+    /// What to do when a new session would exceed `max_concurrent_sessions`.
+    /// Defaults to `EvictOldest`.
+    #[serde(default)]
+    pub session_over_limit_policy: SessionLimitPolicy,
 }
 
 /// Per-realm session-version (`sv`) tracking configuration.
@@ -894,6 +902,18 @@ impl Default for SessionVersionConfig {
             delta_retention_seconds: Self::default_delta_retention_seconds(),
         }
     }
+}
+
+/// What to do when a new `create_session` would push a user's live session
+/// count past `RealmConfig::max_concurrent_sessions`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLimitPolicy {
+    /// Reject the new session with [`crate::identity::IdentityError::SessionLimitExceeded`].
+    RejectNew,
+    /// Revoke the oldest active session(s) to make room, then proceed.
+    #[default]
+    EvictOldest,
 }
 
 // ── SecretString serde helpers ────────────────────────────────────────────────

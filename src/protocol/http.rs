@@ -679,6 +679,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/admin", admin_routes)
         .route("/admin/bootstrap", axum::routing::post(admin_bootstrap))
         .nest("/scim/v2", crate::protocol::scim::router())
+        .merge(crate::protocol::web::openapi::openapi_router())
         .nest(
             "/realms/{realm_name}",
             Router::new()
@@ -1636,6 +1637,9 @@ fn identity_error_to_response(
         IdentityError::DPopBindingMismatch => (StatusCode::UNAUTHORIZED, "invalid_token"),
         IdentityError::JwtBearerAssertionInvalid { .. } => {
             (StatusCode::UNAUTHORIZED, "invalid_grant")
+        }
+        IdentityError::SessionLimitExceeded { .. } => {
+            (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
         }
     };
 

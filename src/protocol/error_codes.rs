@@ -255,6 +255,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::DeviceCodeDenied => Some(DEVICE_CODE_DENIED),
 
         IdentityError::RateLimited => Some(RATE_LIMITED),
+        IdentityError::SessionLimitExceeded { .. } => Some("session_limit_exceeded"),
 
         IdentityError::UserNotVerified => Some(EMAIL_UNVERIFIED),
         IdentityError::PasswordExpired => Some(PASSWORD_EXPIRED),

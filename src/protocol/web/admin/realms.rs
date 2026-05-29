@@ -403,6 +403,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::SmsMfaChallengeFailed => "SMS MFA Challenge Failed",
         A::SmsMfaLocked => "SMS MFA Locked",
         A::DeviceFingerprintsErased => "Device Fingerprints Erased",
+        A::SessionLimitEnforced => "Session Limit Enforced",
     }
 }
 
@@ -507,7 +508,8 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::ScimGroupDeleted
         | A::BackupCreated
         | A::BackupRestored
-        | A::Cleanup => "System",
+        | A::Cleanup
+        | A::SessionLimitEnforced => "System",
     }
 }
 

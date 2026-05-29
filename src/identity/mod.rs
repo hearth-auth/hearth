@@ -72,7 +72,7 @@ pub use types::{
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
     PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
-    RequiredActionTokenResponse, Session, SessionContext, SessionVersionConfig,
+    RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
     UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;

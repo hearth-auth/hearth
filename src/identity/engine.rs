@@ -157,8 +157,8 @@ use crate::identity::types::{
     ImportUserRequest, InvitationStatus, Organization, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
     PendingAuthorizationRequest, Realm, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, Session, SessionContext, UpdateOrganizationRequest, UpdateRealmRequest,
-    UpdateUserRequest, User, UserStatus,
+    RegistrationPolicy, Session, SessionContext, SessionLimitPolicy, UpdateOrganizationRequest,
+    UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::webauthn::{
@@ -395,6 +395,12 @@ pub struct EmbeddedIdentityEngine {
     ip_login_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Pending `WebAuthn` challenges awaiting completion.
     webauthn_challenges: WebAuthnChallengeStore,
+    /// Per-user locks for serializing concurrent `create_session` calls.
+    ///
+    /// Prevents TOCTOU races when enforcing `max_concurrent_sessions`: the
+    /// read (count live sessions) and the write (create or evict + create)
+    /// must be atomic per user. Key format: `"{realm_uuid}:{user_uuid}"`.
+    session_limit_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
     /// Realm ops are not on the hot path, and a realm record and its
@@ -656,6 +662,7 @@ impl EmbeddedIdentityEngine {
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
+            session_limit_locks: Mutex::new(HashMap::new()),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
@@ -825,6 +832,7 @@ impl EmbeddedIdentityEngine {
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
+            session_limit_locks: Mutex::new(HashMap::new()),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
@@ -3982,6 +3990,87 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             UserStatus::Active => {}
             UserStatus::PendingVerification => return Err(IdentityError::UserNotVerified),
             UserStatus::Disabled => return Err(IdentityError::Unauthorized),
+        }
+
+        // Enforce per-realm concurrent session limit when configured.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(limit) = realm.config().max_concurrent_sessions {
+                let policy = realm.config().session_over_limit_policy.clone();
+                let lock_key = format!("{}:{}", realm_id.as_uuid(), user_id.as_uuid());
+
+                // Acquire per-user lock — serializes the count-check + create
+                // sequence to prevent TOCTOU races under concurrent logins.
+                let user_lock = {
+                    let mut locks = self
+                        .session_limit_locks
+                        .lock()
+                        .expect("session_limit_locks poisoned");
+                    locks
+                        .entry(lock_key)
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
+                        .clone()
+                };
+                let _guard = user_lock
+                    .lock()
+                    .expect("session_limit_locks user lock poisoned");
+
+                let now = self.clock.now();
+                // Use a large-but-safe limit (u32::MAX avoids the take(limit+1)
+                // overflow that usize::MAX would cause inside list_sessions_by_user).
+                let page =
+                    self.list_sessions_by_user(realm_id, user_id, None, u32::MAX as usize)?;
+                let mut live: Vec<_> = page.items.into_iter().filter(|s| s.is_valid(now)).collect();
+                let active = live.len() as u32;
+
+                if active >= limit {
+                    let evicted = match &policy {
+                        SessionLimitPolicy::RejectNew => {
+                            let ctx = AuditContext {
+                                actor: Actor::User(user_id.clone()),
+                                metadata: Some(serde_json::json!({
+                                    "user_id": user_id.as_uuid().to_string(),
+                                    "evicted": 0u32,
+                                    "policy": "reject_new",
+                                    "limit": limit,
+                                })),
+                            };
+                            let _ = self.record_audit(
+                                realm_id,
+                                Some(&ctx),
+                                AuditAction::SessionLimitEnforced,
+                                "session",
+                                &user_id.as_uuid().to_string(),
+                            );
+                            return Err(IdentityError::SessionLimitExceeded { limit, active });
+                        }
+                        SessionLimitPolicy::EvictOldest => {
+                            let to_evict = (active + 1 - limit) as usize;
+                            live.sort_by_key(|s| s.created_at());
+                            for s in live.iter().take(to_evict) {
+                                let _ = self.revoke_session(realm_id, s.id());
+                            }
+                            to_evict as u32
+                        }
+                    };
+
+                    let ctx = AuditContext {
+                        actor: Actor::User(user_id.clone()),
+                        metadata: Some(serde_json::json!({
+                            "user_id": user_id.as_uuid().to_string(),
+                            "evicted": evicted,
+                            "policy": "evict_oldest",
+                            "limit": limit,
+                        })),
+                    };
+                    let _ = self.record_audit(
+                        realm_id,
+                        Some(&ctx),
+                        AuditAction::SessionLimitEnforced,
+                        "session",
+                        &user_id.as_uuid().to_string(),
+                    );
+                }
+            }
         }
 
         // Generate session

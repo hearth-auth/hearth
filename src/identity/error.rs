@@ -296,6 +296,14 @@ pub enum IdentityError {
     /// The supplied SCIM `externalId` is already associated with a
     /// different user (or organization) in this realm.
     DuplicateScimExternalId,
+    /// The user has reached the per-realm maximum number of concurrent active
+    /// sessions and the realm policy is [`crate::identity::SessionLimitPolicy::RejectNew`].
+    SessionLimitExceeded {
+        /// The configured session limit.
+        limit: u32,
+        /// The number of currently active (live) sessions at the time of rejection.
+        active: u32,
+    },
     /// YAML-authored realm configuration failed registry validation.
     ///
     /// Emitted at startup or SIGHUP reload when `to_realm_config` detects
@@ -623,6 +631,10 @@ impl fmt::Display for IdentityError {
             Self::JwtBearerAssertionInvalid { reason } => {
                 write!(f, "invalid JWT bearer assertion: {reason}")
             }
+            Self::SessionLimitExceeded { limit, active } => write!(
+                f,
+                "session limit exceeded: {active} active sessions, limit is {limit}"
+            ),
         }
     }
 }
@@ -731,7 +743,8 @@ impl std::error::Error for IdentityError {
             | Self::DPopBindingMismatch
             | Self::DPopNonceInvalid
             | Self::JwtBearerAssertionInvalid { .. }
-            | Self::SessionVersionDisabled => None,
+            | Self::SessionVersionDisabled
+            | Self::SessionLimitExceeded { .. } => None,
         }
     }
 }
