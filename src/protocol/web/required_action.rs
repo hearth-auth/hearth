@@ -132,6 +132,7 @@ pub fn required_action_check(
     q: &AuthorizeQuery,
     headers: &HeaderMap,
     now: Timestamp,
+    via_par: bool,
 ) -> Option<Response> {
     let user = state.identity.get_user(realm, user_id).ok().flatten()?;
 
@@ -168,6 +169,7 @@ pub fn required_action_check(
         },
         response_type: q.response_type.clone(),
         response_mode: q.response_mode.clone().filter(|m| !m.is_empty()),
+        via_par,
     };
 
     let token = match state
@@ -470,8 +472,8 @@ pub fn resume_oidc_flow(
         oidc_params.nonce.clone(),
         Vec::new(),
         response_mode,
-        None,  // jar_request — RA resume restores pre-validated params
-        false, // not via PAR (required action resume)
+        None,                // jar_request — RA resume restores pre-validated params
+        oidc_params.via_par, // propagated from the original authorize request
     ) {
         Ok(resp) => {
             let location = build_authorization_redirect(&oidc_params.redirect_uri, &resp);

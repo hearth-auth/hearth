@@ -60,6 +60,13 @@ pub struct OidcParams {
     /// originally-requested mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_mode: Option<String>,
+    /// Whether the originating request went through PAR (RFC 9126).
+    ///
+    /// Preserved here so that `resume_oidc_flow` can pass `via_par = true`
+    /// to `issue_authorization_code` — FAPI Baseline/Advanced realms reject
+    /// code issuance when this flag is `false`.
+    #[serde(default)]
+    pub via_par: bool,
 }
 
 /// Claims embedded in a Required-Action session JWT.

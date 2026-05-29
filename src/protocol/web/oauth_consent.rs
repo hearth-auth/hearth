@@ -212,11 +212,21 @@ async fn authorize_get_impl(
     q: &AuthorizeQuery,
     headers: &axum::http::HeaderMap,
 ) -> Response {
+    // Compute wall-clock time early so it's available for both the PAR path
+    // (which now runs MFA intercepts) and the non-PAR path below.
+    let now = Timestamp::from_micros(now_micros());
+
     // 0. PAR path: when `request_uri` is present, consume the stored entry to
     //    expand the pre-validated parameters and set `via_par = true`.  This
     //    must run before the JAR check because a PAR submission may itself
     //    have contained a JAR — the stored params are already the effective
     //    values; no re-extraction is needed here.
+    //
+    //    MFA interstitials (required-action, SMS) are also invoked here so
+    //    that FAPI realms requiring PAR can still enforce MFA.  The cookie
+    //    state written by each intercept carries `via_par = true` so that
+    //    the resume path calls `issue_authorization_code` with the correct
+    //    flag (FAPI gate rejects `via_par = false`).
     if let Some(ref request_uri) = q.request_uri {
         let stored = match state.identity.consume_par(realm, request_uri) {
             Ok(s) => s,
@@ -228,6 +238,55 @@ async fn authorize_get_impl(
                 return handlers_common::server_error();
             }
         };
+
+        // Build an AuthorizeQuery from the stored PAR params so the MFA
+        // intercepts below can use the same q-accepting API.
+        let par_q = AuthorizeQuery {
+            client_id: stored.client_id.to_string(),
+            redirect_uri: stored.redirect_uri.clone(),
+            response_type: stored.response_type.clone(),
+            scope: stored.scope.clone(),
+            state: stored.state.clone(),
+            code_challenge: stored.code_challenge.clone().unwrap_or_default(),
+            code_challenge_method: match stored.code_challenge_method {
+                Some(CodeChallengeMethod::S256) => "S256".to_string(),
+                None => String::new(),
+            },
+            nonce: stored.nonce.clone().unwrap_or_default(),
+            prompt: String::new(),
+            response_mode: None,
+            request: None,
+            request_uri: None,
+        };
+
+        // Required-action intercept: carries via_par=true in OidcParams so
+        // resume_oidc_flow passes it to issue_authorization_code.
+        if let Some(ra_response) = super::required_action::required_action_check(
+            state,
+            realm,
+            &session.user_id,
+            &par_q,
+            headers,
+            now,
+            true, // via_par
+        ) {
+            return ra_response;
+        }
+
+        // SMS MFA intercept: carries via_par=true in SmsMfaState cookie so
+        // sms_challenge_post passes it to issue_code_and_redirect.
+        if let Some(sms_response) = super::sms_challenge::sms_mfa_challenge_check(
+            state,
+            realm,
+            &session.user_id,
+            &par_q,
+            headers,
+            now,
+            true, // via_par
+        ) {
+            return sms_response;
+        }
+
         return issue_code_and_redirect(
             state,
             realm,
@@ -343,7 +402,7 @@ async fn authorize_get_impl(
     }
 
     // 4. Required-action intercept (AC-1): runs after auth, before code issuance.
-    let now = Timestamp::from_micros(now_micros());
+    // `now` was computed at the top of this function (before the PAR block).
     if let Some(ra_response) = super::required_action::required_action_check(
         state,
         realm,
@@ -351,6 +410,7 @@ async fn authorize_get_impl(
         q,
         headers,
         now,
+        false, // not via PAR (non-PAR path; PAR path returned early above)
     ) {
         return ra_response;
     }
@@ -365,6 +425,7 @@ async fn authorize_get_impl(
         q,
         headers,
         now,
+        false, // not via PAR (non-PAR path; PAR path returned early above)
     ) {
         return sms_response;
     }

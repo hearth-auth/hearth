@@ -92,6 +92,13 @@ struct SmsMfaState {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     nonce: String,
     response_type: String,
+    /// Whether the originating request went through PAR (RFC 9126).
+    ///
+    /// Restored in `sms_challenge_post` so `issue_code_and_redirect` can
+    /// pass `via_par = true` to the engine — FAPI Baseline/Advanced realms
+    /// reject code issuance when this flag is `false`.
+    #[serde(default)]
+    via_par: bool,
 }
 
 /// Issues an HMAC-signed SMS MFA pending cookie value.
@@ -167,6 +174,7 @@ pub fn sms_mfa_challenge_check(
     q: &AuthorizeQuery,
     _headers: &axum::http::HeaderMap,
     _now: Timestamp,
+    via_par: bool,
 ) -> Option<Response> {
     // 1. Is SMS MFA required for this realm?
     let realm_obj = state.identity.get_realm(realm).ok().flatten()?;
@@ -243,6 +251,7 @@ pub fn sms_mfa_challenge_check(
                     code_challenge_method: q.code_challenge_method.clone(),
                     nonce: q.nonce.clone(),
                     response_type: q.response_type.clone(),
+                    via_par,
                 };
                 if let Some(cookie) =
                     issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie)
@@ -272,6 +281,7 @@ pub fn sms_mfa_challenge_check(
         code_challenge_method: q.code_challenge_method.clone(),
         nonce: q.nonce.clone(),
         response_type: q.response_type.clone(),
+        via_par,
     };
 
     let Some(cookie) = issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie) else {
@@ -485,8 +495,8 @@ pub async fn sms_challenge_post(
                 nonce,
                 vec!["sms".to_string()],
                 None,
-                None,  // jar_request — SMS MFA resume uses pre-validated params
-                false, // via_par — SMS MFA resume is never PAR-initiated
+                None,              // jar_request — SMS MFA resume uses pre-validated params
+                sms_state.via_par, // propagated from originating authorize request
             );
             append_cookie(&mut response, &clear);
             response

@@ -536,3 +536,271 @@ async fn fapi_a05_discovery_advertises_advanced_profile() {
         "discovery should advertise fapi_profile=advanced"
     );
 }
+
+/// FAPI-A-06 (regression Finding 1): PAR with PKCE only inside the JAR must succeed.
+///
+/// RFC 9101 allows `code_challenge` to be placed exclusively in the signed
+/// request object. The PAR FAPI gate must check `effective_code_challenge`
+/// (post-JAR), not the raw outer `code_challenge` field. Verifies the fix
+/// that moved the PKCE gate to after JAR extraction.
+#[tokio::test]
+async fn fapi_a06_par_pkce_only_in_jar_accepted() {
+    let env = setup_with_profile(FapiProfile::Advanced).await;
+
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let jwks = jwks_json(&pub_bytes);
+
+    // Register a fully-capable Advanced client (JWKS + JARM).
+    let client = env
+        .harness
+        .identity()
+        .register_client(
+            &env.realm,
+            &RegisterClientRequest {
+                client_name: "FAPI-A-06 JAR-only PKCE Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                jwks: Some(jwks),
+                authorization_signed_response_alg: Some("EdDSA".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("register FAPI-A-06 client");
+
+    let realm_rec = env
+        .harness
+        .identity()
+        .get_realm(&env.realm)
+        .expect("get_realm")
+        .unwrap();
+    let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
+    let cid_str = client.client_id().to_string();
+
+    // JAR carries PKCE; outer request deliberately omits code_challenge.
+    let jar = sign_jar(&pkcs8, &cid_str, &issuer);
+    let par_req = PushedAuthorizationRequest {
+        client_id: client.client_id().clone(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        scope: "openid".to_string(),
+        state: "a06-state".to_string(),
+        resource: None,
+        response_type: "code".to_string(),
+        // Intentionally absent — PKCE lives only inside the JAR.
+        code_challenge: None,
+        code_challenge_method: None,
+        nonce: Some("a06-nonce".to_string()),
+        request: Some(jar),
+    };
+
+    // Before the fix this returned FapiViolation("FAPI 2.0 Baseline requires PKCE").
+    let resp = env
+        .harness
+        .identity()
+        .push_authorization_request(&env.realm, &par_req)
+        .expect("PAR with PKCE only in JAR must succeed");
+    assert!(
+        !resp.request_uri.is_empty(),
+        "PAR should return a non-empty request_uri"
+    );
+}
+
+/// FAPI-A-07 (regression Finding 2): realm-level FAPI Advanced must enforce DPoP
+/// at token exchange even for clients without `profile: Fapi2`.
+///
+/// Exploit path (pre-fix): register a `Standard` client in a FAPI Advanced realm.
+/// Advanced authorize gate passes (JWKS + JARM present). Exchange code without
+/// DPoP → non-sender-constrained token issued. The per-client gate at
+/// `client.profile().is_fapi2()` silently skips the DPoP check.
+#[tokio::test]
+async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
+    use hearth::identity::{ClientProfile, TokenExchangeRequest};
+
+    // RFC 7636 §Appendix B example verifier / challenge pair.
+    const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+    let env = setup_with_profile(FapiProfile::Advanced).await;
+
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let jwks = jwks_json(&pub_bytes);
+
+    // Register a client with profile=Standard (not Fapi2) but fully Advanced-capable
+    // (JWKS + JARM + client_secret so it can authenticate at token exchange).
+    let client = env
+        .harness
+        .identity()
+        .register_client(
+            &env.realm,
+            &RegisterClientRequest {
+                client_name: "FAPI-A-07 Standard-profile client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("a07-secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                jwks: Some(jwks),
+                authorization_signed_response_alg: Some("EdDSA".to_string()),
+                profile: ClientProfile::Standard, // NOT Fapi2 — this is the attack surface
+                ..Default::default()
+            },
+        )
+        .expect("register standard-profile client");
+
+    let realm_rec = env
+        .harness
+        .identity()
+        .get_realm(&env.realm)
+        .expect("get_realm")
+        .unwrap();
+    let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
+    let cid_str = client.client_id().to_string();
+    let jar = sign_jar(&pkcs8, &cid_str, &issuer);
+
+    // PAR: PKCE in both outer and JAR so the authorize auth_req carries it forward.
+    let par_req = PushedAuthorizationRequest {
+        client_id: client.client_id().clone(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        scope: "openid".to_string(),
+        state: "a07-state".to_string(),
+        resource: None,
+        response_type: "code".to_string(),
+        code_challenge: Some(PKCE_CHALLENGE.to_string()),
+        code_challenge_method: Some(CodeChallengeMethod::S256),
+        nonce: Some("a07-nonce".to_string()),
+        request: Some(jar),
+    };
+    env.harness
+        .identity()
+        .push_authorization_request(&env.realm, &par_req)
+        .expect("PAR should succeed");
+
+    // Authorize via PAR (via_par=true) — passes realm-level FAPI gate.
+    let auth_req = auth_req_from_par(&par_req, env.user_id.clone());
+    let auth_resp = env
+        .harness
+        .identity()
+        .authorize(&env.realm, &auth_req)
+        .expect("authorize should succeed");
+    assert!(!auth_resp.code().is_empty());
+
+    // Token exchange WITHOUT DPoP — realm Advanced gate must catch this even though
+    // client.profile() == Standard (not Fapi2).
+    let exchange_req = TokenExchangeRequest {
+        client_id: client.client_id().clone(),
+        code: auth_resp.code().to_string(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        code_verifier: Some(PKCE_VERIFIER.to_string()),
+        dpop_jkt: None, // deliberately absent to trigger the realm-level gate
+        client_assertion_type: None,
+        client_assertion: None,
+    };
+
+    let err = env
+        .harness
+        .identity()
+        .exchange_authorization_code(&env.realm, &exchange_req)
+        .expect_err("realm-level Advanced gate must reject token exchange without DPoP");
+    assert!(
+        matches!(err, IdentityError::FapiViolation { .. }),
+        "expected FapiViolation (DPoP required by realm), got: {err:?}"
+    );
+}
+
+/// FAPI-B-05 (regression HEA-1020): FAPI Baseline realm + SMS MFA — code must be
+/// issued when `via_par = true` is passed after OTP verification.
+///
+/// The old code hardcoded `via_par = false` in `sms_challenge_post` (and
+/// `resume_oidc_flow`), causing the FAPI gate to reject code issuance even when
+/// the original request went through PAR.  The negative half of the test
+/// (via_par=false rejected) ensures this test fails on the unfixed code.
+#[tokio::test]
+async fn fapi_b05_sms_mfa_resume_via_par_preserved() {
+    use hearth::identity::UpdateUserRequest;
+
+    let env = setup_with_profile(FapiProfile::Baseline).await;
+
+    // Enable SMS MFA on the FAPI Baseline realm.
+    let realm_rec = env
+        .harness
+        .identity()
+        .get_realm(&env.realm)
+        .expect("get realm")
+        .unwrap();
+    let mut config = realm_rec.config().clone();
+    config.mfa_methods = Some(vec!["sms".to_string()]);
+    env.harness
+        .identity()
+        .update_realm(
+            &env.realm,
+            &UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("update realm with SMS MFA");
+
+    // Give the test user a verified phone so SMS MFA applies to their session.
+    env.harness
+        .identity()
+        .update_user(
+            &env.realm,
+            &env.user_id,
+            &UpdateUserRequest {
+                phone_number: Some(Some("+15555550101".to_string())),
+                phone_verified: Some(true),
+                ..UpdateUserRequest::default()
+            },
+        )
+        .expect("set verified phone");
+
+    // Positive: after successful OTP verification the web layer calls
+    // issue_authorization_code with via_par=true (the fixed behaviour).
+    let resp = env
+        .harness
+        .identity()
+        .issue_authorization_code(
+            &env.realm,
+            &env.user_id,
+            &env.client_id,
+            REDIRECT_URI,
+            "openid",
+            "sms-fapi-state",
+            Some(PKCE_CHALLENGE.to_string()),
+            Some(CodeChallengeMethod::S256),
+            Some("sms-nonce".to_string()),
+            vec!["sms".to_string()],
+            None, // response_mode
+            None, // jar_request
+            true, // via_par = true — what the fixed code passes
+        )
+        .expect("FAPI Baseline + SMS MFA: issue_authorization_code(via_par=true) must succeed");
+    assert!(!resp.code().is_empty(), "auth code must be non-empty");
+
+    // Negative: the old code hardcoded via_par=false in sms_challenge_post.
+    // The FAPI gate must reject it — this assertion fails on the unfixed code.
+    let err = env
+        .harness
+        .identity()
+        .issue_authorization_code(
+            &env.realm,
+            &env.user_id,
+            &env.client_id,
+            REDIRECT_URI,
+            "openid",
+            "sms-fapi-state-2",
+            Some(PKCE_CHALLENGE.to_string()),
+            Some(CodeChallengeMethod::S256),
+            Some("sms-nonce-2".to_string()),
+            vec!["sms".to_string()],
+            None,  // response_mode
+            None,  // jar_request
+            false, // via_par=false — what old code passed; FAPI gate must reject
+        )
+        .expect_err(
+            "FAPI Baseline + SMS MFA: issue_authorization_code(via_par=false) must be rejected",
+        );
+    assert!(
+        matches!(err, IdentityError::FapiViolation { .. }),
+        "expected FapiViolation, got: {err:?}"
+    );
+}
