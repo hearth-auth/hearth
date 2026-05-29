@@ -1930,6 +1930,8 @@ struct HttpParRequest {
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     nonce: Option<String>,
+    /// Signed JAR JWT (RFC 9101) — required for FAPI Advanced.
+    request: Option<String>,
 }
 
 fn default_response_type() -> String {
@@ -2002,7 +2004,7 @@ async fn par_handler(
         code_challenge: body.code_challenge,
         code_challenge_method,
         nonce: body.nonce,
-        request: None,
+        request: body.request,
     };
 
     match state
@@ -8331,5 +8333,240 @@ mod tests {
         // Verify access_token is non-empty
         let token = json["access_token"].as_str().expect("access_token string");
         assert!(!token.is_empty(), "access_token should not be empty");
+    }
+
+    /// PAR with a signed JAR JWT in the request body is accepted under FAPI Advanced.
+    ///
+    /// Regression for HEA-1019: `HttpParRequest` was missing the `request` field,
+    /// so the JAR was silently dropped and Advanced realms always rejected with
+    /// `FapiViolation`.  This test exercises the full HTTP deserialisation path and
+    /// MUST return 201 with the fix applied.
+    #[tokio::test]
+    async fn par_jar_accepted_under_fapi_advanced() {
+        use crate::identity::{
+            CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
+        };
+        use base64::Engine as _;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(temp_dir.path());
+
+        // Create an Advanced FAPI realm.
+        let realm_rec = state
+            .identity
+            .create_realm(&CreateRealmRequest {
+                name: format!("fapi-adv-jar-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm");
+        let mut config = realm_rec.config().clone();
+        config.fapi_profile = Some(FapiProfile::Advanced);
+        state
+            .identity
+            .update_realm(
+                realm_rec.id(),
+                &UpdateRealmRequest {
+                    config: Some(config),
+                    ..Default::default()
+                },
+            )
+            .expect("set FAPI Advanced");
+
+        // Generate Ed25519 key pair and register a JARM-capable JWKS client.
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("from_pkcs8");
+        let pub_bytes = ring::signature::KeyPair::public_key(&pair)
+            .as_ref()
+            .to_vec();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let x = b64.encode(&pub_bytes);
+        let jwks = format!(
+            r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"hea1019","x":"{x}"}}]}}"#
+        );
+
+        let client = state
+            .identity
+            .register_client(
+                realm_rec.id(),
+                &RegisterClientRequest {
+                    client_name: "FAPI-A JAR HTTP Client".to_string(),
+                    redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                    client_secret: None,
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: false,
+                    jwks: Some(jwks),
+                    authorization_signed_response_alg: Some("EdDSA".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+
+        // Sign a minimal JAR JWT.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs() as i64;
+        let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
+        // HTTP body expects the raw UUID; JAR claims compare against the prefixed form.
+        let cid_http = client.client_id().as_uuid().to_string();
+        let cid_jar = client.client_id().to_string();
+        const REDIRECT: &str = "https://app.example.com/callback";
+        const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+        let header_b64 = b64.encode(
+            serde_json::to_vec(&serde_json::json!({"alg": "EdDSA", "kid": "hea1019"}))
+                .expect("header json"),
+        );
+        let claims_b64 = b64.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "iss": cid_jar, "aud": issuer,
+                "exp": now + 300, "iat": now,
+                "jti": uuid::Uuid::new_v4().to_string(),
+                "client_id": cid_jar,
+                "response_type": "code",
+                "redirect_uri": REDIRECT,
+                "scope": "openid",
+                "state": "jar-state",
+                "code_challenge": CHALLENGE,
+                "code_challenge_method": "S256",
+                "nonce": "hea1019-nonce"
+            }))
+            .expect("claims json"),
+        );
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let sig = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .expect("pair")
+            .sign(signing_input.as_bytes());
+        let jar_jwt = format!("{signing_input}.{}", b64.encode(sig.as_ref()));
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "client_id": cid_http,
+            "redirect_uri": REDIRECT,
+            "scope": "openid",
+            "state": "par-state",
+            "response_type": "code",
+            "code_challenge": CHALLENGE,
+            "code_challenge_method": "S256",
+            "nonce": "hea1019-nonce",
+            "request": jar_jwt
+        }))
+        .expect("body json");
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/realms/{}/as/par", realm_rec.name()))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "JAR in HTTP PAR body must be accepted under FAPI Advanced (HEA-1019 regression)"
+        );
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).expect("json");
+        assert!(
+            json.get("request_uri").is_some(),
+            "response must include request_uri"
+        );
+    }
+
+    /// PAR without a JAR JWT is rejected under FAPI Advanced.
+    ///
+    /// Counterpart to `par_jar_accepted_under_fapi_advanced`: confirms the
+    /// negative case still returns 400 / `invalid_request` when the `request`
+    /// field is absent.
+    #[tokio::test]
+    async fn par_without_jar_rejected_under_fapi_advanced() {
+        use crate::identity::{
+            CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
+        };
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(temp_dir.path());
+
+        let realm_rec = state
+            .identity
+            .create_realm(&CreateRealmRequest {
+                name: format!("fapi-adv-nojar-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm");
+        let mut config = realm_rec.config().clone();
+        config.fapi_profile = Some(FapiProfile::Advanced);
+        state
+            .identity
+            .update_realm(
+                realm_rec.id(),
+                &UpdateRealmRequest {
+                    config: Some(config),
+                    ..Default::default()
+                },
+            )
+            .expect("set FAPI Advanced");
+
+        let client = state
+            .identity
+            .register_client(
+                realm_rec.id(),
+                &RegisterClientRequest {
+                    client_name: "FAPI-A No-JAR Client".to_string(),
+                    redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                    client_secret: Some("secret".to_string()),
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: false,
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "client_id": client.client_id().as_uuid().to_string(),
+            "redirect_uri": "https://app.example.com/callback",
+            "scope": "openid",
+            "state": "par-state",
+            "response_type": "code",
+            "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            "code_challenge_method": "S256",
+            "nonce": "test-nonce"
+        }))
+        .expect("body json");
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/realms/{}/as/par", realm_rec.name()))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "PAR without JAR must be rejected (FapiViolation) under FAPI Advanced"
+        );
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).expect("json");
+        assert_eq!(
+            json["error"], "invalid_request",
+            "error must be invalid_request for FAPI violation"
+        );
     }
 }
