@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **OpenAPI 3.0 spec served from binary (HEA-972)** — `GET /openapi.json` and
+  `GET /openapi.yaml` now serve a merged OpenAPI 3.0 spec; `GET /docs` serves Swagger UI.
+  All 63 proto RPCs annotated with `google.api.http` bindings; `docs/api/openapi.json` is the
+  canonical committed artifact (82 paths, produced by `make openapi`).  A drift gate in
+  `tests/openapi.rs` fails the build if the committed spec diverges from the route table.
+  `docs/api/grpc-only.txt` enumerates the 21 RPCs that are intentionally gRPC-only (HEA-972).
+
 - **Concurrent session limits (HEA-971)** — `RealmConfig` gains `max_concurrent_sessions: Option<u32>`
   and `session_over_limit_policy: SessionLimitPolicy` (`reject_new` | `evict_oldest`, default
   `evict_oldest`). When the limit is reached, `RejectNew` returns HTTP 429 / gRPC

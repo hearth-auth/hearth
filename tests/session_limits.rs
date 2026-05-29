@@ -33,9 +33,11 @@ fn create_realm_with_limit(
     limit: u32,
     policy: SessionLimitPolicy,
 ) -> RealmId {
-    let mut config = RealmConfig::default();
-    config.max_concurrent_sessions = Some(limit);
-    config.session_over_limit_policy = policy;
+    let config = RealmConfig {
+        max_concurrent_sessions: Some(limit),
+        session_over_limit_policy: policy,
+        ..RealmConfig::default()
+    };
 
     harness
         .identity()

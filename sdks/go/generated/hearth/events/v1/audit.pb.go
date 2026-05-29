@@ -7,6 +7,7 @@
 package eventsv1
 
 import (
+	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -412,6 +413,7 @@ func (x *CreateAuditEvent) GetMetadata() string {
 }
 
 // Query parameters for filtering audit events.
+// All fields except realm_id become URL query parameters on the HTTP binding.
 type AuditQuery struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RealmId       string                 `protobuf:"bytes,1,opt,name=realm_id,json=realmId,proto3" json:"realm_id,omitempty"`
@@ -645,7 +647,7 @@ var File_hearth_events_v1_audit_proto protoreflect.FileDescriptor
 
 const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"\n" +
-	"\x1chearth/events/v1/audit.proto\x12\x10hearth.events.v1\"\xbd\x02\n" +
+	"\x1chearth/events/v1/audit.proto\x12\x10hearth.events.v1\x1a\x1cgoogle/api/annotations.proto\"\xbd\x02\n" +
 	"\n" +
 	"AuditEvent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x19\n" +
@@ -743,10 +745,10 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"\x1fAUDIT_ACTION_SCIM_GROUP_DELETED\x10/\x12\x1e\n" +
 	"\x1aAUDIT_ACTION_ROLE_ASSIGNED\x100\x12\x1d\n" +
 	"\x19AUDIT_ACTION_ROLE_REVOKED\x101\x12\x18\n" +
-	"\x14AUDIT_ACTION_CLEANUP\x1022\xc4\x01\n" +
-	"\fAuditService\x12L\n" +
+	"\x14AUDIT_ACTION_CLEANUP\x1022\xda\x01\n" +
+	"\fAuditService\x12b\n" +
 	"\n" +
-	"ListEvents\x12\x1c.hearth.events.v1.AuditQuery\x1a .hearth.events.v1.AuditEventPage\x12f\n" +
+	"ListEvents\x12\x1c.hearth.events.v1.AuditQuery\x1a .hearth.events.v1.AuditEventPage\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/admin/audit\x12f\n" +
 	"\x0fVerifyIntegrity\x12(.hearth.events.v1.VerifyIntegrityRequest\x1a).hearth.events.v1.VerifyIntegrityResponseBAZ?github.com/hearthdb/hearth/sdks/go/generated/events/v1;eventsv1b\x06proto3"
 
 var (

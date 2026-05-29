@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -91,6 +91,14 @@ proto-gen:
 proto-lint:
 	cd proto && $(BUF) lint
 
+## Format .proto files in-place (run before committing).
+proto-format:
+	cd proto && $(BUF) format -w
+
+## Check proto formatting without modifying files (CI gate).
+proto-format-check:
+	cd proto && $(BUF) format --diff --exit-code
+
 ## Check for backwards-incompatible proto changes vs main.
 proto-breaking:
 	cd proto && $(BUF) breaking --against '../.git#branch=main,subdir=proto'
@@ -104,6 +112,31 @@ proto-check:
 	else \
 		echo "ERROR: Generated code is out of date. Run 'make proto-gen' and commit."; \
 		git diff --stat sdks/typescript/src/generated sdks/go/generated; \
+		exit 1; \
+	fi
+
+# ── OpenAPI ───────────────────────────────────────────
+
+## (Re)generate docs/api/openapi.json from proto-derived + supplement sources.
+## Requires: python3 + PyYAML.  On Nix machines it finds pyyaml from the store;
+## elsewhere it installs it via pip (quiet, user-level).
+openapi:
+	@python3 -c "import yaml" 2>/dev/null \
+	  || nix-shell -p python3Packages.pyyaml --run true 2>/dev/null \
+	  || pip3 install --user --quiet pyyaml
+	@if command -v nix-shell >/dev/null 2>&1 && ! python3 -c "import yaml" 2>/dev/null; then \
+		nix-shell -p python3Packages.pyyaml --run "python3 scripts/merge_openapi.py"; \
+	else \
+		python3 scripts/merge_openapi.py; \
+	fi
+
+## CI gate: regenerate and fail if docs/api/openapi.json is stale.
+openapi-check: openapi
+	@if git diff --quiet docs/api/openapi.json; then \
+		echo "✓ docs/api/openapi.json is up to date."; \
+	else \
+		echo "ERROR: docs/api/openapi.json is stale. Run 'make openapi' and commit the result."; \
+		git diff --stat docs/api/openapi.json; \
 		exit 1; \
 	fi
 

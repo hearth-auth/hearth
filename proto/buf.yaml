@@ -2,9 +2,25 @@ version: v2
 modules:
   - path: .
     name: buf.build/hearth/api
+deps:
+  - buf.build/googleapis/googleapis
 lint:
   use:
     - STANDARD
+  # Pre-existing violations grandfathered here; tracked for cleanup in HEA-969.
+  # RPC_REQUEST_RESPONSE_UNIQUE: services share resource types (User, Realm, Role…).
+  # RPC_*_STANDARD_NAME: *Call wrappers and resource types predate strict naming.
+  # ENUM_VALUE_PREFIX / ENUM_ZERO_VALUE_SUFFIX: AccessTokenAuthorization values.
+  except:
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+  ignore:
+    - google
 breaking:
   use:
     - FILE
+  ignore:
+    - google

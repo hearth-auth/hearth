@@ -2,69 +2,121 @@ syntax = "proto3";
 
 package hearth.rbac.v1;
 
+import "google/api/annotations.proto";
+
 option go_package = "github.com/hearthdb/hearth/sdks/go/generated/rbac/v1;rbacv1";
 
 // RBAC admin service: roles, groups, assignments. Mirrors the HTTP admin
 // surface in `docs/specs/AUTHORIZATION.md § 8.2`. There is NO service-to-service
 // Check RPC; callers decode the JWT's `permissions` claim locally.
 service RbacAdminService {
-  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse);
-  rpc CreateRole(CreateRoleRequest) returns (Role);
-  rpc GetRole(GetRoleRequest) returns (Role);
-  rpc UpdateRole(UpdateRoleRequest) returns (Role);
-  rpc DeleteRole(DeleteRoleRequest) returns (DeleteRoleResponse);
+  rpc ListRoles(ListRolesRequest) returns (ListRolesResponse) {
+    option (google.api.http) = {get: "/admin/roles"};
+  }
+  rpc CreateRole(CreateRoleRequest) returns (Role) {
+    option (google.api.http) = {
+      post: "/admin/roles"
+      body: "*"
+    };
+  }
+  rpc GetRole(GetRoleRequest) returns (Role) {
+    option (google.api.http) = {get: "/admin/roles/{role_id}"};
+  }
+  rpc UpdateRole(UpdateRoleRequest) returns (Role) {
+    option (google.api.http) = {
+      put: "/admin/roles/{role_id}"
+      body: "*"
+    };
+  }
+  rpc DeleteRole(DeleteRoleRequest) returns (DeleteRoleResponse) {
+    option (google.api.http) = {delete: "/admin/roles/{role_id}"};
+  }
 
-  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
-  rpc CreateGroup(CreateGroupRequest) returns (Group);
-  rpc GetGroup(GetGroupRequest) returns (Group);
-  rpc UpdateGroup(UpdateGroupRequest) returns (Group);
-  rpc DeleteGroup(DeleteGroupRequest) returns (DeleteGroupResponse);
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse) {
+    option (google.api.http) = {get: "/admin/groups"};
+  }
+  rpc CreateGroup(CreateGroupRequest) returns (Group) {
+    option (google.api.http) = {
+      post: "/admin/groups"
+      body: "*"
+    };
+  }
+  rpc GetGroup(GetGroupRequest) returns (Group) {
+    option (google.api.http) = {get: "/admin/groups/{group_id}"};
+  }
+  rpc UpdateGroup(UpdateGroupRequest) returns (Group) {
+    option (google.api.http) = {
+      put: "/admin/groups/{group_id}"
+      body: "*"
+    };
+  }
+  rpc DeleteGroup(DeleteGroupRequest) returns (DeleteGroupResponse) {
+    option (google.api.http) = {delete: "/admin/groups/{group_id}"};
+  }
 
-  rpc ListGroupMembers(ListGroupMembersRequest) returns (ListGroupMembersResponse);
-  rpc AddGroupMember(AddGroupMemberRequest) returns (GroupMembership);
-  rpc RemoveGroupMember(RemoveGroupMemberRequest) returns (RemoveGroupMemberResponse);
+  rpc ListGroupMembers(ListGroupMembersRequest) returns (ListGroupMembersResponse) {
+    option (google.api.http) = {get: "/admin/groups/{group_id}/members"};
+  }
+  rpc AddGroupMember(AddGroupMemberRequest) returns (GroupMembership) {
+    option (google.api.http) = {
+      post: "/admin/groups/{group_id}/members"
+      body: "*"
+    };
+  }
+  rpc RemoveGroupMember(RemoveGroupMemberRequest) returns (RemoveGroupMemberResponse) {
+    option (google.api.http) = {delete: "/admin/groups/{group_id}/members/{member.id}"};
+  }
 
-  rpc AssignUserRole(AssignUserRoleRequest) returns (RoleAssignment);
-  rpc UnassignUserRole(UnassignUserRoleRequest) returns (UnassignUserRoleResponse);
-  rpc ListUserAssignments(ListUserAssignmentsRequest) returns (ListUserAssignmentsResponse);
+  rpc AssignUserRole(AssignUserRoleRequest) returns (RoleAssignment) {
+    option (google.api.http) = {
+      post: "/admin/users/{user_id}/roles"
+      body: "*"
+    };
+  }
+  rpc UnassignUserRole(UnassignUserRoleRequest) returns (UnassignUserRoleResponse) {
+    option (google.api.http) = {delete: "/admin/assignments/{assignment_id}"};
+  }
+  rpc ListUserAssignments(ListUserAssignmentsRequest) returns (ListUserAssignmentsResponse) {
+    option (google.api.http) = {get: "/admin/users/{user_id}/roles"};
+  }
+
+  // AssignGroupRole / UnassignGroupRole / ListRoleMembers have no REST route
+  // yet — gRPC-only until HEA-969 adds the missing endpoints.
   rpc AssignGroupRole(AssignGroupRoleRequest) returns (RoleAssignment);
   rpc UnassignGroupRole(UnassignGroupRoleRequest) returns (UnassignGroupRoleResponse);
   rpc ListRoleMembers(ListRoleMembersRequest) returns (ListRoleMembersResponse);
 
-  rpc ResolveEffectivePermissions(ResolveEffectivePermissionsRequest)
-      returns (ResolveEffectivePermissionsResponse);
+  rpc ResolveEffectivePermissions(ResolveEffectivePermissionsRequest) returns (ResolveEffectivePermissionsResponse) {
+    option (google.api.http) = {get: "/admin/users/{user_id}/effective-permissions"};
+  }
 
   // User extras: direct per-user permission grants outside of roles.
-  rpc GrantUserPermission(GrantUserPermissionRequest)
-      returns (GrantUserPermissionResponse);
-  rpc RevokeUserPermission(RevokeUserPermissionRequest)
-      returns (RevokeUserPermissionResponse);
-  rpc ListUserPermissions(ListUserPermissionsRequest)
-      returns (ListUserPermissionsResponse);
+  // No REST routes yet — gRPC-only until HEA-969.
+  rpc GrantUserPermission(GrantUserPermissionRequest) returns (GrantUserPermissionResponse);
+  rpc RevokeUserPermission(RevokeUserPermissionRequest) returns (RevokeUserPermissionResponse);
+  rpc ListUserPermissions(ListUserPermissionsRequest) returns (ListUserPermissionsResponse);
 
   // Additional org roles: per-user role assignments scoped to an org.
-  rpc AddAdditionalRole(AddAdditionalRoleRequest)
-      returns (AddAdditionalRoleResponse);
-  rpc RemoveAdditionalRole(RemoveAdditionalRoleRequest)
-      returns (RemoveAdditionalRoleResponse);
-  rpc ListAdditionalRoles(ListAdditionalRolesRequest)
-      returns (ListAdditionalRolesResponse);
+  // No REST routes yet — gRPC-only until HEA-969.
+  rpc AddAdditionalRole(AddAdditionalRoleRequest) returns (AddAdditionalRoleResponse);
+  rpc RemoveAdditionalRole(RemoveAdditionalRoleRequest) returns (RemoveAdditionalRoleResponse);
+  rpc ListAdditionalRoles(ListAdditionalRolesRequest) returns (ListAdditionalRolesResponse);
 
-  // Read-only realm-level lookups.
-  rpc ListRealmPermissions(ListRealmPermissionsRequest)
-      returns (ListRealmPermissionsResponse);
-  rpc ListRealmRoles(ListRealmRolesRequest)
-      returns (ListRealmRolesResponse);
+  // Read-only realm-level lookups — gRPC-only until HEA-969.
+  rpc ListRealmPermissions(ListRealmPermissionsRequest) returns (ListRealmPermissionsResponse);
+  rpc ListRealmRoles(ListRealmRolesRequest) returns (ListRealmRolesResponse);
 
   // ── Consent management ───────────────────────────────────────────────────
 
   // Revoke OAuth consent for a specific (user, client) pair.
-  rpc RevokeConsent(RevokeConsentRequest)
-      returns (RevokeConsentResponse);
+  rpc RevokeConsent(RevokeConsentRequest) returns (RevokeConsentResponse) {
+    option (google.api.http) = {delete: "/admin/users/{user_id}/consents/{client_id}"};
+  }
 
   // List all active consents for a user.
-  rpc ListUserConsents(ListUserConsentsRequest)
-      returns (ListUserConsentsResponse);
+  rpc ListUserConsents(ListUserConsentsRequest) returns (ListUserConsentsResponse) {
+    option (google.api.http) = {get: "/admin/users/{user_id}/consents"};
+  }
 }
 
 // ── Consent revocation ───────────────────────────────────────────────────────
@@ -321,8 +373,8 @@ message ListRoleMembersResponse {
 message ResolveEffectivePermissionsRequest {
   string realm_id = 1;
   string user_id = 2;
-  string org_id = 3;     // optional; empty means realm-only
-  string scope = 4;      // optional; empty means no narrowing
+  string org_id = 3; // optional; empty means realm-only
+  string scope = 4; // optional; empty means no narrowing
 }
 
 message ResolveEffectivePermissionsResponse {

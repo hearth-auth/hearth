@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package hearth.identity.v1;
 
+import "google/api/annotations.proto";
+
 option go_package = "github.com/hearthdb/hearth/sdks/go/generated/identity/v1;identityv1";
 
 // Request to initiate an OAuth 2.0 authorization.
@@ -223,9 +225,13 @@ message ListApplicationsRequest {
   optional uint32 limit = 2;
 }
 
-message GetApplicationRequest { string client_id = 1; }
+message GetApplicationRequest {
+  string client_id = 1;
+}
 
-message DeleteApplicationRequest { string client_id = 1; }
+message DeleteApplicationRequest {
+  string client_id = 1;
+}
 
 message UpdateApplicationCall {
   string client_id = 1;
@@ -240,11 +246,27 @@ message OAuthEmpty {}
 // generated code stays within a single proto file. Both share the admin
 // interceptor.
 service ApplicationAdminService {
-  rpc ListApplications(ListApplicationsRequest) returns (OAuthClientPage);
-  rpc GetApplication(GetApplicationRequest) returns (OAuthClient);
-  rpc CreateApplication(RegisterClientRequest) returns (OAuthClient);
-  rpc UpdateApplication(UpdateApplicationCall) returns (OAuthClient);
-  rpc DeleteApplication(DeleteApplicationRequest) returns (OAuthEmpty);
+  rpc ListApplications(ListApplicationsRequest) returns (OAuthClientPage) {
+    option (google.api.http) = {get: "/admin/applications"};
+  }
+  rpc GetApplication(GetApplicationRequest) returns (OAuthClient) {
+    option (google.api.http) = {get: "/admin/applications/{client_id}"};
+  }
+  rpc CreateApplication(RegisterClientRequest) returns (OAuthClient) {
+    option (google.api.http) = {
+      post: "/admin/applications"
+      body: "*"
+    };
+  }
+  rpc UpdateApplication(UpdateApplicationCall) returns (OAuthClient) {
+    option (google.api.http) = {
+      put: "/admin/applications/{client_id}"
+      body: "body"
+    };
+  }
+  rpc DeleteApplication(DeleteApplicationRequest) returns (OAuthEmpty) {
+    option (google.api.http) = {delete: "/admin/applications/{client_id}"};
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,13 +285,61 @@ service ApplicationAdminService {
 // ---------------------------------------------------------------------------
 
 service OAuthService {
-  rpc Authorize(AuthorizationRequest) returns (AuthorizationResponse);
-  rpc TokenExchange(TokenExchangeRequest) returns (OidcTokenResponse);
-  rpc Revoke(TokenRevocationRequest) returns (OAuthEmpty);
-  rpc Introspect(TokenIntrospectionRequest) returns (IntrospectionResponse);
-  rpc DeviceAuthorize(DeviceAuthorizationRequest) returns (DeviceAuthorizationResponse);
+  rpc Authorize(AuthorizationRequest) returns (AuthorizationResponse) {
+    option (google.api.http) = {
+      post: "/authorize"
+      body: "*"
+    };
+  }
+  // TokenExchange handles authorization_code and refresh_token grants.
+  // ClientCredentials (client_credentials grant) maps to the same POST /token
+  // endpoint via grant_type discriminator — see grpc-only.txt for the
+  // ClientCredentials RPC.
+  rpc TokenExchange(TokenExchangeRequest) returns (OidcTokenResponse) {
+    option (google.api.http) = {
+      post: "/token"
+      body: "*"
+    };
+  }
+  rpc Revoke(TokenRevocationRequest) returns (OAuthEmpty) {
+    option (google.api.http) = {
+      post: "/revoke"
+      body: "*"
+    };
+  }
+  rpc Introspect(TokenIntrospectionRequest) returns (IntrospectionResponse) {
+    option (google.api.http) = {
+      post: "/introspect"
+      body: "*"
+    };
+  }
+  rpc DeviceAuthorize(DeviceAuthorizationRequest) returns (DeviceAuthorizationResponse) {
+    option (google.api.http) = {
+      post: "/device_authorization"
+      body: "*"
+    };
+  }
+  // ClientCredentials maps to POST /token with grant_type=client_credentials.
+  // Listed here for gRPC clients; the HTTP binding duplicates TokenExchange's
+  // path intentionally — see grpc-only.txt.
   rpc ClientCredentials(ClientCredentialsRequest) returns (ClientCredentialsResponse);
-  rpc RegisterClient(RegisterClientRequest) returns (OAuthClient);
+  // Dynamic client registration (RFC 7591). Maps to POST /register (preferred)
+  // and POST /clients (legacy).
+  rpc RegisterClient(RegisterClientRequest) returns (OAuthClient) {
+    option (google.api.http) = {
+      post: "/register"
+      body: "*"
+      additional_bindings: {
+        post: "/clients"
+        body: "*"
+      }
+    };
+  }
   // Per-request permission decision endpoint (HEA-922). Requires bearer auth.
-  rpc Decide(TokenDecisionRequest) returns (TokenDecisionResponse);
+  rpc Decide(TokenDecisionRequest) returns (TokenDecisionResponse) {
+    option (google.api.http) = {
+      post: "/oauth/authorize"
+      body: "*"
+    };
+  }
 }
