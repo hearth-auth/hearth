@@ -107,9 +107,31 @@ Every SDK must provide typed access to standard JWT claims from a verified token
 | `hasScope(s)` | bool |
 | `hasRole(r)` | bool — reads Hearth `roles` claim |
 | `hasPermission(p)` | bool — reads Hearth `permissions` claim |
+| `inGroup(g)` | bool — reads Hearth `groups: string[]` claim |
+| `inOrg(o)` | bool — reads Hearth `oid: string` claim |
+| `tokenType()` | string — reads `token_type` claim (`"access"`, `"refresh"`, `"required_action"`) |
+| `organizationId()` | string \| null — reads `oid` claim |
+| `orgGroups()` | string[] — reads `org_groups` claim (Keycloak-style paths, e.g. `/org-slug/group`) |
 | `get(claim)` | raw value (for custom claims) |
 
 `hasRole` and `hasPermission` must read from Hearth's standard custom claims (`roles: string[]`, `permissions: string[]`). If the claim is absent, return `false` (never error).
+
+`inGroup` reads `groups: string[]`; `inOrg` reads the `oid` string claim (exact match). Both must return `false` (never error) when the claim is absent.
+
+### Hearth custom claims reference
+
+The following non-standard claims are embedded in every Hearth-issued JWT. SDKs must expose typed accessors for them and must never error when they are absent (older tokens or third-party relay tokens may omit them):
+
+| Claim | Type | Description |
+|-------|------|-------------|
+| `roles` | `string[]` | Roles assigned to the subject in the issuing realm |
+| `permissions` | `string[]` | Expanded permission strings derived from roles |
+| `groups` | `string[]` | Groups the subject belongs to within the realm |
+| `oid` | `string` | Organization ID the token was issued for (B2B tenancy) |
+| `org_groups` | `string[]` | Group paths scoped to the organization (Keycloak-style, e.g. `/org-slug/group`) |
+| `tid` | `string` | Realm / tenant ID (matches the realm's `RealmId`) |
+| `sid` | `string` | Session ID — present on access tokens tied to an interactive session |
+| `token_type` | `string` | Token purpose: `"access"`, `"refresh"`, or `"required_action"` |
 
 ---
 
@@ -213,7 +235,7 @@ Every SDK repo must contain:
 For use in PR reviews and automated CI checks (see `.github/workflows/sdk-conformance.yml` and `scripts/check-sdk-conformance.sh`):
 
 - [ ] Error types match the 9 names from Section 5 (`ConfigurationError`, `DiscoveryError`, `JWKSFetchError`, `TokenExpiredError`, `TokenNotYetValidError`, `TokenInvalidError`, `TokenIssuerError`, `TokenAudienceError`, `IntrospectionError`)
-- [ ] All public Claims API methods from Section 4 are present (`subject`, `issuer`, `audiences`, `expiry`, `issuedAt`, `jwtID`, `scope`, `scopes`, `hasScope`, `hasRole`, `hasPermission`, `get`)
+- [ ] All 17 public Claims API methods from Section 4 are present (`subject`, `issuer`, `audiences`, `expiry`, `issuedAt`, `jwtID`, `scope`, `scopes`, `hasScope`, `hasRole`, `hasPermission`, `inGroup`, `inOrg`, `tokenType`, `organizationId`, `orgGroups`, `get`)
 - [ ] No tokens or secrets can appear in error messages or logs (Section 11)
 - [ ] JWKS caching follows the 5-rule contract (Section 2)
 - [ ] Tests cover JWKS rotation and clock skew edge cases (Section 9)
