@@ -29,6 +29,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`private_key_jwt` client authentication (HEA-984)** — Confidential clients can now
+  authenticate to the token endpoint using RFC 7523 §2.2 `private_key_jwt` assertions instead
+  of a `client_secret`. Clients register an Ed25519 public key via `assertion_public_key`;
+  the AS verifies the self-signed JWT, enforces `iss == sub == client_id`, checks `aud` against
+  the realm issuer URL, validates `exp`, and prevents JTI replay. Both `authorization_code` and
+  `client_credentials` grant types are supported. Discovery advertises
+  `token_endpoint_auth_methods_supported: ["none", "client_secret_post", "private_key_jwt"]`.
+
 - **RFC 9207 authorization response `iss` — formal test coverage (HEA-985)** —
   Added `tests/rfc9207_iss.rs` with 6 integration tests confirming that every
   successful authorization response carries a non-empty `iss` parameter matching

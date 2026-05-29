@@ -1145,6 +1145,11 @@ struct HttpTokenRequest {
     // JWT Bearer assertion (RFC 7523)
     #[serde(default)]
     assertion: Option<String>,
+    // private_key_jwt client authentication (RFC 7523 §2.2)
+    #[serde(default)]
+    client_assertion_type: Option<String>,
+    #[serde(default)]
+    client_assertion: Option<String>,
 }
 
 /// HTTP request body for token revocation (RFC 7009).
@@ -1499,6 +1504,9 @@ fn identity_error_to_response(
             (StatusCode::BAD_REQUEST, "invalid attestation")
         }
         IdentityError::InvalidAssertion { .. } => (StatusCode::UNAUTHORIZED, "invalid assertion"),
+        IdentityError::InvalidClientAssertion { .. } => {
+            (StatusCode::UNAUTHORIZED, "invalid_client")
+        }
         IdentityError::Unauthorized => (StatusCode::FORBIDDEN, "forbidden"),
         IdentityError::ClientNotFound => (StatusCode::NOT_FOUND, "not found"),
         IdentityError::MagicLinkTokenInvalid => {
@@ -2108,6 +2116,8 @@ async fn token_exchange_impl(
                 }
             };
             request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
 
             match state
                 .identity
@@ -2179,6 +2189,8 @@ async fn token_exchange_impl(
                 }
             };
             request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
 
             let realm_str = realm_id.as_uuid().to_string();
             match state.identity.client_credentials_token(&realm_id, &request) {
@@ -6359,6 +6371,8 @@ async fn realm_token_exchange(
                 }
             };
             request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
             match state
                 .identity
                 .exchange_authorization_code(&realm_id, &request)
@@ -6412,6 +6426,8 @@ async fn realm_token_exchange(
                 }
             };
             request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
             match state.identity.client_credentials_token(&realm_id, &request) {
                 Ok(response) => {
                     let resp = pb::OidcTokenResponse {

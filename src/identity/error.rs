@@ -63,6 +63,11 @@ pub enum IdentityError {
     /// Intentionally vague — does not distinguish wrong vs. expired
     /// for enumeration resistance.
     InvalidClientSecret,
+    /// The `private_key_jwt` client assertion is invalid (RFC 7523 §2.2).
+    InvalidClientAssertion {
+        /// Why the assertion was rejected.
+        reason: String,
+    },
     /// The device authorization is still pending user action.
     AuthorizationPending,
     /// The device is polling too frequently; must slow down.
@@ -462,6 +467,9 @@ impl fmt::Display for IdentityError {
             Self::InvalidAuthorizationCode => write!(f, "invalid authorization code"),
             Self::InvalidGrant { reason } => write!(f, "invalid grant: {reason}"),
             Self::InvalidClientSecret => write!(f, "invalid client secret"),
+            Self::InvalidClientAssertion { reason } => {
+                write!(f, "invalid client assertion: {reason}")
+            }
             Self::AuthorizationPending => write!(f, "authorization pending"),
             Self::SlowDown => write!(f, "polling too frequently"),
             Self::DeviceCodeExpired => write!(f, "device code expired"),
@@ -660,6 +668,7 @@ impl std::error::Error for IdentityError {
             | Self::InvalidAuthorizationCode
             | Self::InvalidGrant { .. }
             | Self::InvalidClientSecret
+            | Self::InvalidClientAssertion { .. }
             | Self::AuthorizationPending
             | Self::SlowDown
             | Self::DeviceCodeExpired

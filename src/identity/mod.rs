@@ -609,6 +609,17 @@ pub trait IdentityEngine: Send + Sync {
         client_secret: &str,
     ) -> Result<(), IdentityError>;
 
+    /// Verifies a `private_key_jwt` client assertion per RFC 7523 §2.2.
+    ///
+    /// Validates signature, `iss == sub == client_id`, `exp` in the future,
+    /// `aud` contains the realm issuer URL, and JTI replay prevention.
+    fn verify_client_assertion(
+        &self,
+        realm_id: &RealmId,
+        client_id: &ClientId,
+        assertion: &str,
+    ) -> Result<(), IdentityError>;
+
     /// Initiates a Device Authorization Grant (RFC 8628).
     ///
     /// Generates a device code and a short user code, stores them, and

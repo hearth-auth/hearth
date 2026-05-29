@@ -667,6 +667,10 @@ pub struct TokenExchangeRequest {
     /// JWK thumbprint for DPoP binding (RFC 9449). When present, the issued access token
     /// will carry a `cnf.jkt` claim and `token_type` will be `DPoP`.
     pub dpop_jkt: Option<String>,
+    /// Assertion type for `private_key_jwt` client authentication (RFC 7523).
+    pub client_assertion_type: Option<String>,
+    /// The signed JWT assertion for `private_key_jwt` client authentication.
+    pub client_assertion: Option<String>,
 }
 
 /// Response from a successful token exchange.
@@ -914,12 +918,16 @@ pub(crate) struct StoredPushedAuthorizationRequest {
 pub struct ClientCredentialsRequest {
     /// The client requesting tokens.
     pub client_id: ClientId,
-    /// The client secret for authentication.
-    pub client_secret: String,
+    /// The client secret for authentication (required unless `client_assertion` is provided).
+    pub client_secret: Option<String>,
     /// Requested scope (space-delimited).
     pub scope: Option<String>,
     /// JWK thumbprint for DPoP binding (RFC 9449).
     pub dpop_jkt: Option<String>,
+    /// Assertion type for `private_key_jwt` client authentication (RFC 7523).
+    pub client_assertion_type: Option<String>,
+    /// The signed JWT assertion for `private_key_jwt` client authentication.
+    pub client_assertion: Option<String>,
 }
 
 /// Request for the JWT Bearer Grant (RFC 7523).

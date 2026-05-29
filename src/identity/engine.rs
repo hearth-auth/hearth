@@ -2284,6 +2284,7 @@ impl EmbeddedIdentityEngine {
             token_endpoint_auth_methods_supported: vec![
                 "none".to_string(),
                 "client_secret_post".to_string(),
+                "private_key_jwt".to_string(),
             ],
             code_challenge_methods_supported: vec!["S256".to_string()],
             grant_types_supported: vec![
@@ -5105,6 +5106,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidAuthorizationCode);
         }
 
+        // 6b. Authenticate the client if a private_key_jwt assertion was provided
+        const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+        if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
+            let assertion = request.client_assertion.as_deref().ok_or_else(|| {
+                IdentityError::InvalidClientAssertion {
+                    reason: "client_assertion is required when client_assertion_type is set"
+                        .to_string(),
+                }
+            })?;
+            self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
+        }
+
         // 7. Validate PKCE if code_challenge was present
         if let Some(ref challenge) = stored_code.code_challenge {
             let verifier = request
@@ -5625,13 +5638,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::UnsupportedGrantType);
         }
 
-        // 3. Verify client secret
-        let secret_hash = client
-            .client_secret_hash()
-            .ok_or(IdentityError::InvalidClientSecret)?;
-        let valid = credentials::verify_raw_secret(request.client_secret.as_bytes(), secret_hash)?;
-        if !valid {
-            return Err(IdentityError::InvalidClientSecret);
+        // 3. Authenticate client: private_key_jwt takes precedence over client_secret
+        const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+        if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
+            let assertion = request.client_assertion.as_deref().ok_or_else(|| {
+                IdentityError::InvalidClientAssertion {
+                    reason: "client_assertion is required when client_assertion_type is set"
+                        .to_string(),
+                }
+            })?;
+            self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
+        } else {
+            let secret = request
+                .client_secret
+                .as_deref()
+                .ok_or(IdentityError::InvalidClientSecret)?;
+            let secret_hash = client
+                .client_secret_hash()
+                .ok_or(IdentityError::InvalidClientSecret)?;
+            let valid = credentials::verify_raw_secret(secret.as_bytes(), secret_hash)?;
+            if !valid {
+                return Err(IdentityError::InvalidClientSecret);
+            }
         }
 
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
@@ -5833,6 +5861,101 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             self.config.token.access_token_ttl_secs,
             scope,
         ))
+    }
+
+    /// Verifies a `private_key_jwt` client assertion per RFC 7523 §2.2.
+    ///
+    /// Validates signature, `iss == client_id`, `sub == client_id`, `exp`, `aud`,
+    /// and JTI replay protection. Returns `Ok(())` on success; returns
+    /// `InvalidClientAssertion` on any failure so callers cannot distinguish
+    /// individual check failures (enumeration resistance).
+    fn verify_client_assertion(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        assertion: &str,
+    ) -> Result<(), IdentityError> {
+        // Load client to retrieve the registered public key.
+        let client_key = keys::encode_oauth_client(client_id);
+        let client_bytes = self
+            .storage
+            .get(realm_id, &client_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidClient)?;
+        let client: OAuthClient =
+            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        let pk_b64 =
+            client
+                .assertion_public_key()
+                .ok_or_else(|| IdentityError::InvalidClientAssertion {
+                    reason: "no assertion public key registered for this client".to_string(),
+                })?;
+        let pk_bytes =
+            URL_SAFE_NO_PAD
+                .decode(pk_b64)
+                .map_err(|_| IdentityError::InvalidClientAssertion {
+                    reason: "client has an invalid assertion public key".to_string(),
+                })?;
+
+        // Verify EdDSA signature — rejects alg:none, HMAC, RSA, etc.
+        let claims = tokens::verify_assertion_signature(assertion, &pk_bytes).map_err(|_| {
+            IdentityError::InvalidClientAssertion {
+                reason: "assertion signature verification failed".to_string(),
+            }
+        })?;
+
+        // iss MUST equal client_id (RFC 7523 §3)
+        if claims.iss != client_id.to_string() {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "iss claim must equal the client_id".to_string(),
+            });
+        }
+
+        // sub MUST equal client_id (RFC 7523 §3 / OIDC Core §9)
+        if claims.sub != client_id.to_string() {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "sub claim must equal the client_id".to_string(),
+            });
+        }
+
+        // exp MUST be in the future
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if now_secs >= claims.exp {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "assertion has expired".to_string(),
+            });
+        }
+
+        // aud MUST contain this realm's token endpoint URL
+        let expected_aud = self.realm_issuer_url(realm_id);
+        if !claims.aud.contains(&expected_aud) {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "aud claim does not match the token endpoint issuer".to_string(),
+            });
+        }
+
+        // JTI replay protection — each JTI may only be used once per realm.
+        if let Some(ref jti) = claims.jti {
+            let jti_key = keys::encode_client_assertion_jti(jti);
+            if self
+                .storage
+                .get(realm_id, &jti_key)
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
+                return Err(IdentityError::InvalidClientAssertion {
+                    reason: "assertion jti has already been used (replay)".to_string(),
+                });
+            }
+            self.storage
+                .put(realm_id, &jti_key, b"1")
+                .map_err(Self::storage_err)?;
+        }
+
+        Ok(())
     }
 
     fn device_authorize(

@@ -45,7 +45,8 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::TokenExpired
         | IdentityError::InvalidCredential { .. }
         | IdentityError::InvalidClient
-        | IdentityError::InvalidClientSecret => (Code::Unauthenticated, err.to_string()),
+        | IdentityError::InvalidClientSecret
+        | IdentityError::InvalidClientAssertion { .. } => (Code::Unauthenticated, err.to_string()),
         IdentityError::Unauthorized
         | IdentityError::SystemRealmProtected { .. }
         | IdentityError::RealmSuspended
