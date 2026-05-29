@@ -36,7 +36,7 @@ import asyncio
 from typing import Awaitable, Callable, Optional, TYPE_CHECKING
 
 from .claims import Claims
-from .errors import AuthorizationModeMismatchError
+from .errors import AuthorizationModeMismatchError, RequiredActionError
 
 if TYPE_CHECKING:
     from .client import HearthClient
@@ -105,6 +105,27 @@ def _check_introspection_sync(
     return permission in (resp.permissions or [])
 
 
+def _is_required_action_token(token: str) -> bool:
+    """Return True when the token's token_type claim is 'required_action'."""
+    try:
+        return Claims.decode(token).token_type() == "required_action"
+    except Exception:
+        return False
+
+
+async def _send_401_required_action(send: Callable) -> None:
+    """Emit a minimal HTTP 401 ASGI response for required-action tokens (spec §6 rule 6)."""
+    await send({
+        "type": "http.response.start",
+        "status": 401,
+        "headers": [
+            [b"content-type", b"text/plain; charset=utf-8"],
+            [b"www-authenticate", b'Bearer realm="hearth", error="required_action"'],
+        ],
+    })
+    await send({"type": "http.response.body", "body": b"Required actions pending"})
+
+
 async def _send_403(send: Callable) -> None:
     """Emit a minimal HTTP 403 ASGI response."""
     await send({
@@ -113,6 +134,18 @@ async def _send_403(send: Callable) -> None:
         "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
     })
     await send({"type": "http.response.body", "body": b"Forbidden"})
+
+
+def _wsgi_401_required_action(start_response: Callable) -> list:
+    """Return a minimal HTTP 401 WSGI response for required-action tokens (spec §6 rule 6)."""
+    start_response(
+        "401 Unauthorized",
+        [
+            ("Content-Type", "text/plain"),
+            ("WWW-Authenticate", 'Bearer realm="hearth", error="required_action"'),
+        ],
+    )
+    return [b"Required actions pending"]
 
 
 def _wsgi_403(start_response: Callable) -> list:
@@ -170,6 +203,12 @@ class RequirePermissionMiddleware:
         token = _extract_bearer_asgi(scope)
         if not token:
             await _send_403(send)
+            return
+
+        if _is_required_action_token(token):
+            # Spec §6 rule 6: required_action tokens must never be accepted for
+            # general API access — respond 401 and do not call next.
+            await _send_401_required_action(send)
             return
 
         try:
@@ -263,6 +302,11 @@ class WsgiPermissionMiddleware:
         token = _extract_bearer_environ(environ)
         if not token:
             return _wsgi_403(start_response)
+
+        if _is_required_action_token(token):
+            # Spec §6 rule 6: required_action tokens must never be accepted for
+            # general API access — respond 401 and do not call next.
+            return _wsgi_401_required_action(start_response)
 
         try:
             allowed = self._check(token)
