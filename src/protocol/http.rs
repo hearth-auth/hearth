@@ -1837,7 +1837,7 @@ async fn authorize(
     headers: HeaderMap,
     Json(body): Json<pb::AuthorizationRequest>,
 ) -> impl IntoResponse {
-    use crate::identity::{AuthorizationRequest, CodeChallengeMethod, IdentityError};
+    use crate::identity::{AuthorizationRequest, IdentityError};
 
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,

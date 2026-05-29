@@ -9,6 +9,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **PAR `request_uri` now consumed in HTTP authorize handler (HEA-1017)** —
+  `GET /ui/oauth/authorize` and `POST /v1/authorize` previously ignored the
+  `request_uri` query/body parameter, causing FAPI 2.0 Baseline realms to
+  reject every browser-based authorization request (the handler always passed
+  `via_par = false`). Both handlers now call `consume_par` when `request_uri`
+  is present, expand the pre-validated stored parameters, and set `via_par =
+  true` — enabling FAPI 2.0 Baseline and Advanced clients to complete the
+  authorization code flow. The gRPC `OAuthService.Authorize` RPC gains the
+  same PAR expansion. `AuthorizationRequest` in the gRPC/REST proto gains an
+  optional `request_uri` field (field 10).
+
 - **FAPI 2.0 DPoP enforcement on `refresh_token` grant (HEA-1016)** — FAPI 2.0
   clients must now supply a DPoP proof on every token endpoint call, including
   `grant_type=refresh_token`. Requests without a DPoP header are rejected with

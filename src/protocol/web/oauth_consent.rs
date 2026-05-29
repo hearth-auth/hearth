@@ -122,6 +122,11 @@ pub struct AuthorizeQuery {
     /// serve only as defaults.
     #[serde(default)]
     pub request: Option<String>,
+    /// PAR `request_uri` (RFC 9126). When present, this handler calls
+    /// `consume_par` to expand the pre-validated stored parameters and
+    /// sets `via_par = true` on the resulting authorization request.
+    #[serde(default)]
+    pub request_uri: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +212,40 @@ async fn authorize_get_impl(
     q: &AuthorizeQuery,
     headers: &axum::http::HeaderMap,
 ) -> Response {
+    // 0. PAR path: when `request_uri` is present, consume the stored entry to
+    //    expand the pre-validated parameters and set `via_par = true`.  This
+    //    must run before the JAR check because a PAR submission may itself
+    //    have contained a JAR — the stored params are already the effective
+    //    values; no re-extraction is needed here.
+    if let Some(ref request_uri) = q.request_uri {
+        let stored = match state.identity.consume_par(realm, request_uri) {
+            Ok(s) => s,
+            Err(IdentityError::InvalidPushedAuthorizationRequest) => {
+                return handlers_common::bad_request("invalid or expired request_uri");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "consume_par failed in authorize_get_impl");
+                return handlers_common::server_error();
+            }
+        };
+        return issue_code_and_redirect(
+            state,
+            realm,
+            &session.user_id,
+            &stored.client_id,
+            &stored.redirect_uri,
+            &stored.scope,
+            &stored.state,
+            stored.code_challenge,
+            stored.code_challenge_method,
+            stored.nonce,
+            Vec::new(),
+            None, // response_mode — PAR stores these; extend when needed
+            None, // jar_request — already consumed at PAR push time
+            true, // via_par
+        );
+    }
+
     // 1. client_id is always required (JAR and non-JAR alike).
     let Ok(client_uuid) = uuid::Uuid::parse_str(&q.client_id) else {
         return handlers_common::bad_request("invalid client_id");

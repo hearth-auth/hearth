@@ -17,6 +17,10 @@ message AuthorizationRequest {
   optional string code_challenge = 7;
   optional string code_challenge_method = 8;
   optional string nonce = 9;
+  // PAR request_uri (RFC 9126). When set, the server expands the stored
+  // pushed authorization parameters and treats this as a PAR-backed request
+  // (via_par = true). Other authorization fields are ignored when this is set.
+  optional string request_uri = 10;
 }
 
 // Response from a successful authorization request.
