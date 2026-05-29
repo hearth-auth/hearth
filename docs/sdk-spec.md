@@ -26,7 +26,24 @@ SDKs **must** auto-discover all endpoint URLs from `{issuer_url}/.well-known/ope
 
 ## 2. JWKS & Token Verification
 
-**Required algorithms:** RS256, ES256. Both must be supported; others may be allowed if the server advertises them in `jwks_uri`.
+**Required algorithm:** Ed25519 (`alg: "EdDSA"`, `kty: "OKP"`). Hearth exclusively issues tokens signed with Ed25519; SDKs **must** support OKP key verification.
+
+> **Federation exception:** Hearth may relay tokens from third-party identity providers (e.g., enterprise SSO) that use RS256 or ES256. SDKs _should_ accept these algorithms when the corresponding key is present in the JWKS and the token's `alg` header matches, but RS256/ES256 are **never issued by Hearth itself**.
+
+**OKP (Ed25519) JWKS key format:**
+
+Hearth's JWKS endpoint emits Ed25519 public keys using the OKP key type defined in [RFC 8037](https://www.rfc-editor.org/rfc/rfc8037):
+
+| Field | Value |
+|-------|-------|
+| `kty` | `"OKP"` |
+| `crv` | `"Ed25519"` |
+| `x`   | Base64url-encoded 32-byte public key (the only coordinate) |
+| `y`   | **Absent** — OKP/Ed25519 keys have no y-coordinate |
+| `alg` | `"EdDSA"` |
+| `use` | `"sig"` |
+
+SDKs must parse OKP JWKs that omit `y`. Parsers that assume `y` is always present (common in EC-only JWK implementations) will fail to load Hearth's signing keys.
 
 **JWKS caching rules (mandatory):**
 1. Cache keys by `kid`. Do not discard keys not present in the latest fetch.
@@ -34,6 +51,7 @@ SDKs **must** auto-discover all endpoint URLs from `{issuer_url}/.well-known/ope
 3. On cache miss for a `kid`: re-fetch once before returning an error.
 4. On HTTP 401 from a protected resource: re-fetch JWKS once, then retry the verification.
 5. Maximum cache age: 24 hours regardless of Cache-Control.
+6. When parsing a cached JWKS, skip (do not error on) any key with an unrecognized `kty`; Hearth may add new key types for federation keys without a version bump.
 
 **JWT validation steps (mandatory, in order):**
 1. Verify signature against cached JWKS.
