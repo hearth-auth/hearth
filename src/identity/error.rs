@@ -449,6 +449,15 @@ pub enum IdentityError {
         /// Machine-readable reason string.
         reason: String,
     },
+    /// The request violates a FAPI 2.0 Security Profile constraint.
+    ///
+    /// Returned when a client registered with `profile: fapi2` attempts an
+    /// operation that is forbidden by the FAPI 2.0 spec (e.g., non-PAR
+    /// authorization, missing DPoP, forbidden response type).
+    FapiViolation {
+        /// Human-readable description of the violated constraint.
+        reason: String,
+    },
 }
 
 impl fmt::Display for IdentityError {
@@ -651,6 +660,9 @@ impl fmt::Display for IdentityError {
             Self::JwtBearerAssertionInvalid { reason } => {
                 write!(f, "invalid JWT bearer assertion: {reason}")
             }
+            Self::FapiViolation { reason } => {
+                write!(f, "FAPI 2.0 violation: {reason}")
+            }
             Self::SessionLimitExceeded { limit, active } => write!(
                 f,
                 "session limit exceeded: {active} active sessions, limit is {limit}"
@@ -766,7 +778,8 @@ impl std::error::Error for IdentityError {
             | Self::JwtBearerAssertionInvalid { .. }
             | Self::InvalidJar { .. }
             | Self::SessionVersionDisabled
-            | Self::SessionLimitExceeded { .. } => None,
+            | Self::SessionLimitExceeded { .. }
+            | Self::FapiViolation { .. } => None,
         }
     }
 }

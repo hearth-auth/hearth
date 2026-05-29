@@ -348,6 +348,7 @@ pub async fn admin_onboarding_app_post(
         jwks: None,
         jwks_uri: None,
         authorization_signed_response_alg: None,
+        profile: crate::identity::ClientProfile::Standard,
     };
 
     match state.identity.register_client(&realm_id, &req) {

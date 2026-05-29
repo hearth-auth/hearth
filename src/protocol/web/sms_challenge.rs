@@ -485,7 +485,8 @@ pub async fn sms_challenge_post(
                 nonce,
                 vec!["sms".to_string()],
                 None,
-                None, // jar_request — SMS MFA resume uses pre-validated params
+                None,  // jar_request — SMS MFA resume uses pre-validated params
+                false, // via_par — SMS MFA resume is never PAR-initiated
             );
             append_cookie(&mut response, &clear);
             response

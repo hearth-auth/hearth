@@ -107,6 +107,7 @@ fn auth_request(env: &Env) -> AuthorizationRequest {
         amr_values: vec![],
         response_mode: None,
         request: None,
+        via_par: false,
     }
 }
 

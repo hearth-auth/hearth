@@ -106,6 +106,7 @@ fn authorize_with_mode(env: &Env, mode: ResponseMode) -> hearth::identity::Autho
                 amr_values: vec![],
                 response_mode: Some(mode),
                 request: None,
+                via_par: false,
             },
         )
         .expect("authorize")
@@ -236,6 +237,7 @@ async fn no_response_mode_returns_plain_response() {
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
+                via_par: false,
             },
         )
         .expect("authorize without response_mode");
@@ -333,6 +335,7 @@ async fn no_response_mode_defaults_to_query() {
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -415,6 +418,7 @@ async fn mandatory_jarm_client_gets_jarm_without_response_mode() {
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -492,6 +496,7 @@ async fn mandatory_jarm_client_upgrades_plain_query_mode() {
                 amr_values: vec![],
                 response_mode: Some(ResponseMode::Query),
                 request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -1009,4 +1014,33 @@ async fn jarm_jwt_signature_verifies_via_jwks() {
     public_key
         .verify(signed_input.as_bytes(), &sig_bytes)
         .expect("JARM JWT Ed25519 signature must verify against the realm's JWKS public key");
+}
+
+// ---------------------------------------------------------------------------
+// JARM-security: JARM JWT is rejected when presented as a Bearer access token
+//
+// Regression for HEA-1004 (RFC 8725 §3.11 token-type confusion).
+// Before the fix, JARM used typ:"JWT" — same as access tokens.  After the
+// fix, typ is "oauth-authz-resp+jwt", and verify_token_signature rejects any
+// token whose typ header differs from JWT_TYPE ("JWT"), giving defense-in-depth
+// beyond the missing `sub`/`token_type` claims.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn jarm_jwt_rejected_as_bearer_token() {
+    let env = setup().await;
+    let resp = authorize_with_mode(&env, ResponseMode::QueryJwt);
+
+    let jarm_jwt = resp
+        .jarm_jwt()
+        .expect("query.jwt mode must produce a JARM JWT")
+        .to_string();
+
+    // Present the JARM JWT as if it were an access token.
+    let result = env.harness.identity().validate_token(&env.realm, &jarm_jwt);
+
+    assert!(
+        result.is_err(),
+        "JARM JWT must be rejected when used as a Bearer access token (RFC 8725 §3.11)"
+    );
 }

@@ -289,6 +289,7 @@ async fn valid_assertion_exchanges_auth_code() {
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -824,6 +825,7 @@ async fn auth_code_exchange_without_assertion_rejected_for_pkjwt_client() {
                 amr_values: vec![],
                 response_mode: None,
                 request: None,
+                via_par: false,
             },
         )
         .expect("authorize");

@@ -7,6 +7,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **JARM JWT token-type confusion fix (HEA-1004)** — JARM JWTs now carry
+  `typ: "oauth-authz-resp+jwt"` (IANA-registered media type per JARM §4.1 /
+  RFC 9101 §2) instead of the generic `"JWT"`. This gives explicit RFC 8725
+  §3.11 token-type discrimination: `validate_token` rejects JARM JWTs
+  as Bearer tokens at the `typ`-header check before any claim parsing.
+  JARM JWT lifetime capped at 300 s (FAPI 2.0 §5.3.2.2) and `iat` claim added.
+
 ### Added
 
 - **JAR on direct `/authorize` (HEA-983)** — the `GET /authorize` endpoint now
@@ -25,6 +34,24 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   of plain `code=...&state=...`, providing end-to-end integrity for the browser
   redirect. Discovery now advertises `query.jwt`, `fragment.jwt`, and `jwt` in
   `response_modes_supported` (OAuth 2.0 JARM).
+
+- **FAPI 2.0 Security Profile — per-client `ClientProfile::Fapi2` (HEA-980)** —
+  individual OAuth 2.0 clients may now be registered with `"profile": "fapi2"`.
+  Clients in this profile must use `private_key_jwt` (no `client_secret`), must
+  register a JWKS, must submit every authorization request via PAR (`via_par`),
+  must supply a DPoP proof at the token endpoint, and receive `s_hash` in JARM
+  responses when `state` is present. Standard clients in the same realm are
+  completely unaffected. See `docs/specs/OIDC.md §2.2` for the full normative
+  spec (HEA-980).
+
+- **FAPI 2.0 Security Profile enforcement (HEA-987)** — realms may now declare
+  `fapi_profile: baseline` or `fapi_profile: advanced` in their configuration.
+  **Baseline** mandates PAR (RFC 9126) and PKCE (S256) on every authorization
+  request. **Advanced** additionally requires JAR (RFC 9101) in the PAR body,
+  JARM (`authorization_signed_response_alg` on the client), and a registered
+  client JWKS (`private_key_jwt`). The OIDC discovery document now advertises
+  `fapi_profile` when a realm is in either mode. Clients in non-FAPI realms are
+  unaffected (HEA-987).
 
 - **Mandatory JARM per client (HEA-986)** — `OAuthClient` now carries an
   `authorization_signed_response_alg` field (`EdDSA` only). When set via
@@ -85,6 +112,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   - **SEC-5 (Fail-open):** A `get_realm` storage error during session
     creation now propagates to the caller and rejects the session, rather
     than skipping limit enforcement and proceeding.
+
+- **Unknown `response_mode` rejected with `invalid_request` (HEA-1005)** —
+  two call sites in the OAuth authorization handler previously used `.ok()` to
+  silently discard `response_mode` parse failures, causing unrecognized values
+  (typos, unsupported modes such as `"form_post.jwt"`) to fall through to plain
+  `query` mode. A client requiring JARM would receive an unprotected plain-text
+  redirect with no error signal, defeating the integrity guarantee JARM provides.
+  Both the bypass path (direct code issue without consent page) and the consent
+  completion path now return an `invalid_request` redirect immediately when the
+  `response_mode` value cannot be parsed (FAPI 2.0 / RFC 9207 / JARM spec
+  compliance, Medium severity).
 
 ### Added
 

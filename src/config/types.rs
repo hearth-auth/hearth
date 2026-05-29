@@ -2043,6 +2043,7 @@ impl RealmYamlConfig {
             session_version: crate::identity::SessionVersionConfig::default(),
             max_concurrent_sessions,
             session_over_limit_policy,
+            fapi_profile: None,
         })
     }
 }

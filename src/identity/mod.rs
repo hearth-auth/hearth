@@ -43,8 +43,8 @@ pub use error::IdentityError;
 pub use magic_link::MagicLinkResponse;
 pub use oidc::{
     fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,
-    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel,
-    CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
+    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientProfile,
+    ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
     OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
@@ -67,10 +67,10 @@ pub use types::{
     canonicalize_scopes, AdaptiveMfaConfig, AttributeDefinition, AttributeDefinitions,
     AttributeType, BreachCheckConfig, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
     CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    CreateWebhookRequest, CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
-    OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
-    PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
+    CreateWebhookRequest, CredentialExport, DcrPolicy, FapiProfile, ImportClientRequest,
+    ImportUserRequest, InvitationStatus, MigrationReport, Organization, OrganizationConfig,
+    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
+    PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
     RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
     UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
@@ -1384,6 +1384,7 @@ pub trait IdentityEngine: Send + Sync {
         amr_values: Vec<String>,
         response_mode: Option<ResponseMode>,
         jar_request: Option<String>,
+        via_par: bool,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     // ===== External IdP federation (Phase 2: Gap #5) =====

@@ -803,6 +803,7 @@ fn authorize_direct_with_jar(
         vec![],
         None,
         Some(jar_jwt),
+        false, // JAR path, not via PAR
     )
 }
 

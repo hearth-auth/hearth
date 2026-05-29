@@ -345,6 +345,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
 
         IdentityError::InvalidPushedAuthorizationRequest => Some("invalid_request"),
         IdentityError::InvalidJar { .. } => Some("invalid_request_object"),
+        IdentityError::FapiViolation { .. } => Some("fapi_violation"),
 
         IdentityError::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
         IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => Some("use_dpop_nonce"),

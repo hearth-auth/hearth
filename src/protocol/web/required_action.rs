@@ -470,7 +470,8 @@ pub fn resume_oidc_flow(
         oidc_params.nonce.clone(),
         Vec::new(),
         response_mode,
-        None, // jar_request — RA resume restores pre-validated params
+        None,  // jar_request — RA resume restores pre-validated params
+        false, // not via PAR (required action resume)
     ) {
         Ok(resp) => {
             let location = build_authorization_redirect(&oidc_params.redirect_uri, &resp);

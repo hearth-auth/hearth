@@ -244,6 +244,7 @@ async fn authorize_get_impl(
                 .as_deref()
                 .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok()),
             q.request.clone(),
+            false, // JAR path: not via PAR (JAR != PAR)
         );
     }
 
@@ -388,7 +389,8 @@ async fn authorize_get_impl(
             optional(&q.nonce),
             Vec::new(),
             parsed_response_mode,
-            None, // jar_request — already handled above for JAR path
+            None,  // jar_request — already handled above for JAR path
+            false, // not via PAR (direct /authorize)
         );
     }
 
@@ -688,7 +690,8 @@ pub async fn consent_submit(
                 pending.nonce.clone(),
                 Vec::new(),
                 pending_response_mode,
-                None, // jar_request — consent was already approved; no JAR needed
+                None,  // jar_request — consent was already approved; no JAR needed
+                false, // not via PAR (direct /authorize)
             );
             append_cookie(&mut response, &clear_cookie);
             response
@@ -847,6 +850,7 @@ pub(super) fn issue_code_and_redirect(
     amr_values: Vec<String>,
     response_mode: Option<crate::identity::ResponseMode>,
     jar_request: Option<String>,
+    via_par: bool,
 ) -> Response {
     match state.identity.issue_authorization_code(
         realm,
@@ -861,6 +865,7 @@ pub(super) fn issue_code_and_redirect(
         amr_values,
         response_mode,
         jar_request,
+        via_par,
     ) {
         Ok(resp) => {
             let location = build_authorization_redirect(redirect_uri, &resp);

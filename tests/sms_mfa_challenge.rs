@@ -228,6 +228,7 @@ async fn sms_amr_claim_in_tokens() {
             vec!["sms".to_string()],
             None,
             None,
+            false,
         )
         .expect("issue_authorization_code");
 
@@ -292,6 +293,7 @@ async fn no_sms_mfa_means_empty_amr() {
             Vec::new(),
             None,
             None,
+            false,
         )
         .expect("issue_authorization_code");
 
@@ -421,6 +423,7 @@ async fn sms_amr_preserved_through_refresh() {
             vec!["sms".to_string()],
             None,
             None,
+            false,
         )
         .expect("issue_authorization_code");
 

@@ -1,0 +1,117 @@
+{
+  "description": "FAPI 2.0 Security Profile conformance test vectors (curated subset).",
+  "spec_refs": [
+    "FAPI 2.0 Security Profile 1.0 (fapi-2_0-security-profile)",
+    "RFC 9126 (PAR)",
+    "RFC 9449 (DPoP)",
+    "OAuth 2.0 JARM"
+  ],
+  "vectors": [
+    {
+      "id": "FAPI2-REG-01",
+      "description": "FAPI2 client registration with client_secret rejected",
+      "spec": "FAPI 2.0 §5.3.1.1 — only private_key_jwt or mTLS allowed",
+      "input": {
+        "profile": "fapi2",
+        "client_secret": "should-be-rejected",
+        "jwks": null
+      },
+      "expected_error": "fapi_violation"
+    },
+    {
+      "id": "FAPI2-REG-02",
+      "description": "FAPI2 client registration without JWKS rejected",
+      "spec": "FAPI 2.0 §5.3.1.1 — clients must register a JWKS",
+      "input": {
+        "profile": "fapi2",
+        "client_secret": null,
+        "jwks": null,
+        "jwks_uri": null
+      },
+      "expected_error": "fapi_violation"
+    },
+    {
+      "id": "FAPI2-REG-03",
+      "description": "FAPI2 client registration with JWKS succeeds",
+      "spec": "FAPI 2.0 §5.3.1.1",
+      "input": {
+        "profile": "fapi2",
+        "client_secret": null,
+        "jwks": "{\"keys\":[{\"kty\":\"OKP\",\"use\":\"sig\",\"alg\":\"EdDSA\"}]}"
+      },
+      "expected": "success"
+    },
+    {
+      "id": "FAPI2-AUTH-01",
+      "description": "FAPI2 client direct /authorize (no PAR) rejected",
+      "spec": "FAPI 2.0 §5.3.2 — PAR mandatory",
+      "input": {
+        "via_par": false
+      },
+      "expected_error": "fapi_violation"
+    },
+    {
+      "id": "FAPI2-AUTH-02",
+      "description": "FAPI2 client authorization via PAR succeeds",
+      "spec": "FAPI 2.0 §5.3.2",
+      "input": {
+        "via_par": true
+      },
+      "expected": "success"
+    },
+    {
+      "id": "FAPI2-TOKEN-01",
+      "description": "FAPI2 token exchange without DPoP rejected",
+      "spec": "FAPI 2.0 §5.3.3 — sender-constrained tokens mandatory",
+      "input": {
+        "dpop_jkt": null
+      },
+      "expected_error": "fapi_violation"
+    },
+    {
+      "id": "FAPI2-TOKEN-02",
+      "description": "FAPI2 token exchange with DPoP succeeds",
+      "spec": "FAPI 2.0 §5.3.3",
+      "input": {
+        "dpop_jkt": "abc123_thumbprint"
+      },
+      "expected": "success"
+    },
+    {
+      "id": "FAPI2-JARM-01",
+      "description": "FAPI2 JARM response includes s_hash when state is non-empty",
+      "spec": "FAPI 2.0 §5.3.2.3 — s_hash = BASE64URL(LEFT(SHA-256(state), 16))",
+      "input": {
+        "state": "test-state-value",
+        "jarm_enabled": true
+      },
+      "expected_claims": {
+        "s_hash_present": true
+      }
+    },
+    {
+      "id": "FAPI2-JARM-02",
+      "description": "Standard client JARM response does not include s_hash",
+      "spec": "s_hash is FAPI2-only",
+      "input": {
+        "profile": "standard",
+        "state": "test-state-value",
+        "jarm_enabled": true
+      },
+      "expected_claims": {
+        "s_hash_present": false
+      }
+    },
+    {
+      "id": "FAPI2-STD-01",
+      "description": "Standard client not subject to FAPI2 constraints",
+      "spec": "Standard profile has no additional restrictions",
+      "input": {
+        "profile": "standard",
+        "via_par": false,
+        "dpop_jkt": null
+      },
+      "expected": "success"
+    }
+  ]
+}

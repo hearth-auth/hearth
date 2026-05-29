@@ -867,6 +867,37 @@ pub struct RealmConfig {
     /// Defaults to `RejectNew`. Set to `EvictOldest` to opt in to eviction.
     #[serde(default)]
     pub session_over_limit_policy: SessionLimitPolicy,
+    /// FAPI 2.0 Security Profile enforcement level for this realm.
+    ///
+    /// When set, the authorization server enforces the corresponding FAPI profile
+    /// on all authorization requests in this realm:
+    ///
+    /// - `baseline` — requires PAR + PKCE (S256) on every request.
+    /// - `advanced` — additionally requires JAR, JARM, and `private_key_jwt`.
+    ///
+    /// `None` (default) means standard OAuth 2.0 / OIDC rules apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fapi_profile: Option<FapiProfile>,
+}
+
+/// FAPI 2.0 Security Profile enforcement level.
+///
+/// Activates when set on a `RealmConfig`. Controls which FAPI 2.0 constraints
+/// the AS enforces for all authorization requests in the realm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum FapiProfile {
+    /// FAPI 2.0 Baseline Security Profile.
+    ///
+    /// Requires: PAR (RFC 9126), PKCE with S256 (RFC 7636), `iss` in responses
+    /// (RFC 9207). All authorization requests must be submitted as PAR.
+    Baseline,
+    /// FAPI 2.0 Advanced Security Profile.
+    ///
+    /// Requires all Baseline constraints plus: JAR (RFC 9101), JARM
+    /// (OAuth 2.0 JARM), and `private_key_jwt` client authentication.
+    Advanced,
 }
 
 /// Per-realm session-version (`sv`) tracking configuration.

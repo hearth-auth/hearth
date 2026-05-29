@@ -20,6 +20,44 @@ pub enum ClientTrustLevel {
     ThirdParty,
 }
 
+/// Security profile for an OAuth 2.0 client.
+///
+/// When set to `Fapi2`, the authorization server enforces the full FAPI 2.0
+/// Security Profile (FAPI2SP) restrictions on this client:
+///
+/// - PAR-only: every authorization request MUST arrive via a pushed
+///   authorization request (`request_uri`); direct `/authorize` calls are
+///   rejected.
+/// - `response_type=code` only: implicit and hybrid flows are forbidden.
+/// - `private_key_jwt` client authentication only: `client_secret` is
+///   forbidden at registration time; clients must register a JWKS.
+/// - Sender-constrained tokens: the token endpoint requires a DPoP proof
+///   (or mTLS — future). Requests without `dpop_jkt` are rejected.
+/// - `s_hash` in JARM: when `state` is non-empty, a SHA-256 hash of the
+///   state is added to the JARM JWT for binding verification.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientProfile {
+    /// Standard OAuth 2.0 / OIDC client (default).
+    #[default]
+    Standard,
+    /// FAPI 2.0 Security Profile — elevated constraints apply.
+    Fapi2,
+}
+
+impl ClientProfile {
+    /// Returns `true` if this is a FAPI 2.0 client.
+    pub fn is_fapi2(self) -> bool {
+        matches!(self, Self::Fapi2)
+    }
+
+    /// Returns `true` if this is a Standard (default) client. Used by serde
+    /// `skip_serializing_if` to omit the field from stored records when default.
+    pub fn is_standard(&self) -> bool {
+        matches!(self, Self::Standard)
+    }
+}
+
 /// The lifecycle status of an OAuth 2.0 application client.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -123,6 +161,8 @@ pub struct RegisterClientRequest {
     ///
     /// When set, JARM is mandatory for this client. Supported values: `"EdDSA"`.
     pub authorization_signed_response_alg: Option<String>,
+    /// Security profile for this client. Defaults to `Standard`.
+    pub profile: ClientProfile,
 }
 
 impl Default for RegisterClientRequest {
@@ -147,6 +187,7 @@ impl Default for RegisterClientRequest {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            profile: ClientProfile::Standard,
         }
     }
 }
@@ -262,6 +303,11 @@ pub struct OAuthClient {
     /// values: `"EdDSA"`. Omit to allow plain responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     authorization_signed_response_alg: Option<String>,
+    /// Security profile for this client. Defaults to `Standard` for
+    /// backward-compatible deserialization of records written before the
+    /// profile field was introduced.
+    #[serde(default, skip_serializing_if = "ClientProfile::is_standard")]
+    profile: ClientProfile,
 }
 
 fn default_require_consent() -> bool {
@@ -298,6 +344,7 @@ impl OAuthClient {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            profile: ClientProfile::Standard,
         }
     }
 
@@ -332,6 +379,7 @@ impl OAuthClient {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            profile: ClientProfile::Standard,
         }
     }
 
@@ -543,6 +591,16 @@ impl OAuthClient {
         self.authorization_signed_response_alg = alg;
     }
 
+    /// Returns the client's security profile.
+    pub fn profile(&self) -> ClientProfile {
+        self.profile
+    }
+
+    /// Sets the client's security profile.
+    pub(crate) fn set_profile(&mut self, profile: ClientProfile) {
+        self.profile = profile;
+    }
+
     /// Returns `true` if this client was provisioned from YAML configuration.
     ///
     /// YAML-managed clients have deterministic UUID v5 identifiers (derived
@@ -596,6 +654,8 @@ pub struct UpdateClientRequest {
     /// JARM signing algorithm update. `Some(Some("EdDSA"))` enables mandatory JARM,
     /// `Some(None)` clears it (disables mandatory JARM). `None` leaves unchanged.
     pub authorization_signed_response_alg: Option<Option<String>>,
+    /// Updated security profile. `None` leaves unchanged.
+    pub profile: Option<ClientProfile>,
 }
 
 // ===== RP-Initiated Logout =====
@@ -752,6 +812,13 @@ pub struct AuthorizationRequest {
     /// (and override) the request fields. The outer `client_id` must match
     /// the `iss` claim inside the JWT.
     pub request: Option<String>,
+    /// Whether this authorization request was submitted via PAR (RFC 9126).
+    ///
+    /// `true` when the web layer consumed a `request_uri` produced by
+    /// `push_authorization_request` before calling `issue_authorization_code`.
+    /// FAPI 2.0 clients require `via_par = true` — direct `/authorize` calls
+    /// without a prior PAR submission are rejected.
+    pub via_par: bool,
 }
 
 /// Response from a successful authorization request.
@@ -848,6 +915,12 @@ pub(crate) struct JarmClaims {
     pub code: String,
     /// The echoed state value.
     pub state: String,
+    /// FAPI 2.0 §5.3.2.3: BASE64URL(LEFT(SHA-256(ASCII(state)), 16)).
+    ///
+    /// Required for FAPI 2.0 clients when `state` is non-empty.
+    /// `None` for Standard clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s_hash: Option<String>,
 }
 
 /// JWT claims for a JARM error response (JARM §4.3).
@@ -1066,6 +1139,12 @@ pub struct OidcDiscoveryDocument {
     /// JARM authorization response signing algorithms supported (OAuth 2.0 JARM §10).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authorization_signing_alg_values_supported: Vec<String>,
+    /// FAPI 2.0 Security Profile enforced for this realm.
+    ///
+    /// `"baseline"` or `"advanced"` when a FAPI profile is configured;
+    /// omitted for standard OAuth 2.0 / OIDC realms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fapi_profile: Option<String>,
 }
 
 // ===== JWT Authorization Requests — RFC 9101 (JAR) =====
@@ -1721,6 +1800,7 @@ mod tests {
             dpop_signing_alg_values_supported: Vec::new(),
             request_object_signing_alg_values_supported: Vec::new(),
             authorization_signing_alg_values_supported: Vec::new(),
+            fapi_profile: None,
         };
 
         let json = serde_json::to_string(&doc).expect("serialize");

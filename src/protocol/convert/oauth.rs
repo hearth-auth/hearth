@@ -70,6 +70,7 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             jwks: None,
             jwks_uri: None,
             authorization_signed_response_alg: None,
+            profile: domain::ClientProfile::Standard,
         }
     }
 }
@@ -114,6 +115,7 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
                 }
             }),
             authorization_signed_response_alg: None,
+            profile: None,
         }
     }
 }
@@ -152,6 +154,7 @@ pub(crate) fn proto_authorize_to_domain(
         amr_values: Vec::new(),
         response_mode: None,
         request: None,
+        via_par: false,
     })
 }
 

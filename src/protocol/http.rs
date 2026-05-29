@@ -1650,6 +1650,7 @@ fn identity_error_to_response(
             (StatusCode::UNAUTHORIZED, "invalid_grant")
         }
         IdentityError::InvalidJar { .. } => (StatusCode::BAD_REQUEST, "invalid_request_object"),
+        IdentityError::FapiViolation { .. } => (StatusCode::BAD_REQUEST, "invalid_request"),
         IdentityError::SessionLimitExceeded { .. } => {
             (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
         }
@@ -6841,6 +6842,7 @@ async fn realm_register_client_dynamic(
         jwks: None,
         jwks_uri: None,
         authorization_signed_response_alg: None,
+        profile: crate::identity::ClientProfile::Standard,
     };
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {

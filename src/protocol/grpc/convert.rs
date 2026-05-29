@@ -155,6 +155,9 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::InvalidJar { .. } => {
             (Code::InvalidArgument, "invalid_request_object".to_string())
         }
+        IdentityError::FapiViolation { reason } => {
+            (Code::InvalidArgument, format!("fapi_violation: {reason}"))
+        }
         IdentityError::InvalidDPopProof { .. } => {
             (Code::Unauthenticated, "invalid DPoP proof".to_string())
         }
