@@ -67,6 +67,8 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             declared_scopes: Vec::new(),
             consent_spans_orgs: false,
             access_token_authorization,
+            jwks: None,
+            jwks_uri: None,
         }
     }
 }

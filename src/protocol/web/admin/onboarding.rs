@@ -345,6 +345,8 @@ pub async fn admin_onboarding_app_post(
         declared_scopes: Vec::new(),
         consent_spans_orgs: false,
         access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
+        jwks: None,
+        jwks_uri: None,
     };
 
     match state.identity.register_client(&realm_id, &req) {

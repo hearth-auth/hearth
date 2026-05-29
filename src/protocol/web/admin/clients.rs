@@ -400,6 +400,8 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         declared_scopes,
         consent_spans_orgs: false,
         access_token_authorization,
+        jwks: None,
+        jwks_uri: None,
     }
 }
 

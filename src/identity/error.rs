@@ -68,6 +68,15 @@ pub enum IdentityError {
         /// Why the assertion was rejected.
         reason: String,
     },
+    /// A JAR (RFC 9101) signed request object is invalid.
+    ///
+    /// Covers: unsupported algorithm (including `none`), bad signature,
+    /// expired token, wrong `iss`, wrong `aud`, no registered JWKS, missing
+    /// key for `kid`. Intentionally aggregated to limit information leakage.
+    InvalidJar {
+        /// Why the JAR was rejected. Safe to include in error responses.
+        reason: String,
+    },
     /// The device authorization is still pending user action.
     AuthorizationPending,
     /// The device is polling too frequently; must slow down.
@@ -470,6 +479,9 @@ impl fmt::Display for IdentityError {
             Self::InvalidClientAssertion { reason } => {
                 write!(f, "invalid client assertion: {reason}")
             }
+            Self::InvalidJar { reason } => {
+                write!(f, "invalid request object (JAR): {reason}")
+            }
             Self::AuthorizationPending => write!(f, "authorization pending"),
             Self::SlowDown => write!(f, "polling too frequently"),
             Self::DeviceCodeExpired => write!(f, "device code expired"),
@@ -752,6 +764,7 @@ impl std::error::Error for IdentityError {
             | Self::DPopBindingMismatch
             | Self::DPopNonceInvalid
             | Self::JwtBearerAssertionInvalid { .. }
+            | Self::InvalidJar { .. }
             | Self::SessionVersionDisabled
             | Self::SessionLimitExceeded { .. } => None,
         }

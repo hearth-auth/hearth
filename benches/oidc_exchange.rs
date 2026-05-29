@@ -113,6 +113,8 @@ fn bench_auth_code_exchange(c: &mut Criterion) {
                     redirect_uri: "https://bench.example.com/callback".to_string(),
                     code_verifier: None,
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             );
             assert!(result.is_ok());

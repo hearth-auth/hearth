@@ -149,6 +149,9 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::JwtBearerAssertionInvalid { .. } => {
             (Code::InvalidArgument, "invalid_grant".to_string())
         }
+        IdentityError::InvalidJar { .. } => {
+            (Code::InvalidArgument, "invalid_request_object".to_string())
+        }
         IdentityError::InvalidDPopProof { .. } => {
             (Code::Unauthenticated, "invalid DPoP proof".to_string())
         }

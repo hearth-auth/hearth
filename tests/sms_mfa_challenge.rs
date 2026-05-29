@@ -239,6 +239,8 @@ async fn sms_amr_claim_in_tokens() {
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange_authorization_code");
@@ -299,6 +301,8 @@ async fn no_sms_mfa_means_empty_amr() {
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange_authorization_code");
@@ -424,6 +428,8 @@ async fn sms_amr_preserved_through_refresh() {
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code");

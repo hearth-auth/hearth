@@ -4853,6 +4853,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         client.set_declared_scopes(request.declared_scopes.clone());
         client.set_consent_spans_orgs(request.consent_spans_orgs);
         client.set_access_token_authorization(request.access_token_authorization);
+        client.set_jwks(request.jwks.clone());
+        client.set_jwks_uri(request.jwks_uri.clone());
 
         // Serialize and persist
         let client_bytes =
@@ -5958,6 +5960,177 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(())
     }
 
+    fn verify_jar(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        request_jwt: &str,
+    ) -> Result<crate::identity::oidc::JarClaims, IdentityError> {
+        use crate::identity::federation::oidc as fed_oidc;
+        use crate::identity::oidc::JarClaims;
+
+        #[derive(serde::Deserialize)]
+        struct JarHeader {
+            alg: String,
+            #[serde(default)]
+            kid: Option<String>,
+        }
+
+        // 1. Parse JWT structure
+        let parts: Vec<&str> = request_jwt.split('.').collect();
+        if parts.len() != 3 {
+            return Err(IdentityError::InvalidJar {
+                reason: "malformed JWT".to_string(),
+            });
+        }
+
+        // 2. Decode and parse header — reject alg:none immediately.
+        let header_bytes =
+            URL_SAFE_NO_PAD
+                .decode(parts[0])
+                .map_err(|_| IdentityError::InvalidJar {
+                    reason: "invalid JWT header encoding".to_string(),
+                })?;
+        let header: JarHeader =
+            serde_json::from_slice(&header_bytes).map_err(|_| IdentityError::InvalidJar {
+                reason: "invalid JWT header".to_string(),
+            })?;
+        let alg = header.alg.as_str();
+        if alg.eq_ignore_ascii_case("none") {
+            return Err(IdentityError::InvalidJar {
+                reason: "alg:none is not permitted in signed request objects".to_string(),
+            });
+        }
+        if alg != "EdDSA" && alg != "RS256" {
+            return Err(IdentityError::InvalidJar {
+                reason: format!("unsupported algorithm '{alg}'; only EdDSA and RS256 are accepted"),
+            });
+        }
+
+        // 3. Load client and resolve registered JWKS.
+        let client_key = keys::encode_oauth_client(client_id);
+        let client_bytes = self
+            .storage
+            .get(realm_id, &client_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidClient)?;
+        let client: OAuthClient =
+            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        let jwks_json = client.jwks().ok_or_else(|| IdentityError::InvalidJar {
+            reason: "client has no registered jwks for JAR verification".to_string(),
+        })?;
+
+        // 4. Parse the JWKS and select the matching key.
+        #[derive(serde::Deserialize)]
+        struct JwksContainer {
+            keys: Vec<fed_oidc::Jwk>,
+        }
+        let jwks: JwksContainer =
+            serde_json::from_str(jwks_json).map_err(|_| IdentityError::InvalidJar {
+                reason: "client jwks is not valid JSON".to_string(),
+            })?;
+
+        let kid = header.kid.as_deref();
+        let selected = if let Some(k) = kid {
+            jwks.keys.iter().find(|j| j.kid.as_deref() == Some(k))
+        } else if jwks.keys.len() == 1 {
+            jwks.keys.first()
+        } else {
+            None
+        }
+        .ok_or_else(|| IdentityError::InvalidJar {
+            reason: "no matching key found in client jwks".to_string(),
+        })?;
+
+        // 5. Verify signature based on key type.
+        match alg {
+            "EdDSA" => {
+                let x_b64 = selected
+                    .x
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "EdDSA JWK missing 'x' parameter".to_string(),
+                    })?;
+                let pk_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(x_b64)
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "EdDSA JWK 'x' is not valid base64url".to_string(),
+                        })?;
+                let signing_input = format!("{}.{}", parts[0], parts[1]);
+                let sig_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(parts[2])
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "invalid signature encoding".to_string(),
+                        })?;
+                let public_key =
+                    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &pk_bytes);
+                public_key
+                    .verify(signing_input.as_bytes(), &sig_bytes)
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "EdDSA signature verification failed".to_string(),
+                    })?;
+            }
+            "RS256" => {
+                fed_oidc::verify_rs256(request_jwt, selected).map_err(|_| {
+                    IdentityError::InvalidJar {
+                        reason: "RS256 signature verification failed".to_string(),
+                    }
+                })?;
+            }
+            _ => unreachable!("alg already restricted to EdDSA/RS256 above"),
+        }
+
+        // 6. Decode claims.
+        let claims_bytes =
+            URL_SAFE_NO_PAD
+                .decode(parts[1])
+                .map_err(|_| IdentityError::InvalidJar {
+                    reason: "invalid claims encoding".to_string(),
+                })?;
+        let claims: JarClaims =
+            serde_json::from_slice(&claims_bytes).map_err(|_| IdentityError::InvalidJar {
+                reason: "invalid claims payload".to_string(),
+            })?;
+
+        // 7. Validate iss == client_id.
+        if claims.iss != client_id.to_string() {
+            return Err(IdentityError::InvalidJar {
+                reason: "iss claim must equal the client_id".to_string(),
+            });
+        }
+
+        // 8. Validate aud contains the realm issuer URL (authorization endpoint or issuer).
+        let expected_aud = self.realm_issuer_url(realm_id);
+        let aud_ok = match &claims.aud {
+            crate::identity::tokens::Audience::Single(s) => {
+                s == &expected_aud || s.starts_with(&expected_aud)
+            }
+            crate::identity::tokens::Audience::Multi(v) => v
+                .iter()
+                .any(|a| a == &expected_aud || a.starts_with(&expected_aud)),
+        };
+        if !aud_ok {
+            return Err(IdentityError::InvalidJar {
+                reason: "aud claim does not include the authorization server issuer".to_string(),
+            });
+        }
+
+        // 9. Validate exp is in the future.
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if now_secs >= claims.exp {
+            return Err(IdentityError::InvalidJar {
+                reason: "request object has expired".to_string(),
+            });
+        }
+
+        Ok(claims)
+    }
+
     fn device_authorize(
         &self,
         realm_id: &RealmId,
@@ -6224,12 +6397,66 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         self.require_active_realm(realm_id)?;
 
-        if request.response_type != "code" {
+        // JAR (RFC 9101): if a signed request object is present, verify it and
+        // use its claims to override the plain-text request parameters.
+        let (
+            effective_redirect_uri,
+            effective_scope,
+            effective_state,
+            effective_resource,
+            effective_response_type,
+            effective_code_challenge,
+            effective_code_challenge_method,
+            effective_nonce,
+        ) = if let Some(ref jar_jwt) = request.request {
+            let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
+            // JAR client_id claim must match the outer client_id.
+            if let Some(ref jar_cid) = jar.client_id {
+                if jar_cid != &request.client_id.to_string() {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "client_id in JAR claims does not match the request".to_string(),
+                    });
+                }
+            }
+            let ccm = jar.code_challenge_method.as_deref().and_then(|m| {
+                if m == "S256" {
+                    Some(CodeChallengeMethod::S256)
+                } else {
+                    None
+                }
+            });
+            (
+                jar.redirect_uri
+                    .unwrap_or_else(|| request.redirect_uri.clone()),
+                jar.scope.unwrap_or_else(|| request.scope.clone()),
+                jar.state.unwrap_or_else(|| request.state.clone()),
+                jar.resource.or_else(|| request.resource.clone()),
+                jar.response_type
+                    .unwrap_or_else(|| request.response_type.clone()),
+                jar.code_challenge
+                    .or_else(|| request.code_challenge.clone()),
+                ccm.or_else(|| request.code_challenge_method.clone()),
+                jar.nonce.or_else(|| request.nonce.clone()),
+            )
+        } else {
+            (
+                request.redirect_uri.clone(),
+                request.scope.clone(),
+                request.state.clone(),
+                request.resource.clone(),
+                request.response_type.clone(),
+                request.code_challenge.clone(),
+                request.code_challenge_method.clone(),
+                request.nonce.clone(),
+            )
+        };
+
+        if effective_response_type != "code" {
             return Err(IdentityError::InvalidInput {
                 reason: "response_type must be 'code'".to_string(),
             });
         }
-        if request.state.is_empty() {
+        if effective_state.is_empty() {
             return Err(IdentityError::InvalidInput {
                 reason: "state must not be empty".to_string(),
             });
@@ -6239,20 +6466,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get_client(realm_id, &request.client_id)?
             .ok_or(IdentityError::ClientNotFound)?;
 
-        if !client.redirect_uris().contains(&request.redirect_uri) {
+        if !client.redirect_uris().contains(&effective_redirect_uri) {
             return Err(IdentityError::InvalidRedirectUri);
         }
 
         let pkce_required =
             !client.is_confidential() || self.config.oidc.require_pkce_for_confidential_clients;
-        if pkce_required && request.code_challenge.is_none() {
+        if pkce_required && effective_code_challenge.is_none() {
             return Err(IdentityError::InvalidInput {
                 reason: "PKCE is required (code_challenge with S256 must be supplied)".to_string(),
             });
         }
-        if request.code_challenge.is_some()
+        if effective_code_challenge.is_some()
             && !matches!(
-                request.code_challenge_method,
+                effective_code_challenge_method,
                 Some(CodeChallengeMethod::S256)
             )
         {
@@ -6269,14 +6496,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let stored = StoredPushedAuthorizationRequest {
             request_uri_id: request_uri_id.clone(),
             client_id: request.client_id.clone(),
-            redirect_uri: request.redirect_uri.clone(),
-            scope: request.scope.clone(),
-            state: request.state.clone(),
-            resource: request.resource.clone(),
-            response_type: request.response_type.clone(),
-            code_challenge: request.code_challenge.clone(),
-            code_challenge_method: request.code_challenge_method.clone(),
-            nonce: request.nonce.clone(),
+            redirect_uri: effective_redirect_uri,
+            scope: effective_scope,
+            state: effective_state,
+            resource: effective_resource,
+            response_type: effective_response_type,
+            code_challenge: effective_code_challenge,
+            code_challenge_method: effective_code_challenge_method,
+            nonce: effective_nonce,
             created_at: now,
             expires_at,
             used: false,
@@ -17487,6 +17714,7 @@ mod tests {
             code_challenge: Some(challenge.to_string()),
             code_challenge_method: Some(crate::identity::oidc::CodeChallengeMethod::S256),
             nonce: None,
+            request: None,
         }
     }
 

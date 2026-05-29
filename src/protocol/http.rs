@@ -1646,6 +1646,7 @@ fn identity_error_to_response(
         IdentityError::JwtBearerAssertionInvalid { .. } => {
             (StatusCode::UNAUTHORIZED, "invalid_grant")
         }
+        IdentityError::InvalidJar { .. } => (StatusCode::BAD_REQUEST, "invalid_request_object"),
         IdentityError::SessionLimitExceeded { .. } => {
             (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
         }
@@ -1947,6 +1948,7 @@ async fn par_handler(
         code_challenge: body.code_challenge,
         code_challenge_method,
         nonce: body.nonce,
+        request: None,
     };
 
     match state
@@ -6833,6 +6835,8 @@ async fn realm_register_client_dynamic(
         ],
         consent_spans_orgs: false,
         access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
+        jwks: None,
+        jwks_uri: None,
     };
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {

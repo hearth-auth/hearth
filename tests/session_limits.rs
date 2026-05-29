@@ -40,7 +40,7 @@ fn unrecognized_policy_string_returns_error() {
         result.is_err(),
         "unrecognized session_over_limit_policy must be a hard error, not a silent fallback"
     );
-    let errors = result.unwrap_err();
+    let errors = result.expect_err("expected config error");
     assert!(
         errors
             .iter()

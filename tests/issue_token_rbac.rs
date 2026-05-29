@@ -633,6 +633,8 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
                 redirect_uri: "http://localhost/callback".into(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect_err("should fail");

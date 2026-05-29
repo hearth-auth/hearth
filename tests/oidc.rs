@@ -103,6 +103,8 @@ async fn oidc_authorization_code_flow_roundtrip() {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code");
@@ -429,6 +431,8 @@ async fn oidc_pkce_s256_flow() {
             redirect_uri: "https://app.example.com/callback".to_string(),
             code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(
@@ -466,6 +470,8 @@ async fn oidc_pkce_s256_flow() {
             redirect_uri: "https://app.example.com/callback".to_string(),
             code_verifier: Some("wrong-verifier-value".to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(
@@ -508,6 +514,8 @@ async fn oidc_pkce_s256_flow() {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(code_verifier),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange with correct verifier");
@@ -755,6 +763,8 @@ async fn conformance_token_endpoint_rfc6749() {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code");
@@ -800,6 +810,8 @@ async fn conformance_token_endpoint_rfc6749() {
             redirect_uri: "https://app.example.com/callback".to_string(),
             code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(
@@ -817,6 +829,8 @@ async fn conformance_token_endpoint_rfc6749() {
             redirect_uri: "https://app.example.com/callback".to_string(),
             code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(
@@ -856,6 +870,8 @@ async fn conformance_token_endpoint_rfc6749() {
             redirect_uri: "https://evil.example.com/callback".to_string(),
             code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(

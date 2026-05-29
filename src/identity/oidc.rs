@@ -112,6 +112,13 @@ pub struct RegisterClientRequest {
     pub consent_spans_orgs: bool,
     /// Access-token authorization mode. Defaults to `Embedded`.
     pub access_token_authorization: AccessTokenAuthorization,
+    /// Inline JWKS JSON for JAR (RFC 9101) signed request objects.
+    ///
+    /// When set, the client may pass `request=<JWT>` on `/authorize` or
+    /// `/as/par`. Value must be a JSON string, e.g. `{"keys":[{...}]}`.
+    pub jwks: Option<String>,
+    /// JWKS URI for JAR signed request object verification (stored for future use).
+    pub jwks_uri: Option<String>,
 }
 
 impl Default for RegisterClientRequest {
@@ -133,6 +140,8 @@ impl Default for RegisterClientRequest {
             declared_scopes: Vec::new(),
             consent_spans_orgs: false,
             access_token_authorization: AccessTokenAuthorization::Embedded,
+            jwks: None,
+            jwks_uri: None,
         }
     }
 }
@@ -226,6 +235,21 @@ pub struct OAuthClient {
     /// Controls how access-token authorization data is exposed to resource servers.
     #[serde(default)]
     access_token_authorization: AccessTokenAuthorization,
+    /// Inline JSON Web Key Set for JAR (RFC 9101) signature verification.
+    ///
+    /// When set, this client may sign authorization requests (`request=<JWT>`)
+    /// on `/authorize` or `/as/par`. The value is a JSON string containing a
+    /// JWKS object, e.g. `{"keys":[{...}]}`. Supports `RS256` (RSA) and
+    /// `EdDSA` (Ed25519) key types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jwks: Option<String>,
+    /// URL pointing to a JSON Web Key Set for JAR signature verification.
+    ///
+    /// When set and `jwks` is absent, the AS MAY fetch this URL to resolve
+    /// signing keys. MUST be an `https://` URI. Actual HTTP fetching is not
+    /// yet implemented — this field validates and stores the URI for future use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jwks_uri: Option<String>,
 }
 
 fn default_require_consent() -> bool {
@@ -259,6 +283,8 @@ impl OAuthClient {
             post_logout_redirect_uris: Vec::new(),
             assertion_public_key: None,
             access_token_authorization: AccessTokenAuthorization::Embedded,
+            jwks: None,
+            jwks_uri: None,
         }
     }
 
@@ -290,6 +316,8 @@ impl OAuthClient {
             post_logout_redirect_uris: Vec::new(),
             assertion_public_key: None,
             access_token_authorization: AccessTokenAuthorization::Embedded,
+            jwks: None,
+            jwks_uri: None,
         }
     }
 
@@ -469,6 +497,26 @@ impl OAuthClient {
     /// Sets the access-token authorization mode.
     pub(crate) fn set_access_token_authorization(&mut self, mode: AccessTokenAuthorization) {
         self.access_token_authorization = mode;
+    }
+
+    /// Returns the inline JWKS (JSON string) for JAR signature verification, if set.
+    pub fn jwks(&self) -> Option<&str> {
+        self.jwks.as_deref()
+    }
+
+    /// Sets the inline JWKS JSON for JAR signature verification. `None` clears it.
+    pub(crate) fn set_jwks(&mut self, jwks: Option<String>) {
+        self.jwks = jwks;
+    }
+
+    /// Returns the JWKS URI for JAR signature verification, if set.
+    pub fn jwks_uri(&self) -> Option<&str> {
+        self.jwks_uri.as_deref()
+    }
+
+    /// Sets the JWKS URI for JAR signature verification. `None` clears it.
+    pub(crate) fn set_jwks_uri(&mut self, uri: Option<String>) {
+        self.jwks_uri = uri;
     }
 
     /// Returns `true` if this client was provisioned from YAML configuration.
@@ -839,6 +887,61 @@ pub struct OidcDiscoveryDocument {
     pub dpop_signing_alg_values_supported: Vec<String>,
 }
 
+// ===== JWT Authorization Requests — RFC 9101 (JAR) =====
+
+/// Claims carried in a JAR JWT (RFC 9101 §4).
+///
+/// The JWT body contains both the standard JWT claims (`iss`, `aud`, `exp`,
+/// `nbf`, `iat`, `jti`) and the authorization request parameters that it
+/// carries on behalf of the client. The AS validates the envelope claims
+/// first, then uses the authorization parameters to drive the flow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JarClaims {
+    /// Issuer — MUST equal the `client_id`.
+    pub iss: String,
+    /// Audience — MUST identify this AS (issuer URL or authorization endpoint).
+    pub aud: crate::identity::tokens::Audience,
+    /// Expiration time (Unix seconds). MUST be in the future.
+    pub exp: i64,
+    /// Not-before time (Unix seconds). Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nbf: Option<i64>,
+    /// Issued-at time (Unix seconds). Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iat: Option<i64>,
+    /// JWT ID — unique identifier, used for replay prevention if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
+    // ── Authorization request parameters ──
+    /// Must be "code".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_type: Option<String>,
+    /// The client identifier — must match the `client_id` query parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Redirect URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+    /// Space-delimited scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// CSRF protection state value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// PKCE S256 code challenge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_challenge: Option<String>,
+    /// Code challenge method (`S256` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_challenge_method: Option<String>,
+    /// OIDC nonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    /// RFC 8707 resource indicator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+}
+
 // ===== Pushed Authorization Requests (RFC 9126) =====
 
 /// Request to push authorization parameters to the PAR endpoint.
@@ -865,6 +968,13 @@ pub struct PushedAuthorizationRequest {
     pub code_challenge_method: Option<CodeChallengeMethod>,
     /// OIDC nonce claim to bind to the ID token.
     pub nonce: Option<String>,
+    /// Signed JAR JWT (RFC 9101) carrying the authorization parameters.
+    ///
+    /// When present, the server validates the JWT signature against the
+    /// client's registered `jwks`, then uses the JWT claims to populate
+    /// (and override) the request fields. `client_id` on the outer request
+    /// must match `iss` inside the JWT.
+    pub request: Option<String>,
 }
 
 /// Response from a successful PAR push (RFC 9126 §2.2).

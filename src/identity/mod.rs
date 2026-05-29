@@ -46,11 +46,11 @@ pub use oidc::{
     AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel,
     CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
-    IntrospectionResponse, JwtBearerRequest, OAuthClient, OidcConfig, OidcDiscoveryDocument,
-    OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
-    PushedAuthorizationResponse, RegisterClientRequest, StepUpMfaGrantRequest,
-    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
-    UserInfoResponse,
+    IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
+    OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
+    PushedAuthorizationRequest, PushedAuthorizationResponse, RegisterClientRequest,
+    StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
+    UpdateClientRequest, UserInfoResponse,
 };
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
@@ -619,6 +619,22 @@ pub trait IdentityEngine: Send + Sync {
         client_id: &ClientId,
         assertion: &str,
     ) -> Result<(), IdentityError>;
+
+    /// Verifies a JAR (RFC 9101) signed request object.
+    ///
+    /// Looks up the client's registered `jwks`, selects the key matching the
+    /// JWT header `kid`/`alg`, verifies the signature (EdDSA or RS256), and
+    /// validates `iss == client_id`, `aud` contains the realm issuer URL, and
+    /// `exp` is in the future. Returns the decoded [`JarClaims`] on success.
+    ///
+    /// Rejects `alg: none`, missing JWKS, unknown `kid`, and any claim
+    /// validation failure with [`IdentityError::InvalidJar`].
+    fn verify_jar(
+        &self,
+        realm_id: &RealmId,
+        client_id: &ClientId,
+        request_jwt: &str,
+    ) -> Result<JarClaims, IdentityError>;
 
     /// Initiates a Device Authorization Grant (RFC 8628).
     ///

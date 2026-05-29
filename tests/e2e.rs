@@ -110,6 +110,8 @@ async fn developer_onramp_realm_app_oidc_login() {
                 redirect_uri: "https://app.startup.io/callback".to_string(),
                 code_verifier: Some(code_verifier),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code");
