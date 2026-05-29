@@ -62,3 +62,7 @@ tests/ui/reports/
 tests/ui/node_modules/
 
 *.tsbuildinfo
+
+.next
+
+go-gin

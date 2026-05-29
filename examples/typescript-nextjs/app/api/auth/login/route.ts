@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { randomBytes, createHash } from "crypto";
 import { cookies } from "next/headers";
-import { CLIENT_ID, REDIRECT_URI, hearthClient } from "@/lib/hearth";
+import { CLIENT_ID, REDIRECT_URI, getHearthClient } from "@/lib/hearth";
+
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   // Fetch Hearth's OIDC discovery document to get the authorization_endpoint.
-  const discovery = await hearthClient.discovery();
+  const discovery = await getHearthClient().discovery();
 
   // Generate PKCE verifier + challenge (RFC 7636).
   const codeVerifier = randomBytes(32).toString("hex");
@@ -18,7 +20,7 @@ export async function GET() {
 
   // Store verifier + state in short-lived HTTP-only cookies so the callback
   // route can verify them without exposing them to JavaScript.
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   cookieStore.set("pkce_verifier", codeVerifier, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",

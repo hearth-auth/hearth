@@ -1,27 +1,36 @@
 import { HearthApiClient, createHearth } from "@hearth/sdk";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
-const HEARTH_BASE_URL = process.env.HEARTH_BASE_URL!;
-const HEARTH_REALM_ID = process.env.HEARTH_REALM_ID!;
-
 export const CLIENT_ID = process.env.HEARTH_CLIENT_ID!;
 export const REDIRECT_URI = process.env.HEARTH_REDIRECT_URI!;
 
-// Low-level HTTP client: token exchange, admin ops, JWKS retrieval.
-export const hearthClient = new HearthApiClient({
-  baseUrl: HEARTH_BASE_URL,
-  realmId: HEARTH_REALM_ID,
-});
+// Lazy singletons: defer construction until first request so that
+// `npm run build` succeeds when env vars are absent from the build env.
+let _client: HearthApiClient | undefined;
+let _jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
 
-// JWKS set for server-side token verification.
-// createRemoteJWKSet caches the keys and re-fetches on a key miss.
-export const JWKS = createRemoteJWKSet(
-  new URL(`${HEARTH_BASE_URL}/.well-known/jwks.json`),
-);
+export function getHearthClient(): HearthApiClient {
+  if (!_client) {
+    _client = new HearthApiClient({
+      baseUrl: process.env.HEARTH_BASE_URL!,
+      realmId: process.env.HEARTH_REALM_ID!,
+    });
+  }
+  return _client;
+}
+
+function getJwks() {
+  if (!_jwks) {
+    _jwks = createRemoteJWKSet(
+      new URL(`${process.env.HEARTH_BASE_URL!}/.well-known/jwks.json`),
+    );
+  }
+  return _jwks;
+}
 
 export async function verifyAccessToken(token: string) {
-  const { payload } = await jwtVerify(token, JWKS, {
-    issuer: HEARTH_BASE_URL,
+  const { payload } = await jwtVerify(token, getJwks(), {
+    issuer: process.env.HEARTH_BASE_URL!,
   });
   return payload;
 }
@@ -30,8 +39,8 @@ export async function verifyAccessToken(token: string) {
 // Only available after import on the client; do not import server-only modules here.
 export function makeHearthFacade(getToken: () => string | null | undefined) {
   return createHearth({
-    baseUrl: HEARTH_BASE_URL,
-    realmId: HEARTH_REALM_ID,
+    baseUrl: process.env.HEARTH_BASE_URL!,
+    realmId: process.env.HEARTH_REALM_ID!,
     getToken,
   });
 }
