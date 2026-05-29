@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **FAPI 2.0 profile mutation now guarded against client_secret retention (HEA-1021)** —
+  `update_client` rejected the `profile → Fapi2` transition if the existing client already
+  held a `client_secret_hash`, closing a gap where a Standard confidential client could be
+  silently "upgraded" to FAPI 2.0 while retaining its symmetric secret in violation of
+  FAPI 2.0 §5.3.1.1. Additionally, `regenerate_client_secret` now returns `FapiViolation`
+  for any FAPI 2.0 client before reaching the `is_confidential` check, so no admin can
+  issue or refresh a secret on a FAPI 2.0 client regardless of stored state.
+
 - **DPoP sender-constraint now enforced for all clients in FAPI Baseline realms (HEA-1022)** —
   The realm-level DPoP gate in `exchange_authorization_code` only checked for
   `FapiProfile::Advanced`; a `Standard`-profile client in a FAPI Baseline realm could
