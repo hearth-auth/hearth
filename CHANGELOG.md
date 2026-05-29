@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Patch docs-site npm vulnerabilities (Group B)** — upgraded `@docusaurus/core` and
+  `@docusaurus/preset-classic` from 3.5.2 → 3.10.1; added `overrides` for
+  `serialize-javascript` (→ ^7.0.0, fixes GHSA-5c6j-r48x-rmvq HIGH XSS/code-injection),
+  `uuid` (→ ^11.0.0, fixes GHSA-w5hq-g745-h8pq buffer-bounds), and `webpackbar`
+  (existing). Resolves all 9 Group B security alerts; `npm audit` now reports 0
+  vulnerabilities in docs-site (HEA-952).
+
 - **Pin GitHub Actions to SHA hashes** — all `uses:` references in `release.yml`,
   `docs-site.yml`, and `sdk-smoke.yml` are now pinned to immutable 40-char commit SHAs
   (e.g. `actions/checkout@34e114...` `# v4`) to eliminate supply-chain risk from mutable
