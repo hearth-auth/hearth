@@ -9101,6 +9101,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             client.set_authorization_signed_response_alg(alg_opt.clone());
         }
         if let Some(profile) = request.profile {
+            if profile.is_fapi2() && client.client_secret_hash().is_some() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "Cannot set FAPI 2.0 profile on a client with a client_secret; \
+                             remove the secret first or register a new FAPI2 client"
+                        .to_string(),
+                });
+            }
             client.set_profile(profile);
         }
 
@@ -9139,6 +9146,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
+
+        if client.profile().is_fapi2() {
+            return Err(IdentityError::FapiViolation {
+                reason: "FAPI 2.0 clients must not use client_secret".to_string(),
+            });
+        }
 
         if !client.is_confidential() {
             return Err(IdentityError::InvalidInput {

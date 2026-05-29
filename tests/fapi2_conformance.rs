@@ -15,6 +15,10 @@
 //! - FAPI2-JARM-02: JARM response does NOT include s_hash for standard clients
 //! - FAPI2-STD-01: Standard clients not subject to FAPI2 constraints
 //! - FAPI2-STD-02: Standard clients may refresh without DPoP (regression)
+//! - FAPI2-MUT-01: update_client profile→Fapi2 on confidential client rejected (secret conflict)
+//! - FAPI2-MUT-02: update_client profile→Fapi2 on public client succeeds (no secret present)
+//! - FAPI2-MUT-03: regenerate_client_secret on FAPI2 client rejected
+//! - FAPI2-MUT-04: regenerate_client_secret on Standard confidential client succeeds (regression)
 //!
 //! Spec refs:
 //!   FAPI 2.0 Security Profile 1.0, RFC 9126 (PAR), RFC 9449 (DPoP), JARM
@@ -30,7 +34,7 @@ use hearth::core::RealmId;
 use hearth::identity::oidc::{ClientProfile, CodeChallengeMethod, ResponseMode};
 use hearth::identity::{
     decode_claims_unverified, AuthorizationRequest, CreateRealmRequest, CreateUserRequest,
-    IdentityError, RegisterClientRequest, TokenExchangeRequest,
+    IdentityError, RegisterClientRequest, TokenExchangeRequest, UpdateClientRequest,
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -809,5 +813,134 @@ async fn fapi2_std02_standard_refresh_without_dpop_succeeds() {
     assert!(
         !refreshed.access_token().is_empty(),
         "standard client must receive a refreshed access token"
+    );
+}
+
+// ── FAPI2-MUT: Mutation-time invariant guards ─────────────────────────────
+
+/// FAPI2-MUT-01: Upgrading a confidential Standard client to FAPI2 profile must be rejected
+/// because the existing client_secret violates FAPI2's prohibition on client_secret.
+#[tokio::test]
+async fn fapi2_mut01_update_profile_to_fapi2_with_secret_rejected() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&h).await;
+
+    let client = h
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Std Confidential Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("my-secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register standard confidential client");
+
+    let err = h
+        .identity()
+        .update_client(
+            &realm,
+            client.client_id(),
+            &UpdateClientRequest {
+                profile: Some(ClientProfile::Fapi2),
+                ..Default::default()
+            },
+        )
+        .expect_err("must reject FAPI2 profile upgrade on client with secret");
+
+    assert!(
+        matches!(err, IdentityError::FapiViolation { .. }),
+        "expected FapiViolation, got: {err:?}"
+    );
+}
+
+/// FAPI2-MUT-02: Upgrading a public Standard client to FAPI2 profile succeeds
+/// because there is no client_secret to conflict with FAPI2 requirements.
+#[tokio::test]
+async fn fapi2_mut02_update_profile_to_fapi2_on_public_client_succeeds() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&h).await;
+
+    // Register a Standard public client (no client_secret, has JWKS for private_key_jwt).
+    let client = h
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Std Public Client With JWKS".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                jwks: Some(minimal_jwks()),
+                ..Default::default()
+            },
+        )
+        .expect("register standard public client");
+
+    h.identity()
+        .update_client(
+            &realm,
+            client.client_id(),
+            &UpdateClientRequest {
+                profile: Some(ClientProfile::Fapi2),
+                ..Default::default()
+            },
+        )
+        .expect("FAPI2 profile upgrade on public client must succeed");
+}
+
+/// FAPI2-MUT-03: regenerate_client_secret on a FAPI2 client must be rejected.
+#[tokio::test]
+async fn fapi2_mut03_regenerate_secret_on_fapi2_client_rejected() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&h).await;
+
+    let client_id = register_fapi2_client(&h, &realm);
+
+    let err = h
+        .identity()
+        .regenerate_client_secret(&realm, &client_id)
+        .expect_err("must reject secret regeneration on FAPI2 client");
+
+    assert!(
+        matches!(err, IdentityError::FapiViolation { .. }),
+        "expected FapiViolation, got: {err:?}"
+    );
+}
+
+/// FAPI2-MUT-04: regenerate_client_secret on a Standard confidential client succeeds (regression guard).
+#[tokio::test]
+async fn fapi2_mut04_regenerate_secret_on_standard_client_succeeds() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&h).await;
+
+    let client = h
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Standard Confidential Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("initial-secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register standard confidential client");
+
+    let new_secret = h
+        .identity()
+        .regenerate_client_secret(&realm, client.client_id())
+        .expect("regenerate_client_secret must succeed for standard confidential client");
+
+    assert!(
+        !new_secret.is_empty(),
+        "regenerated secret must be non-empty"
     );
 }
