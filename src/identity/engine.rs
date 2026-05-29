@@ -6696,8 +6696,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 reason: "jti has already been used (replay)".to_string(),
             });
         }
+        // Store expiry as 8-byte little-endian i64 (Unix seconds) so the
+        // background sweeper in cleanup::sweep_jar_jtis() can purge entries
+        // once they can no longer represent a valid JWT (exp + clock skew).
+        let jar_jti_expires_at = claims.exp.saturating_add(CLOCK_SKEW_SECS);
         self.storage
-            .put(realm_id, &jti_key, b"1")
+            .put(realm_id, &jti_key, &jar_jti_expires_at.to_le_bytes())
             .map_err(Self::storage_err)?;
 
         Ok(claims)
@@ -6999,6 +7003,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             effective_code_challenge,
             effective_code_challenge_method,
             effective_nonce,
+            effective_response_mode,
         ) = if let Some(ref jar_jwt) = request.request {
             let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
             // JAR client_id claim must match the outer client_id.
@@ -7028,6 +7033,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .or_else(|| request.code_challenge.clone()),
                 ccm.or_else(|| request.code_challenge_method.clone()),
                 jar.nonce.or_else(|| request.nonce.clone()),
+                // JAR response_mode takes precedence over the outer param (RFC 9101 §4).
+                jar.response_mode.or_else(|| request.response_mode.clone()),
             )
         } else {
             (
@@ -7039,6 +7046,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 request.code_challenge.clone(),
                 request.code_challenge_method.clone(),
                 request.nonce.clone(),
+                request.response_mode.clone(),
             )
         };
 
@@ -7109,6 +7117,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             code_challenge: effective_code_challenge,
             code_challenge_method: effective_code_challenge_method,
             nonce: effective_nonce,
+            response_mode: effective_response_mode,
             created_at: now,
             expires_at,
             used: false,
@@ -18462,6 +18471,7 @@ mod tests {
             code_challenge_method: Some(crate::identity::oidc::CodeChallengeMethod::S256),
             nonce: None,
             request: None,
+            response_mode: None,
         }
     }
 

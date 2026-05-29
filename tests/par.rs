@@ -98,6 +98,7 @@ fn par_request_with_pkce(client_id: hearth::core::ClientId) -> PushedAuthorizati
         code_challenge_method: Some(CodeChallengeMethod::S256),
         nonce: None,
         request: None,
+        response_mode: None,
     }
 }
 
@@ -146,6 +147,7 @@ fn public_client_without_pkce_rejected() {
         code_challenge_method: None,
         nonce: None,
         request: None,
+        response_mode: None,
     };
 
     assert!(
@@ -175,6 +177,7 @@ fn non_code_response_type_rejected() {
         code_challenge_method: Some(CodeChallengeMethod::S256),
         nonce: None,
         request: None,
+        response_mode: None,
     };
 
     assert!(
