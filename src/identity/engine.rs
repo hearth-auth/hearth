@@ -1794,9 +1794,18 @@ impl EmbeddedIdentityEngine {
 
         // FAPI 2.0: DPoP sender-constrained tokens are mandatory on the refresh
         // path, mirroring the gate at exchange_authorization_code (§5.3.3).
+        // Check both per-client profile AND realm-level fapi_profile so that
+        // standard-profile clients in a Baseline/Advanced realm cannot bypass
+        // the sender-constraint requirement on refresh (mirrors HEA-1022 fix).
         if let Some(ref client_id) = family.client_id {
             if let Some(client) = self.get_client(realm_id, client_id)? {
-                if client.profile().is_fapi2() && dpop_jkt.is_none() {
+                let realm_fapi = self
+                    .get_realm(realm_id)?
+                    .ok_or(IdentityError::RealmNotFound)?
+                    .config()
+                    .fapi_profile;
+                let fapi_enforced = client.profile().is_fapi2() || realm_fapi.is_some();
+                if fapi_enforced && dpop_jkt.is_none() {
                     return Err(IdentityError::FapiViolation {
                         reason: "FAPI 2.0 requires sender-constrained tokens; \
                                  include a DPoP proof and dpop_jkt in the token request"

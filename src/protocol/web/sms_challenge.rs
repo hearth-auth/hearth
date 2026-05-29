@@ -591,6 +591,7 @@ mod tests {
             code_challenge_method: "S256".to_string(),
             nonce: "nonce456".to_string(),
             response_type: "code".to_string(),
+            via_par: false,
         };
 
         let cookie_header = issue_sms_mfa_cookie(&secret, &user_id, &s)
@@ -638,6 +639,7 @@ mod tests {
             code_challenge_method: String::new(),
             nonce: String::new(),
             response_type: "code".to_string(),
+            via_par: false,
         };
 
         let cookie_header = issue_sms_mfa_cookie(&secret, &user_a, &s)

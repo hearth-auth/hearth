@@ -299,6 +299,7 @@ mod tests {
             state: Some("state-abc".to_string()),
             response_type: "code".to_string(),
             response_mode: None,
+            via_par: false,
         }
     }
 

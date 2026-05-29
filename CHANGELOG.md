@@ -45,6 +45,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   same PAR expansion. `AuthorizationRequest` in the gRPC/REST proto gains an
   optional `request_uri` field (field 10).
 
+- **FAPI 2.0 DPoP enforcement on `refresh_token` grant — realm-level gate added (HEA-1024)** —
+  The realm-level DPoP gate was only applied to `exchange_authorization_code`, not
+  `refresh_tokens`. A standard-profile client in a FAPI Baseline or Advanced realm could
+  refresh its access token without a DPoP proof, receiving an unbounded token with no
+  `cnf.jkt` claim. `rotate_grant_family` now checks both the per-client profile and the
+  realm's `fapi_profile`; refreshes without DPoP are rejected with `invalid_dpop_proof`
+  when either gate applies. The HTTP `refresh_token` response also now correctly sets
+  `token_type: DPoP` when a DPoP thumbprint is present (RFC 9449 §7). Regression test:
+  FAPI-B-11.
+
 - **FAPI 2.0 DPoP enforcement on `refresh_token` grant (HEA-1016)** — FAPI 2.0
   clients must now supply a DPoP proof on every token endpoint call, including
   `grant_type=refresh_token`. Requests without a DPoP header are rejected with
