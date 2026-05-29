@@ -27,6 +27,8 @@ const sidebars = {
         'rbac',
         'client-scoped-roles',
         'organizations',
+        'required-actions',
+        'sms-mfa-deployment',
         'webhooks',
         'federation',
         'scim-provisioning',
@@ -43,6 +45,8 @@ const sidebars = {
         'storage-sizing',
         'security-hardening',
         'troubleshooting',
+        'disaster-recovery',
+        'verify-release',
       ],
     },
     {

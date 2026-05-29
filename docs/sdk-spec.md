@@ -26,7 +26,24 @@ SDKs **must** auto-discover all endpoint URLs from `{issuer_url}/.well-known/ope
 
 ## 2. JWKS & Token Verification
 
-**Required algorithms:** RS256, ES256. Both must be supported; others may be allowed if the server advertises them in `jwks_uri`.
+**Required algorithm:** Ed25519 (`alg: "EdDSA"`, `kty: "OKP"`). Hearth exclusively issues tokens signed with Ed25519; SDKs **must** support OKP key verification.
+
+> **Federation exception:** Hearth may relay tokens from third-party identity providers (e.g., enterprise SSO) that use RS256 or ES256. SDKs _should_ accept these algorithms when the corresponding key is present in the JWKS and the token's `alg` header matches, but RS256/ES256 are **never issued by Hearth itself**.
+
+**OKP (Ed25519) JWKS key format:**
+
+Hearth's JWKS endpoint emits Ed25519 public keys using the OKP key type defined in [RFC 8037](https://www.rfc-editor.org/rfc/rfc8037):
+
+| Field | Value |
+|-------|-------|
+| `kty` | `"OKP"` |
+| `crv` | `"Ed25519"` |
+| `x`   | Base64url-encoded 32-byte public key (the only coordinate) |
+| `y`   | **Absent** — OKP/Ed25519 keys have no y-coordinate |
+| `alg` | `"EdDSA"` |
+| `use` | `"sig"` |
+
+SDKs must parse OKP JWKs that omit `y`. Parsers that assume `y` is always present (common in EC-only JWK implementations) will fail to load Hearth's signing keys.
 
 **JWKS caching rules (mandatory):**
 1. Cache keys by `kid`. Do not discard keys not present in the latest fetch.
@@ -34,6 +51,7 @@ SDKs **must** auto-discover all endpoint URLs from `{issuer_url}/.well-known/ope
 3. On cache miss for a `kid`: re-fetch once before returning an error.
 4. On HTTP 401 from a protected resource: re-fetch JWKS once, then retry the verification.
 5. Maximum cache age: 24 hours regardless of Cache-Control.
+6. When parsing a cached JWKS, skip (do not error on) any key with an unrecognized `kty`; Hearth may add new key types for federation keys without a version bump.
 
 **JWT validation steps (mandatory, in order):**
 1. Verify signature against cached JWKS.
@@ -72,6 +90,48 @@ Introspection results **must not be cached** (RFC 7662 §2.1 — the token state
 
 ---
 
+## 3.5. Token Verification Modes
+
+`OAuthClient.access_token_authorization` controls how resource servers must verify access tokens. The mode is operator-configured at client registration and determines whether JWKS verification alone is sufficient.
+
+| Mode | Wire Value | Meaning |
+|------|------------|---------|
+| `Embedded` (default) | `"embedded"` | RBAC claims (`roles`, `permissions`, `groups`, `oid`) are fully embedded in the JWT; verify via JWKS |
+| `Introspection` | `"introspection"` | JWT carries identity claims only; resource servers **MUST** call `introspect()` (§3) for live authorization data |
+| `Decision` | `"decision"` | JWT carries identity claims only; resource servers **MUST** call `POST /oauth/authorize` per-request for live authorization decisions |
+
+### Required SDK Behavior Per Mode
+
+**`Embedded` (default)**
+
+- Verify the token via JWKS (standard §2 flow).
+- Trust RBAC claims embedded in the JWT: `roles`, `permissions`, `groups`, `oid`, `org_groups`.
+- Introspection is not required and SHOULD NOT be called on the hot path.
+
+**`Introspection`**
+
+- **MUST** call `introspect()` (§3) before accepting the token for any authorization decision.
+- **MUST NOT** rely on JWKS-verified JWT claims for authorization data (`roles`, `permissions`, `groups`, `oid`, `org_groups` are absent or empty in the JWT by design).
+- JWKS signature verification MAY be performed for structural identity validation, but RBAC claims from the JWT **MUST** be ignored; all authorization data comes from the `IntrospectionResult`.
+- An SDK that skips introspection and reads JWT RBAC claims directly will silently accept stale or missing authorization data — this is a security error.
+
+**`Decision`**
+
+- **MUST** call `POST /oauth/authorize` per-request to obtain a live authorization decision.
+- **MUST NOT** rely on JWT claims or introspection results for access control.
+- The token provides identity only; the authorization server evaluates all access control in real time.
+
+### Mode Discovery and Configuration
+
+The `access_token_authorization` mode is set by the operator at client registration (via `POST /admin/clients` or YAML `clients:` config). It is **not** advertised in the OIDC discovery document or embedded in the token — resource servers receive their mode through operator documentation or configuration management.
+
+SDKs **MAY** expose a `token_authorization_mode` constructor parameter so operators can explicitly declare the expected mode. When declared:
+
+- The SDK middleware (§6) **MUST** enforce the corresponding verification path.
+- If the mode requires introspection but `client_id` / `client_secret` are not provided, the SDK **MUST** raise `ConfigurationError` at construction time rather than silently falling back to JWKS-only verification.
+
+---
+
 ## 4. Claims API
 
 Every SDK must provide typed access to standard JWT claims from a verified token, without requiring consumers to parse raw JSON:
@@ -89,9 +149,31 @@ Every SDK must provide typed access to standard JWT claims from a verified token
 | `hasScope(s)` | bool |
 | `hasRole(r)` | bool — reads Hearth `roles` claim |
 | `hasPermission(p)` | bool — reads Hearth `permissions` claim |
+| `inGroup(g)` | bool — reads Hearth `groups: string[]` claim |
+| `inOrg(o)` | bool — reads Hearth `oid: string` claim |
+| `tokenType()` | string — reads `token_type` claim (`"access"`, `"refresh"`, `"required_action"`) |
+| `organizationId()` | string \| null — reads `oid` claim |
+| `orgGroups()` | string[] — reads `org_groups` claim (Keycloak-style paths, e.g. `/org-slug/group`) |
 | `get(claim)` | raw value (for custom claims) |
 
 `hasRole` and `hasPermission` must read from Hearth's standard custom claims (`roles: string[]`, `permissions: string[]`). If the claim is absent, return `false` (never error).
+
+`inGroup` reads `groups: string[]`; `inOrg` reads the `oid` string claim (exact match). Both must return `false` (never error) when the claim is absent.
+
+### Hearth custom claims reference
+
+The following non-standard claims are embedded in every Hearth-issued JWT. SDKs must expose typed accessors for them and must never error when they are absent (older tokens or third-party relay tokens may omit them):
+
+| Claim | Type | Description |
+|-------|------|-------------|
+| `roles` | `string[]` | Roles assigned to the subject in the issuing realm |
+| `permissions` | `string[]` | Expanded permission strings derived from roles |
+| `groups` | `string[]` | Groups the subject belongs to within the realm |
+| `oid` | `string` | Organization ID the token was issued for (B2B tenancy) |
+| `org_groups` | `string[]` | Group paths scoped to the organization (Keycloak-style, e.g. `/org-slug/group`) |
+| `tid` | `string` | Realm / tenant ID (matches the realm's `RealmId`) |
+| `sid` | `string` | Session ID — present on access tokens tied to an interactive session |
+| `token_type` | `string` | Token purpose: `"access"`, `"refresh"`, or `"required_action"` |
 
 ---
 
@@ -110,6 +192,11 @@ All SDKs must define and expose the following error/exception types. Language-na
 | `TokenIssuerError` | `iss` does not match configured issuer |
 | `TokenAudienceError` | `aud` does not contain expected audience |
 | `IntrospectionError` | Introspection endpoint unreachable or returned error |
+| `RequiredActionError` | Token has `token_type === "required_action"` (required-action JWT presented as a regular access token), or server returns `error_code: "HEARTH_REQUIRED_ACTIONS_PENDING"` |
+
+`RequiredActionError` must additionally expose:
+- `requiredActions: string[]` — the pending action names from the token's `required_actions` claim (e.g. `["VERIFY_EMAIL", "UPDATE_PASSWORD"]`).
+- `redirectUri?: string` — optional URL to the Hearth interstitial page, when one is provided by the server.
 
 All errors must include a human-readable `message`. Errors that wrap an underlying network or parse error must expose the original cause (Go: `Unwrap()`; Python: `__cause__`; TypeScript: `cause` property).
 
@@ -126,7 +213,8 @@ All server-side SDKs (node, go, python) must provide HTTP middleware that:
 3. On success: injects verified claims into the request context using a well-known key.
 4. On missing/invalid token: responds with `401 Unauthorized`, `WWW-Authenticate: Bearer realm="hearth"`.
 5. On insufficient scope/role: responds with `403 Forbidden`.
-6. Does not call `next` on auth failure.
+6. On a token where `token_type === "required_action"`: MUST respond with `401 Unauthorized` and throw `RequiredActionError` (not a generic `UnauthorizedError`). The `requiredActions` field MUST be populated from the `required_actions` claim in the JWT. This token is valid but scoped only to completing the required actions — it MUST NOT be accepted for general API access.
+7. Does not call `next` on auth failure.
 
 The browser SDK (`@hearth/browser`) is exempt from the middleware requirement but must provide equivalent helpers for SPA route guards.
 
@@ -143,6 +231,16 @@ The browser SDK must additionally implement:
 - **Logout**: Local session clear + RP-initiated logout redirect.
 - **Storage abstraction**: Default `sessionStorage`; pluggable (localStorage, in-memory, custom). Storage key prefix must be configurable.
 - **Cross-tab state sync**: Broadcast channel or storage events to sync login/logout across tabs (optional but recommended).
+
+### `handleCallback()` — required-action detection
+
+After exchanging the authorization code for tokens, `handleCallback()` MUST inspect `token_type` before resolving with a usable access token:
+
+1. If the server issues a token with `token_type === "required_action"`: MUST throw `RequiredActionError` instead of storing the token as a valid access token. Populate `requiredActions` from the token's `required_actions` claim.
+2. If the callback URL contains a `required_action_redirect_uri` query parameter (server-supplied interstitial redirect): MUST throw `RequiredActionError` and set `error.redirectUri` to that value so the application can forward the user to the Hearth interstitial page.
+3. If neither condition applies, resolve normally and return the access/refresh token pair.
+
+Applications that catch `RequiredActionError` from `handleCallback()` SHOULD redirect the user to `error.redirectUri` (when present) or construct the appropriate `/ui/required-actions/{action}` URL for the first pending action.
 
 ---
 
@@ -190,14 +288,92 @@ Every SDK repo must contain:
 
 ---
 
+## 12. Admin SDK
+
+The Admin SDK is an **optional** surface exposing management operations against the Hearth admin API (`/admin/*` endpoints). It is a separate entry point from the resource-server (`HearthClient`) and browser SDKs — not a subobject or method on `HearthClient`.
+
+### Entry Point
+
+SDKs must expose a dedicated `AdminClient` type. Instantiation requires:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `base_url` | string | Yes | Root URL of the Hearth instance (no trailing slash) |
+| `realm_id` | string | Yes | ID of the realm to administer |
+| `access_token` | string | Yes | A valid access token whose subject holds the `admin` role in the target realm |
+
+`AdminClient` does **not** perform OIDC discovery and does **not** manage token lifecycle. The caller is responsible for obtaining and refreshing the admin access token (typically via a confidential client's `client_credentials` grant).
+
+All requests must include the following headers:
+
+```
+Authorization: Bearer {access_token}
+X-Realm-ID: {realm_id}
+```
+
+### Scoping and Auth
+
+- All operations are scoped to the realm identified by `realm_id`.
+- The `access_token` must belong to a subject with the `admin` role in that realm.
+- Tokens scoped to the system realm (`RealmId::nil()`) may administer realm-level metadata (e.g., creating or deleting realms via `/admin/realms`).
+- A `403 Forbidden` response indicates the token's subject lacks the required admin role; SDKs should surface this as a distinct error (e.g., an HTTP error type carrying the status code) rather than silently failing.
+
+### Minimum Required Operations
+
+All `AdminClient` implementations must provide at minimum:
+
+#### Users
+
+| Method | HTTP Equivalent |
+|--------|-----------------|
+| `createUser(params)` | `POST /admin/users` |
+| `getUser(id)` | `GET /admin/users/{id}` |
+| `updateUser(id, params)` | `PUT /admin/users/{id}` |
+| `deleteUser(id)` | `DELETE /admin/users/{id}` |
+| `listUsers(options)` | `GET /admin/users?limit=N&cursor=C` |
+
+#### Realms
+
+| Method | HTTP Equivalent |
+|--------|-----------------|
+| `createRealm(params)` | `POST /admin/realms` |
+| `getRealm(id)` | `GET /admin/realms/{id}` |
+| `updateRealm(id, params)` | `PUT /admin/realms/{id}` |
+| `deleteRealm(id)` | `DELETE /admin/realms/{id}` |
+| `listRealms(options)` | `GET /admin/realms?limit=N&cursor=C` |
+
+#### OAuth Clients, Roles, Groups, Organization Memberships
+
+These entities follow the same CRUD + list pattern targeting:
+- `/admin/clients` — OAuth 2.0 client registrations
+- `/admin/roles` — realm-level role definitions
+- `/admin/groups` — realm-level group definitions
+- `/admin/orgs/{orgId}/members` — organization membership management
+
+### Pagination
+
+All list methods must accept an optional `limit` (integer, server-defined default) and `cursor` (opaque string for continuation) parameter. Responses must include a `PageResponse` envelope with items and an optional `next_cursor`. When `next_cursor` is absent or null, no further pages exist.
+
+### Error Handling
+
+`AdminClient` errors must use the same error taxonomy from Section 5 where applicable. HTTP 4xx/5xx responses not covered by that taxonomy (e.g., `403 Forbidden` on insufficient admin role) must be surfaced as typed errors that include the HTTP status code — not swallowed or mapped to a generic exception.
+
+---
+
 ## Conformance Checklist
 
 For use in PR reviews and automated CI checks (see `.github/workflows/sdk-conformance.yml` and `scripts/check-sdk-conformance.sh`):
 
-- [ ] Error types match the 9 names from Section 5 (`ConfigurationError`, `DiscoveryError`, `JWKSFetchError`, `TokenExpiredError`, `TokenNotYetValidError`, `TokenInvalidError`, `TokenIssuerError`, `TokenAudienceError`, `IntrospectionError`)
-- [ ] All public Claims API methods from Section 4 are present (`subject`, `issuer`, `audiences`, `expiry`, `issuedAt`, `jwtID`, `scope`, `scopes`, `hasScope`, `hasRole`, `hasPermission`, `get`)
+- [ ] Error types match the 10 names from Section 5 (`ConfigurationError`, `DiscoveryError`, `JWKSFetchError`, `TokenExpiredError`, `TokenNotYetValidError`, `TokenInvalidError`, `TokenIssuerError`, `TokenAudienceError`, `IntrospectionError`, `RequiredActionError`)
+- [ ] `RequiredActionError` exposes `requiredActions: string[]` and optional `redirectUri: string` (Section 5)
+- [ ] Browser SDK `handleCallback()` throws `RequiredActionError` on `token_type === "required_action"` or `required_action_redirect_uri` callback param (Section 7)
+- [ ] Server-side middleware returns `401` and throws `RequiredActionError` on `token_type === "required_action"` (Section 6)
+- [ ] All 17 public Claims API methods from Section 4 are present (`subject`, `issuer`, `audiences`, `expiry`, `issuedAt`, `jwtID`, `scope`, `scopes`, `hasScope`, `hasRole`, `hasPermission`, `inGroup`, `inOrg`, `tokenType`, `organizationId`, `orgGroups`, `get`)
 - [ ] No tokens or secrets can appear in error messages or logs (Section 11)
 - [ ] JWKS caching follows the 5-rule contract (Section 2)
 - [ ] Tests cover JWKS rotation and clock skew edge cases (Section 9)
 - [ ] README includes quickstart, API reference, and troubleshooting (Section 10)
 - [ ] CHANGELOG.md present and updated (Section 8)
+- [ ] `access_token_authorization` mode handling: `Introspection` and `Decision` modes enforce introspect/authorize call before accepting claims; JWKS-only verification is not used for authorization in those modes (Section 3.5)
+- [ ] Ed25519/OKP JWKS key parsing: SDK correctly parses OKP keys (`kty: "OKP"`, `crv: "Ed25519"`) from the JWKS endpoint; does not require a `y` coordinate; does not error on unrecognized `kty` values (Section 2)
+- [ ] Admin SDK entry-point pattern: `AdminClient` is a separate type from `HearthClient`; takes `(base_url, realm_id, access_token)` directly (no OIDC discovery); sends `X-Realm-ID` header on every request; implements minimum CRUD + list for users, realms, clients, roles, groups, and org memberships (Section 12)
