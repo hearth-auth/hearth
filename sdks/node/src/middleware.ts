@@ -7,7 +7,7 @@ import { IntrospectionClient } from "./introspect.js";
 import { AuthorizeClient } from "./authorize.js";
 import type { VerifiedToken } from "./token.js";
 import type { AccessTokenAuthorizationMode } from "./token.js";
-import { TokenVerificationError, AuthorizationModeError } from "./errors.js";
+import { TokenVerificationError, AuthorizationModeError, RequiredActionError } from "./errors.js";
 
 // No import from 'express' or 'fastify' — decoupled from any framework.
 
@@ -187,6 +187,13 @@ export function hearthMiddleware(options: MiddlewareOptions) {
       return;
     }
 
+    // §6 Rule 6: required_action tokens must never be accepted for general API access
+    if (verified.tokenType() === "required_action") {
+      const err = new RequiredActionError(verified.requiredActions());
+      sendUnauthorized(res, "Token requires completion of required actions");
+      throw err;
+    }
+
     let decision: AuthDecision;
     if (mode === "introspection") {
       decision = await checkIntrospection(rawToken, introspectionClient, options, verified);
@@ -261,6 +268,16 @@ export function hearthFastifyHook(options: MiddlewareOptions) {
         return;
       }
       return;
+    }
+
+    // §6 Rule 6: required_action tokens must never be accepted for general API access
+    if (verified.tokenType() === "required_action") {
+      const err = new RequiredActionError(verified.requiredActions());
+      reply.header("WWW-Authenticate", WWW_AUTHENTICATE).code(401).send({
+        error: "unauthorized",
+        error_description: "Token requires completion of required actions",
+      });
+      throw err;
     }
 
     // Reuse Express-side request wrapper for auth-options check
