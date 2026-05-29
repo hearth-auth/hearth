@@ -23,6 +23,10 @@
 //! - FAPI-A-03: Client without JARM config rejected under Advanced
 //! - FAPI-A-04: Valid Advanced request (PAR + PKCE + JAR + JARM client) accepted
 //! - FAPI-A-05: Discovery advertises `fapi_profile = "advanced"`
+//! - FAPI-A-06: PAR with PKCE only inside JAR accepted (regression HEA-1019)
+//! - FAPI-A-07: Realm Advanced enforces DPoP at token exchange for standard-profile clients
+//! - FAPI-A-08: HTTP server — PAR+JAR→authorize flow succeeds end-to-end (HEA-1023)
+//! - FAPI-A-09: HTTP server — direct authorize (no PAR) rejected in Advanced realm (HEA-1023)
 
 #![allow(clippy::unwrap_used)]
 
@@ -1350,4 +1354,249 @@ async fn fapi_b11_realm_baseline_enforces_dpop_on_refresh_for_standard_profile_c
         .identity()
         .refresh_tokens(&env.realm, initial_tokens.refresh_token(), Some(DPOP_JKT))
         .expect("refresh with DPoP must succeed");
+}
+
+// ── Advanced HTTP server-mode tests (HEA-1023) ───────────────────────────────
+//
+// These tests exercise the HTTP surface for FAPI Advanced realms — confirming
+// the PAR+JAR consumption path sets `via_par = true` and satisfies the engine
+// gates.  The embedded tests above call domain layer APIs directly; only these
+// tests prove the HTTP authorize handler actually calls `consume_par`.
+
+/// Holds the running HTTP server state for FAPI Advanced integration tests.
+/// Dropping this struct shuts down the server via the `_shutdown` channel.
+struct FapiAdvancedServer {
+    base: String,
+    realm_uuid: String,
+    realm_name: String,
+    client_uuid: String,
+    /// Prefixed form of the client ID used in JAR `iss`/`client_id` claims.
+    client_id_str: String,
+    user_uuid: String,
+    pkcs8_bytes: Vec<u8>,
+    _shutdown: tokio::sync::oneshot::Sender<()>,
+}
+
+/// Starts an in-process axum server backed by a FAPI Advanced realm.
+///
+/// The realm has `fapi_profile = Advanced` and one registered client with an
+/// Ed25519 JWKS (for JAR validation) and `authorization_signed_response_alg =
+/// "EdDSA"` (required by the Advanced JARM gate).  The raw pkcs8 bytes are
+/// returned so tests can sign JARs with the matching private key.
+async fn start_fapi_advanced_http_server() -> FapiAdvancedServer {
+    use hearth::protocol::http::{router, AppState};
+    use tokio::net::TcpListener;
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+
+    let realm_rec = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("fapi-adv-http-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+    let realm_id = realm_rec.id().clone();
+
+    let mut config = realm_rec.config().clone();
+    config.fapi_profile = Some(FapiProfile::Advanced);
+    harness
+        .identity()
+        .update_realm(
+            &realm_id,
+            &UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("apply Advanced profile");
+
+    // Ed25519 key pair — public key registered as JWKS, private key used to sign JARs.
+    let (pkcs8_bytes, pub_bytes) = generate_ed25519();
+    let jwks = jwks_json(&pub_bytes);
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm_id,
+            &RegisterClientRequest {
+                client_name: "FAPI Advanced HTTP Test Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                jwks: Some(jwks),
+                // Required: Advanced realm gate checks authorization_signed_response_alg is set.
+                authorization_signed_response_alg: Some("EdDSA".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("register FAPI Advanced client");
+
+    let user = harness
+        .identity()
+        .create_user(
+            &realm_id,
+            &CreateUserRequest {
+                email: format!("adv-http-user-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "FAPI Advanced HTTP User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    let realm_uuid = realm_id.as_uuid().to_string();
+    let realm_name = realm_rec.name().to_string();
+    let client_uuid = client.client_id().as_uuid().to_string();
+    let client_id_str = client.client_id().to_string();
+    let user_uuid = user.id().as_uuid().to_string();
+
+    let state = Arc::new(AppState::new_dev(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        harness.audit_arc(),
+    ));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind random port");
+    let port = listener.local_addr().expect("local addr").port();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _harness = harness; // keeps TempDir alive for the server's lifetime
+        axum::serve(listener, router(state))
+            .with_graceful_shutdown(async {
+                rx.await.ok();
+            })
+            .await
+            .ok();
+    });
+
+    FapiAdvancedServer {
+        base: format!("http://127.0.0.1:{port}"),
+        realm_uuid,
+        realm_name,
+        client_uuid,
+        client_id_str,
+        user_uuid,
+        pkcs8_bytes,
+        _shutdown: tx,
+    }
+}
+
+/// FAPI-A-08 (HEA-1023): HTTP PAR+JAR→authorize flow succeeds end-to-end for an Advanced realm.
+///
+/// The HTTP `/authorize` handler must call `consume_par` when a `request_uri` is
+/// present and set `via_par = true` in the domain request.  Without that, the
+/// Advanced engine gate rejects every authorize even after a valid PAR+JAR
+/// submission.  This test drives the full roundtrip through the HTTP surface:
+///
+///   1. POST `/as/par` with a signed JAR → `request_uri`
+///   2. POST `/authorize` with the `request_uri` and a `user_id` → auth code
+///
+/// Spec: FAPI 2.0 §5.3.2, RFC 9126, RFC 9101.
+#[tokio::test]
+async fn fapi_a08_http_par_jar_authorize_flow_succeeds() {
+    let srv = start_fapi_advanced_http_server().await;
+    let http = reqwest::Client::new();
+
+    // The engine derives the realm issuer as "{base_issuer}/realms/{name}".
+    // In dev/test mode the base issuer is "https://hearth.local" (OidcConfig default).
+    let issuer = format!("https://hearth.local/realms/{}", srv.realm_name);
+    let jar = sign_jar(&srv.pkcs8_bytes, &srv.client_id_str, &issuer);
+
+    // Step 1: POST /as/par with the signed JAR to get a request_uri.
+    let par_body: serde_json::Value = http
+        .post(format!("{}/as/par", srv.base))
+        .header("X-Realm-ID", &srv.realm_uuid)
+        .json(&serde_json::json!({
+            "client_id": srv.client_uuid,
+            "redirect_uri": REDIRECT_URI,
+            "scope": "openid",
+            "state": "fapi-a08-state",
+            "response_type": "code",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+            "nonce": "fapi-a08-nonce",
+            "request": jar
+        }))
+        .send()
+        .await
+        .expect("PAR request")
+        .json()
+        .await
+        .expect("PAR response JSON");
+
+    let request_uri = par_body["request_uri"]
+        .as_str()
+        .expect("PAR response must include request_uri");
+    assert!(
+        request_uri.starts_with("urn:ietf:params:oauth:request_uri:"),
+        "request_uri must use RFC 9126 URN scheme, got: {request_uri}"
+    );
+
+    // Step 2: POST /authorize with the request_uri.  The handler calls consume_par,
+    // sets via_par = true, and issues a code satisfying the Advanced gate.
+    let auth_resp = http
+        .post(format!("{}/authorize", srv.base))
+        .header("X-Realm-ID", &srv.realm_uuid)
+        .json(&serde_json::json!({
+            "user_id": srv.user_uuid,
+            "request_uri": request_uri
+        }))
+        .send()
+        .await
+        .expect("authorize request");
+
+    assert_eq!(
+        auth_resp.status(),
+        reqwest::StatusCode::OK,
+        "PAR+JAR→authorize must return 200 OK for FAPI Advanced realm"
+    );
+    let auth_body: serde_json::Value = auth_resp.json().await.expect("auth response JSON");
+    let code = auth_body["code"]
+        .as_str()
+        .expect("authorize response must contain 'code'");
+    assert!(!code.is_empty(), "auth code must be non-empty");
+}
+
+/// FAPI-A-09 (HEA-1023): HTTP direct authorize without PAR is rejected in an Advanced realm.
+///
+/// FAPI Advanced mandates PAR (RFC 9126 §2.4): submitting a full set of
+/// authorization parameters directly to `/authorize` without a `request_uri`
+/// must yield 400 `error=invalid_request`.
+#[tokio::test]
+async fn fapi_a09_http_direct_authorize_without_par_rejected() {
+    let srv = start_fapi_advanced_http_server().await;
+    let http = reqwest::Client::new();
+
+    let resp = http
+        .post(format!("{}/authorize", srv.base))
+        .header("X-Realm-ID", &srv.realm_uuid)
+        .json(&serde_json::json!({
+            "user_id": srv.user_uuid,
+            "client_id": srv.client_uuid,
+            "redirect_uri": REDIRECT_URI,
+            "scope": "openid",
+            "state": "fapi-a09-state",
+            "response_type": "code",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256"
+        }))
+        .send()
+        .await
+        .expect("authorize request");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "FAPI Advanced direct authorize (no PAR) must return 400"
+    );
+    let body: serde_json::Value = resp.json().await.expect("error response JSON");
+    assert_eq!(
+        body["error"].as_str(),
+        Some("invalid_request"),
+        "FAPI violation must produce error=invalid_request, got: {body}"
+    );
 }
