@@ -42,8 +42,10 @@ final class HearthServiceProvider extends ServiceProvider
         );
 
         $this->app->singleton('hearth', static function (Application $app): HearthClient {
+            /** @var \Illuminate\Config\Repository $configRepo */
+            $configRepo = $app->make('config');
             /** @var array<string, mixed> $config */
-            $config = $app['config']['hearth'];
+            $config = $configRepo->get('hearth', []);
 
             $jwksTtl = isset($config['jwks_ttl']) ? (int) $config['jwks_ttl'] : null;
 
@@ -67,8 +69,11 @@ final class HearthServiceProvider extends ServiceProvider
         $this->app->singleton(HearthMiddleware::class, static function (Application $app): HearthMiddleware {
             /** @var HearthClient $client */
             $client = $app->make('hearth');
+
+            /** @var \Illuminate\Config\Repository $configRepo */
+            $configRepo = $app->make('config');
             /** @var array<string, mixed> $config */
-            $config = $app['config']['hearth'];
+            $config = $configRepo->get('hearth', []);
 
             $coreMiddleware = new \Hearth\Middleware\HearthMiddleware(
                 tokenVerifier: $client->getTokenVerifier(),

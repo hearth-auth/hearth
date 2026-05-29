@@ -19,7 +19,7 @@ use Symfony\Component\HttpFoundation\Response;
  *
  * Converts the incoming Illuminate request to a minimal PSR-7 ServerRequest
  * (carrying only the Authorization header), delegates all JWT validation to
- * {@see CoreMiddleware}, then converts the result back to an Illuminate/Symfony
+ * {@see CoreMiddleware}, then converts the result back to a Symfony/Laravel
  * response.
  *
  * On success the verified {@see \Hearth\Claims} object is attached to the
@@ -43,42 +43,39 @@ final class HearthMiddleware
         // Build a minimal PSR-7 server request forwarding only the Authorization
         // header.  The PSR-15 core reads nothing else from the request object.
         $psrRequest = (new PsrServerRequest('GET', (string) $request->getUri()))
-            ->withHeader('Authorization', (string) $request->header('Authorization', ''));
+            ->withHeader('Authorization', $request->headers->get('Authorization') ?? '');
 
-        // Holder object for state shared with the anonymous handler below.
-        // PHP anonymous classes capture constructor arguments by value, not by
-        // reference — a holder object sidesteps this: both sides share the same
-        // object identity, so mutations inside handle() are visible here.
-        $holder          = new \stdClass();
-        $holder->called  = false;
-        $holder->claims  = null;
-
-        $handler = new class($holder) implements RequestHandlerInterface {
-            public function __construct(private readonly \stdClass $holder) {}
+        // The anonymous handler exposes $claims as a public property so the outer
+        // scope can read it after process() returns.  PHP anonymous classes cannot
+        // close over outer variables by reference, so a public property is the
+        // cleanest way to share state between the handler and the caller.
+        $handler = new class implements RequestHandlerInterface {
+            /** @var \Hearth\Claims|null */
+            public mixed $claims = null;
 
             public function handle(ServerRequestInterface $psrRequest): ResponseInterface
             {
-                // Core middleware injects verified Claims into the request attribute
-                // before calling this handler.  Capture and signal success.
-                $this->holder->claims = $psrRequest->getAttribute(CoreMiddleware::CLAIMS_ATTRIBUTE);
-                $this->holder->called = true;
+                /** @var \Hearth\Claims|null $claims */
+                $claims        = $psrRequest->getAttribute(CoreMiddleware::CLAIMS_ATTRIBUTE);
+                $this->claims  = $claims;
 
-                // Return a throwaway 200 — the real response is produced by $next below.
+                // Dummy 200 — the real response is produced by $next below.
                 return new PsrResponse(200);
             }
         };
 
         $psrResponse = $this->coreMiddleware->process($psrRequest, $handler);
 
-        if (!$holder->called) {
-            // Core middleware short-circuited without calling the handler, meaning
-            // authentication failed.  Forward its status code and headers.
+        // The core middleware returns a non-200 (401 by spec) when authentication
+        // fails and our handler was never called.  Our dummy handler always returns
+        // 200 on success, so any other status means we must forward the failure.
+        if ($psrResponse->getStatusCode() !== 200) {
             return $this->toSymfonyResponse($psrResponse);
         }
 
         // Authentication succeeded.  Attach claims to the request attributes so
         // downstream code can access them without re-verifying the token.
-        $request->attributes->set(CoreMiddleware::CLAIMS_ATTRIBUTE, $holder->claims);
+        $request->attributes->set(CoreMiddleware::CLAIMS_ATTRIBUTE, $handler->claims);
 
         return $next($request);
     }
