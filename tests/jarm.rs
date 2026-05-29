@@ -23,7 +23,6 @@ use hearth::identity::{
 
 const REDIRECT_URI: &str = "https://app.example.com/callback";
 const PKCE_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
-const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
 struct Env {
     harness: common::TestHarness,
@@ -261,5 +260,81 @@ async fn discovery_advertises_jarm_response_modes() {
     assert!(
         modes.contains(&"jwt".to_string()),
         "discovery must include jwt; got {modes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-07: response_mode=query.jwt → response_mode() reflects the mode
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn query_jwt_response_mode_is_set() {
+    let env = setup().await;
+    let resp = authorize_with_mode(&env, ResponseMode::QueryJwt);
+    assert_eq!(
+        resp.response_mode(),
+        &ResponseMode::QueryJwt,
+        "response_mode must be QueryJwt"
+    );
+    // JARM JWT must be present for the redirect builder to deliver it
+    assert!(
+        resp.jarm_jwt().is_some(),
+        "jarm_jwt must be set for query.jwt mode"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-08: response_mode=fragment.jwt → response_mode() reflects the mode
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn fragment_jwt_response_mode_is_set() {
+    let env = setup().await;
+    let resp = authorize_with_mode(&env, ResponseMode::FragmentJwt);
+    assert_eq!(
+        resp.response_mode(),
+        &ResponseMode::FragmentJwt,
+        "response_mode must be FragmentJwt"
+    );
+    assert!(resp.jarm_jwt().is_some(), "jarm_jwt must be set");
+}
+
+// ---------------------------------------------------------------------------
+// JARM-09: no response_mode → response_mode() is Query (default)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn no_response_mode_defaults_to_query() {
+    let env = setup().await;
+    let resp = env
+        .harness
+        .identity()
+        .authorize(
+            &env.realm,
+            &AuthorizationRequest {
+                client_id: env.client_id.clone(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                response_type: "code".to_string(),
+                scope: "openid".to_string(),
+                state: "plain-state-2".to_string(),
+                nonce: None,
+                code_challenge: Some(PKCE_CHALLENGE.to_string()),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                resource: None,
+                user_id: env.user_id.clone(),
+                amr_values: vec![],
+                response_mode: None,
+            },
+        )
+        .expect("authorize");
+
+    assert_eq!(
+        resp.response_mode(),
+        &ResponseMode::Query,
+        "omitting response_mode must default to Query"
+    );
+    assert!(
+        resp.jarm_jwt().is_none(),
+        "plain query must not produce a JARM JWT"
     );
 }

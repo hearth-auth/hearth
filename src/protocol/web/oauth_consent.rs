@@ -984,4 +984,88 @@ mod tests {
         let out = append_query("https://app/cb", &[("state", "a b&c=d")]);
         assert!(out.contains("state=a%20b%26c%3Dd"), "got: {out}");
     }
+
+    #[test]
+    fn append_fragment_uses_hash() {
+        let out = append_fragment("https://app/cb", &[("code", "abc"), ("state", "xyz")]);
+        assert_eq!(out, "https://app/cb#code=abc&state=xyz");
+    }
+
+    #[test]
+    fn append_fragment_skips_empty_values() {
+        let out = append_fragment("https://app/cb", &[("response", "jwt123"), ("extra", "")]);
+        assert_eq!(out, "https://app/cb#response=jwt123");
+    }
+
+    #[test]
+    fn build_redirect_query_jwt_produces_response_param() {
+        use crate::identity::oidc::{AuthorizationResponse, ResponseMode};
+        let resp = AuthorizationResponse::new_jarm(
+            "authcode".to_string(),
+            "mystate".to_string(),
+            "https://as.example.com".to_string(),
+            "eyJhbGci.payload.sig".to_string(),
+            ResponseMode::QueryJwt,
+        );
+        let location = build_authorization_redirect("https://app/cb", &resp);
+        assert!(
+            location.starts_with("https://app/cb?response="),
+            "query.jwt must use ?response=, got: {location}"
+        );
+        assert!(!location.contains("code="), "must not expose code=");
+    }
+
+    #[test]
+    fn build_redirect_fragment_jwt_uses_hash() {
+        use crate::identity::oidc::{AuthorizationResponse, ResponseMode};
+        let resp = AuthorizationResponse::new_jarm(
+            "authcode".to_string(),
+            "mystate".to_string(),
+            "https://as.example.com".to_string(),
+            "eyJhbGci.payload.sig".to_string(),
+            ResponseMode::FragmentJwt,
+        );
+        let location = build_authorization_redirect("https://app/cb", &resp);
+        assert!(
+            location.starts_with("https://app/cb#response="),
+            "fragment.jwt must use #response=, got: {location}"
+        );
+    }
+
+    #[test]
+    fn build_redirect_plain_query_has_code_state_iss() {
+        use crate::identity::oidc::AuthorizationResponse;
+        let resp = AuthorizationResponse::new(
+            "authcode".to_string(),
+            "mystate".to_string(),
+            "https://as.example.com".to_string(),
+        );
+        let location = build_authorization_redirect("https://app/cb", &resp);
+        assert!(location.contains("code=authcode"), "got: {location}");
+        assert!(location.contains("state=mystate"), "got: {location}");
+        assert!(location.contains("iss="), "got: {location}");
+        assert!(!location.contains("response="), "got: {location}");
+        assert!(
+            location.contains('?'),
+            "must use query string, got: {location}"
+        );
+    }
+
+    #[test]
+    fn build_redirect_jwt_mode_uses_query() {
+        use crate::identity::oidc::{AuthorizationResponse, ResponseMode};
+        // response_mode=jwt defaults to query delivery for code flow
+        let resp = AuthorizationResponse::new_jarm(
+            "code".to_string(),
+            "st".to_string(),
+            "https://as.example.com".to_string(),
+            "jwt.tok.en".to_string(),
+            ResponseMode::Jwt,
+        );
+        let location = build_authorization_redirect("https://app/cb", &resp);
+        assert!(
+            location.contains("?response="),
+            "jwt mode must use query delivery, got: {location}"
+        );
+    }
 }

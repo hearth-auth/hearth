@@ -1803,6 +1803,11 @@ pub struct PendingAuthorizationRequest {
     pub code_challenge_method: Option<String>,
     /// OIDC nonce echoed into the ID token.
     pub nonce: Option<String>,
+    /// JARM response mode wire string (`query.jwt`, `fragment.jwt`, `jwt`).
+    ///
+    /// `None` means the client used the default `query` mode. Preserved here
+    /// so it can be threaded through the consent redirect path.
+    pub response_mode: Option<String>,
     /// When the ticket was created.
     pub created_at: Timestamp,
     /// When the ticket expires. Past this point `take_pending_authorization`
@@ -2656,6 +2661,7 @@ mod tests {
             code_challenge: Some("abc".to_string()),
             code_challenge_method: Some("S256".to_string()),
             nonce: Some("n-0".to_string()),
+            response_mode: None,
             created_at: Timestamp::from_micros(1_000_000),
             expires_at: Timestamp::from_micros(1_600_000_000),
         };

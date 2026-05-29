@@ -101,6 +101,7 @@ fn authorize_and_exchange(
                 nonce: None,
                 resource: resource.map(str::to_string),
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         )
         .expect("authorize");

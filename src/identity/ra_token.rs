@@ -53,6 +53,13 @@ pub struct OidcParams {
     pub state: Option<String>,
     /// Response type (e.g., `"code"`).
     pub response_type: String,
+    /// JARM response mode wire string (`query.jwt`, `fragment.jwt`, `jwt`).
+    ///
+    /// `None` means default `query` mode. Preserved so that, after all
+    /// required actions complete, the authorization code redirect uses the
+    /// originally-requested mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<String>,
 }
 
 /// Claims embedded in a Required-Action session JWT.
@@ -284,6 +291,7 @@ mod tests {
             nonce: Some("nonce-xyz".to_string()),
             state: Some("state-abc".to_string()),
             response_type: "code".to_string(),
+            response_mode: None,
         }
     }
 

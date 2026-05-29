@@ -42,7 +42,7 @@ use crate::identity::CodeChallengeMethod;
 use crate::identity::RequiredAction;
 use crate::identity::{CleartextPassword, SessionContext, UpdateUserRequest};
 use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
-use crate::protocol::web::oauth_consent::AuthorizeQuery;
+use crate::protocol::web::oauth_consent::{build_authorization_redirect, AuthorizeQuery};
 
 use super::handlers::append_cookie;
 use super::handlers_common;
@@ -1523,25 +1523,6 @@ fn now_micros() -> i64 {
         .ok()
         .and_then(|d| i64::try_from(d.as_micros()).ok())
         .unwrap_or(0)
-}
-
-/// Appends query parameters to a redirect URI.  Replicates the logic from
-/// [`super::oauth_consent`] without a cross-module dependency.
-fn build_redirect_location(base: &str, params: &[(&str, &str)]) -> String {
-    let mut out = String::with_capacity(base.len() + 64);
-    out.push_str(base);
-    let mut first = !base.contains('?');
-    for (k, v) in params {
-        if v.is_empty() {
-            continue;
-        }
-        out.push(if first { '?' } else { '&' });
-        first = false;
-        percent_encode_into(k, &mut out);
-        out.push('=');
-        percent_encode_into(v, &mut out);
-    }
-    out
 }
 
 fn percent_encode_into(value: &str, out: &mut String) {

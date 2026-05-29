@@ -105,6 +105,7 @@ fn auth_request(env: &Env) -> AuthorizationRequest {
         code_challenge_method: Some(CodeChallengeMethod::S256),
         nonce: Some(uuid::Uuid::new_v4().to_string()),
         amr_values: vec![],
+        response_mode: None,
     }
 }
 

@@ -290,6 +290,7 @@ async fn refresh_token_rotation_e2e() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         )
         .expect("authorize");
@@ -398,6 +399,7 @@ async fn conformance_rfc7662_introspection_response() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         )
         .expect("authorize");
@@ -713,6 +715,7 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         )
         .expect_err("authorize on archived client must fail");
@@ -751,6 +754,7 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         )
         .expect("authorize on restored client must succeed");
