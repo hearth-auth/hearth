@@ -9,6 +9,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Kotlin SDK spec conformance (HEA-964)** — `Claims` gains four new accessors:
+  `inOrg(o)`, `tokenType()`, `organizationId()`, `orgGroups()`; new `RequiredActionError`
+  with `requiredActions: List<String>` and optional `redirectUri`; `requirePermission`
+  middleware rejects `token_type=required_action` tokens with `RequiredActionError` across
+  all modes (EMBEDDED/DECISION/INTROSPECTION) before any network call (spec §6 rule 6);
+  `AdminClient` gains `realmId` constructor param + `X-Realm-ID` header on every request,
+  full CRUD for OAuth clients (`/admin/clients`), roles (`/admin/roles`),
+  groups (`/admin/groups`), and org memberships (`/admin/orgs/{id}/members`) with
+  corresponding types (`Role`, `Group`, `OrgMember`, etc.) (HEA-964).
+
 - **Rust SDK spec conformance (HEA-965)** — `Claims` gains six new accessors:
   `scope()`, `inGroup(g)`, `inOrg(o)`, `tokenType()`, `organizationId()`,
   `orgGroups()`; new `RequiredActionError` variant with `required_actions: Vec<String>`
