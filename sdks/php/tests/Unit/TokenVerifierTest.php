@@ -10,7 +10,7 @@ use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
 use Hearth\Exceptions\TokenIssuerException;
-use Hearth\Exceptions\TokenSignatureException;
+use Hearth\Exceptions\TokenInvalidException;
 use Hearth\TokenVerifier;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -90,7 +90,7 @@ final class TokenVerifierTest extends TestCase
 
     public function testVerifyThrowsOnMalformedJwt(): void
     {
-        $this->expectException(TokenSignatureException::class);
+        $this->expectException(TokenInvalidException::class);
         $this->verifier->verify('not.a.valid.jwt.parts');
     }
 
@@ -103,7 +103,7 @@ final class TokenVerifierTest extends TestCase
             ->method('getKey')
             ->willReturn($otherPublic); // wrong public key
 
-        $this->expectException(TokenSignatureException::class);
+        $this->expectException(TokenInvalidException::class);
         $this->verifier->verify($this->makeToken($this->validClaims()));
     }
 
@@ -151,7 +151,7 @@ final class TokenVerifierTest extends TestCase
         $this->setUpJwksForKey();
         $token = $this->makeToken($this->validClaims(['iat' => time() + 60]));
 
-        $this->expectException(TokenSignatureException::class);
+        $this->expectException(TokenInvalidException::class);
         $this->verifier->verify($token);
     }
 
@@ -162,7 +162,7 @@ final class TokenVerifierTest extends TestCase
         $payload = strtr(rtrim(base64_encode(json_encode($this->validClaims())), '='), '+/', '-_');
         $token   = "{$header}.{$payload}.fakesig";
 
-        $this->expectException(TokenSignatureException::class);
+        $this->expectException(TokenInvalidException::class);
         $this->verifier->verify($token);
     }
 }

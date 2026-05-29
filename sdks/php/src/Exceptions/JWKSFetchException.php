@@ -11,8 +11,10 @@ use Throwable;
  *
  * Also thrown when a key ID (kid) referenced by a JWT is not found in the
  * cached or freshly-fetched JWKS.
+ *
+ * Conforms to §5 of the Hearth SDK Common Specification (`JWKSFetchError`).
  */
-class JwksException extends HearthException
+class JWKSFetchException extends HearthException
 {
     public function __construct(string $message = 'JWKS fetch or parse failed', int $code = 0, ?Throwable $previous = null)
     {

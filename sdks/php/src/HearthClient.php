@@ -119,12 +119,12 @@ final class HearthClient
      * - `"introspection"`: JWKS verification + mandatory introspection call.
      * - `"decision"`: JWKS verification only (caller must separately call `POST /oauth/authorize`).
      *
-     * @throws \Hearth\Exceptions\TokenSignatureException
+     * @throws \Hearth\Exceptions\TokenInvalidException
      * @throws \Hearth\Exceptions\TokenExpiredException
      * @throws \Hearth\Exceptions\TokenIssuerException
      * @throws \Hearth\Exceptions\TokenAudienceException
      * @throws \Hearth\Exceptions\RequiredActionException
-     * @throws \Hearth\Exceptions\JwksException
+     * @throws \Hearth\Exceptions\JWKSFetchException
      * @throws \Hearth\Exceptions\IntrospectionException When mode is "introspection"
      */
     public function verifyToken(string $rawToken): Claims

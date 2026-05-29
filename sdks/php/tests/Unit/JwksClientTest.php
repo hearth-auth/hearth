@@ -6,7 +6,7 @@ namespace Hearth\Tests\Unit;
 
 use GuzzleHttp\Psr7\HttpFactory;
 use GuzzleHttp\Psr7\Response;
-use Hearth\Exceptions\JwksException;
+use Hearth\Exceptions\JWKSFetchException;
 use Hearth\JwksClient;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -64,7 +64,7 @@ final class JwksClientTest extends TestCase
         self::assertSame(SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES, strlen($key));
     }
 
-    public function testGetKeyThrowsJwksExceptionForUnknownKid(): void
+    public function testGetKeyThrowsJWKSFetchExceptionForUnknownKid(): void
     {
         $jwks = json_encode(['keys' => []]);
 
@@ -72,7 +72,7 @@ final class JwksClientTest extends TestCase
             ->method('sendRequest')
             ->willReturn(new Response(200, [], $jwks));
 
-        $this->expectException(JwksException::class);
+        $this->expectException(JWKSFetchException::class);
         $this->jwksClient->getKey('unknown-kid');
     }
 
@@ -114,13 +114,13 @@ final class JwksClientTest extends TestCase
         $this->jwksClient->getKey(self::FAKE_KID); // should hit cache
     }
 
-    public function testThrowsJwksExceptionOnNonSuccessHttpStatus(): void
+    public function testThrowsJWKSFetchExceptionOnNonSuccessHttpStatus(): void
     {
         $this->httpClient
             ->method('sendRequest')
             ->willReturn(new Response(503));
 
-        $this->expectException(JwksException::class);
+        $this->expectException(JWKSFetchException::class);
         $this->jwksClient->getKey(self::FAKE_KID);
     }
 }
