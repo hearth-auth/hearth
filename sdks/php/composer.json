@@ -1,0 +1,41 @@
+{
+  "name": "hearth-auth/hearth-php",
+  "description": "Official PHP SDK for Hearth Identity Provider",
+  "type": "library",
+  "license": "MIT",
+  "keywords": ["oauth2", "oidc", "jwt", "auth", "hearth", "identity"],
+  "homepage": "https://github.com/hearth-auth/hearth",
+  "require": {
+    "php": ">=8.1",
+    "ext-json": "*",
+    "ext-sodium": "*",
+    "lcobucci/jwt": "^5.0",
+    "psr/http-client": "^1.0",
+    "psr/http-factory": "^1.0",
+    "psr/http-message": "^1.0 || ^2.0",
+    "psr/http-server-handler": "^1.0",
+    "psr/http-server-middleware": "^1.0",
+    "guzzlehttp/guzzle": "^7.5",
+    "guzzlehttp/psr7": "^2.0"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.5",
+    "phpstan/phpstan": "^1.10"
+  },
+  "autoload": {
+    "psr-4": {
+      "Hearth\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Hearth\\Tests\\": "tests/"
+    }
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true,
+  "config": {
+    "sort-packages": true,
+    "optimize-autoloader": true
+  }
+}
