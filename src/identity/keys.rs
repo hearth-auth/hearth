@@ -88,6 +88,12 @@ const REVOKED_JTI_PREFIX: &str = "oauth:revjti:";
 /// Prefix for JWT bearer assertion JTI replay store (RFC 7523).
 const JWT_BEARER_JTI_PREFIX: &str = "oauth:jb-jti:";
 
+/// Prefix for `private_key_jwt` client assertion JTI replay store (RFC 7523 §2.2).
+const CLIENT_ASSERTION_JTI_PREFIX: &str = "oauth:ca-jti:";
+
+/// Prefix for JAR (RFC 9101) signed request object JTI replay store.
+const JAR_JTI_PREFIX: &str = "oauth:jar-jti:";
+
 /// Prefix for OAuth consent record storage.
 const OAUTH_CONSENT_PREFIX: &str = "oauth:consent:";
 
@@ -665,6 +671,38 @@ pub(crate) fn encode_jwt_bearer_jti(jti: &str) -> Vec<u8> {
 /// Used during cascade realm deletion to purge the replay store.
 pub(crate) fn jwt_bearer_jti_scan_prefix() -> Vec<u8> {
     JWT_BEARER_JTI_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the storage key for a consumed `private_key_jwt` assertion JTI.
+///
+/// Format: `oauth:ca-jti:{jti}`
+///
+/// Used for RFC 7523 §2.2 `private_key_jwt` JTI replay prevention.
+pub(crate) fn encode_client_assertion_jti(jti: &str) -> Vec<u8> {
+    format!("{CLIENT_ASSERTION_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all `private_key_jwt` assertion JTIs in a realm.
+///
+/// Used during cascade realm deletion to purge the replay store.
+pub(crate) fn client_assertion_jti_scan_prefix() -> Vec<u8> {
+    CLIENT_ASSERTION_JTI_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the storage key for a JAR (RFC 9101) signed request object JTI.
+///
+/// Format: `oauth:jar-jti:{jti}`
+///
+/// Used for RFC 9101 §4 JAR replay prevention.
+pub(crate) fn encode_jar_jti(jti: &str) -> Vec<u8> {
+    format!("{JAR_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all JAR JTIs in a realm.
+///
+/// Used during cascade realm deletion to purge the replay store.
+pub(crate) fn jar_jti_scan_prefix() -> Vec<u8> {
+    JAR_JTI_PREFIX.as_bytes().to_vec()
 }
 
 // ===== OAuth consent key encoding =====

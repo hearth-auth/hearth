@@ -67,6 +67,10 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             declared_scopes: Vec::new(),
             consent_spans_orgs: false,
             access_token_authorization,
+            jwks: None,
+            jwks_uri: None,
+            authorization_signed_response_alg: None,
+            profile: domain::ClientProfile::Standard,
         }
     }
 }
@@ -110,6 +114,8 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
                     _ => AccessTokenAuthorization::Embedded,
                 }
             }),
+            authorization_signed_response_alg: None,
+            profile: None,
         }
     }
 }
@@ -146,6 +152,9 @@ pub(crate) fn proto_authorize_to_domain(
         code_challenge_method,
         nonce: r.nonce,
         amr_values: Vec::new(),
+        response_mode: None,
+        request: None,
+        via_par: false,
     })
 }
 
@@ -175,6 +184,8 @@ pub(crate) fn proto_token_exchange_to_domain(
         redirect_uri: r.redirect_uri.clone(),
         code_verifier: r.code_verifier.clone(),
         dpop_jkt: None,
+        client_assertion_type: None,
+        client_assertion: None,
     })
 }
 
@@ -203,9 +214,15 @@ pub(crate) fn proto_client_creds_to_domain(
             uuid::Uuid::parse_str(&r.client_id)
                 .map_err(|_| "invalid client_id UUID".to_string())?,
         ),
-        client_secret: r.client_secret.clone(),
+        client_secret: if r.client_secret.is_empty() {
+            None
+        } else {
+            Some(r.client_secret.clone())
+        },
         scope: r.scope.clone(),
         dpop_jkt: None,
+        client_assertion_type: None,
+        client_assertion: None,
     })
 }
 

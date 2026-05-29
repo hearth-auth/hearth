@@ -859,6 +859,45 @@ pub struct RealmConfig {
     /// feed. Defaults to disabled for backward compatibility.
     #[serde(default)]
     pub session_version: SessionVersionConfig,
+    /// Maximum number of concurrent active (non-revoked, non-expired) sessions
+    /// per user in this realm. `None` means unlimited (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_sessions: Option<u32>,
+    /// What to do when a new session would exceed `max_concurrent_sessions`.
+    /// Defaults to `RejectNew`. Set to `EvictOldest` to opt in to eviction.
+    #[serde(default)]
+    pub session_over_limit_policy: SessionLimitPolicy,
+    /// FAPI 2.0 Security Profile enforcement level for this realm.
+    ///
+    /// When set, the authorization server enforces the corresponding FAPI profile
+    /// on all authorization requests in this realm:
+    ///
+    /// - `baseline` — requires PAR + PKCE (S256) on every request.
+    /// - `advanced` — additionally requires JAR, JARM, and `private_key_jwt`.
+    ///
+    /// `None` (default) means standard OAuth 2.0 / OIDC rules apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fapi_profile: Option<FapiProfile>,
+}
+
+/// FAPI 2.0 Security Profile enforcement level.
+///
+/// Activates when set on a `RealmConfig`. Controls which FAPI 2.0 constraints
+/// the AS enforces for all authorization requests in the realm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum FapiProfile {
+    /// FAPI 2.0 Baseline Security Profile.
+    ///
+    /// Requires: PAR (RFC 9126), PKCE with S256 (RFC 7636), `iss` in responses
+    /// (RFC 9207). All authorization requests must be submitted as PAR.
+    Baseline,
+    /// FAPI 2.0 Advanced Security Profile.
+    ///
+    /// Requires all Baseline constraints plus: JAR (RFC 9101), JARM
+    /// (OAuth 2.0 JARM), and `private_key_jwt` client authentication.
+    Advanced,
 }
 
 /// Per-realm session-version (`sv`) tracking configuration.
@@ -894,6 +933,30 @@ impl Default for SessionVersionConfig {
             delta_retention_seconds: Self::default_delta_retention_seconds(),
         }
     }
+}
+
+/// What to do when a new `create_session` would push a user's live session
+/// count past `RealmConfig::max_concurrent_sessions`.
+///
+/// The default is [`RejectNew`][SessionLimitPolicy::RejectNew]. Operators must
+/// explicitly opt in to [`EvictOldest`][SessionLimitPolicy::EvictOldest] via
+/// `session_over_limit_policy = "evict_oldest"` in realm config.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLimitPolicy {
+    /// Reject the new session with [`crate::identity::IdentityError::SessionLimitExceeded`].
+    ///
+    /// This is the default. An attacker cannot silently evict a victim's
+    /// sessions by flooding new-session requests — the victim's existing
+    /// sessions remain intact and the attacker receives an error instead.
+    #[default]
+    RejectNew,
+    /// Revoke the oldest active session(s) to make room, then proceed.
+    ///
+    /// Opt-in only. Enables a DoS vector where an attacker can evict a
+    /// victim's sessions via repeated login. Only use when the application
+    /// requires single-session semantics and the threat model accepts it.
+    EvictOldest,
 }
 
 // ── SecretString serde helpers ────────────────────────────────────────────────
@@ -1771,6 +1834,17 @@ pub struct PendingAuthorizationRequest {
     pub code_challenge_method: Option<String>,
     /// OIDC nonce echoed into the ID token.
     pub nonce: Option<String>,
+    /// JARM response mode wire string (`query.jwt`, `fragment.jwt`, `jwt`).
+    ///
+    /// `None` means the client used the default `query` mode. Preserved here
+    /// so it can be threaded through the consent redirect path.
+    pub response_mode: Option<String>,
+    /// JARM signing algorithm from `OAuthClient.authorization_signed_response_alg`.
+    ///
+    /// Carried forward so that error redirects in consent_post can be
+    /// JWT-wrapped without an extra client lookup (JARM §4.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_signed_response_alg: Option<String>,
     /// When the ticket was created.
     pub created_at: Timestamp,
     /// When the ticket expires. Past this point `take_pending_authorization`
@@ -2624,6 +2698,8 @@ mod tests {
             code_challenge: Some("abc".to_string()),
             code_challenge_method: Some("S256".to_string()),
             nonce: Some("n-0".to_string()),
+            response_mode: None,
+            authorization_signed_response_alg: Some("EdDSA".to_string()),
             created_at: Timestamp::from_micros(1_000_000),
             expires_at: Timestamp::from_micros(1_600_000_000),
         };

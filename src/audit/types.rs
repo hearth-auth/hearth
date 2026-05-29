@@ -262,6 +262,16 @@ pub enum AuditAction {
     ///
     /// Metadata carries `user_id` and `count` (number of records removed).
     DeviceFingerprintsErased,
+    /// The per-realm concurrent session limit was enforced.
+    ///
+    /// Emitted whenever `max_concurrent_sessions` is set and a new session
+    /// would exceed it — whether the policy is `RejectNew` (evicted=0, no
+    /// session created) or `EvictOldest` (evicted≥1, oldest sessions revoked).
+    ///
+    /// Metadata carries `user_id`, `evicted` (number of sessions removed,
+    /// 0 for `RejectNew`), `policy` (`"reject_new"` | `"evict_oldest"`),
+    /// and `limit`.
+    SessionLimitEnforced,
 }
 
 impl AuditAction {
@@ -354,6 +364,7 @@ impl AuditAction {
             Self::SmsMfaChallengeFailed,
             Self::SmsMfaLocked,
             Self::DeviceFingerprintsErased,
+            Self::SessionLimitEnforced,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -444,6 +455,7 @@ impl AuditAction {
             Self::SmsMfaChallengeFailed => "sms_mfa_challenge_failed",
             Self::SmsMfaLocked => "sms_mfa_locked",
             Self::DeviceFingerprintsErased => "device_fingerprints_erased",
+            Self::SessionLimitEnforced => "session_limit_enforced",
         }
     }
 }
@@ -535,6 +547,7 @@ impl std::str::FromStr for AuditAction {
             "sms_mfa_challenge_failed" => Ok(Self::SmsMfaChallengeFailed),
             "sms_mfa_locked" => Ok(Self::SmsMfaLocked),
             "device_fingerprints_erased" => Ok(Self::DeviceFingerprintsErased),
+            "session_limit_enforced" => Ok(Self::SessionLimitEnforced),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -629,7 +642,8 @@ impl AuditAction {
             | Self::StepUpMfaCompleted
             | Self::SmsOtpEnrollmentStarted
             | Self::SmsOtpEnrollmentVerified
-            | Self::SmsMfaChallengeSucceeded => LogOnly,
+            | Self::SmsMfaChallengeSucceeded
+            | Self::SessionLimitEnforced => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged

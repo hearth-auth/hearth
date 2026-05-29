@@ -20,6 +20,44 @@ pub enum ClientTrustLevel {
     ThirdParty,
 }
 
+/// Security profile for an OAuth 2.0 client.
+///
+/// When set to `Fapi2`, the authorization server enforces the full FAPI 2.0
+/// Security Profile (FAPI2SP) restrictions on this client:
+///
+/// - PAR-only: every authorization request MUST arrive via a pushed
+///   authorization request (`request_uri`); direct `/authorize` calls are
+///   rejected.
+/// - `response_type=code` only: implicit and hybrid flows are forbidden.
+/// - `private_key_jwt` client authentication only: `client_secret` is
+///   forbidden at registration time; clients must register a JWKS.
+/// - Sender-constrained tokens: the token endpoint requires a DPoP proof
+///   (or mTLS — future). Requests without `dpop_jkt` are rejected.
+/// - `s_hash` in JARM: when `state` is non-empty, a SHA-256 hash of the
+///   state is added to the JARM JWT for binding verification.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientProfile {
+    /// Standard OAuth 2.0 / OIDC client (default).
+    #[default]
+    Standard,
+    /// FAPI 2.0 Security Profile — elevated constraints apply.
+    Fapi2,
+}
+
+impl ClientProfile {
+    /// Returns `true` if this is a FAPI 2.0 client.
+    pub fn is_fapi2(self) -> bool {
+        matches!(self, Self::Fapi2)
+    }
+
+    /// Returns `true` if this is a Standard (default) client. Used by serde
+    /// `skip_serializing_if` to omit the field from stored records when default.
+    pub fn is_standard(&self) -> bool {
+        matches!(self, Self::Standard)
+    }
+}
+
 /// The lifecycle status of an OAuth 2.0 application client.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -112,6 +150,19 @@ pub struct RegisterClientRequest {
     pub consent_spans_orgs: bool,
     /// Access-token authorization mode. Defaults to `Embedded`.
     pub access_token_authorization: AccessTokenAuthorization,
+    /// Inline JWKS JSON for JAR (RFC 9101) signed request objects.
+    ///
+    /// When set, the client may pass `request=<JWT>` on `/authorize` or
+    /// `/as/par`. Value must be a JSON string, e.g. `{"keys":[{...}]}`.
+    pub jwks: Option<String>,
+    /// JWKS URI for JAR signed request object verification (stored for future use).
+    pub jwks_uri: Option<String>,
+    /// JARM signing algorithm for authorization responses (OAuth 2.0 JARM §4).
+    ///
+    /// When set, JARM is mandatory for this client. Supported values: `"EdDSA"`.
+    pub authorization_signed_response_alg: Option<String>,
+    /// Security profile for this client. Defaults to `Standard`.
+    pub profile: ClientProfile,
 }
 
 impl Default for RegisterClientRequest {
@@ -133,6 +184,10 @@ impl Default for RegisterClientRequest {
             declared_scopes: Vec::new(),
             consent_spans_orgs: false,
             access_token_authorization: AccessTokenAuthorization::Embedded,
+            jwks: None,
+            jwks_uri: None,
+            authorization_signed_response_alg: None,
+            profile: ClientProfile::Standard,
         }
     }
 }
@@ -226,6 +281,33 @@ pub struct OAuthClient {
     /// Controls how access-token authorization data is exposed to resource servers.
     #[serde(default)]
     access_token_authorization: AccessTokenAuthorization,
+    /// Inline JSON Web Key Set for JAR (RFC 9101) signature verification.
+    ///
+    /// When set, this client may sign authorization requests (`request=<JWT>`)
+    /// on `/authorize` or `/as/par`. The value is a JSON string containing a
+    /// JWKS object, e.g. `{"keys":[{...}]}`. Supports `RS256` (RSA) and
+    /// `EdDSA` (Ed25519) key types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jwks: Option<String>,
+    /// URL pointing to a JSON Web Key Set for JAR signature verification.
+    ///
+    /// When set and `jwks` is absent, the AS MAY fetch this URL to resolve
+    /// signing keys. MUST be an `https://` URI. Actual HTTP fetching is not
+    /// yet implemented — this field validates and stores the URI for future use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jwks_uri: Option<String>,
+    /// JARM signing algorithm for authorization responses (OAuth 2.0 JARM §4).
+    ///
+    /// When set, JARM is mandatory for this client: every authorization response
+    /// is wrapped in a signed JWT regardless of `response_mode`. Supported
+    /// values: `"EdDSA"`. Omit to allow plain responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authorization_signed_response_alg: Option<String>,
+    /// Security profile for this client. Defaults to `Standard` for
+    /// backward-compatible deserialization of records written before the
+    /// profile field was introduced.
+    #[serde(default, skip_serializing_if = "ClientProfile::is_standard")]
+    profile: ClientProfile,
 }
 
 fn default_require_consent() -> bool {
@@ -259,6 +341,10 @@ impl OAuthClient {
             post_logout_redirect_uris: Vec::new(),
             assertion_public_key: None,
             access_token_authorization: AccessTokenAuthorization::Embedded,
+            jwks: None,
+            jwks_uri: None,
+            authorization_signed_response_alg: None,
+            profile: ClientProfile::Standard,
         }
     }
 
@@ -290,6 +376,10 @@ impl OAuthClient {
             post_logout_redirect_uris: Vec::new(),
             assertion_public_key: None,
             access_token_authorization: AccessTokenAuthorization::Embedded,
+            jwks: None,
+            jwks_uri: None,
+            authorization_signed_response_alg: None,
+            profile: ClientProfile::Standard,
         }
     }
 
@@ -471,6 +561,46 @@ impl OAuthClient {
         self.access_token_authorization = mode;
     }
 
+    /// Returns the inline JWKS (JSON string) for JAR signature verification, if set.
+    pub fn jwks(&self) -> Option<&str> {
+        self.jwks.as_deref()
+    }
+
+    /// Sets the inline JWKS JSON for JAR signature verification. `None` clears it.
+    pub(crate) fn set_jwks(&mut self, jwks: Option<String>) {
+        self.jwks = jwks;
+    }
+
+    /// Returns the JWKS URI for JAR signature verification, if set.
+    pub fn jwks_uri(&self) -> Option<&str> {
+        self.jwks_uri.as_deref()
+    }
+
+    /// Sets the JWKS URI for JAR signature verification. `None` clears it.
+    pub(crate) fn set_jwks_uri(&mut self, uri: Option<String>) {
+        self.jwks_uri = uri;
+    }
+
+    /// Returns the JARM signing algorithm, if mandatory JARM is configured.
+    pub fn authorization_signed_response_alg(&self) -> Option<&str> {
+        self.authorization_signed_response_alg.as_deref()
+    }
+
+    /// Sets the JARM signing algorithm. `None` disables mandatory JARM.
+    pub(crate) fn set_authorization_signed_response_alg(&mut self, alg: Option<String>) {
+        self.authorization_signed_response_alg = alg;
+    }
+
+    /// Returns the client's security profile.
+    pub fn profile(&self) -> ClientProfile {
+        self.profile
+    }
+
+    /// Sets the client's security profile.
+    pub(crate) fn set_profile(&mut self, profile: ClientProfile) {
+        self.profile = profile;
+    }
+
     /// Returns `true` if this client was provisioned from YAML configuration.
     ///
     /// YAML-managed clients have deterministic UUID v5 identifiers (derived
@@ -521,6 +651,11 @@ pub struct UpdateClientRequest {
     pub assertion_public_key: Option<Option<String>>,
     /// New access-token authorization mode. `None` leaves unchanged.
     pub access_token_authorization: Option<AccessTokenAuthorization>,
+    /// JARM signing algorithm update. `Some(Some("EdDSA"))` enables mandatory JARM,
+    /// `Some(None)` clears it (disables mandatory JARM). `None` leaves unchanged.
+    pub authorization_signed_response_alg: Option<Option<String>>,
+    /// Updated security profile. `None` leaves unchanged.
+    pub profile: Option<ClientProfile>,
 }
 
 // ===== RP-Initiated Logout =====
@@ -587,6 +722,55 @@ pub enum CodeChallengeMethod {
     S256,
 }
 
+/// OAuth 2.0 authorization response mode (OIDC Core §3 + JARM).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ResponseMode {
+    /// Standard query-string redirect (default for `response_type=code`).
+    #[default]
+    Query,
+    /// Fragment-based redirect.
+    Fragment,
+    /// JARM: signed JWT response delivered via query string (`?response=<jwt>`).
+    QueryJwt,
+    /// JARM: signed JWT response delivered via fragment (`#response=<jwt>`).
+    FragmentJwt,
+    /// JARM: `response_mode=jwt` — defaults to `query.jwt` for code flow.
+    Jwt,
+}
+
+impl ResponseMode {
+    /// Returns the wire string sent by the client.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Fragment => "fragment",
+            Self::QueryJwt => "query.jwt",
+            Self::FragmentJwt => "fragment.jwt",
+            Self::Jwt => "jwt",
+        }
+    }
+
+    /// Whether this mode produces a signed JWT authorization response.
+    pub fn is_jarm(&self) -> bool {
+        matches!(self, Self::QueryJwt | Self::FragmentJwt | Self::Jwt)
+    }
+}
+
+impl std::str::FromStr for ResponseMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "query" => Ok(Self::Query),
+            "fragment" => Ok(Self::Fragment),
+            "query.jwt" => Ok(Self::QueryJwt),
+            "fragment.jwt" => Ok(Self::FragmentJwt),
+            "jwt" => Ok(Self::Jwt),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Request to initiate an OAuth 2.0 authorization.
 #[derive(Debug, Clone)]
 pub struct AuthorizationRequest {
@@ -618,6 +802,23 @@ pub struct AuthorizationRequest {
     /// (e.g. `["sms"]`). Propagated to `StoredAuthorizationCode.amr_values`
     /// and then into the issued tokens at exchange time.
     pub amr_values: Vec<String>,
+    /// JARM response mode (RFC 9207 / OAuth 2.0 JARM). When set to a JWT
+    /// variant, the authorization response is wrapped in a signed JWT.
+    pub response_mode: Option<ResponseMode>,
+    /// Signed JAR JWT (RFC 9101) carrying authorization parameters.
+    ///
+    /// When present, the engine validates the JWT signature against the
+    /// client's registered `jwks`, then uses the JWT claims to populate
+    /// (and override) the request fields. The outer `client_id` must match
+    /// the `iss` claim inside the JWT.
+    pub request: Option<String>,
+    /// Whether this authorization request was submitted via PAR (RFC 9126).
+    ///
+    /// `true` when the web layer consumed a `request_uri` produced by
+    /// `push_authorization_request` before calling `issue_authorization_code`.
+    /// FAPI 2.0 clients require `via_par = true` — direct `/authorize` calls
+    /// without a prior PAR submission are rejected.
+    pub via_par: bool,
 }
 
 /// Response from a successful authorization request.
@@ -629,12 +830,42 @@ pub struct AuthorizationResponse {
     state: String,
     /// RFC 9207 issuer identifier — appended to the redirect as `iss=`.
     iss: String,
+    /// JARM signed JWT wrapping `{iss, aud, exp, code, state}`. Present only
+    /// when the request used a JARM response mode (`query.jwt` / `fragment.jwt`
+    /// / `jwt`). When present, the redirect MUST use `response=<jwt>` instead
+    /// of plain `code=...&state=...`.
+    jarm_jwt: Option<String>,
+    /// The effective response mode for this response.
+    response_mode: ResponseMode,
 }
 
 impl AuthorizationResponse {
     /// Creates a new authorization response.
     pub(crate) fn new(code: String, state: String, iss: String) -> Self {
-        Self { code, state, iss }
+        Self {
+            code,
+            state,
+            iss,
+            jarm_jwt: None,
+            response_mode: ResponseMode::Query,
+        }
+    }
+
+    /// Creates a JARM authorization response with a signed JWT.
+    pub(crate) fn new_jarm(
+        code: String,
+        state: String,
+        iss: String,
+        jarm_jwt: String,
+        response_mode: ResponseMode,
+    ) -> Self {
+        Self {
+            code,
+            state,
+            iss,
+            jarm_jwt: Some(jarm_jwt),
+            response_mode,
+        }
     }
 
     /// Returns the authorization code.
@@ -651,6 +882,70 @@ impl AuthorizationResponse {
     pub fn iss(&self) -> &str {
         &self.iss
     }
+
+    /// Returns the JARM signed JWT, if this is a JARM response.
+    pub fn jarm_jwt(&self) -> Option<&str> {
+        self.jarm_jwt.as_deref()
+    }
+
+    /// Returns the effective response mode.
+    pub fn response_mode(&self) -> &ResponseMode {
+        &self.response_mode
+    }
+}
+
+/// JWT claims for a JARM (JWT Authorization Response Message) response.
+///
+/// Signed with the realm's Ed25519 key. The JWT wraps code + state so
+/// the client can verify the response was issued by the expected AS.
+/// Spec: OAuth 2.0 JARM (draft-fett-oauth-jwarm).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct JarmClaims {
+    /// Issuer — the authorization server's issuer URL.
+    pub iss: String,
+    /// Audience — the client_id that sent the authorization request.
+    pub aud: String,
+    /// Expiry — short-lived (max 10 minutes, typically 2–5 min per FAPI).
+    pub exp: i64,
+    /// Issued-at timestamp (JARM MEDIUM-1 / RFC 7519 §4.1.6).
+    pub iat: i64,
+    /// JWT ID — unique per response, prevents replay (JARM MEDIUM-2).
+    pub jti: String,
+    /// The authorization code.
+    pub code: String,
+    /// The echoed state value.
+    pub state: String,
+    /// FAPI 2.0 §5.3.2.3: BASE64URL(LEFT(SHA-256(ASCII(state)), 16)).
+    ///
+    /// Required for FAPI 2.0 clients when `state` is non-empty.
+    /// `None` for Standard clients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s_hash: Option<String>,
+}
+
+/// JWT claims for a JARM error response (JARM §4.3).
+///
+/// When a client has `authorization_signed_response_alg` set, error responses
+/// on the authorization endpoint MUST also be JWT-wrapped so that the client
+/// only needs to handle one response format.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct JarmErrorClaims {
+    /// Issuer — the authorization server's issuer URL.
+    pub iss: String,
+    /// Audience — the client_id that sent the authorization request.
+    pub aud: String,
+    /// Expiry — 300 s (5 minutes, FAPI 2.0 §5.3.2.2).
+    pub exp: i64,
+    /// Issued-at timestamp.
+    pub iat: i64,
+    /// Unique JWT ID — required by JARM spec §2.4 for replay detection.
+    pub jti: String,
+    /// RFC 6749 error code (e.g. `consent_required`, `access_denied`).
+    pub error: String,
+    /// Human-readable error description.
+    pub error_description: String,
+    /// Echoed OAuth `state` parameter.
+    pub state: String,
 }
 
 /// Request to exchange an authorization code for tokens.
@@ -667,6 +962,10 @@ pub struct TokenExchangeRequest {
     /// JWK thumbprint for DPoP binding (RFC 9449). When present, the issued access token
     /// will carry a `cnf.jkt` claim and `token_type` will be `DPoP`.
     pub dpop_jkt: Option<String>,
+    /// Assertion type for `private_key_jwt` client authentication (RFC 7523).
+    pub client_assertion_type: Option<String>,
+    /// The signed JWT assertion for `private_key_jwt` client authentication.
+    pub client_assertion: Option<String>,
 }
 
 /// Response from a successful token exchange.
@@ -833,6 +1132,76 @@ pub struct OidcDiscoveryDocument {
     /// DPoP signing algorithms supported (RFC 9449 §5.1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dpop_signing_alg_values_supported: Vec<String>,
+    /// JAR request-object signing algorithms supported (RFC 9101 §10.6).
+    ///
+    /// Advertises which algorithms the AS accepts in `request=<JWT>` parameters
+    /// on `/authorize` and `/as/par`. Clients MUST use one of these algorithms.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_object_signing_alg_values_supported: Vec<String>,
+    /// JARM authorization response signing algorithms supported (OAuth 2.0 JARM §10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorization_signing_alg_values_supported: Vec<String>,
+    /// FAPI 2.0 Security Profile enforced for this realm.
+    ///
+    /// `"baseline"` or `"advanced"` when a FAPI profile is configured;
+    /// omitted for standard OAuth 2.0 / OIDC realms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fapi_profile: Option<String>,
+}
+
+// ===== JWT Authorization Requests — RFC 9101 (JAR) =====
+
+/// Claims carried in a JAR JWT (RFC 9101 §4).
+///
+/// The JWT body contains both the standard JWT claims (`iss`, `aud`, `exp`,
+/// `nbf`, `iat`, `jti`) and the authorization request parameters that it
+/// carries on behalf of the client. The AS validates the envelope claims
+/// first, then uses the authorization parameters to drive the flow.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JarClaims {
+    /// Issuer — MUST equal the `client_id`.
+    pub iss: String,
+    /// Audience — MUST identify this AS (issuer URL or authorization endpoint).
+    pub aud: crate::identity::tokens::Audience,
+    /// Expiration time (Unix seconds). MUST be in the future.
+    pub exp: i64,
+    /// Not-before time (Unix seconds). Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nbf: Option<i64>,
+    /// Issued-at time (Unix seconds). Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iat: Option<i64>,
+    /// JWT ID — unique identifier, used for replay prevention if present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
+    // ── Authorization request parameters ──
+    /// Must be "code".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_type: Option<String>,
+    /// The client identifier — must match the `client_id` query parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Redirect URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+    /// Space-delimited scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// CSRF protection state value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// PKCE S256 code challenge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_challenge: Option<String>,
+    /// Code challenge method (`S256` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_challenge_method: Option<String>,
+    /// OIDC nonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>,
+    /// RFC 8707 resource indicator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
 }
 
 // ===== Pushed Authorization Requests (RFC 9126) =====
@@ -861,6 +1230,13 @@ pub struct PushedAuthorizationRequest {
     pub code_challenge_method: Option<CodeChallengeMethod>,
     /// OIDC nonce claim to bind to the ID token.
     pub nonce: Option<String>,
+    /// Signed JAR JWT (RFC 9101) carrying the authorization parameters.
+    ///
+    /// When present, the server validates the JWT signature against the
+    /// client's registered `jwks`, then uses the JWT claims to populate
+    /// (and override) the request fields. `client_id` on the outer request
+    /// must match `iss` inside the JWT.
+    pub request: Option<String>,
 }
 
 /// Response from a successful PAR push (RFC 9126 §2.2).
@@ -914,12 +1290,16 @@ pub(crate) struct StoredPushedAuthorizationRequest {
 pub struct ClientCredentialsRequest {
     /// The client requesting tokens.
     pub client_id: ClientId,
-    /// The client secret for authentication.
-    pub client_secret: String,
+    /// The client secret for authentication (required unless `client_assertion` is provided).
+    pub client_secret: Option<String>,
     /// Requested scope (space-delimited).
     pub scope: Option<String>,
     /// JWK thumbprint for DPoP binding (RFC 9449).
     pub dpop_jkt: Option<String>,
+    /// Assertion type for `private_key_jwt` client authentication (RFC 7523).
+    pub client_assertion_type: Option<String>,
+    /// The signed JWT assertion for `private_key_jwt` client authentication.
+    pub client_assertion: Option<String>,
 }
 
 /// Request for the JWT Bearer Grant (RFC 7523).
@@ -1420,6 +1800,9 @@ mod tests {
             backchannel_logout_session_supported: false,
             pushed_authorization_request_endpoint: None,
             dpop_signing_alg_values_supported: Vec::new(),
+            request_object_signing_alg_values_supported: Vec::new(),
+            authorization_signing_alg_values_supported: Vec::new(),
+            fapi_profile: None,
         };
 
         let json = serde_json::to_string(&doc).expect("serialize");

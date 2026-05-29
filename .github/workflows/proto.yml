@@ -1,0 +1,61 @@
+# Proto governance gates (HEA-973).
+#
+# Runs on every PR or push that touches proto sources. Three checks:
+#   1. buf lint       — STANDARD lint rules (exceptions tracked in buf.yaml)
+#   2. buf format     — canonical style, fails if any file is unformatted
+#   3. buf breaking   — backwards-compatibility check against main
+#
+# This workflow is intentionally lightweight (no Rust compilation) so
+# proto-only PRs get fast feedback without burning the full CI matrix.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'proto/**'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'proto/**'
+      - 'buf.yaml'
+      - 'buf.gen.yaml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  proto:
+    name: proto (lint + format + breaking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Breaking check compares against .git#branch=main — full history
+          # required so the comparison works on PR branches.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install buf
+        uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
+
+      - name: buf lint
+        run: make proto-lint
+
+      - name: buf format (fail if unformatted)
+        run: make proto-format-check
+
+      - name: buf breaking (vs main)
+        # Skip on direct pushes to main — the breaking check compares against
+        # main, which is the current commit on push events. Only meaningful
+        # for PR branches.
+        if: github.event_name == 'pull_request'
+        run: make proto-breaking

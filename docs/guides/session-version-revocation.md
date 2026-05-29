@@ -257,8 +257,6 @@ signal, not a soft warning.
 
 ## See also
 
-- [`SESSION_VERSION_RFC.md`](../specs/SESSION_VERSION_RFC.md) — full design rationale,
-  storage key layout, push vs. pull tradeoff analysis, claim shape.
 - [`AUTHORIZATION.md § 14`](../specs/AUTHORIZATION.md#14-session-version-sv-revocation) —
   normative spec for `sv` claim semantics and fail-closed contract.
 - [`permission-delivery.md`](./permission-delivery.md) — choosing between `embedded`,

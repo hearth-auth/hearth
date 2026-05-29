@@ -58,6 +58,7 @@ pub mod handlers;
 pub(crate) mod handlers_common;
 pub mod mailcatcher;
 pub mod oauth_consent;
+pub mod openapi;
 pub mod realm_resolver;
 pub mod required_action;
 pub mod saml;

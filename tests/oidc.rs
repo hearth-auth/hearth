@@ -85,6 +85,9 @@ async fn oidc_authorization_code_flow_roundtrip() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -103,6 +106,8 @@ async fn oidc_authorization_code_flow_roundtrip() {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code");
@@ -416,6 +421,9 @@ async fn oidc_pkce_s256_flow() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize with PKCE");
@@ -429,6 +437,8 @@ async fn oidc_pkce_s256_flow() {
             redirect_uri: "https://app.example.com/callback".to_string(),
             code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(
@@ -453,6 +463,9 @@ async fn oidc_pkce_s256_flow() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize with PKCE again");
@@ -466,6 +479,8 @@ async fn oidc_pkce_s256_flow() {
             redirect_uri: "https://app.example.com/callback".to_string(),
             code_verifier: Some("wrong-verifier-value".to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(
@@ -493,6 +508,9 @@ async fn oidc_pkce_s256_flow() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize with PKCE third time");
@@ -508,6 +526,8 @@ async fn oidc_pkce_s256_flow() {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(code_verifier),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange with correct verifier");
@@ -728,6 +748,9 @@ async fn conformance_token_endpoint_rfc6749() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -755,6 +778,8 @@ async fn conformance_token_endpoint_rfc6749() {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code");
@@ -800,6 +825,8 @@ async fn conformance_token_endpoint_rfc6749() {
             redirect_uri: "https://app.example.com/callback".to_string(),
             code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(
@@ -817,6 +844,8 @@ async fn conformance_token_endpoint_rfc6749() {
             redirect_uri: "https://app.example.com/callback".to_string(),
             code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(
@@ -844,6 +873,9 @@ async fn conformance_token_endpoint_rfc6749() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize again");
@@ -856,6 +888,8 @@ async fn conformance_token_endpoint_rfc6749() {
             redirect_uri: "https://evil.example.com/callback".to_string(),
             code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
             dpop_jkt: None,
+            client_assertion_type: None,
+            client_assertion: None,
         },
     );
     assert!(

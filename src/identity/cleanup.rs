@@ -549,6 +549,8 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             nonce: None,
+            response_mode: None,
+            authorization_signed_response_alg: None,
             created_at: Timestamp::from_micros(T0),
             expires_at: Timestamp::from_micros(T0 + TEN_MINUTES),
         };
@@ -584,6 +586,8 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             nonce: None,
+            response_mode: None,
+            authorization_signed_response_alg: None,
             created_at: Timestamp::from_micros(T0),
             expires_at: Timestamp::from_micros(T0 + ONE_HOUR),
         };

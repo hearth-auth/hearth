@@ -679,6 +679,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/admin", admin_routes)
         .route("/admin/bootstrap", axum::routing::post(admin_bootstrap))
         .nest("/scim/v2", crate::protocol::scim::router())
+        .merge(crate::protocol::web::openapi::openapi_router())
         .nest(
             "/realms/{realm_name}",
             Router::new()
@@ -1144,6 +1145,11 @@ struct HttpTokenRequest {
     // JWT Bearer assertion (RFC 7523)
     #[serde(default)]
     assertion: Option<String>,
+    // private_key_jwt client authentication (RFC 7523 §2.2)
+    #[serde(default)]
+    client_assertion_type: Option<String>,
+    #[serde(default)]
+    client_assertion: Option<String>,
 }
 
 /// HTTP request body for token revocation (RFC 7009).
@@ -1468,13 +1474,16 @@ fn identity_error_to_response(
         ),
         IdentityError::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid token"),
         IdentityError::TokenExpired => (StatusCode::UNAUTHORIZED, "token expired"),
-        IdentityError::InvalidClient => (StatusCode::BAD_REQUEST, "invalid client"),
+        // RFC 6749 §5.2: all client authentication failures MUST return 401 with
+        // "invalid_client" — distinguishable status codes are an enumeration oracle
+        // (OAuth 2.0 Security BCP §2.2).
+        IdentityError::InvalidClient => (StatusCode::UNAUTHORIZED, "invalid_client"),
         IdentityError::InvalidRedirectUri => (StatusCode::BAD_REQUEST, "invalid redirect URI"),
         IdentityError::InvalidAuthorizationCode => {
             (StatusCode::BAD_REQUEST, "invalid authorization code")
         }
         IdentityError::InvalidGrant { .. } => (StatusCode::BAD_REQUEST, "invalid grant"),
-        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid client"),
+        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid_client"),
         IdentityError::AuthorizationPending => (StatusCode::BAD_REQUEST, "authorization_pending"),
         IdentityError::SlowDown => (StatusCode::BAD_REQUEST, "slow_down"),
         IdentityError::DeviceCodeExpired => (StatusCode::BAD_REQUEST, "expired_token"),
@@ -1498,6 +1507,9 @@ fn identity_error_to_response(
             (StatusCode::BAD_REQUEST, "invalid attestation")
         }
         IdentityError::InvalidAssertion { .. } => (StatusCode::UNAUTHORIZED, "invalid assertion"),
+        IdentityError::InvalidClientAssertion { .. } => {
+            (StatusCode::UNAUTHORIZED, "invalid_client")
+        }
         IdentityError::Unauthorized => (StatusCode::FORBIDDEN, "forbidden"),
         IdentityError::ClientNotFound => (StatusCode::NOT_FOUND, "not found"),
         IdentityError::MagicLinkTokenInvalid => {
@@ -1636,6 +1648,11 @@ fn identity_error_to_response(
         IdentityError::DPopBindingMismatch => (StatusCode::UNAUTHORIZED, "invalid_token"),
         IdentityError::JwtBearerAssertionInvalid { .. } => {
             (StatusCode::UNAUTHORIZED, "invalid_grant")
+        }
+        IdentityError::InvalidJar { .. } => (StatusCode::BAD_REQUEST, "invalid_request_object"),
+        IdentityError::FapiViolation { .. } => (StatusCode::BAD_REQUEST, "invalid_request"),
+        IdentityError::SessionLimitExceeded { .. } => {
+            (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
         }
     };
 
@@ -1820,19 +1837,98 @@ async fn authorize(
     headers: HeaderMap,
     Json(body): Json<pb::AuthorizationRequest>,
 ) -> impl IntoResponse {
+    use crate::identity::{AuthorizationRequest, IdentityError};
+
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
 
-    let request = match proto_authorize_to_domain(body) {
-        Ok(r) => r,
-        Err(msg) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": msg})),
-            )
-                .into_response();
+    // PAR path: when `request_uri` is present, consume the stored entry to
+    // obtain the pre-validated parameters and set `via_par = true`.
+    let request = if let Some(ref request_uri) = body.request_uri {
+        let user_id = match uuid::Uuid::parse_str(&body.user_id) {
+            Ok(u) => UserId::new(u),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid user_id"})),
+                )
+                    .into_response();
+            }
+        };
+        let stored = match state.identity.consume_par(&realm_id, request_uri) {
+            Ok(s) => s,
+            Err(IdentityError::InvalidPushedAuthorizationRequest) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "invalid or expired request_uri"
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "consume_par failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+        // RFC 9126 §4: if client_id is present in the request body, it MUST
+        // match the client_id stored in the PAR entry.
+        if !body.client_id.is_empty() {
+            let body_client_id = match uuid::Uuid::parse_str(&body.client_id) {
+                Ok(u) => ClientId::new(u),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_request",
+                            "error_description": "invalid client_id"
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            if body_client_id != stored.client_id {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "client_id mismatch with pushed authorization request"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+
+        AuthorizationRequest {
+            client_id: stored.client_id,
+            redirect_uri: stored.redirect_uri,
+            scope: stored.scope,
+            state: stored.state,
+            resource: stored.resource,
+            response_type: stored.response_type,
+            user_id,
+            code_challenge: stored.code_challenge,
+            code_challenge_method: stored.code_challenge_method,
+            nonce: stored.nonce,
+            amr_values: Vec::new(),
+            response_mode: None,
+            request: None,
+            via_par: true,
+        }
+    } else {
+        match proto_authorize_to_domain(body) {
+            Ok(r) => r,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
+            }
         }
     };
 
@@ -1863,6 +1959,8 @@ struct HttpParRequest {
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
     nonce: Option<String>,
+    /// Signed JAR JWT (RFC 9101) — required for FAPI Advanced.
+    request: Option<String>,
 }
 
 fn default_response_type() -> String {
@@ -1935,6 +2033,7 @@ async fn par_handler(
         code_challenge: body.code_challenge,
         code_challenge_method,
         nonce: body.nonce,
+        request: body.request,
     };
 
     match state
@@ -2104,6 +2203,8 @@ async fn token_exchange_impl(
                 }
             };
             request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
 
             match state
                 .identity
@@ -2136,7 +2237,10 @@ async fn token_exchange_impl(
                     .into_response();
             };
 
-            match state.identity.refresh_tokens(&realm_id, &refresh_token) {
+            match state
+                .identity
+                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
+            {
                 Ok(tokens) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -2148,7 +2252,7 @@ async fn token_exchange_impl(
                     let resp = pb::OidcTokenResponse {
                         access_token: tokens.access_token().to_string(),
                         id_token: String::new(),
-                        token_type: "Bearer".to_string(),
+                        token_type: if dpop_jkt.is_some() { "DPoP" } else { "Bearer" }.to_string(),
                         expires_in: 900,
                         refresh_token: tokens.refresh_token().to_string(),
                     };
@@ -2175,6 +2279,8 @@ async fn token_exchange_impl(
                 }
             };
             request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
 
             let realm_str = realm_id.as_uuid().to_string();
             match state.identity.client_credentials_token(&realm_id, &request) {
@@ -6355,6 +6461,8 @@ async fn realm_token_exchange(
                 }
             };
             request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
             match state
                 .identity
                 .exchange_authorization_code(&realm_id, &request)
@@ -6377,12 +6485,15 @@ async fn realm_token_exchange(
                 )
                     .into_response();
             };
-            match state.identity.refresh_tokens(&realm_id, &refresh_token) {
+            match state
+                .identity
+                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
+            {
                 Ok(tokens) => {
                     let resp = pb::OidcTokenResponse {
                         access_token: tokens.access_token().to_string(),
                         id_token: String::new(),
-                        token_type: "Bearer".to_string(),
+                        token_type: if dpop_jkt.is_some() { "DPoP" } else { "Bearer" }.to_string(),
                         expires_in: 900,
                         refresh_token: tokens.refresh_token().to_string(),
                     };
@@ -6408,6 +6519,8 @@ async fn realm_token_exchange(
                 }
             };
             request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
             match state.identity.client_credentials_token(&realm_id, &request) {
                 Ok(response) => {
                     let resp = pb::OidcTokenResponse {
@@ -6813,6 +6926,10 @@ async fn realm_register_client_dynamic(
         ],
         consent_spans_orgs: false,
         access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
+        jwks: None,
+        jwks_uri: None,
+        authorization_signed_response_alg: None,
+        profile: crate::identity::ClientProfile::Standard,
     };
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {
@@ -8245,5 +8362,240 @@ mod tests {
         // Verify access_token is non-empty
         let token = json["access_token"].as_str().expect("access_token string");
         assert!(!token.is_empty(), "access_token should not be empty");
+    }
+
+    /// PAR with a signed JAR JWT in the request body is accepted under FAPI Advanced.
+    ///
+    /// Regression for HEA-1019: `HttpParRequest` was missing the `request` field,
+    /// so the JAR was silently dropped and Advanced realms always rejected with
+    /// `FapiViolation`.  This test exercises the full HTTP deserialisation path and
+    /// MUST return 201 with the fix applied.
+    #[tokio::test]
+    async fn par_jar_accepted_under_fapi_advanced() {
+        use crate::identity::{
+            CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
+        };
+        use base64::Engine as _;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(temp_dir.path());
+
+        // Create an Advanced FAPI realm.
+        let realm_rec = state
+            .identity
+            .create_realm(&CreateRealmRequest {
+                name: format!("fapi-adv-jar-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm");
+        let mut config = realm_rec.config().clone();
+        config.fapi_profile = Some(FapiProfile::Advanced);
+        state
+            .identity
+            .update_realm(
+                realm_rec.id(),
+                &UpdateRealmRequest {
+                    config: Some(config),
+                    ..Default::default()
+                },
+            )
+            .expect("set FAPI Advanced");
+
+        // Generate Ed25519 key pair and register a JARM-capable JWKS client.
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("from_pkcs8");
+        let pub_bytes = ring::signature::KeyPair::public_key(&pair)
+            .as_ref()
+            .to_vec();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let x = b64.encode(&pub_bytes);
+        let jwks = format!(
+            r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"hea1019","x":"{x}"}}]}}"#
+        );
+
+        let client = state
+            .identity
+            .register_client(
+                realm_rec.id(),
+                &RegisterClientRequest {
+                    client_name: "FAPI-A JAR HTTP Client".to_string(),
+                    redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                    client_secret: None,
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: false,
+                    jwks: Some(jwks),
+                    authorization_signed_response_alg: Some("EdDSA".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+
+        // Sign a minimal JAR JWT.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs() as i64;
+        let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
+        // HTTP body expects the raw UUID; JAR claims compare against the prefixed form.
+        let cid_http = client.client_id().as_uuid().to_string();
+        let cid_jar = client.client_id().to_string();
+        const REDIRECT: &str = "https://app.example.com/callback";
+        const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+        let header_b64 = b64.encode(
+            serde_json::to_vec(&serde_json::json!({"alg": "EdDSA", "kid": "hea1019"}))
+                .expect("header json"),
+        );
+        let claims_b64 = b64.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "iss": cid_jar, "aud": issuer,
+                "exp": now + 300, "iat": now,
+                "jti": uuid::Uuid::new_v4().to_string(),
+                "client_id": cid_jar,
+                "response_type": "code",
+                "redirect_uri": REDIRECT,
+                "scope": "openid",
+                "state": "jar-state",
+                "code_challenge": CHALLENGE,
+                "code_challenge_method": "S256",
+                "nonce": "hea1019-nonce"
+            }))
+            .expect("claims json"),
+        );
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let sig = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .expect("pair")
+            .sign(signing_input.as_bytes());
+        let jar_jwt = format!("{signing_input}.{}", b64.encode(sig.as_ref()));
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "client_id": cid_http,
+            "redirect_uri": REDIRECT,
+            "scope": "openid",
+            "state": "par-state",
+            "response_type": "code",
+            "code_challenge": CHALLENGE,
+            "code_challenge_method": "S256",
+            "nonce": "hea1019-nonce",
+            "request": jar_jwt
+        }))
+        .expect("body json");
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/realms/{}/as/par", realm_rec.name()))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "JAR in HTTP PAR body must be accepted under FAPI Advanced (HEA-1019 regression)"
+        );
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).expect("json");
+        assert!(
+            json.get("request_uri").is_some(),
+            "response must include request_uri"
+        );
+    }
+
+    /// PAR without a JAR JWT is rejected under FAPI Advanced.
+    ///
+    /// Counterpart to `par_jar_accepted_under_fapi_advanced`: confirms the
+    /// negative case still returns 400 / `invalid_request` when the `request`
+    /// field is absent.
+    #[tokio::test]
+    async fn par_without_jar_rejected_under_fapi_advanced() {
+        use crate::identity::{
+            CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
+        };
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(temp_dir.path());
+
+        let realm_rec = state
+            .identity
+            .create_realm(&CreateRealmRequest {
+                name: format!("fapi-adv-nojar-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm");
+        let mut config = realm_rec.config().clone();
+        config.fapi_profile = Some(FapiProfile::Advanced);
+        state
+            .identity
+            .update_realm(
+                realm_rec.id(),
+                &UpdateRealmRequest {
+                    config: Some(config),
+                    ..Default::default()
+                },
+            )
+            .expect("set FAPI Advanced");
+
+        let client = state
+            .identity
+            .register_client(
+                realm_rec.id(),
+                &RegisterClientRequest {
+                    client_name: "FAPI-A No-JAR Client".to_string(),
+                    redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                    client_secret: Some("secret".to_string()),
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: false,
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "client_id": client.client_id().as_uuid().to_string(),
+            "redirect_uri": "https://app.example.com/callback",
+            "scope": "openid",
+            "state": "par-state",
+            "response_type": "code",
+            "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            "code_challenge_method": "S256",
+            "nonce": "test-nonce"
+        }))
+        .expect("body json");
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/realms/{}/as/par", realm_rec.name()))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "PAR without JAR must be rejected (FapiViolation) under FAPI Advanced"
+        );
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).expect("json");
+        assert_eq!(
+            json["error"], "invalid_request",
+            "error must be invalid_request for FAPI violation"
+        );
     }
 }

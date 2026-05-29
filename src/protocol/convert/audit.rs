@@ -98,7 +98,8 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         | domain::AuditAction::SmsMfaChallengeSucceeded
         | domain::AuditAction::SmsMfaChallengeFailed
         | domain::AuditAction::SmsMfaLocked
-        | domain::AuditAction::DeviceFingerprintsErased => pb::AuditAction::Unspecified,
+        | domain::AuditAction::DeviceFingerprintsErased
+        | domain::AuditAction::SessionLimitEnforced => pb::AuditAction::Unspecified,
     }
 }
 

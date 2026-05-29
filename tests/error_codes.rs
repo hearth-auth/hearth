@@ -7,10 +7,33 @@ mod common;
 
 use std::sync::Arc;
 
-use hearth::identity::IdentityEngine;
+use hearth::identity::tokens::{Audience, JwtAssertionClaims};
+use hearth::identity::{IdentityEngine, SigningKey};
 use hearth::protocol::http::{router, AppState};
 use serde_json::Value;
 use tokio::net::TcpListener;
+
+const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_secs() as i64
+}
+
+fn make_assertion(key: &SigningKey, client_id: &str, audience: &str) -> String {
+    let now = now_secs();
+    let claims = JwtAssertionClaims {
+        iss: client_id.to_string(),
+        sub: client_id.to_string(),
+        aud: Audience::single(audience.to_string()),
+        exp: now + 300,
+        jti: Some(uuid::Uuid::new_v4().to_string()),
+        iat: Some(now),
+    };
+    key.issue_assertion_jwt(&claims).expect("sign assertion")
+}
 
 // ─── in-process server helpers ───────────────────────────────────────────────
 
@@ -162,11 +185,14 @@ async fn admin_create_user_duplicate_email_returns_error_code() {
 // ─── Scenario 3: unknown OAuth client → HEARTH_INVALID_CLIENT ────────────────
 
 /// Requesting a client_credentials token for an unregistered client must return
-/// `HEARTH_INVALID_CLIENT`.
+/// HTTP 401 with `HEARTH_INVALID_CLIENT` (RFC 6749 §5.2, OAuth Security BCP §2.2).
+///
+/// The 401 (not 400) response prevents client_id enumeration: an attacker cannot
+/// distinguish "client not found" from "wrong secret" by observing the status code.
 ///
 /// Covers: IdentityError::InvalidClient mapping.
 #[tokio::test]
-async fn client_credentials_unknown_client_returns_error_code() {
+async fn client_credentials_unknown_client_returns_401_and_error_code() {
     let (base, _identity, _shutdown) = start_server().await;
     let (realm_id, _) = bootstrap(&base).await;
 
@@ -182,7 +208,62 @@ async fn client_credentials_unknown_client_returns_error_code() {
         .await
         .expect("client credentials request");
 
-    assert_eq!(resp.status().as_u16(), 400);
+    // Must be 401, not 400 — divergent status codes are an enumeration oracle.
+    assert_eq!(resp.status().as_u16(), 401);
+    let body: Value = resp.json().await.expect("parse body");
+    assert_eq!(
+        body["error_code"].as_str(),
+        Some("HEARTH_INVALID_CLIENT"),
+        "expected HEARTH_INVALID_CLIENT, got: {body}"
+    );
+    assert!(
+        body["error"].as_str().is_some(),
+        "error field must be present"
+    );
+}
+
+// ─── Scenario 3b: private_key_jwt unknown client → same 401 (HEA-994) ────────
+
+/// A `private_key_jwt` assertion for a non-existent client_id must return
+/// HTTP 401 — the same status as a bad-assertion response — so that an attacker
+/// cannot enumerate registered client IDs by observing the status code.
+///
+/// Covers: IdentityError::InvalidClient via private_key_jwt path (HEA-994,
+/// HIGH-2 from security audit HEA-989).
+#[tokio::test]
+async fn private_key_jwt_unknown_client_returns_401() {
+    let (base, _identity, _shutdown) = start_server().await;
+    let (realm_id, _) = bootstrap(&base).await;
+
+    // Generate a throwaway key — the server never sees this key since the
+    // client doesn't exist. InvalidClient fires before signature verification.
+    let key = SigningKey::generate().expect("generate key");
+    let nonexistent_client_id = uuid::Uuid::new_v4().to_string();
+    // Use a plausible audience; rejected before audience validation since the
+    // client lookup fails first.
+    let aud = format!("{base}/token");
+    let assertion = make_assertion(&key, &nonexistent_client_id, &aud);
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/token"))
+        .header("X-Realm-ID", &realm_id)
+        .json(&serde_json::json!({
+            "grant_type": "client_credentials",
+            "client_id": nonexistent_client_id,
+            "client_assertion_type": CLIENT_ASSERTION_TYPE,
+            "client_assertion": assertion,
+        }))
+        .send()
+        .await
+        .expect("private_key_jwt request");
+
+    // Must be 401 — indistinguishable from a bad-assertion response.
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "non-existent client via private_key_jwt must return 401, not {}",
+        resp.status().as_u16()
+    );
     let body: Value = resp.json().await.expect("parse body");
     assert_eq!(
         body["error_code"].as_str(),

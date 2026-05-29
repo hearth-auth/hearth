@@ -1,0 +1,31 @@
+# RPCs that have gRPC bindings but no REST/HTTP route.
+# Every RPC listed here is intentionally excluded from the parity gate.
+# When HEA-969 adds the missing REST endpoints, remove the corresponding line.
+#
+# Format: <package>.<ServiceName>/<RpcName>
+
+# IdentityAdminService — organization endpoints missing REST routes (HEA-969)
+hearth.identity.v1.IdentityAdminService/ListOrganizations
+hearth.identity.v1.IdentityAdminService/GetOrganization
+hearth.identity.v1.IdentityAdminService/CreateOrganization
+hearth.identity.v1.IdentityAdminService/UpdateOrganization
+hearth.identity.v1.IdentityAdminService/DeleteOrganization
+
+# OAuthService — ClientCredentials maps to POST /token (same as TokenExchange, different grant_type)
+hearth.identity.v1.OAuthService/ClientCredentials
+
+# RbacAdminService — no REST routes yet (HEA-969)
+hearth.rbac.v1.RbacAdminService/AssignGroupRole
+hearth.rbac.v1.RbacAdminService/UnassignGroupRole
+hearth.rbac.v1.RbacAdminService/ListRoleMembers
+hearth.rbac.v1.RbacAdminService/GrantUserPermission
+hearth.rbac.v1.RbacAdminService/RevokeUserPermission
+hearth.rbac.v1.RbacAdminService/ListUserPermissions
+hearth.rbac.v1.RbacAdminService/AddAdditionalRole
+hearth.rbac.v1.RbacAdminService/RemoveAdditionalRole
+hearth.rbac.v1.RbacAdminService/ListAdditionalRoles
+hearth.rbac.v1.RbacAdminService/ListRealmPermissions
+hearth.rbac.v1.RbacAdminService/ListRealmRoles
+
+# AuditService — VerifyIntegrity has no REST route yet (HEA-969)
+hearth.events.v1.AuditService/VerifyIntegrity

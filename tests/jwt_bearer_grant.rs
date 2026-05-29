@@ -565,6 +565,222 @@ async fn jwt_bearer_tampered_signature_rejected() {
     );
 }
 
+// ===== Test: CRIT-1 — assertion without jti is rejected =====
+
+#[tokio::test]
+async fn jwt_bearer_no_jti_rejected() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let assertion_key = SigningKey::generate().expect("generate key");
+    let pk_b64 = URL_SAFE_NO_PAD.encode(assertion_key.public_key_bytes());
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "No JTI Client".to_string(),
+                redirect_uris: vec![],
+                client_secret: None,
+                grant_types: vec![JWT_BEARER_GRANT.to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    harness
+        .identity()
+        .update_client(
+            &realm,
+            client.client_id(),
+            &UpdateClientRequest {
+                assertion_public_key: Some(Some(pk_b64)),
+                ..Default::default()
+            },
+        )
+        .expect("set assertion key");
+
+    let audience = realm_issuer(&harness, &realm);
+    // Pass jti: None — the server must reject rather than silently skip replay protection.
+    let assertion = make_assertion(
+        &assertion_key,
+        &client.client_id().to_string(),
+        &audience,
+        60,
+        None,
+    );
+
+    let err = harness
+        .identity()
+        .jwt_bearer_token(
+            &realm,
+            &JwtBearerRequest {
+                client_id: client.client_id().clone(),
+                assertion,
+                scope: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect_err("assertion without jti must be rejected");
+
+    assert!(
+        matches!(
+            err,
+            hearth::identity::IdentityError::JwtBearerAssertionInvalid { .. }
+        ),
+        "expected JwtBearerAssertionInvalid for missing jti, got: {err:?}"
+    );
+}
+
+// ===== Test: HIGH-2 — sub != client_id is rejected =====
+
+#[tokio::test]
+async fn jwt_bearer_sub_mismatch_rejected() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let assertion_key = SigningKey::generate().expect("generate key");
+    let pk_b64 = URL_SAFE_NO_PAD.encode(assertion_key.public_key_bytes());
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Sub Mismatch Client".to_string(),
+                redirect_uris: vec![],
+                client_secret: None,
+                grant_types: vec![JWT_BEARER_GRANT.to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    harness
+        .identity()
+        .update_client(
+            &realm,
+            client.client_id(),
+            &UpdateClientRequest {
+                assertion_public_key: Some(Some(pk_b64)),
+                ..Default::default()
+            },
+        )
+        .expect("set assertion key");
+
+    let audience = realm_issuer(&harness, &realm);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time before UNIX epoch")
+        .as_secs() as i64;
+    // iss == client_id but sub is a different value — must be rejected.
+    let claims = JwtAssertionClaims {
+        iss: client.client_id().to_string(),
+        sub: "not-the-client-id".to_string(),
+        aud: Audience::single(audience),
+        exp: now + 60,
+        jti: Some(uuid::Uuid::new_v4().to_string()),
+        iat: Some(now),
+    };
+    let assertion = assertion_key.issue_assertion_jwt(&claims).expect("sign");
+
+    let err = harness
+        .identity()
+        .jwt_bearer_token(
+            &realm,
+            &JwtBearerRequest {
+                client_id: client.client_id().clone(),
+                assertion,
+                scope: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect_err("sub != client_id must be rejected");
+
+    assert!(
+        matches!(
+            err,
+            hearth::identity::IdentityError::JwtBearerAssertionInvalid { .. }
+        ),
+        "expected JwtBearerAssertionInvalid for sub mismatch, got: {err:?}"
+    );
+}
+
+// ===== Test: MEDIUM-1 — assertion with exp > now + 10 minutes is rejected =====
+
+#[tokio::test]
+async fn jwt_bearer_exp_too_far_future_rejected() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let assertion_key = SigningKey::generate().expect("generate key");
+    let pk_b64 = URL_SAFE_NO_PAD.encode(assertion_key.public_key_bytes());
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Long Exp Client".to_string(),
+                redirect_uris: vec![],
+                client_secret: None,
+                grant_types: vec![JWT_BEARER_GRANT.to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    harness
+        .identity()
+        .update_client(
+            &realm,
+            client.client_id(),
+            &UpdateClientRequest {
+                assertion_public_key: Some(Some(pk_b64)),
+                ..Default::default()
+            },
+        )
+        .expect("set assertion key");
+
+    let audience = realm_issuer(&harness, &realm);
+    // exp = now + 601 seconds — just over the 10-minute ceiling.
+    let assertion = make_assertion(
+        &assertion_key,
+        &client.client_id().to_string(),
+        &audience,
+        601,
+        Some(uuid::Uuid::new_v4().to_string()),
+    );
+
+    let err = harness
+        .identity()
+        .jwt_bearer_token(
+            &realm,
+            &JwtBearerRequest {
+                client_id: client.client_id().clone(),
+                assertion,
+                scope: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect_err("assertion with exp > 10 min must be rejected");
+
+    assert!(
+        matches!(
+            err,
+            hearth::identity::IdentityError::JwtBearerAssertionInvalid { .. }
+        ),
+        "expected JwtBearerAssertionInvalid for excessive lifetime, got: {err:?}"
+    );
+}
+
 // ===== Test: OIDC discovery includes jwt-bearer grant type =====
 
 #[tokio::test]

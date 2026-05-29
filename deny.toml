@@ -46,3 +46,8 @@ name = "r-efi"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+skip = [
+    # wasip3 0.4.0 pins wit-bindgen 0.51.0; wasip2 1.0.x uses 0.57.1.
+    # No common version available upstream — skip to suppress the warning.
+    { name = "wit-bindgen", version = "=0.51.0" },
+]

@@ -43,14 +43,14 @@ pub use error::IdentityError;
 pub use magic_link::MagicLinkResponse;
 pub use oidc::{
     fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,
-    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel,
-    CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
+    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientProfile,
+    ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
-    IntrospectionResponse, JwtBearerRequest, OAuthClient, OidcConfig, OidcDiscoveryDocument,
-    OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse, PushedAuthorizationRequest,
-    PushedAuthorizationResponse, RegisterClientRequest, StepUpMfaGrantRequest,
-    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
-    UserInfoResponse,
+    IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
+    OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
+    PushedAuthorizationRequest, PushedAuthorizationResponse, RegisterClientRequest, ResponseMode,
+    StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
+    UpdateClientRequest, UserInfoResponse,
 };
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
@@ -67,12 +67,12 @@ pub use types::{
     canonicalize_scopes, AdaptiveMfaConfig, AttributeDefinition, AttributeDefinitions,
     AttributeType, BreachCheckConfig, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
     CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    CreateWebhookRequest, CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
-    OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
-    PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
+    CreateWebhookRequest, CredentialExport, DcrPolicy, FapiProfile, ImportClientRequest,
+    ImportUserRequest, InvitationStatus, MigrationReport, Organization, OrganizationConfig,
+    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
+    PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
-    RequiredActionTokenResponse, Session, SessionContext, SessionVersionConfig,
+    RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
     UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
@@ -471,10 +471,15 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// The refresh token's session must still be valid. The session's TTL
     /// is also refreshed. Returns a new token pair with updated expiration.
+    ///
+    /// `dpop_jkt` is the JWK thumbprint extracted from the DPoP proof header on
+    /// the current request (RFC 9449). FAPI 2.0 clients require it; the
+    /// refreshed access token will carry `cnf.jkt` bound to this thumbprint.
     fn refresh_tokens(
         &self,
         realm_id: &RealmId,
         refresh_token: &str,
+        dpop_jkt: Option<&str>,
     ) -> Result<TokenPair, IdentityError>;
 
     /// Returns the JWKS document containing public keys for external verification.
@@ -608,6 +613,33 @@ pub trait IdentityEngine: Send + Sync {
         client_id: &ClientId,
         client_secret: &str,
     ) -> Result<(), IdentityError>;
+
+    /// Verifies a `private_key_jwt` client assertion per RFC 7523 §2.2.
+    ///
+    /// Validates signature, `iss == sub == client_id`, `exp` in the future,
+    /// `aud` contains the realm issuer URL, and JTI replay prevention.
+    fn verify_client_assertion(
+        &self,
+        realm_id: &RealmId,
+        client_id: &ClientId,
+        assertion: &str,
+    ) -> Result<(), IdentityError>;
+
+    /// Verifies a JAR (RFC 9101) signed request object.
+    ///
+    /// Looks up the client's registered `jwks`, selects the key matching the
+    /// JWT header `kid`/`alg`, verifies the signature (EdDSA or RS256), and
+    /// validates `iss == client_id`, `aud` contains the realm issuer URL, and
+    /// `exp` is in the future. Returns the decoded [`JarClaims`] on success.
+    ///
+    /// Rejects `alg: none`, missing JWKS, unknown `kid`, and any claim
+    /// validation failure with [`IdentityError::InvalidJar`].
+    fn verify_jar(
+        &self,
+        realm_id: &RealmId,
+        client_id: &ClientId,
+        request_jwt: &str,
+    ) -> Result<JarClaims, IdentityError>;
 
     /// Initiates a Device Authorization Grant (RFC 8628).
     ///
@@ -1318,11 +1350,30 @@ pub trait IdentityEngine: Send + Sync {
         ticket: &str,
     ) -> Result<Option<PendingAuthorizationRequest>, IdentityError>;
 
+    /// Signs a JARM error response JWT for mandatory-JARM clients (JARM §4.3).
+    ///
+    /// Called from the authorization endpoint when an error must be returned to
+    /// a client whose `authorization_signed_response_alg` is set. The resulting
+    /// JWT carries `error` + `error_description` + `state` so the client can
+    /// verify the error with the same signature check it applies to success
+    /// responses. The `typ` header is `oauth-authz-resp+jwt`.
+    fn sign_jarm_error_jwt(
+        &self,
+        realm_id: &RealmId,
+        client_id: &str,
+        error: &str,
+        error_description: &str,
+        state_param: &str,
+    ) -> Result<String, IdentityError>;
+
     /// Issues an authorization code for a previously-approved authorization
     /// request. Unlike [`IdentityEngine::authorize`], this variant skips
     /// the consent gating and is called only after consent has been
     /// recorded (or explicitly bypassed for a trusted client). Returns
     /// the authorization code response.
+    /// `jar_request`: when `Some`, the signed request object (RFC 9101) is
+    /// verified against the client's JWKS and its claims override the other
+    /// parameters. Pass `None` for non-JAR flows.
     #[allow(clippy::too_many_arguments)]
     fn issue_authorization_code(
         &self,
@@ -1336,6 +1387,9 @@ pub trait IdentityEngine: Send + Sync {
         code_challenge_method: Option<CodeChallengeMethod>,
         nonce: Option<String>,
         amr_values: Vec<String>,
+        response_mode: Option<ResponseMode>,
+        jar_request: Option<String>,
+        via_par: bool,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     // ===== External IdP federation (Phase 2: Gap #5) =====

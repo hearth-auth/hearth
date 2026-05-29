@@ -46,6 +46,10 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::InvalidCredential { .. }
         | IdentityError::InvalidClient
         | IdentityError::InvalidClientSecret => (Code::Unauthenticated, err.to_string()),
+        // Deliberately generic — internal reason MUST NOT reach the caller (enumeration resistance).
+        IdentityError::InvalidClientAssertion { .. } => {
+            (Code::Unauthenticated, "invalid_client".to_string())
+        }
         IdentityError::Unauthorized
         | IdentityError::SystemRealmProtected { .. }
         | IdentityError::RealmSuspended
@@ -105,6 +109,11 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::RateLimited
         | IdentityError::MemberLimitReached
         | IdentityError::TokenTooLarge { .. } => (Code::ResourceExhausted, err.to_string()),
+        // SEC-4: active count and configured limit must not appear in the
+        // gRPC error string — that leaks enforcement metadata to callers.
+        IdentityError::SessionLimitExceeded { .. } => {
+            (Code::ResourceExhausted, "session limit reached".to_string())
+        }
         IdentityError::PasswordCompromised => (
             Code::InvalidArgument,
             "password has appeared in a known data breach".to_string(),
@@ -142,6 +151,12 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         ),
         IdentityError::JwtBearerAssertionInvalid { .. } => {
             (Code::InvalidArgument, "invalid_grant".to_string())
+        }
+        IdentityError::InvalidJar { .. } => {
+            (Code::InvalidArgument, "invalid_request_object".to_string())
+        }
+        IdentityError::FapiViolation { reason } => {
+            (Code::InvalidArgument, format!("fapi_violation: {reason}"))
         }
         IdentityError::InvalidDPopProof { .. } => {
             (Code::Unauthenticated, "invalid DPoP proof".to_string())

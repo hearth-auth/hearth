@@ -8,3 +8,7 @@ plugins:
     out: ../sdks/go/generated
     opt:
       - paths=source_relative
+  # OpenAPI generation is NOT part of buf generate. It is handled separately
+  # by `make openapi` (scripts/merge_openapi.py) which merges the proto-derived
+  # Swagger 2.0 JSON with the hand-written supplement. Run `make openapi-check`
+  # to verify docs/api/openapi.json is up to date (HEA-972).

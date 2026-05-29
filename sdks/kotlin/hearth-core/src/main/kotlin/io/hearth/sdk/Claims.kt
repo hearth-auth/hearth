@@ -4,7 +4,7 @@ import com.nimbusds.jwt.JWTClaimsSet
 import java.time.Instant
 
 /**
- * Typed access to JWT claims from a verified token (sdk-spec.md §4).
+ * Typed access to JWT claims from a verified token (SDK.md §4).
  *
  * All standard claims are exposed as typed properties.
  * Custom claims are available via [get].

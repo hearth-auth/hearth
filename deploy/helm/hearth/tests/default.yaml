@@ -1,0 +1,178 @@
+---
+# Source: hearth/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: hearth/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+data:
+  hearth.yaml: |
+    email:
+      transport: log
+    observability:
+      log_format: json
+      log_level: info
+    operational:
+      max_connections: 1024
+      queue_depth: 4096
+      request_timeout_secs: 30
+      shutdown_timeout_secs: 10
+    server:
+      bind_address: 0.0.0.0
+      port: 8420
+    storage:
+      data_dir: /var/lib/hearth
+      fsync: true
+      hot_tier_capacity: 10000
+      memtable_flush_bytes: 67108864
+      wal_max_size_bytes: 268435456
+---
+# Source: hearth/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  accessModes:
+    - "ReadWriteOnce"
+  resources:
+    requests:
+      storage: "10Gi"
+---
+# Source: hearth/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8420
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+---
+# Source: hearth/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hearth
+      app.kubernetes.io/instance: hearth
+  template:
+    metadata:
+      annotations:
+        # Force pod restart when config changes
+        checksum/config: 58f5f29d0b0971be6ea3da90719a2b7391f716b37603c957d8aa9b98bfc50bd0
+      labels:
+        app.kubernetes.io/name: hearth
+        app.kubernetes.io/instance: hearth
+    spec:
+      serviceAccountName: hearth
+      securityContext:
+        fsGroup: 10001
+        runAsNonRoot: true
+      containers:
+        - name: hearth
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+            runAsGroup: 10001
+            runAsNonRoot: true
+            runAsUser: 10001
+          image: "ghcr.io/hearth-rs/hearth:0.1.0"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/hearth", "serve", "-c", "/etc/hearth/hearth.yaml"]
+          ports:
+            - name: http
+              containerPort: 8420
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info,hearth=debug"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/hearth
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/hearth
+            # readOnlyRootFilesystem requires a writable /tmp
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: hearth
+        - name: data
+          persistentVolumeClaim:
+            claimName: hearth
+        - name: tmp
+          emptyDir: {}

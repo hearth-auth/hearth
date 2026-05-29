@@ -1,6 +1,6 @@
 # Hearth Rust SDK
 
-> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/sdk-spec.md).
+> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/specs/SDK.md).
 
 Rust SDK for the [Hearth](https://github.com/hearth-auth/hearth) identity platform.
 
@@ -187,7 +187,7 @@ if resp.active {
 
 ## Spec Conformance
 
-This SDK is audited against the [Hearth SDK Common Specification](../../docs/sdk-spec.md). CI enforces conformance on every PR via `scripts/check-sdk-conformance.sh`.
+This SDK is audited against the [Hearth SDK Common Specification](../../docs/specs/SDK.md). CI enforces conformance on every PR via `scripts/check-sdk-conformance.sh`.
 
 ## License
 

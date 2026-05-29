@@ -206,7 +206,7 @@ async fn alg_none_rejected_by_refresh_tokens() {
         .expect("tokens");
 
     let forged = forge_alg_none(pair.refresh_token());
-    let result = harness.identity().refresh_tokens(&realm, &forged);
+    let result = harness.identity().refresh_tokens(&realm, &forged, None);
     assert!(
         matches!(result, Err(IdentityError::InvalidToken)),
         "alg:none refresh token must be rejected by refresh_tokens with InvalidToken, got: {result:?}"
@@ -380,7 +380,7 @@ async fn hs256_forgery_rejected_by_refresh_tokens() {
         .expect("tokens");
 
     let forged = forge_hs256(pair.refresh_token());
-    let result = harness.identity().refresh_tokens(&realm, &forged);
+    let result = harness.identity().refresh_tokens(&realm, &forged, None);
     assert!(
         matches!(result, Err(IdentityError::InvalidToken)),
         "HS256-claimed refresh token must be rejected with InvalidToken, got: {result:?}"
@@ -420,7 +420,7 @@ async fn expired_refresh_token_rejected() {
     // Advance clock past 31 days to expire the refresh token.
     clock.advance(31 * 24 * 3600 * 1_000_000);
 
-    let result = engine.refresh_tokens(&realm, pair.refresh_token());
+    let result = engine.refresh_tokens(&realm, pair.refresh_token(), None);
     assert!(
         matches!(result, Err(IdentityError::TokenExpired)),
         "expired refresh token must be rejected with TokenExpired, got: {result:?}"
@@ -531,7 +531,7 @@ async fn cross_realm_replay_on_refresh_tokens() {
     // Present realm_A's refresh token to realm_B's refresh endpoint.
     let result = harness
         .identity()
-        .refresh_tokens(&realm_b, pair.refresh_token());
+        .refresh_tokens(&realm_b, pair.refresh_token(), None);
     assert!(
         matches!(result, Err(IdentityError::InvalidToken)),
         "refresh token from realm A must be rejected by realm B with InvalidToken: {result:?}"
@@ -755,7 +755,7 @@ async fn future_iat_rejected_by_refresh_tokens() {
 
     clock.advance(-3600 * 1_000_000);
 
-    let result = engine.refresh_tokens(&realm, pair.refresh_token());
+    let result = engine.refresh_tokens(&realm, pair.refresh_token(), None);
     assert!(
         matches!(result, Err(IdentityError::InvalidToken)),
         "refresh token with future iat must be rejected with InvalidToken: {result:?}"
@@ -1019,7 +1019,7 @@ async fn wrong_aud_rejected_by_refresh_tokens() {
         .issue_tokens(&realm, user.id(), session.id())
         .expect("tokens");
 
-    let result = engine_b.refresh_tokens(&realm, pair.refresh_token());
+    let result = engine_b.refresh_tokens(&realm, pair.refresh_token(), None);
     assert!(
         matches!(result, Err(IdentityError::InvalidToken)),
         "aud=hearth refresh token must be rejected by engine expecting aud=other-service with InvalidToken: {result:?}"

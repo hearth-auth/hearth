@@ -27,6 +27,8 @@ pub const TOKEN_TOO_LARGE: &str = "HEARTH_TOKEN_TOO_LARGE";
 pub const INVALID_CREDENTIAL: &str = "HEARTH_INVALID_CREDENTIAL";
 /// The OAuth client is not recognized or misconfigured.
 pub const INVALID_CLIENT: &str = "HEARTH_INVALID_CLIENT";
+/// The `private_key_jwt` client assertion is invalid (RFC 7523 §2.2).
+pub const INVALID_CLIENT_ASSERTION: &str = "HEARTH_INVALID_CLIENT_ASSERTION";
 /// The authorization grant (auth code or device code) is invalid, expired, or consumed.
 pub const INVALID_GRANT: &str = "HEARTH_INVALID_GRANT";
 /// The redirect URI does not match any registered URI.
@@ -231,6 +233,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::InvalidCredential { .. } => Some(INVALID_CREDENTIAL),
         IdentityError::CredentialNotFound => Some(INVALID_CREDENTIAL),
         IdentityError::InvalidClient | IdentityError::InvalidClientSecret => Some(INVALID_CLIENT),
+        IdentityError::InvalidClientAssertion { .. } => Some(INVALID_CLIENT_ASSERTION),
         IdentityError::InvalidAuthorizationCode | IdentityError::InvalidGrant { .. } => {
             Some(INVALID_GRANT)
         }
@@ -255,6 +258,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::DeviceCodeDenied => Some(DEVICE_CODE_DENIED),
 
         IdentityError::RateLimited => Some(RATE_LIMITED),
+        IdentityError::SessionLimitExceeded { .. } => Some("session_limit_exceeded"),
 
         IdentityError::UserNotVerified => Some(EMAIL_UNVERIFIED),
         IdentityError::PasswordExpired => Some(PASSWORD_EXPIRED),
@@ -340,6 +344,8 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::SystemRealmProtected { .. } => Some(SYSTEM_REALM_PROTECTED),
 
         IdentityError::InvalidPushedAuthorizationRequest => Some("invalid_request"),
+        IdentityError::InvalidJar { .. } => Some("invalid_request_object"),
+        IdentityError::FapiViolation { .. } => Some("fapi_violation"),
 
         IdentityError::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
         IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => Some("use_dpop_nonce"),

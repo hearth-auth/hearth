@@ -10,9 +10,9 @@ use std::sync::Arc;
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, FakeClock, RealmId, Timestamp};
 use hearth::identity::{
-    CodeChallengeMethod, CreateRealmRequest, CredentialConfig, EmbeddedIdentityEngine,
-    IdentityConfig, IdentityEngine, IdentityError, PushedAuthorizationRequest,
-    RegisterClientRequest,
+    AuthorizationRequest, CodeChallengeMethod, CreateRealmRequest, CreateUserRequest,
+    CredentialConfig, EmbeddedIdentityEngine, FapiProfile, IdentityConfig, IdentityEngine,
+    IdentityError, PushedAuthorizationRequest, RegisterClientRequest, UpdateRealmRequest,
 };
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
@@ -97,6 +97,7 @@ fn par_request_with_pkce(client_id: hearth::core::ClientId) -> PushedAuthorizati
         code_challenge: Some(pkce_challenge(PKCE_VERIFIER)),
         code_challenge_method: Some(CodeChallengeMethod::S256),
         nonce: None,
+        request: None,
     }
 }
 
@@ -144,6 +145,7 @@ fn public_client_without_pkce_rejected() {
         code_challenge: None,
         code_challenge_method: None,
         nonce: None,
+        request: None,
     };
 
     assert!(
@@ -172,6 +174,7 @@ fn non_code_response_type_rejected() {
         code_challenge: Some(pkce_challenge(PKCE_VERIFIER)),
         code_challenge_method: Some(CodeChallengeMethod::S256),
         nonce: None,
+        request: None,
     };
 
     assert!(
@@ -199,5 +202,126 @@ fn discovery_advertises_par_endpoint() {
     assert!(
         ep.ends_with("/as/par"),
         "PAR endpoint must end with /as/par, got: {ep}"
+    );
+}
+
+// ===== P-05: PAR → authorize end-to-end (FAPI gate regression) =====
+//
+// Verifies that the web/REST handler correctly propagates `via_par = true`
+// after consuming a pushed authorization request.  On old code the handler
+// always set `via_par = false`, causing FAPI 2.0 Baseline realms to reject
+// every browser-based authorization request.
+//
+// The test cannot call the private `consume_par` method, so it simulates the
+// handler's behaviour: push PAR to get a `request_uri`, then call `authorize`
+// with the same parameters and `via_par = true`.  The negative half confirms
+// that the same call with `via_par = false` is rejected — which is exactly
+// what the un-fixed handler was producing.
+
+#[test]
+fn par_authorize_via_par_true_succeeds_on_fapi_realm() {
+    let env = setup();
+
+    // Create a FAPI Baseline realm.
+    let realm_rec = env
+        .engine
+        .create_realm(&CreateRealmRequest {
+            name: format!("par-fapi-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create fapi realm");
+    let fapi_realm = realm_rec.id().clone();
+    let mut config = realm_rec.config().clone();
+    config.fapi_profile = Some(FapiProfile::Baseline);
+    env.engine
+        .update_realm(
+            &fapi_realm,
+            &UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("update realm");
+
+    // Register a confidential client in the FAPI realm.
+    let fapi_client = env
+        .engine
+        .register_client(
+            &fapi_realm,
+            &RegisterClientRequest {
+                client_name: "FAPI PAR Test Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("test-secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register fapi client");
+
+    // Create a subject user in the FAPI realm.
+    let user_id = env
+        .engine
+        .create_user(
+            &fapi_realm,
+            &CreateUserRequest {
+                email: format!("par-user-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "PAR User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user")
+        .id()
+        .clone();
+
+    // Push a PAR to obtain a request_uri.
+    let par_req = par_request_with_pkce(fapi_client.client_id().clone());
+    let par_resp = env
+        .engine
+        .push_authorization_request(&fapi_realm, &par_req)
+        .expect("PAR push must succeed on FAPI realm");
+    assert!(
+        par_resp
+            .request_uri
+            .starts_with("urn:ietf:params:oauth:request_uri:"),
+        "request_uri must use RFC 9126 URN scheme"
+    );
+
+    // Positive: authorize with via_par = true — simulates the fixed web
+    // handler consuming the request_uri and propagating via_par = true.
+    let auth_req = AuthorizationRequest {
+        client_id: fapi_client.client_id().clone(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        scope: par_req.scope.clone(),
+        state: par_req.state.clone(),
+        resource: None,
+        response_type: par_req.response_type.clone(),
+        user_id: user_id.clone(),
+        code_challenge: par_req.code_challenge.clone(),
+        code_challenge_method: par_req.code_challenge_method,
+        nonce: None,
+        amr_values: Vec::new(),
+        response_mode: None,
+        request: None,
+        via_par: true,
+    };
+    env.engine
+        .authorize(&fapi_realm, &auth_req)
+        .expect("FAPI realm + via_par=true must issue a code");
+
+    // Negative: the same parameters with via_par = false are rejected by the
+    // FAPI engine guard.  This is exactly what the un-fixed handler produced
+    // (it always passed via_par = false regardless of request_uri presence).
+    let direct_req = AuthorizationRequest {
+        via_par: false,
+        ..auth_req
+    };
+    let err = env
+        .engine
+        .authorize(&fapi_realm, &direct_req)
+        .expect_err("FAPI realm + via_par=false must be rejected");
+    assert!(
+        matches!(err, IdentityError::FapiViolation { .. }),
+        "expected FapiViolation, got: {err:?}"
     );
 }

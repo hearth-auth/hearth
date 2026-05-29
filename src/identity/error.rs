@@ -63,6 +63,20 @@ pub enum IdentityError {
     /// Intentionally vague — does not distinguish wrong vs. expired
     /// for enumeration resistance.
     InvalidClientSecret,
+    /// The `private_key_jwt` client assertion is invalid (RFC 7523 §2.2).
+    InvalidClientAssertion {
+        /// Why the assertion was rejected.
+        reason: String,
+    },
+    /// A JAR (RFC 9101) signed request object is invalid.
+    ///
+    /// Covers: unsupported algorithm (including `none`), bad signature,
+    /// expired token, wrong `iss`, wrong `aud`, no registered JWKS, missing
+    /// key for `kid`. Intentionally aggregated to limit information leakage.
+    InvalidJar {
+        /// Why the JAR was rejected. Safe to include in error responses.
+        reason: String,
+    },
     /// The device authorization is still pending user action.
     AuthorizationPending,
     /// The device is polling too frequently; must slow down.
@@ -296,6 +310,14 @@ pub enum IdentityError {
     /// The supplied SCIM `externalId` is already associated with a
     /// different user (or organization) in this realm.
     DuplicateScimExternalId,
+    /// The user has reached the per-realm maximum number of concurrent active
+    /// sessions and the realm policy is [`crate::identity::SessionLimitPolicy::RejectNew`].
+    SessionLimitExceeded {
+        /// The configured session limit.
+        limit: u32,
+        /// The number of currently active (live) sessions at the time of rejection.
+        active: u32,
+    },
     /// YAML-authored realm configuration failed registry validation.
     ///
     /// Emitted at startup or SIGHUP reload when `to_realm_config` detects
@@ -427,6 +449,15 @@ pub enum IdentityError {
         /// Machine-readable reason string.
         reason: String,
     },
+    /// The request violates a FAPI 2.0 Security Profile constraint.
+    ///
+    /// Returned when a client registered with `profile: fapi2` attempts an
+    /// operation that is forbidden by the FAPI 2.0 spec (e.g., non-PAR
+    /// authorization, missing DPoP, forbidden response type).
+    FapiViolation {
+        /// Human-readable description of the violated constraint.
+        reason: String,
+    },
 }
 
 impl fmt::Display for IdentityError {
@@ -454,6 +485,12 @@ impl fmt::Display for IdentityError {
             Self::InvalidAuthorizationCode => write!(f, "invalid authorization code"),
             Self::InvalidGrant { reason } => write!(f, "invalid grant: {reason}"),
             Self::InvalidClientSecret => write!(f, "invalid client secret"),
+            Self::InvalidClientAssertion { reason } => {
+                write!(f, "invalid client assertion: {reason}")
+            }
+            Self::InvalidJar { reason } => {
+                write!(f, "invalid request object (JAR): {reason}")
+            }
             Self::AuthorizationPending => write!(f, "authorization pending"),
             Self::SlowDown => write!(f, "polling too frequently"),
             Self::DeviceCodeExpired => write!(f, "device code expired"),
@@ -623,6 +660,13 @@ impl fmt::Display for IdentityError {
             Self::JwtBearerAssertionInvalid { reason } => {
                 write!(f, "invalid JWT bearer assertion: {reason}")
             }
+            Self::FapiViolation { reason } => {
+                write!(f, "FAPI 2.0 violation: {reason}")
+            }
+            Self::SessionLimitExceeded { limit, active } => write!(
+                f,
+                "session limit exceeded: {active} active sessions, limit is {limit}"
+            ),
         }
     }
 }
@@ -648,6 +692,7 @@ impl std::error::Error for IdentityError {
             | Self::InvalidAuthorizationCode
             | Self::InvalidGrant { .. }
             | Self::InvalidClientSecret
+            | Self::InvalidClientAssertion { .. }
             | Self::AuthorizationPending
             | Self::SlowDown
             | Self::DeviceCodeExpired
@@ -731,7 +776,10 @@ impl std::error::Error for IdentityError {
             | Self::DPopBindingMismatch
             | Self::DPopNonceInvalid
             | Self::JwtBearerAssertionInvalid { .. }
-            | Self::SessionVersionDisabled => None,
+            | Self::InvalidJar { .. }
+            | Self::SessionVersionDisabled
+            | Self::SessionLimitExceeded { .. }
+            | Self::FapiViolation { .. } => None,
         }
     }
 }

@@ -82,6 +82,8 @@ jobs:
               - 'rustfmt.toml'
               - 'clippy.toml'
               - 'proto/**'
+              - 'docs/api/**'
+              - 'scripts/merge_openapi.py'
               - 'templates/**'
               - 'ui/**'
               - 'Makefile'
@@ -102,7 +104,7 @@ jobs:
             sdks-any:
               - 'sdks/**'
               - 'scripts/check-sdk-conformance.sh'
-              - 'docs/sdk-spec.md'
+              - 'docs/specs/SDK.md'
               - '.github/workflows/ci.yml'
             proto:
               - 'proto/**'
@@ -208,6 +210,12 @@ jobs:
 
       - name: make proto-check (regenerate SDKs and fail if generated code drifts)
         run: make proto-check
+
+      - name: Install PyYAML (needed by make openapi-check)
+        run: pip3 install --user --quiet pyyaml
+
+      - name: make openapi-check (regenerate and fail if openapi.json drifts — HEA-972)
+        run: make openapi-check
 
   # ── UI tests — merged smoke/regression/accessibility + exploratory ──────────
   #
@@ -371,7 +379,7 @@ jobs:
   # ── SDK spec conformance (folded from sdk-conformance.yml) ───────────────────
 
   sdk-conformance:
-    name: sdk-conformance (docs/sdk-spec.md)
+    name: sdk-conformance (docs/specs/SDK.md)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
     if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-any == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'

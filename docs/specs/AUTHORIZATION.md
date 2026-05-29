@@ -969,8 +969,7 @@ and a `### Security` entry in `CHANGELOG.md`.
 
 ## 14. Session-version (`sv`) revocation
 
-> **Implemented — HEA-930.** The design RFC lives at [`SESSION_VERSION_RFC.md`](./SESSION_VERSION_RFC.md).
-> Operator how-to: [`docs/guides/session-version-revocation.md`](../guides/session-version-revocation.md).
+> **Implemented — HEA-930.** Operator how-to: [`docs/guides/session-version-revocation.md`](../guides/session-version-revocation.md).
 
 Hearth's default `embedded` mode uses **eventually-consistent revocation**: a revoked session stops granting new tokens immediately, but access tokens already issued remain valid until expiry (bounded by `access_token_ttl`, typically 15–60 min). This is the standard trade-off in stateless JWT systems and is acceptable for the vast majority of use cases.
 
@@ -983,7 +982,7 @@ For operators that need tighter bounds — sub-second revocation freshness witho
 
 This is opt-in per realm (`session_version.enabled: true` in config). Tokens without `sv` (issued before the feature is enabled or while it is disabled) are validated by the existing path unchanged — backward compatible.
 
-See [`SESSION_VERSION_RFC.md`](./SESSION_VERSION_RFC.md) for the full design, including claim shape, storage key layout, delta-feed wire format, push vs. pull tradeoff, DPoP/MFA interaction, and SDK contract.
+For the operator-facing tuning guide (poll interval, stale threshold, fail-closed behavior), see [`docs/guides/session-version-revocation.md`](../guides/session-version-revocation.md).
 
 ---
 

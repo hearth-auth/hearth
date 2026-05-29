@@ -7,6 +7,7 @@
 package rbacv1
 
 import (
+	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -3833,7 +3834,7 @@ var File_hearth_rbac_v1_rbac_proto protoreflect.FileDescriptor
 
 const file_hearth_rbac_v1_rbac_proto_rawDesc = "" +
 	"\n" +
-	"\x19hearth/rbac/v1/rbac.proto\x12\x0ehearth.rbac.v1\"g\n" +
+	"\x19hearth/rbac/v1/rbac.proto\x12\x0ehearth.rbac.v1\x1a\x1cgoogle/api/annotations.proto\"g\n" +
 	"\x14RevokeConsentRequest\x12\x19\n" +
 	"\brealm_id\x18\x01 \x01(\tR\arealmId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n" +
@@ -4107,32 +4108,32 @@ const file_hearth_rbac_v1_rbac_proto_rawDesc = "" +
 	"\n" +
 	"scope_kind\x18\x04 \x01(\tR\tscopeKind\x12 \n" +
 	"\vpermissions\x18\x05 \x03(\tR\vpermissions\x12!\n" +
-	"\fparent_roles\x18\x06 \x03(\tR\vparentRoles2\xd3\x16\n" +
-	"\x10RbacAdminService\x12P\n" +
-	"\tListRoles\x12 .hearth.rbac.v1.ListRolesRequest\x1a!.hearth.rbac.v1.ListRolesResponse\x12E\n" +
+	"\fparent_roles\x18\x06 \x03(\tR\vparentRoles2\xa3\x1c\n" +
+	"\x10RbacAdminService\x12f\n" +
+	"\tListRoles\x12 .hearth.rbac.v1.ListRolesRequest\x1a!.hearth.rbac.v1.ListRolesResponse\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/admin/roles\x12^\n" +
 	"\n" +
-	"CreateRole\x12!.hearth.rbac.v1.CreateRoleRequest\x1a\x14.hearth.rbac.v1.Role\x12?\n" +
-	"\aGetRole\x12\x1e.hearth.rbac.v1.GetRoleRequest\x1a\x14.hearth.rbac.v1.Role\x12E\n" +
+	"CreateRole\x12!.hearth.rbac.v1.CreateRoleRequest\x1a\x14.hearth.rbac.v1.Role\"\x17\x82\xd3\xe4\x93\x02\x11:\x01*\"\f/admin/roles\x12_\n" +
+	"\aGetRole\x12\x1e.hearth.rbac.v1.GetRoleRequest\x1a\x14.hearth.rbac.v1.Role\"\x1e\x82\xd3\xe4\x93\x02\x18\x12\x16/admin/roles/{role_id}\x12h\n" +
 	"\n" +
-	"UpdateRole\x12!.hearth.rbac.v1.UpdateRoleRequest\x1a\x14.hearth.rbac.v1.Role\x12S\n" +
+	"UpdateRole\x12!.hearth.rbac.v1.UpdateRoleRequest\x1a\x14.hearth.rbac.v1.Role\"!\x82\xd3\xe4\x93\x02\x1b:\x01*\x1a\x16/admin/roles/{role_id}\x12s\n" +
 	"\n" +
-	"DeleteRole\x12!.hearth.rbac.v1.DeleteRoleRequest\x1a\".hearth.rbac.v1.DeleteRoleResponse\x12S\n" +
+	"DeleteRole\x12!.hearth.rbac.v1.DeleteRoleRequest\x1a\".hearth.rbac.v1.DeleteRoleResponse\"\x1e\x82\xd3\xe4\x93\x02\x18*\x16/admin/roles/{role_id}\x12j\n" +
 	"\n" +
-	"ListGroups\x12!.hearth.rbac.v1.ListGroupsRequest\x1a\".hearth.rbac.v1.ListGroupsResponse\x12H\n" +
-	"\vCreateGroup\x12\".hearth.rbac.v1.CreateGroupRequest\x1a\x15.hearth.rbac.v1.Group\x12B\n" +
-	"\bGetGroup\x12\x1f.hearth.rbac.v1.GetGroupRequest\x1a\x15.hearth.rbac.v1.Group\x12H\n" +
-	"\vUpdateGroup\x12\".hearth.rbac.v1.UpdateGroupRequest\x1a\x15.hearth.rbac.v1.Group\x12V\n" +
-	"\vDeleteGroup\x12\".hearth.rbac.v1.DeleteGroupRequest\x1a#.hearth.rbac.v1.DeleteGroupResponse\x12e\n" +
-	"\x10ListGroupMembers\x12'.hearth.rbac.v1.ListGroupMembersRequest\x1a(.hearth.rbac.v1.ListGroupMembersResponse\x12X\n" +
-	"\x0eAddGroupMember\x12%.hearth.rbac.v1.AddGroupMemberRequest\x1a\x1f.hearth.rbac.v1.GroupMembership\x12h\n" +
-	"\x11RemoveGroupMember\x12(.hearth.rbac.v1.RemoveGroupMemberRequest\x1a).hearth.rbac.v1.RemoveGroupMemberResponse\x12W\n" +
-	"\x0eAssignUserRole\x12%.hearth.rbac.v1.AssignUserRoleRequest\x1a\x1e.hearth.rbac.v1.RoleAssignment\x12e\n" +
-	"\x10UnassignUserRole\x12'.hearth.rbac.v1.UnassignUserRoleRequest\x1a(.hearth.rbac.v1.UnassignUserRoleResponse\x12n\n" +
-	"\x13ListUserAssignments\x12*.hearth.rbac.v1.ListUserAssignmentsRequest\x1a+.hearth.rbac.v1.ListUserAssignmentsResponse\x12Y\n" +
+	"ListGroups\x12!.hearth.rbac.v1.ListGroupsRequest\x1a\".hearth.rbac.v1.ListGroupsResponse\"\x15\x82\xd3\xe4\x93\x02\x0f\x12\r/admin/groups\x12b\n" +
+	"\vCreateGroup\x12\".hearth.rbac.v1.CreateGroupRequest\x1a\x15.hearth.rbac.v1.Group\"\x18\x82\xd3\xe4\x93\x02\x12:\x01*\"\r/admin/groups\x12d\n" +
+	"\bGetGroup\x12\x1f.hearth.rbac.v1.GetGroupRequest\x1a\x15.hearth.rbac.v1.Group\" \x82\xd3\xe4\x93\x02\x1a\x12\x18/admin/groups/{group_id}\x12m\n" +
+	"\vUpdateGroup\x12\".hearth.rbac.v1.UpdateGroupRequest\x1a\x15.hearth.rbac.v1.Group\"#\x82\xd3\xe4\x93\x02\x1d:\x01*\x1a\x18/admin/groups/{group_id}\x12x\n" +
+	"\vDeleteGroup\x12\".hearth.rbac.v1.DeleteGroupRequest\x1a#.hearth.rbac.v1.DeleteGroupResponse\" \x82\xd3\xe4\x93\x02\x1a*\x18/admin/groups/{group_id}\x12\x8f\x01\n" +
+	"\x10ListGroupMembers\x12'.hearth.rbac.v1.ListGroupMembersRequest\x1a(.hearth.rbac.v1.ListGroupMembersResponse\"(\x82\xd3\xe4\x93\x02\"\x12 /admin/groups/{group_id}/members\x12\x85\x01\n" +
+	"\x0eAddGroupMember\x12%.hearth.rbac.v1.AddGroupMemberRequest\x1a\x1f.hearth.rbac.v1.GroupMembership\"+\x82\xd3\xe4\x93\x02%:\x01*\" /admin/groups/{group_id}/members\x12\x9e\x01\n" +
+	"\x11RemoveGroupMember\x12(.hearth.rbac.v1.RemoveGroupMemberRequest\x1a).hearth.rbac.v1.RemoveGroupMemberResponse\"4\x82\xd3\xe4\x93\x02.*,/admin/groups/{group_id}/members/{member.id}\x12\x80\x01\n" +
+	"\x0eAssignUserRole\x12%.hearth.rbac.v1.AssignUserRoleRequest\x1a\x1e.hearth.rbac.v1.RoleAssignment\"'\x82\xd3\xe4\x93\x02!:\x01*\"\x1c/admin/users/{user_id}/roles\x12\x91\x01\n" +
+	"\x10UnassignUserRole\x12'.hearth.rbac.v1.UnassignUserRoleRequest\x1a(.hearth.rbac.v1.UnassignUserRoleResponse\"*\x82\xd3\xe4\x93\x02$*\"/admin/assignments/{assignment_id}\x12\x94\x01\n" +
+	"\x13ListUserAssignments\x12*.hearth.rbac.v1.ListUserAssignmentsRequest\x1a+.hearth.rbac.v1.ListUserAssignmentsResponse\"$\x82\xd3\xe4\x93\x02\x1e\x12\x1c/admin/users/{user_id}/roles\x12Y\n" +
 	"\x0fAssignGroupRole\x12&.hearth.rbac.v1.AssignGroupRoleRequest\x1a\x1e.hearth.rbac.v1.RoleAssignment\x12h\n" +
 	"\x11UnassignGroupRole\x12(.hearth.rbac.v1.UnassignGroupRoleRequest\x1a).hearth.rbac.v1.UnassignGroupRoleResponse\x12b\n" +
-	"\x0fListRoleMembers\x12&.hearth.rbac.v1.ListRoleMembersRequest\x1a'.hearth.rbac.v1.ListRoleMembersResponse\x12\x86\x01\n" +
-	"\x1bResolveEffectivePermissions\x122.hearth.rbac.v1.ResolveEffectivePermissionsRequest\x1a3.hearth.rbac.v1.ResolveEffectivePermissionsResponse\x12n\n" +
+	"\x0fListRoleMembers\x12&.hearth.rbac.v1.ListRoleMembersRequest\x1a'.hearth.rbac.v1.ListRoleMembersResponse\x12\xbc\x01\n" +
+	"\x1bResolveEffectivePermissions\x122.hearth.rbac.v1.ResolveEffectivePermissionsRequest\x1a3.hearth.rbac.v1.ResolveEffectivePermissionsResponse\"4\x82\xd3\xe4\x93\x02.\x12,/admin/users/{user_id}/effective-permissions\x12n\n" +
 	"\x13GrantUserPermission\x12*.hearth.rbac.v1.GrantUserPermissionRequest\x1a+.hearth.rbac.v1.GrantUserPermissionResponse\x12q\n" +
 	"\x14RevokeUserPermission\x12+.hearth.rbac.v1.RevokeUserPermissionRequest\x1a,.hearth.rbac.v1.RevokeUserPermissionResponse\x12n\n" +
 	"\x13ListUserPermissions\x12*.hearth.rbac.v1.ListUserPermissionsRequest\x1a+.hearth.rbac.v1.ListUserPermissionsResponse\x12h\n" +
@@ -4140,9 +4141,9 @@ const file_hearth_rbac_v1_rbac_proto_rawDesc = "" +
 	"\x14RemoveAdditionalRole\x12+.hearth.rbac.v1.RemoveAdditionalRoleRequest\x1a,.hearth.rbac.v1.RemoveAdditionalRoleResponse\x12n\n" +
 	"\x13ListAdditionalRoles\x12*.hearth.rbac.v1.ListAdditionalRolesRequest\x1a+.hearth.rbac.v1.ListAdditionalRolesResponse\x12q\n" +
 	"\x14ListRealmPermissions\x12+.hearth.rbac.v1.ListRealmPermissionsRequest\x1a,.hearth.rbac.v1.ListRealmPermissionsResponse\x12_\n" +
-	"\x0eListRealmRoles\x12%.hearth.rbac.v1.ListRealmRolesRequest\x1a&.hearth.rbac.v1.ListRealmRolesResponse\x12\\\n" +
-	"\rRevokeConsent\x12$.hearth.rbac.v1.RevokeConsentRequest\x1a%.hearth.rbac.v1.RevokeConsentResponse\x12e\n" +
-	"\x10ListUserConsents\x12'.hearth.rbac.v1.ListUserConsentsRequest\x1a(.hearth.rbac.v1.ListUserConsentsResponseB=Z;github.com/hearthdb/hearth/sdks/go/generated/rbac/v1;rbacv1b\x06proto3"
+	"\x0eListRealmRoles\x12%.hearth.rbac.v1.ListRealmRolesRequest\x1a&.hearth.rbac.v1.ListRealmRolesResponse\x12\x91\x01\n" +
+	"\rRevokeConsent\x12$.hearth.rbac.v1.RevokeConsentRequest\x1a%.hearth.rbac.v1.RevokeConsentResponse\"3\x82\xd3\xe4\x93\x02-*+/admin/users/{user_id}/consents/{client_id}\x12\x8e\x01\n" +
+	"\x10ListUserConsents\x12'.hearth.rbac.v1.ListUserConsentsRequest\x1a(.hearth.rbac.v1.ListUserConsentsResponse\"'\x82\xd3\xe4\x93\x02!\x12\x1f/admin/users/{user_id}/consentsB=Z;github.com/hearthdb/hearth/sdks/go/generated/rbac/v1;rbacv1b\x06proto3"
 
 var (
 	file_hearth_rbac_v1_rbac_proto_rawDescOnce sync.Once

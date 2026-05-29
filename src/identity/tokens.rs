@@ -539,7 +539,9 @@ impl SigningKey {
     /// need a distinct `typ` to prevent cross-context token confusion
     /// (RFC 8725 §3.11). The caller controls the `typ` string and is
     /// responsible for using a value that does not collide with `"JWT"` or
-    /// `"logout+JWT"`.
+    /// `"logout+JWT"`. Note: `issue_token()` legitimately produces `typ: "JWT"`
+    /// for access/refresh tokens; the collision prohibition applies only to
+    /// direct callers of *this* function (e.g. JARM responses, client assertions).
     pub(crate) fn sign_jwt<T: serde::Serialize>(
         &self,
         claims: &T,

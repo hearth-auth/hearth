@@ -1,6 +1,4 @@
 //! Integration tests for admin HTTP auth (permission-gated via `hearth.admin`).
-//!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 — `admin_rbac_auth`.
 
 mod common;
 

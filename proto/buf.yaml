@@ -2,9 +2,26 @@ version: v2
 modules:
   - path: .
     name: buf.build/hearth/api
+# google/api protos are vendored locally in proto/google/api/ (Apache-2.0).
+# No remote buf.build dep needed; proto/ include path resolves them for both
+# protoc (build.rs) and buf (lint / format / breaking).
 lint:
   use:
     - STANDARD
+  # Pre-existing violations grandfathered here; tracked for cleanup in HEA-969.
+  # RPC_REQUEST_RESPONSE_UNIQUE: services share resource types (User, Realm, Role…).
+  # RPC_*_STANDARD_NAME: *Call wrappers and resource types predate strict naming.
+  # ENUM_VALUE_PREFIX / ENUM_ZERO_VALUE_SUFFIX: AccessTokenAuthorization values.
+  except:
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+  ignore:
+    - google
 breaking:
   use:
     - FILE
+  ignore:
+    - google

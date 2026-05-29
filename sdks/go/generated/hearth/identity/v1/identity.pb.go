@@ -7,6 +7,7 @@
 package identityv1
 
 import (
+	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -1965,7 +1966,7 @@ var File_hearth_identity_v1_identity_proto protoreflect.FileDescriptor
 
 const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"\n" +
-	"!hearth/identity/v1/identity.proto\x12\x12hearth.identity.v1\"\xac\x02\n" +
+	"!hearth/identity/v1/identity.proto\x12\x12hearth.identity.v1\x1a\x1cgoogle/api/annotations.proto\"\xac\x02\n" +
 	"\x04User\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05email\x18\x02 \x01(\tR\x05email\x12!\n" +
@@ -2166,23 +2167,22 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"\x12OrganizationStatus\x12#\n" +
 	"\x1fORGANIZATION_STATUS_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aORGANIZATION_STATUS_ACTIVE\x10\x01\x12!\n" +
-	"\x1dORGANIZATION_STATUS_SUSPENDED\x10\x022\xa3\n" +
+	"\x1dORGANIZATION_STATUS_SUSPENDED\x10\x022\xb4\f\n" +
+	"\x14IdentityAdminService\x12e\n" +
+	"\tListUsers\x12$.hearth.identity.v1.ListUsersRequest\x1a\x1c.hearth.identity.v1.UserPage\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/admin/users\x12b\n" +
+	"\aGetUser\x12\".hearth.identity.v1.GetUserRequest\x1a\x18.hearth.identity.v1.User\"\x19\x82\xd3\xe4\x93\x02\x13\x12\x11/admin/users/{id}\x12f\n" +
 	"\n" +
-	"\x14IdentityAdminService\x12O\n" +
-	"\tListUsers\x12$.hearth.identity.v1.ListUsersRequest\x1a\x1c.hearth.identity.v1.UserPage\x12G\n" +
-	"\aGetUser\x12\".hearth.identity.v1.GetUserRequest\x1a\x18.hearth.identity.v1.User\x12M\n" +
+	"CreateUser\x12%.hearth.identity.v1.CreateUserRequest\x1a\x18.hearth.identity.v1.User\"\x17\x82\xd3\xe4\x93\x02\x11:\x01*\"\f/admin/users\x12k\n" +
 	"\n" +
-	"CreateUser\x12%.hearth.identity.v1.CreateUserRequest\x1a\x18.hearth.identity.v1.User\x12J\n" +
+	"UpdateUser\x12\".hearth.identity.v1.UpdateUserCall\x1a\x18.hearth.identity.v1.User\"\x1f\x82\xd3\xe4\x93\x02\x19:\x04body2\x11/admin/users/{id}\x12i\n" +
 	"\n" +
-	"UpdateUser\x12\".hearth.identity.v1.UpdateUserCall\x1a\x18.hearth.identity.v1.User\x12N\n" +
+	"DeleteUser\x12%.hearth.identity.v1.DeleteUserRequest\x1a\x19.hearth.identity.v1.Empty\"\x19\x82\xd3\xe4\x93\x02\x13*\x11/admin/users/{id}\x12i\n" +
 	"\n" +
-	"DeleteUser\x12%.hearth.identity.v1.DeleteUserRequest\x1a\x19.hearth.identity.v1.Empty\x12R\n" +
-	"\n" +
-	"ListRealms\x12%.hearth.identity.v1.ListRealmsRequest\x1a\x1d.hearth.identity.v1.RealmPage\x12J\n" +
-	"\bGetRealm\x12#.hearth.identity.v1.GetRealmRequest\x1a\x19.hearth.identity.v1.Realm\x12P\n" +
-	"\vCreateRealm\x12&.hearth.identity.v1.CreateRealmRequest\x1a\x19.hearth.identity.v1.Realm\x12M\n" +
-	"\vUpdateRealm\x12#.hearth.identity.v1.UpdateRealmCall\x1a\x19.hearth.identity.v1.Realm\x12P\n" +
-	"\vDeleteRealm\x12&.hearth.identity.v1.DeleteRealmRequest\x1a\x19.hearth.identity.v1.Empty\x12g\n" +
+	"ListRealms\x12%.hearth.identity.v1.ListRealmsRequest\x1a\x1d.hearth.identity.v1.RealmPage\"\x15\x82\xd3\xe4\x93\x02\x0f\x12\r/admin/realms\x12f\n" +
+	"\bGetRealm\x12#.hearth.identity.v1.GetRealmRequest\x1a\x19.hearth.identity.v1.Realm\"\x1a\x82\xd3\xe4\x93\x02\x14\x12\x12/admin/realms/{id}\x12j\n" +
+	"\vCreateRealm\x12&.hearth.identity.v1.CreateRealmRequest\x1a\x19.hearth.identity.v1.Realm\"\x18\x82\xd3\xe4\x93\x02\x12:\x01*\"\r/admin/realms\x12o\n" +
+	"\vUpdateRealm\x12#.hearth.identity.v1.UpdateRealmCall\x1a\x19.hearth.identity.v1.Realm\" \x82\xd3\xe4\x93\x02\x1a:\x04body\x1a\x12/admin/realms/{id}\x12l\n" +
+	"\vDeleteRealm\x12&.hearth.identity.v1.DeleteRealmRequest\x1a\x19.hearth.identity.v1.Empty\"\x1a\x82\xd3\xe4\x93\x02\x14*\x12/admin/realms/{id}\x12g\n" +
 	"\x11ListOrganizations\x12,.hearth.identity.v1.ListOrganizationsRequest\x1a$.hearth.identity.v1.OrganizationPage\x12_\n" +
 	"\x0fGetOrganization\x12*.hearth.identity.v1.GetOrganizationRequest\x1a .hearth.identity.v1.Organization\x12e\n" +
 	"\x12CreateOrganization\x12-.hearth.identity.v1.CreateOrganizationRequest\x1a .hearth.identity.v1.Organization\x12b\n" +

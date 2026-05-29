@@ -14,17 +14,17 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger(JwksClient::class.java)
 
-/** Minimum JWKS cache TTL per sdk-spec.md §2.2: 5 minutes. */
+/** Minimum JWKS cache TTL per SDK.md §2.2: 5 minutes. */
 const val JWKS_MIN_TTL_MS = 5 * 60 * 1000L
 
-/** Default JWKS cache TTL per sdk-spec.md §2.2: 1 hour. */
+/** Default JWKS cache TTL per SDK.md §2.2: 1 hour. */
 const val JWKS_DEFAULT_TTL_MS = 60 * 60 * 1000L
 
-/** Maximum JWKS cache TTL per sdk-spec.md §2.2: 24 hours. */
+/** Maximum JWKS cache TTL per SDK.md §2.2: 24 hours. */
 const val JWKS_MAX_TTL_MS = 24 * 60 * 60 * 1000L
 
 /**
- * JWKS fetcher and cache conforming to sdk-spec.md §2.2.
+ * JWKS fetcher and cache conforming to SDK.md §2.2.
  *
  * - Keys are cached by `kid`; old keys are merged on refresh (supports rotation).
  * - TTL respects `Cache-Control: max-age` from the JWKS endpoint, clamped to [5 min, 24 h].

@@ -97,9 +97,11 @@ async fn client_credentials_full_flow() {
             &realm,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: "super-secret-value-123!".to_string(),
+                client_secret: Some("super-secret-value-123!".to_string()),
                 scope: Some("read write".to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("client credentials token");
@@ -288,6 +290,9 @@ async fn refresh_token_rotation_e2e() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -302,6 +307,8 @@ async fn refresh_token_rotation_e2e() {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code");
@@ -314,7 +321,7 @@ async fn refresh_token_rotation_e2e() {
     //    The rotation is tracked by the stored hash, not the token string.
     let refreshed = harness
         .identity()
-        .refresh_tokens(&realm, &original_refresh)
+        .refresh_tokens(&realm, &original_refresh, None)
         .expect("refresh tokens");
 
     // 4. Validate new access token — should succeed
@@ -325,7 +332,9 @@ async fn refresh_token_rotation_e2e() {
     assert_eq!(claims.sub, user.id().to_string());
 
     // 5. Use old refresh token — should fail (grant family hash was rotated)
-    let reuse_result = harness.identity().refresh_tokens(&realm, &original_refresh);
+    let reuse_result = harness
+        .identity()
+        .refresh_tokens(&realm, &original_refresh, None);
     assert!(
         reuse_result.is_err(),
         "reusing old refresh token after rotation must fail"
@@ -334,7 +343,9 @@ async fn refresh_token_rotation_e2e() {
     // 6. After theft detection (step 5), the grant family is revoked,
     // so even the current refresh token should also be invalid
     let new_refresh = refreshed.refresh_token().to_string();
-    let new_refresh_result = harness.identity().refresh_tokens(&realm, &new_refresh);
+    let new_refresh_result = harness
+        .identity()
+        .refresh_tokens(&realm, &new_refresh, None);
     assert!(
         new_refresh_result.is_err(),
         "current refresh token should also be revoked after theft detection"
@@ -394,6 +405,9 @@ async fn conformance_rfc7662_introspection_response() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -408,6 +422,8 @@ async fn conformance_rfc7662_introspection_response() {
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange");
@@ -707,6 +723,9 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect_err("authorize on archived client must fail");
@@ -745,6 +764,9 @@ async fn archived_client_blocks_and_restore_allows_authorize() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize on restored client must succeed");

@@ -42,7 +42,7 @@ use crate::identity::CodeChallengeMethod;
 use crate::identity::RequiredAction;
 use crate::identity::{CleartextPassword, SessionContext, UpdateUserRequest};
 use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
-use crate::protocol::web::oauth_consent::AuthorizeQuery;
+use crate::protocol::web::oauth_consent::{build_authorization_redirect, AuthorizeQuery};
 
 use super::handlers::append_cookie;
 use super::handlers_common;
@@ -132,6 +132,7 @@ pub fn required_action_check(
     q: &AuthorizeQuery,
     headers: &HeaderMap,
     now: Timestamp,
+    via_par: bool,
 ) -> Option<Response> {
     let user = state.identity.get_user(realm, user_id).ok().flatten()?;
 
@@ -167,6 +168,8 @@ pub fn required_action_check(
             Some(q.state.clone())
         },
         response_type: q.response_type.clone(),
+        response_mode: q.response_mode.clone().filter(|m| !m.is_empty()),
+        via_par,
     };
 
     let token = match state
@@ -452,6 +455,11 @@ pub fn resume_oidc_flow(
         Some(oidc_params.code_challenge.clone())
     };
 
+    let response_mode = oidc_params
+        .response_mode
+        .as_deref()
+        .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok());
+
     match state.identity.issue_authorization_code(
         realm,
         &user_id,
@@ -463,16 +471,12 @@ pub fn resume_oidc_flow(
         code_challenge_method,
         oidc_params.nonce.clone(),
         Vec::new(),
+        response_mode,
+        None,                // jar_request — RA resume restores pre-validated params
+        oidc_params.via_par, // propagated from the original authorize request
     ) {
         Ok(resp) => {
-            let location = build_redirect_location(
-                &oidc_params.redirect_uri,
-                &[
-                    ("code", resp.code()),
-                    ("state", resp.state()),
-                    ("iss", resp.iss()),
-                ],
-            );
+            let location = build_authorization_redirect(&oidc_params.redirect_uri, &resp);
             let mut response = Redirect::to(&location).into_response();
             append_cookie(&mut response, &clear_cookie);
             response
@@ -1525,25 +1529,6 @@ fn now_micros() -> i64 {
         .unwrap_or(0)
 }
 
-/// Appends query parameters to a redirect URI.  Replicates the logic from
-/// [`super::oauth_consent`] without a cross-module dependency.
-fn build_redirect_location(base: &str, params: &[(&str, &str)]) -> String {
-    let mut out = String::with_capacity(base.len() + 64);
-    out.push_str(base);
-    let mut first = !base.contains('?');
-    for (k, v) in params {
-        if v.is_empty() {
-            continue;
-        }
-        out.push(if first { '?' } else { '&' });
-        first = false;
-        percent_encode_into(k, &mut out);
-        out.push('=');
-        percent_encode_into(v, &mut out);
-    }
-    out
-}
-
 fn percent_encode_into(value: &str, out: &mut String) {
     use std::fmt::Write as _;
     for b in value.bytes() {
@@ -1561,6 +1546,41 @@ fn percent_encode_into(value: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build_redirect_location(base: &str, params: &[(&str, &str)]) -> String {
+        use std::fmt::Write as _;
+        let mut out = base.to_string();
+        let mut first = true;
+        for (k, v) in params {
+            if v.is_empty() {
+                continue;
+            }
+            out.push(if first { '?' } else { '&' });
+            first = false;
+            for b in k.bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(b as char);
+                    }
+                    _ => {
+                        let _ = write!(out, "%{b:02X}");
+                    }
+                }
+            }
+            out.push('=');
+            for b in v.bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(b as char);
+                    }
+                    _ => {
+                        let _ = write!(out, "%{b:02X}");
+                    }
+                }
+            }
+        }
+        out
+    }
 
     #[test]
     fn build_redirect_location_appends_params() {

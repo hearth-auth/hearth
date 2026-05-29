@@ -7,7 +7,241 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Changed
+
+- **CI required-check renamed: `sdk-conformance (docs/sdk-spec.md)` → `sdk-conformance (docs/specs/SDK.md)`.**
+  The SDK common-spec doc moved from `docs/sdk-spec.md` to `docs/specs/SDK.md` to co-locate
+  with the other canonical specs in `docs/specs/`. The CI job name in `.github/workflows/ci.yml`
+  and the entry in `scripts/ci-required-checks-migrate.sh` updated to match. **Operators must
+  re-run `scripts/ci-required-checks-migrate.sh --apply` (or update GitHub branch protection
+  manually) so the required-check name matches the new job.** All inbound SDK README,
+  CHANGELOG, and code-comment links updated.
+
+### Security
+
+- **FAPI 2.0 profile mutation now guarded against client_secret retention (HEA-1021)** —
+  `update_client` rejected the `profile → Fapi2` transition if the existing client already
+  held a `client_secret_hash`, closing a gap where a Standard confidential client could be
+  silently "upgraded" to FAPI 2.0 while retaining its symmetric secret in violation of
+  FAPI 2.0 §5.3.1.1. Additionally, `regenerate_client_secret` now returns `FapiViolation`
+  for any FAPI 2.0 client before reaching the `is_confidential` check, so no admin can
+  issue or refresh a secret on a FAPI 2.0 client regardless of stored state.
+
+- **DPoP sender-constraint now enforced for all clients in FAPI Baseline realms (HEA-1022)** —
+  The realm-level DPoP gate in `exchange_authorization_code` only checked for
+  `FapiProfile::Advanced`; a `Standard`-profile client in a FAPI Baseline realm could
+  exchange an authorization code without a DPoP proof, receiving a non-sender-constrained
+  access token. The gate now uses `fapi_profile.is_some()`, covering both Baseline and
+  Advanced — consistent with FAPI 2.0 Baseline §5.3.3.
+
+- **JAR `request` field now propagated through HTTP PAR endpoint (HEA-1019)** —
+  The HTTP PAR body deserialiser (`HttpParRequest`) was missing the `request`
+  field, so signed JAR JWTs sent by FAPI Advanced clients were silently dropped
+  before reaching the engine. This caused every HTTP PAR call to an Advanced
+  FAPI realm to return `invalid_request` (JAR required) regardless of whether
+  the client supplied one. The field is now forwarded to the domain layer;
+  FAPI Advanced clients can complete PAR using the HTTP endpoint.
+
+- **RFC 9126 §4 `client_id` mismatch check in PAR-backed authorize (HEA-1018)** —
+  The `POST /v1/authorize` and `GET /ui/oauth/authorize` handlers previously did
+  not verify that the `client_id` in the request matched the `client_id` stored
+  with the pushed authorization request. An attacker who obtained a `request_uri`
+  (e.g. via referrer leakage) could have submitted it under a different client
+  identity. Both handlers now return `invalid_request` when the `client_id`
+  parameter is present and does not match the stored PAR entry. Two new HTTP-layer
+  regression tests cover replay attacks (FAPI-B-09) and `client_id` mismatch
+  (FAPI-B-10).
+
+- **PAR `request_uri` now consumed in HTTP authorize handler (HEA-1017)** —
+  `GET /ui/oauth/authorize` and `POST /v1/authorize` previously ignored the
+  `request_uri` query/body parameter, causing FAPI 2.0 Baseline realms to
+  reject every browser-based authorization request (the handler always passed
+  `via_par = false`). Both handlers now call `consume_par` when `request_uri`
+  is present, expand the pre-validated stored parameters, and set `via_par =
+  true` — enabling FAPI 2.0 Baseline and Advanced clients to complete the
+  authorization code flow. The gRPC `OAuthService.Authorize` RPC gains the
+  same PAR expansion. `AuthorizationRequest` in the gRPC/REST proto gains an
+  optional `request_uri` field (field 10).
+
+- **FAPI 2.0 DPoP enforcement on `refresh_token` grant — realm-level gate added (HEA-1024)** —
+  The realm-level DPoP gate was only applied to `exchange_authorization_code`, not
+  `refresh_tokens`. A standard-profile client in a FAPI Baseline or Advanced realm could
+  refresh its access token without a DPoP proof, receiving an unbounded token with no
+  `cnf.jkt` claim. `rotate_grant_family` now checks both the per-client profile and the
+  realm's `fapi_profile`; refreshes without DPoP are rejected with `invalid_dpop_proof`
+  when either gate applies. The HTTP `refresh_token` response also now correctly sets
+  `token_type: DPoP` when a DPoP thumbprint is present (RFC 9449 §7). Regression test:
+  FAPI-B-11.
+
+- **FAPI 2.0 DPoP enforcement on `refresh_token` grant (HEA-1016)** — FAPI 2.0
+  clients must now supply a DPoP proof on every token endpoint call, including
+  `grant_type=refresh_token`. Requests without a DPoP header are rejected with
+  `invalid_dpop_proof`. The refreshed access token carries `cnf.jkt` bound to
+  the thumbprint extracted from the proof, preventing unbounded token issuance.
+  Standard clients are unaffected.
+
+- **JARM JWT token-type confusion fix (HEA-1004)** — JARM JWTs now carry
+  `typ: "oauth-authz-resp+jwt"` (IANA-registered media type per JARM §4.1 /
+  RFC 9101 §2) instead of the generic `"JWT"`. This gives explicit RFC 8725
+  §3.11 token-type discrimination: `validate_token` rejects JARM JWTs
+  as Bearer tokens at the `typ`-header check before any claim parsing.
+  JARM JWT lifetime capped at 300 s (FAPI 2.0 §5.3.2.2) and `iat` claim added.
+
 ### Added
+
+- **JAR on direct `/authorize` (HEA-983)** — the `GET /authorize` endpoint now
+  accepts a `request=<signed-JWT>` parameter (RFC 9101). When present, Hearth
+  verifies the JWT signature against the client's registered JWKS (EdDSA, RS256,
+  PS256, ES256), enforces `iss == client_id`, `aud == realm issuer URL`, `exp`,
+  `nbf`, and per-realm JTI replay prevention, then uses the JWT claims to
+  override the outer query parameters before processing the authorization request.
+  Discovery now advertises `request_object_signing_alg_values_supported:
+  ["RS256", "PS256", "ES256", "EdDSA"]`.
+
+- **JARM — JWT Authorization Response Mode (HEA-979)** — clients may request
+  `response_mode=jwt`, `query.jwt`, or `fragment.jwt` to receive the
+  authorization response wrapped in a realm-signed EdDSA JWT containing
+  `{iss, aud, exp, code, state}`. The redirect carries `response=<jwt>` instead
+  of plain `code=...&state=...`, providing end-to-end integrity for the browser
+  redirect. Discovery now advertises `query.jwt`, `fragment.jwt`, and `jwt` in
+  `response_modes_supported` (OAuth 2.0 JARM).
+
+- **FAPI 2.0 Security Profile — per-client `ClientProfile::Fapi2` (HEA-980)** —
+  individual OAuth 2.0 clients may now be registered with `"profile": "fapi2"`.
+  Clients in this profile must use `private_key_jwt` (no `client_secret`), must
+  register a JWKS, must submit every authorization request via PAR (`via_par`),
+  must supply a DPoP proof at the token endpoint, and receive `s_hash` in JARM
+  responses when `state` is present. Standard clients in the same realm are
+  completely unaffected. See `docs/specs/OIDC.md §2.2` for the full normative
+  spec (HEA-980).
+
+- **FAPI 2.0 Security Profile enforcement (HEA-987)** — realms may now declare
+  `fapi_profile: baseline` or `fapi_profile: advanced` in their configuration.
+  **Baseline** mandates PAR (RFC 9126) and PKCE (S256) on every authorization
+  request. **Advanced** additionally requires JAR (RFC 9101) in the PAR body,
+  JARM (`authorization_signed_response_alg` on the client), and a registered
+  client JWKS (`private_key_jwt`). The OIDC discovery document now advertises
+  `fapi_profile` when a realm is in either mode. Clients in non-FAPI realms are
+  unaffected (HEA-987).
+
+- **Mandatory JARM per client (HEA-986)** — `OAuthClient` now carries an
+  `authorization_signed_response_alg` field (`EdDSA` only). When set via
+  `RegisterClientRequest` or `UpdateClientRequest`, every authorization response
+  for that client is automatically promoted to JARM regardless of the
+  `response_mode` in the request — a plain `query` or `fragment` request is
+  silently upgraded to `query.jwt`. Registration rejects unsupported algorithm
+  values at creation time. Discovery advertises
+  `authorization_signing_alg_values_supported: ["EdDSA"]` (HEA-986).
+
+- **`private_key_jwt` client authentication (HEA-984)** — confidential clients
+  can now authenticate to the token endpoint by presenting a self-signed EdDSA
+  JWT assertion (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`)
+  instead of a `client_secret`. Hearth verifies the assertion against the
+  client's registered Ed25519 public key, enforces `iss`/`sub == client_id`,
+  `aud == realm issuer URL`, `exp` in the future, and replay prevention via
+  per-realm JTI tracking. Discovery advertises `private_key_jwt` in
+  `token_endpoint_auth_methods_supported` (RFC 7523 §2.2 / OIDC Core §9).
+
+### Security
+
+- **JWT Bearer grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`) hardening (HEA-999)** —
+  several security gaps in the RFC 7523 JWT Bearer token endpoint are resolved:
+  - `jti` is now mandatory; assertions without a JWT ID are rejected (`invalid_grant`).
+  - `sub` must equal `client_id` (RFC 7523 §3 / OIDC Core §9); mismatches are rejected.
+  - Assertion lifetime is capped at 10 minutes; requests with `exp > now + 600 s` fail.
+  - JTI store migrated to exp-bounded values with `saturating_add` overflow safety; entries
+    auto-expire after their validity window so storage does not grow unboundedly.
+  - The JTI check-and-consume is now atomic per realm (per-realm mutex), eliminating the
+    TOCTOU race between `storage.get` and `storage.put`.
+
+- **Token endpoint client-auth error normalization (HEA-994)** — all client
+  authentication failures on the token endpoint now return HTTP 401
+  `"invalid_client"` regardless of whether the client ID is unknown or the
+  credential is wrong. Previously `InvalidClient` returned HTTP 400, creating
+  a distinguishable oracle for client ID enumeration (OAuth 2.0 Security BCP
+  §2.2 / RFC 6749 §5.2). gRPC `InvalidClientAssertion` also no longer leaks
+  the internal reason string to callers (HEA-992).
+
+- **`private_key_jwt` JTI replay-store purged on realm deletion (HEA-995)** —
+  `oauth:ca-jti:*` sentinels are now swept during cascade realm delete,
+  preventing unbounded storage growth when realms are recycled.
+
+- **Session limit enforcement hardening (HEA-982)** — five findings from the
+  HEA-981 security review are resolved:
+  - **SEC-1 (TOCTOU):** The per-user lock now covers the session write; the
+    count → evict → write sequence is fully atomic under one guard.
+  - **SEC-2 (Default policy):** `SessionLimitPolicy` default changed from
+    `EvictOldest` to `RejectNew`. Operators opt in to eviction via
+    `session_over_limit_policy = "evict_oldest"`. Prevents attacker-driven
+    silent eviction of victim sessions.
+  - **SEC-3 (Silent fallback):** An unrecognised `session_over_limit_policy`
+    string now returns a hard `RegistryError::InvalidRealmConfigField` at
+    config parse time instead of silently falling back to the default.
+  - **SEC-4 (gRPC information leak):** The gRPC error message for session
+    limit exceeded is now the generic string `"session limit reached"`;
+    active count and configured limit are no longer exposed to callers.
+  - **SEC-5 (Fail-open):** A `get_realm` storage error during session
+    creation now propagates to the caller and rejects the session, rather
+    than skipping limit enforcement and proceeding.
+
+- **Unknown `response_mode` rejected with `invalid_request` (HEA-1005)** —
+  two call sites in the OAuth authorization handler previously used `.ok()` to
+  silently discard `response_mode` parse failures, causing unrecognized values
+  (typos, unsupported modes such as `"form_post.jwt"`) to fall through to plain
+  `query` mode. A client requiring JARM would receive an unprotected plain-text
+  redirect with no error signal, defeating the integrity guarantee JARM provides.
+  Both the bypass path (direct code issue without consent page) and the consent
+  completion path now return an `invalid_request` redirect immediately when the
+  `response_mode` value cannot be parsed (FAPI 2.0 / RFC 9207 / JARM spec
+  compliance, Medium severity).
+
+### Added
+
+- **`private_key_jwt` client authentication (HEA-984)** — Confidential clients can now
+  authenticate to the token endpoint using RFC 7523 §2.2 `private_key_jwt` assertions instead
+  of a `client_secret`. Clients register an Ed25519 public key via `assertion_public_key`;
+  the AS verifies the self-signed JWT, enforces `iss == sub == client_id`, checks `aud` against
+  the realm issuer URL, validates `exp`, and prevents JTI replay. Both `authorization_code` and
+  `client_credentials` grant types are supported. Discovery advertises
+  `token_endpoint_auth_methods_supported: ["none", "client_secret_post", "private_key_jwt"]`.
+
+- **RFC 9207 authorization response `iss` — formal test coverage (HEA-985)** —
+  Added `tests/rfc9207_iss.rs` with 6 integration tests confirming that every
+  successful authorization response carries a non-empty `iss` parameter matching
+  the OIDC discovery document issuer, that the discovery document advertises
+  `authorization_response_iss_parameter_supported: true` (both global and per-realm),
+  and that `iss` is stable across repeated requests.
+
+- **Helm chart lint + template-test CI (HEA-974)** — `make helm-lint` runs `helm lint` against
+  `deploy/helm/hearth/`; `make helm-template` renders the chart with both `values.yaml` and the
+  new `values-prod.yaml` production profile and diffs the output against committed snapshots in
+  `deploy/helm/hearth/tests/`. A new `.github/workflows/helm.yml` CI job runs both gates on every
+  PR or push that touches `deploy/helm/**`. `deploy/README.md` now includes an end-to-end
+  production install walkthrough (`helm install hearth deploy/helm/hearth -f values-prod.yaml`).
+
+- **Proto governance gates (HEA-973)** — `buf` is now required and governed across the full
+  development workflow. `buf lint` and `buf format` run in the pre-commit hook whenever
+  `.proto` files are staged (format → lint → regenerate, atomic commit). A dedicated
+  `.github/workflows/proto.yml` CI job runs `buf lint`, `buf format --diff --exit-code`, and
+  `buf breaking --against main` on every proto-touching PR. New Makefile targets:
+  `make proto-format` (in-place reformat), `make proto-format-check` (CI drift gate).
+  `docs/specs/PROTO.md` documents RPC naming conventions, `google.api.http` bindings,
+  `json_name` usage, backward-compatibility rules, and pre-existing lint exceptions.
+
+- **OpenAPI 3.0 spec served from binary (HEA-972)** — `GET /openapi.json` and
+  `GET /openapi.yaml` now serve a merged OpenAPI 3.0 spec; `GET /docs` serves Swagger UI.
+  All 63 proto RPCs annotated with `google.api.http` bindings; `docs/api/openapi.json` is the
+  canonical committed artifact (82 paths, produced by `make openapi`).  A drift gate in
+  `tests/openapi.rs` fails the build if the committed spec diverges from the route table.
+  `docs/api/grpc-only.txt` enumerates the 21 RPCs that are intentionally gRPC-only (HEA-972).
+
+- **Concurrent session limits (HEA-971)** — `RealmConfig` gains `max_concurrent_sessions: Option<u32>`
+  and `session_over_limit_policy: SessionLimitPolicy` (`reject_new` | `evict_oldest`, default
+  `reject_new`). When the limit is reached, `RejectNew` returns HTTP 429 / gRPC
+  `RESOURCE_EXHAUSTED` with error code `session_limit_exceeded`; `EvictOldest` revokes the
+  oldest active session and allows the new one. Configurable globally under `[session]`
+  (`session_max_concurrent`, `session_over_limit_policy`) and per-realm in `hearth.yaml`.
+  Each enforcement writes a `session_limit_enforced` audit event (HEA-971).
 
 - **Kotlin SDK spec conformance (HEA-964)** — `Claims` gains four new accessors:
   `inOrg(o)`, `tokenType()`, `organizationId()`, `orgGroups()`; new `RequiredActionError`

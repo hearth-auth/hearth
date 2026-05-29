@@ -61,26 +61,35 @@ pub struct JwksDoc {
 
 /// A single JWKS entry.
 ///
-/// Only RSA (`RS256`) is supported today — that covers every
-/// mainstream OIDC provider Hearth targets in v1. EC (`ES256`) and
-/// Ed25519 are straightforward follow-ups but not in scope.
+/// Covers RSA (`RS256`, `PS256`), EC (`ES256`), and OKP/Ed25519 (`EdDSA`)
+/// key types for upstream OIDC federation and JAR (RFC 9101) client
+/// request-object signing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Jwk {
-    /// Key type (`"RSA"`).
+    /// Key type (`"RSA"`, `"EC"`, or `"OKP"`).
     pub kty: String,
-    /// Intended algorithm (`"RS256"`), or `None` if the provider omits it.
+    /// Intended algorithm (`"RS256"`, `"ES256"`, `"EdDSA"`, etc.), or `None`.
     #[serde(default)]
     pub alg: Option<String>,
-    /// Key ID. Required so the ID token header `kid` can select the
-    /// right key during verification.
+    /// Key ID. Used to select the right key from a JWKS by `kid` header.
     #[serde(default)]
     pub kid: Option<String>,
-    /// RSA modulus, base64url no-pad.
+    /// RSA modulus, base64url no-pad. Present for `kty == "RSA"`.
     #[serde(default)]
     pub n: Option<String>,
-    /// RSA exponent, base64url no-pad.
+    /// RSA exponent, base64url no-pad. Present for `kty == "RSA"`.
     #[serde(default)]
     pub e: Option<String>,
+    /// X coordinate, base64url no-pad.
+    /// Ed25519 public key for `kty == "OKP"`, or EC x-coordinate for `kty == "EC"`.
+    #[serde(default)]
+    pub x: Option<String>,
+    /// Y coordinate, base64url no-pad. Present for `kty == "EC"` (P-256 etc.).
+    #[serde(default)]
+    pub y: Option<String>,
+    /// Curve name. `"Ed25519"` for OKP; `"P-256"` for EC.
+    #[serde(default)]
+    pub crv: Option<String>,
 }
 
 /// The claims Hearth reads from an upstream ID token.
@@ -638,6 +647,9 @@ mod tests {
                     kid: Some("k1".into()),
                     n: Some("n1".into()),
                     e: Some("AQAB".into()),
+                    x: None,
+                    crv: None,
+                    y: None,
                 },
                 Jwk {
                     kty: "RSA".into(),
@@ -645,6 +657,9 @@ mod tests {
                     kid: Some("k2".into()),
                     n: Some("n2".into()),
                     e: Some("AQAB".into()),
+                    x: None,
+                    crv: None,
+                    y: None,
                 },
             ],
         };
@@ -664,6 +679,9 @@ mod tests {
                 kid: None,
                 n: Some("n".into()),
                 e: Some("AQAB".into()),
+                x: None,
+                crv: None,
+                y: None,
             }],
         };
         assert!(select_jwk(&jwks, None).is_some());
@@ -679,6 +697,9 @@ mod tests {
                     kid: Some("k1".into()),
                     n: Some("n1".into()),
                     e: Some("AQAB".into()),
+                    x: None,
+                    crv: None,
+                    y: None,
                 },
                 Jwk {
                     kty: "RSA".into(),
@@ -686,6 +707,9 @@ mod tests {
                     kid: Some("k2".into()),
                     n: Some("n2".into()),
                     e: Some("AQAB".into()),
+                    x: None,
+                    crv: None,
+                    y: None,
                 },
             ],
         };

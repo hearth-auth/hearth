@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-sdk-conformance.sh — Verify each Hearth SDK conforms to docs/sdk-spec.md.
+# check-sdk-conformance.sh — Verify each Hearth SDK conforms to docs/specs/SDK.md.
 #
 # Exits non-zero if any requirement is unmet. Designed to run in CI on every PR.
 # Can also be run locally: ./scripts/check-sdk-conformance.sh [sdk_dir]
@@ -148,6 +148,6 @@ if [[ $FAIL -eq 0 ]]; then
   green "All SDK conformance checks passed."
 else
   red "One or more SDK conformance checks FAILED. See above for details."
-  red "Reference: docs/sdk-spec.md"
+  red "Reference: docs/specs/SDK.md"
   exit 1
 fi

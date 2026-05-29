@@ -1,0 +1,259 @@
+---
+# Source: hearth/templates/pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hearth
+      app.kubernetes.io/instance: hearth
+---
+# Source: hearth/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: hearth/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+type: Opaque
+data:
+  SMTP_PASSWORD: ""
+---
+# Source: hearth/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+data:
+  hearth.yaml: |
+    email:
+      from: Hearth <noreply@example.com>
+      smtp:
+        encryption: starttls
+        host: smtp.example.com
+        password: ${SMTP_PASSWORD}
+        port: 587
+        username: hearth@example.com
+      transport: smtp
+    observability:
+      log_format: json
+      log_level: info
+    oidc:
+      issuer: https://auth.example.com
+    operational:
+      max_connections: 4096
+      queue_depth: 16384
+      request_timeout_secs: 30
+      shutdown_timeout_secs: 30
+    server:
+      bind_address: 0.0.0.0
+      port: 8420
+    storage:
+      data_dir: /var/lib/hearth
+      fsync: true
+      hot_tier_capacity: 50000
+      memtable_flush_bytes: 134217728
+      wal_max_size_bytes: 536870912
+---
+# Source: hearth/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  accessModes:
+    - "ReadWriteOnce"
+  resources:
+    requests:
+      storage: "50Gi"
+---
+# Source: hearth/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8420
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+---
+# Source: hearth/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hearth
+      app.kubernetes.io/instance: hearth
+  template:
+    metadata:
+      annotations:
+        # Force pod restart when config changes
+        checksum/config: 1b8871c843643eb21a55c5b709c8c5dae05a5c861708cc5116a4b86c155e29c4
+        checksum/secret: e425a4c4080a940ae82f052504a85b4ce6f37a299c5a825ede8ff1418893f19c
+      labels:
+        app.kubernetes.io/name: hearth
+        app.kubernetes.io/instance: hearth
+    spec:
+      serviceAccountName: hearth
+      securityContext:
+        fsGroup: 10001
+        runAsNonRoot: true
+      containers:
+        - name: hearth
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+            runAsGroup: 10001
+            runAsNonRoot: true
+            runAsUser: 10001
+          image: "ghcr.io/hearth-rs/hearth:0.1.0"
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/hearth", "serve", "-c", "/etc/hearth/hearth.yaml"]
+          ports:
+            - name: http
+              containerPort: 8420
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: "info,hearth=info"
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: hearth
+                  key: SMTP_PASSWORD
+          volumeMounts:
+            - name: config
+              mountPath: /etc/hearth
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/hearth
+            # readOnlyRootFilesystem requires a writable /tmp
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 1Gi
+            requests:
+              cpu: 250m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: hearth
+        - name: data
+          persistentVolumeClaim:
+            claimName: hearth
+        - name: tmp
+          emptyDir: {}
+---
+# Source: hearth/templates/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hearth
+  labels:
+    helm.sh/chart: hearth-0.1.0
+    app.kubernetes.io/name: hearth
+    app.kubernetes.io/instance: hearth
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: 10m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+      - auth.example.com
+      secretName: hearth-tls
+  rules:
+    - host: "auth.example.com"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hearth
+                port:
+                  number: 8420

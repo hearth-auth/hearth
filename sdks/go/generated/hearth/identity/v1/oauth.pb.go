@@ -7,6 +7,7 @@
 package identityv1
 
 import (
+	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -86,8 +87,12 @@ type AuthorizationRequest struct {
 	CodeChallenge       *string                `protobuf:"bytes,7,opt,name=code_challenge,json=codeChallenge,proto3,oneof" json:"code_challenge,omitempty"`
 	CodeChallengeMethod *string                `protobuf:"bytes,8,opt,name=code_challenge_method,json=codeChallengeMethod,proto3,oneof" json:"code_challenge_method,omitempty"`
 	Nonce               *string                `protobuf:"bytes,9,opt,name=nonce,proto3,oneof" json:"nonce,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// PAR request_uri (RFC 9126). When set, the server expands the stored
+	// pushed authorization parameters and treats this as a PAR-backed request
+	// (via_par = true). Other authorization fields are ignored when this is set.
+	RequestUri    *string `protobuf:"bytes,10,opt,name=request_uri,json=requestUri,proto3,oneof" json:"request_uri,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AuthorizationRequest) Reset() {
@@ -179,6 +184,13 @@ func (x *AuthorizationRequest) GetCodeChallengeMethod() string {
 func (x *AuthorizationRequest) GetNonce() string {
 	if x != nil && x.Nonce != nil {
 		return *x.Nonce
+	}
+	return ""
+}
+
+func (x *AuthorizationRequest) GetRequestUri() string {
+	if x != nil && x.RequestUri != nil {
+		return *x.RequestUri
 	}
 	return ""
 }
@@ -1982,7 +1994,7 @@ var File_hearth_identity_v1_oauth_proto protoreflect.FileDescriptor
 
 const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\n" +
-	"\x1ehearth/identity/v1/oauth.proto\x12\x12hearth.identity.v1\"\xf7\x02\n" +
+	"\x1ehearth/identity/v1/oauth.proto\x12\x12hearth.identity.v1\x1a\x1cgoogle/api/annotations.proto\"\xad\x03\n" +
 	"\x14AuthorizationRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x12!\n" +
 	"\fredirect_uri\x18\x02 \x01(\tR\vredirectUri\x12\x14\n" +
@@ -1992,10 +2004,14 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\auser_id\x18\x06 \x01(\tR\x06userId\x12*\n" +
 	"\x0ecode_challenge\x18\a \x01(\tH\x00R\rcodeChallenge\x88\x01\x01\x127\n" +
 	"\x15code_challenge_method\x18\b \x01(\tH\x01R\x13codeChallengeMethod\x88\x01\x01\x12\x19\n" +
-	"\x05nonce\x18\t \x01(\tH\x02R\x05nonce\x88\x01\x01B\x11\n" +
+	"\x05nonce\x18\t \x01(\tH\x02R\x05nonce\x88\x01\x01\x12$\n" +
+	"\vrequest_uri\x18\n" +
+	" \x01(\tH\x03R\n" +
+	"requestUri\x88\x01\x01B\x11\n" +
 	"\x0f_code_challengeB\x18\n" +
 	"\x16_code_challenge_methodB\b\n" +
-	"\x06_nonce\"A\n" +
+	"\x06_nonceB\x0e\n" +
+	"\f_request_uri\"A\n" +
 	"\x15AuthorizationResponse\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\"\xa6\x01\n" +
@@ -2183,23 +2199,24 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x18AccessTokenAuthorization\x12\f\n" +
 	"\bEMBEDDED\x10\x00\x12\x11\n" +
 	"\rINTROSPECTION\x10\x01\x12\f\n" +
-	"\bDECISION\x10\x022\x82\x04\n" +
-	"\x17ApplicationAdminService\x12d\n" +
-	"\x10ListApplications\x12+.hearth.identity.v1.ListApplicationsRequest\x1a#.hearth.identity.v1.OAuthClientPage\x12\\\n" +
-	"\x0eGetApplication\x12).hearth.identity.v1.GetApplicationRequest\x1a\x1f.hearth.identity.v1.OAuthClient\x12_\n" +
-	"\x11CreateApplication\x12).hearth.identity.v1.RegisterClientRequest\x1a\x1f.hearth.identity.v1.OAuthClient\x12_\n" +
-	"\x11UpdateApplication\x12).hearth.identity.v1.UpdateApplicationCall\x1a\x1f.hearth.identity.v1.OAuthClient\x12a\n" +
-	"\x11DeleteApplication\x12,.hearth.identity.v1.DeleteApplicationRequest\x1a\x1e.hearth.identity.v1.OAuthEmpty2\xb3\x06\n" +
-	"\fOAuthService\x12`\n" +
-	"\tAuthorize\x12(.hearth.identity.v1.AuthorizationRequest\x1a).hearth.identity.v1.AuthorizationResponse\x12`\n" +
-	"\rTokenExchange\x12(.hearth.identity.v1.TokenExchangeRequest\x1a%.hearth.identity.v1.OidcTokenResponse\x12T\n" +
-	"\x06Revoke\x12*.hearth.identity.v1.TokenRevocationRequest\x1a\x1e.hearth.identity.v1.OAuthEmpty\x12f\n" +
+	"\bDECISION\x10\x022\xc4\x05\n" +
+	"\x17ApplicationAdminService\x12\x81\x01\n" +
+	"\x10ListApplications\x12+.hearth.identity.v1.ListApplicationsRequest\x1a#.hearth.identity.v1.OAuthClientPage\"\x1b\x82\xd3\xe4\x93\x02\x15\x12\x13/admin/applications\x12\x85\x01\n" +
+	"\x0eGetApplication\x12).hearth.identity.v1.GetApplicationRequest\x1a\x1f.hearth.identity.v1.OAuthClient\"'\x82\xd3\xe4\x93\x02!\x12\x1f/admin/applications/{client_id}\x12\x7f\n" +
+	"\x11CreateApplication\x12).hearth.identity.v1.RegisterClientRequest\x1a\x1f.hearth.identity.v1.OAuthClient\"\x1e\x82\xd3\xe4\x93\x02\x18:\x01*\"\x13/admin/applications\x12\x8e\x01\n" +
+	"\x11UpdateApplication\x12).hearth.identity.v1.UpdateApplicationCall\x1a\x1f.hearth.identity.v1.OAuthClient\"-\x82\xd3\xe4\x93\x02':\x04body\x1a\x1f/admin/applications/{client_id}\x12\x8a\x01\n" +
+	"\x11DeleteApplication\x12,.hearth.identity.v1.DeleteApplicationRequest\x1a\x1e.hearth.identity.v1.OAuthEmpty\"'\x82\xd3\xe4\x93\x02!*\x1f/admin/applications/{client_id}2\xef\a\n" +
+	"\fOAuthService\x12w\n" +
+	"\tAuthorize\x12(.hearth.identity.v1.AuthorizationRequest\x1a).hearth.identity.v1.AuthorizationResponse\"\x15\x82\xd3\xe4\x93\x02\x0f:\x01*\"\n" +
+	"/authorize\x12s\n" +
+	"\rTokenExchange\x12(.hearth.identity.v1.TokenExchangeRequest\x1a%.hearth.identity.v1.OidcTokenResponse\"\x11\x82\xd3\xe4\x93\x02\v:\x01*\"\x06/token\x12h\n" +
+	"\x06Revoke\x12*.hearth.identity.v1.TokenRevocationRequest\x1a\x1e.hearth.identity.v1.OAuthEmpty\"\x12\x82\xd3\xe4\x93\x02\f:\x01*\"\a/revoke\x12~\n" +
 	"\n" +
-	"Introspect\x12-.hearth.identity.v1.TokenIntrospectionRequest\x1a).hearth.identity.v1.IntrospectionResponse\x12r\n" +
-	"\x0fDeviceAuthorize\x12..hearth.identity.v1.DeviceAuthorizationRequest\x1a/.hearth.identity.v1.DeviceAuthorizationResponse\x12p\n" +
-	"\x11ClientCredentials\x12,.hearth.identity.v1.ClientCredentialsRequest\x1a-.hearth.identity.v1.ClientCredentialsResponse\x12\\\n" +
-	"\x0eRegisterClient\x12).hearth.identity.v1.RegisterClientRequest\x1a\x1f.hearth.identity.v1.OAuthClient\x12]\n" +
-	"\x06Decide\x12(.hearth.identity.v1.TokenDecisionRequest\x1a).hearth.identity.v1.TokenDecisionResponseBEZCgithub.com/hearthdb/hearth/sdks/go/generated/identity/v1;identityv1b\x06proto3"
+	"Introspect\x12-.hearth.identity.v1.TokenIntrospectionRequest\x1a).hearth.identity.v1.IntrospectionResponse\"\x16\x82\xd3\xe4\x93\x02\x10:\x01*\"\v/introspect\x12\x94\x01\n" +
+	"\x0fDeviceAuthorize\x12..hearth.identity.v1.DeviceAuthorizationRequest\x1a/.hearth.identity.v1.DeviceAuthorizationResponse\" \x82\xd3\xe4\x93\x02\x1a:\x01*\"\x15/device_authorization\x12p\n" +
+	"\x11ClientCredentials\x12,.hearth.identity.v1.ClientCredentialsRequest\x1a-.hearth.identity.v1.ClientCredentialsResponse\x12\x81\x01\n" +
+	"\x0eRegisterClient\x12).hearth.identity.v1.RegisterClientRequest\x1a\x1f.hearth.identity.v1.OAuthClient\"#\x82\xd3\xe4\x93\x02\x1d:\x01*Z\r:\x01*\"\b/clients\"\t/register\x12z\n" +
+	"\x06Decide\x12(.hearth.identity.v1.TokenDecisionRequest\x1a).hearth.identity.v1.TokenDecisionResponse\"\x1b\x82\xd3\xe4\x93\x02\x15:\x01*\"\x10/oauth/authorizeBEZCgithub.com/hearthdb/hearth/sdks/go/generated/identity/v1;identityv1b\x06proto3"
 
 var (
 	file_hearth_identity_v1_oauth_proto_rawDescOnce sync.Once
