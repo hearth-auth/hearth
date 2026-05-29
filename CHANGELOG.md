@@ -9,6 +9,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Rust SDK spec conformance (HEA-965)** — `Claims` gains six new accessors:
+  `scope()`, `inGroup(g)`, `inOrg(o)`, `tokenType()`, `organizationId()`,
+  `orgGroups()`; new `RequiredActionError` variant with `required_actions: Vec<String>`
+  and optional `redirect_uri`; Tower middleware short-circuits `token_type=required_action`
+  tokens with HTTP 401 before any permission check (spec §6 rule 6); `AdminClient`
+  gains full CRUD for OAuth clients (`/admin/clients`), roles (`/admin/roles`),
+  groups (`/admin/groups`), and org memberships (`/admin/orgs/{id}/members`) with
+  corresponding request/response types.
+
 - **Go SDK spec conformance (HEA-961)** — `Claims` gains six new accessors:
   `Scope()`, `InGroup(g)`, `InOrg(o)`, `TokenType()`, `OrganizationId()`,
   `OrgGroups()`; new `RequiredActionError` with `RequiredActions []string` and
