@@ -23,8 +23,8 @@ use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
 use hearth::core::{ClientId, RealmId, UserId};
 use hearth::identity::oidc::CodeChallengeMethod;
 use hearth::identity::{
-    AuthorizationRequest, CreateRealmRequest, CreateUserRequest, RegisterClientRequest,
-    ResponseMode,
+    AuthorizationRequest, ClientTrustLevel, CreateRealmRequest, CreateUserRequest,
+    RegisterClientRequest, ResponseMode,
 };
 
 const REDIRECT_URI: &str = "https://app.example.com/callback";
@@ -205,8 +205,8 @@ async fn jarm_jwt_claims_are_correct() {
         .as_secs() as i64;
     assert!(exp > now, "exp must be in the future");
     assert!(
-        exp - now <= 600,
-        "JARM JWT lifetime must be at most 10 minutes"
+        exp - now <= 300,
+        "JARM JWT lifetime must be at most 5 minutes (FAPI 2.0 §5.3.2.2)"
     );
 }
 
@@ -606,7 +606,237 @@ async fn expired_jarm_jwt_rejected_client_side() {
 }
 
 // ---------------------------------------------------------------------------
-// JARM-15: mandatory-JARM client — error response is JWT-wrapped (§4.3)
+// JARM-15 (HTTP regression, HEA-1005): unknown response_mode → invalid_request
+// ---------------------------------------------------------------------------
+
+/// Percent-encoded form of REDIRECT_URI for query-string embedding.
+const REDIRECT_URI_ENCODED: &str = "https%3A%2F%2Fapp.example.com%2Fcallback";
+
+/// Builds a minimal [`WebState`] and axum router backed by the supplied harness.
+/// Returns `(router, session_cookie_kv)` where `session_cookie_kv` is the
+/// `Cookie:` header value (key=value without attributes) for a fresh session
+/// belonging to a newly-created user in `realm`.
+async fn build_http_test_env(
+    harness: &common::TestHarness,
+    realm_id: &hearth::core::RealmId,
+    user_id: &hearth::core::UserId,
+) -> (axum::Router, String) {
+    use hearth::identity::onboarding::OnboardingService;
+    use hearth::identity::{EmailBranding, EmailService, LoggingEmailSender, SessionContext};
+    use hearth::protocol::web::auth::{issue_auth_cookies, CookieSecret};
+    use hearth::protocol::web::{self, WebState};
+    use std::sync::Arc;
+
+    let session = harness
+        .identity()
+        .create_session(realm_id, user_id, &SessionContext::default())
+        .expect("create session");
+
+    let sender: hearth::identity::SharedEmailSender = Arc::new(LoggingEmailSender::new());
+    let email_svc = Arc::new(
+        EmailService::new(
+            sender,
+            "Hearth".to_string(),
+            None,
+            EmailBranding::default(),
+            String::new(),
+            None,
+        )
+        .expect("email service"),
+    );
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let onboarding = Arc::new(OnboardingService::new(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        Arc::clone(&email_svc),
+        tmp.path().to_path_buf(),
+    ));
+    let secret = CookieSecret::from_bytes([77u8; 32]);
+    let state = WebState::new(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        harness.audit_arc(),
+        onboarding,
+        secret.clone(),
+        Some(email_svc),
+    );
+    let router = web::router(state);
+
+    let issued = issue_auth_cookies(&secret, realm_id, session.id(), false);
+    let cookie_kv = issued
+        .session_cookie
+        .split_once(';')
+        .map(|(kv, _)| kv.to_string())
+        .unwrap_or(issued.session_cookie);
+
+    // Keep `tmp` alive for the router's lifetime by leaking it intentionally —
+    // OnboardingService only reads from data_dir on first-run checks, which
+    // the authorize handler never triggers.
+    std::mem::forget(tmp);
+
+    (router, cookie_kv)
+}
+
+#[tokio::test]
+async fn unknown_response_mode_returns_invalid_request() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("jarm-unk-mode-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+
+    let client = harness
+        .identity()
+        .register_client(
+            realm.id(),
+            &RegisterClientRequest {
+                client_name: "Unk Mode Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                trust_level: ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let user = harness
+        .identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: format!("unk-mode-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Unk Mode User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    let (router, cookie_kv) = build_http_test_env(&harness, realm.id(), user.id()).await;
+
+    let url = format!(
+        "/ui/oauth/authorize?client_id={}&redirect_uri={REDIRECT_URI_ENCODED}\
+         &response_type=code&scope=openid&state=s\
+         &code_challenge={PKCE_CHALLENGE}&code_challenge_method=S256\
+         &response_mode=unknown_mode",
+        client.client_id().as_uuid(),
+    );
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(&url)
+        .header("Cookie", cookie_kv)
+        .body(Body::empty())
+        .expect("request");
+
+    let resp = router.oneshot(req).await.expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "expected redirect");
+    let loc = resp
+        .headers()
+        .get("location")
+        .expect("location header")
+        .to_str()
+        .expect("location str");
+    assert!(
+        loc.contains("error=invalid_request"),
+        "expected error=invalid_request in redirect; got: {loc}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-16 (HTTP regression, HEA-1005): absent response_mode → code (no regression)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn empty_response_mode_uses_query() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("jarm-def-mode-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+
+    let client = harness
+        .identity()
+        .register_client(
+            realm.id(),
+            &RegisterClientRequest {
+                client_name: "Def Mode Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                trust_level: ClientTrustLevel::FirstParty,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let user = harness
+        .identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: format!("def-mode-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Def Mode User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    let (router, cookie_kv) = build_http_test_env(&harness, realm.id(), user.id()).await;
+
+    // No response_mode — should redirect with a plain authorization code.
+    let url = format!(
+        "/ui/oauth/authorize?client_id={}&redirect_uri={REDIRECT_URI_ENCODED}\
+         &response_type=code&scope=openid&state=s\
+         &code_challenge={PKCE_CHALLENGE}&code_challenge_method=S256",
+        client.client_id().as_uuid(),
+    );
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(&url)
+        .header("Cookie", cookie_kv)
+        .body(Body::empty())
+        .expect("request");
+
+    let resp = router.oneshot(req).await.expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER, "expected redirect");
+    let loc = resp
+        .headers()
+        .get("location")
+        .expect("location header")
+        .to_str()
+        .expect("location str");
+    assert!(
+        loc.contains("code="),
+        "location must contain authorization code; got: {loc}"
+    );
+    assert!(
+        !loc.contains("error="),
+        "location must not contain error; got: {loc}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-17: mandatory-JARM client — error response is JWT-wrapped (§4.3)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -703,4 +933,80 @@ async fn jarm_error_response_is_jwt_wrapped() {
         "oauth-authz-resp+jwt",
         "typ header must be oauth-authz-resp+jwt per JARM §4.1"
     );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-10: JARM JWT signature verifies via JWKS (end-to-end client path)
+//
+// Simulates the full verifying-party path:
+//   JWT header → kid → realm JWKS → Ed25519 public key → ring verify
+// Catches regressions where a JARM JWT is signed with a key whose kid is
+// not published in the realm's JWKS.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn jarm_jwt_signature_verifies_via_jwks() {
+    use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
+    use hearth::identity::tokens::JwksDocument;
+
+    let env = setup().await;
+    let resp = authorize_with_mode(&env, ResponseMode::QueryJwt);
+    let jwt = resp.jarm_jwt().expect("must have JARM JWT");
+
+    // 1. Split the JWT into header.claims.sig
+    let parts: Vec<&str> = jwt.split('.').collect();
+    assert_eq!(parts.len(), 3, "JARM JWT must be a 3-part JWS");
+
+    let header_json = BASE64_URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .expect("base64 decode header");
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_json).expect("parse header JSON");
+
+    // 2. Extract kid from the JWT header
+    let kid = header["kid"]
+        .as_str()
+        .expect("JARM JWT header must contain kid");
+
+    // 3. Fetch the realm JWKS and find the key matching kid
+    let jwks_json = env
+        .harness
+        .identity()
+        .realm_jwks(&env.realm)
+        .expect("realm_jwks");
+    let jwks_str = serde_json::to_string(&jwks_json).expect("serialize jwks");
+    let jwks: JwksDocument = serde_json::from_str(&jwks_str).expect("deserialize JwksDocument");
+
+    let key = jwks
+        .keys
+        .iter()
+        .find(|k| k.kid == kid)
+        .unwrap_or_else(|| panic!("kid {kid} not found in realm JWKS"));
+
+    assert_eq!(key.kty, "OKP", "JARM key must be OKP (Ed25519)");
+    assert_eq!(
+        key.crv.as_deref().unwrap_or(""),
+        "Ed25519",
+        "JARM key curve must be Ed25519"
+    );
+
+    // 4. Decode the Ed25519 public key from the `x` JWK field
+    let x_bytes = BASE64_URL_SAFE_NO_PAD
+        .decode(key.x.as_deref().expect("OKP key must have x field"))
+        .expect("base64 decode public key x");
+
+    // 5. Reconstruct the signed message: header.claims (the bytes that were signed)
+    let signed_input = format!("{}.{}", parts[0], parts[1]);
+
+    // 6. Decode the signature
+    let sig_bytes = BASE64_URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .expect("base64 decode signature");
+
+    // 7. Verify Ed25519 signature using ring
+    let public_key =
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, x_bytes.clone());
+    public_key
+        .verify(signed_input.as_bytes(), &sig_bytes)
+        .expect("JARM JWT Ed25519 signature must verify against the realm's JWKS public key");
 }

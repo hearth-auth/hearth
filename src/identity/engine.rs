@@ -5254,8 +5254,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let jarm_claims = JarmClaims {
                 iss: issuer.clone(),
                 aud: request.client_id.to_string(),
-                // JARM JWTs are short-lived: 10 minutes max (FAPI recommends 5 min).
-                exp: now_secs + 600,
+                // FAPI 2.0 §5.3.2.2 requires JARM JWT lifetime ≤ 5 minutes.
+                exp: now_secs + 300,
                 iat: now_secs,
                 jti: uuid::Uuid::new_v4().to_string(),
                 code: raw_code.clone(),
@@ -9370,7 +9370,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let claims = JarmErrorClaims {
             iss: self.config.oidc.issuer.clone(),
             aud: client_id.to_string(),
-            exp: now_secs + 600,
+            // FAPI 2.0 §5.3.2.2 requires JARM JWT lifetime ≤ 5 minutes.
+            exp: now_secs + 300,
             iat: now_secs,
             error: error.to_string(),
             error_description: error_description.to_string(),
