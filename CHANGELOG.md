@@ -28,6 +28,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **JWT Bearer grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`) hardening (HEA-999)** —
+  several security gaps in the RFC 7523 JWT Bearer token endpoint are resolved:
+  - `jti` is now mandatory; assertions without a JWT ID are rejected (`invalid_grant`).
+  - `sub` must equal `client_id` (RFC 7523 §3 / OIDC Core §9); mismatches are rejected.
+  - Assertion lifetime is capped at 10 minutes; requests with `exp > now + 600 s` fail.
+  - JTI store migrated to exp-bounded values with `saturating_add` overflow safety; entries
+    auto-expire after their validity window so storage does not grow unboundedly.
+  - The JTI check-and-consume is now atomic per realm (per-realm mutex), eliminating the
+    TOCTOU race between `storage.get` and `storage.put`.
+
 - **Token endpoint client-auth error normalization (HEA-994)** — all client
   authentication failures on the token endpoint now return HTTP 401
   `"invalid_client"` regardless of whether the client ID is unknown or the
