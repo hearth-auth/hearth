@@ -1775,6 +1775,7 @@ impl EmbeddedIdentityEngine {
         user_id: &UserId,
         now_secs: i64,
         claims: &TokenClaims,
+        dpop_jkt: Option<&str>,
     ) -> Result<TokenPair, IdentityError> {
         let family_key = keys::encode_grant_family(fid);
         let family_bytes = self
@@ -1789,6 +1790,20 @@ impl EmbeddedIdentityEngine {
 
         if family.revoked {
             return Err(IdentityError::TokenRevoked);
+        }
+
+        // FAPI 2.0: DPoP sender-constrained tokens are mandatory on the refresh
+        // path, mirroring the gate at exchange_authorization_code (§5.3.3).
+        if let Some(ref client_id) = family.client_id {
+            if let Some(client) = self.get_client(realm_id, client_id)? {
+                if client.profile().is_fapi2() && dpop_jkt.is_none() {
+                    return Err(IdentityError::FapiViolation {
+                        reason: "FAPI 2.0 requires sender-constrained tokens; \
+                                 include a DPoP proof and dpop_jkt in the token request"
+                            .to_string(),
+                    });
+                }
+            }
         }
 
         // Verify the incoming refresh token matches the current hash
@@ -1885,7 +1900,9 @@ impl EmbeddedIdentityEngine {
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: family.amr_values.clone(),
-            cnf: None,
+            cnf: dpop_jkt.map(|jkt| crate::identity::tokens::CnfClaim {
+                jkt: jkt.to_string(),
+            }),
             custom: claims.custom.clone(),
             sv: claims.sv,
         };
@@ -4754,6 +4771,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         refresh_token: &str,
+        dpop_jkt: Option<&str>,
     ) -> Result<TokenPair, IdentityError> {
         // Verify Ed25519 signature against realm key (with global-key fallback
         // for Phase 0 realms). Rejects forged/tampered tokens at the crypto
@@ -4837,6 +4855,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 &user_id,
                 now_secs,
                 &claims,
+                dpop_jkt,
             )
         } else {
             // Legacy path: Phase-0 session tokens (fid == None).
@@ -15837,7 +15856,7 @@ mod tests {
         // Advance clock and refresh
         clock.advance(60 * 1_000_000); // 60 seconds in microseconds
         let new_tokens = engine
-            .refresh_tokens(&realm_id, tokens.refresh_token())
+            .refresh_tokens(&realm_id, tokens.refresh_token(), None)
             .expect("refresh should succeed");
 
         // New tokens are different
@@ -15850,7 +15869,7 @@ mod tests {
         assert_eq!(new_refresh_claims.fid, refresh_claims.fid);
 
         // Old refresh token is now rejected (rotation)
-        let result = engine.refresh_tokens(&realm_id, tokens.refresh_token());
+        let result = engine.refresh_tokens(&realm_id, tokens.refresh_token(), None);
         assert!(
             matches!(result, Err(IdentityError::TokenRevoked)),
             "old refresh token should be rejected after rotation, got: {result:?}"
@@ -15883,7 +15902,7 @@ mod tests {
             .issue_token(&forged_claims)
             .expect("issue forged token");
 
-        let result = engine.refresh_tokens(&realm_id, &forged_token);
+        let result = engine.refresh_tokens(&realm_id, &forged_token, None);
         assert!(
             matches!(result, Err(IdentityError::InvalidToken)),
             "subject/session mismatch must be rejected, got: {result:?}"
@@ -15960,7 +15979,7 @@ mod tests {
             .encode(serde_json::to_vec(&forged_claims).expect("serialize forged refresh claims"));
         let forged_token = format!("{}.{}.{}", parts[0], forged_payload, parts[2]);
 
-        let result = engine.refresh_tokens(&realm_id, &forged_token);
+        let result = engine.refresh_tokens(&realm_id, &forged_token, None);
         assert!(
             matches!(result, Err(IdentityError::InvalidToken)),
             "forged no-fid payload must be rejected, got: {result:?}"
@@ -16079,7 +16098,7 @@ mod tests {
             .expect("revoke should succeed");
 
         // Refresh is now rejected
-        let result = engine.refresh_tokens(&realm_id, tokens.refresh_token());
+        let result = engine.refresh_tokens(&realm_id, tokens.refresh_token(), None);
         assert!(
             matches!(result, Err(IdentityError::TokenRevoked)),
             "refresh should fail after revocation, got: {result:?}"
@@ -16262,13 +16281,13 @@ mod tests {
         // Legitimate user rotates (advance clock for unique tokens)
         clock.advance(1_000_000);
         let new_pair = engine
-            .refresh_tokens(&realm_id, &stolen_refresh)
+            .refresh_tokens(&realm_id, &stolen_refresh, None)
             .expect("legitimate rotation");
         let legitimate_refresh = new_pair.refresh_token().to_string();
 
         // Attacker uses the stolen (old) refresh token
         clock.advance(1_000_000);
-        let attack_result = engine.refresh_tokens(&realm_id, &stolen_refresh);
+        let attack_result = engine.refresh_tokens(&realm_id, &stolen_refresh, None);
         assert!(
             attack_result.is_err(),
             "stolen refresh token must be rejected"
@@ -16276,7 +16295,7 @@ mod tests {
 
         // Legitimate user's new refresh token should ALSO be revoked
         // (entire grant family revoked due to theft detection)
-        let legitimate_result = engine.refresh_tokens(&realm_id, &legitimate_refresh);
+        let legitimate_result = engine.refresh_tokens(&realm_id, &legitimate_refresh, None);
         assert!(
             legitimate_result.is_err(),
             "legitimate refresh token must also be revoked after theft detection"
@@ -16512,6 +16531,7 @@ mod tests {
                             if let Ok(new_pair) = engine.refresh_tokens(
                                 &realm_id,
                                 &refresh_tokens[idx],
+                                None,
                             ) {
                                 access_tokens[idx] = new_pair.access_token().to_string();
                                 refresh_tokens[idx] = new_pair.refresh_token().to_string();
@@ -16624,7 +16644,7 @@ mod tests {
                     // Advance clock 1 second to get unique timestamps
                     clock.advance(1_000_000);
 
-                    let new_pair = engine.refresh_tokens(&realm_id, &current_refresh)
+                    let new_pair = engine.refresh_tokens(&realm_id, &current_refresh, None)
                         .unwrap_or_else(|e| panic!("rotation {i} failed: {e}"));
 
                     old_refresh_tokens.push(current_refresh);
@@ -16644,7 +16664,7 @@ mod tests {
 
                 // After all rotations, none of the old refresh tokens should work
                 for (i, old_token) in old_refresh_tokens.iter().enumerate() {
-                    let result = engine.refresh_tokens(&realm_id, old_token);
+                    let result = engine.refresh_tokens(&realm_id, old_token, None);
                     // First old token reuse triggers theft detection
                     if result.is_err() {
                         // After theft detection, all tokens in the family are revoked
@@ -17615,7 +17635,7 @@ mod tests {
 
         // Real refresh works
         engine
-            .refresh_tokens(&realm_id, response.refresh_token())
+            .refresh_tokens(&realm_id, response.refresh_token(), None)
             .expect("legitimate refresh should succeed");
 
         // Craft a forged refresh token with a different signing key
@@ -17631,7 +17651,7 @@ mod tests {
             .issue_token(&forged_claims)
             .expect("issue forged refresh");
 
-        let result = engine.refresh_tokens(&realm_id, &forged_token);
+        let result = engine.refresh_tokens(&realm_id, &forged_token, None);
         assert!(result.is_err(), "forged refresh token must be rejected");
     }
 

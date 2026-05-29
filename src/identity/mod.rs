@@ -471,10 +471,15 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// The refresh token's session must still be valid. The session's TTL
     /// is also refreshed. Returns a new token pair with updated expiration.
+    ///
+    /// `dpop_jkt` is the JWK thumbprint extracted from the DPoP proof header on
+    /// the current request (RFC 9449). FAPI 2.0 clients require it; the
+    /// refreshed access token will carry `cnf.jkt` bound to this thumbprint.
     fn refresh_tokens(
         &self,
         realm_id: &RealmId,
         refresh_token: &str,
+        dpop_jkt: Option<&str>,
     ) -> Result<TokenPair, IdentityError>;
 
     /// Returns the JWKS document containing public keys for external verification.

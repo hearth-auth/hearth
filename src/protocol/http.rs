@@ -1837,19 +1837,69 @@ async fn authorize(
     headers: HeaderMap,
     Json(body): Json<pb::AuthorizationRequest>,
 ) -> impl IntoResponse {
+    use crate::identity::{AuthorizationRequest, CodeChallengeMethod, IdentityError};
+
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
 
-    let request = match proto_authorize_to_domain(body) {
-        Ok(r) => r,
-        Err(msg) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": msg})),
-            )
-                .into_response();
+    // PAR path: when `request_uri` is present, consume the stored entry to
+    // obtain the pre-validated parameters and set `via_par = true`.
+    let request = if let Some(ref request_uri) = body.request_uri {
+        let user_id = match uuid::Uuid::parse_str(&body.user_id) {
+            Ok(u) => UserId::new(u),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid user_id"})),
+                )
+                    .into_response();
+            }
+        };
+        let stored = match state.identity.consume_par(&realm_id, request_uri) {
+            Ok(s) => s,
+            Err(IdentityError::InvalidPushedAuthorizationRequest) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "invalid or expired request_uri"
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "consume_par failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+        AuthorizationRequest {
+            client_id: stored.client_id,
+            redirect_uri: stored.redirect_uri,
+            scope: stored.scope,
+            state: stored.state,
+            resource: stored.resource,
+            response_type: stored.response_type,
+            user_id,
+            code_challenge: stored.code_challenge,
+            code_challenge_method: stored.code_challenge_method,
+            nonce: stored.nonce,
+            amr_values: Vec::new(),
+            response_mode: None,
+            request: None,
+            via_par: true,
+        }
+    } else {
+        match proto_authorize_to_domain(body) {
+            Ok(r) => r,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
+            }
         }
     };
 
@@ -2156,7 +2206,10 @@ async fn token_exchange_impl(
                     .into_response();
             };
 
-            match state.identity.refresh_tokens(&realm_id, &refresh_token) {
+            match state
+                .identity
+                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
+            {
                 Ok(tokens) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -6401,7 +6454,10 @@ async fn realm_token_exchange(
                 )
                     .into_response();
             };
-            match state.identity.refresh_tokens(&realm_id, &refresh_token) {
+            match state
+                .identity
+                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
+            {
                 Ok(tokens) => {
                     let resp = pb::OidcTokenResponse {
                         access_token: tokens.access_token().to_string(),

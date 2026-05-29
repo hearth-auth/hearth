@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **FAPI 2.0 DPoP enforcement on `refresh_token` grant (HEA-1016)** — FAPI 2.0
+  clients must now supply a DPoP proof on every token endpoint call, including
+  `grant_type=refresh_token`. Requests without a DPoP header are rejected with
+  `invalid_dpop_proof`. The refreshed access token carries `cnf.jkt` bound to
+  the thumbprint extracted from the proof, preventing unbounded token issuance.
+  Standard clients are unaffected.
+
 - **JARM JWT token-type confusion fix (HEA-1004)** — JARM JWTs now carry
   `typ: "oauth-authz-resp+jwt"` (IANA-registered media type per JARM §4.1 /
   RFC 9101 §2) instead of the generic `"JWT"`. This gives explicit RFC 8725

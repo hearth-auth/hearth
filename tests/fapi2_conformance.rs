@@ -9,9 +9,12 @@
 //! - FAPI2-AUTH-02: PAR-based authorization accepted for FAPI2 clients
 //! - FAPI2-TOKEN-01: Token exchange without DPoP rejected for FAPI2 clients
 //! - FAPI2-TOKEN-02: Token exchange with DPoP accepted for FAPI2 clients
+//! - FAPI2-TOKEN-03: refresh_token grant without DPoP rejected for FAPI2 clients
+//! - FAPI2-TOKEN-04: refresh_token grant with DPoP accepted; access token carries cnf.jkt
 //! - FAPI2-JARM-01: JARM response includes s_hash for FAPI2 clients with state
 //! - FAPI2-JARM-02: JARM response does NOT include s_hash for standard clients
 //! - FAPI2-STD-01: Standard clients not subject to FAPI2 constraints
+//! - FAPI2-STD-02: Standard clients may refresh without DPoP (regression)
 //!
 //! Spec refs:
 //!   FAPI 2.0 Security Profile 1.0, RFC 9126 (PAR), RFC 9449 (DPoP), JARM
@@ -26,8 +29,8 @@ use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
 use hearth::core::RealmId;
 use hearth::identity::oidc::{ClientProfile, CodeChallengeMethod, ResponseMode};
 use hearth::identity::{
-    AuthorizationRequest, CreateRealmRequest, CreateUserRequest, IdentityError,
-    RegisterClientRequest, TokenExchangeRequest,
+    decode_claims_unverified, AuthorizationRequest, CreateRealmRequest, CreateUserRequest,
+    IdentityError, RegisterClientRequest, TokenExchangeRequest,
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -603,5 +606,208 @@ async fn fapi2_std01_standard_client_not_restricted() {
     assert!(
         !token_resp.access_token().is_empty(),
         "standard client must receive an access token"
+    );
+}
+
+// ── FAPI2-TOKEN-03/04: DPoP enforcement on refresh_token grant ────────────────
+
+/// FAPI2-TOKEN-03: `grant_type=refresh_token` without DPoP on FAPI2 client → `FapiViolation`.
+/// Spec: FAPI 2.0 §5.3.3 — sender-constrained tokens mandatory on every token endpoint call.
+#[tokio::test]
+async fn fapi2_token03_refresh_no_dpop_rejected() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&h).await;
+    let client_id = register_fapi2_client(&h, &realm);
+    let user_id = create_user(&h, &realm).await;
+
+    // Obtain initial token pair with DPoP (code exchange).
+    let auth_resp = h
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client_id.clone(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                response_type: "code".to_string(),
+                scope: "openid".to_string(),
+                state: "token03-state".to_string(),
+                nonce: None,
+                code_challenge: Some(pkce_challenge()),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                resource: None,
+                user_id,
+                amr_values: vec![],
+                response_mode: None,
+                request: None,
+                via_par: true,
+            },
+        )
+        .expect("authorize");
+
+    let initial_tokens = h
+        .identity()
+        .exchange_authorization_code(
+            &realm,
+            &TokenExchangeRequest {
+                client_id: client_id.clone(),
+                code: auth_resp.code().to_string(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                code_verifier: Some(PKCE_VERIFIER.to_string()),
+                dpop_jkt: Some("initial_thumbprint".to_string()),
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("initial token exchange with DPoP");
+
+    // Attempt refresh WITHOUT DPoP — must be rejected for FAPI2 clients.
+    let err = h
+        .identity()
+        .refresh_tokens(&realm, initial_tokens.refresh_token(), None)
+        .expect_err("FAPI2 refresh without DPoP must fail");
+
+    assert!(
+        matches!(err, IdentityError::FapiViolation { .. }),
+        "expected FapiViolation for refresh without DPoP, got: {err:?}"
+    );
+}
+
+/// FAPI2-TOKEN-04: `grant_type=refresh_token` with DPoP on FAPI2 client → success; access token
+/// carries `cnf.jkt`.
+/// Spec: FAPI 2.0 §5.3.3, RFC 9449 §7 (DPoP-bound access tokens MUST carry `cnf.jkt`).
+#[tokio::test]
+async fn fapi2_token04_refresh_with_dpop_accepted() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&h).await;
+    let client_id = register_fapi2_client(&h, &realm);
+    let user_id = create_user(&h, &realm).await;
+
+    let auth_resp = h
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client_id.clone(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                response_type: "code".to_string(),
+                scope: "openid".to_string(),
+                state: "token04-state".to_string(),
+                nonce: None,
+                code_challenge: Some(pkce_challenge()),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                resource: None,
+                user_id,
+                amr_values: vec![],
+                response_mode: None,
+                request: None,
+                via_par: true,
+            },
+        )
+        .expect("authorize");
+
+    let initial_tokens = h
+        .identity()
+        .exchange_authorization_code(
+            &realm,
+            &TokenExchangeRequest {
+                client_id: client_id.clone(),
+                code: auth_resp.code().to_string(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                code_verifier: Some(PKCE_VERIFIER.to_string()),
+                dpop_jkt: Some("initial_thumbprint".to_string()),
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("initial token exchange with DPoP");
+
+    const REFRESH_THUMBPRINT: &str = "refresh_dpop_thumbprint";
+
+    // Refresh WITH a new DPoP thumbprint — must succeed.
+    let refreshed = h
+        .identity()
+        .refresh_tokens(
+            &realm,
+            initial_tokens.refresh_token(),
+            Some(REFRESH_THUMBPRINT),
+        )
+        .expect("FAPI2 refresh with DPoP must succeed");
+
+    assert!(
+        !refreshed.access_token().is_empty(),
+        "refreshed access token must be non-empty"
+    );
+
+    // Refreshed access token must carry cnf.jkt bound to the new thumbprint.
+    let claims =
+        decode_claims_unverified(refreshed.access_token()).expect("decode refreshed access token");
+    let cnf = claims
+        .cnf
+        .expect("refreshed FAPI2 access token must carry cnf claim");
+    assert_eq!(
+        cnf.jkt, REFRESH_THUMBPRINT,
+        "cnf.jkt must match the DPoP thumbprint provided at refresh"
+    );
+}
+
+// ── FAPI2-STD-02: Standard client refresh regression ────────────────────────
+
+/// FAPI2-STD-02: Standard client `grant_type=refresh_token` without DPoP → still succeeds.
+/// Spec: Standard profile has no DPoP requirement.
+#[tokio::test]
+async fn fapi2_std02_standard_refresh_without_dpop_succeeds() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = create_realm(&h).await;
+    let client_id = register_std_client(&h, &realm);
+    let user_id = create_user(&h, &realm).await;
+
+    let auth_resp = h
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client_id.clone(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                response_type: "code".to_string(),
+                scope: "openid".to_string(),
+                state: "std02-state".to_string(),
+                nonce: None,
+                code_challenge: Some(pkce_challenge()),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                resource: None,
+                user_id,
+                amr_values: vec![],
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        )
+        .expect("standard authorize");
+
+    let initial_tokens = h
+        .identity()
+        .exchange_authorization_code(
+            &realm,
+            &TokenExchangeRequest {
+                client_id: client_id.clone(),
+                code: auth_resp.code().to_string(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                code_verifier: Some(PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("standard token exchange");
+
+    // Refresh without DPoP — allowed for standard clients.
+    let refreshed = h
+        .identity()
+        .refresh_tokens(&realm, initial_tokens.refresh_token(), None)
+        .expect("standard client refresh without DPoP must succeed");
+
+    assert!(
+        !refreshed.access_token().is_empty(),
+        "standard client must receive a refreshed access token"
     );
 }

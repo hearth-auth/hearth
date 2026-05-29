@@ -156,7 +156,7 @@ async fn resource_aud_preserved_through_refresh() {
     // 3. Refresh tokens
     let refreshed = harness
         .identity()
-        .refresh_tokens(&realm_id, tokens.refresh_token())
+        .refresh_tokens(&realm_id, tokens.refresh_token(), None)
         .expect("refresh tokens");
 
     // 4. Assert refreshed access token still has Multi audience

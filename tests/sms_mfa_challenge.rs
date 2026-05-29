@@ -445,7 +445,7 @@ async fn sms_amr_preserved_through_refresh() {
 
     let refreshed = h
         .identity()
-        .refresh_tokens(&realm, tokens.refresh_token())
+        .refresh_tokens(&realm, tokens.refresh_token(), None)
         .expect("refresh tokens");
 
     let claims = hearth::identity::decode_claims_unverified(refreshed.access_token())
