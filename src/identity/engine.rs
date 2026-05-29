@@ -401,6 +401,11 @@ pub struct EmbeddedIdentityEngine {
     /// read (count live sessions) and the write (create or evict + create)
     /// must be atomic per user. Key format: `"{realm_uuid}:{user_uuid}"`.
     session_limit_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-realm locks for atomic JTI check-and-consume in the JWT Bearer grant.
+    ///
+    /// Eliminates the TOCTOU window between `storage.get` and `storage.put`
+    /// in replay prevention. One lock per realm; created on first use.
+    jti_locks: Mutex<HashMap<RealmId, Arc<Mutex<()>>>>,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
     /// Realm ops are not on the hot path, and a realm record and its
@@ -663,6 +668,7 @@ impl EmbeddedIdentityEngine {
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
             session_limit_locks: Mutex::new(HashMap::new()),
+            jti_locks: Mutex::new(HashMap::new()),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
@@ -833,6 +839,7 @@ impl EmbeddedIdentityEngine {
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
             session_limit_locks: Mutex::new(HashMap::new()),
+            jti_locks: Mutex::new(HashMap::new()),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
@@ -2370,6 +2377,56 @@ impl EmbeddedIdentityEngine {
                 &user_id_str,
             );
         }
+    }
+
+    /// Returns the per-realm lock for JWT Bearer JTI operations, creating it on first use.
+    fn jwt_bearer_jti_lock(&self, realm_id: &RealmId) -> Arc<Mutex<()>> {
+        let mut map = self.jti_locks.lock().expect("jti_locks poisoned");
+        Arc::clone(
+            map.entry(realm_id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Atomically checks and consumes a JWT Bearer assertion JTI for replay prevention.
+    ///
+    /// Stores the JTI with its expiry time (big-endian i64 `assertion_exp`). On lookup the
+    /// stored expiry is compared against `now`: if the original assertion is still within
+    /// its validity window (plus `CLOCK_SKEW_SECS`), the call is rejected as replay.
+    ///
+    /// Lazy expiry: entries are not proactively pruned; they become "expired" once
+    /// `now > stored_exp + CLOCK_SKEW_SECS`. Re-use of an expired JTI is safe because any
+    /// replayed assertion would also fail the `exp` check.
+    ///
+    /// The per-realm mutex eliminates the TOCTOU window between `get` and `put`.
+    fn check_and_consume_jwt_bearer_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        assertion_exp: i64,
+    ) -> Result<(), IdentityError> {
+        let jti_key = keys::encode_jwt_bearer_jti(jti);
+        let lock = self.jwt_bearer_jti_lock(realm_id);
+        let _guard = lock.lock().expect("jwt bearer jti lock poisoned");
+
+        if let Some(stored) = self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+        {
+            let stored_exp = i64::from_be_bytes(stored.try_into().unwrap_or([0u8; 8]));
+            let now_secs = self.clock.now().as_micros() / 1_000_000;
+            if now_secs <= stored_exp.saturating_add(CLOCK_SKEW_SECS) {
+                return Err(IdentityError::JwtBearerAssertionInvalid {
+                    reason: "assertion jti has already been used (replay)".to_string(),
+                });
+            }
+            // Entry is past expiry — safe to overwrite with the new assertion's exp.
+        }
+        self.storage
+            .put(realm_id, &jti_key, &assertion_exp.to_be_bytes())
+            .map_err(Self::storage_err)?;
+        Ok(())
     }
 }
 
@@ -5888,10 +5945,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
+        // sub MUST equal client_id (RFC 7523 §3 / OIDC Core §9)
+        if assertion_claims.sub != request.client_id.to_string() {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "sub claim must equal the client_id".to_string(),
+            });
+        }
+
         // exp MUST be in the future
         if now_secs >= assertion_claims.exp {
             return Err(IdentityError::JwtBearerAssertionInvalid {
                 reason: "assertion has expired".to_string(),
+            });
+        }
+
+        // exp MUST NOT be more than 10 minutes in the future.
+        // Unbounded lifetimes defeat replay protection when jti recycling windows are large.
+        const MAX_ASSERTION_LIFETIME_SECS: i64 = 600;
+        if assertion_claims.exp - now_secs > MAX_ASSERTION_LIFETIME_SECS {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "assertion lifetime exceeds maximum allowed duration".to_string(),
             });
         }
 
@@ -5903,23 +5976,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
-        // 6. JTI replay prevention — store each consumed JTI per-realm
-        if let Some(jti) = &assertion_claims.jti {
-            let jti_key = keys::encode_jwt_bearer_jti(jti);
-            if self
-                .storage
-                .get(realm_id, &jti_key)
-                .map_err(Self::storage_err)?
-                .is_some()
-            {
-                return Err(IdentityError::JwtBearerAssertionInvalid {
-                    reason: "assertion jti has already been used (replay)".to_string(),
-                });
+        // 6. jti is mandatory — without it any intercepted assertion is replayable
+        // for its full validity window.
+        let jti = assertion_claims.jti.as_ref().ok_or_else(|| {
+            IdentityError::JwtBearerAssertionInvalid {
+                reason: "jti claim is required".to_string(),
             }
-            self.storage
-                .put(realm_id, &jti_key, b"1")
-                .map_err(Self::storage_err)?;
-        }
+        })?;
+
+        // 6b. Atomic JTI check-and-consume with exp-bounded lazy expiry (HIGH-1/CRIT-2)
+        self.check_and_consume_jwt_bearer_jti(realm_id, jti, assertion_claims.exp)?;
 
         // 7. Validate requested scope against the client's declared scopes
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
@@ -13432,6 +13498,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize should succeed");
@@ -13466,6 +13533,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize");
@@ -13528,6 +13596,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize");
@@ -13590,6 +13659,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize");
@@ -13667,6 +13737,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize");
@@ -13730,6 +13801,7 @@ mod tests {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         );
         assert!(
@@ -13762,6 +13834,7 @@ mod tests {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         );
         assert!(
@@ -14099,6 +14172,7 @@ mod tests {
                 nonce: Some("unique-nonce-abc".to_string()),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         );
         assert!(result.is_ok(), "first use of nonce should succeed");
@@ -14118,6 +14192,7 @@ mod tests {
                 nonce: Some("unique-nonce-abc".to_string()),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         );
         assert!(
@@ -14140,6 +14215,7 @@ mod tests {
                 nonce: Some("different-nonce-xyz".to_string()),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             },
         );
         assert!(result.is_ok(), "different nonce should succeed");
@@ -14198,6 +14274,7 @@ mod tests {
                     nonce: Some("same-nonce".to_string()),
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             );
             assert!(
@@ -14228,6 +14305,7 @@ mod tests {
             nonce: Some(nonce.to_string()),
             resource: None,
             amr_values: Vec::new(),
+            response_mode: None,
         };
 
         // Use the nonce at t=0.
@@ -14287,6 +14365,7 @@ mod tests {
                 nonce: Some(format!("batch-a-nonce-{i}")),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -14314,6 +14393,7 @@ mod tests {
                 nonce: Some(format!("batch-b-nonce-{i}")),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -15315,6 +15395,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize");
@@ -15433,6 +15514,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize");
@@ -15550,6 +15632,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize");
@@ -15736,6 +15819,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize");
@@ -15983,6 +16067,7 @@ mod tests {
                         nonce: None,
                                             resource: None,
                                             amr_values: Vec::new(),
+                                        response_mode: None,
                     }).expect("authorize");
 
                     let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -16098,6 +16183,7 @@ mod tests {
                     nonce: None,
                                     resource: None,
                                     amr_values: Vec::new(),
+                                response_mode: None,
                 }).expect("authorize");
 
                 let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -16662,6 +16748,7 @@ mod tests {
             code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
             code_challenge_method: Some("S256".to_string()),
             nonce: None,
+            response_mode: None,
             created_at: now,
             expires_at: now.add_micros(600_000_000),
         };
@@ -16692,6 +16779,7 @@ mod tests {
             code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
             code_challenge_method: Some("S256".to_string()),
             nonce: None,
+            response_mode: None,
             created_at: now,
             expires_at: now.add_micros(600_000_000),
         };
@@ -17080,6 +17168,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize");
@@ -17325,6 +17414,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect_err("must reject public client with no PKCE");
@@ -17358,6 +17448,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect_err("must reject challenge without S256 method");
@@ -17430,6 +17521,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("confidential client must succeed without PKCE");
@@ -17558,6 +17650,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect_err("invalid scope chars must be rejected");
@@ -17590,6 +17683,7 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
                 },
             )
             .expect("authorize must succeed");
