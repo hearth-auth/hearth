@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **RFC 9207 authorization response `iss` — formal test coverage (HEA-985)** —
+  Added `tests/rfc9207_iss.rs` with 6 integration tests confirming that every
+  successful authorization response carries a non-empty `iss` parameter matching
+  the OIDC discovery document issuer, that the discovery document advertises
+  `authorization_response_iss_parameter_supported: true` (both global and per-realm),
+  and that `iss` is stable across repeated requests.
+
 - **Helm chart lint + template-test CI (HEA-974)** — `make helm-lint` runs `helm lint` against
   `deploy/helm/hearth/`; `make helm-template` renders the chart with both `values.yaml` and the
   new `values-prod.yaml` production profile and diffs the output against committed snapshots in
