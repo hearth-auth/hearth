@@ -186,6 +186,76 @@ data class IntrospectionResult(
     val extra: Map<String, kotlinx.serialization.json.JsonElement> = emptyMap(),
 )
 
+// ── Admin — OAuth Clients ─────────────────────────────────────────────────────
+
+@Serializable
+data class UpdateClientRequest(
+    @SerialName("client_name") val clientName: String? = null,
+    @SerialName("redirect_uris") val redirectUris: List<String>? = null,
+    @SerialName("grant_types") val grantTypes: List<String>? = null,
+)
+
+// ── Admin — Roles ─────────────────────────────────────────────────────────────
+
+@Serializable
+data class Role(
+    val id: String,
+    val name: String,
+    val description: String? = null,
+    @SerialName("created_at") val createdAt: Long? = null,
+    @SerialName("updated_at") val updatedAt: Long? = null,
+)
+
+@Serializable
+data class CreateRoleRequest(
+    val name: String,
+    val description: String? = null,
+)
+
+@Serializable
+data class UpdateRoleRequest(
+    val name: String? = null,
+    val description: String? = null,
+)
+
+// ── Admin — Groups ────────────────────────────────────────────────────────────
+
+@Serializable
+data class Group(
+    val id: String,
+    val name: String,
+    val description: String? = null,
+    @SerialName("created_at") val createdAt: Long? = null,
+    @SerialName("updated_at") val updatedAt: Long? = null,
+)
+
+@Serializable
+data class CreateGroupRequest(
+    val name: String,
+    val description: String? = null,
+)
+
+@Serializable
+data class UpdateGroupRequest(
+    val name: String? = null,
+    val description: String? = null,
+)
+
+// ── Admin — Organization Memberships ──────────────────────────────────────────
+
+@Serializable
+data class OrgMember(
+    @SerialName("user_id") val userId: String,
+    val role: String,
+    @SerialName("joined_at") val joinedAt: Long? = null,
+)
+
+@Serializable
+data class AddOrgMemberRequest(
+    @SerialName("user_id") val userId: String,
+    val role: String = "member",
+)
+
 // ── Permission delivery modes (HEA-922) ───────────────────────────────────────
 
 /**

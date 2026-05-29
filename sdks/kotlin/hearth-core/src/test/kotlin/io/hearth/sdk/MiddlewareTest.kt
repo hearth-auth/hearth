@@ -274,4 +274,64 @@ class MiddlewareTest {
         )
         assertFalse(checker.check("some-token"))
     }
+
+    // ── §6 Rule 6: required_action token detection ────────────────────────────
+
+    @Test
+    fun `embedded - throws RequiredActionError when token_type is required_action`() = runTest {
+        val requiredActionToken = makeToken(
+            """{"token_type":"required_action","required_actions":["VERIFY_EMAIL"],"sub":"u1"}"""
+        )
+        val checker = requirePermission(
+            "docs.read",
+            RequirePermissionOptions(mode = AccessTokenAuthorizationMode.EMBEDDED, client = makeClient()),
+        )
+        assertFailsWith<RequiredActionError> { checker.check(requiredActionToken) }
+    }
+
+    @Test
+    fun `embedded - RequiredActionError has populated requiredActions from token`() = runTest {
+        val requiredActionToken = makeToken(
+            """{"token_type":"required_action","required_actions":["VERIFY_EMAIL","UPDATE_PASSWORD"],"sub":"u1"}"""
+        )
+        val checker = requirePermission(
+            "docs.read",
+            RequirePermissionOptions(mode = AccessTokenAuthorizationMode.EMBEDDED, client = makeClient()),
+        )
+        val err = assertFailsWith<RequiredActionError> { checker.check(requiredActionToken) }
+        assertEquals(listOf("VERIFY_EMAIL", "UPDATE_PASSWORD"), err.requiredActions)
+    }
+
+    @Test
+    fun `decision - throws RequiredActionError when token_type is required_action`() = runTest {
+        val requiredActionToken = makeToken(
+            """{"token_type":"required_action","required_actions":["VERIFY_EMAIL"],"sub":"u1"}"""
+        )
+        val checker = requirePermission(
+            "docs.read",
+            RequirePermissionOptions(mode = AccessTokenAuthorizationMode.DECISION, client = makeClient()),
+        )
+        assertFailsWith<RequiredActionError> { checker.check(requiredActionToken) }
+        // must not hit the server
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun `introspection - throws RequiredActionError when token_type is required_action`() = runTest {
+        val requiredActionToken = makeToken(
+            """{"token_type":"required_action","required_actions":["VERIFY_EMAIL"],"sub":"u1"}"""
+        )
+        val client = makeClient(
+            clientId = "app",
+            clientSecret = "secret",
+            introspectionOverride = server.url("/introspect").toString(),
+        )
+        val checker = requirePermission(
+            "docs.read",
+            RequirePermissionOptions(mode = AccessTokenAuthorizationMode.INTROSPECTION, client = client),
+        )
+        assertFailsWith<RequiredActionError> { checker.check(requiredActionToken) }
+        // must not hit the introspection endpoint
+        assertEquals(0, server.requestCount)
+    }
 }

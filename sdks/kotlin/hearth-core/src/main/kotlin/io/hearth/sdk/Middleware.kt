@@ -80,10 +80,12 @@ data class RequirePermissionOptions(
 fun requirePermission(permission: String, opts: RequirePermissionOptions): PermissionChecker =
     when (opts.mode) {
         AccessTokenAuthorizationMode.EMBEDDED -> PermissionChecker { token ->
+            checkRequiredAction(token)
             decodeLocalPermissions(token)?.contains(permission) == true
         }
 
         AccessTokenAuthorizationMode.DECISION -> PermissionChecker { token ->
+            checkRequiredAction(token)
             opts.client.checkPermission(
                 token = token,
                 permission = permission,
@@ -93,6 +95,7 @@ fun requirePermission(permission: String, opts: RequirePermissionOptions): Permi
         }
 
         AccessTokenAuthorizationMode.INTROSPECTION -> PermissionChecker { token ->
+            checkRequiredAction(token)
             val result = opts.client.introspect(token)
 
             // Validate echoed mode. Absent mode field defaults to "embedded" (pre-HEA-922 servers).
@@ -104,6 +107,35 @@ fun requirePermission(permission: String, opts: RequirePermissionOptions): Permi
             result.active && result.permissions.contains(permission)
         }
     }
+
+/**
+ * Decodes the JWT payload locally and throws [RequiredActionError] when
+ * `token_type === "required_action"` (sdk-spec §6 Rule 6).
+ *
+ * The signature is NOT verified here — this is an early-exit gate only.
+ */
+internal fun checkRequiredAction(token: String) {
+    if (token.isBlank()) return
+    val parts = token.split(".")
+    if (parts.size != 3) return
+    try {
+        val decoded = java.util.Base64.getUrlDecoder().decode(
+            parts[1].padEnd((parts[1].length + 3) / 4 * 4, '=')
+        )
+        val obj = JSON.parseToJsonElement(String(decoded)) as? JsonObject ?: return
+        val tokenType = (obj["token_type"] as? JsonPrimitive)?.contentOrNull ?: return
+        if (tokenType == "required_action") {
+            val actions = (obj["required_actions"] as? JsonArray)
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                ?: emptyList()
+            throw RequiredActionError(requiredActions = actions)
+        }
+    } catch (e: RequiredActionError) {
+        throw e
+    } catch (_: Exception) {
+        // Malformed token — let downstream verification handle it
+    }
+}
 
 /**
  * Decodes the JWT payload locally and returns the `permissions` list, or `null` when
