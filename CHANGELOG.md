@@ -19,6 +19,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **JAR `response_mode` override now enforced (HEA-1008)** — `JarClaims` lacked a
+  `response_mode` field, so a JAR JWT could not override the outer query-string
+  `response_mode`.  A network attacker who stripped the outer parameter could downgrade
+  a JARM response to plain `query` mode.  `response_mode` is now deserialized from the
+  JAR and takes precedence over the outer value in both `authorize()` and
+  `push_authorization_request()` (RFC 9101 §4).  `StoredPushedAuthorizationRequest`
+  also persists the effective `response_mode` so the PAR→authorize path honours it.
+
 - **JAR JTI replay store now expires entries (HEA-1009)** — JAR (RFC 9101) JTI entries
   were previously stored indefinitely, allowing unbounded storage growth for any
   authenticated client. Each entry now carries an 8-byte expiry timestamp
