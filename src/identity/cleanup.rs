@@ -54,6 +54,8 @@ pub struct CleanupStats {
     pub pending_tickets_deleted: u64,
     /// Grant families swept.
     pub grant_families_deleted: u64,
+    /// Expired `private_key_jwt` client-assertion JTI sentinels swept.
+    pub ca_jti_deleted: u64,
     /// Number of entity-type sweeps that encountered an error.
     pub errors: u64,
 }
@@ -65,6 +67,7 @@ impl CleanupStats {
             + self.device_codes_deleted
             + self.pending_tickets_deleted
             + self.grant_families_deleted
+            + self.ca_jti_deleted
     }
 }
 
@@ -126,6 +129,18 @@ pub(crate) fn sweep_expired(
                 realm = %realm_id,
                 error = %e,
                 "cleanup: grant family sweep failed"
+            );
+        }
+    }
+
+    match sweep_client_assertion_jtis(realm_id, storage, now, config.max_per_type) {
+        Ok(n) => stats.ca_jti_deleted = n,
+        Err(e) => {
+            stats.errors += 1;
+            tracing::warn!(
+                realm = %realm_id,
+                error = %e,
+                "cleanup: client assertion JTI sweep failed"
             );
         }
     }
@@ -266,6 +281,54 @@ fn sweep_grant_families(
         })?;
 
         if now >= family.expires_at {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+
+    Ok(deleted)
+}
+
+/// Deletes expired `private_key_jwt` client-assertion JTI sentinels.
+///
+/// Each entry stores the assertion's `exp` claim as 8 little-endian bytes
+/// (i64 Unix seconds). An entry is eligible for deletion once
+/// `stored_exp < now_secs`; we do **not** apply `CLOCK_SKEW_SECS` here
+/// because the sweeper is a background best-effort pass — the lazy-cleanup
+/// path in the replay-check already grants the full skew window.
+///
+/// Entries with malformed values (wrong length) are also deleted; they
+/// cannot be meaningfully interpreted and would otherwise accumulate.
+fn sweep_client_assertion_jtis(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now: Timestamp,
+    max_per_type: usize,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::client_assertion_jti_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let now_secs = now.as_micros() / 1_000_000;
+    let mut deleted: u64 = 0;
+
+    for entry in &entries {
+        if deleted >= max_per_type as u64 {
+            break;
+        }
+
+        let should_delete = if entry.value.len() == 8 {
+            let exp_secs = i64::from_le_bytes(
+                // SAFETY: length checked above.
+                entry.value[..8].try_into().expect("8 bytes"),
+            );
+            exp_secs < now_secs
+        } else {
+            // Corrupt entry — delete defensively.
+            true
+        };
+
+        if should_delete {
             storage.delete(realm_id, &entry.key)?;
             deleted += 1;
         }
@@ -639,6 +702,69 @@ mod tests {
         assert_eq!(stats.auth_codes_deleted, 3);
     }
 
+    // --- client assertion JTIs ---
+
+    fn ca_jti_key_with_exp(jti: &str, exp_secs: i64) -> (Vec<u8>, Vec<u8>) {
+        let key = keys::encode_client_assertion_jti(jti);
+        let val = exp_secs.to_le_bytes().to_vec();
+        (key, val)
+    }
+
+    #[test]
+    fn sweep_ca_jtis_deletes_expired() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        // now_secs = T0 / 1_000_000 + 2*ONE_HOUR_SECS
+        // T0 in micros = 1_700_000_000_000_000 → T0_secs = 1_700_000_000
+        let t0_secs: i64 = T0 / 1_000_000;
+        let exp_secs: i64 = t0_secs + 60; // exp 60 seconds after T0
+        let now_micros = T0 + 2 * ONE_HOUR; // well past exp
+        let clock = fake_clock(now_micros);
+
+        let (key, val) = ca_jti_key_with_exp("jti-expired-1", exp_secs);
+        s.put(&realm, &key, &val).expect("put");
+
+        let config = CleanupConfig::default();
+        let stats = sweep_expired(&realm, &s, &clock, &config);
+        assert_eq!(stats.ca_jti_deleted, 1);
+        assert!(s.get(&realm, &key).expect("get").is_none());
+    }
+
+    #[test]
+    fn sweep_ca_jtis_keeps_valid() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        let t0_secs: i64 = T0 / 1_000_000;
+        let exp_secs: i64 = t0_secs + 3600; // exp 1 hour after T0
+        let now_micros = T0 + TEN_MINUTES / 2; // before exp
+        let clock = fake_clock(now_micros);
+
+        let (key, val) = ca_jti_key_with_exp("jti-valid-1", exp_secs);
+        s.put(&realm, &key, &val).expect("put");
+
+        let config = CleanupConfig::default();
+        let stats = sweep_expired(&realm, &s, &clock, &config);
+        assert_eq!(stats.ca_jti_deleted, 0);
+        assert!(s.get(&realm, &key).expect("get").is_some());
+    }
+
+    #[test]
+    fn sweep_ca_jtis_deletes_corrupt_entry() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let clock = fake_clock(T0);
+
+        let key = keys::encode_client_assertion_jti("jti-corrupt");
+        s.put(&realm, &key, b"bad").expect("put"); // wrong length
+
+        let config = CleanupConfig::default();
+        let stats = sweep_expired(&realm, &s, &clock, &config);
+        assert_eq!(stats.ca_jti_deleted, 1);
+        assert!(s.get(&realm, &key).expect("get").is_none());
+    }
+
     // --- total deleted ---
 
     #[test]
@@ -648,8 +774,9 @@ mod tests {
             device_codes_deleted: 2,
             pending_tickets_deleted: 3,
             grant_families_deleted: 4,
+            ca_jti_deleted: 5,
             ..Default::default()
         };
-        assert_eq!(stats.total_deleted(), 10);
+        assert_eq!(stats.total_deleted(), 15);
     }
 }

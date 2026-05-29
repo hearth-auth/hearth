@@ -1196,6 +1196,13 @@ fn identity_error_to_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal error: audit record failed",
         ),
+        IdentityError::ClientAssertionJtiReplay => {
+            // RFC 7523 §3: invalid_grant — the JTI uniqueness requirement is
+            // not met. Map to 400 with `invalid_grant` so compliant OAuth
+            // clients handle it cleanly. Do not leak whether the previous
+            // assertion was still within its validity window.
+            (StatusCode::BAD_REQUEST, "invalid_grant")
+        }
     };
 
     (status, Json(serde_json::json!({"error": message})))

@@ -63,6 +63,14 @@ const USER_CODE_PREFIX: &str = "oauth:ucode:";
 /// Prefix for revoked token JTI storage (sessionless token revocation).
 const REVOKED_JTI_PREFIX: &str = "oauth:revjti:";
 
+/// Prefix for client-assertion JTI replay sentinels (`private_key_jwt`).
+///
+/// Format: `oauth:ca-jti:{jti}` — value is the assertion's `exp` claim as
+/// 8 little-endian bytes (Unix seconds, i64). Entries are reclaimed lazily
+/// on the next replay check after `exp + CLOCK_SKEW_SECS` passes, and
+/// proactively by the maintenance sweeper.
+const CLIENT_ASSERTION_JTI_PREFIX: &str = "oauth:ca-jti:";
+
 /// Prefix for OAuth consent record storage.
 const OAUTH_CONSENT_PREFIX: &str = "oauth:consent:";
 
@@ -537,6 +545,26 @@ pub(crate) fn password_reset_scan_prefix() -> Vec<u8> {
 /// that cannot be revoked via session revocation.
 pub(crate) fn encode_revoked_jti(jti: &str) -> Vec<u8> {
     format!("{REVOKED_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Encodes the replay-sentinel key for a `private_key_jwt` client assertion JTI.
+///
+/// Format: `oauth:ca-jti:{jti}`
+///
+/// The stored value is the assertion's `exp` claim as 8 little-endian bytes
+/// (i64 Unix seconds). This lets the replay-check delete stale entries
+/// lazily and the maintenance sweeper reclaim them proactively.
+pub(crate) fn encode_client_assertion_jti(jti: &str) -> Vec<u8> {
+    format!("{CLIENT_ASSERTION_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all client-assertion JTI sentinels.
+///
+/// Format: `oauth:ca-jti:`
+///
+/// Used by the maintenance sweeper to enumerate and reclaim expired entries.
+pub(crate) fn client_assertion_jti_scan_prefix() -> Vec<u8> {
+    CLIENT_ASSERTION_JTI_PREFIX.as_bytes().to_vec()
 }
 
 // ===== OAuth consent key encoding =====
@@ -1631,5 +1659,38 @@ mod tests {
             assert!(!fed.starts_with(p));
             assert!(!p.starts_with(&fed));
         }
+    }
+
+    // ===== Client-assertion JTI key tests =====
+
+    #[test]
+    fn encode_client_assertion_jti_format() {
+        let key = encode_client_assertion_jti("some-jti-value");
+        let key_str = std::str::from_utf8(&key).expect("utf8");
+        assert_eq!(key_str, "oauth:ca-jti:some-jti-value");
+    }
+
+    #[test]
+    fn client_assertion_jti_starts_with_scan_prefix() {
+        let key = encode_client_assertion_jti("test-jti");
+        let prefix = client_assertion_jti_scan_prefix();
+        assert!(key.starts_with(&prefix));
+    }
+
+    #[test]
+    fn client_assertion_jti_prefix_does_not_overlap_revoked_jti_prefix() {
+        // Regression guard: `oauth:ca-jti:` must not overlap `oauth:revjti:`.
+        // A scan of one must never sweep entries belonging to the other.
+        let ca_prefix = client_assertion_jti_scan_prefix();
+        let rev_prefix = b"oauth:revjti:".to_vec();
+        assert!(!ca_prefix.starts_with(&rev_prefix));
+        assert!(!rev_prefix.starts_with(&ca_prefix));
+    }
+
+    #[test]
+    fn different_jtis_produce_different_ca_jti_keys() {
+        let k1 = encode_client_assertion_jti("jti-a");
+        let k2 = encode_client_assertion_jti("jti-b");
+        assert_ne!(k1, k2);
     }
 }

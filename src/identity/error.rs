@@ -368,6 +368,13 @@ pub enum IdentityError {
         /// The method that was attempted (e.g. `"password"`, `"passkey"`, `"magic_link"`).
         method: &'static str,
     },
+    /// A `private_key_jwt` client assertion JTI has already been consumed.
+    ///
+    /// Each `jti` MUST be unique per RFC 7523 §3. Replay attacks and
+    /// duplicate submissions are rejected here. Intentionally vague — does
+    /// not reveal whether the original assertion is still within its validity
+    /// window.
+    ClientAssertionJtiReplay,
 }
 
 impl fmt::Display for IdentityError {
@@ -529,6 +536,9 @@ impl fmt::Display for IdentityError {
                     "authentication method '{method}' is not permitted by realm policy"
                 )
             }
+            Self::ClientAssertionJtiReplay => {
+                write!(f, "client assertion jti has already been used")
+            }
         }
     }
 }
@@ -623,7 +633,8 @@ impl std::error::Error for IdentityError {
             | Self::AuditFailure { .. }
             | Self::PasswordExpired
             | Self::PasswordReused
-            | Self::AuthMethodNotAllowed { .. } => None,
+            | Self::AuthMethodNotAllowed { .. }
+            | Self::ClientAssertionJtiReplay => None,
         }
     }
 }

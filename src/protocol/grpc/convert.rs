@@ -92,6 +92,11 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::SamlUnknownSp | IdentityError::SamlUnknownIdp => {
             (Code::NotFound, err.to_string())
         }
+        IdentityError::ClientAssertionJtiReplay => {
+            // RFC 7523 §3: unique jti requirement not met → InvalidArgument
+            // (maps to `invalid_grant` at the OAuth layer).
+            (Code::InvalidArgument, err.to_string())
+        }
         IdentityError::MfaRequired
         | IdentityError::AuthorizationPending
         | IdentityError::SlowDown

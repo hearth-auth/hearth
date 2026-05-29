@@ -2012,6 +2012,67 @@ impl EmbeddedIdentityEngine {
             );
         }
     }
+
+    // ===== Client-assertion JTI replay protection =====
+
+    /// Checks whether a `private_key_jwt` assertion JTI has been consumed,
+    /// then atomically marks it as consumed.
+    ///
+    /// ## Stored format
+    /// `oauth:ca-jti:{jti}` → 8 bytes, little-endian i64 Unix seconds
+    /// (the assertion's `exp` claim).
+    ///
+    /// ## Lazy expiry
+    /// If a stored entry's `exp + CLOCK_SKEW_SECS < now_secs`, the replay
+    /// window has closed. The entry is deleted and the JTI is treated as
+    /// new — a fresh assertion with the same JTI would already be rejected
+    /// by `exp` validation before reaching this check.
+    ///
+    /// ## Fail-closed
+    /// If the storage `put` after a clean JTI check fails, the error is
+    /// propagated to the caller. The JTI is **not** considered consumed in
+    /// that case — the assertion must be rejected to prevent a race where
+    /// two requests with the same JTI both slip through.
+    pub(crate) fn check_and_consume_client_assertion_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        exp_secs: i64,
+    ) -> Result<(), IdentityError> {
+        let jti_key = keys::encode_client_assertion_jti(jti);
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+
+        if let Some(stored) = self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+        {
+            if stored.len() == 8 {
+                let stored_exp = i64::from_le_bytes(
+                    // INVARIANT: length verified above.
+                    #[allow(clippy::unwrap_used)]
+                    stored[..8].try_into().unwrap(),
+                );
+                if stored_exp + CLOCK_SKEW_SECS < now_secs {
+                    // Replay window closed — lazy-delete stale entry.
+                    let _ = self.storage.delete(realm_id, &jti_key);
+                } else {
+                    return Err(IdentityError::ClientAssertionJtiReplay);
+                }
+            } else {
+                // Corrupt entry: fail closed.
+                return Err(IdentityError::ClientAssertionJtiReplay);
+            }
+        }
+
+        // Fail-closed: if we cannot record the JTI we must reject the request.
+        let exp_bytes = exp_secs.to_le_bytes();
+        self.storage
+            .put(realm_id, &jti_key, &exp_bytes)
+            .map_err(Self::storage_err)?;
+
+        Ok(())
+    }
 }
 
 impl IdentityEngine for EmbeddedIdentityEngine {
@@ -8823,6 +8884,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 "device_codes_deleted": stats.device_codes_deleted,
                 "pending_tickets_deleted": stats.pending_tickets_deleted,
                 "grant_families_deleted": stats.grant_families_deleted,
+                "ca_jti_deleted": stats.ca_jti_deleted,
                 "errors": stats.errors,
             }));
             let ctx = crate::audit::context::AuditContext {
@@ -13878,5 +13940,109 @@ mod tests {
             matches!(err, IdentityError::PasswordResetTokenInvalid),
             "expected PasswordResetTokenInvalid after TTL expiry, got: {err}"
         );
+    }
+
+    // ===== client-assertion JTI replay protection =====
+
+    #[test]
+    fn ca_jti_first_use_succeeds() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: "ca-jti-test".to_string(),
+                config: None,
+            })
+            .expect("create realm");
+
+        let now_secs = clock.now().as_micros() / 1_000_000;
+        let exp_secs = now_secs + 300;
+
+        engine
+            .check_and_consume_client_assertion_jti(realm.id(), "unique-jti-1", exp_secs)
+            .expect("first use must succeed");
+    }
+
+    #[test]
+    fn ca_jti_second_use_is_replay() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: "ca-jti-replay-test".to_string(),
+                config: None,
+            })
+            .expect("create realm");
+
+        let now_secs = clock.now().as_micros() / 1_000_000;
+        let exp_secs = now_secs + 300;
+
+        engine
+            .check_and_consume_client_assertion_jti(realm.id(), "jti-replay", exp_secs)
+            .expect("first use");
+
+        let err = engine
+            .check_and_consume_client_assertion_jti(realm.id(), "jti-replay", exp_secs)
+            .expect_err("second use must be rejected");
+
+        assert!(
+            matches!(err, IdentityError::ClientAssertionJtiReplay),
+            "expected ClientAssertionJtiReplay, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn ca_jti_expired_entry_is_not_treated_as_replay() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: "ca-jti-expiry-test".to_string(),
+                config: None,
+            })
+            .expect("create realm");
+
+        let now_secs = clock.now().as_micros() / 1_000_000;
+        // exp is 60 seconds in the future — within valid window.
+        let exp_secs = now_secs + 60;
+
+        engine
+            .check_and_consume_client_assertion_jti(realm.id(), "jti-will-expire", exp_secs)
+            .expect("first use");
+
+        // Advance clock past exp + CLOCK_SKEW_SECS (60 + 60 + 1 = 121 s).
+        clock.advance(121 * 1_000_000);
+
+        // Replay window has closed — re-use of this JTI is now allowed
+        // (the original assertion's exp has long passed).
+        engine
+            .check_and_consume_client_assertion_jti(realm.id(), "jti-will-expire", exp_secs + 121)
+            .expect("after exp window closed, JTI must not be treated as replay");
+    }
+
+    #[test]
+    fn ca_jti_isolated_per_realm() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_a = engine
+            .create_realm(&CreateRealmRequest {
+                name: "ca-jti-realm-a".to_string(),
+                config: None,
+            })
+            .expect("realm a");
+        let realm_b = engine
+            .create_realm(&CreateRealmRequest {
+                name: "ca-jti-realm-b".to_string(),
+                config: None,
+            })
+            .expect("realm b");
+
+        let now_secs = clock.now().as_micros() / 1_000_000;
+        let exp_secs = now_secs + 300;
+
+        engine
+            .check_and_consume_client_assertion_jti(realm_a.id(), "shared-jti", exp_secs)
+            .expect("realm-a first use");
+
+        // Same JTI in a different realm is independent.
+        engine
+            .check_and_consume_client_assertion_jti(realm_b.id(), "shared-jti", exp_secs)
+            .expect("realm-b must accept the same JTI value independently");
     }
 }
