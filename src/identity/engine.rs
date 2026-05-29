@@ -4533,7 +4533,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             permissions: effective_perms,
             custom,
             resource: ctx.resource.as_ref(),
-            dpop_jkt: None, // set at HTTP layer when DPoP proof is validated
+            dpop_jkt: None,
             sv: sv_claim,
         })
     }
@@ -12970,6 +12970,8 @@ mod tests {
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange code");
@@ -13030,6 +13032,8 @@ mod tests {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(result1.is_ok(), "first exchange should succeed");
@@ -13043,6 +13047,8 @@ mod tests {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -13091,6 +13097,8 @@ mod tests {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -13164,6 +13172,8 @@ mod tests {
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("first exchange");
@@ -13177,6 +13187,8 @@ mod tests {
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -14617,9 +14629,11 @@ mod tests {
                 &realm_id,
                 &ClientCredentialsRequest {
                     client_id: client.client_id().clone(),
-                    client_secret: secret.clone(),
+                    client_secret: Some(secret.clone()),
                     scope: Some("read write".to_string()),
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("client_credentials_token should succeed");
@@ -14648,9 +14662,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: "wrong-secret".to_string(),
+                client_secret: Some("wrong-secret".to_string()),
                 scope: None,
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
 
@@ -14687,9 +14703,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: "anything".to_string(),
+                client_secret: Some("anything".to_string()),
                 scope: None,
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
 
@@ -14801,6 +14819,8 @@ mod tests {
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange code");
@@ -14916,6 +14936,8 @@ mod tests {
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange code");
@@ -15032,6 +15054,8 @@ mod tests {
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange code");
@@ -15216,6 +15240,8 @@ mod tests {
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange");
@@ -15285,9 +15311,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: "wrong-secret-456".to_string(),
+                client_secret: Some("wrong-secret-456".to_string()),
                 scope: None,
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -15300,9 +15328,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: String::new(),
+                client_secret: Some(String::new()),
                 scope: None,
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -15316,9 +15346,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: fake_client_id,
-                client_secret: "any-secret".to_string(),
+                client_secret: Some("any-secret".to_string()),
                 scope: None,
                 dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -15450,6 +15482,8 @@ mod tests {
                         redirect_uri: "https://app.example.com/cb".to_string(),
                         code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                         dpop_jkt: None,
+                        client_assertion_type: None,
+                        client_assertion: None,
                     }).expect("exchange");
 
                     access_tokens.push(tokens.access_token().to_string());
@@ -15563,6 +15597,8 @@ mod tests {
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 }).expect("exchange");
 
                 let mut current_refresh = tokens.refresh_token().to_string();
@@ -16548,6 +16584,8 @@ mod tests {
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
                     dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange");

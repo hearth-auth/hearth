@@ -12,6 +12,43 @@ use hearth::identity::{
     SessionLimitPolicy,
 };
 
+// ===== SEC-2: Default policy is RejectNew =====
+
+/// Verify the in-memory default; operators must explicitly opt in to eviction.
+#[test]
+fn default_policy_is_reject_new() {
+    assert_eq!(
+        SessionLimitPolicy::default(),
+        SessionLimitPolicy::RejectNew,
+        "default must be RejectNew so an attacker cannot silently evict victim sessions"
+    );
+}
+
+// ===== SEC-3: Unrecognized policy string is a hard error =====
+
+#[test]
+fn unrecognized_policy_string_returns_error() {
+    use hearth::config::{AuthConfig, RealmYamlConfig};
+    use hearth::rbac::registry::RegistryError;
+
+    let yaml_config = RealmYamlConfig {
+        session_over_limit_policy: Some("banish_oldest".to_string()),
+        ..Default::default()
+    };
+    let result = yaml_config.to_realm_config(&AuthConfig::default(), None);
+    assert!(
+        result.is_err(),
+        "unrecognized session_over_limit_policy must be a hard error, not a silent fallback"
+    );
+    let errors = result.unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e, RegistryError::InvalidRealmConfigField { .. })),
+        "expected InvalidRealmConfigField error, got: {errors:?}"
+    );
+}
+
 fn create_user_in(harness: &common::TestHarness, realm: &RealmId) -> hearth::identity::User {
     harness
         .identity()

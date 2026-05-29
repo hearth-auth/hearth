@@ -7,6 +7,26 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **Session limit enforcement hardening (HEA-982)** — five findings from the
+  HEA-981 security review are resolved:
+  - **SEC-1 (TOCTOU):** The per-user lock now covers the session write; the
+    count → evict → write sequence is fully atomic under one guard.
+  - **SEC-2 (Default policy):** `SessionLimitPolicy` default changed from
+    `EvictOldest` to `RejectNew`. Operators opt in to eviction via
+    `session_over_limit_policy = "evict_oldest"`. Prevents attacker-driven
+    silent eviction of victim sessions.
+  - **SEC-3 (Silent fallback):** An unrecognised `session_over_limit_policy`
+    string now returns a hard `RegistryError::InvalidRealmConfigField` at
+    config parse time instead of silently falling back to the default.
+  - **SEC-4 (gRPC information leak):** The gRPC error message for session
+    limit exceeded is now the generic string `"session limit reached"`;
+    active count and configured limit are no longer exposed to callers.
+  - **SEC-5 (Fail-open):** A `get_realm` storage error during session
+    creation now propagates to the caller and rejects the session, rather
+    than skipping limit enforcement and proceeding.
+
 ### Added
 
 - **RFC 9207 authorization response `iss` — formal test coverage (HEA-985)** —
@@ -41,7 +61,7 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 - **Concurrent session limits (HEA-971)** — `RealmConfig` gains `max_concurrent_sessions: Option<u32>`
   and `session_over_limit_policy: SessionLimitPolicy` (`reject_new` | `evict_oldest`, default
-  `evict_oldest`). When the limit is reached, `RejectNew` returns HTTP 429 / gRPC
+  `reject_new`). When the limit is reached, `RejectNew` returns HTTP 429 / gRPC
   `RESOURCE_EXHAUSTED` with error code `session_limit_exceeded`; `EvictOldest` revokes the
   oldest active session and allows the new one. Configurable globally under `[session]`
   (`session_max_concurrent`, `session_over_limit_policy`) and per-realm in `hearth.yaml`.

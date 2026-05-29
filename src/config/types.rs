@@ -836,7 +836,9 @@ pub struct AuthConfig {
     /// Per-realm overrides via `realms.<name>.session_max_concurrent`.
     #[serde(default)]
     pub session_max_concurrent: Option<u32>,
-    /// Global default over-limit policy (`"evict_oldest"` or `"reject_new"`).
+    /// Global default over-limit policy: `"reject_new"` (default) or `"evict_oldest"`.
+    ///
+    /// An unrecognised value is a hard error at config parse time.
     #[serde(default)]
     pub session_over_limit_policy: Option<String>,
 }
@@ -1283,8 +1285,9 @@ pub struct RealmYamlConfig {
     /// Overrides global `auth.session_max_concurrent`. `None` = unlimited.
     #[serde(default)]
     pub session_max_concurrent: Option<u32>,
-    /// Over-limit policy for this realm: `"evict_oldest"` or `"reject_new"`.
-    /// Overrides global `auth.session_over_limit_policy`.
+    /// Over-limit policy for this realm: `"reject_new"` (default) or `"evict_oldest"`.
+    /// Overrides global `auth.session_over_limit_policy`. An unrecognised value is
+    /// a hard error at config parse time.
     #[serde(default)]
     pub session_over_limit_policy: Option<String>,
     /// Argon2id memory cost override.
@@ -1627,16 +1630,27 @@ impl RealmYamlConfig {
             .session_max_concurrent
             .or(global.session_max_concurrent);
 
-        let session_over_limit_policy = self
+        // SEC-3: Hard error on unrecognised policy string — never silently default.
+        let raw_policy = self
             .session_over_limit_policy
             .as_deref()
-            .or(global.session_over_limit_policy.as_deref())
-            .and_then(|s| match s {
-                "reject_new" => Some(crate::identity::SessionLimitPolicy::RejectNew),
-                "evict_oldest" => Some(crate::identity::SessionLimitPolicy::EvictOldest),
-                _ => None,
-            })
-            .unwrap_or_default();
+            .or(global.session_over_limit_policy.as_deref());
+        let session_over_limit_policy = match raw_policy {
+            None | Some("reject_new") => {
+                // None → default (RejectNew); explicit "reject_new" → same.
+                raw_policy.map_or_else(crate::identity::SessionLimitPolicy::default, |_| {
+                    crate::identity::SessionLimitPolicy::RejectNew
+                })
+            }
+            Some("evict_oldest") => crate::identity::SessionLimitPolicy::EvictOldest,
+            Some(unknown) => {
+                return Err(vec![RegistryError::InvalidRealmConfigField {
+                    field: "session_over_limit_policy".to_string(),
+                    value: unknown.to_string(),
+                    reason: "must be \"reject_new\" or \"evict_oldest\"".to_string(),
+                }]);
+            }
+        };
 
         let password_memory_cost = self.password_memory_cost.or(global.password_memory_cost);
         let password_time_cost = self.password_time_cost.or(global.password_time_cost);

@@ -864,7 +864,7 @@ pub struct RealmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_sessions: Option<u32>,
     /// What to do when a new session would exceed `max_concurrent_sessions`.
-    /// Defaults to `EvictOldest`.
+    /// Defaults to `RejectNew`. Set to `EvictOldest` to opt in to eviction.
     #[serde(default)]
     pub session_over_limit_policy: SessionLimitPolicy,
 }
@@ -906,13 +906,25 @@ impl Default for SessionVersionConfig {
 
 /// What to do when a new `create_session` would push a user's live session
 /// count past `RealmConfig::max_concurrent_sessions`.
+///
+/// The default is [`RejectNew`][SessionLimitPolicy::RejectNew]. Operators must
+/// explicitly opt in to [`EvictOldest`][SessionLimitPolicy::EvictOldest] via
+/// `session_over_limit_policy = "evict_oldest"` in realm config.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLimitPolicy {
     /// Reject the new session with [`crate::identity::IdentityError::SessionLimitExceeded`].
+    ///
+    /// This is the default. An attacker cannot silently evict a victim's
+    /// sessions by flooding new-session requests — the victim's existing
+    /// sessions remain intact and the attacker receives an error instead.
+    #[default]
     RejectNew,
     /// Revoke the oldest active session(s) to make room, then proceed.
-    #[default]
+    ///
+    /// Opt-in only. Enables a DoS vector where an attacker can evict a
+    /// victim's sessions via repeated login. Only use when the application
+    /// requires single-session semantics and the threat model accepts it.
     EvictOldest,
 }
 

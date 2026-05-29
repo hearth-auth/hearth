@@ -162,6 +162,20 @@ pub enum RegistryError {
         /// Human-readable reason.
         reason: String,
     },
+    /// A realm configuration field has an unrecognised value.
+    ///
+    /// Returned at config load / `SIGHUP` reload when a string-typed
+    /// configuration field contains a value that is not in the accepted set.
+    /// The server refuses to start (or apply the reload) rather than silently
+    /// falling back to a default.
+    InvalidRealmConfigField {
+        /// The name of the configuration field (e.g. `"session_over_limit_policy"`).
+        field: String,
+        /// The unrecognised value as supplied by the operator.
+        value: String,
+        /// Human-readable description of the accepted values.
+        reason: String,
+    },
 }
 
 impl fmt::Display for RegistryError {
@@ -217,6 +231,16 @@ impl fmt::Display for RegistryError {
             }
             Self::InvalidClaimName { claim, reason } => {
                 write!(f, "invalid custom claim name {claim:?}: {reason}")
+            }
+            Self::InvalidRealmConfigField {
+                field,
+                value,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "invalid realm config field {field:?}: value {value:?} is not accepted; {reason}"
+                )
             }
         }
     }
