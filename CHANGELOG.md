@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Python SDK spec conformance (HEA-962)** — `Claims` gains six new accessors:
+  `scope()`, `in_group(g)`, `in_org(o)`, `token_type()`, `organization_id()`,
+  `org_groups()`; new `RequiredActionError` with `required_actions: list[str]`
+  and optional `redirect_uri`; WSGI + ASGI middleware now return `401` (not `403`)
+  for `required_action` tokens (spec §6 rule 6); `AdminClient` gains full CRUD for
+  OAuth clients (`/admin/clients`), roles (`/admin/roles`), groups (`/admin/groups`),
+  and org memberships (`/admin/orgs/{id}/members`).
+
 - **TypeScript browser SDK spec §4/§5/§7 conformance (HEA-960)** — `Claims` class
   gains six new accessors: `scope()`, `inGroup(g)`, `inOrg(o)`, `tokenType()`,
   `organizationId()`, `orgGroups()`; new `RequiredActionError` type with
