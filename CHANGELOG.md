@@ -9,6 +9,19 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Node SDK spec conformance (HEA-959)** — `@hearth/node` now fully implements the
+  SDK spec (§4 Claims, §5 Errors, §6 Middleware, §12 AdminClient):
+  - Claims: `audiences()` (was `audience()`), `expiry()` (was `expiresAt()`), plus new
+    `jwtID()`, `inGroup()`, `inOrg()`, `tokenType()`, `organizationId()`, `orgGroups()`.
+  - Errors: `JWKSFetchError` (renamed from `JwksFetchError`), `TokenNotYetValidError`,
+    `TokenInvalidError`, `TokenIssuerError`, `TokenAudienceError`, `RequiredActionError`
+    (with `requiredActions: string[]` and optional `redirectUri`).
+  - Middleware: detects `token_type === "required_action"` and responds 401 + throws
+    `RequiredActionError` (Express and Fastify adapters).
+  - `AdminClient` — new separate entry point; takes `(base_url, realm_id, access_token)`;
+    sends `X-Realm-ID` header on every request; full CRUD + list for users, realms,
+    clients, roles, groups, and org memberships.
+
 - **PHP SDK Phase 1** — core scaffold at `sdks/php/`: `composer.json` (PHP 8.1+,
   PSR-4/PSR-12, `lcobucci/jwt` v5, Guzzle, PSR-7/15/17/18 interfaces),
   10 exception classes, 4 type classes (`IntrospectionResult`, `TokenResponse`,
