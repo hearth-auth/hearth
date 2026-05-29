@@ -7,10 +7,10 @@ namespace Hearth\Tests\Unit;
 use GuzzleHttp\Psr7\HttpFactory;
 use GuzzleHttp\Psr7\ServerRequest;
 use Hearth\Claims;
+use Hearth\Contracts\TokenVerifierInterface;
 use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenSignatureException;
 use Hearth\Middleware\HearthMiddleware;
-use Hearth\TokenVerifier;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\ResponseInterface;
@@ -22,13 +22,13 @@ use Psr\Http\Server\RequestHandlerInterface;
  */
 final class MiddlewareTest extends TestCase
 {
-    private TokenVerifier&MockObject $verifier;
+    private TokenVerifierInterface&MockObject $verifier;
     private HearthMiddleware $middleware;
     private HttpFactory $factory;
 
     protected function setUp(): void
     {
-        $this->verifier    = $this->createMock(TokenVerifier::class);
+        $this->verifier    = $this->createMock(TokenVerifierInterface::class);
         $this->factory     = new HttpFactory();
         $this->middleware  = new HearthMiddleware($this->verifier, $this->factory);
     }

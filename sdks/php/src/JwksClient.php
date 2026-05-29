@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Hearth;
 
+use Hearth\Contracts\JwksClientInterface;
 use Hearth\Exceptions\JwksException;
 use Hearth\Exceptions\NetworkException;
 use Psr\Http\Client\ClientInterface;
@@ -20,7 +21,7 @@ use Throwable;
  *   4. Maximum cache age: 24 hours regardless of Cache-Control.
  *   5. Skip (do not error on) any key with an unrecognised `kty`.
  */
-final class JwksClient
+final class JwksClient implements JwksClientInterface
 {
     private const DEFAULT_TTL_SECONDS = 300;          // 5 minutes fallback
     private const MAX_TTL_SECONDS     = 86_400;       // 24 hours hard cap

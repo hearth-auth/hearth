@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Hearth;
 
 use DateTimeImmutable;
+use Hearth\Contracts\JwksClientInterface;
+use Hearth\Contracts\TokenVerifierInterface;
 use Hearth\Exceptions\JwksException;
 use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
@@ -25,18 +27,18 @@ use JsonException;
  *
  * Tokens with `token_type === "required_action"` raise RequiredActionException.
  */
-final class TokenVerifier
+final class TokenVerifier implements TokenVerifierInterface
 {
     /** Maximum clock skew tolerated for the `iat` claim (seconds). */
     private const CLOCK_SKEW_SECONDS = 5;
 
     /**
-     * @param JwksClient  $jwksClient   Key source
-     * @param string      $issuerUrl    Expected `iss` value
-     * @param string|null $clientId     Expected audience; if null, audience check is skipped
+     * @param JwksClientInterface $jwksClient   Key source
+     * @param string              $issuerUrl    Expected `iss` value
+     * @param string|null         $clientId     Expected audience; if null, audience check is skipped
      */
     public function __construct(
-        private readonly JwksClient $jwksClient,
+        private readonly JwksClientInterface $jwksClient,
         private readonly string $issuerUrl,
         private readonly ?string $clientId = null,
     ) {}

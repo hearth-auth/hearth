@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace Hearth\Middleware;
 
 use Hearth\Claims;
+use Hearth\Contracts\TokenVerifierInterface;
 use Hearth\Exceptions\HearthException;
 use Hearth\Exceptions\RequiredActionException;
-use Hearth\TokenVerifier;
 use Psr\Http\Message\ResponseFactoryInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
@@ -35,13 +35,13 @@ final class HearthMiddleware implements MiddlewareInterface
     public const CLAIMS_ATTRIBUTE = 'hearth_claims';
 
     /**
-     * @param TokenVerifier           $tokenVerifier   Configured verifier (JWKS + claim checks)
+     * @param TokenVerifierInterface  $tokenVerifier   Configured verifier (JWKS + claim checks)
      * @param ResponseFactoryInterface $responseFactory PSR-17 factory for creating 401/403 responses
      * @param bool                     $requireAuth     When false, missing tokens are forwarded to the handler
      *                                                  (useful for optional-auth routes)
      */
     public function __construct(
-        private readonly TokenVerifier $tokenVerifier,
+        private readonly TokenVerifierInterface $tokenVerifier,
         private readonly ResponseFactoryInterface $responseFactory,
         private readonly bool $requireAuth = true,
     ) {}

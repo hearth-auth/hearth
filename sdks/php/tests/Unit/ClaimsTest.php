@@ -69,9 +69,7 @@ final class ClaimsTest extends TestCase
 
     public function testExpiryReturnsNullWhenAbsent(): void
     {
-        $claims = $this->makeClaims(['exp' => null]);
-        self::assertNull($this->makeClaims(array_diff_key([], ['exp' => '']))->expiry());
-        // Inline null test
+        // Claims with no 'exp' key at all must return null
         self::assertNull((new Claims([]))->expiry());
     }
 

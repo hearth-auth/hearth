@@ -5,12 +5,12 @@ declare(strict_types=1);
 namespace Hearth\Tests\Unit;
 
 use Hearth\Claims;
+use Hearth\Contracts\JwksClientInterface;
 use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
 use Hearth\Exceptions\TokenIssuerException;
 use Hearth\Exceptions\TokenSignatureException;
-use Hearth\JwksClient;
 use Hearth\TokenVerifier;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -23,16 +23,16 @@ use PHPUnit\Framework\TestCase;
  */
 final class TokenVerifierTest extends TestCase
 {
-    private JwksClient&MockObject $jwksClient;
+    private JwksClientInterface&MockObject $jwksClient;
     private TokenVerifier $verifier;
 
     /** Generates a real Ed25519 keypair for signing test tokens. */
-    private array $keypair;
+    private string $keypair;
 
     protected function setUp(): void
     {
         $this->keypair    = sodium_crypto_sign_keypair();
-        $this->jwksClient = $this->createMock(JwksClient::class);
+        $this->jwksClient = $this->createMock(JwksClientInterface::class);
 
         $this->verifier = new TokenVerifier(
             $this->jwksClient,
