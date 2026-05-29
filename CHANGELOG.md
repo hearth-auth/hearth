@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **TypeScript browser SDK spec §4/§5/§7 conformance (HEA-960)** — `Claims` class
+  gains six new accessors: `scope()`, `inGroup(g)`, `inOrg(o)`, `tokenType()`,
+  `organizationId()`, `orgGroups()`; new `RequiredActionError` type with
+  `requiredActions: string[]` and optional `redirectUri`;
+  `HearthApiClient.handleCallback()` exchanges the PKCE auth code and throws
+  `RequiredActionError` when the returned token has `token_type === "required_action"`
+  or the callback URL carries `required_action_redirect_uri`.
+
 - **Node SDK spec conformance (HEA-959)** — `@hearth/node` now fully implements the
   SDK spec (§4 Claims, §5 Errors, §6 Middleware, §12 AdminClient):
   - Claims: `audiences()` (was `audience()`), `expiry()` (was `expiresAt()`), plus new
