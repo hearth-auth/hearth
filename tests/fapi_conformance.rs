@@ -9,6 +9,8 @@
 //! - FAPI-B-02: Direct authorize without PAR rejected under Baseline
 //! - FAPI-B-03: Valid Baseline request (PAR + PKCE) accepted
 //! - FAPI-B-04: Discovery advertises `fapi_profile = "baseline"`
+//! - FAPI-B-05: FAPI Baseline + SMS MFA preserves `via_par` through MFA resume
+//! - FAPI-B-06: Standard-profile client in FAPI Baseline realm must be DPoP-constrained
 //!
 //! ## Advanced (FAPI-A)
 //! - FAPI-A-01: Missing JAR rejected under Advanced
@@ -802,5 +804,89 @@ async fn fapi_b05_sms_mfa_resume_via_par_preserved() {
     assert!(
         matches!(err, IdentityError::FapiViolation { .. }),
         "expected FapiViolation, got: {err:?}"
+    );
+}
+
+/// FAPI-B-06 (regression [HEA-1022]): realm-level FAPI Baseline must enforce DPoP
+/// at token exchange even for clients without `profile: Fapi2`.
+///
+/// Exploit path (pre-fix): register a `Standard` client in a FAPI Baseline realm.
+/// The per-client gate `client.profile().is_fapi2()` is false, and the old realm
+/// gate only matched `FapiProfile::Advanced` — so Baseline realms silently skipped
+/// the DPoP check, issuing non-sender-constrained tokens.
+///
+/// FAPI 2.0 Baseline §5.3.3 requires sender-constrained tokens for every client.
+#[tokio::test]
+async fn fapi_b06_realm_baseline_enforces_dpop_for_standard_profile_client() {
+    use hearth::identity::{ClientProfile, TokenExchangeRequest};
+
+    const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+    // Baseline realm — no JAR/JARM needed.
+    let env = setup_with_profile(FapiProfile::Baseline).await;
+
+    // Register a Standard-profile client (NOT Fapi2) — this is the attack surface.
+    let client = env
+        .harness
+        .identity()
+        .register_client(
+            &env.realm,
+            &RegisterClientRequest {
+                client_name: "FAPI-B-06 Standard-profile client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("b06-secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                profile: ClientProfile::Standard, // NOT Fapi2 — intentional
+                ..Default::default()
+            },
+        )
+        .expect("register standard-profile client");
+
+    // Valid Baseline flow: PAR + PKCE (no JAR required for Baseline).
+    let par_req = PushedAuthorizationRequest {
+        client_id: client.client_id().clone(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        scope: "openid".to_string(),
+        state: "b06-state".to_string(),
+        resource: None,
+        response_type: "code".to_string(),
+        code_challenge: Some(PKCE_CHALLENGE.to_string()),
+        code_challenge_method: Some(hearth::identity::oidc::CodeChallengeMethod::S256),
+        nonce: Some("b06-nonce".to_string()),
+        request: None,
+    };
+    env.harness
+        .identity()
+        .push_authorization_request(&env.realm, &par_req)
+        .expect("PAR should succeed");
+
+    let auth_req = auth_req_from_par(&par_req, env.user_id.clone());
+    let auth_resp = env
+        .harness
+        .identity()
+        .authorize(&env.realm, &auth_req)
+        .expect("authorize should succeed");
+    assert!(!auth_resp.code().is_empty());
+
+    // Token exchange WITHOUT DPoP — realm Baseline gate must catch this.
+    let exchange_req = TokenExchangeRequest {
+        client_id: client.client_id().clone(),
+        code: auth_resp.code().to_string(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        code_verifier: Some(PKCE_VERIFIER.to_string()),
+        dpop_jkt: None, // deliberately absent — triggers the realm-level gate
+        client_assertion_type: None,
+        client_assertion: None,
+    };
+
+    let err = env
+        .harness
+        .identity()
+        .exchange_authorization_code(&env.realm, &exchange_req)
+        .expect_err("realm-level Baseline gate must reject token exchange without DPoP");
+    assert!(
+        matches!(err, IdentityError::FapiViolation { .. }),
+        "expected FapiViolation (DPoP required by Baseline realm), got: {err:?}"
     );
 }

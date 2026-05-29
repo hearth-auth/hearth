@@ -5524,7 +5524,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .ok_or(IdentityError::ClientNotFound)?;
 
         // 8b. FAPI 2.0: DPoP sender-constrained tokens are mandatory.
-        if client.profile().is_fapi2() && request.dpop_jkt.is_none() {
+        // Check both per-client profile flag AND realm-level fapi_profile so that
+        // clients registered without `profile: fapi2` cannot bypass the realm gate.
+        // Use `.is_some()` (not a variant match) so both Baseline and Advanced are
+        // covered — FAPI 2.0 Baseline §5.3.3 requires sender-constrained tokens too.
+        let realm_fapi = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?
+            .config()
+            .fapi_profile;
+        let fapi_enforced = client.profile().is_fapi2() || realm_fapi.is_some();
+        if fapi_enforced && request.dpop_jkt.is_none() {
             return Err(IdentityError::FapiViolation {
                 reason: "FAPI 2.0 requires sender-constrained tokens; \
                          include a DPoP proof and dpop_jkt in the token request"
@@ -6956,17 +6966,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::RealmSuspended);
         }
 
-        // FAPI 2.0 gate: enforce profile constraints before processing the request.
+        // FAPI 2.0 pre-JAR gate: only the JAR-required check can safely fire here,
+        // because the PKCE check must use `effective_code_challenge` (which may come
+        // from inside the signed JAR per RFC 9101 §6.1).
         if let Some(profile) = realm.config().fapi_profile {
-            // Baseline + Advanced: PKCE (S256) is always required, even for
-            // confidential clients. The `require_pkce_for_confidential_clients`
-            // config flag has no effect under a FAPI profile.
-            if request.code_challenge.is_none() {
-                return Err(IdentityError::FapiViolation {
-                    reason: "FAPI 2.0 Baseline requires PKCE (code_challenge with S256)"
-                        .to_string(),
-                });
-            }
             // Advanced: JAR (signed request object) is mandatory.
             if profile == FapiProfile::Advanced && request.request.is_none() {
                 return Err(IdentityError::FapiViolation {
@@ -7029,6 +7032,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 request.nonce.clone(),
             )
         };
+
+        // FAPI 2.0 post-JAR gate: PKCE must be checked against `effective_code_challenge`
+        // so that clients who supply it only inside the JAR (RFC 9101 §6.1) are accepted.
+        if realm.config().fapi_profile.is_some() {
+            // Baseline + Advanced: PKCE (S256) is always required, even for confidential
+            // clients. The `require_pkce_for_confidential_clients` config flag has no
+            // effect under a FAPI profile.
+            if effective_code_challenge.is_none() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "FAPI 2.0 Baseline requires PKCE (code_challenge with S256)"
+                        .to_string(),
+                });
+            }
+        }
 
         if effective_response_type != "code" {
             return Err(IdentityError::InvalidInput {
