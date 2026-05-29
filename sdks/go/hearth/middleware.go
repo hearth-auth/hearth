@@ -35,6 +35,14 @@ type MiddlewareConfig struct {
 	// configured on the client, sv-related rejections call OnUnauthorized, not
 	// OnDenied, to match the 401 semantics prescribed by RFC HEA-930 § 8.
 	OnUnauthorized func(w http.ResponseWriter, r *http.Request)
+
+	// OnRequiredAction is called when the token has token_type == "required_action"
+	// (spec §6 rule 6). The middleware always writes HTTP 401 before calling next.
+	//
+	// When nil, the middleware falls back to OnUnauthorized. Providing this
+	// handler lets callers distinguish a required-action rejection (and access the
+	// typed RequiredActionError with pending action names) from a generic 401.
+	OnRequiredAction func(w http.ResponseWriter, r *http.Request, err *RequiredActionError)
 }
 
 // bearerToken is the default TokenExtractor: strips "Bearer " prefix.
@@ -83,12 +91,26 @@ func RequirePermission(c *Client, permission string, cfg MiddlewareConfig) func(
 	if unauth == nil {
 		unauth = unauthorizedHandler
 	}
+	onRequiredAction := cfg.OnRequiredAction
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := extract(r)
 			if token == "" {
 				deny(w, r)
+				return
+			}
+
+			// Spec §6 rule 6: required_action tokens must be rejected with 401
+			// regardless of mode — they are valid but scoped only to completing
+			// pending actions and must never be accepted for general API access.
+			if raw := decodeClaims(token); raw != nil && raw.TokenType == "required_action" {
+				rae := &RequiredActionError{RequiredActions: raw.RequiredActions}
+				if onRequiredAction != nil {
+					onRequiredAction(w, r, rae)
+				} else {
+					unauth(w, r)
+				}
 				return
 			}
 

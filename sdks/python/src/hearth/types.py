@@ -114,6 +114,81 @@ class RegisterClientRequest(BaseModel):
     trust_level: Optional[str] = None
 
 
+class CreateClientRequest(BaseModel):
+    """Request body for POST /admin/clients."""
+
+    name: str
+    redirect_uris: List[str] = []
+    trust_level: Optional[str] = None
+
+
+class UpdateClientRequest(BaseModel):
+    """Request body for PUT /admin/clients/{id}."""
+
+    name: Optional[str] = None
+    redirect_uris: Optional[List[str]] = None
+    trust_level: Optional[str] = None
+
+
+class Role(BaseModel):
+    """A realm-level role definition."""
+
+    id: str
+    name: str
+    description: Optional[str] = None
+
+
+class CreateRoleRequest(BaseModel):
+    """Request body for POST /admin/roles."""
+
+    name: str
+    description: Optional[str] = None
+
+
+class UpdateRoleRequest(BaseModel):
+    """Request body for PUT /admin/roles/{id}."""
+
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class Group(BaseModel):
+    """A realm-level group definition."""
+
+    id: str
+    name: str
+    description: Optional[str] = None
+
+
+class CreateGroupRequest(BaseModel):
+    """Request body for POST /admin/groups."""
+
+    name: str
+    description: Optional[str] = None
+
+
+class UpdateGroupRequest(BaseModel):
+    """Request body for PUT /admin/groups/{id}."""
+
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class OrgMember(BaseModel):
+    """An organization membership record."""
+
+    user_id: str
+    org_id: str
+    role: Optional[str] = None
+
+
+class AddOrgMemberRequest(BaseModel):
+    """Request body for POST /admin/orgs/{orgId}/members."""
+
+    user_id: str
+    role: Optional[str] = None
+
+
 class Jwk(BaseModel):
     kty: str
     crv: str

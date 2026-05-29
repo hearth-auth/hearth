@@ -3,7 +3,7 @@
 import { createRemoteJWKSet, jwtVerify, errors as joseErrors } from "jose";
 import type { JWTVerifyOptions, RemoteJWKSetOptions, JWSHeaderParameters, FlattenedJWSInput, GetKeyFunction } from "jose";
 import { DiscoveryClient } from "./discovery.js";
-import { JwksFetchError, TokenVerificationError, TokenExpiredError, TokenClaimsError } from "./errors.js";
+import { JWKSFetchError, TokenVerificationError, TokenExpiredError, TokenClaimsError } from "./errors.js";
 import { VerifiedToken } from "./token.js";
 import type { ResolvedConfig } from "./config.js";
 
@@ -34,8 +34,8 @@ export class JwksVerifier {
       const doc = await this.discovery.discover();
       jwksUri = doc.jwks_uri;
     } catch (err) {
-      if (err instanceof JwksFetchError) throw err;
-      throw new JwksFetchError("Failed to discover JWKS URI", { cause: err });
+      if (err instanceof JWKSFetchError) throw err;
+      throw new JWKSFetchError("Failed to discover JWKS URI", { cause: err });
     }
 
     const cacheMaxAge = Math.min(this.config.jwks_ttl, 24 * 60 * 60 * 1000);
@@ -93,7 +93,7 @@ export class JwksVerifier {
         // JWKS key not found — re-fetch once and retry (handles key rotation / 401-like scenario)
         this.remoteJwkSet = null;
         const freshSet = await this.getJwkSet().catch((e) => {
-          throw new JwksFetchError("JWKS re-fetch after key miss failed", { cause: e });
+          throw new JWKSFetchError("JWKS re-fetch after key miss failed", { cause: e });
         });
         try {
           const result = await jwtVerify(token, freshSet, verifyOptions);

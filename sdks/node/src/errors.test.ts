@@ -3,12 +3,17 @@ import {
   HearthError,
   ConfigurationError,
   DiscoveryError,
-  JwksFetchError,
+  JWKSFetchError,
   TokenVerificationError,
   TokenExpiredError,
+  TokenNotYetValidError,
+  TokenInvalidError,
+  TokenIssuerError,
+  TokenAudienceError,
   TokenClaimsError,
   IntrospectionError,
   MiddlewareError,
+  RequiredActionError,
 } from "./errors.js";
 
 describe("HearthError taxonomy", () => {
@@ -16,21 +21,72 @@ describe("HearthError taxonomy", () => {
     const classes = [
       ConfigurationError,
       DiscoveryError,
-      JwksFetchError,
+      JWKSFetchError,
       TokenVerificationError,
-      TokenExpiredError,
       TokenClaimsError,
       IntrospectionError,
       MiddlewareError,
+      TokenInvalidError,
+      TokenIssuerError,
+      TokenAudienceError,
     ];
     for (const Cls of classes) {
-      const err = Cls === TokenExpiredError
-        ? new TokenExpiredError(new Date())
-        : new (Cls as new (m: string) => HearthError)("test");
+      const err = new (Cls as new (m: string) => HearthError)("test");
       expect(err).toBeInstanceOf(HearthError);
       expect(err).toBeInstanceOf(Cls);
       expect(err.name).toBe(Cls.name);
     }
+  });
+
+  it("TokenExpiredError extends TokenVerificationError", () => {
+    const err = new TokenExpiredError(new Date());
+    expect(err).toBeInstanceOf(HearthError);
+    expect(err).toBeInstanceOf(TokenVerificationError);
+    expect(err).toBeInstanceOf(TokenExpiredError);
+  });
+
+  it("TokenNotYetValidError extends TokenVerificationError", () => {
+    const d = new Date("2099-01-01T00:00:00Z");
+    const err = new TokenNotYetValidError(d);
+    expect(err).toBeInstanceOf(HearthError);
+    expect(err).toBeInstanceOf(TokenVerificationError);
+    expect(err).toBeInstanceOf(TokenNotYetValidError);
+    expect(err.message).toContain("2099-01-01T00:00:00.000Z");
+    expect(err.name).toBe("TokenNotYetValidError");
+  });
+
+  it("TokenInvalidError extends TokenVerificationError", () => {
+    const err = new TokenInvalidError("bad signature");
+    expect(err).toBeInstanceOf(TokenVerificationError);
+    expect(err.name).toBe("TokenInvalidError");
+  });
+
+  it("TokenIssuerError extends TokenVerificationError", () => {
+    const err = new TokenIssuerError("https://wrong.example.com");
+    expect(err).toBeInstanceOf(TokenVerificationError);
+    expect(err.name).toBe("TokenIssuerError");
+    expect(err.message).toContain("https://wrong.example.com");
+  });
+
+  it("TokenAudienceError extends TokenVerificationError", () => {
+    const err = new TokenAudienceError("my-client");
+    expect(err).toBeInstanceOf(TokenVerificationError);
+    expect(err.name).toBe("TokenAudienceError");
+    expect(err.message).toContain("my-client");
+  });
+
+  it("RequiredActionError exposes requiredActions and optional redirectUri", () => {
+    const err = new RequiredActionError(["VERIFY_EMAIL", "UPDATE_PASSWORD"]);
+    expect(err).toBeInstanceOf(HearthError);
+    expect(err.name).toBe("RequiredActionError");
+    expect(err.requiredActions).toEqual(["VERIFY_EMAIL", "UPDATE_PASSWORD"]);
+    expect(err.redirectUri).toBeUndefined();
+  });
+
+  it("RequiredActionError accepts optional redirectUri", () => {
+    const err = new RequiredActionError(["VERIFY_EMAIL"], "https://auth.example.com/ui/required-actions");
+    expect(err.requiredActions).toEqual(["VERIFY_EMAIL"]);
+    expect(err.redirectUri).toBe("https://auth.example.com/ui/required-actions");
   });
 
   it("supports cause chaining", () => {

@@ -9,6 +9,64 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Kotlin SDK spec conformance (HEA-964)** — `Claims` gains four new accessors:
+  `inOrg(o)`, `tokenType()`, `organizationId()`, `orgGroups()`; new `RequiredActionError`
+  with `requiredActions: List<String>` and optional `redirectUri`; `requirePermission`
+  middleware rejects `token_type=required_action` tokens with `RequiredActionError` across
+  all modes (EMBEDDED/DECISION/INTROSPECTION) before any network call (spec §6 rule 6);
+  `AdminClient` gains `realmId` constructor param + `X-Realm-ID` header on every request,
+  full CRUD for OAuth clients (`/admin/clients`), roles (`/admin/roles`),
+  groups (`/admin/groups`), and org memberships (`/admin/orgs/{id}/members`) with
+  corresponding types (`Role`, `Group`, `OrgMember`, etc.) (HEA-964).
+
+- **Rust SDK spec conformance (HEA-965)** — `Claims` gains six new accessors:
+  `scope()`, `inGroup(g)`, `inOrg(o)`, `tokenType()`, `organizationId()`,
+  `orgGroups()`; new `RequiredActionError` variant with `required_actions: Vec<String>`
+  and optional `redirect_uri`; Tower middleware short-circuits `token_type=required_action`
+  tokens with HTTP 401 before any permission check (spec §6 rule 6); `AdminClient`
+  gains full CRUD for OAuth clients (`/admin/clients`), roles (`/admin/roles`),
+  groups (`/admin/groups`), and org memberships (`/admin/orgs/{id}/members`) with
+  corresponding request/response types.
+
+- **Go SDK spec conformance (HEA-961)** — `Claims` gains six new accessors:
+  `Scope()`, `InGroup(g)`, `InOrg(o)`, `TokenType()`, `OrganizationId()`,
+  `OrgGroups()`; new `RequiredActionError` with `RequiredActions []string` and
+  optional `RedirectURI`; middleware adds `OnRequiredAction` callback and rejects
+  `token_type=required_action` tokens with HTTP 401 (spec §6 rule 6); `AdminClient`
+  gains full CRUD for OAuth clients (`/admin/clients`), roles (`/admin/roles`),
+  groups (`/admin/groups`), and org memberships (`/admin/orgs/{id}/members`);
+  `ListUsers` and `ListRealms` now accept `ListOptions{Limit, Cursor}` for cursor
+  pagination.
+
+- **Python SDK spec conformance (HEA-962)** — `Claims` gains six new accessors:
+  `scope()`, `in_group(g)`, `in_org(o)`, `token_type()`, `organization_id()`,
+  `org_groups()`; new `RequiredActionError` with `required_actions: list[str]`
+  and optional `redirect_uri`; WSGI + ASGI middleware now return `401` (not `403`)
+  for `required_action` tokens (spec §6 rule 6); `AdminClient` gains full CRUD for
+  OAuth clients (`/admin/clients`), roles (`/admin/roles`), groups (`/admin/groups`),
+  and org memberships (`/admin/orgs/{id}/members`).
+
+- **TypeScript browser SDK spec §4/§5/§7 conformance (HEA-960)** — `Claims` class
+  gains six new accessors: `scope()`, `inGroup(g)`, `inOrg(o)`, `tokenType()`,
+  `organizationId()`, `orgGroups()`; new `RequiredActionError` type with
+  `requiredActions: string[]` and optional `redirectUri`;
+  `HearthApiClient.handleCallback()` exchanges the PKCE auth code and throws
+  `RequiredActionError` when the returned token has `token_type === "required_action"`
+  or the callback URL carries `required_action_redirect_uri`.
+
+- **Node SDK spec conformance (HEA-959)** — `@hearth/node` now fully implements the
+  SDK spec (§4 Claims, §5 Errors, §6 Middleware, §12 AdminClient):
+  - Claims: `audiences()` (was `audience()`), `expiry()` (was `expiresAt()`), plus new
+    `jwtID()`, `inGroup()`, `inOrg()`, `tokenType()`, `organizationId()`, `orgGroups()`.
+  - Errors: `JWKSFetchError` (renamed from `JwksFetchError`), `TokenNotYetValidError`,
+    `TokenInvalidError`, `TokenIssuerError`, `TokenAudienceError`, `RequiredActionError`
+    (with `requiredActions: string[]` and optional `redirectUri`).
+  - Middleware: detects `token_type === "required_action"` and responds 401 + throws
+    `RequiredActionError` (Express and Fastify adapters).
+  - `AdminClient` — new separate entry point; takes `(base_url, realm_id, access_token)`;
+    sends `X-Realm-ID` header on every request; full CRUD + list for users, realms,
+    clients, roles, groups, and org memberships.
+
 - **PHP SDK Phase 1** — core scaffold at `sdks/php/`: `composer.json` (PHP 8.1+,
   PSR-4/PSR-12, `lcobucci/jwt` v5, Guzzle, PSR-7/15/17/18 interfaces),
   10 exception classes, 4 type classes (`IntrospectionResult`, `TokenResponse`,
@@ -21,6 +79,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   detection). Includes PHPUnit 10 stub test suite and PHPStan level-8 config (HEA-954).
 
 ### Security
+
+- **ReDoS fix in Node SDK error sanitizer** — replaced the backtracking regex in
+  `sdks/node/src/errors.ts` `sanitize()` with a linear O(n) charcode scan; a crafted
+  input like `eyJeyJeyJ…` (no dots) caused O(n²) regex backtracking in V8 on any
+  `HearthError` message containing JWT-shaped tokens (HEA-958, CodeQL CWE-1333).
 
 - **Patch example project vulnerabilities (Groups C + D)** — upgraded Go example
   (`examples/go-gin`) via `go get -u ./...`: `gin` 1.10→1.12, `golang.org/x/crypto`

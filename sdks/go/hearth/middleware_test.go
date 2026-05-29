@@ -280,6 +280,76 @@ func TestMiddlewareIntrospectionMissingPermission(t *testing.T) {
 	}
 }
 
+// ─── Required-action token guard (spec §6 rule 6) ────────────────────────────
+
+func TestMiddlewareRequiredActionTokenReturns401(t *testing.T) {
+	// A token with token_type="required_action" must yield 401, even when the
+	// permission claim is present. The middleware must reject before checking perms.
+	c := NewClient("http://localhost", "r1")
+	token := forgeJWT(t, map[string]any{
+		"token_type":       "required_action",
+		"required_actions": []string{"VERIFY_EMAIL"},
+		"permissions":      []string{"docs.edit"},
+	})
+	rr := applyMiddleware(t, c, "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded}, token)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("required_action token must return 401, got %d", rr.Code)
+	}
+}
+
+func TestMiddlewareRequiredActionOnRequiredActionCallback(t *testing.T) {
+	// When OnRequiredAction is provided, it must be called with the typed error.
+	c := NewClient("http://localhost", "r1")
+	token := forgeJWT(t, map[string]any{
+		"token_type":       "required_action",
+		"required_actions": []string{"VERIFY_EMAIL", "UPDATE_PASSWORD"},
+	})
+
+	var capturedErr *RequiredActionError
+	cfg := MiddlewareConfig{
+		ExpectedMode: ModeEmbedded,
+		OnRequiredAction: func(w http.ResponseWriter, _ *http.Request, err *RequiredActionError) {
+			capturedErr = err
+			http.Error(w, "required action pending", http.StatusUnauthorized)
+		},
+	}
+	rr := applyMiddleware(t, c, "docs.edit", cfg, token)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+	if capturedErr == nil {
+		t.Fatal("OnRequiredAction was not called")
+	}
+	if len(capturedErr.RequiredActions) != 2 {
+		t.Errorf("RequiredActions: %v", capturedErr.RequiredActions)
+	}
+	if capturedErr.RequiredActions[0] != "VERIFY_EMAIL" {
+		t.Errorf("first action: %q", capturedErr.RequiredActions[0])
+	}
+}
+
+func TestMiddlewareRequiredActionDoesNotCallNext(t *testing.T) {
+	// next must NOT be called when token_type is required_action.
+	c := NewClient("http://localhost", "r1")
+	token := forgeJWT(t, map[string]any{
+		"token_type":       "required_action",
+		"required_actions": []string{"VERIFY_EMAIL"},
+		"permissions":      []string{"docs.edit"},
+	})
+	nextCalled := false
+	mw := RequirePermission(c, "docs.edit", MiddlewareConfig{ExpectedMode: ModeEmbedded})
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	if nextCalled {
+		t.Error("next must not be called when token_type=required_action")
+	}
+}
+
 // ─── CheckPermission direct API ──────────────────────────────────────────────
 
 func TestCheckPermissionAllowed(t *testing.T) {

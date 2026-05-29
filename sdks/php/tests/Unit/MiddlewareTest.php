@@ -9,7 +9,7 @@ use GuzzleHttp\Psr7\ServerRequest;
 use Hearth\Claims;
 use Hearth\Contracts\TokenVerifierInterface;
 use Hearth\Exceptions\RequiredActionException;
-use Hearth\Exceptions\TokenSignatureException;
+use Hearth\Exceptions\TokenInvalidException;
 use Hearth\Middleware\HearthMiddleware;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
@@ -79,7 +79,7 @@ final class MiddlewareTest extends TestCase
     {
         $this->verifier
             ->method('verify')
-            ->willThrowException(new TokenSignatureException('bad sig'));
+            ->willThrowException(new TokenInvalidException('bad sig'));
 
         $response = $this->middleware->process($this->makeRequest('Bearer bad.token.here'), $this->createMock(RequestHandlerInterface::class));
         self::assertSame(401, $response->getStatusCode());

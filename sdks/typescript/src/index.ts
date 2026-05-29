@@ -19,6 +19,7 @@ export {
   HearthSdkError,
   IntrospectionError,
   JWKSFetchError,
+  RequiredActionError,
   SessionVersionCacheStaleError,
   SessionVersionRevokedError,
   TokenAudienceError,
@@ -37,7 +38,7 @@ export { Claims } from "./claims.js";
 
 // Lower-level API client (kept for backwards-compatibility).
 export { HearthApiClient, HearthError } from "./client.js";
-export type { HearthApiClientConfig } from "./client.js";
+export type { HearthApiClientConfig, HandleCallbackParams } from "./client.js";
 export { AdminClient } from "./admin.js";
 export { createHearth } from "./hearth.js";
 export type {

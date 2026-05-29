@@ -6,15 +6,17 @@ namespace Hearth\Tests\Unit;
 
 use DateTimeImmutable;
 use Hearth\Exceptions\ConfigurationException;
+use Hearth\Exceptions\DiscoveryException;
 use Hearth\Exceptions\HearthException;
 use Hearth\Exceptions\IntrospectionException;
-use Hearth\Exceptions\JwksException;
+use Hearth\Exceptions\JWKSFetchException;
 use Hearth\Exceptions\NetworkException;
 use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
+use Hearth\Exceptions\TokenInvalidException;
 use Hearth\Exceptions\TokenIssuerException;
-use Hearth\Exceptions\TokenSignatureException;
+use Hearth\Exceptions\TokenNotYetValidException;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -25,14 +27,38 @@ final class ExceptionsTest extends TestCase
     public function testAllExceptionsExtendHearthException(): void
     {
         self::assertInstanceOf(HearthException::class, new ConfigurationException());
+        self::assertInstanceOf(HearthException::class, new DiscoveryException());
         self::assertInstanceOf(HearthException::class, new NetworkException('https://x.y'));
-        self::assertInstanceOf(HearthException::class, new JwksException());
+        self::assertInstanceOf(HearthException::class, new JWKSFetchException());
         self::assertInstanceOf(HearthException::class, new TokenExpiredException());
-        self::assertInstanceOf(HearthException::class, new TokenSignatureException());
+        self::assertInstanceOf(HearthException::class, new TokenInvalidException());
+        self::assertInstanceOf(HearthException::class, new TokenNotYetValidException());
         self::assertInstanceOf(HearthException::class, new TokenIssuerException('a', 'b'));
         self::assertInstanceOf(HearthException::class, new TokenAudienceException('a', []));
         self::assertInstanceOf(HearthException::class, new IntrospectionException());
         self::assertInstanceOf(HearthException::class, new RequiredActionException([]));
+    }
+
+    public function testDiscoveryExceptionWrapsUnderlyingCause(): void
+    {
+        $cause = new \RuntimeException('connection refused');
+        $e     = new DiscoveryException('Discovery endpoint unreachable', 0, $cause);
+        self::assertSame($cause, $e->getPrevious());
+        self::assertStringContainsString('Discovery endpoint unreachable', $e->getMessage());
+    }
+
+    public function testJWKSFetchExceptionWrapsUnderlyingCause(): void
+    {
+        $cause = new \RuntimeException('timeout');
+        $e     = new JWKSFetchException('JWKS endpoint unreachable', 0, $cause);
+        self::assertSame($cause, $e->getPrevious());
+    }
+
+    public function testTokenNotYetValidExceptionExposesNotBefore(): void
+    {
+        $nbf = new \DateTimeImmutable('2099-01-01 00:00:00');
+        $e   = new TokenNotYetValidException($nbf);
+        self::assertSame($nbf, $e->getNotBefore());
     }
 
     public function testNetworkExceptionExposesUrl(): void
@@ -83,7 +109,7 @@ final class ExceptionsTest extends TestCase
 
     public function testExceptionMessagesDoNotLeakSensitiveData(): void
     {
-        $e = new TokenSignatureException('Token signature verification failed');
+        $e = new TokenInvalidException('Token signature verification failed');
         // The message must not contain any raw token value
         self::assertStringNotContainsString('eyJ', $e->getMessage());
     }

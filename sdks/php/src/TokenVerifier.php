@@ -7,12 +7,12 @@ namespace Hearth;
 use DateTimeImmutable;
 use Hearth\Contracts\JwksClientInterface;
 use Hearth\Contracts\TokenVerifierInterface;
-use Hearth\Exceptions\JwksException;
+use Hearth\Exceptions\JWKSFetchException;
 use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
 use Hearth\Exceptions\TokenIssuerException;
-use Hearth\Exceptions\TokenSignatureException;
+use Hearth\Exceptions\TokenInvalidException;
 use JsonException;
 
 /**
@@ -46,8 +46,8 @@ final class TokenVerifier implements TokenVerifierInterface
     /**
      * Verifies and decodes a JWT, returning a typed Claims accessor.
      *
-     * @throws TokenSignatureException  On malformed JWT or invalid Ed25519 signature
-     * @throws JwksException            When the signing key cannot be resolved
+     * @throws TokenInvalidException  On malformed JWT or invalid Ed25519 signature
+     * @throws JWKSFetchException            When the signing key cannot be resolved
      * @throws TokenExpiredException    When `exp` is in the past
      * @throws TokenIssuerException     When `iss` does not match
      * @throws TokenAudienceException   When `aud` does not include the client ID
@@ -101,13 +101,13 @@ final class TokenVerifier implements TokenVerifierInterface
      * Splits a JWT into its three base64url-encoded parts.
      *
      * @return array{string, string, string}
-     * @throws TokenSignatureException
+     * @throws TokenInvalidException
      */
     private function splitToken(string $rawToken): array
     {
         $parts = explode('.', $rawToken);
         if (count($parts) !== 3) {
-            throw new TokenSignatureException('Malformed JWT: expected 3 dot-separated parts');
+            throw new TokenInvalidException('Malformed JWT: expected 3 dot-separated parts');
         }
 
         return [$parts[0], $parts[1], $parts[2]];
@@ -117,23 +117,23 @@ final class TokenVerifier implements TokenVerifierInterface
      * Base64url-decodes and JSON-decodes a JWT part.
      *
      * @return array<string, mixed>
-     * @throws TokenSignatureException
+     * @throws TokenInvalidException
      */
     private function decodeJsonPart(string $b64url, string $partName): array
     {
         $decoded = base64_decode(strtr($b64url, '-_', '+/'), true);
         if ($decoded === false) {
-            throw new TokenSignatureException("Malformed JWT: could not base64url-decode {$partName}");
+            throw new TokenInvalidException("Malformed JWT: could not base64url-decode {$partName}");
         }
 
         try {
             $data = json_decode($decoded, true, 512, JSON_THROW_ON_ERROR);
         } catch (JsonException $e) {
-            throw new TokenSignatureException("Malformed JWT: {$partName} is not valid JSON", 0, $e);
+            throw new TokenInvalidException("Malformed JWT: {$partName} is not valid JSON", 0, $e);
         }
 
         if (!is_array($data)) {
-            throw new TokenSignatureException("Malformed JWT: {$partName} must be a JSON object");
+            throw new TokenInvalidException("Malformed JWT: {$partName} must be a JSON object");
         }
 
         return $data;
@@ -143,13 +143,13 @@ final class TokenVerifier implements TokenVerifierInterface
      * Rejects tokens that are not EdDSA-signed.
      *
      * @param array<string, mixed> $header
-     * @throws TokenSignatureException
+     * @throws TokenInvalidException
      */
     private function checkAlgorithm(array $header): void
     {
         $alg = $header['alg'] ?? null;
         if ($alg !== 'EdDSA') {
-            throw new TokenSignatureException(
+            throw new TokenInvalidException(
                 "Unsupported JWT algorithm: expected EdDSA, got " . json_encode($alg),
             );
         }
@@ -158,7 +158,7 @@ final class TokenVerifier implements TokenVerifierInterface
     /**
      * Verifies the Ed25519 signature using libsodium.
      *
-     * @throws TokenSignatureException
+     * @throws TokenInvalidException
      */
     private function verifySignature(
         string $headerB64,
@@ -170,11 +170,11 @@ final class TokenVerifier implements TokenVerifierInterface
         $signature = base64_decode(strtr($sigB64, '-_', '+/'), true);
 
         if ($signature === false) {
-            throw new TokenSignatureException('Malformed JWT: could not base64url-decode signature');
+            throw new TokenInvalidException('Malformed JWT: could not base64url-decode signature');
         }
 
         if (!sodium_crypto_sign_verify_detached($signature, $message, $publicKeyBytes)) {
-            throw new TokenSignatureException('JWT signature verification failed');
+            throw new TokenInvalidException('JWT signature verification failed');
         }
     }
 
@@ -223,7 +223,7 @@ final class TokenVerifier implements TokenVerifierInterface
 
     /**
      * @param array<string, mixed> $claims
-     * @throws TokenSignatureException
+     * @throws TokenInvalidException
      */
     private function checkIssuedAt(array $claims): void
     {
@@ -233,7 +233,7 @@ final class TokenVerifier implements TokenVerifierInterface
 
         $iat = (int) $claims['iat'];
         if ($iat > time() + self::CLOCK_SKEW_SECONDS) {
-            throw new TokenSignatureException('JWT was issued in the future (beyond clock skew tolerance)');
+            throw new TokenInvalidException('JWT was issued in the future (beyond clock skew tolerance)');
         }
     }
 }

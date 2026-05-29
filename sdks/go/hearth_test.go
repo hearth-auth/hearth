@@ -237,7 +237,7 @@ func TestAdminCRUD(t *testing.T) {
 	}
 
 	// List
-	page, err := admin.ListUsers(ctx, 10)
+	page, err := admin.ListUsers(ctx, hearth.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatalf("list users: %v", err)
 	}

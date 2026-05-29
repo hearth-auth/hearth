@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Hearth;
 
 use Hearth\Contracts\JwksClientInterface;
-use Hearth\Exceptions\JwksException;
+use Hearth\Exceptions\JWKSFetchException;
 use Hearth\Exceptions\NetworkException;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
@@ -17,7 +17,7 @@ use Throwable;
  * Implements the mandatory §2 JWKS caching contract:
  *   1. Cache keys by `kid`; do not discard keys missing from the latest fetch.
  *   2. Respect `Cache-Control: max-age` from the JWKS response.
- *   3. On cache miss for a `kid`: re-fetch once before raising JwksException.
+ *   3. On cache miss for a `kid`: re-fetch once before raising JWKSFetchException.
  *   4. Maximum cache age: 24 hours regardless of Cache-Control.
  *   5. Skip (do not error on) any key with an unrecognised `kty`.
  */
@@ -57,10 +57,10 @@ final class JwksClient implements JwksClientInterface
     /**
      * Returns the 32-byte raw Ed25519 public key for the given `kid`.
      *
-     * On a cache miss, re-fetches the JWKS once before raising JwksException.
+     * On a cache miss, re-fetches the JWKS once before raising JWKSFetchException.
      *
      * @return non-empty-string Raw 32-byte Ed25519 public key
-     * @throws JwksException    When the key is not found after a re-fetch
+     * @throws JWKSFetchException    When the key is not found after a re-fetch
      * @throws NetworkException When the JWKS endpoint is unreachable
      */
     public function getKey(string $kid): string
@@ -73,7 +73,7 @@ final class JwksClient implements JwksClientInterface
         $this->fetch();
 
         if (!isset($this->cache[$kid])) {
-            throw new JwksException("No key with kid '{$kid}' found in JWKS after re-fetch");
+            throw new JWKSFetchException("No key with kid '{$kid}' found in JWKS after re-fetch");
         }
 
         return $this->cache[$kid]['publicKeyBytes'];
@@ -83,7 +83,7 @@ final class JwksClient implements JwksClientInterface
      * Forces a refresh of the JWKS cache, regardless of TTL.
      *
      * @throws NetworkException When the endpoint is unreachable
-     * @throws JwksException    When the response is not valid JSON or lacks a `keys` array
+     * @throws JWKSFetchException    When the response is not valid JSON or lacks a `keys` array
      */
     public function refresh(): void
     {
@@ -116,7 +116,7 @@ final class JwksClient implements JwksClientInterface
 
         $status = $response->getStatusCode();
         if ($status < 200 || $status >= 300) {
-            throw new JwksException("JWKS endpoint returned HTTP {$status}");
+            throw new JWKSFetchException("JWKS endpoint returned HTTP {$status}");
         }
 
         // Derive TTL: override > Cache-Control max-age > default
@@ -127,7 +127,7 @@ final class JwksClient implements JwksClientInterface
         $data = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
 
         if (!is_array($data) || !isset($data['keys']) || !is_array($data['keys'])) {
-            throw new JwksException('JWKS response is missing the "keys" array');
+            throw new JWKSFetchException('JWKS response is missing the "keys" array');
         }
 
         $this->lastFetchedAt = time();

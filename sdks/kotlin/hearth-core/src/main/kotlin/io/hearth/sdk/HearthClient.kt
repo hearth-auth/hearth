@@ -420,7 +420,7 @@ class HearthClient(
      * returned each time, keeping credential lifetime explicit.
      */
     fun admin(accessToken: String): AdminClient =
-        AdminClient(issuerUrl, accessToken, httpClient)
+        AdminClient(issuerUrl, accessToken, httpClient, realmId ?: "")
 
     // ── RBAC helpers (local, no network) ──────────────────────────────────────
 

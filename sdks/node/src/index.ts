@@ -20,14 +20,20 @@ export {
   HearthError,
   ConfigurationError,
   DiscoveryError,
-  JwksFetchError,
+  JWKSFetchError,
   TokenVerificationError,
   TokenExpiredError,
+  TokenNotYetValidError,
+  TokenInvalidError,
+  TokenIssuerError,
+  TokenAudienceError,
   TokenClaimsError,
   IntrospectionError,
   MiddlewareError,
   AuthorizationModeError,
   AuthorizeError,
+  RequiredActionError,
+  AdminHttpError,
 } from "./errors.js";
 
 // §6 — Middleware
@@ -37,3 +43,7 @@ export type { MiddlewareOptions } from "./middleware.js";
 // §7 — Decision client (POST /oauth/authorize)
 export { AuthorizeClient } from "./authorize.js";
 export type { AuthorizeOptions, AuthorizeResult } from "./authorize.js";
+
+// §12 — Admin SDK
+export { AdminClient } from "./admin.js";
+export type { AdminClientConfig, PageOptions, PageResponse } from "./admin.js";

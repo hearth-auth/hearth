@@ -13,6 +13,8 @@ const CONFIG: ResolvedConfig = {
   introspection_endpoint: "https://auth.example.com/introspect",
   http_timeout: 10_000,
   clock_skew_seconds: 60,
+  realm_id: null,
+  authorize_endpoint: null,
 };
 
 const DISCOVERY: OidcDiscovery = {

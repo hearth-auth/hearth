@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **§5 error taxonomy** — renamed exceptions to match the SDK Common Specification (HEA-963):
+  - `JwksException` → `JWKSFetchException`
+  - `TokenSignatureException` → `TokenInvalidException`
+- **New exceptions added** — `DiscoveryException` (§5 `DiscoveryError`) and
+  `TokenNotYetValidException` (§5 `TokenNotYetValidError`, exposes `getNotBefore()`).
+
 ### Added
 
 - **`HearthClient`** — primary SDK entry point for resource-server and server-side

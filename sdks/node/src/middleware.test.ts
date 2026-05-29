@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { hearthMiddleware } from "./middleware.js";
 import { HearthClient } from "./client.js";
-import { TokenExpiredError } from "./errors.js";
+import { TokenExpiredError, RequiredActionError } from "./errors.js";
 import { VerifiedToken } from "./token.js";
 import type { JWTPayload } from "jose";
 
@@ -113,5 +113,44 @@ describe("hearthMiddleware", () => {
     await mw(req as never, res as never, next);
     expect(res.statusCode).toBe(200);
     expect(next).toHaveBeenCalled();
+  });
+
+  it("returns 401 and throws RequiredActionError when token_type is required_action", async () => {
+    const token = makeVerifiedToken({
+      token_type: "required_action",
+      required_actions: ["VERIFY_EMAIL", "UPDATE_PASSWORD"],
+    } as unknown as JWTPayload);
+    vi.spyOn(HearthClient.prototype, "verifyToken").mockResolvedValue(token);
+    const mw = hearthMiddleware(BASE_CONFIG);
+    const { req, res, next } = makeReqRes("Bearer required-action-token");
+    let thrownError: unknown;
+    try {
+      await mw(req as never, res as never, next);
+    } catch (err) {
+      thrownError = err;
+    }
+    expect(res.statusCode).toBe(401);
+    expect(next).not.toHaveBeenCalled();
+    expect(thrownError).toBeInstanceOf(RequiredActionError);
+    const reqActionErr = thrownError as RequiredActionError;
+    expect(reqActionErr.requiredActions).toEqual(["VERIFY_EMAIL", "UPDATE_PASSWORD"]);
+  });
+
+  it("RequiredActionError includes empty requiredActions when required_actions claim is absent", async () => {
+    const token = makeVerifiedToken({
+      token_type: "required_action",
+    } as unknown as JWTPayload);
+    vi.spyOn(HearthClient.prototype, "verifyToken").mockResolvedValue(token);
+    const mw = hearthMiddleware(BASE_CONFIG);
+    const { req, res, next } = makeReqRes("Bearer required-action-token");
+    let thrownError: unknown;
+    try {
+      await mw(req as never, res as never, next);
+    } catch (err) {
+      thrownError = err;
+    }
+    expect(res.statusCode).toBe(401);
+    expect(thrownError).toBeInstanceOf(RequiredActionError);
+    expect((thrownError as RequiredActionError).requiredActions).toEqual([]);
   });
 });

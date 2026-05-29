@@ -5,12 +5,12 @@ declare(strict_types=1);
 namespace Hearth\Contracts;
 
 use Hearth\Claims;
-use Hearth\Exceptions\JwksException;
+use Hearth\Exceptions\JWKSFetchException;
 use Hearth\Exceptions\RequiredActionException;
 use Hearth\Exceptions\TokenAudienceException;
 use Hearth\Exceptions\TokenExpiredException;
+use Hearth\Exceptions\TokenInvalidException;
 use Hearth\Exceptions\TokenIssuerException;
-use Hearth\Exceptions\TokenSignatureException;
 
 /**
  * Contract for JWT verification implementations.
@@ -23,8 +23,8 @@ interface TokenVerifierInterface
     /**
      * Verifies and decodes a raw JWT string, returning a typed Claims accessor.
      *
-     * @throws TokenSignatureException  On malformed JWT or invalid signature
-     * @throws JwksException            When the signing key cannot be resolved
+     * @throws TokenInvalidException    On malformed JWT or invalid signature
+     * @throws JWKSFetchException       When the signing key cannot be resolved
      * @throws TokenExpiredException    When `exp` is in the past
      * @throws TokenIssuerException     When `iss` does not match
      * @throws TokenAudienceException   When `aud` does not include the client ID

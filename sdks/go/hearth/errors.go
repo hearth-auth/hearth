@@ -169,3 +169,23 @@ type SessionVersionCacheStaleError struct {
 func (e *SessionVersionCacheStaleError) Error() string {
 	return fmt.Sprintf("session version cache stale: age=%s, onStale=%s", e.Age, e.OnStale)
 }
+
+// RequiredActionError is returned when a token has token_type == "required_action"
+// (spec §5, §6). The token is structurally valid but scoped only to completing
+// the pending actions — it must NOT be accepted for general API access.
+//
+// Middleware writes HTTP 401 and surfaces this error instead of a generic
+// unauthorized error so callers can redirect the user to the appropriate
+// required-action flow.
+type RequiredActionError struct {
+	// RequiredActions lists the pending action names embedded in the token's
+	// required_actions claim (e.g. ["VERIFY_EMAIL", "UPDATE_PASSWORD"]).
+	RequiredActions []string
+	// RedirectURI is an optional URL to the Hearth interstitial page, when
+	// one is provided by the server. May be empty.
+	RedirectURI string
+}
+
+func (e *RequiredActionError) Error() string {
+	return fmt.Sprintf("required action pending: %v", e.RequiredActions)
+}
