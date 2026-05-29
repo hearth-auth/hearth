@@ -44,6 +44,7 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 | `make ci-local-fast` | Host-side mirror of PR-blocking CI (7 checks, ~5 min) — run before push |
 | `make ci-local-full` | Full container reproduction via `act` (~10-15 min) — use when `ci-local-fast` passes but CI fails, or when editing workflow files |
 | `make sdk-smoke-local` | Build hearth, boot `--dev`, run TS + Go SDK example smokes, tear down |
+| `cd sdks/php && composer test` | Run PHP SDK unit tests (smoke-test the PHP SDK locally) |
 
 ### UI Test Pre-commit Workflow
 
