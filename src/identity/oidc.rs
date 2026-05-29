@@ -840,9 +840,36 @@ pub(crate) struct JarmClaims {
     pub aud: String,
     /// Expiry — short-lived (max 10 minutes, typically 2–5 min per FAPI).
     pub exp: i64,
+    /// Issued-at timestamp (JARM MEDIUM-1 / RFC 7519 §4.1.6).
+    pub iat: i64,
+    /// JWT ID — unique per response, prevents replay (JARM MEDIUM-2).
+    pub jti: String,
     /// The authorization code.
     pub code: String,
     /// The echoed state value.
+    pub state: String,
+}
+
+/// JWT claims for a JARM error response (JARM §4.3).
+///
+/// When a client has `authorization_signed_response_alg` set, error responses
+/// on the authorization endpoint MUST also be JWT-wrapped so that the client
+/// only needs to handle one response format.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct JarmErrorClaims {
+    /// Issuer — the authorization server's issuer URL.
+    pub iss: String,
+    /// Audience — the client_id that sent the authorization request.
+    pub aud: String,
+    /// Expiry — same short-lived window as success JARMs (600 s).
+    pub exp: i64,
+    /// Issued-at timestamp.
+    pub iat: i64,
+    /// RFC 6749 error code (e.g. `consent_required`, `access_denied`).
+    pub error: String,
+    /// Human-readable error description.
+    pub error_description: String,
+    /// Echoed OAuth `state` parameter.
     pub state: String,
 }
 

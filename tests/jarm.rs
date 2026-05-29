@@ -15,6 +15,7 @@
 //! 12. Discovery advertises `authorization_signing_alg_values_supported: ["EdDSA"]`
 //! 13. Unsupported alg rejected at client registration
 //! 14. Expired JARM JWT detected client-side (simulation)
+//! 15. Mandatory-JARM client — error response JWT-wrapped with correct claims (JARM §4.3)
 
 mod common;
 
@@ -601,5 +602,105 @@ async fn expired_jarm_jwt_rejected_client_side() {
     assert!(
         exp < now,
         "simulated expired JARM JWT must have exp in the past: exp={exp}, now={now}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-15: mandatory-JARM client — error response is JWT-wrapped (§4.3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn jarm_error_response_is_jwt_wrapped() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("jarm-err-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "JARM Error Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                authorization_signed_response_alg: Some("EdDSA".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    // sign_jarm_error_jwt is the engine method called by jarm_aware_error_redirect
+    // when a mandatory-JARM client triggers an error on the authorization endpoint.
+    let jwt = harness
+        .identity()
+        .sign_jarm_error_jwt(
+            &realm,
+            &client.client_id().to_string(),
+            "consent_required",
+            "user consent required",
+            "test-state-xyz",
+        )
+        .expect("sign_jarm_error_jwt must succeed for a valid realm");
+
+    let parts: Vec<&str> = jwt.split('.').collect();
+    assert_eq!(parts.len(), 3, "JARM error JWT must be a 3-part JWS");
+
+    let claims_json = BASE64_URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("base64 decode claims");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&claims_json).expect("parse claims JSON");
+
+    assert_eq!(
+        claims["error"].as_str().unwrap_or(""),
+        "consent_required",
+        "error claim must be echoed"
+    );
+    assert_eq!(
+        claims["error_description"].as_str().unwrap_or(""),
+        "user consent required",
+        "error_description must be echoed"
+    );
+    assert_eq!(
+        claims["state"].as_str().unwrap_or(""),
+        "test-state-xyz",
+        "state must be echoed"
+    );
+    assert_eq!(
+        claims["aud"].as_str().unwrap_or(""),
+        client.client_id().to_string(),
+        "aud must be the client_id"
+    );
+    assert!(
+        !claims["iss"].as_str().unwrap_or("").is_empty(),
+        "iss must be non-empty"
+    );
+    let exp = claims["exp"].as_i64().expect("exp must be integer");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs() as i64;
+    assert!(exp > now, "exp must be in the future");
+
+    // Verify header typ = oauth-authz-resp+jwt (JARM §4.1)
+    let header_json = BASE64_URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .expect("base64 decode header");
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_json).expect("parse header JSON");
+    assert_eq!(
+        header["typ"].as_str().unwrap_or(""),
+        "oauth-authz-resp+jwt",
+        "typ header must be oauth-authz-resp+jwt per JARM §4.1"
     );
 }

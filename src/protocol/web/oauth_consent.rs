@@ -275,22 +275,30 @@ async fn authorize_get_impl(
         "" => None,
         "S256" => Some(CodeChallengeMethod::S256),
         _ => {
-            return redirect_with_oauth_error(
+            return jarm_aware_error_redirect(
+                state,
+                realm,
+                &client_id.to_string(),
                 &q.redirect_uri,
                 "invalid_request",
                 "unsupported code_challenge_method",
                 &q.state,
+                client.authorization_signed_response_alg(),
             );
         }
     };
 
     // 3b. Public clients MUST supply PKCE S256 (RFC 9700 / HEA-501 F-01).
     if !client.is_confidential() && q.code_challenge.is_empty() {
-        return redirect_with_oauth_error(
+        return jarm_aware_error_redirect(
+            state,
+            realm,
+            &client_id.to_string(),
             &q.redirect_uri,
             "invalid_request",
             "public clients must use PKCE with code_challenge_method=S256",
             &q.state,
+            client.authorization_signed_response_alg(),
         );
     }
 
@@ -350,6 +358,22 @@ async fn authorize_get_impl(
 
     let bypass = !client.require_consent() || (covered && !force_prompt);
 
+    let parsed_response_mode = if let Some(mode_str) = q.response_mode.as_deref() {
+        match mode_str.parse::<crate::identity::ResponseMode>() {
+            Ok(m) => Some(m),
+            Err(_) => {
+                return redirect_with_oauth_error(
+                    &q.redirect_uri,
+                    "invalid_request",
+                    "unsupported_response_mode",
+                    &q.state,
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     if bypass {
         return issue_code_and_redirect(
             state,
@@ -363,9 +387,7 @@ async fn authorize_get_impl(
             code_challenge_method,
             optional(&q.nonce),
             Vec::new(),
-            q.response_mode
-                .as_deref()
-                .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok()),
+            parsed_response_mode,
             None, // jar_request — already handled above for JAR path
         );
     }
@@ -373,11 +395,15 @@ async fn authorize_get_impl(
     if silent_only {
         // OIDC Core §3.1.2.1: when `prompt=none` and consent is needed,
         // respond with `error=consent_required` on the redirect URI.
-        return redirect_with_oauth_error(
+        return jarm_aware_error_redirect(
+            state,
+            realm,
+            &client_id.to_string(),
             &q.redirect_uri,
             "consent_required",
             "user consent required",
             &q.state,
+            client.authorization_signed_response_alg(),
         );
     }
 
@@ -393,6 +419,9 @@ async fn authorize_get_impl(
         code_challenge_method: code_challenge_method.as_ref().map(|_| "S256".to_string()),
         nonce: optional(&q.nonce),
         response_mode: q.response_mode.clone(),
+        authorization_signed_response_alg: client
+            .authorization_signed_response_alg()
+            .map(str::to_string),
         created_at: now,
         expires_at: now.add_micros(CONSENT_TICKET_TTL_SECS * 1_000_000),
     };
@@ -625,6 +654,27 @@ pub async fn consent_submit(
                     None
                 }
             });
+            let pending_response_mode = if let Some(mode_str) = pending.response_mode.as_deref() {
+                match mode_str.parse::<ResponseMode>() {
+                    Ok(m) => Some(m),
+                    Err(_) => {
+                        let mut err_response = jarm_aware_error_redirect(
+                            &state,
+                            &session.realm_id,
+                            &pending.client_id.to_string(),
+                            &pending.redirect_uri,
+                            "invalid_request",
+                            "unsupported_response_mode",
+                            &pending.state,
+                            pending.authorization_signed_response_alg.as_deref(),
+                        );
+                        append_cookie(&mut err_response, &clear_cookie);
+                        return err_response;
+                    }
+                }
+            } else {
+                None
+            };
             let mut response = issue_code_and_redirect(
                 &state,
                 &session.realm_id,
@@ -637,10 +687,7 @@ pub async fn consent_submit(
                 method,
                 pending.nonce.clone(),
                 Vec::new(),
-                pending
-                    .response_mode
-                    .as_deref()
-                    .and_then(|m| m.parse::<ResponseMode>().ok()),
+                pending_response_mode,
                 None, // jar_request — consent was already approved; no JAR needed
             );
             append_cookie(&mut response, &clear_cookie);
@@ -656,11 +703,15 @@ pub async fn consent_submit(
                 &pending.requested_scopes,
                 "self",
             );
-            let mut response = redirect_with_oauth_error(
+            let mut response = jarm_aware_error_redirect(
+                &state,
+                &session.realm_id,
+                &pending.client_id.to_string(),
                 &pending.redirect_uri,
                 "access_denied",
                 "user denied authorization",
                 &pending.state,
+                pending.authorization_signed_response_alg.as_deref(),
             );
             append_cookie(&mut response, &clear_cookie);
             response
@@ -861,6 +912,37 @@ pub(super) fn build_authorization_redirect(
             ],
         ),
     }
+}
+
+/// Builds an OAuth error redirect, JWT-wrapping it when the client requires JARM (§4.3).
+///
+/// When `jarm_alg` is `Some`, signs a `JarmErrorClaims` JWT with the realm key and
+/// redirects as `?response=<jwt>`. Falls back to plain query params on signing failure.
+pub(super) fn jarm_aware_error_redirect(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    client_id: &str,
+    redirect_uri: &str,
+    error: &str,
+    description: &str,
+    state_param: &str,
+    jarm_alg: Option<&str>,
+) -> Response {
+    if jarm_alg.is_some() {
+        match state
+            .identity
+            .sign_jarm_error_jwt(realm, client_id, error, description, state_param)
+        {
+            Ok(jwt) => {
+                let location = append_query(redirect_uri, &[("response", &jwt)]);
+                return axum::response::Redirect::to(&location).into_response();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "sign_jarm_error_jwt failed, falling back to plain redirect");
+            }
+        }
+    }
+    redirect_with_oauth_error(redirect_uri, error, description, state_param)
 }
 
 /// Builds a redirect URI with OAuth error parameters (RFC 6749 §4.1.2.1).

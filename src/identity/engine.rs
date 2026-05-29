@@ -5256,10 +5256,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 aud: request.client_id.to_string(),
                 // JARM JWTs are short-lived: 10 minutes max (FAPI recommends 5 min).
                 exp: now_secs + 600,
+                iat: now_secs,
+                jti: uuid::Uuid::new_v4().to_string(),
                 code: raw_code.clone(),
                 state: request.state.clone(),
             };
-            let jarm_jwt = signing_key.sign_jwt(&jarm_claims, "JWT")?;
+            // JARM spec §4.1 requires typ=oauth-authz-resp+jwt (RFC 9101 §2).
+            let jarm_jwt = signing_key.sign_jwt(&jarm_claims, "oauth-authz-resp+jwt")?;
             return Ok(AuthorizationResponse::new_jarm(
                 raw_code,
                 request.state.clone(),
@@ -9351,6 +9354,29 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::ConsentTicketExpired);
         }
         Ok(pending)
+    }
+
+    fn sign_jarm_error_jwt(
+        &self,
+        realm_id: &RealmId,
+        client_id: &str,
+        error: &str,
+        error_description: &str,
+        state_param: &str,
+    ) -> Result<String, IdentityError> {
+        use crate::identity::oidc::JarmErrorClaims;
+        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        let claims = JarmErrorClaims {
+            iss: self.config.oidc.issuer.clone(),
+            aud: client_id.to_string(),
+            exp: now_secs + 600,
+            iat: now_secs,
+            error: error.to_string(),
+            error_description: error_description.to_string(),
+            state: state_param.to_string(),
+        };
+        signing_key.sign_jwt(&claims, "oauth-authz-resp+jwt")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -16970,6 +16996,7 @@ mod tests {
             code_challenge_method: Some("S256".to_string()),
             nonce: None,
             response_mode: None,
+            authorization_signed_response_alg: None,
             created_at: now,
             expires_at: now.add_micros(600_000_000),
         };
@@ -17001,6 +17028,7 @@ mod tests {
             code_challenge_method: Some("S256".to_string()),
             nonce: None,
             response_mode: None,
+            authorization_signed_response_alg: None,
             created_at: now,
             expires_at: now.add_micros(600_000_000),
         };

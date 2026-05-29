@@ -1345,6 +1345,22 @@ pub trait IdentityEngine: Send + Sync {
         ticket: &str,
     ) -> Result<Option<PendingAuthorizationRequest>, IdentityError>;
 
+    /// Signs a JARM error response JWT for mandatory-JARM clients (JARM §4.3).
+    ///
+    /// Called from the authorization endpoint when an error must be returned to
+    /// a client whose `authorization_signed_response_alg` is set. The resulting
+    /// JWT carries `error` + `error_description` + `state` so the client can
+    /// verify the error with the same signature check it applies to success
+    /// responses. The `typ` header is `oauth-authz-resp+jwt`.
+    fn sign_jarm_error_jwt(
+        &self,
+        realm_id: &RealmId,
+        client_id: &str,
+        error: &str,
+        error_description: &str,
+        state_param: &str,
+    ) -> Result<String, IdentityError>;
+
     /// Issues an authorization code for a previously-approved authorization
     /// request. Unlike [`IdentityEngine::authorize`], this variant skips
     /// the consent gating and is called only after consent has been
