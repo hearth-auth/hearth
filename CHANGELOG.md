@@ -9,6 +9,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Go SDK spec conformance (HEA-961)** — `Claims` gains six new accessors:
+  `Scope()`, `InGroup(g)`, `InOrg(o)`, `TokenType()`, `OrganizationId()`,
+  `OrgGroups()`; new `RequiredActionError` with `RequiredActions []string` and
+  optional `RedirectURI`; middleware adds `OnRequiredAction` callback and rejects
+  `token_type=required_action` tokens with HTTP 401 (spec §6 rule 6); `AdminClient`
+  gains full CRUD for OAuth clients (`/admin/clients`), roles (`/admin/roles`),
+  groups (`/admin/groups`), and org memberships (`/admin/orgs/{id}/members`);
+  `ListUsers` and `ListRealms` now accept `ListOptions{Limit, Cursor}` for cursor
+  pagination.
+
 - **Python SDK spec conformance (HEA-962)** — `Claims` gains six new accessors:
   `scope()`, `in_group(g)`, `in_org(o)`, `token_type()`, `organization_id()`,
   `org_groups()`; new `RequiredActionError` with `required_actions: list[str]`
