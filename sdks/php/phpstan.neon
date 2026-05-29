@@ -1,0 +1,7 @@
+parameters:
+    level: 8
+    paths:
+        - src
+    phpVersion: 80100
+    checkMissingIterableValueType: false
+    treatPhpDocTypesAsCertain: false

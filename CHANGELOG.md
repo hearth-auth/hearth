@@ -7,6 +7,19 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **PHP SDK Phase 1** — core scaffold at `sdks/php/`: `composer.json` (PHP 8.1+,
+  PSR-4/PSR-12, `lcobucci/jwt` v5, Guzzle, PSR-7/15/17/18 interfaces),
+  10 exception classes, 4 type classes (`IntrospectionResult`, `TokenResponse`,
+  `UserInfoResponse`, `PageResponse<T>`), `Claims` (17 spec-compliant accessors),
+  `JwksClient` (OKP/Ed25519 with 5-rule JWKS caching contract), `TokenVerifier`
+  (libsodium Ed25519 + exp/iss/aud/iat validation), `IntrospectionClient` (RFC 7662),
+  `HearthClient` (OIDC discovery, code exchange, verifyToken, getUserInfo),
+  `AdminClient` (CRUD + paginated list for users, realms, clients, roles, groups,
+  org memberships), `Middleware/HearthMiddleware` (PSR-15 Bearer auth, required-action
+  detection). Includes PHPUnit 10 stub test suite and PHPStan level-8 config (HEA-954).
+
 ### Security
 
 - **Patch example project vulnerabilities (Groups C + D)** — upgraded Go example

@@ -66,3 +66,6 @@ tests/ui/node_modules/
 .next
 
 go-gin
+
+**/php/vendor
+*.cache
