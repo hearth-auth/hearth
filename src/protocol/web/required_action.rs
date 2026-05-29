@@ -167,6 +167,7 @@ pub fn required_action_check(
             Some(q.state.clone())
         },
         response_type: q.response_type.clone(),
+        response_mode: q.response_mode.clone().filter(|m| !m.is_empty()),
     };
 
     let token = match state
@@ -452,6 +453,11 @@ pub fn resume_oidc_flow(
         Some(oidc_params.code_challenge.clone())
     };
 
+    let response_mode = oidc_params
+        .response_mode
+        .as_deref()
+        .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok());
+
     match state.identity.issue_authorization_code(
         realm,
         &user_id,
@@ -463,16 +469,10 @@ pub fn resume_oidc_flow(
         code_challenge_method,
         oidc_params.nonce.clone(),
         Vec::new(),
+        response_mode,
     ) {
         Ok(resp) => {
-            let location = build_redirect_location(
-                &oidc_params.redirect_uri,
-                &[
-                    ("code", resp.code()),
-                    ("state", resp.state()),
-                    ("iss", resp.iss()),
-                ],
-            );
+            let location = build_authorization_redirect(&oidc_params.redirect_uri, &resp);
             let mut response = Redirect::to(&location).into_response();
             append_cookie(&mut response, &clear_cookie);
             response

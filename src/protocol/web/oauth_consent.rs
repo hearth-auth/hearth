@@ -62,6 +62,7 @@ use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
 use crate::identity::{
     canonicalize_scopes, CodeChallengeMethod, IdentityError, PendingAuthorizationRequest,
+    ResponseMode,
 };
 
 use super::auth::{CookieSecret, UiSession};
@@ -111,6 +112,11 @@ pub struct AuthorizeQuery {
     /// OIDC `prompt` parameter. Supported: `none`, `consent`, or empty.
     #[serde(default)]
     pub prompt: String,
+    /// JARM response mode (`query.jwt`, `fragment.jwt`, `jwt`).
+    ///
+    /// Absent means default `query` mode (plain code redirect).
+    #[serde(default)]
+    pub response_mode: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +322,9 @@ async fn authorize_get_impl(
             code_challenge_method,
             optional(&q.nonce),
             Vec::new(),
+            q.response_mode
+                .as_deref()
+                .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok()),
         );
     }
 
@@ -341,6 +350,7 @@ async fn authorize_get_impl(
         code_challenge: optional(&q.code_challenge),
         code_challenge_method: code_challenge_method.as_ref().map(|_| "S256".to_string()),
         nonce: optional(&q.nonce),
+        response_mode: q.response_mode.clone(),
         created_at: now,
         expires_at: now.add_micros(CONSENT_TICKET_TTL_SECS * 1_000_000),
     };
@@ -585,6 +595,10 @@ pub async fn consent_submit(
                 method,
                 pending.nonce.clone(),
                 Vec::new(),
+                pending
+                    .response_mode
+                    .as_deref()
+                    .and_then(|m| m.parse::<ResponseMode>().ok()),
             );
             append_cookie(&mut response, &clear_cookie);
             response
@@ -737,6 +751,7 @@ pub(super) fn issue_code_and_redirect(
     code_challenge_method: Option<CodeChallengeMethod>,
     nonce: Option<String>,
     amr_values: Vec<String>,
+    response_mode: Option<crate::identity::ResponseMode>,
 ) -> Response {
     match state.identity.issue_authorization_code(
         realm,
@@ -749,23 +764,57 @@ pub(super) fn issue_code_and_redirect(
         code_challenge_method,
         nonce,
         amr_values,
+        response_mode,
     ) {
         Ok(resp) => {
-            // RFC 9207: include iss= in authorization response to prevent mix-up attacks
-            let location = append_query(
-                redirect_uri,
-                &[
-                    ("code", resp.code()),
-                    ("state", resp.state()),
-                    ("iss", resp.iss()),
-                ],
-            );
+            let location = build_authorization_redirect(redirect_uri, &resp);
             Redirect::to(&location).into_response()
         }
         Err(e) => {
             tracing::warn!(error = %e, "issue_authorization_code failed");
             handlers_common::server_error()
         }
+    }
+}
+
+/// Builds the redirect location string from an `AuthorizationResponse`.
+///
+/// JARM modes wrap all response parameters in a signed JWT (RFC 9207 §4.3):
+/// * `query.jwt` / `jwt` → `redirect_uri?response=<jwt>`
+/// * `fragment.jwt` → `redirect_uri#response=<jwt>`
+///
+/// Plain modes send individual parameters per RFC 6749 §4.1.2 + RFC 9207 §4.1:
+/// * `fragment` → hash-fragment delivery of `code`, `state`, `iss`
+/// * `query` (default) → query-string delivery of `code`, `state`, `iss`
+pub(super) fn build_authorization_redirect(
+    redirect_uri: &str,
+    resp: &crate::identity::AuthorizationResponse,
+) -> String {
+    match resp.response_mode() {
+        ResponseMode::QueryJwt | ResponseMode::Jwt => append_query(
+            redirect_uri,
+            &[("response", resp.jarm_jwt().unwrap_or_default())],
+        ),
+        ResponseMode::FragmentJwt => append_fragment(
+            redirect_uri,
+            &[("response", resp.jarm_jwt().unwrap_or_default())],
+        ),
+        ResponseMode::Fragment => append_fragment(
+            redirect_uri,
+            &[
+                ("code", resp.code()),
+                ("state", resp.state()),
+                ("iss", resp.iss()),
+            ],
+        ),
+        ResponseMode::Query => append_query(
+            redirect_uri,
+            &[
+                ("code", resp.code()),
+                ("state", resp.state()),
+                ("iss", resp.iss()),
+            ],
+        ),
     }
 }
 
@@ -798,6 +847,29 @@ pub(super) fn append_query(base: &str, params: &[(&str, &str)]) -> String {
             continue;
         }
         out.push(if first { '?' } else { '&' });
+        first = false;
+        percent_encode_into(k, &mut out);
+        out.push('=');
+        percent_encode_into(v, &mut out);
+    }
+    out
+}
+
+/// Appends parameters to the fragment (hash) portion of a URI.
+///
+/// Used for `response_mode=fragment` and `response_mode=fragment.jwt`. The
+/// fragment is always appended after any existing query string, using `#`
+/// as separator.  Per RFC 3986, the fragment is the last component and a URI
+/// may have at most one `#`, so we always use `#` then `&` for subsequent params.
+pub(super) fn append_fragment(base: &str, params: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(base.len() + 64);
+    out.push_str(base);
+    let mut first = true;
+    for (k, v) in params {
+        if v.is_empty() {
+            continue;
+        }
+        out.push(if first { '#' } else { '&' });
         first = false;
         percent_encode_into(k, &mut out);
         out.push('=');

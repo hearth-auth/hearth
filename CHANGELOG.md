@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **JARM — JWT Authorization Response Mode (HEA-979)** — clients may request
+  `response_mode=jwt`, `query.jwt`, or `fragment.jwt` to receive the
+  authorization response wrapped in a realm-signed EdDSA JWT containing
+  `{iss, aud, exp, code, state}`. The redirect carries `response=<jwt>` instead
+  of plain `code=...&state=...`, providing end-to-end integrity for the browser
+  redirect. Discovery now advertises `query.jwt`, `fragment.jwt`, and `jwt` in
+  `response_modes_supported` (OAuth 2.0 JARM).
+
 - **`private_key_jwt` client authentication (HEA-984)** — confidential clients
   can now authenticate to the token endpoint by presenting a self-signed EdDSA
   JWT assertion (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`)

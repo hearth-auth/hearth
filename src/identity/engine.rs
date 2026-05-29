@@ -143,7 +143,7 @@ struct StoredEmailVerification {
 use crate::identity::oidc::{
     ApplicationStatus, AuthorizationRequest, AuthorizationResponse, BackchannelTarget,
     CodeChallengeMethod, FrontchannelTarget, OAuthClient, OidcConfig, OidcDiscoveryDocument,
-    OidcTokenResponse, RegisterClientRequest, RpLogoutRequest, RpLogoutResult,
+    OidcTokenResponse, RegisterClientRequest, ResponseMode, RpLogoutRequest, RpLogoutResult,
     StoredAuthorizationCode, StoredDeviceCode, StoredGrantFamily, TokenExchangeRequest,
 };
 use crate::identity::tokens::{
@@ -2262,7 +2262,13 @@ impl EmbeddedIdentityEngine {
             jwks_uri: format!("{issuer}/.well-known/jwks.json"),
             userinfo_endpoint: format!("{issuer}/userinfo"),
             response_types_supported: vec!["code".to_string()],
-            response_modes_supported: vec!["query".to_string(), "fragment".to_string()],
+            response_modes_supported: vec![
+                "query".to_string(),
+                "fragment".to_string(),
+                "query.jwt".to_string(),
+                "fragment.jwt".to_string(),
+                "jwt".to_string(),
+            ],
             subject_types_supported: vec!["public".to_string()],
             id_token_signing_alg_values_supported: vec!["EdDSA".to_string()],
             scopes_supported: vec![
@@ -4915,11 +4921,32 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
+        use crate::identity::oidc::JarmClaims;
+
         // 1. Validate response_type
         if request.response_type != "code" {
             return Err(IdentityError::InvalidInput {
                 reason: "response_type must be 'code'".to_string(),
             });
+        }
+
+        // 1b. Validate response_mode (if provided)
+        if let Some(mode) = &request.response_mode {
+            let supported = [
+                ResponseMode::Query,
+                ResponseMode::Fragment,
+                ResponseMode::QueryJwt,
+                ResponseMode::FragmentJwt,
+                ResponseMode::Jwt,
+            ];
+            if !supported.contains(mode) {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "unsupported response_mode '{}'; supported: query, fragment, query.jwt, fragment.jwt, jwt",
+                        mode.as_str()
+                    ),
+                });
+            }
         }
 
         // 2. Validate state is non-empty (CSRF protection)
@@ -5081,10 +5108,35 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &code_key, &code_bytes)
             .map_err(Self::storage_err)?;
 
+        let issuer = self.config.oidc.issuer.clone();
+
+        // 10. JARM — if a JWT response mode was requested, sign the response.
+        let response_mode = request.response_mode.clone().unwrap_or(ResponseMode::Query);
+        if response_mode.is_jarm() {
+            let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+            let now_secs = self.clock.now().as_micros() / 1_000_000;
+            let jarm_claims = JarmClaims {
+                iss: issuer.clone(),
+                aud: request.client_id.to_string(),
+                // JARM JWTs are short-lived: 10 minutes max (FAPI recommends 5 min).
+                exp: now_secs + 600,
+                code: raw_code.clone(),
+                state: request.state.clone(),
+            };
+            let jarm_jwt = signing_key.sign_jwt(&jarm_claims, "JWT")?;
+            return Ok(AuthorizationResponse::new_jarm(
+                raw_code,
+                request.state.clone(),
+                issuer,
+                jarm_jwt,
+                response_mode,
+            ));
+        }
+
         Ok(AuthorizationResponse::new(
             raw_code,
             request.state.clone(),
-            self.config.oidc.issuer.clone(),
+            issuer,
         ))
     }
 
@@ -9049,6 +9101,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         code_challenge_method: Option<CodeChallengeMethod>,
         nonce: Option<String>,
         amr_values: Vec<String>,
+        response_mode: Option<crate::identity::oidc::ResponseMode>,
     ) -> Result<AuthorizationResponse, IdentityError> {
         let request = AuthorizationRequest {
             client_id: client_id.clone(),
@@ -9062,6 +9115,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             code_challenge_method,
             nonce,
             amr_values,
+            response_mode,
         };
         self.authorize(realm_id, &request)
     }

@@ -48,7 +48,7 @@ pub use oidc::{
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
     OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
-    PushedAuthorizationRequest, PushedAuthorizationResponse, RegisterClientRequest,
+    PushedAuthorizationRequest, PushedAuthorizationResponse, RegisterClientRequest, ResponseMode,
     StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
     UpdateClientRequest, UserInfoResponse,
 };
@@ -1363,6 +1363,7 @@ pub trait IdentityEngine: Send + Sync {
         code_challenge_method: Option<CodeChallengeMethod>,
         nonce: Option<String>,
         amr_values: Vec<String>,
+        response_mode: Option<ResponseMode>,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     // ===== External IdP federation (Phase 2: Gap #5) =====

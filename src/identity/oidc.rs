@@ -635,6 +635,55 @@ pub enum CodeChallengeMethod {
     S256,
 }
 
+/// OAuth 2.0 authorization response mode (OIDC Core §3 + JARM).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ResponseMode {
+    /// Standard query-string redirect (default for `response_type=code`).
+    #[default]
+    Query,
+    /// Fragment-based redirect.
+    Fragment,
+    /// JARM: signed JWT response delivered via query string (`?response=<jwt>`).
+    QueryJwt,
+    /// JARM: signed JWT response delivered via fragment (`#response=<jwt>`).
+    FragmentJwt,
+    /// JARM: `response_mode=jwt` — defaults to `query.jwt` for code flow.
+    Jwt,
+}
+
+impl ResponseMode {
+    /// Returns the wire string sent by the client.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Fragment => "fragment",
+            Self::QueryJwt => "query.jwt",
+            Self::FragmentJwt => "fragment.jwt",
+            Self::Jwt => "jwt",
+        }
+    }
+
+    /// Whether this mode produces a signed JWT authorization response.
+    pub fn is_jarm(&self) -> bool {
+        matches!(self, Self::QueryJwt | Self::FragmentJwt | Self::Jwt)
+    }
+}
+
+impl std::str::FromStr for ResponseMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "query" => Ok(Self::Query),
+            "fragment" => Ok(Self::Fragment),
+            "query.jwt" => Ok(Self::QueryJwt),
+            "fragment.jwt" => Ok(Self::FragmentJwt),
+            "jwt" => Ok(Self::Jwt),
+            _ => Err(()),
+        }
+    }
+}
+
 /// Request to initiate an OAuth 2.0 authorization.
 #[derive(Debug, Clone)]
 pub struct AuthorizationRequest {
@@ -666,6 +715,9 @@ pub struct AuthorizationRequest {
     /// (e.g. `["sms"]`). Propagated to `StoredAuthorizationCode.amr_values`
     /// and then into the issued tokens at exchange time.
     pub amr_values: Vec<String>,
+    /// JARM response mode (RFC 9207 / OAuth 2.0 JARM). When set to a JWT
+    /// variant, the authorization response is wrapped in a signed JWT.
+    pub response_mode: Option<ResponseMode>,
 }
 
 /// Response from a successful authorization request.
@@ -677,12 +729,42 @@ pub struct AuthorizationResponse {
     state: String,
     /// RFC 9207 issuer identifier — appended to the redirect as `iss=`.
     iss: String,
+    /// JARM signed JWT wrapping `{iss, aud, exp, code, state}`. Present only
+    /// when the request used a JARM response mode (`query.jwt` / `fragment.jwt`
+    /// / `jwt`). When present, the redirect MUST use `response=<jwt>` instead
+    /// of plain `code=...&state=...`.
+    jarm_jwt: Option<String>,
+    /// The effective response mode for this response.
+    response_mode: ResponseMode,
 }
 
 impl AuthorizationResponse {
     /// Creates a new authorization response.
     pub(crate) fn new(code: String, state: String, iss: String) -> Self {
-        Self { code, state, iss }
+        Self {
+            code,
+            state,
+            iss,
+            jarm_jwt: None,
+            response_mode: ResponseMode::Query,
+        }
+    }
+
+    /// Creates a JARM authorization response with a signed JWT.
+    pub(crate) fn new_jarm(
+        code: String,
+        state: String,
+        iss: String,
+        jarm_jwt: String,
+        response_mode: ResponseMode,
+    ) -> Self {
+        Self {
+            code,
+            state,
+            iss,
+            jarm_jwt: Some(jarm_jwt),
+            response_mode,
+        }
     }
 
     /// Returns the authorization code.
@@ -699,6 +781,35 @@ impl AuthorizationResponse {
     pub fn iss(&self) -> &str {
         &self.iss
     }
+
+    /// Returns the JARM signed JWT, if this is a JARM response.
+    pub fn jarm_jwt(&self) -> Option<&str> {
+        self.jarm_jwt.as_deref()
+    }
+
+    /// Returns the effective response mode.
+    pub fn response_mode(&self) -> &ResponseMode {
+        &self.response_mode
+    }
+}
+
+/// JWT claims for a JARM (JWT Authorization Response Message) response.
+///
+/// Signed with the realm's Ed25519 key. The JWT wraps code + state so
+/// the client can verify the response was issued by the expected AS.
+/// Spec: OAuth 2.0 JARM (draft-fett-oauth-jwarm).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct JarmClaims {
+    /// Issuer — the authorization server's issuer URL.
+    pub iss: String,
+    /// Audience — the client_id that sent the authorization request.
+    pub aud: String,
+    /// Expiry — short-lived (max 10 minutes, typically 2–5 min per FAPI).
+    pub exp: i64,
+    /// The authorization code.
+    pub code: String,
+    /// The echoed state value.
+    pub state: String,
 }
 
 /// Request to exchange an authorization code for tokens.
