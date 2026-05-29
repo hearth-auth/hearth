@@ -402,6 +402,7 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         access_token_authorization,
         jwks: None,
         jwks_uri: None,
+        authorization_signed_response_alg: None,
     }
 }
 
@@ -737,6 +738,7 @@ pub async fn admin_app_edit_submit(
         status: None,
         assertion_public_key: None,
         access_token_authorization,
+        authorization_signed_response_alg: None,
     };
 
     let realm_name = target.0.name().to_string();

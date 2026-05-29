@@ -619,6 +619,7 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             },
         )
         .expect("authorize");

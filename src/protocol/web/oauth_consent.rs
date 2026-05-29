@@ -117,6 +117,11 @@ pub struct AuthorizeQuery {
     /// Absent means default `query` mode (plain code redirect).
     #[serde(default)]
     pub response_mode: Option<String>,
+    /// Signed JAR JWT (RFC 9101). When present, all authorization parameters
+    /// are taken from the JWT payload; other query params (except `client_id`)
+    /// serve only as defaults.
+    #[serde(default)]
+    pub request: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -202,17 +207,53 @@ async fn authorize_get_impl(
     q: &AuthorizeQuery,
     headers: &axum::http::HeaderMap,
 ) -> Response {
-    // 1. Basic parameter validation before we reveal anything about the client.
+    // 1. client_id is always required (JAR and non-JAR alike).
+    let Ok(client_uuid) = uuid::Uuid::parse_str(&q.client_id) else {
+        return handlers_common::bad_request("invalid client_id");
+    };
+    let client_id = ClientId::new(client_uuid);
+
+    // 1b. When a signed request object (JAR) is present, outer params other
+    //     than `client_id` are ignored — the engine verifies the JWT and
+    //     extracts authoritative values from its claims. Skip response_type /
+    //     state / redirect_uri checks here; the engine enforces them after
+    //     JAR extraction. Never redirect for JAR errors (open-redirect risk).
+    if q.request.is_some() {
+        // Load client to confirm it exists; redirect_uri check is deferred.
+        match state.identity.get_client(realm, &client_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return handlers_common::bad_request("unknown client"),
+            Err(e) => {
+                tracing::warn!(error = %e, "authorize_get(JAR): get_client failed");
+                return handlers_common::server_error();
+            }
+        }
+        return issue_code_and_redirect(
+            state,
+            realm,
+            &session.user_id,
+            &client_id,
+            &q.redirect_uri,
+            &q.scope,
+            &q.state,
+            optional(&q.code_challenge),
+            None,
+            optional(&q.nonce),
+            Vec::new(),
+            q.response_mode
+                .as_deref()
+                .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok()),
+            q.request.clone(),
+        );
+    }
+
+    // Non-JAR path: validate outer params normally.
     if q.response_type != "code" {
         return handlers_common::bad_request("response_type must be 'code'");
     }
     if q.state.is_empty() {
         return handlers_common::bad_request("state parameter is required for CSRF protection");
     }
-    let Ok(client_uuid) = uuid::Uuid::parse_str(&q.client_id) else {
-        return handlers_common::bad_request("invalid client_id");
-    };
-    let client_id = ClientId::new(client_uuid);
 
     // 2. Load the client and validate redirect_uri BEFORE any error
     //    redirect — per RFC 6749 §4.1.2.1, we must only redirect errors
@@ -325,6 +366,7 @@ async fn authorize_get_impl(
             q.response_mode
                 .as_deref()
                 .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok()),
+            None, // jar_request — already handled above for JAR path
         );
     }
 
@@ -599,6 +641,7 @@ pub async fn consent_submit(
                     .response_mode
                     .as_deref()
                     .and_then(|m| m.parse::<ResponseMode>().ok()),
+                None, // jar_request — consent was already approved; no JAR needed
             );
             append_cookie(&mut response, &clear_cookie);
             response
@@ -752,6 +795,7 @@ pub(super) fn issue_code_and_redirect(
     nonce: Option<String>,
     amr_values: Vec<String>,
     response_mode: Option<crate::identity::ResponseMode>,
+    jar_request: Option<String>,
 ) -> Response {
     match state.identity.issue_authorization_code(
         realm,
@@ -765,6 +809,7 @@ pub(super) fn issue_code_and_redirect(
         nonce,
         amr_values,
         response_mode,
+        jar_request,
     ) {
         Ok(resp) => {
             let location = build_authorization_redirect(redirect_uri, &resp);

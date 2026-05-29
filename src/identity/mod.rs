@@ -1350,6 +1350,9 @@ pub trait IdentityEngine: Send + Sync {
     /// the consent gating and is called only after consent has been
     /// recorded (or explicitly bypassed for a trusted client). Returns
     /// the authorization code response.
+    /// `jar_request`: when `Some`, the signed request object (RFC 9101) is
+    /// verified against the client's JWKS and its claims override the other
+    /// parameters. Pass `None` for non-JAR flows.
     #[allow(clippy::too_many_arguments)]
     fn issue_authorization_code(
         &self,
@@ -1364,6 +1367,7 @@ pub trait IdentityEngine: Send + Sync {
         nonce: Option<String>,
         amr_values: Vec<String>,
         response_mode: Option<ResponseMode>,
+        jar_request: Option<String>,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     // ===== External IdP federation (Phase 2: Gap #5) =====

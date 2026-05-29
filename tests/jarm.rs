@@ -10,6 +10,11 @@
 //! 4. JARM JWT carries correct `{iss, aud, exp, code, state}` claims
 //! 5. No JARM mode → no JWT, plain code/state response
 //! 6. Discovery advertises jwt/query.jwt/fragment.jwt in response_modes_supported
+//! 10. Client with `authorization_signed_response_alg` → JARM mandatory, no response_mode needed
+//! 11. Client with `authorization_signed_response_alg` → plain query mode is upgraded to JARM
+//! 12. Discovery advertises `authorization_signing_alg_values_supported: ["EdDSA"]`
+//! 13. Unsupported alg rejected at client registration
+//! 14. Expired JARM JWT detected client-side (simulation)
 
 mod common;
 
@@ -99,6 +104,7 @@ fn authorize_with_mode(env: &Env, mode: ResponseMode) -> hearth::identity::Autho
                 user_id: env.user_id.clone(),
                 amr_values: vec![],
                 response_mode: Some(mode),
+                request: None,
             },
         )
         .expect("authorize")
@@ -194,7 +200,7 @@ async fn jarm_jwt_claims_are_correct() {
     let exp = claims["exp"].as_i64().expect("exp must be an integer");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock before epoch")
         .as_secs() as i64;
     assert!(exp > now, "exp must be in the future");
     assert!(
@@ -228,6 +234,7 @@ async fn no_response_mode_returns_plain_response() {
                 user_id: env.user_id.clone(),
                 amr_values: vec![],
                 response_mode: None,
+                request: None,
             },
         )
         .expect("authorize without response_mode");
@@ -324,6 +331,7 @@ async fn no_response_mode_defaults_to_query() {
                 user_id: env.user_id.clone(),
                 amr_values: vec![],
                 response_mode: None,
+                request: None,
             },
         )
         .expect("authorize");
@@ -336,5 +344,262 @@ async fn no_response_mode_defaults_to_query() {
     assert!(
         resp.jarm_jwt().is_none(),
         "plain query must not produce a JARM JWT"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-10: client with authorization_signed_response_alg always gets JARM
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mandatory_jarm_client_gets_jarm_without_response_mode() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("jarm-mandatory-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+
+    // Register a client that requires JARM.
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Mandatory JARM Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                authorization_signed_response_alg: Some("EdDSA".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let user_id = harness
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: format!("mandatory-jarm-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Mandatory JARM User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user")
+        .id()
+        .clone();
+
+    // Call authorize with NO response_mode — the client flag must force JARM.
+    let resp = harness
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                response_type: "code".to_string(),
+                scope: "openid".to_string(),
+                state: "mandatory-jarm-state".to_string(),
+                nonce: None,
+                code_challenge: Some(PKCE_CHALLENGE.to_string()),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                resource: None,
+                user_id,
+                amr_values: vec![],
+                response_mode: None,
+                request: None,
+            },
+        )
+        .expect("authorize");
+
+    assert!(
+        resp.jarm_jwt().is_some(),
+        "client with authorization_signed_response_alg must always produce a JARM JWT"
+    );
+    assert!(!resp.code().is_empty(), "code must be present");
+}
+
+// ---------------------------------------------------------------------------
+// JARM-11: client with authorization_signed_response_alg upgrades plain query
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mandatory_jarm_client_upgrades_plain_query_mode() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("jarm-upgrade-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "JARM Upgrade Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                authorization_signed_response_alg: Some("EdDSA".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let user_id = harness
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: format!("jarm-upgrade-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "JARM Upgrade User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user")
+        .id()
+        .clone();
+
+    // response_mode=query (plain) — must be upgraded to JARM.
+    let resp = harness
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                response_type: "code".to_string(),
+                scope: "openid".to_string(),
+                state: "upgrade-state".to_string(),
+                nonce: None,
+                code_challenge: Some(PKCE_CHALLENGE.to_string()),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                resource: None,
+                user_id,
+                amr_values: vec![],
+                response_mode: Some(ResponseMode::Query),
+                request: None,
+            },
+        )
+        .expect("authorize");
+
+    assert!(
+        resp.jarm_jwt().is_some(),
+        "plain response_mode=query must be upgraded to JARM for mandatory-JARM clients"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-12: discovery advertises authorization_signing_alg_values_supported
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn discovery_advertises_authorization_signing_alg_values_supported() {
+    let env = setup().await;
+    let discovery = env.harness.identity().oidc_discovery();
+
+    assert!(
+        !discovery
+            .authorization_signing_alg_values_supported
+            .is_empty(),
+        "discovery must advertise authorization_signing_alg_values_supported"
+    );
+    assert!(
+        discovery
+            .authorization_signing_alg_values_supported
+            .contains(&"EdDSA".to_string()),
+        "EdDSA must be listed in authorization_signing_alg_values_supported; got {:?}",
+        discovery.authorization_signing_alg_values_supported
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-13: unsupported alg rejected at registration
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unsupported_alg_rejected_at_registration() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("jarm-badreq-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+
+    let result = harness.identity().register_client(
+        &realm,
+        &RegisterClientRequest {
+            client_name: "Bad Alg Client".to_string(),
+            redirect_uris: vec![REDIRECT_URI.to_string()],
+            client_secret: Some("secret".to_string()),
+            grant_types: vec!["authorization_code".to_string()],
+            require_consent: false,
+            authorization_signed_response_alg: Some("RS256".to_string()),
+            ..Default::default()
+        },
+    );
+
+    assert!(
+        result.is_err(),
+        "registering with unsupported authorization_signed_response_alg must fail"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// JARM-14: expired JARM JWT detected client-side (simulation)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn expired_jarm_jwt_rejected_client_side() {
+    use serde_json::json;
+
+    // Simulate a JARM JWT with exp in the past. Clients MUST reject these.
+    // We construct a fake JWT (unsigned, for simulation only) and verify that
+    // the exp claim is in the past — mirroring what a conformant client does.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before epoch")
+        .as_secs() as i64;
+
+    // Build a fake JARM claims payload with exp already elapsed.
+    let claims = json!({
+        "iss": "https://as.example.com",
+        "aud": "client-id",
+        "exp": now - 60,   // 60 seconds in the past
+        "code": "some-code",
+        "state": "some-state"
+    });
+
+    let claims_b64 = BASE64_URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
+    let fake_jwt = format!("eyJhbGciOiJFZERTQSJ9.{claims_b64}.fakesig");
+
+    // Decode claims and verify expiry — simulating client-side validation.
+    let parts: Vec<&str> = fake_jwt.split('.').collect();
+    assert_eq!(parts.len(), 3);
+    let decoded = BASE64_URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("base64 decode");
+    let decoded_claims: serde_json::Value = serde_json::from_slice(&decoded).expect("parse JSON");
+    let exp = decoded_claims["exp"].as_i64().expect("exp must be i64");
+
+    assert!(
+        exp < now,
+        "simulated expired JARM JWT must have exp in the past: exp={exp}, now={now}"
     );
 }

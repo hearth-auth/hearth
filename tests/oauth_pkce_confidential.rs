@@ -129,7 +129,7 @@ fn confidential_client_without_pkce_rejected_by_default() {
             resource: None,
             amr_values: Vec::new(),
             response_mode: None,
-            response_mode: None,
+            request: None,
         },
     );
 
@@ -170,7 +170,7 @@ fn confidential_client_without_pkce_allowed_with_opt_out() {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
-                response_mode: None,
+                request: None,
             },
         )
         .expect("confidential client without PKCE must succeed when opt-out is configured");
@@ -220,7 +220,7 @@ fn public_client_without_pkce_always_rejected() {
             resource: None,
             amr_values: Vec::new(),
             response_mode: None,
-            response_mode: None,
+            request: None,
         },
     );
 

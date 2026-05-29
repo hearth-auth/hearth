@@ -288,6 +288,7 @@ async fn valid_assertion_exchanges_auth_code() {
                 nonce: Some("nonce-abc".to_string()),
                 amr_values: vec![],
                 response_mode: None,
+                request: None,
             },
         )
         .expect("authorize");
@@ -822,6 +823,7 @@ async fn auth_code_exchange_without_assertion_rejected_for_pkjwt_client() {
                 user_id: user_id.clone(),
                 amr_values: vec![],
                 response_mode: None,
+                request: None,
             },
         )
         .expect("authorize");

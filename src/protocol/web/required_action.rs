@@ -470,6 +470,7 @@ pub fn resume_oidc_flow(
         oidc_params.nonce.clone(),
         Vec::new(),
         response_mode,
+        None, // jar_request — RA resume restores pre-validated params
     ) {
         Ok(resp) => {
             let location = build_authorization_redirect(&oidc_params.redirect_uri, &resp);
@@ -1542,6 +1543,41 @@ fn percent_encode_into(value: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build_redirect_location(base: &str, params: &[(&str, &str)]) -> String {
+        use std::fmt::Write as _;
+        let mut out = base.to_string();
+        let mut first = true;
+        for (k, v) in params {
+            if v.is_empty() {
+                continue;
+            }
+            out.push(if first { '?' } else { '&' });
+            first = false;
+            for b in k.bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(b as char);
+                    }
+                    _ => {
+                        let _ = write!(out, "%{b:02X}");
+                    }
+                }
+            }
+            out.push('=');
+            for b in v.bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(b as char);
+                    }
+                    _ => {
+                        let _ = write!(out, "%{b:02X}");
+                    }
+                }
+            }
+        }
+        out
+    }
 
     #[test]
     fn build_redirect_location_appends_params() {

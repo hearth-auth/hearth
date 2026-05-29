@@ -106,6 +106,7 @@ fn auth_request(env: &Env) -> AuthorizationRequest {
         nonce: Some(uuid::Uuid::new_v4().to_string()),
         amr_values: vec![],
         response_mode: None,
+        request: None,
     }
 }
 

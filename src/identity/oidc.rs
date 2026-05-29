@@ -119,6 +119,10 @@ pub struct RegisterClientRequest {
     pub jwks: Option<String>,
     /// JWKS URI for JAR signed request object verification (stored for future use).
     pub jwks_uri: Option<String>,
+    /// JARM signing algorithm for authorization responses (OAuth 2.0 JARM §4).
+    ///
+    /// When set, JARM is mandatory for this client. Supported values: `"EdDSA"`.
+    pub authorization_signed_response_alg: Option<String>,
 }
 
 impl Default for RegisterClientRequest {
@@ -142,6 +146,7 @@ impl Default for RegisterClientRequest {
             access_token_authorization: AccessTokenAuthorization::Embedded,
             jwks: None,
             jwks_uri: None,
+            authorization_signed_response_alg: None,
         }
     }
 }
@@ -250,6 +255,13 @@ pub struct OAuthClient {
     /// yet implemented — this field validates and stores the URI for future use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     jwks_uri: Option<String>,
+    /// JARM signing algorithm for authorization responses (OAuth 2.0 JARM §4).
+    ///
+    /// When set, JARM is mandatory for this client: every authorization response
+    /// is wrapped in a signed JWT regardless of `response_mode`. Supported
+    /// values: `"EdDSA"`. Omit to allow plain responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authorization_signed_response_alg: Option<String>,
 }
 
 fn default_require_consent() -> bool {
@@ -285,6 +297,7 @@ impl OAuthClient {
             access_token_authorization: AccessTokenAuthorization::Embedded,
             jwks: None,
             jwks_uri: None,
+            authorization_signed_response_alg: None,
         }
     }
 
@@ -318,6 +331,7 @@ impl OAuthClient {
             access_token_authorization: AccessTokenAuthorization::Embedded,
             jwks: None,
             jwks_uri: None,
+            authorization_signed_response_alg: None,
         }
     }
 
@@ -519,6 +533,16 @@ impl OAuthClient {
         self.jwks_uri = uri;
     }
 
+    /// Returns the JARM signing algorithm, if mandatory JARM is configured.
+    pub fn authorization_signed_response_alg(&self) -> Option<&str> {
+        self.authorization_signed_response_alg.as_deref()
+    }
+
+    /// Sets the JARM signing algorithm. `None` disables mandatory JARM.
+    pub(crate) fn set_authorization_signed_response_alg(&mut self, alg: Option<String>) {
+        self.authorization_signed_response_alg = alg;
+    }
+
     /// Returns `true` if this client was provisioned from YAML configuration.
     ///
     /// YAML-managed clients have deterministic UUID v5 identifiers (derived
@@ -569,6 +593,9 @@ pub struct UpdateClientRequest {
     pub assertion_public_key: Option<Option<String>>,
     /// New access-token authorization mode. `None` leaves unchanged.
     pub access_token_authorization: Option<AccessTokenAuthorization>,
+    /// JARM signing algorithm update. `Some(Some("EdDSA"))` enables mandatory JARM,
+    /// `Some(None)` clears it (disables mandatory JARM). `None` leaves unchanged.
+    pub authorization_signed_response_alg: Option<Option<String>>,
 }
 
 // ===== RP-Initiated Logout =====
@@ -718,6 +745,13 @@ pub struct AuthorizationRequest {
     /// JARM response mode (RFC 9207 / OAuth 2.0 JARM). When set to a JWT
     /// variant, the authorization response is wrapped in a signed JWT.
     pub response_mode: Option<ResponseMode>,
+    /// Signed JAR JWT (RFC 9101) carrying authorization parameters.
+    ///
+    /// When present, the engine validates the JWT signature against the
+    /// client's registered `jwks`, then uses the JWT claims to populate
+    /// (and override) the request fields. The outer `client_id` must match
+    /// the `iss` claim inside the JWT.
+    pub request: Option<String>,
 }
 
 /// Response from a successful authorization request.
@@ -996,6 +1030,15 @@ pub struct OidcDiscoveryDocument {
     /// DPoP signing algorithms supported (RFC 9449 §5.1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dpop_signing_alg_values_supported: Vec<String>,
+    /// JAR request-object signing algorithms supported (RFC 9101 §10.6).
+    ///
+    /// Advertises which algorithms the AS accepts in `request=<JWT>` parameters
+    /// on `/authorize` and `/as/par`. Clients MUST use one of these algorithms.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_object_signing_alg_values_supported: Vec<String>,
+    /// JARM authorization response signing algorithms supported (OAuth 2.0 JARM §10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authorization_signing_alg_values_supported: Vec<String>,
 }
 
 // ===== JWT Authorization Requests — RFC 9101 (JAR) =====
@@ -1649,6 +1692,8 @@ mod tests {
             backchannel_logout_session_supported: false,
             pushed_authorization_request_endpoint: None,
             dpop_signing_alg_values_supported: Vec::new(),
+            request_object_signing_alg_values_supported: Vec::new(),
+            authorization_signing_alg_values_supported: Vec::new(),
         };
 
         let json = serde_json::to_string(&doc).expect("serialize");

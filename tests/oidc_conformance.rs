@@ -104,6 +104,7 @@ fn authorize_and_exchange(
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             },
         )
         .expect("authorize");

@@ -9,6 +9,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **JAR on direct `/authorize` (HEA-983)** — the `GET /authorize` endpoint now
+  accepts a `request=<signed-JWT>` parameter (RFC 9101). When present, Hearth
+  verifies the JWT signature against the client's registered JWKS (EdDSA, RS256,
+  PS256, ES256), enforces `iss == client_id`, `aud == realm issuer URL`, `exp`,
+  `nbf`, and per-realm JTI replay prevention, then uses the JWT claims to
+  override the outer query parameters before processing the authorization request.
+  Discovery now advertises `request_object_signing_alg_values_supported:
+  ["RS256", "PS256", "ES256", "EdDSA"]`.
+
 - **JARM — JWT Authorization Response Mode (HEA-979)** — clients may request
   `response_mode=jwt`, `query.jwt`, or `fragment.jwt` to receive the
   authorization response wrapped in a realm-signed EdDSA JWT containing
@@ -16,6 +25,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   of plain `code=...&state=...`, providing end-to-end integrity for the browser
   redirect. Discovery now advertises `query.jwt`, `fragment.jwt`, and `jwt` in
   `response_modes_supported` (OAuth 2.0 JARM).
+
+- **Mandatory JARM per client (HEA-986)** — `OAuthClient` now carries an
+  `authorization_signed_response_alg` field (`EdDSA` only). When set via
+  `RegisterClientRequest` or `UpdateClientRequest`, every authorization response
+  for that client is automatically promoted to JARM regardless of the
+  `response_mode` in the request — a plain `query` or `fragment` request is
+  silently upgraded to `query.jwt`. Registration rejects unsupported algorithm
+  values at creation time. Discovery advertises
+  `authorization_signing_alg_values_supported: ["EdDSA"]` (HEA-986).
 
 - **`private_key_jwt` client authentication (HEA-984)** — confidential clients
   can now authenticate to the token endpoint by presenting a self-signed EdDSA

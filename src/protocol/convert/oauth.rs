@@ -69,6 +69,7 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             access_token_authorization,
             jwks: None,
             jwks_uri: None,
+            authorization_signed_response_alg: None,
         }
     }
 }
@@ -112,6 +113,7 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
                     _ => AccessTokenAuthorization::Embedded,
                 }
             }),
+            authorization_signed_response_alg: None,
         }
     }
 }
@@ -149,6 +151,7 @@ pub(crate) fn proto_authorize_to_domain(
         nonce: r.nonce,
         amr_values: Vec::new(),
         response_mode: None,
+        request: None,
     })
 }
 

@@ -227,6 +227,7 @@ async fn sms_amr_claim_in_tokens() {
             None,
             vec!["sms".to_string()],
             None,
+            None,
         )
         .expect("issue_authorization_code");
 
@@ -289,6 +290,7 @@ async fn no_sms_mfa_means_empty_amr() {
             Some(CodeChallengeMethod::S256),
             None,
             Vec::new(),
+            None,
             None,
         )
         .expect("issue_authorization_code");
@@ -417,6 +419,7 @@ async fn sms_amr_preserved_through_refresh() {
             Some(CodeChallengeMethod::S256),
             None,
             vec!["sms".to_string()],
+            None,
             None,
         )
         .expect("issue_authorization_code");

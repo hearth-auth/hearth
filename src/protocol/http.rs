@@ -6840,6 +6840,7 @@ async fn realm_register_client_dynamic(
         access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
         jwks: None,
         jwks_uri: None,
+        authorization_signed_response_alg: None,
     };
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {

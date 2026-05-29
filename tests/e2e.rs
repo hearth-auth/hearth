@@ -97,6 +97,7 @@ async fn developer_onramp_realm_app_oidc_login() {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             },
         )
         .expect("authorize");

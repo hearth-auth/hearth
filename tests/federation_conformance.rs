@@ -285,6 +285,7 @@ fn rs256_signature_verify_round_trip() {
         e: pub_jwk.e,
         x: None,
         crv: None,
+        y: None,
     };
 
     // Craft the synthetic JWT signing input.
@@ -327,6 +328,7 @@ fn rs256_signature_verify_round_trip() {
         e: other_jwk.e,
         x: None,
         crv: None,
+        y: None,
     };
     assert!(matches!(
         verify_rs256(&jwt, &other_rsa_jwk),
@@ -344,6 +346,7 @@ fn rs256_rejects_non_rsa_jwk() {
         e: None,
         x: None,
         crv: None,
+        y: None,
     };
     let dummy_jwt = "aGVhZGVy.cGF5bG9hZA.c2ln";
     assert!(matches!(
@@ -362,6 +365,7 @@ fn rs256_rejects_jwk_missing_components() {
         e: Some("AQAB".into()),
         x: None,
         crv: None,
+        y: None,
     };
     let dummy_jwt = "aGVhZGVy.cGF5bG9hZA.c2ln";
     assert!(matches!(

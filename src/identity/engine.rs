@@ -2318,6 +2318,13 @@ impl EmbeddedIdentityEngine {
             backchannel_logout_session_supported: true,
             pushed_authorization_request_endpoint: Some(format!("{issuer}/as/par")),
             dpop_signing_alg_values_supported: vec!["ES256".to_string(), "EdDSA".to_string()],
+            request_object_signing_alg_values_supported: vec![
+                "RS256".to_string(),
+                "PS256".to_string(),
+                "ES256".to_string(),
+                "EdDSA".to_string(),
+            ],
+            authorization_signing_alg_values_supported: vec!["EdDSA".to_string()],
         }
     }
 
@@ -4950,6 +4957,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         client.set_access_token_authorization(request.access_token_authorization);
         client.set_jwks(request.jwks.clone());
         client.set_jwks_uri(request.jwks_uri.clone());
+        if let Some(ref alg) = request.authorization_signed_response_alg {
+            if alg != "EdDSA" {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
+                    ),
+                });
+            }
+            client.set_authorization_signed_response_alg(Some(alg.clone()));
+        }
 
         // Serialize and persist
         let client_bytes =
@@ -4978,7 +4995,58 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
-        use crate::identity::oidc::JarmClaims;
+        use crate::identity::oidc::{CodeChallengeMethod as CCM, JarmClaims};
+
+        // 0. JAR (RFC 9101): if a signed request object is present, verify it
+        //    and use its claims to override the outer query parameters. This must
+        //    happen before any other validation so that JAR-supplied values
+        //    (state, redirect_uri, scope, …) are used for subsequent checks.
+        let jar_override;
+        let request = if let Some(ref jar_jwt) = request.request {
+            let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
+
+            // JAR client_id claim must match the outer client_id (RFC 9101 §4).
+            if let Some(ref jar_cid) = jar.client_id {
+                if jar_cid != &request.client_id.to_string() {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "client_id in JAR claims does not match the request".to_string(),
+                    });
+                }
+            }
+
+            let ccm = jar.code_challenge_method.as_deref().and_then(|m| {
+                if m == "S256" {
+                    Some(CCM::S256)
+                } else {
+                    None
+                }
+            });
+
+            jar_override = AuthorizationRequest {
+                client_id: request.client_id.clone(),
+                redirect_uri: jar
+                    .redirect_uri
+                    .unwrap_or_else(|| request.redirect_uri.clone()),
+                scope: jar.scope.unwrap_or_else(|| request.scope.clone()),
+                state: jar.state.unwrap_or_else(|| request.state.clone()),
+                resource: jar.resource.or_else(|| request.resource.clone()),
+                response_type: jar
+                    .response_type
+                    .unwrap_or_else(|| request.response_type.clone()),
+                user_id: request.user_id.clone(),
+                code_challenge: jar
+                    .code_challenge
+                    .or_else(|| request.code_challenge.clone()),
+                code_challenge_method: ccm.or_else(|| request.code_challenge_method.clone()),
+                nonce: jar.nonce.or_else(|| request.nonce.clone()),
+                amr_values: request.amr_values.clone(),
+                response_mode: request.response_mode.clone(),
+                request: None, // consumed — prevent re-entry
+            };
+            &jar_override
+        } else {
+            request
+        };
 
         // 1. Validate response_type
         if request.response_type != "code" {
@@ -5167,8 +5235,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         let issuer = self.config.oidc.issuer.clone();
 
-        // 10. JARM — if a JWT response mode was requested, sign the response.
-        let response_mode = request.response_mode.clone().unwrap_or(ResponseMode::Query);
+        // 10. JARM — if a JWT response mode was requested OR the client enforces JARM,
+        //     sign the response. When the client has `authorization_signed_response_alg`
+        //     set, any plain response_mode is upgraded to query.jwt (JARM §4).
+        let response_mode = if client.authorization_signed_response_alg().is_some() {
+            let requested = request.response_mode.clone().unwrap_or(ResponseMode::Query);
+            if requested.is_jarm() {
+                requested
+            } else {
+                ResponseMode::QueryJwt
+            }
+        } else {
+            request.response_mode.clone().unwrap_or(ResponseMode::Query)
+        };
         if response_mode.is_jarm() {
             let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
             let now_secs = self.clock.now().as_micros() / 1_000_000;
@@ -6192,9 +6271,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 reason: "alg:none is not permitted in signed request objects".to_string(),
             });
         }
-        if alg != "EdDSA" && alg != "RS256" {
+        if alg != "EdDSA" && alg != "RS256" && alg != "ES256" && alg != "PS256" {
             return Err(IdentityError::InvalidJar {
-                reason: format!("unsupported algorithm '{alg}'; only EdDSA and RS256 are accepted"),
+                reason: format!(
+                    "unsupported algorithm '{alg}'; supported: RS256, PS256, ES256, EdDSA"
+                ),
             });
         }
 
@@ -6278,7 +6359,113 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     }
                 })?;
             }
-            _ => unreachable!("alg already restricted to EdDSA/RS256 above"),
+            "PS256" => {
+                if selected.kty != "RSA" {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "PS256 requires an RSA key (kty=RSA)".to_string(),
+                    });
+                }
+                let n_b64 = selected
+                    .n
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "PS256 JWK missing 'n' parameter".to_string(),
+                    })?;
+                let e_b64 = selected
+                    .e
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "PS256 JWK missing 'e' parameter".to_string(),
+                    })?;
+                let n = URL_SAFE_NO_PAD
+                    .decode(n_b64)
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "PS256 JWK 'n' is not valid base64url".to_string(),
+                    })?;
+                let e = URL_SAFE_NO_PAD
+                    .decode(e_b64)
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "PS256 JWK 'e' is not valid base64url".to_string(),
+                    })?;
+                let signing_input = format!("{}.{}", parts[0], parts[1]);
+                let sig_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(parts[2])
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "invalid signature encoding".to_string(),
+                        })?;
+                let components = ring::signature::RsaPublicKeyComponents {
+                    n: n.as_slice(),
+                    e: e.as_slice(),
+                };
+                components
+                    .verify(
+                        &ring::signature::RSA_PSS_2048_8192_SHA256,
+                        signing_input.as_bytes(),
+                        &sig_bytes,
+                    )
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "PS256 signature verification failed".to_string(),
+                    })?;
+            }
+            "ES256" => {
+                if selected.kty != "EC" {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "ES256 requires an EC key (kty=EC)".to_string(),
+                    });
+                }
+                if selected.crv.as_deref() != Some("P-256") {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "ES256 JWK must have crv=P-256".to_string(),
+                    });
+                }
+                let x_b64 = selected
+                    .x
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "ES256 JWK missing 'x' parameter".to_string(),
+                    })?;
+                let y_b64 = selected
+                    .y
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "ES256 JWK missing 'y' parameter".to_string(),
+                    })?;
+                let x_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(x_b64)
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "ES256 JWK 'x' is not valid base64url".to_string(),
+                        })?;
+                let y_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(y_b64)
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "ES256 JWK 'y' is not valid base64url".to_string(),
+                        })?;
+                // ring expects uncompressed point: 0x04 || x || y
+                let mut pk_bytes = Vec::with_capacity(1 + x_bytes.len() + y_bytes.len());
+                pk_bytes.push(0x04);
+                pk_bytes.extend_from_slice(&x_bytes);
+                pk_bytes.extend_from_slice(&y_bytes);
+                let signing_input = format!("{}.{}", parts[0], parts[1]);
+                let sig_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(parts[2])
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "invalid signature encoding".to_string(),
+                        })?;
+                let public_key = ring::signature::UnparsedPublicKey::new(
+                    &ring::signature::ECDSA_P256_SHA256_FIXED,
+                    &pk_bytes,
+                );
+                public_key
+                    .verify(signing_input.as_bytes(), &sig_bytes)
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "ES256 signature verification failed".to_string(),
+                    })?;
+            }
+            _ => unreachable!("alg already restricted to EdDSA/RS256/ES256/PS256 above"),
         }
 
         // 6. Decode claims.
@@ -8706,6 +8893,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Some(mode) = request.access_token_authorization {
             client.set_access_token_authorization(mode);
         }
+        if let Some(alg_opt) = &request.authorization_signed_response_alg {
+            if let Some(alg) = alg_opt {
+                if alg != "EdDSA" {
+                    return Err(IdentityError::InvalidInput {
+                        reason: format!(
+                            "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
+                        ),
+                    });
+                }
+            }
+            client.set_authorization_signed_response_alg(alg_opt.clone());
+        }
 
         let updated_bytes =
             serde_json::to_vec(&client).map_err(|e| IdentityError::Serialization {
@@ -9168,6 +9367,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         nonce: Option<String>,
         amr_values: Vec<String>,
         response_mode: Option<crate::identity::oidc::ResponseMode>,
+        jar_request: Option<String>,
     ) -> Result<AuthorizationResponse, IdentityError> {
         let request = AuthorizationRequest {
             client_id: client_id.clone(),
@@ -9182,6 +9382,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce,
             amr_values,
             response_mode,
+            request: jar_request,
         };
         self.authorize(realm_id, &request)
     }
@@ -13499,6 +13700,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize should succeed");
@@ -13534,6 +13736,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize");
@@ -13597,6 +13800,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize");
@@ -13660,6 +13864,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize");
@@ -13738,6 +13943,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize");
@@ -13802,6 +14008,7 @@ mod tests {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             },
         );
         assert!(
@@ -13835,6 +14042,7 @@ mod tests {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             },
         );
         assert!(
@@ -14173,6 +14381,7 @@ mod tests {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             },
         );
         assert!(result.is_ok(), "first use of nonce should succeed");
@@ -14193,6 +14402,7 @@ mod tests {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             },
         );
         assert!(
@@ -14216,6 +14426,7 @@ mod tests {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             },
         );
         assert!(result.is_ok(), "different nonce should succeed");
@@ -14275,6 +14486,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             );
             assert!(
@@ -14306,6 +14518,7 @@ mod tests {
             resource: None,
             amr_values: Vec::new(),
             response_mode: None,
+            request: None,
         };
 
         // Use the nonce at t=0.
@@ -14366,6 +14579,7 @@ mod tests {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -14394,6 +14608,7 @@ mod tests {
                 resource: None,
                 amr_values: Vec::new(),
                 response_mode: None,
+                request: None,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -15396,6 +15611,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize");
@@ -15515,6 +15731,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize");
@@ -15633,6 +15850,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize");
@@ -15820,6 +16038,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize");
@@ -16068,6 +16287,7 @@ mod tests {
                                             resource: None,
                                             amr_values: Vec::new(),
                                         response_mode: None,
+                                        request: None,
                     }).expect("authorize");
 
                     let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -16184,6 +16404,7 @@ mod tests {
                                     resource: None,
                                     amr_values: Vec::new(),
                                 response_mode: None,
+                                request: None,
                 }).expect("authorize");
 
                 let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -17169,6 +17390,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize");
@@ -17415,6 +17637,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect_err("must reject public client with no PKCE");
@@ -17449,6 +17672,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect_err("must reject challenge without S256 method");
@@ -17522,6 +17746,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("confidential client must succeed without PKCE");
@@ -17651,6 +17876,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect_err("invalid scope chars must be rejected");
@@ -17684,6 +17910,7 @@ mod tests {
                     resource: None,
                     amr_values: Vec::new(),
                     response_mode: None,
+                    request: None,
                 },
             )
             .expect("authorize must succeed");
