@@ -2,8 +2,9 @@ version: v2
 modules:
   - path: .
     name: buf.build/hearth/api
-deps:
-  - buf.build/googleapis/googleapis
+# google/api protos are vendored locally in proto/google/api/ (Apache-2.0).
+# No remote buf.build dep needed; proto/ include path resolves them for both
+# protoc (build.rs) and buf (lint / format / breaking).
 lint:
   use:
     - STANDARD

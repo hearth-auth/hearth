@@ -45,9 +45,7 @@ jobs:
           persist-credentials: false
 
       - name: Install buf
-        uses: bufbuild/buf-action@175c91c9b9326d2ec3017dea7e817f05e0e72eac # v1.0.3
-        with:
-          setup_only: true
+        uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1.50.0
 
       - name: buf lint
         run: make proto-lint
