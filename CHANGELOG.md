@@ -20,6 +20,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Token endpoint client-auth error normalization (HEA-994)** — all client
+  authentication failures on the token endpoint now return HTTP 401
+  `"invalid_client"` regardless of whether the client ID is unknown or the
+  credential is wrong. Previously `InvalidClient` returned HTTP 400, creating
+  a distinguishable oracle for client ID enumeration (OAuth 2.0 Security BCP
+  §2.2 / RFC 6749 §5.2). gRPC `InvalidClientAssertion` also no longer leaks
+  the internal reason string to callers (HEA-992).
+
+- **`private_key_jwt` JTI replay-store purged on realm deletion (HEA-995)** —
+  `oauth:ca-jti:*` sentinels are now swept during cascade realm delete,
+  preventing unbounded storage growth when realms are recycled.
+
 - **Session limit enforcement hardening (HEA-982)** — five findings from the
   HEA-981 security review are resolved:
   - **SEC-1 (TOCTOU):** The per-user lock now covers the session write; the
