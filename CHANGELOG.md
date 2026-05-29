@@ -24,6 +24,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   the client supplied one. The field is now forwarded to the domain layer;
   FAPI Advanced clients can complete PAR using the HTTP endpoint.
 
+- **RFC 9126 §4 `client_id` mismatch check in PAR-backed authorize (HEA-1018)** —
+  The `POST /v1/authorize` and `GET /ui/oauth/authorize` handlers previously did
+  not verify that the `client_id` in the request matched the `client_id` stored
+  with the pushed authorization request. An attacker who obtained a `request_uri`
+  (e.g. via referrer leakage) could have submitted it under a different client
+  identity. Both handlers now return `invalid_request` when the `client_id`
+  parameter is present and does not match the stored PAR entry. Two new HTTP-layer
+  regression tests cover replay attacks (FAPI-B-09) and `client_id` mismatch
+  (FAPI-B-10).
+
 - **PAR `request_uri` now consumed in HTTP authorize handler (HEA-1017)** —
   `GET /ui/oauth/authorize` and `POST /v1/authorize` previously ignored the
   `request_uri` query/body parameter, causing FAPI 2.0 Baseline realms to

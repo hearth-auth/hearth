@@ -1874,6 +1874,35 @@ async fn authorize(
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };
+
+        // RFC 9126 §4: if client_id is present in the request body, it MUST
+        // match the client_id stored in the PAR entry.
+        if !body.client_id.is_empty() {
+            let body_client_id = match uuid::Uuid::parse_str(&body.client_id) {
+                Ok(u) => ClientId::new(u),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_request",
+                            "error_description": "invalid client_id"
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            if body_client_id != stored.client_id {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "client_id mismatch with pushed authorization request"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+
         AuthorizationRequest {
             client_id: stored.client_id,
             redirect_uri: stored.redirect_uri,
@@ -2223,7 +2252,7 @@ async fn token_exchange_impl(
                     let resp = pb::OidcTokenResponse {
                         access_token: tokens.access_token().to_string(),
                         id_token: String::new(),
-                        token_type: "Bearer".to_string(),
+                        token_type: if dpop_jkt.is_some() { "DPoP" } else { "Bearer" }.to_string(),
                         expires_in: 900,
                         refresh_token: tokens.refresh_token().to_string(),
                     };
@@ -6464,7 +6493,7 @@ async fn realm_token_exchange(
                     let resp = pb::OidcTokenResponse {
                         access_token: tokens.access_token().to_string(),
                         id_token: String::new(),
-                        token_type: "Bearer".to_string(),
+                        token_type: if dpop_jkt.is_some() { "DPoP" } else { "Bearer" }.to_string(),
                         expires_in: 900,
                         refresh_token: tokens.refresh_token().to_string(),
                     };

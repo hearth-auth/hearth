@@ -13,6 +13,9 @@
 //! - FAPI-B-06: Standard-profile client in FAPI Baseline realm must be DPoP-constrained
 //! - FAPI-B-07: HTTP server — PAR→authorize flow succeeds end-to-end (HEA-1025)
 //! - FAPI-B-08: HTTP server — direct authorize (no PAR) fails with FAPI error (HEA-1025)
+//! - FAPI-B-09: HTTP server — replay of consumed request_uri rejected (HEA-1018)
+//! - FAPI-B-10: HTTP server — client_id mismatch on authorize rejected (RFC 9126 §4)
+//! - FAPI-B-11: Realm Baseline enforces DPoP on refresh_token grant for standard-profile clients
 //!
 //! ## Advanced (FAPI-A)
 //! - FAPI-A-01: Missing JAR rejected under Advanced
@@ -1106,4 +1109,245 @@ async fn fapi_b08_http_direct_authorize_without_par_rejected() {
         Some("invalid_request"),
         "FAPI violation must produce error=invalid_request, got: {body}"
     );
+}
+
+/// FAPI-B-09 (HEA-1018): replay of a consumed `request_uri` is rejected.
+///
+/// RFC 9126 §4 requires that a `request_uri` is single-use. `consume_par`
+/// marks the entry `used = true` on first consumption. A second `/authorize`
+/// call with the same `request_uri` must return 400 `invalid_request`.
+#[tokio::test]
+async fn fapi_b09_http_replay_request_uri_rejected() {
+    let (base, realm_uuid, client_uuid, user_uuid, _shutdown) = start_fapi_http_server().await;
+    let http = reqwest::Client::new();
+
+    // Push PAR to get a request_uri.
+    let par_resp: serde_json::Value = http
+        .post(format!("{base}/as/par"))
+        .header("X-Realm-ID", &realm_uuid)
+        .json(&serde_json::json!({
+            "client_id": client_uuid,
+            "redirect_uri": REDIRECT_URI,
+            "scope": "openid",
+            "state": "fapi-b09-state",
+            "response_type": "code",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+            "nonce": "fapi-b09-nonce"
+        }))
+        .send()
+        .await
+        .expect("PAR request")
+        .json()
+        .await
+        .expect("PAR response JSON");
+
+    let request_uri = par_resp["request_uri"]
+        .as_str()
+        .expect("PAR response must include request_uri");
+
+    // First use: must succeed.
+    let first_resp = http
+        .post(format!("{base}/authorize"))
+        .header("X-Realm-ID", &realm_uuid)
+        .json(&serde_json::json!({
+            "user_id": user_uuid,
+            "client_id": client_uuid,
+            "request_uri": request_uri
+        }))
+        .send()
+        .await
+        .expect("first authorize request");
+    assert_eq!(
+        first_resp.status(),
+        reqwest::StatusCode::OK,
+        "first PAR->authorize must succeed, got: {}",
+        first_resp.status()
+    );
+
+    // Second use (replay): must be rejected with invalid_request.
+    let replay_resp = http
+        .post(format!("{base}/authorize"))
+        .header("X-Realm-ID", &realm_uuid)
+        .json(&serde_json::json!({
+            "user_id": user_uuid,
+            "client_id": client_uuid,
+            "request_uri": request_uri
+        }))
+        .send()
+        .await
+        .expect("replay authorize request");
+    assert_eq!(
+        replay_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "replayed request_uri must return 400"
+    );
+    let replay_body: serde_json::Value = replay_resp.json().await.expect("error JSON");
+    assert_eq!(
+        replay_body["error"].as_str(),
+        Some("invalid_request"),
+        "replay must produce error=invalid_request, got: {replay_body}"
+    );
+}
+
+/// FAPI-B-10 (HEA-1018): `client_id` mismatch between `/authorize` body and
+/// stored PAR entry is rejected per RFC 9126 §4.
+///
+/// Without this check an attacker who obtains a `request_uri` (e.g. via
+/// referrer leakage) could submit it using a different `client_id`.
+#[tokio::test]
+async fn fapi_b10_http_client_id_mismatch_rejected() {
+    let (base, realm_uuid, client_uuid, user_uuid, _shutdown) = start_fapi_http_server().await;
+    let http = reqwest::Client::new();
+
+    // Push PAR using the real client.
+    let par_resp: serde_json::Value = http
+        .post(format!("{base}/as/par"))
+        .header("X-Realm-ID", &realm_uuid)
+        .json(&serde_json::json!({
+            "client_id": client_uuid,
+            "redirect_uri": REDIRECT_URI,
+            "scope": "openid",
+            "state": "fapi-b10-state",
+            "response_type": "code",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+            "nonce": "fapi-b10-nonce"
+        }))
+        .send()
+        .await
+        .expect("PAR request")
+        .json()
+        .await
+        .expect("PAR response JSON");
+
+    let request_uri = par_resp["request_uri"]
+        .as_str()
+        .expect("PAR response must include request_uri");
+
+    // Submit /authorize with a different client_id than the one that pushed the PAR.
+    let other_client_id = uuid::Uuid::new_v4().to_string();
+    let mismatch_resp = http
+        .post(format!("{base}/authorize"))
+        .header("X-Realm-ID", &realm_uuid)
+        .json(&serde_json::json!({
+            "user_id": user_uuid,
+            "client_id": other_client_id,
+            "request_uri": request_uri
+        }))
+        .send()
+        .await
+        .expect("mismatch authorize request");
+
+    assert_eq!(
+        mismatch_resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "client_id mismatch must return 400"
+    );
+    let mismatch_body: serde_json::Value = mismatch_resp.json().await.expect("error JSON");
+    assert_eq!(
+        mismatch_body["error"].as_str(),
+        Some("invalid_request"),
+        "client_id mismatch must produce error=invalid_request, got: {mismatch_body}"
+    );
+}
+
+// ── Domain-level regression tests (HEA-1024) ──────────────────────────────────
+
+/// FAPI-B-11 (regression HEA-1024): `grant_type=refresh_token` without DPoP on a
+/// standard-profile client inside a FAPI Baseline realm → `FapiViolation`.
+///
+/// HEA-1022 fixed the realm-level gate for `exchange_authorization_code`; this test
+/// verifies the same gate applies to `refresh_tokens` (FAPI 2.0 Baseline §5.3.3 —
+/// sender-constrained tokens required for *every* token endpoint call).
+#[tokio::test]
+async fn fapi_b11_realm_baseline_enforces_dpop_on_refresh_for_standard_profile_client() {
+    use hearth::identity::{ClientProfile, TokenExchangeRequest};
+
+    const PKCE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const DPOP_JKT: &str = "test-thumbprint-b11";
+
+    // Baseline realm — DPoP is mandatory for every token endpoint call.
+    let env = setup_with_profile(FapiProfile::Baseline).await;
+
+    // Standard-profile client (not FAPI2) — the realm gate must still apply.
+    let client = env
+        .harness
+        .identity()
+        .register_client(
+            &env.realm,
+            &RegisterClientRequest {
+                client_name: "FAPI-B-11 Standard client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("b11-secret".to_string()),
+                grant_types: vec![
+                    "authorization_code".to_string(),
+                    "refresh_token".to_string(),
+                ],
+                require_consent: false,
+                profile: ClientProfile::Standard, // NOT Fapi2 — tests realm-level gate
+                ..Default::default()
+            },
+        )
+        .expect("register standard-profile client");
+
+    // Valid Baseline flow: PAR + PKCE.
+    let par_req = PushedAuthorizationRequest {
+        client_id: client.client_id().clone(),
+        redirect_uri: REDIRECT_URI.to_string(),
+        scope: "openid".to_string(),
+        state: "b11-state".to_string(),
+        resource: None,
+        response_type: "code".to_string(),
+        code_challenge: Some(PKCE_CHALLENGE.to_string()),
+        code_challenge_method: Some(hearth::identity::oidc::CodeChallengeMethod::S256),
+        nonce: Some("b11-nonce".to_string()),
+        request: None,
+    };
+    env.harness
+        .identity()
+        .push_authorization_request(&env.realm, &par_req)
+        .expect("PAR should succeed");
+
+    let auth_req = auth_req_from_par(&par_req, env.user_id.clone());
+    let auth_resp = env
+        .harness
+        .identity()
+        .authorize(&env.realm, &auth_req)
+        .expect("authorize should succeed");
+
+    // Code exchange WITH DPoP — must succeed (realm gate requires it).
+    let initial_tokens = env
+        .harness
+        .identity()
+        .exchange_authorization_code(
+            &env.realm,
+            &TokenExchangeRequest {
+                client_id: client.client_id().clone(),
+                code: auth_resp.code().to_string(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                code_verifier: Some(PKCE_VERIFIER.to_string()),
+                dpop_jkt: Some(DPOP_JKT.to_string()),
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("token exchange with DPoP must succeed in Baseline realm");
+
+    // Refresh WITHOUT DPoP — realm Baseline gate must reject this.
+    let err = env
+        .harness
+        .identity()
+        .refresh_tokens(&env.realm, initial_tokens.refresh_token(), None)
+        .expect_err("FAPI Baseline realm must reject refresh without DPoP");
+    assert!(
+        matches!(err, IdentityError::FapiViolation { .. }),
+        "expected FapiViolation for refresh without DPoP in Baseline realm, got: {err:?}"
+    );
+
+    // Refresh WITH DPoP — must succeed.
+    env.harness
+        .identity()
+        .refresh_tokens(&env.realm, initial_tokens.refresh_token(), Some(DPOP_JKT))
+        .expect("refresh with DPoP must succeed");
 }

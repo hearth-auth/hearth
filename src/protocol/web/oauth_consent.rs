@@ -239,6 +239,22 @@ async fn authorize_get_impl(
             }
         };
 
+        // RFC 9126 §4: if client_id is present in the query string, it MUST
+        // match the client_id stored in the PAR entry.
+        if !q.client_id.is_empty() {
+            let q_client_id = match uuid::Uuid::parse_str(&q.client_id) {
+                Ok(u) => ClientId::new(u),
+                Err(_) => {
+                    return handlers_common::bad_request("invalid client_id");
+                }
+            };
+            if q_client_id != stored.client_id {
+                return handlers_common::bad_request(
+                    "client_id mismatch with pushed authorization request",
+                );
+            }
+        }
+
         // Build an AuthorizeQuery from the stored PAR params so the MFA
         // intercepts below can use the same q-accepting API.
         let par_q = AuthorizeQuery {
