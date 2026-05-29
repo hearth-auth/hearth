@@ -210,6 +210,76 @@ The following Keycloak features do not migrate automatically. They require manua
 
 ---
 
+## Migration gaps
+
+The importer skips four categories of Keycloak data that have no direct equivalent in Hearth's current data model. Each gap lists what Keycloak stores, why Hearth does not import it, and what to do after migration.
+
+> **See also:** The [SDK migration guide](../../docs-site/docs/sdks/migration-from-keycloak.md) covers the same gaps from a code and SDK-swap perspective.
+
+### Client roles
+
+**What Keycloak stores:** Roles scoped to a specific client (application), exposed as `resource_access.<client>.roles` in the token.
+
+**Why not imported:** Hearth uses realm-scoped roles only. There is no per-client role namespace. Client roles would conflict with or shadow realm roles of the same name across multiple clients.
+
+**Workaround:** Recreate client roles as realm roles using a naming convention that encodes the client. For example, use `my-app:billing-admin` instead of `billing-admin` scoped to `my-app`. Assign those roles to the same users who held them in Keycloak:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"role": "my-app:billing-admin"}' \
+  http://127.0.0.1:8420/admin/realms/<realm-id>/users/<user-id>/roles
+```
+
+### Composite-role parent links
+
+**What Keycloak stores:** Composite roles contain other roles; the parent-child composition is stored as a set of member role references on the parent.
+
+**Why not imported:** Hearth maps roles directly to permission sets at token-issuance time rather than composing roles through inheritance trees. The flat `roles: string[]` and `permissions: string[]` JWT claims replace the need for role inheritance.
+
+**Workaround:** Identify users who held composite roles in Keycloak. In Hearth, assign those users the equivalent leaf roles (already imported as realm roles) and map any additional permissions the composite parent granted via the admin UI:
+
+1. Open **Admin → Realms → \<realm\> → Roles → \<role\> → Permissions**
+2. Add the permission strings that the composite role previously implied
+3. Assign the leaf roles to affected users as needed
+
+### Groups
+
+**What Keycloak stores:** Hierarchical containers of users, used for bulk role assignment and attribute propagation.
+
+**Why not imported:** Keycloak groups serve two different purposes — access-control grouping (closer to Hearth RBAC groups) and B2B tenancy (closer to Hearth Organizations). The importer cannot safely infer which purpose each group served, so it skips all groups to avoid creating incorrect RBAC or Organization records.
+
+**Workaround:** After migration, recreate groups based on their original purpose:
+
+- Groups used for **access control** → create Hearth RBAC groups in `hearth.yaml` under `realms.<name>.groups`, then assign users
+- Groups used for **B2B tenancy** → create Hearth Organizations via the admin UI or:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Acme Corp", "slug": "acme-corp"}' \
+  http://127.0.0.1:8420/admin/realms/<realm-id>/organizations
+```
+
+### Required Actions
+
+**What Keycloak stores:** Required Actions (such as `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `CONFIGURE_TOTP`, `TERMS_AND_CONDITIONS`) are flags on a user record that force the user to complete a specific step at next login.
+
+**Why not imported:** Hearth does not currently implement the same Required Action model. There is no field on the imported user record for pending required actions, so migrated users arrive with no forced next-login step.
+
+**Workaround by action type:**
+
+| Keycloak Required Action | Post-migration step |
+|---|---|
+| `VERIFY_EMAIL` | The `email_verified` flag is imported as-is. If it was `false`, Hearth marks the account unverified. Trigger re-verification: `POST /admin/realms/<realm-id>/users/<user-id>/send-verification-email` |
+| `UPDATE_PASSWORD` | Disable the account (`"status": "inactive"`) and issue a magic-link or admin-reset to force a password change before re-enabling. |
+| `CONFIGURE_TOTP` | TOTP credentials are not portable from Keycloak (see Out of scope). If MFA is required by the realm auth policy, Hearth prompts enrollment automatically at next login. |
+| `TERMS_AND_CONDITIONS` | No equivalent. Implement acceptance tracking in your application layer if required. |
+
+---
+
 ## Rollback plan
 
 Because the Hearth import writes to a separate data directory and Keycloak is unchanged, rollback is straightforward:

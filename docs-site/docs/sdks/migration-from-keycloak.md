@@ -14,6 +14,11 @@ It covers data migration, SDK swap, and authorization model translation.
 > current Hearth main branch (May 2025). Verify claim names against your
 > specific Keycloak configuration.
 
+> **Operator migration guide:** For the full `hearth migrate keycloak` CLI
+> walkthrough, data directory setup, post-migration checklist, and detailed
+> migration gap rationale, see the
+> [Migrating from Keycloak operator guide](../../docs/guides/migrating-from-keycloak.md).
+
 ## Concept mapping
 
 | Keycloak | Hearth | Notes |
@@ -71,11 +76,20 @@ Imported 1 248 users, 3 failed (see migration.log)
   verbatim and verified natively; they upgrade to Argon2id on the user's next
   password change (no forced re-authentication required)
 - **Realm roles** — mapped 1:1 to Hearth roles on the imported realm
-- **Groups** — mapped to Hearth groups; group membership preserved
 - **OAuth clients** — `client_id` and `redirect_uris` preserved
 
 ### What needs manual follow-up
 
+- **Client roles** — Keycloak client-scoped roles are not imported; recreate as
+  realm roles with a naming convention such as `my-app:billing-admin`
+- **Composite-role parent links** — role composition hierarchies are not
+  imported; map roles to permission sets manually in
+  **Admin → Realms → \<realm\> → Roles → \<role\> → Permissions**
+- **Groups** — not imported because Keycloak groups serve dual purposes
+  (access control vs. B2B tenancy); recreate as Hearth RBAC groups or
+  Organizations after migration
+- **Required Actions** — pending `VERIFY_EMAIL`, `UPDATE_PASSWORD`,
+  `CONFIGURE_TOTP`, and similar flags are not preserved; see workarounds below
 - **Client secrets** — Keycloak exports do not include plaintext client secrets;
   rotate them in Hearth after import
 - **Identity providers (IdP)** — SAML/OIDC IdP configurations are not imported;
@@ -84,6 +98,21 @@ Imported 1 248 users, 3 failed (see migration.log)
   Hearth role→permission assignments manually
 - **TOTP / WebAuthn credentials** — authenticator registrations are not portable;
   users re-enroll on next login
+
+### Required Actions workarounds
+
+Users with pending Required Actions in Keycloak arrive in Hearth with no forced
+next-login step. Handle each action type:
+
+| Keycloak Required Action | Post-migration step |
+|---|---|
+| `VERIFY_EMAIL` | `email_verified` is imported as-is; if `false`, trigger: `POST /admin/realms/<realm-id>/users/<user-id>/send-verification-email` |
+| `UPDATE_PASSWORD` | Disable the account and issue an admin password reset before re-enabling |
+| `CONFIGURE_TOTP` | If MFA is required by the realm policy, Hearth prompts enrollment at next login automatically |
+| `TERMS_AND_CONDITIONS` | No equivalent; implement acceptance tracking in your application layer |
+
+> For full gap rationale and step-by-step workarounds, see the
+> [Operator migration guide — Migration gaps](../../docs/guides/migrating-from-keycloak.md#migration-gaps).
 
 ## Step 3 — Update your application code
 
@@ -257,7 +286,7 @@ Hearth's admin UI and update your application's `HEARTH_CLIENT_SECRET`.
 
 ## Further reading
 
-- [Keycloak migration CLI reference](https://github.com/hearth-auth/hearth/blob/main/docs/specs/IMPLEMENTATION_ORDER.md) — `hearth migrate keycloak` flags
+- [Operator migration guide](../../docs/guides/migrating-from-keycloak.md) — full CLI walkthrough, post-migration checklist, and migration gap details
 - [RBAC guide](../rbac.md) — Hearth role/permission model in depth
 - [TypeScript SDK quickstart](./typescript.md)
 - [Go SDK quickstart](./go.md)

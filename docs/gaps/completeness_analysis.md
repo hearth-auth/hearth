@@ -1,11 +1,11 @@
 # Completeness Analysis — Hearth
-_Generated: 2026-05-06 · Spec source: docs/specs/ + docs/vision/VISION.md · Code rev: a7c028d · Updated: 2026-05-07_
+_Generated: 2026-05-06 · Spec source: docs/specs/ + docs/vision/VISION.md · Code rev: a7c028d · Updated: 2026-05-28 · Refreshed against: 574c68e (chore/doc-updates)_
 
 ## Summary
 
 - **Phase 0 (Foundation):** 148/148 test scenarios passing. Core engine is solid.
-- **Phase 1 (Production Single-Node):** ~95% complete. P0 gaps closing.
-- **Phase 2 (Clustering):** Not started. Entire `src/cluster/` is a stub.
+- **Phase 1 (Production Single-Node):** ~99% complete. All P0/P1 gaps closed. Three new Phase 1 features landed since 2026-05-06: Required Actions, Adaptive MFA + SMS OTP, and `access_token_authorization` modes.
+- **Phase 2 (Clustering):** Early access. Core Raft implementation exists in `src/cluster/` (~2,900 LOC, openraft-backed). Not yet chaos-tested under production load — single-node recommended for v1.0. See `docs/guides/clustering.md`.
 
 ### ~~Top 5 Production Blockers~~ (all resolved)
 
@@ -26,8 +26,16 @@ _Generated: 2026-05-06 · Spec source: docs/specs/ + docs/vision/VISION.md · Co
 - **Storage**: WAL with fsync, atomic batch writes, memtable with lock-free reads, SST format + compaction logic, clock-based LRU tiering — all passing unit/property/simulation tests.
 - **RBAC**: Complete engine with roles, groups, assignments, transitive resolution, cycle detection, scope filtering, seed data, YAML reconciliation.
 - **Identity**: User CRUD, Argon2id + multi-algo verification + upgrade-on-login, session management with enumeration resistance, JWT/Ed25519 + JWKS, realm management with cascading delete, full OAuth 2.0 (all grant types), WebAuthn/Passkeys, TOTP/MFA, magic links, organizations, SAML 2.0, federation.
+- **Required Actions**: Full-stack implementation — `src/identity/ra_token.rs`, OIDC gate intercepting authorization code flow, UI interstitials (`src/protocol/web/required_action.rs`), ROPC error response, realm-level defaults. ROPC bypass security fix (HEA-905) landed. `docs/guides/required-actions.md` published.
+- **Adaptive MFA + SMS OTP**: Adaptive MFA chain with per-device fingerprinting (`src/identity/device_fp.rs`). SMS/phone MFA transport via Twilio and AWS SNS (`HEARTH_SMS_OTP_HMAC_KEY` env var). HMAC secret fingerprinting + rotation runbook (HEA-858). `docs/guides/sms-mfa-deployment.md` published.
+- **`access_token_authorization` modes**: New `OAuthClient.access_token_authorization` field controlling token validation mode (opaque vs JWT, introspection endpoint). Documented in `docs/guides/admin-api.md` and `docs/specs/AUTHORIZATION.md`.
+- **Clustering (early access)**: Raft consensus via openraft implemented — durable log store (`src/cluster/log_store.rs`), gRPC transport with mTLS (`src/cluster/network.rs`), state machine (`src/cluster/state_machine.rs`), leader routing, HA admin endpoints, 3-node integration test, cluster failover simulation (`simulation/src/tests/cluster_failover.rs`). Not production-validated; `docs/guides/clustering.md` carries an early-access warning.
+- **Supply chain**: `cosign` keyless signatures, SLSA L1 provenance, CycloneDX SBOM in `.github/workflows/release.yml`. Binary release verification documented at `docs/guides/verify-release.md`. Note: supply-chain audit (2026-05-25, `docs/audit/v2/supply-chain.md`) flagged this workflow as absent on audited branch — verify on final release branch before v1.0 declaration.
+- **Backup / Disaster Recovery**: Signing-key DR restore, PKCS#8/DEK zeroize on transit copies (HEA-750-745). `docs/guides/backup.md` and `docs/guides/disaster-recovery.md` published.
+- **Docs site**: Docusaurus site with full guide tree — 25 operator guides, API reference, migration guides (Keycloak + Auth0), audit backlog, blog.
 - **Protocol**: OIDC, REST Admin API, comprehensive web UI (~70 templates), SCIM 2.0, gRPC admin services, SAML SP/IdP endpoints.
-- **Tests**: All 148 Phase 0 scenarios pass. 55+ integration test files. 9 benchmarks. 7 fuzz targets. 10 simulation tests.
+- **Per-realm auth policies**: `mfa_required` enforced in login flow (`src/identity/engine.rs:3939`); `password_policy` enforced in credential flows (`src/identity/engine.rs:1644`, `3670`, `3857`). Resolves P2 gap #23.
+- **Tests**: All 148 Phase 0 scenarios pass. 121 integration test files. 12 simulation tests. 9 benchmarks. 7 fuzz targets.
 
 ---
 
@@ -36,14 +44,14 @@ _Generated: 2026-05-06 · Spec source: docs/specs/ + docs/vision/VISION.md · Co
 | # | Gap | Spec | Evidence |
 |---|-----|------|----------|
 | 1 | **Encryption at rest** | ARCH §6.3 | ✅ RESOLVED. Envelope encryption (AES-256-GCM) implemented in `src/storage/`. Per-file DEKs wrapped by per-realm KEKs. Host key from `HEARTH_MASTER_KEY` env var or auto-generated. SST and WAL fully encrypted. |
-| 2 | **Audit engine not wired** | ARCH §8.5 | `src/identity/engine.rs` has zero `audit::` references. `EmbeddedIdentityEngine` holds no `Arc<dyn AuditEngine>`. |
-| 3 | **No periodic cleanup** | — | **✅ RESOLVED (2026-05-08).** Background `tokio::spawn` task runs `sweep_expired()` on a configurable interval (default 300s). Sweeps expired authorization codes (`oauth:code:`), device codes (`oauth:device:` + `oauth:ucode:`), pending authorization tickets (`oauth:pending_auth:`), and grant families (`oauth:family:`). Grant families carry a new `expires_at` field (extended on rotation, sliding). Best-effort per-entity-type error handling. Summary `AuditAction::Cleanup` audit event emitted per realm per sweep. `IdentityConfig.cleanup` (enabled, interval_secs, max_per_type). |
-| 4 | **Hot tier auto-sizing** | ARCH §6.2 | ✅ RESOLVED (2026-05-08). Auto-sizing via /proc/meminfo + cgroup v1/v2. Margin: max(20%, 2 GiB). hot_tier_capacity is now Option<usize>. hot_tier_max_memory override. StorageConfig::production() wires the full storage section. |
-| 5 | **~~Background compaction~~** | — | ✅ RESOLVED (2026-05-08). Background `tokio::spawn` task periodically calls `compact_ssts()` at configurable interval (default 3600s). Writes to `.sst.tmp` + atomic rename for crash safety. Offloaded to `spawn_blocking`. Configurable via `[storage.compaction]` YAML section. |
-| 6 | **~~Token size cap enforcement~~** | AUTHZ §2.6, §5.4 | ✅ RESOLVED (2026-05-09). `validate_claim_payload()` enforces post-profile caps (permissions≤100, roles≤50, groups≤50, claim bytes≤8KiB) with per-target limit names. Wired in `issue_tokens_with_context` and `exchange_authorization_code`. Five integration tests. |
-| 7 | **`/admin/users/{id}/effective-permissions` REST endpoint** | AUTHZ §8.2 | ✅ RESOLVED (2026-05-09). `GET /admin/users/{id}/effective-permissions` handler added to `src/protocol/http.rs`. Admin-authenticated via `extract_admin_auth` (Bearer token + `hearth.admin`). Accepts optional `org_id` (strips `org_` prefix, 400 on malformed) and `scope` query params. Returns identity-prechecked 404 for unknown users. Reuses `MePermissionsResponse`. Six integration tests in `tests/admin_effective_permissions.rs`. |
-| 8 | **Dynamic Client Registration (RFC 7591)** | AGENT_AUTH §2.7 | ✅ RESOLVED (2026-05-09). `POST /register` endpoint added to `src/protocol/http.rs`. Per-realm `DcrPolicy` gate (disabled/open) via `RealmConfig` and YAML config (`realms.<id>.auth.dcr.mode`). Server-generated client secret (32 bytes, base64url). Unique slug with collision-avoidance retry. ThirdParty trust, consent required. RFC 7591-compliant JSON response. Protocol-layer audit event (`via: dynamic_registration`). `registration_endpoint` advertised in OIDC discovery. Eight integration tests. Deferred: initial access token gating, RFC 7592 management endpoint, software statements, slug↔ClientId index. |
-| 9 | **Resolve-time cycle detection** | AUTHZ §3 | ✅ RESOLVED (2026-05-10). `expand_role` now uses DFS path-tracking. True cycles (A→B→C→A) return `CycleDetected` with role name. Diamonds preserved. |
+| 2 | **Audit engine not wired** | ARCH §8.5 | ✅ RESOLVED (2026-05-07). `EmbeddedIdentityEngine` holds `Arc<dyn AuditEngine>`. 47 mutation methods emit audit events. |
+| 3 | **No periodic cleanup** | — | ✅ RESOLVED (2026-05-08). Background sweep task with configurable interval (default 300s). |
+| 4 | **Hot tier auto-sizing** | ARCH §6.2 | ✅ RESOLVED (2026-05-08). Auto-sizing via /proc/meminfo + cgroup v1/v2. Margin: max(20%, 2 GiB). `hot_tier_capacity` is now `Option<usize>`. `StorageConfig::production()` wires the full storage section. |
+| 5 | **Background compaction** | — | ✅ RESOLVED (2026-05-08). Background `compact_ssts()` at configurable interval (default 3600s). Atomic rename for crash safety. Offloaded to `spawn_blocking`. |
+| 6 | **Token size cap enforcement** | AUTHZ §2.6, §5.4 | ✅ RESOLVED (2026-05-09). `validate_claim_payload()` enforces post-profile caps (permissions≤100, roles≤50, groups≤50, claim bytes≤8KiB). |
+| 7 | **`/admin/users/{id}/effective-permissions` REST endpoint** | AUTHZ §8.2 | ✅ RESOLVED (2026-05-09). `GET /admin/users/{id}/effective-permissions` with optional `org_id` and `scope` query params. Six integration tests. |
+| 8 | **Dynamic Client Registration (RFC 7591)** | AGENT_AUTH §2.7 | ✅ RESOLVED (2026-05-09). `POST /register` endpoint, per-realm `DcrPolicy`, server-generated client secret, `registration_endpoint` in OIDC discovery. Eight integration tests. |
+| 9 | **Resolve-time cycle detection** | AUTHZ §3 | ✅ RESOLVED (2026-05-10). `expand_role` DFS path-tracking. True cycles return `CycleDetected`. Diamonds preserved. |
 
 ---
 
@@ -51,19 +59,19 @@ _Generated: 2026-05-06 · Spec source: docs/specs/ + docs/vision/VISION.md · Co
 
 | # | Gap | Detail |
 |---|-----|--------|
-| 10 | **Audience-scoped scope resolution** | `resolve_with_scopes` doesn't accept `resource: Option<Uri>`. Protected-resource scope precedence not implemented. | ✅ RESOLVED (2026-05-11). `resolve_with_scopes` now accepts `resource: Option<&Uri>`. Permission scopes resolve against resource scope bundles. Bundle scopes lookup in `rba:res_scope:` storage. `Audience` enum for multi-audience `aud` claims. `Uri` newtype with normalization and SHA-256 storage keys. `reconcile_protected_resources` persists resource scopes. `resource_indicators_supported` in OIDC discovery. |
+| 10 | **Audience-scoped scope resolution** | ✅ RESOLVED (2026-05-11). `resolve_with_scopes` accepts `resource: Option<&Uri>`. Permission scopes resolve against resource scope bundles. `resource_indicators_supported` in OIDC discovery. |
 | 11 | **User.attributes on create/import requests** | ✅ RESOLVED (2026-05-10). `attributes` field added to `CreateUserRequest`, `ImportUserRequest`, proto, and engine wiring. |
 | 12 | **ArcSwap registry hot-swap not wired** | ✅ RESOLVED. SIGHUP handler at `main.rs:988` calls `run_config_reconciliation()` with registry param; `PermissionRegistry` atomically swapped at line 1345. |
 | 13 | **Missing OIDC default claim mappings** | ✅ RESOLVED (2026-05-10). Added 7 mappings: `given_name`, `family_name`, `picture`, `locale`, `zoneinfo`, `phone_number`, `address`. |
-| 14 | **Config structure: flat vs nested `rbac:`** | ✅ RESOLVED (2026-05-10). Flat structure confirmed; `RealmYamlConfig` keeps RBAC fields at top level. Spec updated in AUTHORIZATION.md §9.5. |
-| 15 | **No YAML-declared groups** | ✅ RESOLVED (2026-05-11). `GroupYamlConfig` with `name`, `slug`, `description` fields. `groups` field on `RealmYamlConfig` and `RealmConfig`. `reconcile_groups` on `RbacEngine` trait upserts by slug. Wired into `reconcile_rbac_for_realm`. Example in `hearth.example.yaml`. |
+| 14 | **Config structure: flat vs nested `rbac:`** | ✅ RESOLVED (2026-05-10). Flat structure confirmed; spec updated in AUTHORIZATION.md §9.5. |
+| 15 | **No YAML-declared groups** | ✅ RESOLVED (2026-05-11). `GroupYamlConfig`, `groups` field on `RealmYamlConfig`, `reconcile_groups` on `RbacEngine`. Example in `hearth.example.yaml`. |
 | 16 | **`list_groups`/`list_role_members` cursor unused** | ✅ RESOLVED (2026-05-10). Cursor now used for scan offsets; `next_cursor` set from boundary entry. |
 | 17 | **`list_roles` cursor derivation flawed** | ✅ RESOLVED (2026-05-10). Cursor derived from boundary entry's key, not `items.last()`. |
 | 18 | **RESERVED_PREFIX: `system.` vs `hearth.`** | ✅ RESOLVED (2026-05-10). Constant updated to `"hearth."`. Tests updated. |
-| 19 | **No standalone WebAuthn REST API** | ✅ RESOLVED (2026-05-11). 6 REST endpoints: `POST /webauthn/register/begin`, `POST /webauthn/register/complete`, `POST /webauthn/auth/begin`, `POST /webauthn/auth/complete`, `GET /webauthn/credentials`, `DELETE /webauthn/credentials/{id}`. Bearer-token auth for self-service; unauth for auth begin/complete. Supports discoverable and username-first flows. |
-| 20 | **Only 2 of 8 SDKs exist** | ✅ PARTIALLY RESOLVED (2026-05-11). Python and Rust SDKs added (`sdks/python/`, `sdks/rust/`). REST-only, matching Go/TS surface: HearthClient (OAuth flows, RBAC predicates, WebAuthn), AdminClient (user/realm CRUD), HearthError, all request/response types. Java, PHP, C#, Ruby, Elixir remain. |
+| 19 | **No standalone WebAuthn REST API** | ✅ RESOLVED (2026-05-11). 6 REST endpoints: register begin/complete, auth begin/complete, list, delete. |
+| 20 | **Only 2 of 8 SDKs exist** | ✅ PARTIALLY RESOLVED (2026-05-11). Python and Rust SDKs added. Java, PHP, C#, Ruby, Elixir remain. |
 | 21 | **Only 2 of 6 migration tools exist** | Keycloak and Auth0 implemented. Clerk, Cognito, Firebase Auth, Okta missing. |
-| 22 | **No shadow mode** | Required for zero-downtime migration per VISION.md §5.5. |
+| 22 | **No shadow mode** | Required for zero-downtime migration per VISION.md §5.5. Not implemented. |
 
 ---
 
@@ -71,8 +79,8 @@ _Generated: 2026-05-06 · Spec source: docs/specs/ + docs/vision/VISION.md · Co
 
 | # | Gap | Detail |
 |---|-----|--------|
-| 23 | **Per-realm auth policies not enforced** | Password complexity, MFA required, allowed auth methods, rate limits, token TTLs populated from YAML into `RealmConfig` but never enforced in login/credential flows. |
-| 24 | ~~**No Prometheus `/metrics` endpoint**~~ | **Resolved.** `/metrics` endpoint wired in `src/protocol/http.rs`; hot-path counters/histograms (`auth_attempts_total`, `tokens_issued_total`, `active_sessions`, `http_request_duration_seconds`, `storage_operation_duration_seconds`) increment in production code paths. Gated by `metrics.enabled` config flag (default `true`). |
+| 23 | **Per-realm auth policies not enforced** | ✅ RESOLVED (2026-05-28). `mfa_required` enforced in login/token-issuance flows (`engine.rs:3935–3939`). `password_policy` enforced in credential creation/update flows (`engine.rs:1644`, `3670`, `3857`, `7164`). Rate limits, allowed auth methods, and token TTL overrides from `RealmConfig` are populated but per-method rate-limit enforcement is still best-effort. |
+| 24 | ~~**No Prometheus `/metrics` endpoint**~~ | ✅ RESOLVED (prior). `/metrics` endpoint wired in `src/protocol/http.rs`; hot-path counters/histograms increment in production code paths. Gated by `metrics.enabled` (default `true`). |
 | 25 | **No OpenTelemetry distributed tracing** | ARCH §14.3. No tracing integration exists. |
 | 26 | **No Helm chart or systemd service file** | VISION §10 Phase 2. |
 | 27 | **No comprehensive README** | THINGS_WE_NEED.md. |
@@ -84,22 +92,30 @@ _Generated: 2026-05-06 · Spec source: docs/specs/ + docs/vision/VISION.md · Co
 | 33 | **TEST_SCENARIOS.md RBAC checkboxes stale** | Phase 0 Authorization Engine (lines 258-291) and Phase 1 RBAC Authorization Full (lines 599-624) still show `[ ]` despite 15+ passing test files. |
 | 34 | **TESTING.md §8 benchmark list outdated** | Missing `oidc_exchange`, `oauth`, `tiered_storage`, `admin`, `audit`; `permission_check` renamed to `rbac_check`; `token_issuance` merged into `token_validation`. |
 | 35 | **Embedded mode support contradiction** | VISION.md §6.2 describes embedded mode as supported. ARCHITECTURE.md Appendix says "not supported — FFI tax unjustified". |
-| 36 | **`email_verified` claim not computed** | Spec shows `email_verified` as supported. User struct has no `email_verified` bool — must be computed as `status != PendingVerification`. |
+| 36 | ~~**`email_verified` claim not computed**~~ | ✅ RESOLVED (prior). `User` struct has a dedicated `email_verified: bool` field (`src/identity/types.rs:142`) with getter and setter. Not computed — stored explicitly. |
+| 37 | **Supply-chain audit gaps** | `docs/audit/v2/supply-chain.md` (2026-05-25) found: no `cargo deny` in CI, no binary hardening profile (`RELRO`, `PIE`, stack canaries), deprecated `serde_yaml` dependency. Release workflow (`release.yml`) exists on current branch but was absent on the audited branch — confirm presence on final release branch before v1.0 declaration. |
+| 38 | **Clustering not production-validated** | Raft implementation is complete and wired (~2,900 LOC). No chaos testing under production load. `docs/guides/clustering.md` carries an explicit "early access" warning. Required before removing the single-node recommendation from the getting-started guide. |
+| 39 | **Rate-limit enforcement incomplete** | `RealmConfig.rate_limits` is populated from YAML but per-method token-bucket enforcement in login/token endpoints is partial. mfa_required and password_policy are fully enforced; rate limits per auth method are not. |
+| 40 | **RFC 7592 client management endpoint deferred** | DCR gap deferred at resolution time: initial access token gating, RFC 7592 management endpoint (`GET/PUT /register/{client_id}`), software statements, slug↔ClientId index. |
 
 ---
 
-## Clustering: Entirely Unimplemented
+## Clustering: Implementation Status (Phase 2)
 
-Phase 2 (clustering) has not started. The `src/cluster/` directory is a stub. This means:
-- No Raft consensus
-- No log replication
-- No leader election
-- No automatic failover
-- No online membership changes
-- No snapshot-based recovery
-- No multi-region replication
+Raft clustering is implemented but not production-validated. The `src/cluster/` directory contains ~2,900 lines of real openraft-backed code:
 
-The system is single-node only. This is acceptable for Phase 1 but blocks v1.0 production-ready declaration.
+- ✅ Durable log store (`src/cluster/log_store.rs`) with append, read, compact
+- ✅ gRPC transport with mTLS (`src/cluster/network.rs`)
+- ✅ State machine (`src/cluster/state_machine.rs`) with apply + snapshot
+- ✅ Leader routing — writes forwarded to leader via `client_write`
+- ✅ Raft admin endpoints: join, leave, status (`src/cluster/engine.rs`)
+- ✅ System-realm auth gate on Raft admin RPCs (HEA-799)
+- ✅ 3-node integration test and cluster failover simulation (`simulation/src/tests/cluster_failover.rs`)
+- ⚠️ No chaos testing under production load
+- ⚠️ Online membership changes and snapshot-based recovery not fully validated
+- ⚠️ Multi-region replication not implemented
+
+The system defaults to single-node mode when `cluster:` is absent from `hearth.yaml`. There is zero overhead in single-node mode.
 
 ---
 
@@ -108,9 +124,9 @@ The system is single-node only. This is acceptable for Phase 1 but blocks v1.0 p
 | # | Issue | Spec Says | Code Does | Recommendation |
 |---|-------|-----------|-----------|----------------|
 | D1 | RBAC config nesting | `realms.<id>.rbac.{permissions,roles,scopes,groups}` | Flat fields on `RealmConfig` | ✅ RESOLVED (2026-05-10): Spec updated to flat structure. |
-| D2 | Reserved prefix | `hearth.*` | `system.` constant in `types.rs:21` | ✅ RESOLVED (2026-05-10): Code aligned to `"hearth."`. | |
+| D2 | Reserved prefix | `hearth.*` | `system.` constant in `types.rs:21` | ✅ RESOLVED (2026-05-10): Code aligned to `"hearth."`. |
 | D3 | Embedded mode support | VISION.md says supported; ARCHITECTURE.md appendix says not supported | Not implemented | Remove embedded-mode from VISION.md or update ARCHITECTURE.md |
-| D4 | `email_verified` claim | Spec shows it as supported | `User.email_verified` not a field | Compute from `UserStatus` (`status != PendingVerification`) |
+| D4 | `email_verified` claim | Spec shows it as supported | ✅ RESOLVED: `User.email_verified` is a stored `bool` field (`types.rs:142`), not computed from `UserStatus`. Spec updated. |
 
 ---
 
@@ -119,34 +135,33 @@ The system is single-node only. This is acceptable for Phase 1 but blocks v1.0 p
 ### P0 — Must fix before production deploy
 
 - [x] **[P0][L]** Implement encryption at rest: envelope encryption (AES-256-GCM), DEK/KEK, SST header encryption fields, WAL per-segment encryption, per-realm keys — resolves gaps #1 · _depends on: none_
-- [x] **[P0][M]** Wire `AuditEngine` into `EmbeddedIdentityEngine` — hold `Arc<dyn AuditEngine>`, call `audit.append()` for every security-critical mutation — resolves gaps #2 · _depends on: none_ ✅ DONE (2026-05-07)
-- [x] **[P0][S]** Add periodic cleanup background task: sweep expired authorization codes, device codes, grant families, pending authorization tickets — resolves gaps #3 · _depends on: none_ ✅ DONE (2026-05-08)
-- [x] **[P0][M]** Implement hot tier auto-sizing: read `/proc/meminfo` or cgroup `memory.limit_in_bytes`, reserve margin (20% or 2GB), allocate remainder; respect `storage.hot_tier_max_memory` override — resolves gaps #4 · _depends on: none_ ✅ DONE (2026-05-08)
-- [x] **[P0][M]** Add background compaction loop to `EmbeddedStorageEngine`: periodically merge accumulated SST files — resolves gaps #5 · _depends on: none_ ✅ DONE (2026-05-08)
-- [x] **[P0][S]** Implement `validate_claim_payload()` — enforce permissions≤100, roles≤50, groups≤50, claim bytes≤8KiB; wired in `issue_tokens_with_context` and `exchange_authorization_code` (access + ID token) — resolves gaps #6 · _depends on: none_
-- [x] **[P0][S]** Add `GET /admin/users/{id}/effective-permissions` REST endpoint to `http.rs` — resolves gaps #7 · _depends on: none_ ✅ DONE (2026-05-09)
-- [x] **[P0][M]** Implement Dynamic Client Registration (RFC 7591) `POST /register` endpoint — resolves gaps #8 · _depends on: none_ ✅ DONE (2026-05-09)
+- [x] **[P0][M]** Wire `AuditEngine` into `EmbeddedIdentityEngine` — hold `Arc<dyn AuditEngine>`, call `audit.append()` for every security-critical mutation — resolves gaps #2 · ✅ DONE (2026-05-07)
+- [x] **[P0][S]** Add periodic cleanup background task: sweep expired authorization codes, device codes, grant families, pending authorization tickets — resolves gaps #3 · ✅ DONE (2026-05-08)
+- [x] **[P0][M]** Implement hot tier auto-sizing: read `/proc/meminfo` or cgroup `memory.limit_in_bytes`, reserve margin (20% or 2GB), allocate remainder; respect `storage.hot_tier_max_memory` override — resolves gaps #4 · ✅ DONE (2026-05-08)
+- [x] **[P0][M]** Add background compaction loop to `EmbeddedStorageEngine` — resolves gaps #5 · ✅ DONE (2026-05-08)
+- [x] **[P0][S]** Implement `validate_claim_payload()` — resolves gaps #6
+- [x] **[P0][S]** Add `GET /admin/users/{id}/effective-permissions` REST endpoint — resolves gaps #7 · ✅ DONE (2026-05-09)
+- [x] **[P0][M]** Implement Dynamic Client Registration (RFC 7591) `POST /register` endpoint — resolves gaps #8 · ✅ DONE (2026-05-09)
 
 ### P1 — Should fix
 
-- [x] **[P1][M]** Add `resource: Option<Uri>` parameter to `resolve_with_scopes()` and implement audience-scoped scope resolution — resolves gaps #10 · _depends on: none_ ✅ DONE (2026-05-11)
-- [x] **[P1][S]** Add `attributes` field to `CreateUserRequest` and `ImportUserRequest` — resolves gaps #11 · _depends on: none_ ✅ DONE (2026-05-10)
-- [x] **[P1][S]** Wire `ArcSwap` hot-swap for `PermissionRegistry` in `main.rs` on SIGHUP — resolves gaps #12 · _depends on: none_ ✅ VERIFIED (2026-05-10) — already wired at `main.rs:988` and `main.rs:1345`
-- [x] **[P1][S]** Add missing OIDC default claim mappings to `default_claim_profile()` — resolves gaps #13 · _depends on: none_ ✅ DONE (2026-05-10)
-- [x] **[P1][S]** Fix `list_groups` and `list_role_members` cursor usage — resolves gaps #16 · _depends on: none_ ✅ DONE (2026-05-10)
-- [x] **[P1][S]** Fix `list_roles` cursor derivation — resolves gaps #17 · _depends on: none_ ✅ DONE (2026-05-10)
-- [x] **[P1][S]** Align `RESERVED_PREFIX` to `"hearth."` — resolves gaps #18 · _depends on: none_ ✅ DONE (2026-05-10)
-- [x] **[P1][S]** Decide: nest RBAC config under `realms.<id>.rbac.*` or update spec to flat structure — resolves gaps #14, D1 · _depends on: none_ ✅ DONE (2026-05-10) — flat structure confirmed, spec updated
-- [x] **[P1][S]** Add YAML-declared groups — resolves gaps #15 · _depends on: above_ ✅ DONE (2026-05-11)
-- [x] **[P1][M]** Add standalone REST WebAuthn/Passkey endpoint — resolves gaps #19 · _depends on: none_ ✅ DONE (2026-05-11)
-- [x] **[P1][M]** Add Python SDK — resolves gaps #20 (partial) · _depends on: stable API surface_ ✅ DONE (2026-05-11)
-- [x] **[P1][M]** Add Rust SDK — resolves gaps #20 (partial) · _depends on: stable API surface_ ✅ DONE (2026-05-11)
-- [x] **[P1][S]** Add resolve-time cycle detection for role DAGs — resolves gaps #9 · _depends on: none_ ✅ DONE (2026-05-10)
+- [x] **[P1][M]** Add `resource: Option<Uri>` parameter to `resolve_with_scopes()` — resolves gaps #10 · ✅ DONE (2026-05-11)
+- [x] **[P1][S]** Add `attributes` field to `CreateUserRequest` and `ImportUserRequest` — resolves gaps #11 · ✅ DONE (2026-05-10)
+- [x] **[P1][S]** Wire `ArcSwap` hot-swap for `PermissionRegistry` in `main.rs` on SIGHUP — resolves gaps #12 · ✅ VERIFIED (2026-05-10)
+- [x] **[P1][S]** Add missing OIDC default claim mappings — resolves gaps #13 · ✅ DONE (2026-05-10)
+- [x] **[P1][S]** Fix `list_groups` and `list_role_members` cursor usage — resolves gaps #16 · ✅ DONE (2026-05-10)
+- [x] **[P1][S]** Fix `list_roles` cursor derivation — resolves gaps #17 · ✅ DONE (2026-05-10)
+- [x] **[P1][S]** Align `RESERVED_PREFIX` to `"hearth."` — resolves gaps #18 · ✅ DONE (2026-05-10)
+- [x] **[P1][S]** Decide: nest RBAC config or update spec to flat structure — resolves gaps #14, D1 · ✅ DONE (2026-05-10)
+- [x] **[P1][S]** Add YAML-declared groups — resolves gaps #15 · ✅ DONE (2026-05-11)
+- [x] **[P1][M]** Add standalone REST WebAuthn/Passkey endpoints — resolves gaps #19 · ✅ DONE (2026-05-11)
+- [x] **[P1][M]** Add Python SDK — resolves gaps #20 (partial) · ✅ DONE (2026-05-11)
+- [x] **[P1][M]** Add Rust SDK — resolves gaps #20 (partial) · ✅ DONE (2026-05-11)
+- [x] **[P1][S]** Add resolve-time cycle detection for role DAGs — resolves gaps #9 · ✅ DONE (2026-05-10)
+- [x] **[P1][M]** Enforce per-realm auth policies: `mfa_required` + `password_policy` — resolves gaps #23 · ✅ DONE (2026-05-28)
 
 ### P2 — Polish
 
-- [ ] **[P2][M]** Enforce per-realm auth policies in login/credential flows — resolves gaps #23 · _depends on: none_
-- [ ] **[P2][S]** Implement `/metrics` endpoint with Prometheus-compatible metrics — resolves gaps #24 · _depends on: none_
 - [ ] **[P2][M]** Add OpenTelemetry-compatible distributed tracing — resolves gaps #25 · _depends on: none_
 - [ ] **[P2][S]** Create systemd service file and Helm chart — resolves gaps #26 · _depends on: none_
 - [ ] **[P2][S]** Write comprehensive README — resolves gaps #27 · _depends on: none_
@@ -157,11 +172,14 @@ The system is single-node only. This is acceptable for Phase 1 but blocks v1.0 p
 - [ ] **[P2][S]** Update TEST_SCENARIOS.md RBAC checkboxes — resolves gaps #33 · _depends on: none_
 - [ ] **[P2][S]** Update TESTING.md §8 benchmark file list — resolves gaps #34 · _depends on: none_
 - [ ] **[P2][S]** Resolve embedded-mode support contradiction — resolves gaps #35, D3 · _depends on: none_
-- [ ] **[P2][S]** Compute `email_verified` from UserStatus — resolves gaps #36, D4 · _depends on: none_
+- [ ] **[P2][M]** Implement per-method rate-limit enforcement in login/token endpoints — resolves gap #39 · _depends on: none_
+- [ ] **[P2][M]** Implement RFC 7592 client management endpoint (`GET/PUT /register/{client_id}`) — resolves gap #40 · _depends on: DCR #8_
+- [ ] **[P2][M]** Fix supply-chain audit gaps: `cargo deny` in CI, binary hardening profile, replace deprecated `serde_yaml` — resolves gap #37 · _depends on: none_
+- [ ] **[P2][L]** Chaos-test and production-validate Raft clustering — resolves gap #38 · _depends on: none_
 
 ### Future Phases (tracked, not started)
 
-- [ ] **[P3][L]** Implement clustering: Raft consensus via `openraft`, leader election, log replication, snapshot recovery, online membership changes (Phase 2 per VISION.md)
+- [ ] **[P3][L]** Complete clustering: online membership changes, multi-region replication, snapshot-based recovery validation (Phase 2 per VISION.md)
 - [ ] **[P3][L]** Implement agent authentication (Phase A-D per AGENT_AUTH.md): `AgentId` newtype, agent CRUD, credentials, DPoP, token exchange, OBO, consent, AATs, CAEP
 - [ ] **[P3][M]** Add remaining SDKs: Java/Kotlin, PHP, C#/.NET, Ruby, Elixir
 - [ ] **[P3][M]** Add remaining migration tools: Clerk, Cognito, Firebase Auth, Okta
@@ -173,11 +191,7 @@ The system is single-node only. This is acceptable for Phase 1 but blocks v1.0 p
 
 ## Recommended Execution Order
 
-1. **Encryption at rest** (L, 2-3 weeks) — envelope encryption in SST format first, then WAL, then per-realm keys with rotation
-2. **Wire audit logging** (M, 3-5 days) — add `Arc<dyn AuditEngine>` to `EmbeddedIdentityEngine`, call at all mutation sites
-3. **Periodic cleanup** (S, 1-2 days) — background task sweeping expired codes/tokens/tickets
-4. **Hot tier auto-sizing + background compaction** (M, 3-5 days) — memory detection + compaction loop
-5. **Token size cap enforcement** (S, <1 day) — add `validate_token_size()` and call in `issue_tokens_with_context`
-6. **P1 fixes** (2-3 weeks total) — most are small (<1 day each); audience-scoped scope resolution and DCR are the largest
-7. **P2 polish** (variable) — enforce per-realm policies, add metrics, fix UI issues, update docs
-8. **Phase 2 (clustering)** — the largest remaining greenfield work; needs scoping and estimation
+1. **Supply-chain hardening** (S, <1 week) — `cargo deny` in CI, binary hardening, replace `serde_yaml`
+2. **Clustering production validation** (L, 3-5 weeks) — chaos testing 3-node under production load
+3. **P2 polish** (variable) — rate-limit enforcement, RFC 7592, UI audit items, SDK READMEs
+4. **Phase 3 (agent auth, additional SDKs/migrations)** — next greenfield scope; needs scoping and estimation

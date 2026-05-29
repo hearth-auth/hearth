@@ -147,6 +147,16 @@ Each realm has its own Ed25519 signing key, stored under the system realm namesp
 
 ---
 
+## Required actions
+
+**Required actions** are per-user gates on authentication and token issuance. When a user has pending required actions, the OIDC authorization code flow intercepts the login and presents a series of interstitial pages — one per action, in a fixed priority order — before the authorization code is issued. All actions must be completed before the user can obtain tokens.
+
+Four action types are supported: `VERIFY_EMAIL`, `UPDATE_PASSWORD`, `ENROLL_MFA`, and `ENROLL_PHONE_OTP`. Admins assign and remove actions via `PATCH /admin/realms/{realm_id}/users/{user_id}/required-actions`. Two action types (`ENROLL_MFA` and `ENROLL_PHONE_OTP`) can also be injected automatically by the engine based on realm policy — for example, when a realm requires SMS MFA but the user has no verified phone.
+
+→ See [Required actions guide](required-actions.md) for the full admin API, enforcement scope, execution priority, and Keycloak mapping.
+
+---
+
 ## Multi-tenancy routing in depth
 
 Hearth exposes a flat URL namespace — there are no `/realms/{id}/` path prefixes. Realm routing is header-based:
