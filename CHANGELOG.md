@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **DPoP sender-constraint now enforced for all clients in FAPI Baseline realms (HEA-1022)** —
+  The realm-level DPoP gate in `exchange_authorization_code` only checked for
+  `FapiProfile::Advanced`; a `Standard`-profile client in a FAPI Baseline realm could
+  exchange an authorization code without a DPoP proof, receiving a non-sender-constrained
+  access token. The gate now uses `fapi_profile.is_some()`, covering both Baseline and
+  Advanced — consistent with FAPI 2.0 Baseline §5.3.3.
+
 - **JAR `request` field now propagated through HTTP PAR endpoint (HEA-1019)** —
   The HTTP PAR body deserialiser (`HttpParRequest`) was missing the `request`
   field, so signed JAR JWTs sent by FAPI Advanced clients were silently dropped
