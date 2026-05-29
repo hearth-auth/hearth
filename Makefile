@@ -101,7 +101,7 @@ proto-format-check:
 
 ## Check for backwards-incompatible proto changes vs main.
 proto-breaking:
-	cd proto && $(BUF) breaking --against '../.git#branch=main,subdir=proto'
+	cd proto && $(BUF) breaking --against '../.git#branch=origin/main,subdir=proto'
 
 ## Verify generated SDK code is up-to-date with .proto files.
 proto-check:
