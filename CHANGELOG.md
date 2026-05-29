@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **JAR `request` field now propagated through HTTP PAR endpoint (HEA-1019)** —
+  The HTTP PAR body deserialiser (`HttpParRequest`) was missing the `request`
+  field, so signed JAR JWTs sent by FAPI Advanced clients were silently dropped
+  before reaching the engine. This caused every HTTP PAR call to an Advanced
+  FAPI realm to return `invalid_request` (JAR required) regardless of whether
+  the client supplied one. The field is now forwarded to the domain layer;
+  FAPI Advanced clients can complete PAR using the HTTP endpoint.
+
 - **PAR `request_uri` now consumed in HTTP authorize handler (HEA-1017)** —
   `GET /ui/oauth/authorize` and `POST /v1/authorize` previously ignored the
   `request_uri` query/body parameter, causing FAPI 2.0 Baseline realms to
