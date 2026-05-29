@@ -159,8 +159,168 @@ impl Claims {
             .unwrap_or(false)
     }
 
+    /// Return the raw space-delimited `scope` claim string, or `""` if absent.
+    pub fn scope(&self) -> &str {
+        self.payload
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    }
+
+    /// Return `true` iff the token's `groups` claim contains `group`.
+    #[allow(non_snake_case)]
+    pub fn inGroup(&self, group: &str) -> bool {
+        self.payload
+            .get("groups")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|v| v.as_str() == Some(group)))
+            .unwrap_or(false)
+    }
+
+    /// Return `true` iff the token's `oid` claim exactly matches `org`.
+    #[allow(non_snake_case)]
+    pub fn inOrg(&self, org: &str) -> bool {
+        self.payload
+            .get("oid")
+            .and_then(|v| v.as_str())
+            .map(|s| s == org)
+            .unwrap_or(false)
+    }
+
+    /// Return the `token_type` claim (`"access"`, `"refresh"`, or `"required_action"`),
+    /// or `""` if absent.
+    #[allow(non_snake_case)]
+    pub fn tokenType(&self) -> &str {
+        self.payload
+            .get("token_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    }
+
+    /// Return the `oid` (organization ID) claim, or `None` if absent.
+    #[allow(non_snake_case)]
+    pub fn organizationId(&self) -> Option<&str> {
+        self.payload.get("oid").and_then(|v| v.as_str())
+    }
+
+    /// Return the `org_groups` claim (Keycloak-style paths), or an empty vec if absent.
+    #[allow(non_snake_case)]
+    pub fn orgGroups(&self) -> Vec<String> {
+        self.payload
+            .get("org_groups")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Return an arbitrary claim by key.
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.payload.get(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_claims(extra: serde_json::Value) -> Claims {
+        let mut base = json!({
+            "sub": "user_123",
+            "iss": "https://auth.example.com",
+            "aud": "myapp",
+            "exp": 9999999999i64,
+            "iat": 1000000000i64,
+            "jti": "jwt-id-1",
+            "scope": "openid profile email"
+        });
+        if let (Some(obj), Some(extra_obj)) = (base.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        Claims::from_value(base)
+    }
+
+    #[test]
+    fn scope_returns_raw_string() {
+        let c = make_claims(json!({}));
+        assert_eq!(c.scope(), "openid profile email");
+    }
+
+    #[test]
+    fn scope_absent_returns_empty() {
+        let c = Claims::from_value(json!({"sub": "u"}));
+        assert_eq!(c.scope(), "");
+    }
+
+    #[test]
+    fn in_group_true_when_present() {
+        let c = make_claims(json!({"groups": ["admins", "devs"]}));
+        assert!(c.inGroup("admins"));
+        assert!(c.inGroup("devs"));
+        assert!(!c.inGroup("other"));
+    }
+
+    #[test]
+    fn in_group_false_when_claim_absent() {
+        let c = make_claims(json!({}));
+        assert!(!c.inGroup("admins"));
+    }
+
+    #[test]
+    fn in_org_true_when_exact_match() {
+        let c = make_claims(json!({"oid": "org_abc"}));
+        assert!(c.inOrg("org_abc"));
+        assert!(!c.inOrg("org_xyz"));
+    }
+
+    #[test]
+    fn in_org_false_when_claim_absent() {
+        let c = make_claims(json!({}));
+        assert!(!c.inOrg("org_abc"));
+    }
+
+    #[test]
+    fn token_type_returns_value() {
+        let c = make_claims(json!({"token_type": "access"}));
+        assert_eq!(c.tokenType(), "access");
+
+        let c2 = make_claims(json!({"token_type": "required_action"}));
+        assert_eq!(c2.tokenType(), "required_action");
+    }
+
+    #[test]
+    fn token_type_absent_returns_empty() {
+        let c = make_claims(json!({}));
+        assert_eq!(c.tokenType(), "");
+    }
+
+    #[test]
+    fn organization_id_returns_oid() {
+        let c = make_claims(json!({"oid": "org_abc"}));
+        assert_eq!(c.organizationId(), Some("org_abc"));
+    }
+
+    #[test]
+    fn organization_id_absent_returns_none() {
+        let c = make_claims(json!({}));
+        assert_eq!(c.organizationId(), None);
+    }
+
+    #[test]
+    fn org_groups_returns_paths() {
+        let c = make_claims(json!({"org_groups": ["/acme/engineers", "/acme/admins"]}));
+        assert_eq!(c.orgGroups(), vec!["/acme/engineers", "/acme/admins"]);
+    }
+
+    #[test]
+    fn org_groups_absent_returns_empty_vec() {
+        let c = make_claims(json!({}));
+        assert!(c.orgGroups().is_empty());
     }
 }

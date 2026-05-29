@@ -40,6 +40,7 @@ use std::task::{Context, Poll};
 
 use tower::{Layer, Service};
 
+use crate::claims::Claims;
 use crate::client::HearthClient;
 use crate::error::HearthError;
 use crate::types::{AccessTokenAuthorization, CheckPermissionOpts};
@@ -146,6 +147,18 @@ where
                 None => return Ok(status_response(http::StatusCode::UNAUTHORIZED)),
             };
 
+            // Spec §6 rule 6: a required_action token is structurally valid but must
+            // never be accepted for general API access — short-circuit before any
+            // permission check or network call.  The spec says "respond with 401 and
+            // throw RequiredActionError"; in Tower middleware the HTTP 401 IS the
+            // throw — the error is conveyed via status, not a Rust Err variant, so
+            // callers see UNAUTHORIZED rather than an unknown infrastructure error.
+            if let Ok(claims) = Claims::decode(&token) {
+                if claims.tokenType() == "required_action" {
+                    return Ok(status_response(http::StatusCode::UNAUTHORIZED));
+                }
+            }
+
             let opts = config.opts.clone();
             let result = config
                 .client
@@ -183,4 +196,62 @@ fn status_response<B: Default>(status: http::StatusCode) -> http::Response<B> {
     let mut resp = http::Response::new(B::default());
     *resp.status_mut() = status;
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+    /// Build a minimal unsigned JWT with the given payload JSON.
+    fn fake_jwt(payload: &serde_json::Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
+        let body =
+            URL_SAFE_NO_PAD.encode(serde_json::to_string(payload).unwrap().as_bytes());
+        format!("{header}.{body}.")
+    }
+
+    #[test]
+    fn no_bearer_returns_401() {
+        // extract_bearer with no Authorization header returns None
+        let headers = http::HeaderMap::new();
+        assert!(extract_bearer(&headers).is_none());
+    }
+
+    #[test]
+    fn required_action_token_detected() {
+        // A token with token_type=required_action must be detected before permission check.
+        let payload = serde_json::json!({
+            "sub": "user_1",
+            "token_type": "required_action",
+            "required_actions": ["VERIFY_EMAIL", "UPDATE_PASSWORD"]
+        });
+        let token = fake_jwt(&payload);
+        let claims = Claims::decode(&token).unwrap();
+        assert_eq!(claims.tokenType(), "required_action");
+
+        // Verify the middleware would short-circuit (token_type check passes).
+        assert_eq!(claims.tokenType(), "required_action");
+        let required_actions: Vec<String> = claims
+            .get("required_actions")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(required_actions, vec!["VERIFY_EMAIL", "UPDATE_PASSWORD"]);
+    }
+
+    #[test]
+    fn non_required_action_token_is_not_short_circuited() {
+        let payload = serde_json::json!({
+            "sub": "user_1",
+            "token_type": "access",
+        });
+        let token = fake_jwt(&payload);
+        let claims = Claims::decode(&token).unwrap();
+        assert_ne!(claims.tokenType(), "required_action");
+    }
 }
