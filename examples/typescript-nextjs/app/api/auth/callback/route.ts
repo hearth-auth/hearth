@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { hearthClient, CLIENT_ID, REDIRECT_URI } from "@/lib/hearth";
+import { getHearthClient, CLIENT_ID, REDIRECT_URI } from "@/lib/hearth";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(new URL(`/?error=${error}`, req.url));
   }
 
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   const savedState = cookieStore.get("oauth_state")?.value;
   const codeVerifier = cookieStore.get("pkce_verifier")?.value;
 
@@ -23,7 +23,7 @@ export async function GET(req: NextRequest) {
   }
 
   // Exchange the authorization code for tokens.
-  const tokens = await hearthClient.exchangeCode({
+  const tokens = await getHearthClient().exchangeCode({
     clientId: CLIENT_ID,
     code,
     redirectUri: REDIRECT_URI,

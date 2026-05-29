@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Patch example project vulnerabilities (Groups C + D)** — upgraded Go example
+  (`examples/go-gin`) via `go get -u ./...`: `gin` 1.10→1.12, `golang.org/x/crypto`
+  0.29→0.52, `net` 0.25→0.55, plus all transitive stdlib-linked deps. Upgraded
+  TypeScript example (`examples/typescript-nextjs`) to `next@15.5.18` (fixes
+  GHSA-9g9p-9gw9-jx7f DoS) with `postcss` override `^8.5.15` (fixes GHSA-qx2v-qp2m-jg93
+  XSS). Both examples now build with `npm audit` reporting 0 vulnerabilities. Resolves
+  60 Group C + D security alerts (HEA-953).
+
 - **Patch docs-site npm vulnerabilities (Group B)** — upgraded `@docusaurus/core` and
   `@docusaurus/preset-classic` from 3.5.2 → 3.10.1; added `overrides` for
   `serialize-javascript` (→ ^7.0.0, fixes GHSA-5c6j-r48x-rmvq HIGH XSS/code-injection),

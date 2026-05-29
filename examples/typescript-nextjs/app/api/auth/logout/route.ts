@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const response = NextResponse.redirect(
     new URL("/", process.env.HEARTH_REDIRECT_URI!.replace("/api/auth/callback", "")),
