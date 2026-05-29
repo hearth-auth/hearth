@@ -1474,13 +1474,16 @@ fn identity_error_to_response(
         ),
         IdentityError::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid token"),
         IdentityError::TokenExpired => (StatusCode::UNAUTHORIZED, "token expired"),
-        IdentityError::InvalidClient => (StatusCode::BAD_REQUEST, "invalid client"),
+        // RFC 6749 §5.2: all client authentication failures MUST return 401 with
+        // "invalid_client" — distinguishable status codes are an enumeration oracle
+        // (OAuth 2.0 Security BCP §2.2).
+        IdentityError::InvalidClient => (StatusCode::UNAUTHORIZED, "invalid_client"),
         IdentityError::InvalidRedirectUri => (StatusCode::BAD_REQUEST, "invalid redirect URI"),
         IdentityError::InvalidAuthorizationCode => {
             (StatusCode::BAD_REQUEST, "invalid authorization code")
         }
         IdentityError::InvalidGrant { .. } => (StatusCode::BAD_REQUEST, "invalid grant"),
-        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid client"),
+        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid_client"),
         IdentityError::AuthorizationPending => (StatusCode::BAD_REQUEST, "authorization_pending"),
         IdentityError::SlowDown => (StatusCode::BAD_REQUEST, "slow_down"),
         IdentityError::DeviceCodeExpired => (StatusCode::BAD_REQUEST, "expired_token"),

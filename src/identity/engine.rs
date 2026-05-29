@@ -2971,6 +2971,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
+        // 8g. Delete all private_key_jwt client assertion JTIs (replay store).
+        let ca_jti_prefix = keys::client_assertion_jti_scan_prefix();
+        let ca_jti_end = keys::prefix_end(&ca_jti_prefix);
+        let ca_jtis = self
+            .storage
+            .scan(realm_id, &ca_jti_prefix, &ca_jti_end)
+            .map_err(Self::storage_err)?;
+        if !ca_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for entry in &ca_jtis {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
         // 9. Delete realm signing key (check existence first so we can attribute
         //    cascade work even when only the signing key survives a prior crash).
         let key_storage_key = keys::encode_realm_signing_key(realm_id);

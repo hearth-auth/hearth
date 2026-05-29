@@ -45,8 +45,11 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::TokenExpired
         | IdentityError::InvalidCredential { .. }
         | IdentityError::InvalidClient
-        | IdentityError::InvalidClientSecret
-        | IdentityError::InvalidClientAssertion { .. } => (Code::Unauthenticated, err.to_string()),
+        | IdentityError::InvalidClientSecret => (Code::Unauthenticated, err.to_string()),
+        // Deliberately generic — internal reason MUST NOT reach the caller (enumeration resistance).
+        IdentityError::InvalidClientAssertion { .. } => {
+            (Code::Unauthenticated, "invalid_client".to_string())
+        }
         IdentityError::Unauthorized
         | IdentityError::SystemRealmProtected { .. }
         | IdentityError::RealmSuspended

@@ -679,6 +679,13 @@ pub(crate) fn encode_client_assertion_jti(jti: &str) -> Vec<u8> {
     format!("{CLIENT_ASSERTION_JTI_PREFIX}{jti}").into_bytes()
 }
 
+/// Returns the scan prefix for all `private_key_jwt` assertion JTIs in a realm.
+///
+/// Used during cascade realm deletion to purge the replay store.
+pub(crate) fn client_assertion_jti_scan_prefix() -> Vec<u8> {
+    CLIENT_ASSERTION_JTI_PREFIX.as_bytes().to_vec()
+}
+
 // ===== OAuth consent key encoding =====
 
 /// Encodes the primary key for an OAuth consent record.
