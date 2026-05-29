@@ -1,6 +1,6 @@
 //! Integration tests for realm RBAC seeding.
 //!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 scenarios:
+//! Scenarios:
 //! - fresh realm has seed roles + permissions installed
 //! - seed is idempotent
 //! - startup reconciliation repairs unseeded realms

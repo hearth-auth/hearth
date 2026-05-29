@@ -7,6 +7,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Changed
+
+- **CI required-check renamed: `sdk-conformance (docs/sdk-spec.md)` → `sdk-conformance (docs/specs/SDK.md)`.**
+  The SDK common-spec doc moved from `docs/sdk-spec.md` to `docs/specs/SDK.md` to co-locate
+  with the other canonical specs in `docs/specs/`. The CI job name in `.github/workflows/ci.yml`
+  and the entry in `scripts/ci-required-checks-migrate.sh` updated to match. **Operators must
+  re-run `scripts/ci-required-checks-migrate.sh --apply` (or update GitHub branch protection
+  manually) so the required-check name matches the new job.** All inbound SDK README,
+  CHANGELOG, and code-comment links updated.
+
 ### Security
 
 - **FAPI 2.0 profile mutation now guarded against client_secret retention (HEA-1021)** —

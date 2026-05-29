@@ -65,7 +65,7 @@ TARGET_CHECKS=(
   "CI / sdk-node (18.x)"
   "CI / sdk-node (20.x)"
   "CI / sdk-node (22.x)"
-  "CI / sdk-conformance (docs/sdk-spec.md)"
+  "CI / sdk-conformance (docs/specs/SDK.md)"
   "Security / codeql (rust)"
   "Security / codeql (go)"
   "Security / codeql (javascript-typescript)"

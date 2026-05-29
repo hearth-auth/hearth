@@ -1,7 +1,6 @@
 //! Integration tests for admin HTTP group CRUD + membership.
 //!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 — admin_groups_rbac:crud_and_members,
-//! duplicate_name_rejected, cycle_on_nesting_rejected.
+//! Scenarios: `crud_and_members`, `duplicate_name_rejected`, `cycle_on_nesting_rejected`.
 
 mod common;
 

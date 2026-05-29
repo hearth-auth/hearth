@@ -69,3 +69,5 @@ go-gin
 
 **/php/vendor
 *.cache
+
+.claude/scheduled_tasks.lock

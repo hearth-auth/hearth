@@ -1,6 +1,6 @@
 //! Integration tests for token issuance with RBAC claim population.
 //!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 scenarios:
+//! Scenarios:
 //! - populates roles/groups/permissions claims at issue time
 //! - size cap refuses issuance (currently unenforced — see comment)
 

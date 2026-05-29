@@ -2,7 +2,7 @@
 
 TypeScript client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 
-> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/sdk-spec.md).
+> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/specs/SDK.md).
 
 ## Installation
 
@@ -478,7 +478,7 @@ class HearthError extends Error {
 that differs from the SDK's `expectedMode` config or the `mode` passed to `requirePermission`.
 Verify the `OAuthClient` admin setting matches the resource server's SDK configuration.
 
-See [docs/sdk-spec.md](../../docs/sdk-spec.md) Section 5 for the full error taxonomy.
+See [docs/specs/SDK.md](../../docs/specs/SDK.md) Section 5 for the full error taxonomy.
 
 ---
 

@@ -2,7 +2,7 @@
 # scripts/check-test-quality.sh — CI guardrail for false-confidence test patterns.
 #
 # Tracks: HEA-571. Anti-pattern taxonomy: docs/specs/TESTING.md § "Test Quality
-# Anti-Patterns". Audit baseline: docs/audit/test-suite-audit-2026-05-16.md.
+# Anti-Patterns".
 #
 # FAILS on:
 #   A) assert!(<expr>.is_ok()) / .is_err()     in tests/ and simulation/

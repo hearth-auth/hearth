@@ -5,7 +5,7 @@
 ## SDK Conformance Checklist
 
 If this PR touches any SDK (`sdks/typescript`, `sdks/go`, `sdks/python`, `sdks/rust`),
-verify each item against the [Hearth SDK Common Specification](../docs/sdk-spec.md).
+verify each item against the [Hearth SDK Common Specification](../docs/specs/SDK.md).
 Leave items unchecked only if they genuinely do not apply — CI will also enforce most of these automatically.
 
 - [ ] **Error types (spec §5):** All 9 required error type names are present in the SDK source:

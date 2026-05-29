@@ -1,7 +1,6 @@
 //! Integration tests for admin HTTP role assignment CRUD.
 //!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 — admin_assignments_rbac:crud,
-//! assign_unknown_role_404.
+//! Scenarios: `crud`, `assign_unknown_role_404`.
 
 mod common;
 

@@ -1,7 +1,6 @@
 //! Integration test: first user created via onboarding receives the `realm.admin`
 //! role and therefore the `hearth.admin` permission.
 //!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 — onboarding_rbac:first_user_admin.
 //! Exercises the RBAC side through the engine directly; the complete
 //! onboarding HTTP/web flow is covered in `tests/onboarding.rs`.
 

@@ -1,5 +1,11 @@
 # Agent Authentication & Authorization
 
+> **Implementation status (verified 2026-05-29):**
+> - **Shipped:** DPoP / RFC 9449 sender-constrained tokens (`src/identity/dpop.rs`, FAPI 2.0 enforcement per HEA-907 / HEA-1016 / HEA-1022 / HEA-1024); OAuth 2.0 token exchange foundations (`src/identity/oidc.rs`, `engine.rs`).
+> - **Not yet implemented:** the Agent entity itself — no `AgentId` newtype, no agent CRUD, no Agent Card discovery, no MCP/A2A surfaces, no delegation chains, no approval lifecycle, no AATs. Sections covering these (most of this document) are forward-looking design, not current behavior.
+>
+> **Before coding against any section here, verify the supporting type/method exists in `src/`.** If it doesn't, the section is design-only.
+
 ## Purpose
 
 This document specifies how Hearth authenticates, authorizes, and audits AI agents — autonomous software entities that act on behalf of users, invoke tools, and collaborate with other agents. It extends Hearth's existing OAuth 2.0, OIDC, and claims-based RBAC authorization (see [AUTHORIZATION.md](./AUTHORIZATION.md)) with agent-specific primitives for delegation, scope attenuation, proof-of-possession, and human-in-the-loop approval.

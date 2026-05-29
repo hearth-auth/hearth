@@ -104,7 +104,7 @@ jobs:
             sdks-any:
               - 'sdks/**'
               - 'scripts/check-sdk-conformance.sh'
-              - 'docs/sdk-spec.md'
+              - 'docs/specs/SDK.md'
               - '.github/workflows/ci.yml'
             proto:
               - 'proto/**'
@@ -379,7 +379,7 @@ jobs:
   # ── SDK spec conformance (folded from sdk-conformance.yml) ───────────────────
 
   sdk-conformance:
-    name: sdk-conformance (docs/sdk-spec.md)
+    name: sdk-conformance (docs/specs/SDK.md)
     needs: filter
     # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
     if: (needs.filter.result == 'success' && needs.filter.outputs.sdks-any == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'

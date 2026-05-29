@@ -97,10 +97,16 @@ Read these before writing code. They are the canonical source of truth:
 
 - `docs/specs/ARCHITECTURE.md` — structural rules (MUST/SHOULD per RFC 2119).
 - `docs/specs/AUTHORIZATION.md` — normative spec for roles, groups, permissions, JWT claims, SDK contract.
+- `docs/specs/AUTHZ_EXPANSION.md` — custom permissions, scopes, configurable claim profiles. Hybrid spec + phase tracker.
+- `docs/specs/OIDC.md` — OIDC + OAuth 2.0 + FAPI 2.0 security profile. Normative for FAPI work.
+- `docs/specs/CONFIGURATION.md` — full `hearth.yaml` reference.
+- `docs/specs/UI_ROUTING.md` — realm-name and admin-route reservation rules.
 - `docs/specs/TESTING.md` — eight testing layers, TDD workflow, tooling, CI tiers.
 - `docs/specs/TEST_SCENARIOS.md` — granular checkbox-tracked scenario checklist.
 - `docs/specs/IMPLEMENTATION_ORDER.md` — **mandatory build sequence.** Do not skip ahead.
 - `docs/specs/PROTO.md` — **proto authoring guide.** RPC naming, `google.api.http` conventions, `json_name`, backward-compat rules. Read before touching `proto/`.
+- `docs/specs/SDK.md` — common SDK contract every Hearth client SDK must satisfy.
+- `docs/specs/AGENT_AUTH.md` — agent identity & authorization. **Partial: DPoP + token exchange foundations shipped; Agent entity, delegation, MCP, approval, AATs NOT YET IMPLEMENTED.** Check the status banner at the top before coding against any section.
 - `docs/vision/VISION.md` — design rationale, performance targets, competitive positioning.
 - `docs/specs/THEME.md` — mandatory design theme for all UI code.
 
