@@ -934,10 +934,12 @@ pub(crate) struct JarmErrorClaims {
     pub iss: String,
     /// Audience — the client_id that sent the authorization request.
     pub aud: String,
-    /// Expiry — same short-lived window as success JARMs (600 s).
+    /// Expiry — 300 s (5 minutes, FAPI 2.0 §5.3.2.2).
     pub exp: i64,
     /// Issued-at timestamp.
     pub iat: i64,
+    /// Unique JWT ID — required by JARM spec §2.4 for replay detection.
+    pub jti: String,
     /// RFC 6749 error code (e.g. `consent_required`, `access_denied`).
     pub error: String,
     /// Human-readable error description.

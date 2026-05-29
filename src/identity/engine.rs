@@ -9523,6 +9523,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             // FAPI 2.0 §5.3.2.2 requires JARM JWT lifetime ≤ 5 minutes.
             exp: now_secs + 300,
             iat: now_secs,
+            jti: uuid::Uuid::new_v4().to_string(),
             error: error.to_string(),
             error_description: error_description.to_string(),
             state: state_param.to_string(),

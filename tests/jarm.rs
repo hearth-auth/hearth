@@ -941,6 +941,73 @@ async fn jarm_error_response_is_jwt_wrapped() {
 }
 
 // ---------------------------------------------------------------------------
+// JARM-18: error JARM JWT contains a non-empty jti claim (JARM spec §2.4)
+//
+// JARM §2.4 requires `jti` on ALL response JWTs (success and error) to
+// enable replay detection on the client side. This test ensures the engine
+// populates `jti` on the error path.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn jarm_error_jwt_has_jti() {
+    use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+
+    let realm = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("jarm-jti-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "JARM JTI Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                authorization_signed_response_alg: Some("EdDSA".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let jwt = harness
+        .identity()
+        .sign_jarm_error_jwt(
+            &realm,
+            &client.client_id().to_string(),
+            "access_denied",
+            "user denied access",
+            "state-jti-test",
+        )
+        .expect("sign_jarm_error_jwt must succeed");
+
+    let parts: Vec<&str> = jwt.split('.').collect();
+    assert_eq!(parts.len(), 3, "must be a 3-part JWS");
+
+    let claims_json = BASE64_URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("base64 decode claims");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&claims_json).expect("parse claims JSON");
+
+    let jti = claims["jti"].as_str().unwrap_or("");
+    assert!(
+        !jti.is_empty(),
+        "jti claim must be present and non-empty (JARM §2.4)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // JARM-10: JARM JWT signature verifies via JWKS (end-to-end client path)
 //
 // Simulates the full verifying-party path:
