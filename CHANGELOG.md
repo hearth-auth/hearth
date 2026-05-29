@@ -7,6 +7,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **`private_key_jwt` client authentication (HEA-984)** — confidential clients
+  can now authenticate to the token endpoint by presenting a self-signed EdDSA
+  JWT assertion (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`)
+  instead of a `client_secret`. Hearth verifies the assertion against the
+  client's registered Ed25519 public key, enforces `iss`/`sub == client_id`,
+  `aud == realm issuer URL`, `exp` in the future, and replay prevention via
+  per-realm JTI tracking. Discovery advertises `private_key_jwt` in
+  `token_endpoint_auth_methods_supported` (RFC 7523 §2.2 / OIDC Core §9).
+
 ### Security
 
 - **Session limit enforcement hardening (HEA-982)** — five findings from the
