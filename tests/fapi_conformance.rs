@@ -11,6 +11,8 @@
 //! - FAPI-B-04: Discovery advertises `fapi_profile = "baseline"`
 //! - FAPI-B-05: FAPI Baseline + SMS MFA preserves `via_par` through MFA resume
 //! - FAPI-B-06: Standard-profile client in FAPI Baseline realm must be DPoP-constrained
+//! - FAPI-B-07: HTTP server — PAR→authorize flow succeeds end-to-end (HEA-1025)
+//! - FAPI-B-08: HTTP server — direct authorize (no PAR) fails with FAPI error (HEA-1025)
 //!
 //! ## Advanced (FAPI-A)
 //! - FAPI-A-01: Missing JAR rejected under Advanced
@@ -22,6 +24,8 @@
 #![allow(clippy::unwrap_used)]
 
 mod common;
+
+use std::sync::Arc;
 
 use base64::Engine as _;
 use hearth::core::{ClientId, RealmId, UserId};
@@ -888,5 +892,218 @@ async fn fapi_b06_realm_baseline_enforces_dpop_for_standard_profile_client() {
     assert!(
         matches!(err, IdentityError::FapiViolation { .. }),
         "expected FapiViolation (DPoP required by Baseline realm), got: {err:?}"
+    );
+}
+
+// ── Server-mode regression tests (HEA-1025) ───────────────────────────────────
+//
+// These tests exercise the HTTP surface directly — the embedded tests above
+// call the domain layer APIs, but do not exercise whether the HTTP authorize
+// handler actually calls `consume_par` and sets `via_par = true`.
+
+/// Start an in-process axum HTTP server backed by a FAPI Baseline realm.
+///
+/// Returns `(base_url, realm_uuid_string, client_uuid_string, user_uuid_string,
+/// shutdown_sender)`.  Drop the sender to stop the server.
+async fn start_fapi_http_server() -> (
+    String,
+    String,
+    String,
+    String,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    use hearth::protocol::http::{router, AppState};
+    use tokio::net::TcpListener;
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+
+    let realm_rec = harness
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("fapi-http-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm");
+    let realm_id = realm_rec.id().clone();
+
+    let mut config = realm_rec.config().clone();
+    config.fapi_profile = Some(FapiProfile::Baseline);
+    harness
+        .identity()
+        .update_realm(
+            &realm_id,
+            &UpdateRealmRequest {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .expect("apply Baseline profile");
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm_id,
+            &RegisterClientRequest {
+                client_name: "FAPI HTTP Test Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: Some("test-secret".to_string()),
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    let user = harness
+        .identity()
+        .create_user(
+            &realm_id,
+            &CreateUserRequest {
+                email: format!("http-user-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "HTTP FAPI User".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    let realm_uuid = realm_id.as_uuid().to_string();
+    let client_uuid = client.client_id().as_uuid().to_string();
+    let user_uuid = user.id().as_uuid().to_string();
+
+    let state = Arc::new(AppState::new_dev(
+        harness.identity_arc(),
+        harness.rbac_arc(),
+        harness.audit_arc(),
+    ));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind random port");
+    let port = listener.local_addr().expect("local addr").port();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _harness = harness; // keeps TempDir alive
+        axum::serve(listener, router(state))
+            .with_graceful_shutdown(async {
+                rx.await.ok();
+            })
+            .await
+            .ok();
+    });
+
+    (
+        format!("http://127.0.0.1:{port}"),
+        realm_uuid,
+        client_uuid,
+        user_uuid,
+        tx,
+    )
+}
+
+/// FAPI-B-07 (regression HEA-1025): HTTP PAR→authorize flow succeeds end-to-end.
+///
+/// Before the fix, the HTTP `/authorize` handler never called `consume_par` — it
+/// always left `via_par = false` — so every FAPI2 client received a
+/// `FapiViolation` error even after a valid PAR submission.  This test goes
+/// through the HTTP surface to confirm the handler now consumes the
+/// `request_uri` and returns a real auth code.
+#[tokio::test]
+async fn fapi_b07_http_par_authorize_flow_succeeds() {
+    let (base, realm_uuid, client_uuid, user_uuid, _shutdown) = start_fapi_http_server().await;
+    let http = reqwest::Client::new();
+
+    // Step 1: Push authorization parameters to /as/par to get a request_uri.
+    let par_resp: serde_json::Value = http
+        .post(format!("{base}/as/par"))
+        .header("X-Realm-ID", &realm_uuid)
+        .json(&serde_json::json!({
+            "client_id": client_uuid,
+            "redirect_uri": REDIRECT_URI,
+            "scope": "openid",
+            "state": "fapi-b07-state",
+            "response_type": "code",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256",
+            "nonce": "fapi-b07-nonce"
+        }))
+        .send()
+        .await
+        .expect("PAR request")
+        .json()
+        .await
+        .expect("PAR response JSON");
+
+    let request_uri = par_resp["request_uri"]
+        .as_str()
+        .expect("PAR response must include request_uri");
+    assert!(
+        request_uri.starts_with("urn:ietf:params:oauth:request_uri:"),
+        "request_uri must use RFC 9126 URN scheme, got: {request_uri}"
+    );
+
+    // Step 2: Authorize using the request_uri — handler must call consume_par
+    // and set via_par=true, satisfying the FAPI Baseline gate.
+    let auth_resp = http
+        .post(format!("{base}/authorize"))
+        .header("X-Realm-ID", &realm_uuid)
+        .json(&serde_json::json!({
+            "user_id": user_uuid,
+            "request_uri": request_uri
+        }))
+        .send()
+        .await
+        .expect("authorize request");
+
+    assert_eq!(
+        auth_resp.status(),
+        reqwest::StatusCode::OK,
+        "PAR→authorize via HTTP must return 200 OK"
+    );
+    let auth_body: serde_json::Value = auth_resp.json().await.expect("auth response JSON");
+    let code = auth_body["code"]
+        .as_str()
+        .expect("authorize response must contain 'code'");
+    assert!(!code.is_empty(), "auth code must be non-empty");
+}
+
+/// FAPI-B-08 (regression HEA-1025): HTTP direct authorize without PAR is rejected.
+///
+/// Sending a full authorize request body with no `request_uri` against a FAPI
+/// Baseline realm must yield a 400 with `error = "invalid_request"`.  This
+/// ensures the HTTP surface enforces the PAR-only gate (FAPI 2.0 §5.2.2).
+#[tokio::test]
+async fn fapi_b08_http_direct_authorize_without_par_rejected() {
+    let (base, realm_uuid, client_uuid, user_uuid, _shutdown) = start_fapi_http_server().await;
+    let http = reqwest::Client::new();
+
+    // Attempt authorize without a request_uri — must be rejected by the FAPI gate.
+    let resp = http
+        .post(format!("{base}/authorize"))
+        .header("X-Realm-ID", &realm_uuid)
+        .json(&serde_json::json!({
+            "user_id": user_uuid,
+            "client_id": client_uuid,
+            "redirect_uri": REDIRECT_URI,
+            "scope": "openid",
+            "state": "fapi-b08-state",
+            "response_type": "code",
+            "code_challenge": PKCE_CHALLENGE,
+            "code_challenge_method": "S256"
+        }))
+        .send()
+        .await
+        .expect("authorize request");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "FAPI Baseline direct authorize (no PAR) must return 400"
+    );
+    let body: serde_json::Value = resp.json().await.expect("error response JSON");
+    assert_eq!(
+        body["error"].as_str(),
+        Some("invalid_request"),
+        "FAPI violation must produce error=invalid_request, got: {body}"
     );
 }
