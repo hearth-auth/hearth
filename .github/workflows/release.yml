@@ -49,14 +49,14 @@ jobs:
             target: aarch64-apple-darwin
             artifact: hearth-darwin-arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -79,7 +79,7 @@ jobs:
 
       - name: Install cross
         if: matrix.use_cross == true
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285 # v2
         with:
           tool: cross
 
@@ -98,7 +98,7 @@ jobs:
       - name: Stage binary
         run: cp target/${{ matrix.target }}/release/hearth ${{ matrix.artifact }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -109,12 +109,12 @@ jobs:
     name: Generate CycloneDX SBOM
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -132,7 +132,7 @@ jobs:
       - name: Stage SBOM
         run: cp hearth.cdx.json hearth-sbom.cdx.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hearth-sbom
           path: hearth-sbom.cdx.json
@@ -191,7 +191,7 @@ jobs:
               "${f}"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signatures
           path: |

@@ -7,6 +7,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **Pin GitHub Actions to SHA hashes** — all `uses:` references in `release.yml`,
+  `docs-site.yml`, and `sdk-smoke.yml` are now pinned to immutable 40-char commit SHAs
+  (e.g. `actions/checkout@34e114...` `# v4`) to eliminate supply-chain risk from mutable
+  tags. Resolves 26 Dependabot/security alerts. `slsa-framework/slsa-github-generator` is
+  exempt as a reusable-workflow call; that alert is dismissed as a false positive (HEA-951).
+
 ### Changed
 
 - **License** — re-licensed from AGPL-3.0-only (dual-license) to Apache-2.0. `LICENSE-COMMERCIAL`
