@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Helm chart lint + template-test CI (HEA-974)** — `make helm-lint` runs `helm lint` against
+  `deploy/helm/hearth/`; `make helm-template` renders the chart with both `values.yaml` and the
+  new `values-prod.yaml` production profile and diffs the output against committed snapshots in
+  `deploy/helm/hearth/tests/`. A new `.github/workflows/helm.yml` CI job runs both gates on every
+  PR or push that touches `deploy/helm/**`. `deploy/README.md` now includes an end-to-end
+  production install walkthrough (`helm install hearth deploy/helm/hearth -f values-prod.yaml`).
+
 - **Proto governance gates (HEA-973)** — `buf` is now required and governed across the full
   development workflow. `buf lint` and `buf format` run in the pre-commit hook whenever
   `.proto` files are staged (format → lint → regenerate, atomic commit). A dedicated

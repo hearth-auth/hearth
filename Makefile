@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -235,6 +235,42 @@ dev:
 dev-reset:
 	rm -rf ./data/dev
 	@echo "Dev data wiped. Run make dev for a fresh start."
+
+# ── Helm ──────────────────────────────────────────────
+
+HELM ?= helm
+HELM_CHART := deploy/helm/hearth
+
+## Lint the Hearth Helm chart. Exits non-zero on any warning or error.
+helm-lint:
+	@command -v $(HELM) >/dev/null 2>&1 || (echo "ERROR: helm not found — install Helm 3.10+ (https://helm.sh/docs/intro/install/)" && exit 1)
+	$(HELM) lint $(HELM_CHART)
+
+## Render Helm templates and diff against committed snapshots.
+## Fails if rendered output differs from deploy/helm/hearth/tests/*.yaml.
+## To update snapshots after intentional chart changes: make helm-template UPDATE=1
+helm-template:
+	@command -v $(HELM) >/dev/null 2>&1 || (echo "ERROR: helm not found — install Helm 3.10+ (https://helm.sh/docs/intro/install/)" && exit 1)
+	@if [ "$(UPDATE)" = "1" ]; then \
+		echo "Updating Helm snapshots..."; \
+		$(HELM) template hearth $(HELM_CHART) --namespace hearth \
+			> $(HELM_CHART)/tests/default.yaml; \
+		$(HELM) template hearth $(HELM_CHART) -f $(HELM_CHART)/values-prod.yaml --namespace hearth \
+			> $(HELM_CHART)/tests/prod.yaml; \
+		echo "✓ Snapshots updated: $(HELM_CHART)/tests/"; \
+	else \
+		tmp_dir=$$(mktemp -d); \
+		$(HELM) template hearth $(HELM_CHART) --namespace hearth \
+			> $$tmp_dir/default.yaml; \
+		$(HELM) template hearth $(HELM_CHART) -f $(HELM_CHART)/values-prod.yaml --namespace hearth \
+			> $$tmp_dir/prod.yaml; \
+		diff $(HELM_CHART)/tests/default.yaml $$tmp_dir/default.yaml \
+			|| (echo "ERROR: default.yaml snapshot drift. Run: make helm-template UPDATE=1" && rm -rf $$tmp_dir && exit 1); \
+		diff $(HELM_CHART)/tests/prod.yaml $$tmp_dir/prod.yaml \
+			|| (echo "ERROR: prod.yaml snapshot drift. Run: make helm-template UPDATE=1" && rm -rf $$tmp_dir && exit 1); \
+		rm -rf $$tmp_dir; \
+		echo "✓ Helm snapshots match."; \
+	fi
 
 # ── UI Tests ──────────────────────────────────────────
 #

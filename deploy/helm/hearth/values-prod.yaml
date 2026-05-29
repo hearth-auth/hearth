@@ -1,0 +1,121 @@
+# Hearth Helm chart — production profile.
+# Enables TLS termination via cert-manager, nginx Ingress, and persistent storage.
+#
+# Usage:
+#   helm install hearth deploy/helm/hearth \
+#     -f deploy/helm/hearth/values-prod.yaml \
+#     --namespace hearth \
+#     --create-namespace
+#
+# Before installing, update the host name, OIDC issuer, and any secret values
+# below (or supply them via an external secrets operator / sealed-secrets).
+
+# -- Image -----------------------------------------------------------------------
+image:
+  repository: ghcr.io/hearth-rs/hearth
+  pullPolicy: IfNotPresent
+  tag: ""          # defaults to Chart.yaml appVersion; pin to a release tag in production
+
+# -- Replicas --------------------------------------------------------------------
+# Hearth is single-writer (WAL is fsync-bound). Keep replicaCount=1 unless you
+# are using ReadWriteMany storage and a coordinated HA setup.
+replicaCount: 1
+
+# -- Ingress ---------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+  hosts:
+    - host: auth.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: hearth-tls
+      hosts:
+        - auth.example.com
+
+# -- Persistent storage ----------------------------------------------------------
+persistence:
+  enabled: true
+  storageClassName: ""    # use cluster default; set explicitly (e.g. "gp3") in production
+  accessMode: ReadWriteOnce
+  size: 50Gi
+  existingClaim: ""
+  mountPath: /var/lib/hearth
+
+# -- Resources -------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 2000m
+    memory: 1Gi
+
+# -- Pod disruption budget -------------------------------------------------------
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# -- Hearth config ---------------------------------------------------------------
+config:
+  server:
+    bind_address: "0.0.0.0"
+    port: 8420
+    # TLS termination is handled by the nginx Ingress + cert-manager above.
+    # Uncomment the lines below only if you need mTLS / direct TLS termination
+    # inside the pod (supply the cert/key via secret.tlsCert / secret.tlsKey).
+    # tls_cert_path: "/etc/hearth/tls/tls.crt"
+    # tls_key_path: "/etc/hearth/tls/tls.key"
+
+  storage:
+    data_dir: "/var/lib/hearth"
+    wal_max_size_bytes: 536870912    # 512 MiB
+    memtable_flush_bytes: 134217728  # 128 MiB
+    hot_tier_capacity: 50000
+    fsync: true
+
+  oidc:
+    issuer: "https://auth.example.com"
+
+  observability:
+    log_level: "info"
+    log_format: "json"
+
+  operational:
+    request_timeout_secs: 30
+    shutdown_timeout_secs: 30
+    max_connections: 4096
+    queue_depth: 16384
+
+  email:
+    transport: smtp
+    from: "Hearth <noreply@example.com>"
+    # smtp.password is supplied via secret.env below as ${SMTP_PASSWORD}
+    smtp:
+      host: "smtp.example.com"
+      port: 587
+      encryption: starttls
+      username: "hearth@example.com"
+      password: "${SMTP_PASSWORD}"
+
+# -- Secret values ---------------------------------------------------------------
+# In production, source these from an external secret store (HashiCorp Vault,
+# AWS Secrets Manager, GCP Secret Manager) via the External Secrets Operator or
+# sealed-secrets. Do NOT commit plaintext values to this file.
+secret:
+  # Uncomment to terminate TLS directly inside the pod (PEM format).
+  # tlsCert: ""
+  # tlsKey: ""
+
+  env:
+    SMTP_PASSWORD: ""   # replace with a sealed-secret reference or ESO mapping
+
+# -- Extra non-secret env vars ---------------------------------------------------
+env:
+  RUST_LOG: "info,hearth=info"
