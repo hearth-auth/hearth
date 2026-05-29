@@ -37,6 +37,35 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Session-version (`sv`) revocation** — access tokens now carry an `sv` claim (monotonic
+  `u64`) when `session_version.enabled = true` in the realm config. Resource servers can
+  poll the delta feed to detect revoked sessions without waiting for token expiry. The `sv`
+  counter is bumped automatically on: logout, admin session revoke, password change, role
+  assignment/unassignment, and group membership add/remove. New endpoints:
+  - `GET /oauth/session-versions?realm=<id>&since=<seq>` — paginated delta feed; returns
+    `null` when `since` is behind the retention window (`delta_retention_seconds`, default
+    3600). Requires `hearth.sv_feed` or `hearth.admin` permission.
+  - `GET /oauth/session-versions/snapshot?realm=<id>` — gzip-compressed full snapshot of
+    current per-session minimum `sv` values.
+  - `POST /admin/sessions/{id}/sv-bump` — admin: force-bump a single session.
+  - `POST /admin/realms/{id}/sv-bump-all` — admin: force-bump every tracked session in the
+    realm (returns count).
+  The `hearth.sv_feed` permission is seeded in all new realms via `seed_realm`. When
+  `session_version.enabled = false` (default) the claim is omitted and all sv endpoints
+  return 404 (HEA-932).
+
+- **Session-version revocation operator guide (HEA-934)** — new how-to at
+  `docs/guides/session-version-revocation.md` covering: when to enable `sv`, poll interval
+  and stale threshold tradeoffs, bump trigger table, `sv-bump-all` use cases, fail-closed
+  behavior (`reject` vs `introspect` fallback), DPoP/MFA interaction notes, and delta feed
+  reference. `AUTHORIZATION.md` § 14 updated from roadmap placeholder to implemented status.
+
+- **Admin UI client form exposes `access_token_authorization` mode** — the application
+  create and edit forms in the Admin UI now include a Permission delivery mode picker
+  (`Embedded`, `Introspection`, `Decision`) bound to `OAuthClient.access_token_authorization`.
+  The client list and detail pages display the current mode. A warning banner appears when
+  `Decision` mode is selected on a public (SPA/mobile) client (HEA-931).
+
 - **Org-scoped group paths in OIDC token claims** — tokens issued in an organization
   context now carry an `org_groups` claim (`Vec<String>`) alongside the existing flat
   `groups` claim. Each entry uses the `/org-slug/group-name` path format, matching
@@ -51,6 +80,48 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `urn:ietf:params:oauth:grant-type:jwt-bearer` is now listed in OIDC discovery
   `grant_types_supported`. JTI replay prevention is enforced per-realm. Supported on both
   `POST /token` and `POST /realms/{realm}/token` endpoints (HEA-908).
+
+- **Permission-delivery modes guide (HEA-929)** — new operator how-to at
+  `docs/guides/permission-delivery.md` covering `embedded`, `introspection`, and `decision`
+  modes: decision tree, latency tradeoff table, wire-shape examples, security rules per mode,
+  and Keycloak comparison table. `docs/specs/AUTHORIZATION.md` extended with normative
+  §15 (wire shapes, security rules, revocation caveat, latency targets, client config).
+  `docs/specs/ARCHITECTURE.md` §4.2.1 updated to classify `/introspect` and
+  `POST /oauth/authorize` as off-hot-path.
+
+- **Node SDK: `authorize()` + mode-aware middleware (HEA-924)** — the Node.js server SDK
+  at `sdks/node/` now exposes the three permission-delivery modes introduced in HEA-922:
+  - `HearthClient.authorize(token, permission, opts?)` — calls `POST /oauth/authorize` for
+    Decision-mode resource servers. Fail-closed: returns `{ allowed: false }` on any network
+    or server error. Pass `realm_id` in `HearthConfig` to include `X-Realm-ID`.
+  - `IntrospectionResult` extended with `mode`, `permissions`, `roles`, and `groups` fields
+    populated by Hearth for Introspection/Decision clients.
+  - `hearthMiddleware` / `hearthFastifyHook` accept `expectedMode` (`"embedded"` |
+    `"introspection"` | `"decision"`). MUST NOT silently fall back to a different mode when
+    `permissions` is absent from the JWT — absence of `permissions` never changes authorization
+    behavior unless `expectedMode` is changed. Fail-closed: network errors on `/introspect`
+    or `/oauth/authorize` result in 403.
+  - Mode-echo validation: in `introspection` mode, if the server echoes a different
+    `mode` than `expectedMode`, the request is rejected (fail-closed 403).
+  New exports: `AccessTokenAuthorizationMode`, `AuthorizationModeError`, `AuthorizeError`,
+  `AuthorizeClient`, `AuthorizeOptions`, `AuthorizeResult`.
+  New config fields: `realm_id`, `authorize_endpoint`.
+
+- **TypeScript SDK: `authorize()` + mode-aware middleware (HEA-923)** — the TypeScript SDK
+  at `sdks/typescript/` now exposes the three permission-delivery modes introduced in HEA-922:
+  - `HearthClient.authorize(token, permission, opts?)` — calls `POST /oauth/authorize` for
+    Decision-mode resource servers. Fail-closed: returns `false` on any network or server error.
+    Requires `realmId` in `HearthClientConfig`.
+  - `HearthClient.introspect(token)` — wraps RFC 7662 introspection with optional mode-echo
+    validation. Throws `AuthorizationModeMismatchError` when `expectedMode` is configured and
+    the server returns a different `mode` field.
+  - `requirePermission(permission, opts)` — framework-agnostic middleware factory. Takes an
+    explicit `mode` (`"embedded"` | `"introspection"` | `"decision"`); MUST NOT silently fall
+    back to a different mode when `permissions` is absent from the JWT. Returns a
+    `(token: string) => Promise<boolean>` checker.
+  New exports: `AccessTokenAuthorizationMode`, `AuthorizePermissionOptions`,
+  `AuthorizationModeMismatchError`, `requirePermission`, `PermissionChecker`,
+  `RequirePermissionOptions`.
 
 - **Three access-token authorization modes (HEA-922)** — `OAuthClient` now has an
   `access_token_authorization` field with three modes:

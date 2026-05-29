@@ -70,6 +70,10 @@ pub(crate) const SEED_PERMISSIONS: &[(&str, &str)] = &[
         "user.impersonate",
         "Issue tokens on behalf of another user — a sensitive operation typically reserved for support staff.",
     ),
+    (
+        "hearth.sv_feed",
+        "Subscribe to the session-version delta feed; used by resource servers to poll for revocation events.",
+    ),
 ];
 
 /// Returns the canonical description for a seed permission, or `None` if
@@ -110,6 +114,7 @@ const SEED_ROLES: &[SeedRoleSpec] = &[
         name: "realm.admin",
         permissions: &[
             "hearth.admin",
+            "hearth.sv_feed",
             "realm.read",
             "realm.write",
             "realm.admin",

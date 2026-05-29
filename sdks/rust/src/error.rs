@@ -1,3 +1,5 @@
+use crate::types::AccessTokenAuthorization;
+
 /// Hearth SDK error type — spec §5.
 ///
 /// The `HearthError` enum covers both HTTP-level API errors and all
@@ -62,4 +64,20 @@ pub enum HearthError {
     /// A token introspection request failed or returned inactive.
     #[error("introspection error: {message}")]
     IntrospectionError { message: String },
+
+    /// The server echoed a different authorization mode than the SDK was configured to expect.
+    ///
+    /// This is a hard rejection — the SDK never silently falls back to a different mode.
+    #[error("mode mismatch: expected {expected:?}, got {actual:?}")]
+    ModeMismatch {
+        expected: AccessTokenAuthorization,
+        actual: AccessTokenAuthorization,
+    },
+
+    /// A `Decision`-mode `/oauth/authorize` call failed; fail-closed.
+    ///
+    /// Any network or parse error on the decision endpoint is surfaced as this variant
+    /// so callers can distinguish authorization-network failures from logic denials.
+    #[error("authorization check failed: {reason}")]
+    AuthorizationFailed { reason: String },
 }

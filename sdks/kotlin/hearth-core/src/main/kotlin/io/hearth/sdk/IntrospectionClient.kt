@@ -2,6 +2,7 @@ package io.hearth.sdk
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
@@ -73,11 +74,19 @@ class IntrospectionClient(
             throw IntrospectionError("Introspection endpoint returned invalid JSON", e)
         }
 
-        // Known standard RFC 7662 fields — everything else goes into `extra`
-        val knownKeys = setOf("active", "sub", "exp", "iat", "iss", "aud", "scope", "client_id")
+        // Known fields — standard RFC 7662 + Hearth extensions (HEA-922). Everything else → extra.
+        val knownKeys = setOf(
+            "active", "sub", "exp", "iat", "iss", "aud", "scope", "client_id",
+            "mode", "permissions",
+        )
         val extra = jsonObj.entries
             .filter { it.key !in knownKeys }
             .associate { it.key to it.value }
+
+        val permissions = jsonObj["permissions"]
+            ?.let { it as? JsonArray }
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            ?: emptyList()
 
         return IntrospectionResult(
             active = jsonObj["active"]?.jsonPrimitive?.boolean ?: false,
@@ -88,6 +97,8 @@ class IntrospectionClient(
             aud = jsonObj["aud"],
             scope = jsonObj["scope"]?.jsonPrimitive?.contentOrNull,
             clientId = jsonObj["client_id"]?.jsonPrimitive?.contentOrNull,
+            mode = jsonObj["mode"]?.jsonPrimitive?.contentOrNull,
+            permissions = permissions,
             extra = extra,
         )
     }

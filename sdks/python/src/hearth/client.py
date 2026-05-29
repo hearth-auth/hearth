@@ -17,6 +17,8 @@ from .types import (
     JwksDocument,
     OAuthClient,
     RegisterClientRequest,
+    CheckPermissionResponse,
+    IntrospectResponse,
 )
 
 
@@ -226,6 +228,76 @@ class HearthClient:
             return oid == org_id
         except Exception:
             return False
+
+    # ------------------------------------------------------------------
+    # Permission delivery (HEA-921 — decision + introspection modes)
+    # ------------------------------------------------------------------
+
+    def check_permission(
+        self,
+        access_token: str,
+        permission: str,
+        organization_id: Optional[str] = None,
+        resource: Optional[str] = None,
+    ) -> CheckPermissionResponse:
+        """Call POST /oauth/authorize to check a permission (decision mode).
+
+        This is the *decision-mode* counterpart to the local ``has_permission``
+        predicate.  The server resolves live RBAC state and returns an explicit
+        ``allowed`` / ``denied`` decision.
+
+        Fail-closed per spec §15.3: any network or server error returns
+        ``CheckPermissionResponse(allowed=False)`` rather than raising.
+
+        :param access_token: Bearer token to check on behalf of.
+        :param permission: Permission string to check, e.g. ``"docs.write"``.
+        :param organization_id: Optionally scope the check to an organisation.
+        :param resource: Optional RFC 8707 resource indicator.
+        """
+        try:
+            body: Dict[str, Any] = {"permission": permission}
+            if organization_id is not None:
+                body["organization_id"] = organization_id
+            if resource is not None:
+                body["resource"] = resource
+            resp = self._http.post(
+                f"{self._base}/oauth/authorize",
+                json=body,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if resp.status_code != 200:
+                return CheckPermissionResponse(allowed=False)
+            return CheckPermissionResponse(**resp.json())
+        except Exception:
+            return CheckPermissionResponse(allowed=False)
+
+    def introspect(
+        self,
+        access_token: str,
+        client_id: str,
+        client_secret: Optional[str] = None,
+        token_type_hint: Optional[str] = None,
+    ) -> IntrospectResponse:
+        """Call POST /realms/{realm_id}/introspect (RFC 7662) to inspect a token.
+
+        The response includes a ``mode`` field echoing the ``access_token_authorization``
+        setting on the issuing client.  Callers in introspection mode MUST compare this
+        against their configured expected mode and reject on mismatch.
+
+        :raises HearthError: on non-200 HTTP responses.
+        """
+        body: Dict[str, Any] = {"token": access_token, "client_id": client_id}
+        if client_secret is not None:
+            body["client_secret"] = client_secret
+        if token_type_hint is not None:
+            body["token_type_hint"] = token_type_hint
+        resp = self._http.post(
+            f"{self._base}/realms/{self._realm}/introspect",
+            json=body,
+        )
+        if resp.status_code != 200:
+            raise HearthError(resp.status_code, resp.text)
+        return IntrospectResponse(**resp.json())
 
     # ------------------------------------------------------------------
     # WebAuthn

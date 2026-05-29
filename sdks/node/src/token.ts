@@ -1,5 +1,11 @@
 /** §4 — VerifiedToken: typed claims accessors and helpers. */
 
+/**
+ * Controls how authorization data is delivered to resource servers.
+ * Mirrors the server-side `AccessTokenAuthorization` enum (HEA-922).
+ */
+export type AccessTokenAuthorizationMode = "embedded" | "introspection" | "decision";
+
 import { timingSafeEqual } from "node:crypto";
 import type { JWTPayload } from "jose";
 

@@ -10,7 +10,7 @@
 //! in case storage was corrupted out-of-band).
 
 use std::collections::{BTreeSet, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::core::{Clock, OrganizationId, RealmId, Uri, UserId};
 use crate::identity::ClientTrustLevel;
@@ -27,18 +27,57 @@ use super::types::{
     RoleSubject, Scope, ScopeExport, ScopeSpec, Subject, TraversalKind, UpdateGroupRequest,
     UpdateRoleRequest, UserPermissionGrant,
 };
-use super::RbacEngine;
+use super::{RbacEngine, SvBumper};
 
 /// Embedded RBAC engine backed by [`StorageEngine`].
 pub struct EmbeddedRbacEngine {
     storage: Arc<dyn StorageEngine>,
     clock: Arc<dyn Clock>,
+    /// Injected at startup via [`Self::init_sv_bumper`]. Absent until the
+    /// identity engine is fully constructed (avoids construction-order coupling).
+    sv_bumper: OnceLock<Arc<dyn SvBumper>>,
 }
 
 impl EmbeddedRbacEngine {
     /// Creates a new embedded RBAC engine.
     pub fn new(storage: Arc<dyn StorageEngine>, clock: Arc<dyn Clock>) -> Self {
-        Self { storage, clock }
+        Self {
+            storage,
+            clock,
+            sv_bumper: OnceLock::new(),
+        }
+    }
+
+    /// Injects the [`SvBumper`] implementation. Called once at startup after
+    /// the identity engine is fully constructed. Subsequent calls are silently
+    /// ignored (OnceLock semantics).
+    pub fn init_sv_bumper(&self, bumper: Arc<dyn SvBumper>) {
+        let _ = self.sv_bumper.set(bumper);
+    }
+
+    /// Best-effort sv bump for a single user. Logs on failure.
+    fn bump_sv_for_user(&self, realm_id: &RealmId, user_id: &UserId) {
+        if let Some(b) = self.sv_bumper.get() {
+            b.bump_user_sessions(realm_id, user_id);
+        }
+    }
+
+    /// Best-effort sv bump for all users that are direct members of `group_id`.
+    ///
+    /// Scans the forward membership index and bumps each user member found.
+    /// Non-recursive: group-within-group nesting is not followed; tokens for
+    /// transitively-affected users will become stale at natural expiry.
+    fn bump_sv_for_group_members(&self, realm_id: &RealmId, group_id: &GroupId) {
+        let prefix = keys::gm_forward_scan_prefix(group_id);
+        let end = keys::prefix_end(&prefix);
+        let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) else {
+            return;
+        };
+        for entry in &entries {
+            if let Ok(GroupMember::User(uid)) = Self::de::<GroupMember>(&entry.value) {
+                self.bump_sv_for_user(realm_id, &uid);
+            }
+        }
     }
 
     // -------------------- helpers (serde wrapping) --------------------
@@ -1041,6 +1080,11 @@ impl RbacEngine for EmbeddedRbacEngine {
             ],
         )?;
 
+        match member {
+            GroupMember::User(uid) => self.bump_sv_for_user(realm_id, uid),
+            GroupMember::Group(gid) => self.bump_sv_for_group_members(realm_id, gid),
+        }
+
         Ok(membership)
     }
 
@@ -1054,6 +1098,12 @@ impl RbacEngine for EmbeddedRbacEngine {
             .delete(realm_id, &keys::encode_gm_forward(group_id, member))?;
         self.storage
             .delete(realm_id, &keys::encode_gm_reverse(member, group_id))?;
+
+        match member {
+            GroupMember::User(uid) => self.bump_sv_for_user(realm_id, uid),
+            GroupMember::Group(gid) => self.bump_sv_for_group_members(realm_id, gid),
+        }
+
         Ok(())
     }
 
@@ -1132,6 +1182,11 @@ impl RbacEngine for EmbeddedRbacEngine {
             ],
         )?;
 
+        match &assignment.subject {
+            Subject::User(uid) => self.bump_sv_for_user(realm_id, uid),
+            Subject::Group(gid) => self.bump_sv_for_group_members(realm_id, gid),
+        }
+
         Ok(assignment)
     }
 
@@ -1155,6 +1210,12 @@ impl RbacEngine for EmbeddedRbacEngine {
             realm_id,
             &keys::encode_assign_role(&a.role_id, assignment_id),
         )?;
+
+        match &a.subject {
+            Subject::User(uid) => self.bump_sv_for_user(realm_id, uid),
+            Subject::Group(gid) => self.bump_sv_for_group_members(realm_id, gid),
+        }
+
         Ok(())
     }
 

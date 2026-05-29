@@ -30,7 +30,7 @@ use hearth::protocol;
 use hearth::protocol::http::{self, AppState};
 use hearth::protocol::tls::{build_server_config, ReloadableTlsConfig, TlsConfigParams};
 use hearth::protocol::web::{self, WebState};
-use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
+use hearth::rbac::{EmbeddedRbacEngine, RbacEngine, SvBumper};
 use hearth::storage::{CompactionConfig, EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
 /// Hearth — a purpose-built identity database.
@@ -859,23 +859,27 @@ async fn run_serve(
     let dfp_sweeper_interval_secs = identity_config.cleanup.dfp_sweeper_interval_secs;
 
     // Build the RBAC engine before the identity engine — identity depends on rbac.
-    let rbac_engine: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
+    let raw_rbac_engine = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
     ));
+    let rbac_engine: Arc<dyn RbacEngine> = Arc::clone(&raw_rbac_engine) as Arc<dyn RbacEngine>;
 
     let audit_engine: Arc<dyn hearth::audit::AuditEngine> = Arc::new(EmbeddedAuditEngine::new(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
     ));
 
-    let identity_engine: Arc<dyn IdentityEngine> = Arc::new(EmbeddedIdentityEngine::with_rbac(
+    let raw_identity_engine = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
         identity_config,
         Arc::clone(&rbac_engine),
         Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
     )?);
+    // Wire session-version bumping so RBAC changes invalidate standing tokens.
+    raw_rbac_engine.init_sv_bumper(Arc::clone(&raw_identity_engine) as Arc<dyn SvBumper>);
+    let identity_engine: Arc<dyn IdentityEngine> = raw_identity_engine;
 
     // Build the PermissionRegistry from the initial config and wrap it in an
     // ArcSwap for zero-downtime hot-swap on SIGHUP.  The registry is rebuilt
@@ -2833,21 +2837,24 @@ fn build_all_engines(
     storage: Arc<dyn StorageEngine>,
 ) -> Result<AllEngines, Box<dyn std::error::Error>> {
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
-    let rbac = Arc::new(EmbeddedRbacEngine::new(
+    let raw_rbac = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage),
         Arc::clone(&clock),
-    )) as Arc<dyn hearth::rbac::RbacEngine>;
+    ));
+    let rbac = Arc::clone(&raw_rbac) as Arc<dyn hearth::rbac::RbacEngine>;
     let audit = Arc::new(EmbeddedAuditEngine::new(
         Arc::clone(&storage),
         Arc::clone(&clock),
     )) as Arc<dyn hearth::audit::AuditEngine>;
-    let identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
+    let raw_identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage),
         clock,
         IdentityConfig::default(),
         Arc::clone(&rbac),
         Arc::clone(&audit),
-    )?) as Arc<dyn hearth::identity::IdentityEngine>;
+    )?);
+    raw_rbac.init_sv_bumper(Arc::clone(&raw_identity) as Arc<dyn SvBumper>);
+    let identity = raw_identity as Arc<dyn hearth::identity::IdentityEngine>;
     Ok((identity, Arc::clone(&audit), rbac))
 }
 
@@ -2866,21 +2873,24 @@ fn build_engines(
     } else {
         IdentityConfig::default()
     };
-    let rbac = Arc::new(EmbeddedRbacEngine::new(
+    let raw_rbac = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage),
         Arc::clone(&clock),
-    )) as Arc<dyn hearth::rbac::RbacEngine>;
+    ));
+    let rbac = Arc::clone(&raw_rbac) as Arc<dyn hearth::rbac::RbacEngine>;
     let audit = Arc::new(EmbeddedAuditEngine::new(
         Arc::clone(&storage),
         Arc::clone(&clock),
     )) as Arc<dyn hearth::audit::AuditEngine>;
-    let identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
+    let raw_identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage),
         clock,
         identity_config,
         Arc::clone(&rbac),
         Arc::clone(&audit),
-    )?) as Arc<dyn hearth::identity::IdentityEngine>;
+    )?);
+    raw_rbac.init_sv_bumper(Arc::clone(&raw_identity) as Arc<dyn SvBumper>);
+    let identity = raw_identity as Arc<dyn hearth::identity::IdentityEngine>;
     Ok((identity, rbac))
 }
 

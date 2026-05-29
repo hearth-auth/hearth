@@ -17,7 +17,7 @@ use hearth::identity::{
     device_fp::DeviceFingerprintStore, CreateRealmRequest, CredentialConfig,
     EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
 };
-use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
+use hearth::rbac::{EmbeddedRbacEngine, RbacEngine, SvBumper};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
 // Kept alongside the harness so tests can hand the engines to gRPC / HTTP
@@ -124,6 +124,8 @@ impl TestHarness {
         )
         .expect("identity engine creation");
         let identity_engine = Arc::new(identity_engine);
+        // Wire session-version bumper so RBAC mutations trigger sv invalidation.
+        rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
 
         Ok(Self {
             mode: HarnessMode::Embedded,

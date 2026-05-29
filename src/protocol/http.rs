@@ -558,6 +558,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::patch(admin_patch_realm_config),
         )
         .route(
+            "/sessions/{session_id}/sv-bump",
+            axum::routing::post(admin_sv_bump_session),
+        )
+        .route(
+            "/realms/{realm_id}/sv-bump-all",
+            axum::routing::post(admin_sv_bump_all),
+        )
+        .route(
             "/cluster/bootstrap",
             axum::routing::post(crate::protocol::cluster_admin::admin_cluster_bootstrap),
         )
@@ -635,6 +643,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/oauth/consents/{client_id}",
             axum::routing::delete(self_revoke_consent),
+        )
+        .route(
+            "/oauth/session-versions",
+            axum::routing::get(oauth_sv_delta_feed),
+        )
+        .route(
+            "/oauth/session-versions/snapshot",
+            axum::routing::get(oauth_sv_snapshot),
         )
         .route(
             "/webauthn/register/begin",
@@ -1446,6 +1462,10 @@ fn identity_error_to_response(
         IdentityError::CredentialNotFound => (StatusCode::NOT_FOUND, "credential not found"),
         IdentityError::InvalidCredential { .. } => (StatusCode::UNAUTHORIZED, "invalid credential"),
         IdentityError::SessionNotFound => (StatusCode::NOT_FOUND, "session not found"),
+        IdentityError::SessionVersionDisabled => (
+            StatusCode::NOT_FOUND,
+            "session versioning disabled for realm",
+        ),
         IdentityError::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid token"),
         IdentityError::TokenExpired => (StatusCode::UNAUTHORIZED, "token expired"),
         IdentityError::InvalidClient => (StatusCode::BAD_REQUEST, "invalid client"),
@@ -7727,6 +7747,346 @@ fn end_session_redirect(uri: Option<String>, state: Option<String>) -> Response 
             Redirect::to(&redirect_uri).into_response()
         }
     }
+}
+
+// ── Session-version feed endpoints ───────────────────────────────────────────
+
+/// Query parameters for the delta feed.
+#[derive(Deserialize)]
+struct SvDeltaQuery {
+    since: u64,
+    limit: Option<usize>,
+}
+
+/// `GET /oauth/session-versions?since=<seq>` — session-version delta feed.
+///
+/// Returns all bump events with `seq > since`, up to `limit` (default: 1000).
+/// Returns 204 when there are no new deltas.
+/// Returns 400 when `since` is older than the retention window.
+/// Returns 404 when session versioning is disabled for the realm.
+/// Requires a bearer token with `hearth.sv_feed` permission.
+async fn oauth_sv_delta_feed(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<SvDeltaQuery>,
+) -> Response {
+    // Validate token — extract realm and check hearth.sv_feed permission.
+    let Ok(realm_id) = extract_realm_id(&headers) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing X-Realm-ID header"})),
+        )
+            .into_response();
+    };
+
+    let token = match extract_bearer_token(&headers) {
+        Ok(t) => t,
+        Err(r) => return r.into_response(),
+    };
+
+    let claims = match state.identity.validate_token(&realm_id, &token) {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
+    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
+    if !has_feed_perm && !is_admin {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
+        )
+            .into_response();
+    }
+
+    let limit = params.limit.unwrap_or(1000).min(5000);
+
+    let result = tokio::task::spawn_blocking({
+        let identity = Arc::clone(&state.identity);
+        let realm_id = realm_id.clone();
+        let since = params.since;
+        move || identity.sv_list_deltas(&realm_id, since, limit)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(Some(resp))) => {
+            if resp.deltas.is_empty() {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                Json(resp).into_response()
+            }
+        }
+        Ok(Ok(None)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "since is older than retention window; fetch snapshot first"
+            })),
+        )
+            .into_response(),
+        Ok(Err(crate::identity::IdentityError::SessionVersionDisabled)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session versioning disabled for realm"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /oauth/session-versions/snapshot` — full session-version snapshot.
+///
+/// Returns gzip-compressed JSON with `{realm, current_seq, versions}`.
+/// Returns 404 when session versioning is disabled for the realm.
+/// Requires a bearer token with `hearth.sv_feed` permission.
+async fn oauth_sv_snapshot(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let Ok(realm_id) = extract_realm_id(&headers) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing X-Realm-ID header"})),
+        )
+            .into_response();
+    };
+
+    let token = match extract_bearer_token(&headers) {
+        Ok(t) => t,
+        Err(r) => return r.into_response(),
+    };
+
+    let claims = match state.identity.validate_token(&realm_id, &token) {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
+    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
+    if !has_feed_perm && !is_admin {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
+        )
+            .into_response();
+    }
+
+    let result = tokio::task::spawn_blocking({
+        let identity = Arc::clone(&state.identity);
+        let realm_id = realm_id.clone();
+        move || identity.sv_snapshot(&realm_id)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+
+            let json_bytes = match serde_json::to_vec(&snapshot) {
+                Ok(b) => b,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": e.to_string()})),
+                    )
+                        .into_response()
+                }
+            };
+
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            if encoder.write_all(&json_bytes).is_err() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "compression error"})),
+                )
+                    .into_response();
+            }
+            let compressed = match encoder.finish() {
+                Ok(b) => b,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": "compression error"})),
+                    )
+                        .into_response()
+                }
+            };
+
+            axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .header("Content-Encoding", "gzip")
+                .body(axum::body::Body::from(compressed))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Ok(Err(crate::identity::IdentityError::SessionVersionDisabled)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session versioning disabled for realm"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /admin/sessions/{session_id}/sv-bump` — manually bump a single session's sv.
+///
+/// Returns `{"new_min_sv": <n>}`. Requires `hearth.admin`.
+async fn admin_sv_bump_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(session_id_str): Path<String>,
+) -> Response {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+
+    let uuid = match uuid::Uuid::parse_str(&session_id_str) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid session_id"})),
+            )
+                .into_response()
+        }
+    };
+    let session_id = crate::core::SessionId::new(uuid);
+
+    let result = tokio::task::spawn_blocking({
+        let identity = Arc::clone(&state.identity);
+        let realm_id = auth.realm_id.clone();
+        move || identity.sv_bump_session(&realm_id, &session_id)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(new_min_sv)) => Json(serde_json::json!({"new_min_sv": new_min_sv})).into_response(),
+        Ok(Err(crate::identity::IdentityError::SessionVersionDisabled)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session versioning disabled for realm"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /admin/realms/{realm_id}/sv-bump-all` — bump every active session in the realm.
+///
+/// Returns `{"bumped": <n>}`. Heavy operation — generates O(active_sessions) delta entries.
+/// Requires `hearth.admin`.
+async fn admin_sv_bump_all(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(realm_id_str): Path<String>,
+) -> Response {
+    if let Err(e) = extract_admin_auth(&headers, &state) {
+        return e.into_response();
+    }
+
+    let uuid = match uuid::Uuid::parse_str(&realm_id_str) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid realm_id"})),
+            )
+                .into_response()
+        }
+    };
+    let realm_id = RealmId::new(uuid);
+
+    let result = tokio::task::spawn_blocking({
+        let identity = Arc::clone(&state.identity);
+        move || identity.sv_bump_all(&realm_id)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(bumped)) => Json(serde_json::json!({"bumped": bumped})).into_response(),
+        Ok(Err(crate::identity::IdentityError::SessionVersionDisabled)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session versioning disabled for realm"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Extracts a `Bearer <token>` from the `Authorization` header.
+fn extract_bearer_token(
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let auth_header = headers
+        .get("authorization")
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "missing authorization header"})),
+            )
+        })?
+        .to_str()
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid authorization header"})),
+            )
+        })?;
+    auth_header
+        .strip_prefix("Bearer ")
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid authorization scheme"})),
+            )
+        })
 }
 
 /// HTML-escapes the five special characters to prevent XSS in inline HTML.

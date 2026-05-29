@@ -6,11 +6,14 @@ import { DiscoveryClient } from "./discovery.js";
 import { JwksVerifier } from "./jwks.js";
 import { IntrospectionClient } from "./introspect.js";
 import type { IntrospectionResult } from "./introspect.js";
+import { AuthorizeClient } from "./authorize.js";
+import type { AuthorizeOptions, AuthorizeResult } from "./authorize.js";
 import type { VerifiedToken } from "./token.js";
 
 export class HearthClient {
   private readonly verifier: JwksVerifier;
   private readonly introspectionClient: IntrospectionClient;
+  private readonly authorizeClient: AuthorizeClient;
   private readonly discovery: DiscoveryClient;
 
   constructor(config: HearthConfig) {
@@ -18,6 +21,7 @@ export class HearthClient {
     this.discovery = new DiscoveryClient(resolved.issuer_url, resolved.http_timeout);
     this.verifier = new JwksVerifier(resolved, this.discovery);
     this.introspectionClient = new IntrospectionClient(resolved, () => this.discovery.discover());
+    this.authorizeClient = new AuthorizeClient(resolved);
   }
 
   /**
@@ -35,6 +39,16 @@ export class HearthClient {
    */
   async introspect(token: string, tokenTypeHint?: "access_token" | "refresh_token"): Promise<IntrospectionResult> {
     return this.introspectionClient.introspect(token, tokenTypeHint);
+  }
+
+  /**
+   * Per-request permission decision via `POST /oauth/authorize` (Decision mode).
+   *
+   * Fail-closed: returns `{ allowed: false }` on network errors.
+   * Throws `AuthorizeError` when the endpoint is misconfigured.
+   */
+  async authorize(token: string, permission: string, opts?: AuthorizeOptions): Promise<AuthorizeResult> {
+    return this.authorizeClient.decide(token, permission, opts);
   }
 
   /**

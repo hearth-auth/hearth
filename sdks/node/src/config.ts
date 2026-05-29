@@ -19,6 +19,16 @@ export interface HearthConfig {
   http_timeout?: number;
   /** Clock skew tolerance in seconds for exp/iat validation. Default: 60. */
   clock_skew_seconds?: number;
+  /**
+   * Realm UUID. Required for endpoints that need `X-Realm-ID` (introspection mode,
+   * decision mode via `POST /oauth/authorize`).
+   */
+  realm_id?: string;
+  /**
+   * Override the decision endpoint URL. Defaults to `{issuer_url}/oauth/authorize`.
+   * Only used when `expectedMode` is `"decision"`.
+   */
+  authorize_endpoint?: string;
 }
 
 export const JWKS_TTL_DEFAULT_MS = 5 * 60 * 1000;    // 5 min
@@ -35,6 +45,8 @@ export interface ResolvedConfig {
   introspection_endpoint: string | null;
   http_timeout: number;
   clock_skew_seconds: number;
+  realm_id: string | null;
+  authorize_endpoint: string | null;
 }
 
 export function resolveConfig(config: HearthConfig): ResolvedConfig {
@@ -58,5 +70,7 @@ export function resolveConfig(config: HearthConfig): ResolvedConfig {
     introspection_endpoint: config.introspection_endpoint ?? null,
     http_timeout: config.http_timeout ?? HTTP_TIMEOUT_DEFAULT_MS,
     clock_skew_seconds: config.clock_skew_seconds ?? CLOCK_SKEW_DEFAULT_S,
+    realm_id: config.realm_id ?? null,
+    authorize_endpoint: config.authorize_endpoint ?? null,
   };
 }
