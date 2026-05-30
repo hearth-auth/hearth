@@ -317,10 +317,18 @@ pub struct CreateUserForm {
     #[serde(default)]
     pub password: String,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
-    #[serde(default, rename = "attr_key")]
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_keys: Vec<String>,
-    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
-    #[serde(default, rename = "attr_val")]
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
@@ -1294,10 +1302,18 @@ pub struct EditUserForm {
     #[serde(default)]
     pub admin: Option<String>,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
-    #[serde(default, rename = "attr_key")]
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_keys: Vec<String>,
-    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
-    #[serde(default, rename = "attr_val")]
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,

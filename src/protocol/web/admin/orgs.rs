@@ -227,10 +227,18 @@ pub struct CreateOrgForm {
     )]
     pub max_members: Option<u32>,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
-    #[serde(default, rename = "attr_key")]
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_keys: Vec<String>,
-    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
-    #[serde(default, rename = "attr_val")]
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
@@ -678,10 +686,18 @@ pub struct EditOrgForm {
     )]
     pub max_members: Option<u32>,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
-    #[serde(default, rename = "attr_key")]
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_keys: Vec<String>,
-    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
-    #[serde(default, rename = "attr_val")]
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,

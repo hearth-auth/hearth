@@ -249,3 +249,41 @@ where
         Some(s) => s.parse::<T>().map(Some).map_err(serde::de::Error::custom),
     }
 }
+
+/// Deserializer for HTML repeated-key form fields into `Vec<String>`.
+///
+/// `serde_urlencoded` 0.7.x calls `visit_str` when a key appears exactly once
+/// and `visit_seq` when it appears multiple times. The standard `Vec<String>`
+/// deserializer only accepts `visit_seq`, so single-occurrence attr fields fail
+/// with a type-mismatch error.  This helper accepts both shapes.
+pub(crate) fn string_or_vec<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StringOrVec;
+
+    impl<'de> serde::de::Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a string or sequence of strings")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_owned()])
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Vec<String>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                out.push(s);
+            }
+            Ok(out)
+        }
+    }
+
+    de.deserialize_any(StringOrVec)
+}
