@@ -46,7 +46,14 @@ impl Drop for TracingGuard {
 ///
 /// Panics if the global subscriber has already been set (called twice).
 pub fn init(config: &ObservabilityConfig) -> TracingGuard {
-    let filter = EnvFilter::try_new(&config.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    // RUST_LOG takes priority. When absent, bake per-crate warn overrides for
+    // known noisy dependencies so they don't pollute default output.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!(
+            "{},globset=warn,h2=warn,hyper=warn,tower=warn",
+            config.log_level
+        ))
+    });
 
     let json = config.log_format == "json";
 

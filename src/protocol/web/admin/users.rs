@@ -919,7 +919,7 @@ pub async fn admin_user_send_reset(
 
     if htmx.0 {
         // Return an inline success badge that swaps in place of the form.
-        let html = format!(
+        let fragment = format!(
             r#"<span class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium bg-success/[0.12] text-success-fg">
               <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
               Reset email sent to {user_email}
@@ -928,7 +928,7 @@ pub async fn admin_user_send_reset(
         return axum::response::Response::builder()
             .status(axum::http::StatusCode::OK)
             .header("Content-Type", "text/html; charset=utf-8")
-            .body(axum::body::Body::from(html))
+            .body(axum::body::Body::from(fragment))
             .unwrap_or_else(|_| super::handlers_common::server_error());
     }
 
