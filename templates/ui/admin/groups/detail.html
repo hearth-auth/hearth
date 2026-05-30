@@ -83,28 +83,23 @@
 
   <div class="mb-6">
     <label for="member_search" class="block text-xs font-medium text-ht-content-secondary">Add user to group</label>
-    {# Filter input — typing triggers a fresh innerHTML swap, dropping any
-       in-progress infinite-scroll pagination. Empty queries return the
-       cursor-paginated user list; non-empty queries trigger a case-insensitive
-       substring filter over a bounded window in the picker handler.
-       Realm context is carried in the URL path, so HTMX requests inherit it
-       automatically — no query-string sync required. #}
+    {# Search input — typing triggers a fresh innerHTML swap into
+       #member-picker-results. Empty-query clears the field and shows the
+       cursor-paginated user list; non-empty queries filter by substring.
+       Realm context is in the URL path, so HTMX inherits it automatically. #}
     <input type="search" id="member_search" name="q" placeholder="Filter by name or email…"
            class="mt-1 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-1.5 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus"
            hx-get="/ui/admin/realms/{{ realm_name }}/groups/{{ group.id.as_uuid() }}/members/picker"
-           hx-trigger="input changed delay:300ms, search"
+           hx-trigger="input changed delay:300ms"
            hx-target="#member-picker-results"
-           hx-swap="innerHTML">
-    {# Container is server-side-populated with the first page of users on
-       render (see admin_group_detail handler). This guarantees the list
-       is visible immediately on tab open without depending on a client
-       roundtrip. Subsequent pages append via the `hx-trigger="revealed"`
-       sentinel at the bottom of the rendered chunk (see
-       _member_picker_rows.html). Filter input above swaps innerHTML
-       to reset pagination on search. #}
+           hx-swap="innerHTML"
+           hx-indicator="#member-picker-indicator">
+    <div id="member-picker-indicator" class="htmx-indicator mt-1 text-xs text-ht-content-muted">Searching…</div>
+    {# Populated by HTMX when the user types a query — starts with a
+       placeholder so the bordered container has content before any search. #}
     <div id="member-picker-results"
          class="mt-2 max-h-72 overflow-y-auto rounded-sm border border-divider bg-ht-surface-elevated">
-      {% include "ui/admin/groups/_member_picker_rows.html" %}
+      <p class="py-3 text-center text-xs text-ht-content-muted">Type to search for users to add…</p>
     </div>
   </div>
 

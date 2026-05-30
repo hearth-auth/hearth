@@ -29,18 +29,24 @@
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <label class="relative block">
             <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">User (search by email/name, or paste UUID)</span>
+            {# Hidden shadow input carries `name="q"` so HTMX can include it
+               without eval. Hyperscript keeps it in sync on every keystroke. #}
+            <input type="hidden" id="rbac-search-q" name="q">
             <input type="text" id="user-id-input" name="user_id"
                    value="{{ user_id_input }}"
                    autocomplete="off"
                    placeholder="Type to search…"
                    hx-get="/ui/admin/realms/{{ realm_name }}/rbac/api/users/search"
-                   hx-trigger="input changed delay:200ms, focus"
+                   hx-trigger="input changed delay:300ms"
                    hx-target="#user-id-options"
                    hx-swap="innerHTML"
-                   hx-vals='js:{"q": event.target.value}'
+                   hx-include="#rbac-search-q"
+                   hx-indicator="#rbac-search-indicator"
                    _="on focus remove .hidden from #user-id-options
-                      on input remove .hidden from #user-id-options"
+                      on input set #rbac-search-q.value to my.value
+                              then remove .hidden from #user-id-options"
                    class="mt-1 input font-mono" />
+            <div id="rbac-search-indicator" class="htmx-indicator mt-1 text-xs text-ht-content-muted">Searching…</div>
             <div id="user-id-options"
                  class="hidden absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-y-auto rounded-md border border-divider-subtle bg-ht-surface-elevated shadow-lg empty:hidden"
                  _="on click elsewhere add .hidden to me"></div>

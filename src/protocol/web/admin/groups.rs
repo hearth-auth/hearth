@@ -351,19 +351,6 @@ struct GroupDetailTemplate {
     /// Orgs available as scope targets in the Roles-tab assign form
     /// (only shown when the user picks "Org" in the scope dropdown).
     available_orgs: Vec<AvailableOrg>,
-    /// First page of users for the Members-tab picker, rendered inline so
-    /// the list is visible immediately on tab open without depending on
-    /// `hx-trigger="load"` firing client-side. Subsequent pages append via
-    /// the infinite-scroll sentinel; filter changes reset the container
-    /// via the search input's HTMX target. Field names match the picker
-    /// partial (`_member_picker_rows.html`) so it can be `{% include %}`'d
-    /// from `detail.html` using the parent scope.
-    users: Vec<User>,
-    /// Initial picker query string — empty on first render.
-    query: String,
-    /// Cursor for the second page, when the realm has more than the
-    /// initial page size.
-    next_cursor: Option<String>,
     active_subtab: &'static str,
     chrome: bool,
     active: &'static str,
@@ -445,33 +432,6 @@ pub async fn admin_group_detail(
         .collect::<Vec<_>>();
     let role_count = role_assignments.len();
 
-    // First page of users for the Members-tab picker. Pre-rendering here
-    // (rather than relying on `hx-trigger="load"` to fetch client-side on
-    // tab open) guarantees the list is visible immediately and works even
-    // when HTMX hasn't finished initializing or the realm genuinely has no
-    // users — the empty-state copy renders inline. Subsequent pages append
-    // via the picker's infinite-scroll sentinel; filter changes still
-    // reset the container via the search input's HTMX target.
-    //
-    // Already-assigned members are excluded so the picker doesn't show
-    // them as add-able candidates.
-    let initial_exclude = group_member_user_ids(&state, target.id(), &group_id);
-    let (initial_users, initial_next_cursor) =
-        match state.identity.list_users(target.id(), None, 20) {
-            Ok(p) => {
-                let filtered: Vec<User> = p
-                    .items
-                    .into_iter()
-                    .filter(|u| !initial_exclude.contains(u.id().as_uuid()))
-                    .collect();
-                (filtered, p.next_cursor)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "initial picker list_users failed");
-                (Vec::new(), None)
-            }
-        };
-
     // All realm roles (any scope_kind) — the assign form's scope dropdown
     // decides which scope the assignment is recorded against. We use the
     // realm-wide listing here rather than `build_org_available_roles`
@@ -511,9 +471,6 @@ pub async fn admin_group_detail(
         role_count,
         available_roles,
         available_orgs,
-        users: initial_users,
-        query: String::new(),
-        next_cursor: initial_next_cursor,
         active_subtab,
         chrome: true,
         active: "groups",
