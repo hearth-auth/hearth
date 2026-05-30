@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::core::WebhookId;
-use crate::identity::CreateWebhookRequest;
+use crate::identity::{CreateWebhookRequest, UpdateWebhookRequest};
 
 // ---------------------------------------------------------------------------
 // View models
@@ -66,6 +66,7 @@ pub async fn admin_webhooks_list(
 ) -> Response {
     let flash_message = params.flash.as_deref().map(|f| match f {
         "created" => "Webhook created.".to_string(),
+        "updated" => "Webhook updated.".to_string(),
         "deleted" => "Webhook deleted.".to_string(),
         other => other.to_string(),
     });
@@ -245,7 +246,7 @@ pub async fn admin_webhook_create_submit(
             flash: None,
             csrf: session.csrf.clone(),
             narrow: false,
-            product_name: state.product_name.clone(),
+            product_name: state.product_name_for(target.id()),
             logo_url: state.logo_url.clone(),
             realm_theme_url: state.realm_theme_url(),
             inline_theme_css: state.inline_theme_css(),
@@ -295,7 +296,7 @@ pub async fn admin_webhook_create_submit(
                 flash: None,
                 csrf: session.csrf.clone(),
                 narrow: false,
-                product_name: state.product_name.clone(),
+                product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
                 realm_theme_url: state.realm_theme_url(),
                 inline_theme_css: state.inline_theme_css(),
@@ -420,6 +421,183 @@ pub async fn admin_webhook_test_ping(
         "success": success,
         "message": message,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Edit
+// ---------------------------------------------------------------------------
+
+#[derive(Template)]
+#[template(path = "ui/admin/webhooks/edit.html")]
+#[allow(dead_code)]
+struct WebhookEditTemplate {
+    webhook_id: String,
+    realm_name: String,
+    form_url: String,
+    form_secret: String,
+    form_enabled: bool,
+    subscribed_events: Vec<String>,
+    available_event_types: Vec<WebhookEventType>,
+    error: Option<String>,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    flash: Option<Flash>,
+    csrf: Option<String>,
+    narrow: bool,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// `GET /ui/admin/realms/{realm}/webhooks/{id}/edit` — pre-populated edit form.
+pub async fn admin_webhook_edit_form(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(session): RequireAdmin,
+    target: TargetRealm,
+    AxumPath((_realm_name, webhook_id)): AxumPath<(String, String)>,
+) -> Response {
+    let Ok(uuid) = webhook_id.parse::<uuid::Uuid>() else {
+        return super::handlers_common::not_found("Webhook not found");
+    };
+    let wid = WebhookId::new(uuid);
+
+    let identity = state.identity.clone();
+    let realm_id = target.id().clone();
+    let wh = match tokio::task::spawn_blocking(move || identity.get_webhook(&realm_id, &wid))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten()
+    {
+        Some(w) => w,
+        None => return super::handlers_common::not_found("Webhook not found"),
+    };
+
+    render(&WebhookEditTemplate {
+        webhook_id: wh.id().as_uuid().to_string(),
+        realm_name: target.0.name().to_string(),
+        form_url: wh.url.clone(),
+        form_secret: wh.secret.clone().unwrap_or_default(),
+        form_enabled: wh.enabled,
+        subscribed_events: wh.events.clone(),
+        available_event_types: available_event_types(&wh.events),
+        error: None,
+        chrome: true,
+        active: "webhooks",
+        user_email: Some(session.user_email.clone()),
+        is_admin: true,
+        flash: None,
+        csrf: session.csrf.clone(),
+        narrow: false,
+        product_name: state.product_name_for(target.id()),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    })
+}
+
+/// Form body for editing a webhook.
+#[derive(Debug, Deserialize)]
+pub struct EditWebhookForm {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub secret: String,
+    /// Checked event type checkboxes — may appear multiple times.
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// Checkbox: present means enabled.
+    #[serde(default)]
+    pub enabled: Option<String>,
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
+}
+
+/// `POST /ui/admin/realms/{realm}/webhooks/{id}/edit` — save webhook changes.
+pub async fn admin_webhook_edit_submit(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(session): RequireAdmin,
+    target: TargetRealm,
+    AxumPath((_realm_name, webhook_id)): AxumPath<(String, String)>,
+    FriendlyForm(form): FriendlyForm<EditWebhookForm>,
+) -> Response {
+    if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
+        return resp;
+    }
+
+    let Ok(uuid) = webhook_id.parse::<uuid::Uuid>() else {
+        return super::handlers_common::not_found("Webhook not found");
+    };
+    let wid = WebhookId::new(uuid);
+    let realm_name = target.0.name().to_string();
+
+    let render_form_error = |error: String| {
+        render(&WebhookEditTemplate {
+            webhook_id: wid.as_uuid().to_string(),
+            realm_name: realm_name.clone(),
+            form_url: form.url.clone(),
+            form_secret: form.secret.clone(),
+            form_enabled: form.enabled.is_some(),
+            subscribed_events: form.events.clone(),
+            available_event_types: available_event_types(&form.events),
+            error: Some(error),
+            chrome: true,
+            active: "webhooks",
+            user_email: Some(session.user_email.clone()),
+            is_admin: true,
+            flash: None,
+            csrf: session.csrf.clone(),
+            narrow: false,
+            product_name: state.product_name_for(target.id()),
+            logo_url: state.logo_url.clone(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
+        })
+    };
+
+    if form.url.trim().is_empty() {
+        return render_form_error("Endpoint URL is required.".to_string());
+    }
+
+    let req = UpdateWebhookRequest {
+        url: form.url.trim().to_string(),
+        secret: if form.secret.is_empty() {
+            None
+        } else {
+            Some(form.secret.clone())
+        },
+        events: form.events.clone(),
+        enabled: form.enabled.is_some(),
+    };
+
+    let identity = state.identity.clone();
+    let realm_id = target.id().clone();
+    let wid_clone = wid.clone();
+    let result =
+        tokio::task::spawn_blocking(move || identity.update_webhook(&realm_id, &wid_clone, &req))
+            .await
+            .unwrap_or_else(|e| {
+                Err(crate::identity::IdentityError::Internal {
+                    reason: e.to_string(),
+                })
+            });
+
+    match result {
+        Ok(_) => axum::response::Redirect::to(&format!(
+            "/ui/admin/realms/{realm_name}/webhooks?flash=updated"
+        ))
+        .into_response(),
+        Err(crate::identity::IdentityError::WebhookNotFound) => {
+            super::handlers_common::not_found("Webhook not found")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "update_webhook failed");
+            render_form_error("Failed to update webhook. Please try again.".to_string())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

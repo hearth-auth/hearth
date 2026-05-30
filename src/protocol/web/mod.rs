@@ -1002,6 +1002,15 @@ pub fn router(state: WebState) -> Router {
             "/admin/admin-users/new",
             axum::routing::get(admin::admin_admin_user_create_alias),
         )
+        .route(
+            "/admin/admin-users/import",
+            axum::routing::get(admin::admin_admin_users_import_form)
+                .post(admin::admin_admin_users_import_submit),
+        )
+        .route(
+            "/admin/admin-users/import/template.csv",
+            axum::routing::get(admin::admin_admin_users_import_template_csv),
+        )
         // --- Migration history + orphan recovery ---
         .route(
             "/admin/migrations",
@@ -1442,6 +1451,11 @@ pub fn router(state: WebState) -> Router {
             axum::routing::post(admin::admin_webhook_test_ping),
         )
         .route(
+            "/admin/realms/{realm}/webhooks/{id}/edit",
+            axum::routing::get(admin::admin_webhook_edit_form)
+                .post(admin::admin_webhook_edit_submit),
+        )
+        .route(
             "/admin/realms/{realm}/webhooks/{id}/delete",
             axum::routing::post(admin::admin_webhook_delete),
         )
@@ -1575,6 +1589,7 @@ const ADMIN_USERS_IMPORT_JS: &[u8] = include_bytes!("assets/admin/users-import.j
 const ADMIN_USERS_LIST_JS: &[u8] = include_bytes!("assets/admin/users-list.js");
 const ADMIN_USERS_NEW_JS: &[u8] = include_bytes!("assets/admin/users-new.js");
 const ADMIN_RBAC_DEBUG_JS: &[u8] = include_bytes!("assets/admin/rbac-debug.js");
+const ADMIN_ATTR_ROWS_JS: &[u8] = include_bytes!("assets/admin/attr-rows.js");
 /// Standalone dev-mailcatcher detail-page script (HEA-886).
 const DEV_MAIL_DETAIL_JS: &[u8] = include_bytes!("assets/dev/mail-detail.js");
 /// Self-hosted Fraunces upright woff2 (HEA-630).
@@ -1784,6 +1799,7 @@ async fn serve_static(
         "admin/rbac-debug.js" => {
             Some((ADMIN_RBAC_DEBUG_JS, "application/javascript; charset=utf-8"))
         }
+        "admin/attr-rows.js" => Some((ADMIN_ATTR_ROWS_JS, "application/javascript; charset=utf-8")),
         "dev/mail-detail.js" => Some((DEV_MAIL_DETAIL_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
         "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),

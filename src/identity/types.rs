@@ -1935,6 +1935,19 @@ pub struct CreateWebhookRequest {
     pub enabled: bool,
 }
 
+/// Request to update an existing webhook's configuration.
+#[derive(Clone, Debug)]
+pub struct UpdateWebhookRequest {
+    /// Endpoint URL.
+    pub url: String,
+    /// Optional HMAC-SHA256 signing secret. `None` clears the secret.
+    pub secret: Option<String>,
+    /// Event type filter. Empty = all events.
+    pub events: Vec<String>,
+    /// Whether the webhook is active.
+    pub enabled: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

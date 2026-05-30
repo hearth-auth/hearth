@@ -76,22 +76,22 @@
           {% endif %}
           <input type="hidden" name="attr_key" value="{{ def.key }}">
           {% if def.is_boolean() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
                 <option value="true" {% if current_val == "true" %}selected{% endif %}>true</option>
                 <option value="false" {% if current_val == "false" %}selected{% endif %}>false</option>
               </select>
             {% else if def.is_enum() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
                 {% for ev in def.enum_values %}
                   <option value="{{ ev }}" {% if current_val == ev.as_str() %}selected{% endif %}>{{ ev }}</option>
                 {% endfor %}
               </select>
             {% else if def.is_number() %}
-              <input type="number" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+              <input type="number" name="attr_val" value="{{ current_val }}" class="mt-1 input" {% if def.required %}required{% endif %}>
             {% else %}
-              <input type="text" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+              <input type="text" name="attr_val" value="{{ current_val }}" class="mt-1 input" {% if def.required %}required{% endif %}>
           {% endif %}
         </div>
       {% endfor %}
@@ -110,22 +110,6 @@
       </div>
       <button type="button" data-add-attr-row class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
     </div>
-    <script>
-    (function() {
-      document.getElementById('attr-rows').addEventListener('click', function(e) {
-        var btn = e.target.closest('[data-remove-row]');
-        if (btn) btn.closest('.attr-row').remove();
-      });
-      document.getElementById('add-attr-row').addEventListener('click', function() {
-        var row = document.createElement('div');
-        row.className = 'flex gap-2 items-center attr-row';
-        row.innerHTML = '<input type="text" name="attr_key" placeholder="key" class="input flex-1">' +
-          '<input type="text" name="attr_val" placeholder="value" class="input flex-1">' +
-          '<button type="button" data-remove-row class="text-ht-content-muted hover:text-danger-fg text-sm px-2">&#x2715;</button>';
-        document.getElementById('attr-rows').appendChild(row);
-      });
-    })();
-    </script>
     {% endif %}
 
     <div class="flex items-center gap-3 pt-2">
@@ -139,3 +123,4 @@
   </form>
 </div>
 {% endblock %}
+{% block scripts %}<script src="/ui/static/admin/attr-rows.js"></script>{% endblock %}

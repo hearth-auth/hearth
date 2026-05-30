@@ -82,13 +82,16 @@
 {# Actions bar #}
 <div class="mt-6 rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
   <div class="flex flex-wrap items-center gap-3">
-    <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/reset-password">
+    <form id="reset-pw-form"
+          hx-post="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/reset-password"
+          hx-target="#reset-pw-form"
+          hx-swap="outerHTML">
       {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
       <button type="button"
               class="rounded px-3 py-1.5 text-sm font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
               _="on click
                    if @data-confirming is 'yes'
-                     call (closest <form/>).submit()
+                     call (closest <form/>).requestSubmit()
                    else
                      set @data-confirming to 'yes'
                      set @class to 'btn-ember rounded px-3 py-1.5 text-sm font-medium'
@@ -256,7 +259,7 @@
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Created</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Expires</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
-        <th class="px-3 py-2"></th>
+        <th class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>
@@ -313,7 +316,7 @@
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Credential ID</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Algorithm</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Discoverable</th>
-        <th class="px-3 py-2"></th>
+        <th class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>

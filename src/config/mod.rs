@@ -192,6 +192,7 @@ impl Config {
                 log_level: "debug".to_string(),
                 log_format: "text".to_string(),
                 otlp: None,
+                dev_mode: true,
             },
             operational: OperationalConfig::default(),
             email: EmailConfig::default(),

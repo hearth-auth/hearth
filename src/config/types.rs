@@ -311,6 +311,10 @@ pub struct ObservabilityConfig {
     /// Optional OTLP export. When absent, no spans are exported.
     #[serde(default)]
     pub otlp: Option<OtlpConfig>,
+    /// Whether dev-mode pretty formatting is active. Not serialized — threaded
+    /// in from [`crate::config::Config::dev_mode`] before `telemetry::init`.
+    #[serde(skip)]
+    pub dev_mode: bool,
 }
 
 impl ObservabilityConfig {
@@ -336,6 +340,7 @@ impl Default for ObservabilityConfig {
             log_level: Self::default_log_level(),
             log_format: Self::default_log_format(),
             otlp: None,
+            dev_mode: false,
         }
     }
 }

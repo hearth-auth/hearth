@@ -73,7 +73,8 @@ pub use types::{
     PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
     RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
+    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
+    UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -797,6 +798,16 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<Option<Vec<String>>, IdentityError>;
+
+    /// Returns the base32-encoded pending TOTP secret if the user has a pending
+    /// enrollment that is not yet confirmed. Returns `None` if MFA is already
+    /// enabled or there is no pending enrollment. Used to re-populate the QR
+    /// code and secret on failed activation attempts.
+    fn load_pending_totp_secret(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Option<String>, IdentityError>;
 
     // ===== WebAuthn / Passkeys (Step 24) =====
 
@@ -1692,6 +1703,16 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Lists all webhooks registered in a realm, in insertion order.
     fn list_webhooks(&self, realm_id: &RealmId) -> Result<Vec<Webhook>, IdentityError>;
+
+    /// Updates an existing webhook's configuration.
+    ///
+    /// Returns `WebhookNotFound` when no webhook with that ID exists in the realm.
+    fn update_webhook(
+        &self,
+        realm_id: &RealmId,
+        webhook_id: &WebhookId,
+        req: &UpdateWebhookRequest,
+    ) -> Result<Webhook, IdentityError>;
 
     /// Deletes a webhook from the realm.
     fn delete_webhook(

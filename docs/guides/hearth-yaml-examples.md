@@ -54,7 +54,7 @@ All example URLs use `auth.example.com`.
 | 37 | Production observability | [Part 9](#part-9--enterprise-integrations) |
 | 38 | Storage tuning | [Part 9](#part-9--enterprise-integrations) |
 | 39 | Custom branding | [Part 10](#part-10--branding--complex-scenarios) |
-| 40 | High-security / financial services | [Part 10](#part-10--branding--complex-scenarios) |
+| 40 | High-security / financial services (+ FAPI 2.0 client setup) | [Part 10](#part-10--branding--complex-scenarios) |
 | 41 | Full enterprise kitchen sink | [Part 10](#part-10--branding--complex-scenarios) |
 | 42 | Risk-based step-up MFA (adaptive) | [Part 3](#part-3--mfa) |
 
@@ -1695,6 +1695,32 @@ observability:
   WebAuthn / passkey second factors in addition to TOTP.
 - Registering an application for this realm? Set `require_consent: false` only for
   first-party apps; all third-party integrations must go through consent.
+
+#### FAPI 2.0 with this configuration
+
+The `hearth.yaml` above sets the server-side prerequisites for FAPI 2.0 compliance (TLS required,
+short-lived tokens, MFA, no self-registration). FAPI 2.0 client registration and realm-level FAPI
+profile enforcement are configured via the Admin API — not via `hearth.yaml` today.
+
+After bringing up the server with this config, register a FAPI 2.0 client:
+
+```bash
+# Register a FAPI 2.0 client (no client_secret; JWKS required)
+curl -s -X POST "https://auth.example.com/admin/applications" \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "X-Realm-ID: <realm-uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Open Banking Client",
+    "profile": "fapi2",
+    "redirect_uris": ["https://tpp.example.com/callback"],
+    "grant_types": ["authorization_code"],
+    "jwks": "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"alg\":\"EdDSA\",\"kid\":\"k1\",\"x\":\"<base64url-public-key>\"}]}",
+    "authorization_signed_response_alg": "EdDSA"
+  }'
+```
+
+See [docs/guides/fapi2.md](fapi2.md) for the complete FAPI 2.0 flow (PAR, JAR, JARM, DPoP).
 
 ---
 

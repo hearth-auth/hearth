@@ -17,6 +17,99 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   manually) so the required-check name matches the new job.** All inbound SDK README,
   CHANGELOG, and code-comment links updated.
 
+### Added
+
+- **Startup panel shows env and storage stats (HEA-1032)** — the info panel printed after bind
+  now includes a stats section: realm count, email transport, TLS status, OIDC issuer (when
+  configured), federation connector count (when > 0), cluster peer count (when in cluster mode),
+  WAL file size, SST file count, total data-directory size, and startup duration in ms. Stats are
+  derived from config (zero-cost) or a single `fs::read_dir` pass (cheap). No storage-engine
+  lock and no heap allocation after startup.
+
+- **ASCII HEARTH banner + consolidated startup info panel (HEA-1047)** — `hearth serve` now
+  prints a block-letter ASCII art banner before tracing init, followed by a single info panel
+  after the server binds showing API URL, Admin UI URL, first-run Setup URL (when a
+  `.setup_token` exists), and Mail inbox URL + password (when mailcatcher is active). Both are
+  suppressed when `log_format: json` so machine-readable log pipelines are unaffected.
+  The mid-init mailcatcher box that previously appeared during startup has been removed and
+  consolidated into the panel.
+
+- **Dev-mode pretty log formatter (HEA-1046)** — when `--dev` is active or stdout is a TTY,
+  the log output switches to a compact human-readable format: `HH:MM:SS` timestamps, ANSI-colored
+  level labels (TTY only), and abbreviated target paths (last two `::` segments, e.g.
+  `identity::engine` instead of `hearth::identity::engine`). JSON output (`log_format: json`) is
+  unaffected.
+
+### Fixed
+
+- **"Generate YAML" button on Admin → Migration History now works** — the per-orphan
+  disclosure button on `/ui/admin/migrations` carried an inline hyperscript expression
+  (`closest <div.p-4/>`) whose hyphenated class selector was parsed as a math subtraction,
+  causing the hyperscript parser to reject the whole handler and leaving the button inert.
+  The handler now targets the form panel by id (`#orphan-form-{loop.index}`), matching the
+  existing convention in `templates/ui/admin/organizations/_member_row.html`.
+
+- **Default log filter now suppresses noisy third-party crates (HEA-1045)** — globset, h2,
+  hyper, and tower are capped at `warn` in the default `EnvFilter`, eliminating regex-conversion
+  debug lines from normal `make dev` output. `RUST_LOG` still overrides everything when set.
+
+- **Migration history timestamps now human-readable (HEA-1037 / BUG-13)** — the Completed and
+  Detected columns in the Migration History admin page were displaying raw RFC 3339 strings
+  (e.g. `2024-03-15T14:30:00Z`). The view layer now formats them as `15 Mar 2024 14:30 UTC`.
+
+- **Org/user create forms now show the free-form attribute section (HEA-1031)** — when no
+  attribute definitions are configured for a realm, the create forms for organizations and users
+  showed nothing under the Attributes heading. The `{% else %}` branch rendering the dynamic
+  add/remove UI was missing. Also removed CSP-violating inline `<script>` blocks from all four
+  affected templates (create + edit for org and user); logic moved to the new
+  `/ui/static/admin/attr-rows.js` external file which is served from the same origin and
+  therefore permitted by `script-src 'self'`.
+
+- **Org and user attribute fields now submit correctly with a single attribute row (HEA-1031)**
+  — submitting a create or edit form for an organization or user with exactly one attribute
+  row produced a 400 error. Root cause: `serde_urlencoded` 0.7.x calls `visit_str` (not
+  `visit_seq`) when a repeated key appears once, but `Vec<String>` only accepts `visit_seq`.
+  A new `string_or_vec` deserializer handles both shapes; applied to `attr_keys`/`attr_vals`
+  in `CreateOrgForm`, `EditOrgForm`, `CreateUserForm`, and `EditUserForm`.
+
+- **Org and user attribute forms now submit correctly with two or more attribute rows (HEA-1031)**
+  — submitting a create or edit form with ≥2 attribute rows (i.e. in realms that have
+  schema-defined attribute definitions) produced a 400 "We couldn't read that form" error.
+  Root cause: serde's struct deserializer rejects duplicate field names before
+  `deserialize_with` is invoked, making the `string_or_vec` helper ineffective for the
+  multi-row case. All four form structs (`CreateUserForm`, `EditUserForm`, `CreateOrgForm`,
+  `EditOrgForm`) now implement `axum::extract::FromRequest` directly, parsing the raw body
+  with `form_urlencoded::parse` so all occurrences of `attr_key` and `attr_val` are
+  collected in order without hitting serde's duplicate-field guard.
+
+- **Optional enum/boolean attribute fields no longer produce validation errors when left blank (HEA-1031)**
+  — selecting no option on an optional enum or boolean select (e.g. "Is Contractor") submitted an
+  empty string that the server rejected as "not in allowed values". The four attribute form
+  handlers now strip pairs with empty values before validation; optional blank fields are treated
+  as absent. Required attribute fields left blank now correctly surface a "required attribute
+  missing" server error, and all four templates add the HTML `required` attribute to schema-
+  defined inputs so the browser blocks submission before the server is reached.
+
+- **Submit buttons now show a loading state immediately on form submission (HEA-1031)**
+  — clicking Save/Create multiple times while the server processed the request could trigger
+  duplicate submissions. `initFormSubmitProtection()` in `admin.js` disables the submit button
+  and shows "Saving…" as soon as the form passes browser validation, preventing double-submits.
+
+- **Organization slug field now enforces valid slug characters client-side (HEA-1037 / BUG-14)**
+  — the Create Organization form was missing an HTML `pattern` attribute on the slug input,
+  allowing browsers to accept strings that the server would reject. `pattern="[a-z0-9][a-z0-9-]*"`
+  now matches the server-side constraint (3–63 chars, lowercase alphanum + hyphens).
+
+- **Unlabeled action column headers in admin tables (HEA-1037 / BUG-15)** — axe-core flagged
+  empty `<th></th>` cells at the rightmost position of every list table as accessibility
+  violations. All 16 affected table headers now carry `aria-label="Actions"`.
+
+- **Audit hash chain integrity preserved across server restarts (HEA-1036)** — the in-memory
+  chain cursor was lost on restart, causing the first post-restart `append()` to incorrectly
+  treat the realm as empty and chain from the genesis hash. The engine already recovered
+  correctly via `get_last_hash()` (a storage scan), but the regression test was absent,
+  leaving the invariant unverifiable. Test added; integrity check now passes across restart.
+
 ### Security
 
 - **JAR `response_mode` override now enforced (HEA-1008)** — `JarClaims` lacked a

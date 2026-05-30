@@ -227,13 +227,41 @@ pub struct CreateOrgForm {
     )]
     pub max_members: Option<u32>,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
-    #[serde(default, rename = "attr_key")]
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_keys: Vec<String>,
-    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
-    #[serde(default, rename = "attr_val")]
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+}
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateOrgForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        Ok(Self {
+            name: super::handlers_common::form_scalar(&p, "name"),
+            slug: super::handlers_common::form_scalar(&p, "slug"),
+            description: super::handlers_common::form_scalar(&p, "description"),
+            max_members: super::handlers_common::form_opt_u32(&p, "max_members"),
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
 }
 
 /// `POST /ui/admin/organizations/new`.
@@ -242,7 +270,7 @@ pub async fn admin_org_create_submit(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    FriendlyForm(form): FriendlyForm<CreateOrgForm>,
+    form: CreateOrgForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -272,7 +300,7 @@ pub async fn admin_org_create_submit(
         .attr_keys
         .iter()
         .zip(form.attr_vals.iter())
-        .filter(|(k, _)| !k.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -678,13 +706,41 @@ pub struct EditOrgForm {
     )]
     pub max_members: Option<u32>,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
-    #[serde(default, rename = "attr_key")]
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_keys: Vec<String>,
-    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
-    #[serde(default, rename = "attr_val")]
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+}
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for EditOrgForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        Ok(Self {
+            name: super::handlers_common::form_scalar(&p, "name"),
+            description: super::handlers_common::form_scalar(&p, "description"),
+            status: super::handlers_common::form_scalar(&p, "status"),
+            max_members: super::handlers_common::form_opt_u32(&p, "max_members"),
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
 }
 
 /// `POST /ui/admin/organizations/:id/edit`.
@@ -693,7 +749,7 @@ pub async fn admin_org_edit_submit(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid)): AxumPath<(String, String)>,
-    FriendlyForm(form): FriendlyForm<EditOrgForm>,
+    form: EditOrgForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -726,7 +782,7 @@ pub async fn admin_org_edit_submit(
         .attr_keys
         .iter()
         .zip(form.attr_vals.iter())
-        .filter(|(k, _)| !k.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
