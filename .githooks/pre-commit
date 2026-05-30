@@ -101,6 +101,9 @@ EOF
     # shellcheck disable=SC2086
     git add -- $clean_rs
   fi
+
+  echo "rust changes staged; running 'cargo clippy'..."
+  cargo clippy --all-targets -- -D warnings
 fi
 
 # ── Changelog: warn when src/proto/sdks change but CHANGELOG.md does not ─
