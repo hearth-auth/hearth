@@ -19,6 +19,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Startup panel shows env and storage stats (HEA-1032)** — the info panel printed after bind
+  now includes a stats section: realm count, email transport, TLS status, OIDC issuer (when
+  configured), federation connector count (when > 0), cluster peer count (when in cluster mode),
+  WAL file size, SST file count, total data-directory size, and startup duration in ms. Stats are
+  derived from config (zero-cost) or a single `fs::read_dir` pass (cheap). No storage-engine
+  lock and no heap allocation after startup.
+
 - **ASCII HEARTH banner + consolidated startup info panel (HEA-1047)** — `hearth serve` now
   prints a block-letter ASCII art banner before tracing init, followed by a single info panel
   after the server binds showing API URL, Admin UI URL, first-run Setup URL (when a
