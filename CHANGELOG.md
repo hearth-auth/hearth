@@ -42,6 +42,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Fixed
 
+- **"Generate YAML" button on Admin → Migration History now works** — the per-orphan
+  disclosure button on `/ui/admin/migrations` carried an inline hyperscript expression
+  (`closest <div.p-4/>`) whose hyphenated class selector was parsed as a math subtraction,
+  causing the hyperscript parser to reject the whole handler and leaving the button inert.
+  The handler now targets the form panel by id (`#orphan-form-{loop.index}`), matching the
+  existing convention in `templates/ui/admin/organizations/_member_row.html`.
+
 - **Default log filter now suppresses noisy third-party crates (HEA-1045)** — globset, h2,
   hyper, and tower are capped at `warn` in the default `EnvFilter`, eliminating regex-conversion
   debug lines from normal `make dev` output. `RUST_LOG` still overrides everything when set.
