@@ -7,6 +7,21 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **`fapi_profile` realm config key** — operators can now set `fapi_profile: "baseline"` or
+  `fapi_profile: "advanced"` under `realms.<name>` in `hearth.yaml` to enforce FAPI 2.0 Security
+  Profile constraints on all clients in that realm at startup. Unknown values are a hard error.
+  (HEA-1040)
+
+- **`PATCH /admin/realms/{id}/config` accepts `fapi_profile`** — the admin config patch endpoint
+  now accepts `"fapi_profile": "baseline"`, `"fapi_profile": "advanced"`, or `"fapi_profile": null`
+  (to clear). Returns 400 for unrecognised values. (HEA-1040)
+
+- **`profile` application config key** — per-client FAPI 2.0 profile can now be declared in
+  `realms.<name>.applications.<key>.profile: "fapi2"` in `hearth.yaml`. The reconciler applies it on
+  create and detects drift on subsequent restarts. (HEA-1040)
+
 ### Changed
 
 - **_hyperscript removed** — all admin-UI interactivity now expressed as vanilla-JS components via
