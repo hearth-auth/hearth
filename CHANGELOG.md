@@ -38,6 +38,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   A new `string_or_vec` deserializer handles both shapes; applied to `attr_keys`/`attr_vals`
   in `CreateOrgForm`, `EditOrgForm`, `CreateUserForm`, and `EditUserForm`.
 
+- **Org and user attribute forms now submit correctly with two or more attribute rows (HEA-1031)**
+  — submitting a create or edit form with ≥2 attribute rows (i.e. in realms that have
+  schema-defined attribute definitions) produced a 400 "We couldn't read that form" error.
+  Root cause: serde's struct deserializer rejects duplicate field names before
+  `deserialize_with` is invoked, making the `string_or_vec` helper ineffective for the
+  multi-row case. All four form structs (`CreateUserForm`, `EditUserForm`, `CreateOrgForm`,
+  `EditOrgForm`) now implement `axum::extract::FromRequest` directly, parsing the raw body
+  with `form_urlencoded::parse` so all occurrences of `attr_key` and `attr_val` are
+  collected in order without hitting serde's duplicate-field guard.
+
 - **Organization slug field now enforces valid slug characters client-side (HEA-1037 / BUG-14)**
   — the Create Organization form was missing an HTML `pattern` attribute on the slug input,
   allowing browsers to accept strings that the server would reject. `pattern="[a-z0-9][a-z0-9-]*"`

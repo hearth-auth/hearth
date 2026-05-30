@@ -334,13 +334,34 @@ pub struct CreateUserForm {
     pub csrf: String,
 }
 
+impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateUserForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        Ok(Self {
+            email: super::handlers_common::form_scalar(&p, "email"),
+            display_name: super::handlers_common::form_scalar(&p, "display_name"),
+            first_name: super::handlers_common::form_scalar(&p, "first_name"),
+            last_name: super::handlers_common::form_scalar(&p, "last_name"),
+            password: super::handlers_common::form_scalar(&p, "password"),
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
+}
+
 /// `POST /ui/admin/users/new`.
 pub async fn admin_user_create_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    FriendlyForm(form): FriendlyForm<CreateUserForm>,
+    form: CreateUserForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -1319,13 +1340,40 @@ pub struct EditUserForm {
     pub csrf: String,
 }
 
+impl<S: Send + Sync> axum::extract::FromRequest<S> for EditUserForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        let admin_val = super::handlers_common::form_scalar(&p, "admin");
+        Ok(Self {
+            email: super::handlers_common::form_scalar(&p, "email"),
+            display_name: super::handlers_common::form_scalar(&p, "display_name"),
+            first_name: super::handlers_common::form_scalar(&p, "first_name"),
+            last_name: super::handlers_common::form_scalar(&p, "last_name"),
+            status: super::handlers_common::form_scalar(&p, "status"),
+            admin: if admin_val.is_empty() {
+                None
+            } else {
+                Some(admin_val)
+            },
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
+}
+
 /// `POST /ui/admin/users/:id/edit`.
 pub async fn admin_user_edit_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
-    FriendlyForm(form): FriendlyForm<EditUserForm>,
+    form: EditUserForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;

@@ -244,13 +244,33 @@ pub struct CreateOrgForm {
     pub csrf: String,
 }
 
+impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateOrgForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        Ok(Self {
+            name: super::handlers_common::form_scalar(&p, "name"),
+            slug: super::handlers_common::form_scalar(&p, "slug"),
+            description: super::handlers_common::form_scalar(&p, "description"),
+            max_members: super::handlers_common::form_opt_u32(&p, "max_members"),
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
+}
+
 /// `POST /ui/admin/organizations/new`.
 pub async fn admin_org_create_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    FriendlyForm(form): FriendlyForm<CreateOrgForm>,
+    form: CreateOrgForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -703,13 +723,33 @@ pub struct EditOrgForm {
     pub csrf: String,
 }
 
+impl<S: Send + Sync> axum::extract::FromRequest<S> for EditOrgForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        Ok(Self {
+            name: super::handlers_common::form_scalar(&p, "name"),
+            description: super::handlers_common::form_scalar(&p, "description"),
+            status: super::handlers_common::form_scalar(&p, "status"),
+            max_members: super::handlers_common::form_opt_u32(&p, "max_members"),
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
+}
+
 /// `POST /ui/admin/organizations/:id/edit`.
 pub async fn admin_org_edit_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid)): AxumPath<(String, String)>,
-    FriendlyForm(form): FriendlyForm<EditOrgForm>,
+    form: EditOrgForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;

@@ -256,6 +256,12 @@ where
 /// and `visit_seq` when it appears multiple times. The standard `Vec<String>`
 /// deserializer only accepts `visit_seq`, so single-occurrence attr fields fail
 /// with a type-mismatch error.  This helper accepts both shapes.
+///
+/// NOTE: this helper cannot fix the "duplicate field" error that occurs when a
+/// struct has *two or more* occurrences of the same key — serde's struct
+/// deserializer rejects duplicate keys before `deserialize_with` is invoked.
+/// Forms with potentially repeated `attr_key`/`attr_val` fields must use
+/// [`collect_form_pairs`] + [`form_vec`] via a custom `FromRequest` impl.
 pub(crate) fn string_or_vec<'de, D>(de: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -286,4 +292,45 @@ where
     }
 
     de.deserialize_any(StringOrVec)
+}
+
+// ---------------------------------------------------------------------------
+// Raw form-body helpers (multi-value key support)
+// ---------------------------------------------------------------------------
+
+/// Parses an `application/x-www-form-urlencoded` body into an ordered pair
+/// list, preserving duplicate keys.
+///
+/// Unlike serde's struct deserializer, this correctly collects all occurrences
+/// of repeated keys such as `attr_key` and `attr_val`.
+pub(crate) fn collect_form_pairs(body: &[u8]) -> Vec<(String, String)> {
+    form_urlencoded::parse(body).into_owned().collect()
+}
+
+/// Returns the first value for `key`, or an empty string if absent.
+pub(crate) fn form_scalar(pairs: &[(String, String)], key: &str) -> String {
+    pairs
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
+/// Collects all values for `key` in submission order.
+pub(crate) fn form_vec(pairs: &[(String, String)], key: &str) -> Vec<String> {
+    pairs
+        .iter()
+        .filter(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .collect()
+}
+
+/// Returns the first value for `key` parsed as `u32`, or `None` if absent or empty.
+pub(crate) fn form_opt_u32(pairs: &[(String, String)], key: &str) -> Option<u32> {
+    let s = form_scalar(pairs, key);
+    if s.is_empty() {
+        None
+    } else {
+        s.parse().ok()
+    }
 }
