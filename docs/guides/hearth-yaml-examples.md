@@ -55,6 +55,7 @@ All example URLs use `auth.example.com`.
 | 38 | Custom branding | [Part 10](#part-10--branding--complex-scenarios) |
 | 39 | High-security / financial services | [Part 10](#part-10--branding--complex-scenarios) |
 | 40 | Full enterprise kitchen sink | [Part 10](#part-10--branding--complex-scenarios) |
+| 41 | FAPI 2.0 realm — banking | [Part 11](#part-11--fapi-20--financial-grade-apis) |
 
 ---
 
@@ -1783,3 +1784,104 @@ realms:
 
 *Re-check this file when `src/config/types.rs`, `src/identity/federation/`, or
 `src/identity/types.rs` change public API surface (new YAML keys, renamed variants).*
+
+---
+
+## Part 11 — FAPI 2.0 / Financial-grade APIs
+
+> **Prerequisites:** FAPI 2.0 support shipped in PR #128. The `fapi_profile` YAML key is
+> tracked in [HEA-1040](/HEA/issues/HEA-1040); use the Admin API PATCH until it lands.
+> Full operator guide: [docs/guides/fapi2.md](fapi2.md).
+
+### Example 41 — FAPI 2.0 realm — banking
+
+**Audience:** operators running open-banking, PSD2, or payment-initiation APIs that must comply
+with FAPI 2.0 Baseline or Advanced security profiles. Pairs with §3–§7 of the
+[FAPI 2.0 guide](fapi2.md).
+
+```yaml
+oidc:
+  issuer: "https://auth.example.com"
+
+server:
+  bind_address: "0.0.0.0"
+  port: 443
+  tls_cert_path: "/etc/hearth/tls/server.crt"
+  tls_key_path:  "/etc/hearth/tls/server.key"
+
+storage:
+  data_dir: "/var/lib/hearth/data"
+  fsync: true
+
+token:
+  access_token_ttl: "5m"          # short-lived; DPoP-bound tokens limit blast radius
+  refresh_token_ttl: "8h"
+
+auth:
+  session_ttl: "8h"
+  mfa_required: true
+  mfa_methods:
+    - webauthn                     # phishing-resistant; recommended for FAPI Advanced
+
+realms:
+  banking:
+    # fapi_profile: baseline       # pending HEA-1040 — use Admin API PATCH for now
+    # fapi_profile: advanced       # Advanced adds mandatory JAR, JARM, DPoP
+    auth:
+      mfa_required: true
+      mfa_methods:
+        - webauthn
+      registration:
+        mode: invite_only          # no self-registration; users created by admins
+      rate_limit:
+        max_failed_logins: 5
+        lockout_duration: "30m"
+    token:
+      access_token_ttl: "5m"
+      refresh_token_ttl: "8h"
+    # Applications are registered via Admin API (not YAML) for FAPI 2.0:
+    # - token_endpoint_auth_method: private_key_jwt
+    # - jwks or jwks_uri (no client_secret)
+    # - require_pushed_authorization_requests: true
+    # See docs/guides/fapi2.md §3 for the full registration curl.
+```
+
+**Activate FAPI 2.0 Baseline via Admin API** (while HEA-1040 is pending):
+
+```bash
+curl -s -X PATCH https://auth.example.com/admin/realms/banking \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"fapi_profile": "baseline"}'
+```
+
+**Register a FAPI 2.0 client** (private_key_jwt, no client_secret):
+
+```bash
+curl -s -X POST https://auth.example.com/admin/realms/banking/clients \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "payment-initiation-service",
+    "name": "Payment Initiation Service",
+    "confidential": true,
+    "token_endpoint_auth_method": "private_key_jwt",
+    "jwks_uri": "https://app.example.com/.well-known/jwks.json",
+    "grant_types": ["authorization_code", "refresh_token"],
+    "redirect_uris": ["https://app.example.com/callback"],
+    "require_pushed_authorization_requests": true,
+    "declared_scopes": ["openid", "accounts", "payments"]
+  }'
+```
+
+- `fapi_profile: baseline` enforces PAR, PKCE S256, and `private_key_jwt` server-side. Clients
+  that omit any of these receive a `400 invalid_request` or `401 invalid_client` before the
+  user ever sees the authorization UI.
+- Set `fapi_profile: advanced` to additionally require JAR (signed request objects), JARM
+  (signed authorization responses), and DPoP token binding — the full PSD2 / FDX mandate stack.
+- `token.access_token_ttl: "5m"` minimizes exposure when access tokens are intercepted; DPoP
+  binding (Advanced) further limits usability to the legitimate client.
+- `mfa_methods: [webauthn]` satisfies FAPI 2.0 Advanced's phishing-resistant authenticator
+  requirement and PSD2 SCA (Strong Customer Authentication) under eIDAS LoA High.
+- See [docs/guides/fapi2.md](fapi2.md) for complete PAR, JAR, JARM, DPoP curl examples and
+  the OpenID Foundation conformance suite walkthrough.
