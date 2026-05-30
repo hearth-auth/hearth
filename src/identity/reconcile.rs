@@ -28,7 +28,7 @@ use crate::identity::keys::{
     config_migration_history_key, config_migration_history_scan_prefix, config_orphan_key,
     config_orphan_scan_prefix, config_snapshot_key, prefix_end,
 };
-use crate::identity::oidc::{ApplicationStatus, UpdateClientRequest};
+use crate::identity::oidc::{ApplicationStatus, ClientProfile, UpdateClientRequest};
 use crate::identity::{
     CreateOrganizationRequest, CreateRealmRequest, IdentityEngine, ImportClientRequest,
     OrganizationConfig, OrganizationStatus, RealmConfig, RealmStatus, UpdateOrganizationRequest,
@@ -700,6 +700,19 @@ pub(crate) fn reconcile_applications(
 
         let cfg_require_consent = app_cfg.require_consent.unwrap_or(true);
         let cfg_logo = app_cfg.client_logo_url.clone();
+        let cfg_profile = match app_cfg.profile.as_deref() {
+            None | Some("standard") => ClientProfile::Standard,
+            Some("fapi2") => ClientProfile::Fapi2,
+            Some(other) => {
+                warn!(
+                    realm = realm_name,
+                    app = app_key,
+                    profile = other,
+                    "unknown client profile in YAML; treating as standard"
+                );
+                ClientProfile::Standard
+            }
+        };
 
         match engine.get_client(realm_id, &client_id) {
             Ok(Some(existing)) => {
@@ -710,6 +723,7 @@ pub(crate) fn reconcile_applications(
                 let grants_changed = existing.grant_types() != grant_types;
                 let consent_changed = existing.require_consent() != cfg_require_consent;
                 let logo_changed = existing.client_logo_url() != cfg_logo.as_deref();
+                let profile_changed = existing.profile() != cfg_profile;
 
                 if was_archived
                     || name_changed
@@ -717,6 +731,7 @@ pub(crate) fn reconcile_applications(
                     || grants_changed
                     || consent_changed
                     || logo_changed
+                    || profile_changed
                 {
                     engine.update_client(
                         realm_id,
@@ -744,6 +759,11 @@ pub(crate) fn reconcile_applications(
                             },
                             client_logo_url: if logo_changed {
                                 Some(cfg_logo.clone())
+                            } else {
+                                None
+                            },
+                            profile: if profile_changed {
+                                Some(cfg_profile)
                             } else {
                                 None
                             },
@@ -809,10 +829,13 @@ pub(crate) fn reconcile_applications(
                         consent_spans_orgs: app_cfg.consent_spans_orgs.unwrap_or(false),
                     },
                 )?;
-                // Apply consent-policy fields: the import path doesn't
-                // carry them, so a follow-up update_client puts the client
-                // in the intended state.
-                if !cfg_require_consent || cfg_logo.is_some() {
+                // Apply consent-policy and profile fields: the import path
+                // doesn't carry them, so a follow-up update_client puts the
+                // client in the intended state.
+                let needs_followup = !cfg_require_consent
+                    || cfg_logo.is_some()
+                    || cfg_profile != ClientProfile::Standard;
+                if needs_followup {
                     engine.update_client(
                         realm_id,
                         &client_id,
@@ -822,6 +845,7 @@ pub(crate) fn reconcile_applications(
                             grant_types: None,
                             require_consent: Some(cfg_require_consent),
                             client_logo_url: Some(cfg_logo.clone()),
+                            profile: Some(cfg_profile),
                             slug: app_cfg.slug.clone(),
                             trust_level: app_cfg.trust_level,
                             declared_scopes: app_cfg.declared_scopes.clone(),
