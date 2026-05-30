@@ -1961,6 +1961,7 @@ struct HttpParRequest {
     nonce: Option<String>,
     /// Signed JAR JWT (RFC 9101) — required for FAPI Advanced.
     request: Option<String>,
+    response_mode: Option<String>,
 }
 
 fn default_response_type() -> String {
@@ -2034,6 +2035,7 @@ async fn par_handler(
         code_challenge_method,
         nonce: body.nonce,
         request: body.request,
+        response_mode: body.response_mode,
     };
 
     match state

@@ -22,9 +22,9 @@ use ring::signature::{EcdsaKeyPair, Ed25519KeyPair, KeyPair};
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{ClientId, Clock, FakeClock, RealmId, Timestamp, UserId};
 use hearth::identity::{
-    AuthorizationResponse, CreateRealmRequest, CreateUserRequest, CredentialConfig,
-    EmbeddedIdentityEngine, IdentityConfig, IdentityEngine, IdentityError,
-    PushedAuthorizationRequest, RegisterClientRequest,
+    AuthorizationRequest, AuthorizationResponse, CodeChallengeMethod, CreateRealmRequest,
+    CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
+    IdentityError, PushedAuthorizationRequest, RegisterClientRequest, ResponseMode,
 };
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
@@ -197,6 +197,7 @@ fn par_with_jar(client_id: hearth::core::ClientId, jar_jwt: String) -> PushedAut
         code_challenge_method: None,
         nonce: None,
         request: Some(jar_jwt),
+        response_mode: None,
     }
 }
 
@@ -1148,4 +1149,178 @@ fn jar_par_ps256_accepted() {
         "request_uri must use the correct URN prefix"
     );
     assert_eq!(resp.expires_in, 90, "PAR TTL should be 90 s");
+}
+
+// ── Scenario 20–21: response_mode override (RFC 9101 §4) ──────────────────────
+
+/// Signs a JAR JWT that includes a `response_mode` claim.
+fn sign_jar_with_response_mode(
+    pkcs8_bytes: &[u8],
+    client_id: &str,
+    issuer: &str,
+    jti: &str,
+    response_mode: &str,
+) -> String {
+    let exp = EPOCH_MICROS / 1_000_000 + 3600;
+    let iat = EPOCH_MICROS / 1_000_000;
+    let pkce_challenge = {
+        use data_encoding::BASE64URL_NOPAD;
+        BASE64URL_NOPAD
+            .encode(ring::digest::digest(&ring::digest::SHA256, PKCE_VERIFIER.as_bytes()).as_ref())
+    };
+    let header = serde_json::json!({"alg": "EdDSA", "kid": TEST_KID});
+    let claims = serde_json::json!({
+        "iss": client_id, "aud": issuer, "exp": exp, "iat": iat, "jti": jti,
+        "client_id": client_id, "response_type": "code",
+        "redirect_uri": REDIRECT_URI, "scope": "openid",
+        "state": "rm-state", "code_challenge": pkce_challenge,
+        "code_challenge_method": "S256",
+        "response_mode": response_mode,
+    });
+    let h_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).expect("header"));
+    let c_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
+    let signing_input = format!("{h_b64}.{c_b64}");
+    let pair = Ed25519KeyPair::from_pkcs8(pkcs8_bytes).expect("from_pkcs8");
+    let sig = pair.sign(signing_input.as_bytes());
+    format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()))
+}
+
+/// Registers a JARM-capable client (EdDSA JWKS + `authorization_signed_response_alg`).
+fn register_jarm_client(env: &TestEnv, jwks: &str) -> hearth::identity::OAuthClient {
+    env.engine
+        .register_client(
+            &env.realm,
+            &RegisterClientRequest {
+                client_name: "JAR JARM Test Client".to_string(),
+                redirect_uris: vec![REDIRECT_URI.to_string()],
+                client_secret: None,
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                jwks: Some(jwks.to_string()),
+                authorization_signed_response_alg: Some("EdDSA".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("register JARM client")
+}
+
+fn pkce_challenge_for_verifier(verifier: &str) -> String {
+    use data_encoding::BASE64URL_NOPAD;
+    BASE64URL_NOPAD
+        .encode(ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes()).as_ref())
+}
+
+/// Scenario 20 — JAR `response_mode` overrides the outer query-string value.
+///
+/// RFC 9101 §4 requires that request object claims override corresponding outer
+/// authorization request parameters. A `response_mode: "query.jwt"` claim
+/// inside the JAR must trigger JARM even when the outer `AuthorizationRequest`
+/// has `response_mode: None` — the scenario a network attacker can create by
+/// stripping the outer parameter to downgrade a JARM response.
+#[test]
+fn jar_response_mode_in_jar_overrides_outer_none() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let jwks = jwks_json(&pub_bytes);
+    let client = register_jarm_client(&env, &jwks);
+    let client_id = client.client_id().clone();
+    let cid_str = client_id.to_string();
+    let user_id = create_test_user(&env);
+
+    let jar = sign_jar_with_response_mode(
+        &pkcs8,
+        &cid_str,
+        &env.issuer,
+        "jti-rm-jar-override-1",
+        "query.jwt",
+    );
+
+    let resp = env
+        .engine
+        .authorize(
+            &env.realm,
+            &AuthorizationRequest {
+                client_id: client_id.clone(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                response_type: "code".to_string(),
+                scope: "openid".to_string(),
+                state: "rm-state".to_string(),
+                nonce: None,
+                code_challenge: Some(pkce_challenge_for_verifier(PKCE_VERIFIER)),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                resource: None,
+                user_id: user_id.clone(),
+                amr_values: vec![],
+                response_mode: None, // outer stripped by attacker — JAR must restore it
+                request: Some(jar),
+                via_par: false,
+            },
+        )
+        .expect("authorize must succeed with JAR response_mode override");
+
+    assert!(
+        resp.jarm_jwt().is_some(),
+        "JAR response_mode=query.jwt must produce a JARM JWT even when outer response_mode is None"
+    );
+    assert_eq!(
+        resp.response_mode(),
+        &ResponseMode::QueryJwt,
+        "effective response mode must be query.jwt from the JAR"
+    );
+    assert!(
+        !resp.code().is_empty(),
+        "authorization code must be non-empty"
+    );
+}
+
+/// Scenario 21 — without a JAR, the server-side `authorization_signed_response_alg`
+/// still enforces JARM regardless of the outer `response_mode`.
+///
+/// This sanity-check confirms that Scenario 20's assertion is meaningful: the
+/// client's `authorization_signed_response_alg` flag alone already forces JARM,
+/// and a plain outer `response_mode=None` is upgraded to `query.jwt`.
+#[test]
+fn no_jar_alg_enforced_client_still_gets_jarm() {
+    let env = setup();
+    let (pkcs8, pub_bytes) = generate_ed25519();
+    let jwks = jwks_json(&pub_bytes);
+    let client = register_jarm_client(&env, &jwks);
+    let client_id = client.client_id().clone();
+    let user_id = create_test_user(&env);
+
+    // Suppress unused-variable warning — jwks was needed only for registration.
+    let _ = pkcs8;
+
+    let resp = env
+        .engine
+        .authorize(
+            &env.realm,
+            &AuthorizationRequest {
+                client_id: client_id.clone(),
+                redirect_uri: REDIRECT_URI.to_string(),
+                response_type: "code".to_string(),
+                scope: "openid".to_string(),
+                state: "no-jar-state".to_string(),
+                nonce: None,
+                code_challenge: Some(pkce_challenge_for_verifier(PKCE_VERIFIER)),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                resource: None,
+                user_id: user_id.clone(),
+                amr_values: vec![],
+                response_mode: None,
+                request: None, // no JAR
+                via_par: false,
+            },
+        )
+        .expect("authorize must succeed");
+
+    assert!(
+        resp.jarm_jwt().is_some(),
+        "client with authorization_signed_response_alg must always get JARM"
+    );
+    assert_eq!(
+        resp.response_mode(),
+        &ResponseMode::QueryJwt,
+        "plain response_mode=None is upgraded to query.jwt when client enforces JARM"
+    );
 }

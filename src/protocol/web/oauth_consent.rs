@@ -270,7 +270,7 @@ async fn authorize_get_impl(
             },
             nonce: stored.nonce.clone().unwrap_or_default(),
             prompt: String::new(),
-            response_mode: None,
+            response_mode: stored.response_mode.clone(),
             request: None,
             request_uri: None,
         };

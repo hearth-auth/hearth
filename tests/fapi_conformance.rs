@@ -140,6 +140,7 @@ fn par_with_pkce(client_id: &ClientId) -> PushedAuthorizationRequest {
         code_challenge_method: Some(CodeChallengeMethod::S256),
         nonce: Some("fapi-nonce".to_string()),
         request: None,
+        response_mode: None,
     }
 }
 
@@ -156,6 +157,7 @@ fn par_without_pkce(client_id: &ClientId) -> PushedAuthorizationRequest {
         code_challenge_method: None,
         nonce: None,
         request: None,
+        response_mode: None,
     }
 }
 
@@ -405,6 +407,7 @@ async fn fapi_a02_authorize_without_jarm_client_rejected() {
         code_challenge_method: Some(CodeChallengeMethod::S256),
         nonce: Some("adv-nonce".to_string()),
         request: Some(jar),
+        response_mode: None,
     };
 
     // PAR itself is gate-free for JAR presence — the JARM check fires in authorize.
@@ -512,6 +515,7 @@ async fn fapi_a04_valid_advanced_request_accepted() {
         code_challenge_method: Some(CodeChallengeMethod::S256),
         nonce: Some("adv-full-nonce".to_string()),
         request: Some(jar),
+        response_mode: None,
     };
 
     let _par_resp = env
@@ -605,6 +609,7 @@ async fn fapi_a06_par_pkce_only_in_jar_accepted() {
         code_challenge_method: None,
         nonce: Some("a06-nonce".to_string()),
         request: Some(jar),
+        response_mode: None,
     };
 
     // Before the fix this returned FapiViolation("FAPI 2.0 Baseline requires PKCE").
@@ -681,6 +686,7 @@ async fn fapi_a07_realm_advanced_enforces_dpop_for_standard_profile_client() {
         code_challenge_method: Some(CodeChallengeMethod::S256),
         nonce: Some("a07-nonce".to_string()),
         request: Some(jar),
+        response_mode: None,
     };
     env.harness
         .identity()
@@ -866,6 +872,7 @@ async fn fapi_b06_realm_baseline_enforces_dpop_for_standard_profile_client() {
         code_challenge_method: Some(hearth::identity::oidc::CodeChallengeMethod::S256),
         nonce: Some("b06-nonce".to_string()),
         request: None,
+        response_mode: None,
     };
     env.harness
         .identity()
@@ -1307,6 +1314,7 @@ async fn fapi_b11_realm_baseline_enforces_dpop_on_refresh_for_standard_profile_c
         code_challenge_method: Some(hearth::identity::oidc::CodeChallengeMethod::S256),
         nonce: Some("b11-nonce".to_string()),
         request: None,
+        response_mode: None,
     };
     env.harness
         .identity()

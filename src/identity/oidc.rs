@@ -1202,6 +1202,13 @@ pub struct JarClaims {
     /// RFC 8707 resource indicator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    /// Response mode (RFC 9101 §4 — overrides outer `response_mode` query param).
+    ///
+    /// Clients using JARM SHOULD include this in the JAR to prevent a
+    /// network attacker from stripping the outer `response_mode` and
+    /// downgrading a signed response to plain `query` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_mode: Option<String>,
 }
 
 // ===== Pushed Authorization Requests (RFC 9126) =====
@@ -1237,6 +1244,11 @@ pub struct PushedAuthorizationRequest {
     /// (and override) the request fields. `client_id` on the outer request
     /// must match `iss` inside the JWT.
     pub request: Option<String>,
+    /// Desired response mode (e.g. `"query.jwt"` for JARM).
+    ///
+    /// Passed as the outer fallback value; the JAR's `response_mode` claim
+    /// takes precedence if the JAR is present (RFC 9101 §4).
+    pub response_mode: Option<String>,
 }
 
 /// Response from a successful PAR push (RFC 9126 §2.2).
@@ -1275,6 +1287,12 @@ pub(crate) struct StoredPushedAuthorizationRequest {
     /// OIDC nonce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) nonce: Option<String>,
+    /// Response mode supplied in the JAR (RFC 9101 §4).
+    ///
+    /// Persisted so the `/authorize` handler can honour a JAR-supplied
+    /// `response_mode` even after the JAR JWT has been consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) response_mode: Option<String>,
     /// When this entry was created.
     pub(crate) created_at: Timestamp,
     /// When this entry expires (created_at + 90 s).
