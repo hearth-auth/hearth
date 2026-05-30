@@ -11682,6 +11682,36 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(out)
     }
 
+    fn update_webhook(
+        &self,
+        realm_id: &RealmId,
+        webhook_id: &WebhookId,
+        req: &crate::identity::UpdateWebhookRequest,
+    ) -> Result<crate::identity::Webhook, IdentityError> {
+        use crate::identity::types::Webhook;
+        let existing = self
+            .get_webhook(realm_id, webhook_id)?
+            .ok_or(IdentityError::WebhookNotFound)?;
+        let now = self.clock.now();
+        let updated = Webhook::new(
+            existing.id().clone(),
+            realm_id.clone(),
+            req.url.clone(),
+            req.secret.clone(),
+            req.events.clone(),
+            req.enabled,
+            existing.created_at,
+            now,
+        );
+        let value = serde_json::to_vec(&updated).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &keys::encode_webhook_id(webhook_id), &value)
+            .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        Ok(updated)
+    }
+
     fn delete_webhook(
         &self,
         realm_id: &RealmId,

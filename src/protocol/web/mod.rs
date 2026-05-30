@@ -1451,6 +1451,11 @@ pub fn router(state: WebState) -> Router {
             axum::routing::post(admin::admin_webhook_test_ping),
         )
         .route(
+            "/admin/realms/{realm}/webhooks/{id}/edit",
+            axum::routing::get(admin::admin_webhook_edit_form)
+                .post(admin::admin_webhook_edit_submit),
+        )
+        .route(
             "/admin/realms/{realm}/webhooks/{id}/delete",
             axum::routing::post(admin::admin_webhook_delete),
         )

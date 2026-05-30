@@ -410,7 +410,16 @@ pub async fn admin_user_create_submit(
         })
     };
 
-    match state.identity.create_user(target.id(), &req) {
+    // The system realm guards `create_user` to prevent non-admin accounts.
+    // Use the dedicated `create_admin_user` bypass and then grant the admin role.
+    let is_system = crate::identity::keys::is_system_realm(target.id());
+    let create_result = if is_system {
+        state.identity.create_admin_user(&req)
+    } else {
+        state.identity.create_user(target.id(), &req)
+    };
+
+    match create_result {
         Ok(user) => {
             // Set the initial password. If this fails, delete the partially
             // created user and surface the error rather than leaving an
@@ -434,6 +443,14 @@ pub async fn admin_user_create_submit(
                 },
             );
 
+            // For system-realm users, grant the realm.admin role so they can
+            // actually sign in as administrators.
+            if is_system {
+                if let Err(e) = set_user_admin(&state, target.id(), user.id(), true) {
+                    tracing::warn!(error = %e, "failed to assign realm.admin to new admin user");
+                }
+            }
+
             // Audit.
             audit_user_event(&state, &session, &target.0, user.id(), "create");
             Redirect::to(&format!(
@@ -450,7 +467,7 @@ pub async fn admin_user_create_submit(
         Err(IdentityError::InvalidAttribute { reason }) => render_error(reason),
         Err(e) => {
             tracing::warn!(error = %e, "create_user failed");
-            render_error("Unable to create user right now.".to_string())
+            render_error(format!("Unable to create user: {e}"))
         }
     }
 }

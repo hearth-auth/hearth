@@ -73,7 +73,8 @@ pub use types::{
     PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
     RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
     RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
+    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
+    UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -1702,6 +1703,16 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Lists all webhooks registered in a realm, in insertion order.
     fn list_webhooks(&self, realm_id: &RealmId) -> Result<Vec<Webhook>, IdentityError>;
+
+    /// Updates an existing webhook's configuration.
+    ///
+    /// Returns `WebhookNotFound` when no webhook with that ID exists in the realm.
+    fn update_webhook(
+        &self,
+        realm_id: &RealmId,
+        webhook_id: &WebhookId,
+        req: &UpdateWebhookRequest,
+    ) -> Result<Webhook, IdentityError>;
 
     /// Deletes a webhook from the realm.
     fn delete_webhook(
