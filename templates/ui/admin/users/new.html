@@ -83,6 +83,43 @@
       <p id="pw-error" class="hidden mt-1 text-xs text-danger-fg">Password is required.</p>
     </div>
 
+    {# ── Attributes ── #}
+    {% if !attr_fields.is_empty() %}
+    <div class="space-y-3">
+      <h3 class="text-sm font-semibold text-ht-content-secondary">Attributes</h3>
+      {% for (def, current_val) in attr_fields %}
+        <div>
+          <label class="block text-sm font-medium text-ht-content-secondary">
+            {{ def.display_label() }}
+            {% if def.required %}<span class="ml-0.5 text-danger-fg">*</span>{% endif %}
+          </label>
+          {% if let Some(desc) = def.description_str() %}
+            <p class="mt-0.5 text-xs text-ht-content-muted">{{ desc }}</p>
+          {% endif %}
+          <input type="hidden" name="attr_key" value="{{ def.key }}">
+          {% if def.is_boolean() %}
+              <select name="attr_val" class="mt-1 input">
+                <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
+                <option value="true" {% if current_val == "true" %}selected{% endif %}>true</option>
+                <option value="false" {% if current_val == "false" %}selected{% endif %}>false</option>
+              </select>
+            {% else if def.is_enum() %}
+              <select name="attr_val" class="mt-1 input">
+                <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
+                {% for ev in def.enum_values %}
+                  <option value="{{ ev }}" {% if current_val == ev.as_str() %}selected{% endif %}>{{ ev }}</option>
+                {% endfor %}
+              </select>
+            {% else if def.is_number() %}
+              <input type="number" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+            {% else %}
+              <input type="text" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
     <div class="flex items-center gap-3 pt-2">
       <button type="submit" id="create-user-submit"
               class="btn-ember rounded px-4 py-2 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed">

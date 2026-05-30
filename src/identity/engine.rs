@@ -7728,6 +7728,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
     }
 
+    fn load_pending_totp_secret(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Option<String>, IdentityError> {
+        match self.load_mfa_state(realm_id, user_id)? {
+            Some(state) if !state.enabled => Ok(Some(state.secret_base32)),
+            _ => Ok(None),
+        }
+    }
+
     fn regenerate_recovery_codes(
         &self,
         realm_id: &RealmId,

@@ -715,16 +715,42 @@ fn render_totp_error(state: &Arc<WebState>, session: &UiSession, msg: &str) -> R
         return render(&tmpl);
     }
 
-    // Render with empty secret/codes because regenerating would
-    // invalidate the user's just-scanned QR. They can refresh to
-    // restart if they need new recovery codes.
+    // Reload the pending enrollment state so the QR code, secret, and
+    // recovery codes stay visible after a failed activation attempt.
+    // Regenerating would invalidate the user's already-scanned QR, so
+    // we read back what was stored by enroll_totp.
+    let secret_base32 = state
+        .identity
+        .load_pending_totp_secret(&session.realm_id, &session.user_id)
+        .unwrap_or_default()
+        .unwrap_or_default();
+    let recovery_codes = state
+        .identity
+        .load_pending_recovery_codes(&session.realm_id, &session.user_id)
+        .unwrap_or_default()
+        .unwrap_or_default();
+    let provisioning_uri = if !secret_base32.is_empty() {
+        crate::identity::totp::generate_provisioning_uri(
+            &secret_base32,
+            &session.user_email,
+            "Hearth",
+        )
+    } else {
+        String::new()
+    };
+    let qr_svg = if !provisioning_uri.is_empty() {
+        generate_qr_svg(&provisioning_uri)
+    } else {
+        String::new()
+    };
+
     let mut tmpl = TotpEnrollTemplate::new(
         session,
         false,
-        String::new(),
-        String::new(),
-        String::new(),
-        Vec::new(),
+        secret_base32,
+        provisioning_uri,
+        qr_svg,
+        recovery_codes,
         Some(msg.to_string()),
         admin,
         state.product_name.clone(),

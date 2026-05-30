@@ -798,6 +798,16 @@ pub trait IdentityEngine: Send + Sync {
         user_id: &UserId,
     ) -> Result<Option<Vec<String>>, IdentityError>;
 
+    /// Returns the base32-encoded pending TOTP secret if the user has a pending
+    /// enrollment that is not yet confirmed. Returns `None` if MFA is already
+    /// enabled or there is no pending enrollment. Used to re-populate the QR
+    /// code and secret on failed activation attempts.
+    fn load_pending_totp_secret(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Option<String>, IdentityError>;
+
     // ===== WebAuthn / Passkeys (Step 24) =====
 
     /// Starts a `WebAuthn` registration ceremony.
