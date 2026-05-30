@@ -48,6 +48,19 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   with `form_urlencoded::parse` so all occurrences of `attr_key` and `attr_val` are
   collected in order without hitting serde's duplicate-field guard.
 
+- **Optional enum/boolean attribute fields no longer produce validation errors when left blank (HEA-1031)**
+  — selecting no option on an optional enum or boolean select (e.g. "Is Contractor") submitted an
+  empty string that the server rejected as "not in allowed values". The four attribute form
+  handlers now strip pairs with empty values before validation; optional blank fields are treated
+  as absent. Required attribute fields left blank now correctly surface a "required attribute
+  missing" server error, and all four templates add the HTML `required` attribute to schema-
+  defined inputs so the browser blocks submission before the server is reached.
+
+- **Submit buttons now show a loading state immediately on form submission (HEA-1031)**
+  — clicking Save/Create multiple times while the server processed the request could trigger
+  duplicate submissions. `initFormSubmitProtection()` in `admin.js` disables the submit button
+  and shows "Saving…" as soon as the form passes browser validation, preventing double-submits.
+
 - **Organization slug field now enforces valid slug characters client-side (HEA-1037 / BUG-14)**
   — the Create Organization form was missing an HTML `pattern` attribute on the slug input,
   allowing browsers to accept strings that the server would reject. `pattern="[a-z0-9][a-z0-9-]*"`
