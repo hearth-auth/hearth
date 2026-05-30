@@ -1844,16 +1844,12 @@ async fn run_serve(
     Ok(())
 }
 
-// Unicode full-block logo — █ (U+2588), 5 letter rows, verbatim from brand spec.
+// Unicode full-block logo — █ (U+2588), 5 contiguous letter rows.
 const HEARTH_LOGO: &str = "\
 ██   ██ ███████  █████  ██████  ████████ ██   ██\n\
-\n\
 ██   ██ ██      ██   ██ ██   ██    ██    ██   ██\n\
-\n\
 ███████ █████   ███████ ██████     ██    ███████\n\
-\n\
 ██   ██ ██      ██   ██ ██  ██     ██    ██   ██\n\
-\n\
 ██   ██ ███████ ██   ██ ██   ██    ██    ██   ██";
 
 // Prints the logo + consolidated startup info panel to stdout (raw — never
@@ -1866,6 +1862,7 @@ fn print_startup_panel(
 ) {
     let base = format!("http://{addr}");
     let dev_badge = if dev_mode { "  [dev]" } else { "" };
+    println!();
     println!("{HEARTH_LOGO}");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!(
