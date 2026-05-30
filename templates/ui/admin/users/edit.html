@@ -117,6 +117,22 @@
       </div>
       <button type="button" data-add-attr-row class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
     </div>
+    <script>
+    (function() {
+      document.getElementById('attr-rows').addEventListener('click', function(e) {
+        var btn = e.target.closest('[data-remove-attr-row]');
+        if (btn) btn.closest('.attr-row').remove();
+      });
+      document.querySelector('[data-add-attr-row]').addEventListener('click', function() {
+        var row = document.createElement('div');
+        row.className = 'flex gap-2 items-center attr-row';
+        row.innerHTML = '<input type="text" name="attr_key" placeholder="key" class="input flex-1">' +
+          '<input type="text" name="attr_val" placeholder="value" class="input flex-1">' +
+          '<button type="button" data-remove-attr-row class="text-ht-content-muted hover:text-danger-fg text-sm px-2">&#x2715;</button>';
+        document.getElementById('attr-rows').appendChild(row);
+      });
+    })();
+    </script>
     {% endif %}
 
     <div class="flex items-center gap-3 pt-2">
