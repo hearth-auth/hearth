@@ -70,6 +70,43 @@ EOF
     exit 1
   fi
 
+  # Resolve protoc for the build script. Use PROTOC if already set; otherwise
+  # search PATH and common install locations. Git hooks run without a login
+  # shell, so ~/.local/bin and Homebrew paths are often absent from PATH.
+  if [ -z "${PROTOC:-}" ]; then
+    _protoc_found=""
+    for _candidate in \
+        "$(command -v protoc 2>/dev/null || true)" \
+        "$HOME/.local/bin/protoc" \
+        "/usr/local/bin/protoc" \
+        "/usr/bin/protoc" \
+        "/opt/homebrew/bin/protoc" \
+        "/opt/homebrew/opt/protobuf/bin/protoc"; do
+      if [ -n "$_candidate" ] && [ -x "$_candidate" ]; then
+        _protoc_found="$_candidate"
+        break
+      fi
+    done
+
+    if [ -n "$_protoc_found" ]; then
+      export PROTOC="$_protoc_found"
+    else
+      cat >&2 <<'EOF'
+error: pre-commit hook needs 'protoc' to compile .proto files during
+  cargo fmt / cargo clippy.
+
+Install protoc:
+  macOS:   brew install protobuf
+  Debian:  apt-get install protobuf-compiler
+  Or set:  export PROTOC=/path/to/protoc
+
+To bypass (discouraged — CI will fail):
+  git commit --no-verify
+EOF
+      exit 1
+    fi
+  fi
+
   # Partition staged .rs into "clean" (fully staged) vs "partial" (also has
   # unstaged hunks). Only re-stage clean files after formatting.
   clean_rs=""

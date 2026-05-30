@@ -533,9 +533,32 @@ impl Wal {
 
     /// Appends an entry to the WAL.
     ///
-    /// Serializes the entry, encrypts the payload, writes `[length][ciphertext][crc32]`,
-    /// and optionally fsyncs.
+    /// Convenience wrapper around [`Wal::append_with_pre_rotate`] with a no-op
+    /// pre-rotate callback. Use when there is no pre-rotation work needed
+    /// (e.g., WAL-only tests that don't care about the memtable).
     pub fn append(&self, entry: &WalEntry) -> Result<(), StorageError> {
+        self.append_with_pre_rotate(entry, || Ok(()))
+    }
+
+    /// Appends an entry to the WAL, calling `pre_rotate` before rotating if
+    /// rotation is needed.
+    ///
+    /// `pre_rotate` fires while the WAL file mutex is held — no other write
+    /// can append to (or rotate) the WAL until `pre_rotate` returns. This
+    /// lets the storage engine flush the in-memory memtable to an SST before
+    /// the old WAL entries are discarded, closing the crash-loss window
+    /// described in HEA-1050.
+    ///
+    /// If `pre_rotate` returns an error, rotation is cancelled and the error
+    /// is propagated. The WAL is unmodified in that case.
+    pub fn append_with_pre_rotate<F>(
+        &self,
+        entry: &WalEntry,
+        pre_rotate: F,
+    ) -> Result<(), StorageError>
+    where
+        F: FnOnce() -> Result<(), StorageError>,
+    {
         let plaintext = entry.serialize();
 
         let mut file = self
@@ -548,6 +571,11 @@ impl Wal {
         #[allow(clippy::cast_possible_truncation)]
         let approx_record_size = 4 + plaintext.len() as u64 + encryption::TAG_SIZE as u64 + 4;
         if self.config.max_size > 0 && file_size + approx_record_size > self.config.max_size {
+            // Flush the memtable to an SST before truncating the WAL. The
+            // file mutex is held for the entire pre_rotate + rotate_locked
+            // sequence, so no concurrent write can slip between flush and
+            // truncation and recreate the crash-loss window.
+            pre_rotate()?;
             self.rotate_locked(&mut **file)?;
         }
 

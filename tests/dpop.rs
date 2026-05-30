@@ -62,6 +62,7 @@ impl DPopKey {
 }
 
 /// Builds a DPoP proof JWT for the given method, URL, and optional nonce.
+#[allow(clippy::similar_names)] // htm/htu are the canonical RFC 9449 DPoP claim names
 fn make_dpop_proof(key: &DPopKey, htm: &str, htu: &str, nonce: Option<&str>) -> String {
     let jwk = key.public_jwk_json();
     let header = serde_json::json!({

@@ -123,6 +123,7 @@ pub struct MigrationHistoryRecord {
 /// records without depending on `chrono` or accessing the private
 /// `config::diff` helper.
 #[must_use]
+#[allow(clippy::many_single_char_names, clippy::similar_names)]
 pub fn format_unix_secs_rfc3339(secs: u64) -> String {
     let days = secs / 86_400;
     let time_of_day = secs % 86_400;
