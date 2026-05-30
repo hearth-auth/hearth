@@ -591,12 +591,6 @@ async fn run_serve(
         }
     }
 
-    // ASCII banner on stdout before tracing init — raw println so it is never
-    // captured by structured log sinks. Suppressed when log_format = "json".
-    if config.observability.log_format != "json" {
-        print_ascii_banner();
-    }
-
     // Initialize tracing (and optional OTLP export).
     // The guard must be held for the process lifetime to ensure the batch
     // exporter is flushed on shutdown.
@@ -1850,17 +1844,6 @@ async fn run_serve(
     Ok(())
 }
 
-// Prints the HEARTH ASCII banner to stdout (raw — never in log sinks).
-fn print_ascii_banner() {
-    println!();
-    println!("  #   # #####  ###  ####  ##### #   #");
-    println!("  #   # #     #   # #   #   #   #   #");
-    println!("  ##### ####  ##### ####    #   #####");
-    println!("  #   # #     #   # # #     #   #   #");
-    println!("  #   # ##### #   # #  #    #   #   #");
-    println!();
-}
-
 // Prints the consolidated startup info panel to stdout (raw — never in log
 // sinks). Call only when log_format != "json".
 fn print_startup_panel(
@@ -1870,20 +1853,22 @@ fn print_startup_panel(
     mailcatcher: Option<(&str, &str)>,
 ) {
     let base = format!("http://{addr}");
+    let dev_badge = if dev_mode { "  [dev]" } else { "" };
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!(
-        "  Hearth v{}{}",
+        "  H · E · A · R · T · H    v{}{}",
         env!("CARGO_PKG_VERSION"),
-        if dev_mode { "  [dev mode]" } else { "" }
+        dev_badge
     );
+    println!("  Identity · Auth · RBAC");
+    println!("  ─────────────────────────────────────────────────");
     println!("  API:    {base}");
     println!("  Admin:  {base}/ui");
     if let Some(token) = setup_token {
         println!("  Setup:  {base}/ui/setup?token={token}");
     }
     if let Some((inbox_url, password)) = mailcatcher {
-        println!("  Mail:   {inbox_url}");
-        println!("  Pw:     {password}");
+        println!("  Mail:   {inbox_url}  pw: {password}");
     }
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 }
