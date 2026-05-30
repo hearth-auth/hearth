@@ -42,14 +42,14 @@
                    hx-swap="innerHTML"
                    hx-include="#rbac-search-q"
                    hx-indicator="#rbac-search-indicator"
-                   _="on focus remove .hidden from #user-id-options
-                      on input set #rbac-search-q.value to my.value
-                              then remove .hidden from #user-id-options"
+                   data-component="autocomplete-input"
+                   data-target="#user-id-options"
+                   data-sync-to="#rbac-search-q"
                    class="mt-1 input font-mono" />
             <div id="rbac-search-indicator" class="htmx-indicator mt-1 text-xs text-ht-content-muted">Searching…</div>
             <div id="user-id-options"
                  class="hidden absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-y-auto rounded-md border border-divider-subtle bg-ht-surface-elevated shadow-lg empty:hidden"
-                 _="on click elsewhere add .hidden to me"></div>
+                 data-component="dismiss-outside"></div>
           </label>
           <label class="block">
             <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">Org ID (optional)</span>

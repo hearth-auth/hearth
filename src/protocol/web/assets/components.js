@@ -81,9 +81,15 @@
         : ('targetNext' in root.dataset ? root.nextElementSibling : null);
       if (!target) return;
 
+      // data-also-hide="#id" — element to always hide when toggling target
+      const alsoHide = root.dataset.alsoHide
+        ? document.querySelector(root.dataset.alsoHide)
+        : null;
+
       this.on(root, 'click', () => {
         const nowHidden = target.classList.toggle('hidden');
         const open = !nowHidden;
+        if (alsoHide) alsoHide.classList.add('hidden');
         const { labelOpen, labelClose, labelTarget: labelSel } = root.dataset;
         if (labelOpen && labelClose) {
           const labelEl = labelSel ? document.querySelector(labelSel) : root;
@@ -142,10 +148,14 @@
       super(root);
       const buttons = this.$$('[data-tab]');
       const panels  = this.$$('[data-tab-panel]');
+      // data-active-class="cls" — extra class toggled on the active tab button
+      const activeClass = root.dataset.activeClass || '';
 
       const activate = (name) => {
         for (const btn of buttons) {
-          btn.setAttribute('aria-selected', String(btn.dataset.tab === name));
+          const isActive = btn.dataset.tab === name;
+          btn.setAttribute('aria-selected', String(isActive));
+          if (activeClass) btn.classList.toggle(activeClass, isActive);
         }
         for (const panel of panels) {
           panel.classList.toggle('hidden', panel.dataset.tabPanel !== name);
@@ -271,6 +281,10 @@
       this.on(root, 'input', () => {
         target.disabled = root.value !== match;
       });
+      // Prevent Enter-key submission when value does not yet match.
+      this.on(root, 'keydown', (e) => {
+        if (e.key === 'Enter' && root.value !== match) e.preventDefault();
+      });
     }
   }
   register('type-to-confirm', TypeToConfirm);
@@ -325,22 +339,34 @@
   class ScopeSelector extends Component {
     constructor(root) {
       super(root);
-      const radios    = this.$$('[data-scope-radio]');
-      const orgSelect = this.$('[data-scope-org-select]');
-      const orgPanel  = this.$('[data-scope-org-panel]');
-      const valueEl   = this.$('[data-scope-value]');
+      const radios      = this.$$('[data-scope-radio]');
+      // data-scope-select — alternative to radio buttons: a <select> whose
+      // value is 'realm' or 'org'.  Takes precedence over radios when present.
+      const scopeSelect = this.$('[data-scope-select]');
+      const orgSelect   = this.$('[data-scope-org-select]');
+      const orgPanel    = this.$('[data-scope-org-panel]');
+      const valueEl     = this.$('[data-scope-value]');
 
       const sync = () => {
-        const active = radios.find(r => r.checked);
-        const scope  = active ? active.value : '';
-        const isOrg  = scope === 'org';
+        let scope;
+        if (scopeSelect) {
+          scope = scopeSelect.value;
+        } else {
+          const active = radios.find(r => r.checked);
+          scope = active ? active.value : '';
+        }
+        const isOrg = scope === 'org';
         orgPanel?.classList.toggle('hidden', !isOrg);
         if (valueEl) {
           valueEl.value = isOrg && orgSelect ? 'org:' + orgSelect.value : scope;
         }
       };
 
-      for (const r of radios) this.on(r, 'change', sync);
+      if (scopeSelect) {
+        this.on(scopeSelect, 'change', sync);
+      } else {
+        for (const r of radios) this.on(r, 'change', sync);
+      }
       if (orgSelect) this.on(orgSelect, 'change', sync);
       sync();
     }
@@ -367,6 +393,109 @@
     }
   }
   register('submit-state', SubmitState);
+
+  // =========================================================================
+  // HideTarget — on click, add .hidden to a target element
+  //
+  // data-target="#id"           element to hide
+  // =========================================================================
+
+  class HideTarget extends Component {
+    constructor(root) {
+      super(root);
+      const target = root.dataset.target ? document.querySelector(root.dataset.target) : null;
+      if (!target) return;
+      this.on(root, 'click', () => target.classList.add('hidden'));
+    }
+  }
+  register('hide-target', HideTarget);
+
+  // =========================================================================
+  // ValueReveal — show/hide a target based on a <select> value
+  //
+  // data-show-when="value"      show target when select value equals this
+  // data-target="#id"           element to show or hide
+  // =========================================================================
+
+  class ValueReveal extends Component {
+    constructor(root) {
+      super(root);
+      const target   = root.dataset.target ? document.querySelector(root.dataset.target) : null;
+      const showWhen = root.dataset.showWhen;
+      if (!target || !showWhen) return;
+      const sync = () => target.classList.toggle('hidden', root.value !== showWhen);
+      this.on(root, 'change', sync);
+      sync();
+    }
+  }
+  register('value-reveal', ValueReveal);
+
+  // =========================================================================
+  // AuditExpand — expand/collapse an audit detail <tr>
+  //
+  // No data attributes needed: finds closest [data-audit-row] and its
+  // next sibling [data-audit-detail] by DOM position.
+  // =========================================================================
+
+  class AuditExpand extends Component {
+    constructor(root) {
+      super(root);
+      const row    = root.closest('[data-audit-row]');
+      const detail = row ? row.nextElementSibling : null;
+      if (!row || !detail) return;
+
+      this.on(root, 'click', () => {
+        const nowHidden = detail.classList.toggle('hidden');
+        const expanded  = !nowHidden;
+        row.classList.toggle('bg-ht-surface-overlay', expanded);
+        root.classList.toggle('rotate-90', expanded);
+        root.setAttribute('aria-expanded', String(expanded));
+        root.setAttribute('aria-label', expanded ? 'Collapse event detail' : 'Expand event detail');
+      });
+    }
+  }
+  register('audit-expand', AuditExpand);
+
+  // =========================================================================
+  // AutocompleteInput — show a dropdown on focus/input; optionally sync
+  // the typed value to a hidden field
+  //
+  // data-target="#id"           dropdown element to show
+  // data-sync-to="#id"          hidden input to keep in sync (optional)
+  // =========================================================================
+
+  class AutocompleteInput extends Component {
+    constructor(root) {
+      super(root);
+      const target = root.dataset.target ? document.querySelector(root.dataset.target) : null;
+      const syncEl = root.dataset.syncTo  ? document.querySelector(root.dataset.syncTo)  : null;
+      if (!target) return;
+      const show = () => target.classList.remove('hidden');
+      this.on(root, 'focus', show);
+      this.on(root, 'input', () => {
+        if (syncEl) syncEl.value = root.value;
+        show();
+      });
+    }
+  }
+  register('autocomplete-input', AutocompleteInput);
+
+  // =========================================================================
+  // DismissOutside — add .hidden to self when a click occurs outside
+  // =========================================================================
+
+  class DismissOutside extends Component {
+    constructor(root) {
+      super(root);
+      const handler = (e) => {
+        if (!root.contains(e.target)) root.classList.add('hidden');
+      };
+      // Use capture so we see the click before other handlers consume it.
+      document.addEventListener('click', handler, true);
+      this._teardowns.push(() => document.removeEventListener('click', handler, true));
+    }
+  }
+  register('dismiss-outside', DismissOutside);
 
   // Expose for external use / debugging
   window.HearthComponents = { register, mountAll };
