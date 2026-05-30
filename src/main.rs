@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::config::{Config, EmailTransport, EnvVarWarningKind, SmsTransport, ValidationIssue};
+use hearth::config::{Config, EmailTransport, SmsTransport, ValidationIssue};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::email::mailcatcher::{
     generate_password, MailcatcherSender, MailcatcherState,
@@ -568,12 +568,27 @@ async fn run_serve(
 
     // Safety-net: print config warnings to stderr before tracing initialises
     // so they are visible even if the subscriber setup fails.
-    for w in &config.config_warnings {
-        eprintln!(
-            "[hearth] config warning: {} — {}",
-            w.var_name,
-            w.kind_label()
-        );
+    if !config.config_warnings.is_empty() {
+        let n = config.config_warnings.len();
+        if n > 3 {
+            let preview = config.config_warnings[..3]
+                .iter()
+                .map(|w| w.var_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "[hearth] {n} env-var config warnings; vars: {preview} and {} more",
+                n - 3
+            );
+        } else {
+            let inline = config
+                .config_warnings
+                .iter()
+                .map(|w| format!("{} ({})", w.var_name, w.kind_label()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!("[hearth] config warnings: {inline}");
+        }
     }
 
     // Initialize tracing (and optional OTLP export).
@@ -581,16 +596,15 @@ async fn run_serve(
     // exporter is flushed on shutdown.
     let _tracing_guard = hearth::telemetry::init(&config.observability);
 
-    // Log config warnings through the structured tracing pipeline
-    for w in &config.config_warnings {
-        match w.kind {
-            EnvVarWarningKind::Missing => {
-                warn!(var = %w.var_name, "config references unset environment variable — substituted empty string");
-            }
-            EnvVarWarningKind::Empty => {
-                warn!(var = %w.var_name, "environment variable is set but empty — this is likely a misconfiguration");
-            }
-        }
+    // Single structured warning after tracing init — vars array is JSON-serialisable
+    // in JSON log sinks (HEARTH_LOG_FORMAT=json) and debug-formatted in text sinks.
+    if !config.config_warnings.is_empty() {
+        let vars = config
+            .config_warnings
+            .iter()
+            .map(|w| w.var_name.as_str())
+            .collect::<Vec<_>>();
+        warn!(vars = ?vars, "config references unset or empty environment variables");
     }
 
     info!(
