@@ -1910,53 +1910,52 @@ fn print_startup_panel(
         dev_badge
     );
     println!("  ─────────────────────────────────────────────────");
-    println!("  API:    {base}");
-    println!("  Admin:  {base}/ui");
+    // URL links — labels padded to 7 chars so values align at column 11.
+    println!("  API:     {base}");
+    println!("  Admin:   {base}/ui");
+    if let Some(issuer) = &stats.oidc_issuer {
+        println!("  Issuer:  {issuer}");
+    }
     if let Some(token) = setup_token {
-        println!("  Setup:  {base}/ui/setup?token={token}");
+        println!("  Setup:   {base}/ui/setup?token={token}");
     }
     if let Some((inbox_url, password)) = mailcatcher {
-        println!("  Mail:   {inbox_url}  pw: {password}");
+        println!("  Mail:    {inbox_url}  pw: {password}");
     }
     println!("  ─────────────────────────────────────────────────");
-    // Realm / connectivity stats
-    let mut env_parts: Vec<String> = vec![
-        format!("Realms: {}", stats.realm_count),
-        format!("Email: {}", stats.email_transport),
-        format!("TLS: {}", if stats.tls { "on" } else { "off" }),
-    ];
+    // Environment stats
+    let mut env_line = format!(
+        "  Realms: {}   ·   Email: {}   ·   TLS: {}",
+        stats.realm_count,
+        stats.email_transport,
+        if stats.tls { "on" } else { "off" }
+    );
     if stats.federation_count > 0 {
-        env_parts.push(format!("Connectors: {}", stats.federation_count));
+        env_line.push_str(&format!("   ·   Connectors: {}", stats.federation_count));
     }
     if let Some(peers) = stats.cluster_peers {
-        env_parts.push(format!(
-            "Cluster: {} peer{}",
+        env_line.push_str(&format!(
+            "   ·   Cluster: {} peer{}",
             peers,
             if peers == 1 { "" } else { "s" }
         ));
     }
-    println!("  {}", env_parts.join("   ·   "));
-    if let Some(issuer) = &stats.oidc_issuer {
-        println!("  OIDC:   {issuer}");
-    }
+    println!("{env_line}");
     // Storage stats
-    let storage_parts: Vec<String> = {
-        let mut parts = Vec::new();
-        if let Some(wal) = stats.wal_size {
-            parts.push(format!("WAL {}", fmt_bytes(wal)));
-        }
-        parts.push(format!(
-            "{} SST{}",
-            stats.sst_count,
-            if stats.sst_count == 1 { "" } else { "s" }
-        ));
-        if stats.data_dir_bytes > 0 {
-            parts.push(fmt_bytes(stats.data_dir_bytes));
-        }
-        parts
-    };
+    let mut storage_parts: Vec<String> = Vec::new();
+    if let Some(wal) = stats.wal_size {
+        storage_parts.push(format!("WAL {}", fmt_bytes(wal)));
+    }
+    storage_parts.push(format!(
+        "{} SST{}",
+        stats.sst_count,
+        if stats.sst_count == 1 { "" } else { "s" }
+    ));
+    if stats.data_dir_bytes > 0 {
+        storage_parts.push(fmt_bytes(stats.data_dir_bytes));
+    }
     println!("  Storage: {}", storage_parts.join("  ·  "));
-    println!("  Ready in {} ms", stats.startup_ms);
+    println!("  Startup: {} ms", stats.startup_ms);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 }
 
