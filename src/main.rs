@@ -594,6 +594,7 @@ async fn run_serve(
     // Initialize tracing (and optional OTLP export).
     // The guard must be held for the process lifetime to ensure the batch
     // exporter is flushed on shutdown.
+    config.observability.dev_mode = config.dev_mode;
     let _tracing_guard = hearth::telemetry::init(&config.observability);
 
     // Single structured warning after tracing init — vars array is JSON-serialisable

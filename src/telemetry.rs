@@ -11,12 +11,18 @@
 //! the entire process lifetime. Dropping the guard flushes the batch exporter
 //! and shuts down the OTel pipeline cleanly.
 
+use std::io::IsTerminal as _;
+
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig, WithTonicConfig};
 use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use opentelemetry_semantic_conventions::resource::SERVICE_NAME;
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
+use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
@@ -42,6 +48,10 @@ impl Drop for TracingGuard {
 /// spans flow to the configured OTLP collector via gRPC or HTTP. When it is
 /// `None`, only the fmt layer is installed (identical to the previous setup).
 ///
+/// When `config.dev_mode` is true or stdout is a TTY, a compact pretty
+/// formatter is used: `HH:MM:SS` timestamps, ANSI-colored levels (TTY only),
+/// and abbreviated target paths (last two `::` segments).
+///
 /// # Panics
 ///
 /// Panics if the global subscriber has already been set (called twice).
@@ -56,6 +66,11 @@ pub fn init(config: &ObservabilityConfig) -> TracingGuard {
     });
 
     let json = config.log_format == "json";
+    let is_tty = std::io::stdout().is_terminal();
+    // Use the pretty dev formatter when explicitly in dev mode OR when writing
+    // to an interactive terminal.
+    let use_pretty = !json && (config.dev_mode || is_tty);
+    let ansi = is_tty;
 
     // Build the OTel layer and provider only when configured.
     if let Some(otlp_cfg) = &config.otlp {
@@ -72,6 +87,12 @@ pub fn init(config: &ObservabilityConfig) -> TracingGuard {
                 .with(filter)
                 .with(otel_layer)
                 .with(tracing_subscriber::fmt::layer().json())
+                .init();
+        } else if use_pretty {
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(otel_layer)
+                .with(tracing_subscriber::fmt::layer().event_format(DevFormatter { ansi }))
                 .init();
         } else {
             tracing_subscriber::registry()
@@ -90,6 +111,11 @@ pub fn init(config: &ObservabilityConfig) -> TracingGuard {
                 .with(filter)
                 .with(tracing_subscriber::fmt::layer().json())
                 .init();
+        } else if use_pretty {
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer().event_format(DevFormatter { ansi }))
+                .init();
         } else {
             tracing_subscriber::registry()
                 .with(filter)
@@ -102,6 +128,75 @@ pub fn init(config: &ObservabilityConfig) -> TracingGuard {
 }
 
 // ── private helpers ──────────────────────────────────────────────────────────
+
+/// Dev-mode event formatter: `HH:MM:SS LEVEL target: message key=val`.
+///
+/// Activated when `dev_mode = true` or stdout is a TTY. Produces one physical
+/// line per event (equivalent to `.compact()`).
+struct DevFormatter {
+    /// Whether to emit ANSI color escape codes.
+    ansi: bool,
+}
+
+impl<S, N> FormatEvent<S, N> for DevFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        let meta = event.metadata();
+
+        // HH:MM:SS UTC timestamp.
+        let now = time::OffsetDateTime::now_utc();
+        write!(
+            writer,
+            "{:02}:{:02}:{:02} ",
+            now.hour(),
+            now.minute(),
+            now.second()
+        )?;
+
+        // Level — right-aligned in 5 chars, optionally colored.
+        if self.ansi {
+            let colored = match *meta.level() {
+                Level::ERROR => "\x1b[31mERROR\x1b[0m",
+                Level::WARN => "\x1b[33m WARN\x1b[0m",
+                Level::INFO => "\x1b[32m INFO\x1b[0m",
+                Level::DEBUG => "\x1b[34mDEBUG\x1b[0m",
+                Level::TRACE => "\x1b[35mTRACE\x1b[0m",
+            };
+            write!(writer, "{colored} ")?;
+        } else {
+            write!(writer, "{:>5} ", meta.level())?;
+        }
+
+        // Short target: last two `::` segments only.
+        write!(writer, "{}: ", short_target(meta.target()))?;
+
+        // Message and structured fields.
+        ctx.format_fields(writer.by_ref(), event)?;
+
+        writeln!(writer)
+    }
+}
+
+/// Returns the last two `::`-delimited segments of `target`.
+///
+/// `"hearth::identity::engine"` → `"identity::engine"`.
+/// Targets with fewer than three segments are returned unchanged.
+fn short_target(target: &str) -> String {
+    let mut rev = target.rsplit("::");
+    let last = rev.next().unwrap_or(target);
+    match rev.next() {
+        Some(second_last) => format!("{second_last}::{last}"),
+        None => target.to_string(),
+    }
+}
 
 fn build_provider(cfg: &OtlpConfig) -> SdkTracerProvider {
     let resource = Resource::builder()
@@ -162,4 +257,37 @@ fn tonic_metadata_from_headers(
         }
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_target;
+
+    #[test]
+    fn short_target_three_segments() {
+        assert_eq!(short_target("hearth::identity::engine"), "identity::engine");
+    }
+
+    #[test]
+    fn short_target_four_segments() {
+        assert_eq!(
+            short_target("hearth::identity::engine::reconcile"),
+            "engine::reconcile"
+        );
+    }
+
+    #[test]
+    fn short_target_two_segments_unchanged() {
+        assert_eq!(short_target("identity::engine"), "identity::engine");
+    }
+
+    #[test]
+    fn short_target_one_segment_unchanged() {
+        assert_eq!(short_target("hearth"), "hearth");
+    }
+
+    #[test]
+    fn short_target_empty_unchanged() {
+        assert_eq!(short_target(""), "");
+    }
 }
