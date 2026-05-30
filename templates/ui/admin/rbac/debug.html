@@ -30,7 +30,7 @@
           <label class="relative block">
             <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">User (search by email/name, or paste UUID)</span>
             {# Hidden shadow input carries `name="q"` so HTMX can include it
-               without eval. Hyperscript keeps it in sync on every keystroke. #}
+               without eval. components.js keeps it in sync on every keystroke. #}
             <input type="hidden" id="rbac-search-q" name="q">
             <input type="text" id="user-id-input" name="user_id"
                    value="{{ user_id_input }}"

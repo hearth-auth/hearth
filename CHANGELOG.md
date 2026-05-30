@@ -9,6 +9,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **_hyperscript removed** — all admin-UI interactivity now expressed as vanilla-JS components via
+  `data-component` attributes backed by `components.js`. CSP unchanged (still `script-src 'self'`).
+  No operator action required (HEA-1049).
+
 - **CI required-check renamed: `sdk-conformance (docs/sdk-spec.md)` → `sdk-conformance (docs/specs/SDK.md)`.**
   The SDK common-spec doc moved from `docs/sdk-spec.md` to `docs/specs/SDK.md` to co-locate
   with the other canonical specs in `docs/specs/`. The CI job name in `.github/workflows/ci.yml`

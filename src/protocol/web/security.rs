@@ -84,11 +84,10 @@ where
                 "referrer-policy",
                 "strict-origin-when-cross-origin",
             );
-            // Alpine.js removed (HEA-850): 'unsafe-eval' and 'unsafe-inline'
-            // are no longer needed. All layout reactivity is handled by
-            // vanilla JS classes in admin.js; template interactions use
-            // Hyperscript `_="..."` attributes (eval-free). Fonts and scripts
-            // are self-hosted (HEA-630).
+            // Alpine.js removed (HEA-850), Hyperscript removed (HEA-1049):
+            // 'unsafe-eval' and 'unsafe-inline' are no longer needed. All
+            // interactivity is vanilla JS via data-component attributes backed
+            // by components.js. Fonts and scripts are self-hosted (HEA-630).
             insert(
                 headers,
                 "content-security-policy",

@@ -4,7 +4,7 @@
 //! state change flows through the identity, authorization, or audit
 //! engines. Templates live under `templates/ui/`, compiled into the
 //! binary by the askama derive macro; static assets (`htmx.min.js`,
-//! `admin.js`, `hyperscript.min.js`, fonts, `app.css`) are embedded via
+//! `admin.js`, `components.js`, fonts, `app.css`) are embedded via
 //! `include_bytes!`. No third-party script/font origins needed (HEA-630).
 //!
 //! # Submodules
@@ -1580,9 +1580,6 @@ const PASSKEY_JS: &[u8] = include_bytes!("assets/passkey.js");
 /// Global Alpine.js component registrations and keyboard shortcuts, extracted
 /// from inline `<script>` tags so the CSP can omit `unsafe-inline`.
 const LAYOUT_JS: &[u8] = include_bytes!("assets/layout.js");
-/// Hyperscript 0.9.13 — eval-free declarative scripting library (HEA-824).
-/// Used to replace Alpine.js patterns that require `unsafe-eval` in CSP.
-const HYPERSCRIPT_JS: &[u8] = include_bytes!("assets/hyperscript.min.js");
 /// Per-page admin scripts extracted from inline `<script>` blocks so the CSP
 /// can stay `script-src 'self'` (HEA-886).
 const ADMIN_SLUG_SYNC_JS: &[u8] = include_bytes!("assets/admin/slug-sync.js");
@@ -1806,7 +1803,6 @@ async fn serve_static(
         "dev/mail-detail.js" => Some((DEV_MAIL_DETAIL_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
         "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
-        "hyperscript.min.js" => Some((HYPERSCRIPT_JS, "application/javascript; charset=utf-8")),
         "favicon.svg" => Some((FAVICON_SVG, "image/svg+xml")),
         "img/hearth-wide-web.svg" => Some((HEARTH_WIDE_SVG, "image/svg+xml")),
         "img/hearth-icon.svg" => Some((HEARTH_ICON_SVG, "image/svg+xml")),
@@ -1869,10 +1865,6 @@ mod tests {
         // Compile-time embedded — check lengths so future drops to zero bytes
         // (e.g. a broken build.rs) surface as a test failure.
         assert!(HTMX_JS.len() > 1024, "htmx.min.js seems too small");
-        assert!(
-            HYPERSCRIPT_JS.len() > 1024,
-            "hyperscript.min.js seems too small"
-        );
         assert!(
             APP_CSS_FALLBACK.len() > 64,
             "app.css fallback seems too small"

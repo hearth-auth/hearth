@@ -1,8 +1,8 @@
 {% for row in events %}
-{# Each row manages its own open/closed state independently via Hyperscript.
-   The detail row below is a sibling <tr> rendered immediately after,
-   hidden until the toggle is clicked — no HTMX round-trip needed since
-   the full event payload is embedded in the server render. #}
+{# Each row manages its own open/closed state independently via the
+   data-component system. The detail row below is a sibling <tr> rendered
+   immediately after, hidden until the toggle is clicked — no HTMX round-trip
+   needed since the full event payload is embedded in the server render. #}
 <tr data-audit-row class="border-b border-divider-subtle hover-bg-divider{% if row.action_high_severity %} border-l-2 border-l-amber-400/60{% endif %}">
   <td class="w-8 px-3 py-3">
     <button type="button"

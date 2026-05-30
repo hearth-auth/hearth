@@ -5,8 +5,9 @@
 //! - contains no third-party origins (cdn.jsdelivr.net, fonts.googleapis.com, etc.)
 //! - restricts `base-uri` to `'self'`
 //!
-//! Also verifies that the self-hosted assets (admin.js, hyperscript.min.js, fonts) are
-//! served with the correct Content-Type, and that alpine.min.js is no longer served (HEA-850).
+//! Also verifies that the self-hosted assets (admin.js, components.js, fonts) are served
+//! with the correct Content-Type, and that alpine.min.js and hyperscript.min.js are no
+//! longer served (HEA-850, HEA-1049).
 
 mod common;
 
@@ -185,6 +186,55 @@ async fn alpine_js_not_served() {
         resp.status(),
         StatusCode::NOT_FOUND,
         "alpine.min.js must return 404 after removal"
+    );
+}
+
+#[tokio::test]
+async fn hyperscript_js_not_served() {
+    // Hyperscript removed in HEA-1049 — the route must now return 404.
+    let app = web::router(make_web_state());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ui/static/hyperscript.min.js")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "hyperscript.min.js must return 404 after removal"
+    );
+}
+
+#[tokio::test]
+async fn components_js_served() {
+    // components.js backs data-component attributes (HEA-1049).
+    let app = web::router(make_web_state());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ui/static/components.js")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "components.js must be served"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/javascript; charset=utf-8"),
+        "components.js content-type must be application/javascript; charset=utf-8"
     );
 }
 
