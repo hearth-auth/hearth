@@ -300,7 +300,7 @@ pub async fn admin_org_create_submit(
         .attr_keys
         .iter()
         .zip(form.attr_vals.iter())
-        .filter(|(k, _)| !k.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -782,7 +782,7 @@ pub async fn admin_org_edit_submit(
         .attr_keys
         .iter()
         .zip(form.attr_vals.iter())
-        .filter(|(k, _)| !k.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 

@@ -1357,6 +1357,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initPasswordStrength();
   initAttrRows();
   initConfigEditor();
+  initFormSubmitProtection();
 });
 
 // =========================================================================
@@ -1367,4 +1368,32 @@ function initConfigEditor() {
   const root = document.getElementById('config-editor-root');
   if (!root) return;
   new ConfigEditor().init(root);
+}
+
+// =========================================================================
+// initFormSubmitProtection — disable submit buttons on valid form submission
+// to prevent accidental double-submits. Fires on the `submit` event so the
+// browser's own constraint validation (required, pattern, etc.) still runs
+// first — the button only locks when the form is actually going to submit.
+// =========================================================================
+
+function initFormSubmitProtection() {
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    var btn = form.querySelector('[type=submit]');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    var original = btn.textContent.trim();
+    btn.textContent = 'Saving\u2026';
+    // Re-enable if the browser navigates back (bfcache restore) so the
+    // button isn't stuck disabled on Back navigation.
+    window.addEventListener('pageshow', function onShow(ev) {
+      if (ev.persisted) {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+      window.removeEventListener('pageshow', onShow);
+    });
+  });
 }

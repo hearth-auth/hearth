@@ -98,22 +98,22 @@
           {% endif %}
           <input type="hidden" name="attr_key" value="{{ def.key }}">
           {% if def.is_boolean() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
                 <option value="true" {% if current_val == "true" %}selected{% endif %}>true</option>
                 <option value="false" {% if current_val == "false" %}selected{% endif %}>false</option>
               </select>
             {% else if def.is_enum() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
                 {% for ev in def.enum_values %}
                   <option value="{{ ev }}" {% if current_val == ev.as_str() %}selected{% endif %}>{{ ev }}</option>
                 {% endfor %}
               </select>
             {% else if def.is_number() %}
-              <input type="number" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+              <input type="number" name="attr_val" value="{{ current_val }}" class="mt-1 input" {% if def.required %}required{% endif %}>
             {% else %}
-              <input type="text" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+              <input type="text" name="attr_val" value="{{ current_val }}" class="mt-1 input" {% if def.required %}required{% endif %}>
           {% endif %}
         </div>
       {% endfor %}

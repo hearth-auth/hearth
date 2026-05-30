@@ -379,7 +379,7 @@ pub async fn admin_user_create_submit(
         .attr_keys
         .iter()
         .zip(form.attr_vals.iter())
-        .filter(|(k, _)| !k.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -1389,7 +1389,7 @@ pub async fn admin_user_edit_submit(
         .attr_keys
         .iter()
         .zip(form.attr_vals.iter())
-        .filter(|(k, _)| !k.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let req = UpdateUserRequest {
@@ -1540,7 +1540,7 @@ fn render_edit_error(
                 .attr_keys
                 .iter()
                 .zip(form.attr_vals.iter())
-                .filter(|(k, _)| !k.is_empty())
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             let attr_defs = target
