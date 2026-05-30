@@ -552,6 +552,7 @@ async fn run_serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config(dev, config_path.as_deref())?;
+    let serve_start = std::time::Instant::now();
 
     // Apply CLI overrides
     if let Some(port) = port_override {
@@ -1760,11 +1761,35 @@ async fn run_serve(
         let mc_info = mailcatcher_state
             .as_ref()
             .map(|s| (format!("http://{addr}/dev/mail"), s.password.clone()));
+        let (wal_size, sst_count, data_dir_bytes) = collect_storage_stats(&data_dir);
+        let stats = StartupStats {
+            realm_count: config.realms.as_ref().map(|r| r.len()).unwrap_or(0),
+            federation_count: config
+                .realms
+                .as_ref()
+                .map(|realms| {
+                    realms
+                        .values()
+                        .filter_map(|r| r.federation.as_ref())
+                        .map(|f| f.providers.len())
+                        .sum()
+                })
+                .unwrap_or(0),
+            email_transport: email_transport_label(config.email.transport),
+            tls: config.server.tls_cert_path.is_some(),
+            oidc_issuer: config.oidc.issuer.clone(),
+            cluster_peers: config.cluster.as_ref().map(|c| c.peers.len()),
+            wal_size,
+            sst_count,
+            data_dir_bytes,
+            startup_ms: u64::try_from(serve_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        };
         print_startup_panel(
             addr,
             dev,
             setup_token.as_deref(),
             mc_info.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
+            &stats,
         );
     }
 
@@ -1852,6 +1877,19 @@ const HEARTH_LOGO: &str = "\
 ██   ██ ██      ██   ██ ██  ██     ██    ██   ██\n\
 ██   ██ ███████ ██   ██ ██   ██    ██    ██   ██";
 
+struct StartupStats {
+    realm_count: usize,
+    federation_count: usize,
+    email_transport: &'static str,
+    tls: bool,
+    oidc_issuer: Option<String>,
+    cluster_peers: Option<usize>,
+    wal_size: Option<u64>,
+    sst_count: usize,
+    data_dir_bytes: u64,
+    startup_ms: u64,
+}
+
 // Prints the logo + consolidated startup info panel to stdout (raw — never
 // in log sinks). Call only when log_format != "json".
 fn print_startup_panel(
@@ -1859,6 +1897,7 @@ fn print_startup_panel(
     dev_mode: bool,
     setup_token: Option<&str>,
     mailcatcher: Option<(&str, &str)>,
+    stats: &StartupStats,
 ) {
     let base = format!("http://{addr}");
     let dev_badge = if dev_mode { "  [dev]" } else { "" };
@@ -1879,7 +1918,90 @@ fn print_startup_panel(
     if let Some((inbox_url, password)) = mailcatcher {
         println!("  Mail:   {inbox_url}  pw: {password}");
     }
+    println!("  ─────────────────────────────────────────────────");
+    // Realm / connectivity stats
+    let mut env_parts: Vec<String> = vec![
+        format!("Realms: {}", stats.realm_count),
+        format!("Email: {}", stats.email_transport),
+        format!("TLS: {}", if stats.tls { "on" } else { "off" }),
+    ];
+    if stats.federation_count > 0 {
+        env_parts.push(format!("Connectors: {}", stats.federation_count));
+    }
+    if let Some(peers) = stats.cluster_peers {
+        env_parts.push(format!(
+            "Cluster: {} peer{}",
+            peers,
+            if peers == 1 { "" } else { "s" }
+        ));
+    }
+    println!("  {}", env_parts.join("   ·   "));
+    if let Some(issuer) = &stats.oidc_issuer {
+        println!("  OIDC:   {issuer}");
+    }
+    // Storage stats
+    let storage_parts: Vec<String> = {
+        let mut parts = Vec::new();
+        if let Some(wal) = stats.wal_size {
+            parts.push(format!("WAL {}", fmt_bytes(wal)));
+        }
+        parts.push(format!(
+            "{} SST{}",
+            stats.sst_count,
+            if stats.sst_count == 1 { "" } else { "s" }
+        ));
+        if stats.data_dir_bytes > 0 {
+            parts.push(fmt_bytes(stats.data_dir_bytes));
+        }
+        parts
+    };
+    println!("  Storage: {}", storage_parts.join("  ·  "));
+    println!("  Ready in {} ms", stats.startup_ms);
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+}
+
+fn collect_storage_stats(data_dir: &std::path::Path) -> (Option<u64>, usize, u64) {
+    let wal_size = std::fs::metadata(data_dir.join("hearth.wal"))
+        .ok()
+        .map(|m| m.len());
+    let (sst_count, total_bytes) = std::fs::read_dir(data_dir)
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let path = e.path();
+                    let size = e.metadata().ok().map(|m| m.len()).unwrap_or(0);
+                    Some((path.extension()?.to_str()? == "sst", size))
+                })
+                .fold((0usize, 0u64), |(ssts, total), (is_sst, size)| {
+                    (ssts + usize::from(is_sst), total + size)
+                })
+        })
+        .unwrap_or((0, 0));
+    (wal_size, sst_count, total_bytes)
+}
+
+fn fmt_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{} KB", bytes / 1024)
+    }
+}
+
+fn email_transport_label(t: EmailTransport) -> &'static str {
+    match t {
+        EmailTransport::Log => "log",
+        EmailTransport::Smtp => "smtp",
+        EmailTransport::Sendgrid => "sendgrid",
+        EmailTransport::Postmark => "postmark",
+        EmailTransport::Mailgun => "mailgun",
+        EmailTransport::Mailtrap => "mailtrap",
+        EmailTransport::Mailcatcher => "mailcatcher",
+    }
 }
 
 /// Builds the outbound email sender from configuration.
