@@ -1571,6 +1571,8 @@ fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
 const HTMX_JS: &[u8] = include_bytes!("assets/htmx.min.js");
 /// Admin UI vanilla-JS helpers (sidebar, realm nav, toasts, form init). Alpine-free (HEA-850).
 const ADMIN_JS: &[u8] = include_bytes!("assets/admin.js");
+/// Vanilla-JS component library — mounts [data-component="…"] attributes (HEA-1049).
+const COMPONENTS_JS: &[u8] = include_bytes!("assets/components.js");
 /// Eval-free vanilla JS for WebAuthn (passkey) ceremonies (HEA-849).
 /// Replaces the `passkeyLogin` / `passkeyManager` / `passkeyRow` Alpine
 /// components so these pages no longer require `unsafe-eval` in the CSP.
@@ -1783,6 +1785,7 @@ async fn serve_static(
     let embedded: Option<(&[u8], &str)> = match file.as_str() {
         "htmx.min.js" => Some((HTMX_JS, "application/javascript; charset=utf-8")),
         "admin.js" => Some((ADMIN_JS, "application/javascript; charset=utf-8")),
+        "components.js" => Some((COMPONENTS_JS, "application/javascript; charset=utf-8")),
         "admin/slug-sync.js" => Some((ADMIN_SLUG_SYNC_JS, "application/javascript; charset=utf-8")),
         "admin/webhooks-new.js" => Some((
             ADMIN_WEBHOOKS_NEW_JS,
