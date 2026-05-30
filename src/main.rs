@@ -591,6 +591,12 @@ async fn run_serve(
         }
     }
 
+    // ASCII banner on stdout before tracing init — raw println so it is never
+    // captured by structured log sinks. Suppressed when log_format = "json".
+    if config.observability.log_format != "json" {
+        print_ascii_banner();
+    }
+
     // Initialize tracing (and optional OTLP export).
     // The guard must be held for the process lifetime to ensure the batch
     // exporter is flushed on shutdown.
@@ -946,15 +952,6 @@ async fn run_serve(
             let password = std::env::var("HEARTH_MAILCATCHER_PASSWORD")
                 .unwrap_or_else(|_| generate_password());
             let state = Arc::new(MailcatcherState::new(password));
-            // Print prominent startup banner.
-            println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            println!("  MailcatcherSender active");
-            println!(
-                "  Inbox:    http://{}:{}/dev/mail",
-                config.server.bind_address, config.server.port
-            );
-            println!("  Password: {}", state.password);
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
             Some(state)
         } else {
             None
@@ -998,17 +995,23 @@ async fn run_serve(
     } else {
         PathBuf::from(&config.storage.data_dir)
     };
-    if config.onboarding.enabled {
-        if let Err(e) = onboarding::ensure_setup_token(
+    let setup_token: Option<String> = if config.onboarding.enabled {
+        match onboarding::ensure_setup_token(
             identity_engine.as_ref(),
             &data_dir,
             Some(&base_url),
             Some(email_service.as_ref()),
             config.onboarding.notification_email.as_deref(),
         ) {
-            error!(error = %e, "failed to ensure setup token; onboarding will be unavailable");
+            Ok(token) => token,
+            Err(e) => {
+                error!(error = %e, "failed to ensure setup token; onboarding will be unavailable");
+                None
+            }
         }
-    }
+    } else {
+        None
+    };
 
     // Load the previous config snapshot (absent on first startup) so we can
     // compute a typed diff against the current config before reconciliation.
@@ -1757,6 +1760,20 @@ async fn run_serve(
     std::fs::write(&pid_file_path, std::process::id().to_string())
         .unwrap_or_else(|e| warn!(error = %e, "failed to write PID file"));
 
+    // Consolidated startup info panel — printed once after all init completes,
+    // suppressed in JSON mode so log pipelines stay machine-readable.
+    if config.observability.log_format != "json" {
+        let mc_info = mailcatcher_state
+            .as_ref()
+            .map(|s| (format!("http://{addr}/dev/mail"), s.password.clone()));
+        print_startup_panel(
+            addr,
+            dev,
+            setup_token.as_deref(),
+            mc_info.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
+        );
+    }
+
     // Check for TLS configuration
     if let (Some(cert_path), Some(key_path)) =
         (&config.server.tls_cert_path, &config.server.tls_key_path)
@@ -1831,6 +1848,44 @@ async fn run_serve(
     let _ = std::fs::remove_file(&pid_file_path);
     info!("Hearth server stopped");
     Ok(())
+}
+
+// Prints the HEARTH ASCII banner to stdout (raw — never in log sinks).
+fn print_ascii_banner() {
+    println!();
+    println!("  #   # #####  ###  ####  ##### #   #");
+    println!("  #   # #     #   # #   #   #   #   #");
+    println!("  ##### ####  ##### ####    #   #####");
+    println!("  #   # #     #   # # #     #   #   #");
+    println!("  #   # ##### #   # #  #    #   #   #");
+    println!();
+}
+
+// Prints the consolidated startup info panel to stdout (raw — never in log
+// sinks). Call only when log_format != "json".
+fn print_startup_panel(
+    addr: std::net::SocketAddr,
+    dev_mode: bool,
+    setup_token: Option<&str>,
+    mailcatcher: Option<(&str, &str)>,
+) {
+    let base = format!("http://{addr}");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!(
+        "  Hearth v{}{}",
+        env!("CARGO_PKG_VERSION"),
+        if dev_mode { "  [dev mode]" } else { "" }
+    );
+    println!("  API:    {base}");
+    println!("  Admin:  {base}/ui");
+    if let Some(token) = setup_token {
+        println!("  Setup:  {base}/ui/setup?token={token}");
+    }
+    if let Some((inbox_url, password)) = mailcatcher {
+        println!("  Mail:   {inbox_url}");
+        println!("  Pw:     {password}");
+    }
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 }
 
 /// Builds the outbound email sender from configuration.

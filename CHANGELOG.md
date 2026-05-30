@@ -19,6 +19,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **ASCII HEARTH banner + consolidated startup info panel (HEA-1047)** — `hearth serve` now
+  prints a block-letter ASCII art banner before tracing init, followed by a single info panel
+  after the server binds showing API URL, Admin UI URL, first-run Setup URL (when a
+  `.setup_token` exists), and Mail inbox URL + password (when mailcatcher is active). Both are
+  suppressed when `log_format: json` so machine-readable log pipelines are unaffected.
+  The mid-init mailcatcher box that previously appeared during startup has been removed and
+  consolidated into the panel.
+
 - **Dev-mode pretty log formatter (HEA-1046)** — when `--dev` is active or stdout is a TTY,
   the log output switches to a compact human-readable format: `HH:MM:SS` timestamps, ANSI-colored
   level labels (TTY only), and abbreviated target paths (last two `::` segments, e.g.
