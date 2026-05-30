@@ -102,16 +102,14 @@
           <div class="flex items-center justify-end pb-2">
             <button type="button"
                     title="Copy JSON"
-                    _="on click
-                         call navigator.clipboard.writeText(my parentElement's nextElementSibling's textContent)
-                         set my textContent to 'Copied'
-                         wait 1500ms
-                         set my textContent to 'Copy'"
+                    data-component="copy-to-clipboard"
+                    data-source="#audit-meta-{{ row.event.id }}"
+                    data-copied-label="Copied"
                     class="rounded border border-strong bg-ht-surface-elevated px-2 py-0.5 font-mono text-xs text-ht-content-muted hover-bg-divider hover:text-ht-content-secondary transition-colors">
               Copy
             </button>
           </div>
-          <pre class="overflow-x-auto font-mono text-xs leading-relaxed text-ht-content-secondary">{{ row.metadata_json }}</pre>
+          <pre id="audit-meta-{{ row.event.id }}" class="overflow-x-auto font-mono text-xs leading-relaxed text-ht-content-secondary">{{ row.metadata_json }}</pre>
         {% endif %}
       </div>
     </details>

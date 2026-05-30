@@ -1343,6 +1343,38 @@ document.body.addEventListener('htmx:afterSwap', function(e) {
 })();
 
 // =========================================================================
+// initKeyboardShortcutOverlay — wire up the keyboard shortcut help overlay
+// (replaces the Hyperscript _="..." attributes removed from _layout.html)
+// =========================================================================
+
+function initKeyboardShortcutOverlay() {
+  const overlay = document.getElementById('keyboard-shortcut-overlay');
+  if (!overlay) return;
+
+  window.addEventListener('hearth-shortcut-help', () => {
+    overlay.classList.remove('hidden');
+    window.__hearthShortcutHelpOpen = true;
+  });
+
+  window.addEventListener('hearth-shortcut-help-close', () => {
+    overlay.classList.add('hidden');
+    window.__hearthShortcutHelpOpen = false;
+  });
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      overlay.classList.add('hidden');
+      window.__hearthShortcutHelpOpen = false;
+    }
+  });
+
+  document.getElementById('shortcut-help-close-btn')?.addEventListener('click', () => {
+    overlay.classList.add('hidden');
+    window.__hearthShortcutHelpOpen = false;
+  });
+}
+
+// =========================================================================
 // Bootstrap — initialize all managers on DOMContentLoaded
 // =========================================================================
 
@@ -1358,6 +1390,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initAttrRows();
   initConfigEditor();
   initFormSubmitProtection();
+  initKeyboardShortcutOverlay();
 });
 
 // =========================================================================

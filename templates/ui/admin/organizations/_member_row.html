@@ -18,7 +18,7 @@
         {% for ra in m.rbac_roles %}
         <span class="inline-flex items-center gap-1 rounded-full bg-teal-bg px-2 py-0.5 text-xs font-medium text-teal-fg">
           <button type="button"
-                  _="on click toggle .hidden on #role-perms-{{ ra.assignment_id }}"
+                  data-component="disclosure" data-target="#role-perms-{{ ra.assignment_id }}"
                   title="Show {{ ra.permissions.len() }} permission{% if ra.permissions.len() != 1 %}s{% endif %}"
                   class="cursor-pointer hover:underline focus:outline-none">
             {{ ra.role_name }}
@@ -40,8 +40,10 @@
         {% endfor %}
 
         {% if !available_roles.is_empty() %}
-        <button _="on click toggle .hidden on #add-role-{{ m.view.membership.user_id().as_uuid() }} then add .hidden to #add-perm-{{ m.view.membership.user_id().as_uuid() }}"
-                type="button"
+        <button type="button"
+                data-component="disclosure"
+                data-target="#add-role-{{ m.view.membership.user_id().as_uuid() }}"
+                data-also-hide="#add-perm-{{ m.view.membership.user_id().as_uuid() }}"
                 class="inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-xs text-ht-content-muted transition-colors hover:bg-teal-bg hover:text-teal-fg">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="currentColor" class="h-3 w-3"><path d="M6.75 3.25a.75.75 0 0 0-1.5 0v2h-2a.75.75 0 0 0 0 1.5h2v2a.75.75 0 0 0 1.5 0v-2h2a.75.75 0 0 0 0-1.5h-2v-2Z"/></svg>
           Role
@@ -83,7 +85,7 @@
           </select>
           <button type="submit" class="btn-ember rounded px-2 py-1 text-xs font-semibold text-graphite-950">Assign</button>
           <button type="button"
-                  _="on click add .hidden to #add-role-{{ m.view.membership.user_id().as_uuid() }}"
+                  data-component="hide-target" data-target="#add-role-{{ m.view.membership.user_id().as_uuid() }}"
                   class="text-xs text-ht-content-muted hover:text-ht-content-secondary">Cancel</button>
         </form>
       </div>
@@ -113,8 +115,10 @@
         </span>
         {% endfor %}
 
-        <button _="on click toggle .hidden on #add-perm-{{ m.view.membership.user_id().as_uuid() }} then add .hidden to #add-role-{{ m.view.membership.user_id().as_uuid() }}"
-                type="button"
+        <button type="button"
+                data-component="disclosure"
+                data-target="#add-perm-{{ m.view.membership.user_id().as_uuid() }}"
+                data-also-hide="#add-role-{{ m.view.membership.user_id().as_uuid() }}"
                 class="inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-xs text-ht-content-muted transition-colors hover:bg-steel-bg hover:text-ht-content-primary">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="currentColor" class="h-3 w-3"><path d="M6.75 3.25a.75.75 0 0 0-1.5 0v2h-2a.75.75 0 0 0 0 1.5h2v2a.75.75 0 0 0 1.5 0v-2h2a.75.75 0 0 0 0-1.5h-2v-2Z"/></svg>
           Perm
@@ -144,7 +148,7 @@
           <button type="submit" class="btn-ember rounded px-2 py-1 text-xs font-semibold text-graphite-950">Grant</button>
           {% endif %}
           <button type="button"
-                  _="on click add .hidden to #add-perm-{{ m.view.membership.user_id().as_uuid() }}"
+                  data-component="hide-target" data-target="#add-perm-{{ m.view.membership.user_id().as_uuid() }}"
                   class="text-xs text-ht-content-muted hover:text-ht-content-secondary">Cancel</button>
         </form>
       </div>
@@ -183,22 +187,11 @@
               hx-swap="outerHTML"
               class="inline-block">
           {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-          <button type="button"
+          <button type="submit"
                   class="rounded px-2 py-1 text-xs font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
-                  _="on click
-                       if @data-confirming is 'yes'
-                         closest <form/>.submit()
-                       else
-                         set @data-confirming to 'yes'
-                         set my.textContent to 'Confirm'
-                         add .btn-danger to me
-                         remove .border, .border-strong, .bg-ht-surface-elevated, .text-ht-content-secondary, .hover-bg-divider from me
-                         wait 4s
-                         set @data-confirming to 'no'
-                         set my.textContent to 'Remove'
-                         remove .btn-danger from me
-                         add .border, .border-strong, .bg-ht-surface-elevated, .text-ht-content-secondary, .hover-bg-divider to me
-                       end">
+                  data-component="two-step-confirm"
+                  data-confirm-label="Confirm"
+                  data-confirm-class="btn-danger rounded px-2 py-1 text-xs font-medium">
             Remove
           </button>
         </form>

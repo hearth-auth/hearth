@@ -24,14 +24,12 @@
             {% else %}
             <button type="button"
                     title="Show permissions"
-                    _="on click toggle .hidden on #role-asgn-perms-{{ row.assignment_id }}
-                         then if #role-asgn-perms-{{ row.assignment_id }}.classList.contains('hidden')
-                           set my @title to 'Show permissions'
-                           remove .rotate-90 from #role-asgn-chevron-{{ row.assignment_id }}
-                         else
-                           set my @title to 'Hide permissions'
-                           add .rotate-90 to #role-asgn-chevron-{{ row.assignment_id }}
-                         end"
+                    data-component="reveal"
+                    data-target="#role-asgn-perms-{{ row.assignment_id }}"
+                    data-chevron="#role-asgn-chevron-{{ row.assignment_id }}"
+                    data-chevron-class="rotate-90"
+                    data-title-open="Hide permissions"
+                    data-title-close="Show permissions"
                     class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-ht-content-muted transition-colors hover:bg-ht-surface-base hover:text-ht-content-secondary">
               <svg id="role-asgn-chevron-{{ row.assignment_id }}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="currentColor" class="h-3 w-3 transition-transform">
                 <path d="M4.5 2.5 8 6l-3.5 3.5"  stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
@@ -68,12 +66,11 @@
   {# Assign Role form #}
   <div class="mt-5 border-t border-divider-faint pt-4">
     <button type="button"
-            _="on click toggle .hidden on #assign-role-form
-                 then if #assign-role-form.classList.contains('hidden')
-                   set #assign-role-label.textContent to 'Assign Role'
-                 else
-                   set #assign-role-label.textContent to 'Cancel'
-                 end"
+            data-component="disclosure"
+            data-target="#assign-role-form"
+            data-label-open="Cancel"
+            data-label-close="Assign Role"
+            data-label-target="#assign-role-label"
             class="inline-flex items-center gap-1.5 text-sm font-medium text-teal-fg transition-colors hover:text-teal-fg/80">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="h-4 w-4">
         <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
@@ -91,9 +88,6 @@
               hx-target="#roles-tab-content"
               hx-swap="innerHTML">
           {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-
-          {# Hidden scope field — kept in sync by Hyperscript radio/select handlers #}
-          <input type="hidden" id="role-scope-value" name="scope" value="realm">
 
           <div class="grid gap-4 sm:grid-cols-2">
             <div>
@@ -116,31 +110,27 @@
               </div>
             </div>
 
-            <div>
+            <div data-component="scope-selector">
               <label class="mb-1.5 block font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Scope</label>
+              {# Hidden scope field — kept in sync by ScopeSelector component #}
+              <input type="hidden" id="role-scope-value" name="scope" value="realm" data-scope-value>
               <div class="flex flex-col gap-2">
                 <label class="flex cursor-pointer items-center gap-2 text-sm text-ht-content-secondary">
                   <input type="radio" name="scope_type" value="realm" checked
-                         _="on change if my.value is 'realm'
-                              add .hidden to #role-org-div
-                              set #role-scope-value.value to 'realm'
-                            end"
+                         data-scope-radio
                          class="accent-teal-fg">
                   Realm-wide
                 </label>
                 {% if !available_orgs.is_empty() %}
                 <label class="flex cursor-pointer items-center gap-2 text-sm text-ht-content-secondary">
                   <input type="radio" name="scope_type" value="org"
-                         _="on change if my.value is 'org'
-                              remove .hidden from #role-org-div
-                              set #role-scope-value.value to ('org:' + #role-org-select.value)
-                            end"
+                         data-scope-radio
                          class="accent-teal-fg">
                   Organization
                 </label>
-                <div id="role-org-div" class="ml-6 hidden">
+                <div id="role-org-div" data-scope-org-panel class="ml-6 hidden">
                   <select id="role-org-select"
-                          _="on change set #role-scope-value.value to ('org:' + my.value)"
+                          data-scope-org-select
                           class="w-full rounded-sm border border-white/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
                     <option value="">— pick an org —</option>
                     {% for org in available_orgs %}

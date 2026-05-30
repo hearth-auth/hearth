@@ -475,19 +475,18 @@
   <h2 class="text-base font-semibold text-danger-fg">Permanently delete</h2>
   <p class="mt-1 text-sm text-ht-content-secondary">This realm was removed from hearth.yaml. You can permanently delete all its data.</p>
   <button type="button"
-          _="on click call #realm-delete-dialog.showModal()"
+          data-component="show-dialog" data-target="#realm-delete-dialog"
           class="mt-4 btn-danger rounded px-4 py-2 text-sm font-semibold">
     Permanently delete
   </button>
 
   <dialog id="realm-delete-dialog"
-          class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50"
-          _="on click(event) if event.target is me call me.close() end">
+          class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50">
     <h3 class="text-lg font-semibold text-ht-content-primary">Delete realm?</h3>
     <p class="mt-2 text-sm text-ht-content-muted">This will permanently delete <strong>{{ realm.name() }}</strong> and ALL its data. This action cannot be undone.</p>
     <div class="mt-6 flex justify-end gap-3">
       <button type="button"
-              _="on click call #realm-delete-dialog.close()"
+              data-component="show-dialog" data-action="close"
               class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
         Cancel
       </button>

@@ -199,6 +199,9 @@
   </div>
   {% endif %}
 
+  {# components.js: vanilla-JS component library ([data-component] mounter).
+     Loaded with defer so it executes after HTML parsing, before DOMContentLoaded. #}
+  <script src="/ui/static/components.js" defer></script>
   {# admin.js: layout managers (SidebarManager, RealmNav, ToastManager) +
      form helpers (initRolesTab, initPasswordStrength, etc.). CSP-safe:
      no inline scripts, no eval. First-party, same binary as this HTML. #}
@@ -207,22 +210,15 @@
   <script src="/ui/static/passkey.js"></script>
   <script src="/ui/static/htmx.min.js"
           integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"></script>
-  {# Hyperscript 0.9.13 — eval-free declarative scripting (HEA-824/850).
-     Processes `_="..."` attributes in templates; auto-runs on HTMX-swapped nodes. #}
-  <script src="/ui/static/hyperscript.min.js"
-          integrity="sha384-5yQ5JTatiFEgeiEB4mfkRI3oTGtaNpbJGdcciZ4IEYFpLGt8yDsGAd7tKiMwnX9b"></script>
-
   {# Keyboard-shortcut overlay (global). Shown by the `?` shortcut in
-     admin.js via custom events; ESC fires hearth-shortcut-help-close. #}
+     admin.js via custom events; ESC fires hearth-shortcut-help-close.
+     Event listeners wired in initKeyboardShortcutOverlay() in admin.js. #}
   <div id="keyboard-shortcut-overlay"
-       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden"
-       _="on 'hearth-shortcut-help' from window remove .hidden from me
-          on 'hearth-shortcut-help-close' from window add .hidden to me
-          on click(event) if event.target is me then add .hidden to me end">
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden">
     <div class="w-full max-w-md rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle shadow-md">
       <div class="flex items-start justify-between">
         <h2 class="font-display text-lg font-medium text-ht-content-primary">Keyboard shortcuts</h2>
-        <button _="on click add .hidden to #keyboard-shortcut-overlay"
+        <button id="shortcut-help-close-btn"
                 class="text-ht-content-muted hover:text-ht-content-primary" aria-label="Close">
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>

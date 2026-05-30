@@ -91,7 +91,7 @@
           <div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-muted text-xs font-bold text-ht-content-brand">3</div>
           <div class="min-w-0 flex-1">
             <p class="text-sm font-medium text-ht-content-primary">Enter the current 6-digit code</p>
-            <form _="on submit remove .hidden from #totp-loading add .hidden to #totp-setup-content" method="post" action="/ui/account/totp/activate" autocomplete="off" class="mt-3">
+            <form data-component="submit-state" data-loading="#totp-loading" data-content="#totp-setup-content" method="post" action="/ui/account/totp/activate" autocomplete="off" class="mt-3">
               {% match csrf %}
                 {% when Some with (token) %}
                   <input type="hidden" name="_csrf" value="{{ token }}">
