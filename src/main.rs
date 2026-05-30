@@ -1981,6 +1981,9 @@ fn collect_storage_stats(data_dir: &std::path::Path) -> (Option<u64>, usize, u64
     (wal_size, sst_count, total_bytes)
 }
 
+#[allow(clippy::cast_precision_loss)]
+// INVARIANT: precision loss is acceptable here — this function formats byte sizes
+// for human-readable display (e.g. "1.2 GB"). Sub-MB precision is irrelevant.
 fn fmt_bytes(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
