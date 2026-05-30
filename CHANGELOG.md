@@ -23,6 +23,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   Detected columns in the Migration History admin page were displaying raw RFC 3339 strings
   (e.g. `2024-03-15T14:30:00Z`). The view layer now formats them as `15 Mar 2024 14:30 UTC`.
 
+- **Org and user attribute fields now submit correctly with a single attribute row (HEA-1031)**
+  — submitting a create or edit form for an organization or user with exactly one attribute
+  row produced a 400 error. Root cause: `serde_urlencoded` 0.7.x calls `visit_str` (not
+  `visit_seq`) when a repeated key appears once, but `Vec<String>` only accepts `visit_seq`.
+  A new `string_or_vec` deserializer handles both shapes; applied to `attr_keys`/`attr_vals`
+  in `CreateOrgForm`, `EditOrgForm`, `CreateUserForm`, and `EditUserForm`.
+
 - **Organization slug field now enforces valid slug characters client-side (HEA-1037 / BUG-14)**
   — the Create Organization form was missing an HTML `pattern` attribute on the slug input,
   allowing browsers to accept strings that the server would reject. `pattern="[a-z0-9][a-z0-9-]*"`
