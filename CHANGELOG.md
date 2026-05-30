@@ -19,6 +19,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Fixed
 
+- **Default log filter now suppresses noisy third-party crates (HEA-1045)** — globset, h2,
+  hyper, and tower are capped at `warn` in the default `EnvFilter`, eliminating regex-conversion
+  debug lines from normal `make dev` output. `RUST_LOG` still overrides everything when set.
+
 - **Migration history timestamps now human-readable (HEA-1037 / BUG-13)** — the Completed and
   Detected columns in the Migration History admin page were displaying raw RFC 3339 strings
   (e.g. `2024-03-15T14:30:00Z`). The view layer now formats them as `15 Mar 2024 14:30 UTC`.
