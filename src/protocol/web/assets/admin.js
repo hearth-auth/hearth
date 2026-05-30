@@ -45,7 +45,11 @@ class RealmNav {
 
     this.activePage   = container.dataset.activePage || '';
     const m           = window.location.pathname.match(/^\/ui\/admin\/realms\/([^\/?#]+)(?:\/|$)/);
-    this.currentRealm = m ? decodeURIComponent(m[1]) : '';
+    try {
+      this.currentRealm = m ? decodeURIComponent(m[1]) : '';
+    } catch {
+      this.currentRealm = m ? m[1] : '';
+    }
 
     this.subPages = [
       { key: 'overview',           label: 'Overview',           href: '/ui/admin/realms/{realm}' },
@@ -72,7 +76,11 @@ class RealmNav {
       const data = await res.json();
       this._render(data.realms || []);
     } catch {
-      if (this.loading) this.loading.textContent = 'Could not load realms.';
+      this.loading?.remove();
+      const p = document.createElement('p');
+      p.className = 'px-2 text-xs text-ht-content-muted';
+      p.textContent = 'Could not load realms.';
+      this.container.appendChild(p);
     }
   }
 
