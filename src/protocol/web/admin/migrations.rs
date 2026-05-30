@@ -4,6 +4,39 @@ use super::*;
 use crate::identity::reconcile::{MigrationHistoryRecord, OrphanRecord};
 
 // ---------------------------------------------------------------------------
+// Display helpers
+// ---------------------------------------------------------------------------
+
+/// Converts an RFC 3339 UTC string (`YYYY-MM-DDTHH:MM:SSZ`) to a compact
+/// human-readable form such as `"15 Mar 2024 14:30 UTC"`.
+///
+/// Returns the original string unchanged when it is malformed or too short.
+fn format_rfc3339_human(s: &str) -> String {
+    match (s.get(..4), s.get(5..7), s.get(8..10), s.get(11..16)) {
+        (Some(y), Some(mo), Some(d), Some(hm)) => {
+            let mon = match mo {
+                "01" => "Jan",
+                "02" => "Feb",
+                "03" => "Mar",
+                "04" => "Apr",
+                "05" => "May",
+                "06" => "Jun",
+                "07" => "Jul",
+                "08" => "Aug",
+                "09" => "Sep",
+                "10" => "Oct",
+                "11" => "Nov",
+                "12" => "Dec",
+                _ => mo,
+            };
+            let day_n: u8 = d.parse().unwrap_or(0);
+            format!("{day_n} {mon} {y} {hm} UTC")
+        }
+        _ => s.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // View types
 // ---------------------------------------------------------------------------
 
@@ -37,7 +70,7 @@ impl MigrationRow {
             kind: if r.move_semantics { "move" } else { "copy" },
             users_migrated: r.users_migrated,
             users_skipped: r.users_skipped,
-            completed_at: r.completed_at.clone(),
+            completed_at: format_rfc3339_human(&r.completed_at),
             badge_class: r.status.badge_class().to_string(),
             status_label: r.status.label().to_string(),
             audit_filter: format!("action=MigrationCompleted&q={}", r.source_slug),
@@ -67,7 +100,7 @@ impl OrphanRow {
         );
         Self {
             realm_slug: r.realm_slug.clone(),
-            detected_at: r.detected_at.clone(),
+            detected_at: format_rfc3339_human(&r.detected_at),
             user_count: r.user_count,
             org_count: r.org_count,
             yaml_snippet,

@@ -17,6 +17,27 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   manually) so the required-check name matches the new job.** All inbound SDK README,
   CHANGELOG, and code-comment links updated.
 
+### Fixed
+
+- **Migration history timestamps now human-readable (HEA-1037 / BUG-13)** — the Completed and
+  Detected columns in the Migration History admin page were displaying raw RFC 3339 strings
+  (e.g. `2024-03-15T14:30:00Z`). The view layer now formats them as `15 Mar 2024 14:30 UTC`.
+
+- **Organization slug field now enforces valid slug characters client-side (HEA-1037 / BUG-14)**
+  — the Create Organization form was missing an HTML `pattern` attribute on the slug input,
+  allowing browsers to accept strings that the server would reject. `pattern="[a-z0-9][a-z0-9-]*"`
+  now matches the server-side constraint (3–63 chars, lowercase alphanum + hyphens).
+
+- **Unlabeled action column headers in admin tables (HEA-1037 / BUG-15)** — axe-core flagged
+  empty `<th></th>` cells at the rightmost position of every list table as accessibility
+  violations. All 16 affected table headers now carry `aria-label="Actions"`.
+
+- **Audit hash chain integrity preserved across server restarts (HEA-1036)** — the in-memory
+  chain cursor was lost on restart, causing the first post-restart `append()` to incorrectly
+  treat the realm as empty and chain from the genesis hash. The engine already recovered
+  correctly via `get_last_hash()` (a storage scan), but the regression test was absent,
+  leaving the invariant unverifiable. Test added; integrity check now passes across restart.
+
 ### Security
 
 - **JAR `response_mode` override now enforced (HEA-1008)** — `JarClaims` lacked a
