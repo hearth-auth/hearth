@@ -23,6 +23,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   Detected columns in the Migration History admin page were displaying raw RFC 3339 strings
   (e.g. `2024-03-15T14:30:00Z`). The view layer now formats them as `15 Mar 2024 14:30 UTC`.
 
+- **Org/user create forms now show the free-form attribute section (HEA-1031)** — when no
+  attribute definitions are configured for a realm, the create forms for organizations and users
+  showed nothing under the Attributes heading. The `{% else %}` branch rendering the dynamic
+  add/remove UI was missing. Also removed CSP-violating inline `<script>` blocks from all four
+  affected templates (create + edit for org and user); logic moved to the new
+  `/ui/static/admin/attr-rows.js` external file which is served from the same origin and
+  therefore permitted by `script-src 'self'`.
+
 - **Org and user attribute fields now submit correctly with a single attribute row (HEA-1031)**
   — submitting a create or edit form for an organization or user with exactly one attribute
   row produced a 400 error. Root cause: `serde_urlencoded` 0.7.x calls `visit_str` (not

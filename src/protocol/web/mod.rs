@@ -1589,6 +1589,7 @@ const ADMIN_USERS_IMPORT_JS: &[u8] = include_bytes!("assets/admin/users-import.j
 const ADMIN_USERS_LIST_JS: &[u8] = include_bytes!("assets/admin/users-list.js");
 const ADMIN_USERS_NEW_JS: &[u8] = include_bytes!("assets/admin/users-new.js");
 const ADMIN_RBAC_DEBUG_JS: &[u8] = include_bytes!("assets/admin/rbac-debug.js");
+const ADMIN_ATTR_ROWS_JS: &[u8] = include_bytes!("assets/admin/attr-rows.js");
 /// Standalone dev-mailcatcher detail-page script (HEA-886).
 const DEV_MAIL_DETAIL_JS: &[u8] = include_bytes!("assets/dev/mail-detail.js");
 /// Self-hosted Fraunces upright woff2 (HEA-630).
@@ -1798,6 +1799,7 @@ async fn serve_static(
         "admin/rbac-debug.js" => {
             Some((ADMIN_RBAC_DEBUG_JS, "application/javascript; charset=utf-8"))
         }
+        "admin/attr-rows.js" => Some((ADMIN_ATTR_ROWS_JS, "application/javascript; charset=utf-8")),
         "dev/mail-detail.js" => Some((DEV_MAIL_DETAIL_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
         "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
