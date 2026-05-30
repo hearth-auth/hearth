@@ -17,6 +17,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   manually) so the required-check name matches the new job.** All inbound SDK README,
   CHANGELOG, and code-comment links updated.
 
+### Added
+
+- **Dev-mode pretty log formatter (HEA-1046)** — when `--dev` is active or stdout is a TTY,
+  the log output switches to a compact human-readable format: `HH:MM:SS` timestamps, ANSI-colored
+  level labels (TTY only), and abbreviated target paths (last two `::` segments, e.g.
+  `identity::engine` instead of `hearth::identity::engine`). JSON output (`log_format: json`) is
+  unaffected.
+
 ### Fixed
 
 - **Default log filter now suppresses noisy third-party crates (HEA-1045)** — globset, h2,
