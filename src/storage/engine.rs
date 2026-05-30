@@ -579,7 +579,8 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: key.to_vec(),
             value: value.to_vec(),
         };
-        self.wal.append(&entry)?;
+        self.wal
+            .append_with_pre_rotate(&entry, || self.trigger_flush())?;
 
         // 2. Memtable insert
         self.active_memtable.put(realm_id, key, value)?;
@@ -609,7 +610,8 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: key.to_vec(),
             value: vec![],
         };
-        self.wal.append(&entry)?;
+        self.wal
+            .append_with_pre_rotate(&entry, || self.trigger_flush())?;
 
         // 2. Memtable tombstone
         self.active_memtable.delete(realm_id, key)?;
@@ -661,7 +663,8 @@ impl StorageEngine for EmbeddedStorageEngine {
             key: Vec::new(),
             value: payload,
         };
-        self.wal.append(&wal_entry)?;
+        self.wal
+            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
 
         // 2. Apply each sub-entry to the in-memory state. If a failure
         //    occurs here (e.g., memtable mutex poisoned), the WAL record is

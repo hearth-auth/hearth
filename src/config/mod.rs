@@ -1047,19 +1047,19 @@ fn validate_sms_twilio(sms: &SmsConfig) -> Result<(), ConfigError> {
 
 /// Validates AWS SNS SMS transport configuration.
 fn validate_sms_awssns(sms: &SmsConfig) -> Result<(), ConfigError> {
-    let sns = sms.aws_sns.as_ref().ok_or_else(|| {
+    let aws_sns = sms.aws_sns.as_ref().ok_or_else(|| {
         invalid(
             "sms.aws_sns",
             "aws_sns block is required when sms.transport is awssns",
         )
     })?;
-    if sns.region.is_empty() {
+    if aws_sns.region.is_empty() {
         return Err(invalid("sms.aws_sns.region", "must not be empty"));
     }
-    if sns.access_key_id.is_empty() {
+    if aws_sns.access_key_id.is_empty() {
         return Err(invalid("sms.aws_sns.access_key_id", "must not be empty"));
     }
-    if sns.secret_access_key.is_empty() {
+    if aws_sns.secret_access_key.is_empty() {
         return Err(invalid(
             "sms.aws_sns.secret_access_key",
             "must not be empty",

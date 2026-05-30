@@ -102,10 +102,9 @@ mod tests {
 
     #[test]
     fn merged_spec_json_is_non_empty() {
-        assert!(
-            !MERGED_SPEC_JSON.is_empty(),
-            "MERGED_SPEC_JSON must not be empty"
-        );
+        #[allow(clippy::const_is_empty)]
+        let non_empty = !MERGED_SPEC_JSON.is_empty();
+        assert!(non_empty, "MERGED_SPEC_JSON must not be empty");
     }
 
     #[test]
@@ -118,9 +117,8 @@ mod tests {
 
     #[test]
     fn supplement_spec_is_non_empty() {
-        assert!(
-            !SUPPLEMENT_SPEC.is_empty(),
-            "SUPPLEMENT_SPEC must not be empty"
-        );
+        #[allow(clippy::const_is_empty)]
+        let non_empty = !SUPPLEMENT_SPEC.is_empty();
+        assert!(non_empty, "SUPPLEMENT_SPEC must not be empty");
     }
 }

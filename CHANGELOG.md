@@ -21,6 +21,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   manually) so the required-check name matches the new job.** All inbound SDK README,
   CHANGELOG, and code-comment links updated.
 
+### Fixed
+
+- **Storage: memtable flushed before WAL rotation** — the storage engine now
+  flushes the active memtable to an SST before truncating the WAL on rotation.
+  Previously, up to `storage.memtable_flush_bytes` (default 4 MiB) of data
+  could be lost if the process crashed between a WAL rotation and the next
+  flush cycle. Triggered only when WAL size exceeds `storage.wal_max_bytes`
+  (default 64 MiB), so small/dev deployments were not at risk (HEA-1050).
+
 ### Added
 
 - **Startup panel shows env and storage stats (HEA-1032)** — the info panel printed after bind
