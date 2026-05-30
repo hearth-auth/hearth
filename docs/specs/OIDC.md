@@ -48,6 +48,9 @@ but this is STRONGLY DISCOURAGED and emits a startup warning.
 
 ## 2. FAPI 2.0 Security Profile
 
+> **Operator guide:** For step-by-step setup, curl examples, and error reference, see
+> [docs/guides/fapi2.md](../guides/fapi2.md).
+
 Hearth supports two FAPI 2.0 enforcement mechanisms:
 
 | Mechanism | Scope | Config field |

@@ -839,6 +839,65 @@ mod tests {
     }
 
     #[test]
+    fn hash_chain_survives_restart() {
+        // Phase 1: write events with the first engine instance.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let realm_id = RealmId::generate();
+
+        {
+            let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+            let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+            let engine = EmbeddedAuditEngine::new(
+                Arc::clone(&storage) as Arc<dyn StorageEngine>,
+                Arc::clone(&clock) as Arc<dyn Clock>,
+            );
+
+            for i in 0..3_u32 {
+                engine
+                    .append(&CreateAuditEvent {
+                        realm_id: realm_id.clone(),
+                        actor: format!("actor_{i}"),
+                        action: AuditAction::UserCreated,
+                        resource_type: "user".to_string(),
+                        resource_id: format!("u{i}"),
+                        metadata: None,
+                    })
+                    .expect("append before restart");
+                clock.advance(1_000_000);
+            }
+        } // engine + storage dropped — simulates server restart; temp_dir stays alive
+
+        // Phase 2: reopen the same storage directory with a fresh engine.
+        let config2 = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let storage2 = Arc::new(EmbeddedStorageEngine::open(config2).expect("storage2"));
+        let engine2 = EmbeddedAuditEngine::new(
+            Arc::clone(&storage2) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        );
+
+        for i in 3..6_u32 {
+            engine2
+                .append(&CreateAuditEvent {
+                    realm_id: realm_id.clone(),
+                    actor: format!("actor_{i}"),
+                    action: AuditAction::UserCreated,
+                    resource_type: "user".to_string(),
+                    resource_id: format!("u{i}"),
+                    metadata: None,
+                })
+                .expect("append after restart");
+            clock.advance(1_000_000);
+        }
+
+        // The full chain (pre-restart events + post-restart events) must be valid.
+        let valid = engine2
+            .verify_integrity(&realm_id, None, None)
+            .expect("verify");
+        assert!(valid, "hash chain must survive a server restart");
+    }
+
+    #[test]
     fn genesis_hash_for_empty_realm() {
         let (engine, realm_id) = setup();
 

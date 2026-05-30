@@ -1002,6 +1002,15 @@ pub fn router(state: WebState) -> Router {
             "/admin/admin-users/new",
             axum::routing::get(admin::admin_admin_user_create_alias),
         )
+        .route(
+            "/admin/admin-users/import",
+            axum::routing::get(admin::admin_admin_users_import_form)
+                .post(admin::admin_admin_users_import_submit),
+        )
+        .route(
+            "/admin/admin-users/import/template.csv",
+            axum::routing::get(admin::admin_admin_users_import_template_csv),
+        )
         // --- Migration history + orphan recovery ---
         .route(
             "/admin/migrations",

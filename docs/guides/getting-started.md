@@ -265,3 +265,5 @@ Hearth does not offer a built-in OAuth token-handler mode (delivering `/token` r
 | B2B multi-tenancy within a realm | [Organizations guide](organizations.md) |
 | Production config, TLS, email | [Configuration reference](../../README.md#configuration) |
 | Import from Keycloak | [Migration guide](../../README.md#migrating-from-keycloak) |
+| Client SDKs (TypeScript, Go, PHP, Python, Rust) | [SDK index](../sdk-spec.md) |
+| REST API reference (OpenAPI) | [API reference guide](api-reference.md) — import into Postman/Bruno/Insomnia, generate a typed client, keep the spec current |
