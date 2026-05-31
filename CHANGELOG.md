@@ -45,6 +45,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
     is missing.
   - Realm-scoped 404 pages now render inside the admin chrome (sidebar, user pill, theme) rather
     than as a bare unstyled page.
+- **Token Preview endpoint returns 405 no more** — the RBAC debug token-preview route was
+  registered as POST-only while the JS client sends a GET with a `?user_id=` query param; every
+  button click returned 405 and the result panel never appeared. Route changed to GET; handler
+  extractor changed from `axum::Form` (body) to `axum::extract::Query` (query params) (HEA-1092).
 
 ### Changed
 
