@@ -1,9 +1,9 @@
 //! Integration tests for the RBAC debug / token-preview web-UI endpoints.
 //!
 //! Covers:
-//! - `POST /ui/admin/realms/{realm}/rbac/token-preview` — valid admin + valid UUID
-//! - `POST /ui/admin/realms/{realm}/rbac/token-preview` — valid admin + invalid UUID
-//! - `POST /ui/admin/realms/{realm}/rbac/token-preview` — unauthenticated → 302
+//! - `GET /ui/admin/realms/{realm}/rbac/token-preview?user_id=<uuid>` — valid admin + valid UUID
+//! - `GET /ui/admin/realms/{realm}/rbac/token-preview?user_id=bad` — valid admin + invalid UUID
+//! - `GET /ui/admin/realms/{realm}/rbac/token-preview` — unauthenticated → 302
 
 use std::sync::Arc;
 
@@ -180,11 +180,12 @@ fn admin_cookie(rig: &Rig, csrf: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Token preview — authenticated
+// Token preview — authenticated (GET with query params)
 // ---------------------------------------------------------------------------
 
-/// `POST /ui/admin/realms/{realm}/rbac/token-preview` with a valid user UUID
-/// returns 200 with JSON containing `sub`, `roles`, `groups`, `permissions`.
+/// `GET /ui/admin/realms/{realm}/rbac/token-preview?user_id=<uuid>` with a
+/// valid admin session returns 200 with JSON containing `sub`, `roles`,
+/// `groups`, and `permissions`.
 #[tokio::test]
 async fn token_preview_valid_user_returns_json() {
     let rig = build_rig();
@@ -208,17 +209,16 @@ async fn token_preview_valid_user_returns_json() {
         .expect("create user");
     let user_uuid = user.id().as_uuid().to_string();
 
-    let body = format!("user_id={user_uuid}&_csrf={csrf}");
     let resp = rig
         .app
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri(format!("/ui/admin/realms/{realm}/rbac/token-preview"))
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/token-preview?user_id={user_uuid}"
+                ))
                 .header(header::COOKIE, &cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header("X-CSRF-Token", csrf)
-                .body(Body::from(body))
+                .body(Body::empty())
                 .expect("test invariant"),
         )
         .await
@@ -242,8 +242,8 @@ async fn token_preview_valid_user_returns_json() {
     );
 }
 
-/// `POST /ui/admin/realms/{realm}/rbac/token-preview` with a bad UUID string
-/// returns 200 with a JSON error payload (not a 4xx).
+/// `GET /ui/admin/realms/{realm}/rbac/token-preview?user_id=bad` returns 200
+/// with a JSON error payload (not a 4xx).
 #[tokio::test]
 async fn token_preview_invalid_uuid_returns_json_error() {
     let rig = build_rig();
@@ -251,17 +251,16 @@ async fn token_preview_invalid_uuid_returns_json_error() {
     let cookie = admin_cookie(&rig, csrf);
     let realm = &rig.tenant_realm_name;
 
-    let body = format!("user_id=not-a-uuid&_csrf={csrf}");
     let resp = rig
         .app
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri(format!("/ui/admin/realms/{realm}/rbac/token-preview"))
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/token-preview?user_id=not-a-uuid"
+                ))
                 .header(header::COOKIE, &cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header("X-CSRF-Token", csrf)
-                .body(Body::from(body))
+                .body(Body::empty())
                 .expect("test invariant"),
         )
         .await
@@ -280,7 +279,7 @@ async fn token_preview_invalid_uuid_returns_json_error() {
 // Token preview — unauthenticated
 // ---------------------------------------------------------------------------
 
-/// Unauthenticated POST to token-preview redirects to login (302 / 303).
+/// Unauthenticated GET to token-preview redirects to login (302 / 303).
 #[tokio::test]
 async fn token_preview_unauthenticated_redirects() {
     let rig = build_rig();
@@ -290,10 +289,12 @@ async fn token_preview_unauthenticated_redirects() {
         .app
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri(format!("/ui/admin/realms/{realm}/rbac/token-preview"))
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from("user_id=00000000-0000-0000-0000-000000000001"))
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/token-preview\
+                     ?user_id=00000000-0000-0000-0000-000000000001"
+                ))
+                .body(Body::empty())
                 .expect("test invariant"),
         )
         .await

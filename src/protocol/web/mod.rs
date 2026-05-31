@@ -1149,7 +1149,7 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/admin/realms/{realm}/rbac/token-preview",
-            axum::routing::post(admin::admin_rbac_token_preview),
+            axum::routing::get(admin::admin_rbac_token_preview),
         )
         .route(
             "/admin/realms/{realm}/rbac/permissions",

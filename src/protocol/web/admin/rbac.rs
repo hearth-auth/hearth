@@ -165,10 +165,10 @@ pub async fn admin_rbac_debug(
 }
 
 // =========================================================================
-// RBAC token preview (POST /ui/admin/rbac/token-preview)
+// RBAC token preview (GET /ui/admin/rbac/token-preview)
 // =========================================================================
 
-/// Form body for the token preview endpoint.
+/// Query parameters for the token preview endpoint.
 #[derive(Debug, Deserialize)]
 pub struct TokenPreviewForm {
     /// UUID (bare or with `user_` prefix) of the user to preview.
@@ -176,15 +176,15 @@ pub struct TokenPreviewForm {
     pub user_id: String,
 }
 
-/// `POST /ui/admin/rbac/token-preview` — returns a JSON snippet previewing
-/// the access-token claims that would be embedded for the given user in the
-/// current realm.
+/// `GET /ui/admin/rbac/token-preview?user_id=<uuid>` — returns a JSON snippet
+/// previewing the access-token claims that would be embedded for the given
+/// user in the current realm.
 pub async fn admin_rbac_token_preview(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    axum::Form(form): axum::Form<TokenPreviewForm>,
+    axum::extract::Query(form): axum::extract::Query<TokenPreviewForm>,
 ) -> Response {
     use axum::response::IntoResponse;
     use serde_json::{json, to_string_pretty};
