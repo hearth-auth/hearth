@@ -1242,7 +1242,9 @@ pub async fn admin_user_edit_form(
 ) -> Response {
     let uid = match user_id.parse::<uuid::Uuid>() {
         Ok(u) => crate::core::UserId::new(u),
-        Err(_) => return super::handlers_common::not_found("User not found"),
+        Err(_) => {
+            return super::handlers_common::not_found_authed(&state, &session, "User not found")
+        }
     };
 
     match state.identity.get_user(target.id(), &uid) {
@@ -1298,7 +1300,7 @@ pub async fn admin_user_edit_form(
                 inline_theme_css: state.inline_theme_css(),
             })
         }
-        Ok(None) => super::handlers_common::not_found("User not found"),
+        Ok(None) => super::handlers_common::not_found_authed(&state, &session, "User not found"),
         Err(e) => {
             tracing::warn!(error = %e, "get_user failed");
             super::handlers_common::server_error()

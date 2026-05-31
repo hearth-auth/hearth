@@ -1,9 +1,9 @@
 {% extends "ui/_layout.html" %}
-{% block title %}{{ product_name }} · Users{% endblock %}
+{% block title %}{{ product_name }} · {% if realm_name.is_empty() %}Admin Users{% else %}Users{% endif %}{% endblock %}
 {% block breadcrumb %}
 {% if realm_name.is_empty() %}
 <nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
-  <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
+  <a href="/ui/admin" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
   <span class="text-ht-content-muted">›</span>
   <span class="font-medium text-ht-content-secondary">Admin Users</span>
 </nav>
@@ -18,8 +18,6 @@
 {% endif %}
 {% endblock %}
 {% block body %}
-{% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}
-
 <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">{% if realm_name.is_empty() %}Admin Users{% else %}Users in this realm{% endif %}</h1>
   <div class="flex items-center gap-2">

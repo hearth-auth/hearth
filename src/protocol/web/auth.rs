@@ -634,7 +634,38 @@ where
         // cookie or query override and no fallback. If the path
         // doesn't carry a realm, the request is rejected.
         if let Some(name) = path_realm_segment(parts.uri.path()) {
-            return resolve_named_realm(&web_state, &name);
+            // System realm is handled by resolve_named_realm (always Ok or 500, never 404).
+            if name == crate::identity::keys::SYSTEM_REALM_NAME {
+                return resolve_named_realm(&web_state, &name);
+            }
+            // For named realms, try to get session context so a not-found renders
+            // inside the admin chrome rather than as a bare unstyled page.
+            return match web_state.identity.get_realm_by_name(&name) {
+                Ok(Some(realm)) => Ok(TargetRealm(realm)),
+                Ok(None) => {
+                    let session = UiSession::from_request_parts(parts, state).await.ok();
+                    Err(match session {
+                        Some(ref s) => super::handlers_common::not_found_authed(
+                            &web_state,
+                            s,
+                            "Realm not found.",
+                        ),
+                        None => render_status(
+                            &super::handlers_common::NotFoundTemplate::new(
+                                "Realm not found.".to_string(),
+                            ),
+                            StatusCode::NOT_FOUND,
+                        ),
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, realm = %name, "TargetRealm: get_realm_by_name failed");
+                    Err(render_status(
+                        &super::handlers_common::ServerErrorTemplate::new(),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    ))
+                }
+            };
         }
 
         // No realm context resolved. Reject deliberately rather than

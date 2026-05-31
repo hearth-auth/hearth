@@ -148,7 +148,7 @@ pub async fn admin_realm_detail(
                 inline_theme_css: state.inline_theme_css(),
             })
         }
-        Ok(None) => super::handlers_common::not_found("Realm not found"),
+        Ok(None) => super::handlers_common::not_found_authed(&state, &session, "Realm not found"),
         Err(e) => {
             tracing::warn!(error = %e, "get_realm failed");
             super::handlers_common::server_error()
@@ -554,7 +554,7 @@ fn build_metadata_pills(
             break;
         }
         if let Some(v) = obj.get(key) {
-            pills.push((key.to_string(), truncate_pill_value(v)));
+            pills.push((key.to_string(), pill_display_value(key, v)));
             used.insert(key);
         }
     }
@@ -565,11 +565,30 @@ fn build_metadata_pills(
         if used.contains(k.as_str()) {
             continue;
         }
-        pills.push((k.clone(), truncate_pill_value(v)));
+        pills.push((k.clone(), pill_display_value(k, v)));
     }
 
     let extra = obj.len().saturating_sub(pills.len());
     (pills, extra)
+}
+
+/// Returns the display value for a metadata pill, applying key-specific
+/// humanization before truncation (e.g. `via: "admin_api"` → `"Admin API"`).
+fn pill_display_value(key: &str, v: &serde_json::Value) -> String {
+    if key == "via" {
+        if let serde_json::Value::String(s) = v {
+            return match s.as_str() {
+                "admin_api" | "admin" => "Admin API",
+                "ui" => "UI",
+                "scim" => "SCIM",
+                "self" => "Self-service",
+                "dynamic_registration" => "Dynamic Reg.",
+                other => return truncate_pill_value(&serde_json::Value::String(other.to_string())),
+            }
+            .to_string();
+        }
+    }
+    truncate_pill_value(v)
 }
 
 /// Truncates a metadata value for inline pill rendering — strings cap at
@@ -706,7 +725,7 @@ fn resolve_audit_resource(
                     (name, Some(url))
                 })
         }),
-        "organization" => uuid::Uuid::parse_str(resource_id).ok().and_then(|u| {
+        "org" | "organization" => uuid::Uuid::parse_str(resource_id).ok().and_then(|u| {
             state
                 .identity
                 .get_organization(realm_id, &crate::core::OrganizationId::new(u))

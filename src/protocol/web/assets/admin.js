@@ -1379,18 +1379,19 @@ function initKeyboardShortcutOverlay() {
 // =========================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
-  new SidebarManager();
-  new RealmNav(document.getElementById('realm-nav'));
-  new ToastManager();
-  initRealmPill();
-  initRealmWizard();
-  initOrgListBulkActions();
-  initRolesTab(document.querySelector('[data-roles-tab]'));
-  initPasswordStrength();
-  initAttrRows();
-  initConfigEditor();
-  initFormSubmitProtection();
-  initKeyboardShortcutOverlay();
+  const run = (label, fn) => { try { fn(); } catch (e) { console.error(`[admin] ${label} init failed:`, e); } };
+  run('SidebarManager',         () => new SidebarManager());
+  run('RealmNav',               () => new RealmNav(document.getElementById('realm-nav')));
+  run('ToastManager',           () => new ToastManager());
+  run('initRealmPill',          () => initRealmPill());
+  run('initRealmWizard',        () => initRealmWizard());
+  run('initOrgListBulkActions', () => initOrgListBulkActions());
+  run('initRolesTab',           () => initRolesTab(document.querySelector('[data-roles-tab]')));
+  run('initPasswordStrength',   () => initPasswordStrength());
+  run('initAttrRows',           () => initAttrRows());
+  run('initConfigEditor',       () => initConfigEditor());
+  run('initFormSubmitProtection', () => initFormSubmitProtection());
+  run('initKeyboardShortcutOverlay', () => initKeyboardShortcutOverlay());
 });
 
 // =========================================================================

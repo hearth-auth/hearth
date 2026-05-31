@@ -5131,13 +5131,45 @@ async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoRespons
             let admin = match state.identity.get_user_by_email(&rid, "admin@dev.local") {
                 Ok(Some(u)) => u,
                 Ok(None) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            serde_json::json!({"error": "admin@dev.local not found in dev-realm"}),
-                        ),
-                    )
-                        .into_response();
+                    // User was deleted while dev-realm survived — re-create idempotently
+                    // so callers never need to wipe data just to re-bootstrap.
+                    let _ = state.rbac.seed_realm(&rid);
+                    let new_user = match state.identity.create_user(
+                        &rid,
+                        &crate::identity::CreateUserRequest {
+                            email: "admin@dev.local".to_string(),
+                            display_name: "Dev Admin".to_string(),
+                            ..Default::default()
+                        },
+                    ) {
+                        Ok(u) => u,
+                        Err(e) => return identity_error_to_response(&e).into_response(),
+                    };
+                    let new_uid = new_user.id().clone();
+                    let _ = state.identity.update_user(
+                        &rid,
+                        &new_uid,
+                        &crate::identity::UpdateUserRequest {
+                            status: Some(crate::identity::UserStatus::Active),
+                            ..Default::default()
+                        },
+                    );
+                    let dev_pwd = crate::identity::CleartextPassword::from_string(
+                        "HearthDev123!".to_string(),
+                    );
+                    let _ = state.identity.set_password(&rid, &new_uid, &dev_pwd);
+                    if let Ok(Some(admin_role)) = state.rbac.get_role_by_name(&rid, "realm.admin") {
+                        let _ = state.rbac.assign_role(
+                            &rid,
+                            &AssignRoleRequest {
+                                subject: Subject::User(new_uid.clone()),
+                                role_id: admin_role.id.clone(),
+                                scope: Scope::Realm,
+                                assigned_by: None,
+                            },
+                        );
+                    }
+                    new_user
                 }
                 Err(e) => return identity_error_to_response(&e).into_response(),
             };
