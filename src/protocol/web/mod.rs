@@ -631,7 +631,8 @@ fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
 /// | `/ui/account/sessions` | GET | List the signed-in user's active sessions |
 /// | `/ui/account/sessions/{sid}/revoke` | POST | Revoke one of the user's own sessions |
 /// | `/ui/account/sessions/revoke-others` | POST | Revoke every session except the current one |
-/// | `/ui/admin/users` | GET | Admin users list |
+/// | `/ui/admin` | GET | Admin home (302 → `/ui/admin/realms`) |
+/// | `/ui/admin/users` | GET | Admin users alias (302 → `/ui/admin/admin-users`) |
 /// | `/ui/admin/users/new` | GET/POST | Create user |
 /// | `/ui/admin/users/{id}` | GET | User detail |
 /// | `/ui/admin/users/{id}/edit` | GET/POST | Edit user |
@@ -781,6 +782,20 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/forgot-password/sent",
             axum::routing::get(handlers::admin_forgot_password_sent),
+        )
+        // Convenience aliases so breadcrumb links (/ui/admin, /ui/admin/users)
+        // resolve to the canonical list pages.
+        .route(
+            "/admin",
+            axum::routing::get(|| async {
+                axum::response::Redirect::temporary("/ui/admin/realms")
+            }),
+        )
+        .route(
+            "/admin/users",
+            axum::routing::get(|| async {
+                axum::response::Redirect::temporary("/ui/admin/admin-users")
+            }),
         )
         .route("/", axum::routing::get(handlers::dashboard))
         .route(
