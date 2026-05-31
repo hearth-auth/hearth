@@ -1,5 +1,22 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Create User{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  {% if realm_name.is_empty() || realm_name == "system" %}
+    <a href="/ui/admin" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
+    <span class="text-ht-content-muted">›</span>
+    <a href="/ui/admin/users" class="text-ht-content-secondary hover:text-ht-content-primary">Admin Users</a>
+  {% else %}
+    <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Realms</a>
+    <span class="text-ht-content-muted">›</span>
+    <a href="/ui/admin/realms/{{ realm_name }}" class="text-ht-content-secondary hover:text-ht-content-primary">{{ realm_name }}</a>
+    <span class="text-ht-content-muted">›</span>
+    <a href="/ui/admin/realms/{{ realm_name }}/users" class="text-ht-content-secondary hover:text-ht-content-primary">Users</a>
+  {% endif %}
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary" aria-current="page">Create user</span>
+</nav>
+{% endblock %}
 {% block body %}
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Create user</h1>

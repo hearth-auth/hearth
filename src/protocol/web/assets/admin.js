@@ -917,7 +917,7 @@ class ConfigEditor {
         orphanEl.innerHTML = errorKeys
           .filter(k => !this.hasInlineError(k))
           .map(k => `<div class="mt-1.5 ml-6 flex items-start gap-1.5 text-xs text-danger-fg">
-            <code class="shrink-0 rounded-sm bg-danger/[0.12] px-1 py-0.5 font-mono text-[11px]">${escHtml(k)}</code>
+            <code class="shrink-0 rounded-sm bg-danger/[0.12] px-1 py-0.5 font-mono text-[11px]">${escHtml(humanizeFieldPath(k))}</code>
             <span>${escHtml(this.errors[k])}</span></div>`).join('');
       }
     } else {
@@ -1186,6 +1186,14 @@ class ConfigEditor {
 // =========================================================================
 // Utility helpers
 // =========================================================================
+
+// Converts a dot-delimited snake_case config field path into a human-readable
+// label, e.g. "storage.data_dir" → "Storage › Data Dir".
+function humanizeFieldPath(path) {
+  return path.split('.').map(seg =>
+    seg.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+  ).join(' › ');
+}
 
 // HTML-safe escaping for template literals in ConfigEditor
 function escHtml(s) {
