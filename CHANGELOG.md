@@ -45,6 +45,19 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
     is missing.
   - Realm-scoped 404 pages now render inside the admin chrome (sidebar, user pill, theme) rather
     than as a bare unstyled page.
+- **Permission Check UX overhaul** — six operator-visible improvements to the RBAC debug page (HEA-1094):
+  - Empty-state: resolving a user with zero assignments now shows the Roles / Groups / Permissions
+    grid with "—" in each column instead of hiding the panel entirely.
+  - Resolved-user banner: a "Resolved for: Name (email)" summary appears above the results grid
+    after any successful resolution.
+  - Code chips + copy buttons: permission, role, and group items render as `<code>` chips with
+    per-item one-click copy buttons.
+  - Org ID validation: a non-empty malformed org_id now shows an inline error immediately instead
+    of silently running without org scoping.
+  - Scope hint: the OAuth scope input gains a `placeholder` (`openid profile email`) and a
+    short description line below it.
+  - Realm label: the realm line in both tabs now shows `realm_name · <uuid>` so the human label
+    is visible alongside the identifier.
 - **Token Preview endpoint returns 405 no more** — the RBAC debug token-preview route was
   registered as POST-only while the JS client sends a GET with a `?user_id=` query param; every
   button click returned 405 and the result panel never appeared. Route changed to GET; handler
