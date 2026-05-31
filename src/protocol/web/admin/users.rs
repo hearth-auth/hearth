@@ -590,7 +590,7 @@ struct UserDetailTemplate {
     available_permissions: Vec<String>,
     /// Fully resolved effective permission names for this user.
     effective_permissions: Vec<String>,
-    /// JSON object mapping role UUID → sorted permission strings, for Alpine.js.
+    /// JSON object mapping role UUID → sorted permission strings, for in-browser lookup.
     role_perms_json: String,
     /// User attributes as sorted `(key, value)` pairs.
     attributes: Vec<(String, String)>,
@@ -617,7 +617,7 @@ struct UserRolesTabTemplate {
     role_assignments: Vec<UserRoleAssignmentRow>,
     available_roles: Vec<AvailableRole>,
     available_orgs: Vec<AvailableOrg>,
-    /// JSON object mapping role UUID → sorted permission strings, for Alpine.js in-browser lookup.
+    /// JSON object mapping role UUID → sorted permission strings, for in-browser lookup.
     role_perms_json: String,
     csrf: Option<String>,
 }
@@ -790,7 +790,7 @@ pub async fn admin_user_detail(
         })
         .collect();
 
-    // Build role_id → [permissions] JSON map for Alpine.js in-browser lookup.
+    // Build role_id → [permissions] JSON map for in-browser permission lookup.
     let role_perms_map: std::collections::HashMap<&str, &[String]> = available_roles
         .iter()
         .map(|r| (r.id.as_str(), r.permissions.as_slice()))

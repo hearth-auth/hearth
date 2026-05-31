@@ -410,7 +410,7 @@ pub struct TestPingBody {
 /// to an arbitrary URL (used by the new-webhook form before saving).
 ///
 /// Returns `application/json` with `{"success": bool, "message": "..."}` so
-/// Alpine.js can display the result inline.
+/// the caller can display the result inline.
 pub async fn admin_webhook_test_ping(
     RequireAdmin(_session): RequireAdmin,
     AxumPath(_realm_name): AxumPath<String>,

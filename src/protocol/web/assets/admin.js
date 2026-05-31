@@ -1,8 +1,7 @@
-// Hearth admin UI behaviours — Alpine-free, CSP `script-src 'self'` safe.
+// Hearth admin UI behaviours — vanilla JS, CSP `script-src 'self'` safe.
 //
-// Layout reactivity (sidebar, realm nav, toasts, realm pill) is handled by
-// vanilla JS classes below. Tab/form interactivity uses Hyperscript `_="..."`
-// attributes directly in templates (see HEA-850).
+// All layout reactivity (sidebar, realm nav, toasts, realm pill) and
+// tab/form interactivity is handled by the vanilla JS classes below.
 
 // =========================================================================
 // SidebarManager — mobile sidebar toggle
@@ -1352,7 +1351,6 @@ document.body.addEventListener('htmx:afterSwap', function(e) {
 
 // =========================================================================
 // initKeyboardShortcutOverlay — wire up the keyboard shortcut help overlay
-// (replaces the Hyperscript _="..." attributes removed from _layout.html)
 // =========================================================================
 
 function initKeyboardShortcutOverlay() {

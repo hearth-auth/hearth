@@ -206,7 +206,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// Returns a 200 response with an `HX-Trigger` header that tells the
-/// client-side Alpine.js toast container to display a notification.
+/// client-side `ToastManager` to display a notification.
 ///
 /// `kind` is typically `"success"` or `"error"`.
 pub fn htmx_toast_response(message: &str, kind: &str) -> Response {
