@@ -31,6 +31,10 @@ struct RbacDebugTemplate {
     realm_uuid: String,
     /// Human-readable error message, if any.
     error: Option<String>,
+    /// True when a resolution was attempted (even if all lists are empty).
+    has_result: bool,
+    /// Resolved user context: (display_name, email), shown above the results grid.
+    resolved_user: Option<(String, String)>,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -94,47 +98,67 @@ pub async fn admin_rbac_debug(
     let mut groups: Vec<String> = Vec::new();
     let mut permissions: Vec<String> = Vec::new();
     let mut error: Option<String> = None;
+    let mut has_result = false;
+    let mut resolved_user: Option<(String, String)> = None;
 
     if !user_id_input.is_empty() {
-        let uuid = user_id_input
-            .strip_prefix("user_")
-            .unwrap_or(user_id_input.as_str())
-            .parse::<uuid::Uuid>();
-        match uuid {
-            Err(_) => error = Some("Invalid user UUID".to_string()),
-            Ok(u) => {
-                let user_id = crate::core::UserId::new(u);
-                let org_id = if org_id_input.is_empty() {
-                    None
-                } else {
-                    org_id_input
-                        .strip_prefix("org_")
-                        .unwrap_or(org_id_input.as_str())
-                        .parse::<uuid::Uuid>()
-                        .ok()
+        // UX-4: validate org_id early; a non-empty unparseable value is an error.
+        let org_id_result: Option<Result<crate::core::OrganizationId, ()>> =
+            if org_id_input.is_empty() {
+                None
+            } else {
+                let raw = org_id_input
+                    .strip_prefix("org_")
+                    .unwrap_or(org_id_input.as_str());
+                Some(
+                    raw.parse::<uuid::Uuid>()
                         .map(crate::core::OrganizationId::new)
-                };
-                let scope = if scope_input.is_empty() {
-                    None
-                } else {
-                    Some(scope_input.clone())
-                };
-                match state.rbac.resolve_permissions(
-                    &user_id,
-                    target.id(),
-                    org_id.as_ref(),
-                    scope.as_deref(),
-                ) {
-                    Ok(resolved) => {
-                        roles = resolved.roles;
-                        groups = resolved.groups;
-                        permissions = resolved
-                            .permissions
-                            .into_iter()
-                            .map(|p| p.into_string())
-                            .collect();
+                        .map_err(|_| ()),
+                )
+            };
+
+        if let Some(Err(())) = org_id_result {
+            error = Some("Invalid org UUID — enter a valid org_<uuid> or leave blank".to_string());
+        } else {
+            let uuid = user_id_input
+                .strip_prefix("user_")
+                .unwrap_or(user_id_input.as_str())
+                .parse::<uuid::Uuid>();
+            match uuid {
+                Err(_) => error = Some("Invalid user UUID".to_string()),
+                Ok(u) => {
+                    let user_id = crate::core::UserId::new(u);
+                    let org_id = org_id_result.and_then(|r| r.ok());
+                    let scope = if scope_input.is_empty() {
+                        None
+                    } else {
+                        Some(scope_input.clone())
+                    };
+                    match state.rbac.resolve_permissions(
+                        &user_id,
+                        target.id(),
+                        org_id.as_ref(),
+                        scope.as_deref(),
+                    ) {
+                        Ok(resolved) => {
+                            has_result = true;
+                            roles = resolved.roles;
+                            groups = resolved.groups;
+                            permissions = resolved
+                                .permissions
+                                .into_iter()
+                                .map(|p| p.into_string())
+                                .collect();
+                            // UX-3: load resolved user context for the summary banner.
+                            if let Ok(Some(user)) = state.identity.get_user(target.id(), &user_id) {
+                                resolved_user = Some((
+                                    user.display_name().to_string(),
+                                    user.email().to_string(),
+                                ));
+                            }
+                        }
+                        Err(e) => error = Some(format!("Resolution failed: {e}")),
                     }
-                    Err(e) => error = Some(format!("Resolution failed: {e}")),
                 }
             }
         }
@@ -150,6 +174,8 @@ pub async fn admin_rbac_debug(
         permissions,
         realm_uuid: target.id().as_uuid().to_string(),
         error,
+        has_result,
+        resolved_user,
         chrome: true,
         active: "rbac_debug",
         user_email: Some(session.user_email.clone()),

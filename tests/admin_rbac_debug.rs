@@ -306,3 +306,176 @@ async fn token_preview_unauthenticated_redirects() {
         "unauthenticated request should redirect, got {status}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// RBAC debug page — UX fixes (HEA-1094)
+// ---------------------------------------------------------------------------
+
+/// UX-1: resolving a valid user with no assignments still shows the results
+/// grid (`has_result = true`).  The HTML must include the column headers for
+/// Roles, Groups, and Permissions even when all three lists are empty.
+#[tokio::test]
+async fn debug_empty_assignments_shows_results_grid() {
+    let rig = build_rig();
+    let csrf = "csrf-dbg-empty";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    // Create a user in the tenant realm — no role/group/permission assignments.
+    let user = rig
+        .identity
+        .create_user(
+            &rig.tenant_realm_id,
+            &CreateUserRequest {
+                email: "empty@example.com".to_string(),
+                display_name: "EmptyUser".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let user_uuid = user.id().as_uuid().to_string();
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/debug?user_id={user_uuid}"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    let html = std::str::from_utf8(&bytes).expect("utf8");
+
+    // Results grid section headers must appear even with zero items.
+    assert!(
+        html.contains("Roles (0)"),
+        "empty result should show Roles (0), got: …{html:.200}"
+    );
+    assert!(
+        html.contains("Groups (0)"),
+        "empty result should show Groups (0)"
+    );
+    assert!(
+        html.contains("Permissions (0)"),
+        "empty result should show Permissions (0)"
+    );
+}
+
+/// UX-3: after resolving a valid user, the page renders a "Resolved for:"
+/// banner containing the user's display name.
+#[tokio::test]
+async fn debug_resolved_user_header_present() {
+    let rig = build_rig();
+    let csrf = "csrf-dbg-resolved";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    let user = rig
+        .identity
+        .create_user(
+            &rig.tenant_realm_id,
+            &CreateUserRequest {
+                email: "resolved@example.com".to_string(),
+                display_name: "ResolvedPerson".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let user_uuid = user.id().as_uuid().to_string();
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/debug?user_id={user_uuid}"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    let html = std::str::from_utf8(&bytes).expect("utf8");
+
+    assert!(
+        html.contains("ResolvedPerson"),
+        "resolved user display name must appear in the page"
+    );
+    assert!(
+        html.contains("resolved@example.com"),
+        "resolved user email must appear in the page"
+    );
+}
+
+/// UX-4: submitting a non-empty but malformed org_id shows an inline error
+/// without running the resolution.
+#[tokio::test]
+async fn debug_invalid_org_id_shows_error() {
+    let rig = build_rig();
+    let csrf = "csrf-dbg-orgid";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    let user = rig
+        .identity
+        .create_user(
+            &rig.tenant_realm_id,
+            &CreateUserRequest {
+                email: "orgtest@example.com".to_string(),
+                display_name: "OrgTest".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let user_uuid = user.id().as_uuid().to_string();
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/debug\
+                     ?user_id={user_uuid}&org_id=not-a-uuid"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    let html = std::str::from_utf8(&bytes).expect("utf8");
+
+    // Should show an inline error, not the results grid.
+    assert!(
+        html.contains("Invalid org"),
+        "malformed org_id should produce an error message, got: …{html:.200}"
+    );
+    // Must NOT show resolved results when org parse fails.
+    assert!(
+        !html.contains("Resolved for:"),
+        "resolution should not run when org_id is invalid"
+    );
+}
