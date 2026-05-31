@@ -1577,9 +1577,6 @@ const COMPONENTS_JS: &[u8] = include_bytes!("assets/components.js");
 /// Replaces the `passkeyLogin` / `passkeyManager` / `passkeyRow` Alpine
 /// components so these pages no longer require `unsafe-eval` in the CSP.
 const PASSKEY_JS: &[u8] = include_bytes!("assets/passkey.js");
-/// Global Alpine.js component registrations and keyboard shortcuts, extracted
-/// from inline `<script>` tags so the CSP can omit `unsafe-inline`.
-const LAYOUT_JS: &[u8] = include_bytes!("assets/layout.js");
 /// Per-page admin scripts extracted from inline `<script>` blocks so the CSP
 /// can stay `script-src 'self'` (HEA-886).
 const ADMIN_SLUG_SYNC_JS: &[u8] = include_bytes!("assets/admin/slug-sync.js");
@@ -1802,7 +1799,6 @@ async fn serve_static(
         "admin/attr-rows.js" => Some((ADMIN_ATTR_ROWS_JS, "application/javascript; charset=utf-8")),
         "dev/mail-detail.js" => Some((DEV_MAIL_DETAIL_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
-        "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
         "favicon.svg" => Some((FAVICON_SVG, "image/svg+xml")),
         "img/hearth-wide-web.svg" => Some((HEARTH_WIDE_SVG, "image/svg+xml")),
         "img/hearth-icon.svg" => Some((HEARTH_ICON_SVG, "image/svg+xml")),
