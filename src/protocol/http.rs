@@ -3953,6 +3953,34 @@ async fn admin_patch_realm_config(
             config.sms_otp_max_attempts = Some(v as u32);
         }
     }
+    if let Some(v) = body.get("fapi_profile") {
+        use crate::identity::FapiProfile;
+        if v.is_null() {
+            config.fapi_profile = None;
+        } else if let Some(s) = v.as_str() {
+            match s {
+                "baseline" => config.fapi_profile = Some(FapiProfile::Baseline),
+                "advanced" => config.fapi_profile = Some(FapiProfile::Advanced),
+                other => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": format!("unknown fapi_profile value {other:?}; expected \"baseline\", \"advanced\", or null")
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "fapi_profile must be a string or null"
+                })),
+            )
+                .into_response();
+        }
+    }
 
     match state.identity.update_realm(
         &realm_id,

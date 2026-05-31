@@ -1155,6 +1155,13 @@ pub struct ApplicationYamlConfig {
     /// Whether a realm-level consent row covers all org contexts.
     #[serde(default)]
     pub consent_spans_orgs: Option<bool>,
+    /// FAPI 2.0 Security Profile for this client.
+    ///
+    /// Accepted values: `"fapi2"`. Absent means standard profile.
+    /// Setting this flag subjects the client to FAPI 2.0 constraints
+    /// (DPoP, PAR, PKCE S256) regardless of the realm-level `fapi_profile`.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 /// YAML permission definition.
@@ -1386,6 +1393,13 @@ pub struct RealmYamlConfig {
     /// instead of setting this flag.
     #[serde(default)]
     pub rotate_signing_key: Option<bool>,
+    /// FAPI 2.0 Security Profile enforcement for this realm.
+    ///
+    /// Accepted values: `"baseline"` (PAR + PKCE required for all clients),
+    /// `"advanced"` (Baseline + JAR + JARM required). Absent or `null` means
+    /// standard OAuth 2.0 / OIDC rules apply with no FAPI constraints.
+    #[serde(default)]
+    pub fapi_profile: Option<String>,
 }
 
 /// YAML for `realms.{name}.scim.*`.
@@ -1921,6 +1935,22 @@ impl RealmYamlConfig {
             })
             .collect();
 
+        // --- FAPI profile --------------------------------------------------
+
+        let fapi_profile = match self.fapi_profile.as_deref() {
+            None => None,
+            Some("baseline") => Some(crate::identity::FapiProfile::Baseline),
+            Some("advanced") => Some(crate::identity::FapiProfile::Advanced),
+            Some(other) => {
+                errors.push(RegistryError::InvalidRealmConfigField {
+                    field: "fapi_profile".to_string(),
+                    value: other.to_string(),
+                    reason: "expected \"baseline\" or \"advanced\"".to_string(),
+                });
+                None
+            }
+        };
+
         // --- Structural validation (cross-references, cycles, Tier 1) ------
         //
         // Bail early on grammar errors before running the structural checks
@@ -2048,7 +2078,7 @@ impl RealmYamlConfig {
             session_version: crate::identity::SessionVersionConfig::default(),
             max_concurrent_sessions,
             session_over_limit_policy,
-            fapi_profile: None,
+            fapi_profile,
         })
     }
 }
@@ -2306,5 +2336,54 @@ mod tests {
         // Inherited from global
         assert_eq!(merged.password_memory_cost, Some(65536));
         assert_eq!(merged.password_time_cost, Some(3));
+    }
+
+    #[test]
+    fn fapi_profile_baseline_parsed() {
+        let yaml = RealmYamlConfig {
+            fapi_profile: Some("baseline".to_string()),
+            ..RealmYamlConfig::default()
+        };
+        let cfg = yaml
+            .to_realm_config(&AuthConfig::default(), None)
+            .expect("baseline is valid");
+        assert_eq!(
+            cfg.fapi_profile,
+            Some(crate::identity::FapiProfile::Baseline)
+        );
+    }
+
+    #[test]
+    fn fapi_profile_advanced_parsed() {
+        let yaml = RealmYamlConfig {
+            fapi_profile: Some("advanced".to_string()),
+            ..RealmYamlConfig::default()
+        };
+        let cfg = yaml
+            .to_realm_config(&AuthConfig::default(), None)
+            .expect("advanced is valid");
+        assert_eq!(
+            cfg.fapi_profile,
+            Some(crate::identity::FapiProfile::Advanced)
+        );
+    }
+
+    #[test]
+    fn fapi_profile_absent_yields_none() {
+        let yaml = RealmYamlConfig::default();
+        let cfg = yaml
+            .to_realm_config(&AuthConfig::default(), None)
+            .expect("no fapi_profile is valid");
+        assert!(cfg.fapi_profile.is_none());
+    }
+
+    #[test]
+    fn fapi_profile_unknown_value_is_error() {
+        let yaml = RealmYamlConfig {
+            fapi_profile: Some("enterprise".to_string()),
+            ..RealmYamlConfig::default()
+        };
+        let result = yaml.to_realm_config(&AuthConfig::default(), None);
+        assert!(result.is_err(), "unknown fapi_profile must fail validation");
     }
 }

@@ -397,6 +397,7 @@ Each realm entry supports:
 | `auth` | object | — | Per-realm auth policy (MFA, password policy, rate limits, token TTLs). |
 | `applications` | map | — | Declarative OAuth 2.0 client definitions. |
 | `organizations` | map | — | Declarative organization definitions. |
+| `fapi_profile` | string | — | FAPI 2.0 Security Profile for the realm: `"baseline"` or `"advanced"`. When set, all clients in the realm must comply. `"baseline"` requires PAR + PKCE (S256). `"advanced"` adds JAR + JARM. Absent means standard OAuth 2.0 / OIDC rules apply. Can also be set at runtime via `PATCH /admin/realms/{id}/config`. |
 
 ### `realms.<name>.email`
 
@@ -486,6 +487,7 @@ Declarative OAuth 2.0 client definitions. Keyed by a **slug** (used to derive a 
 | `client_secret` | string | — | Client secret. Supports `${ENV_VAR}` substitution. **Required** when `confidential: true`. Hashed with Argon2id before storage. |
 | `access_token_authorization` | string | `embedded` | Controls how resource servers resolve RBAC permissions for tokens issued to this client. One of: `embedded`, `introspection`, `decision`. See [Token Authorization Modes](../guides/rbac.md#token-authorization-modes). |
 | `require_consent` | bool | `true` | Whether users must approve the OAuth consent screen before tokens are issued. Set `false` only for first-party clients you control. |
+| `profile` | string | `"standard"` | Security profile for this client: `"fapi2"` or `"standard"`. Setting `"fapi2"` subjects this client to FAPI 2.0 constraints (DPoP sender-constrained tokens, PAR, PKCE S256) regardless of the realm-level `fapi_profile`. |
 
 Reconciliation:
 - New slug → client **created** with deterministic UUID
