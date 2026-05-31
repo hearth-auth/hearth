@@ -22,6 +22,30 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `realms.<name>.applications.<key>.profile: "fapi2"` in `hearth.yaml`. The reconciler applies it on
   create and detects drift on subsequent restarts. (HEA-1040)
 
+### Fixed
+
+- **Admin UI defect batch** — 15 confirmed bugs from the 2026-05-31 QA audit (HEA-1089):
+  - Audit log org events no longer display raw UUIDs — resource type mismatch between write path
+    (`"org"`) and display resolver (`"organization"`) is now handled by matching both strings.
+  - Audit "via" metadata pills now show human-readable values: `admin_api` → Admin API, `ui` → UI,
+    `scim` → SCIM, `self` → Self-service.
+  - System Info page shows `(in-memory)` instead of blank when no data directory is configured.
+  - User create/edit validation errors now use human-readable field labels ("First name", "Last name")
+    instead of snake_case identifiers.
+  - Admin actor filter placeholder updated to "email, name, or 'system'".
+  - Audit log expand column now has an accessible `sr-only` header label ("Details").
+  - User list page title now shows "Admin Users" for the system-realm route.
+  - Settings breadcrumb separator changed from `/` to `›`; "Admin" is now a link to `/ui/admin`.
+  - "Admin" breadcrumb link on user list corrected to `/ui/admin` (was `/ui/admin/realms`).
+  - User detail page now renders a breadcrumb (was missing entirely).
+  - Duplicate breadcrumb from `_workspace_tabs.html` removed from user list body.
+  - Admin JS initializers isolated in per-component `try/catch` so a single failure cannot freeze
+    the sidebar "Loading…" spinner.
+  - Bootstrap endpoint returns `409 Conflict` instead of `500` when dev-realm exists but admin user
+    is missing.
+  - Realm-scoped 404 pages now render inside the admin chrome (sidebar, user pill, theme) rather
+    than as a bare unstyled page.
+
 ### Changed
 
 - **_hyperscript removed** — all admin-UI interactivity now expressed as vanilla-JS components via
