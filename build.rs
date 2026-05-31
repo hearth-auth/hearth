@@ -200,7 +200,7 @@ fn compile_tailwind_if_available() {
         return;
     }
 
-    let output = Command::new(&cli)
+    let output = Command::new("./tailwindcss")
         .current_dir("ui")
         .args([
             "-i",
