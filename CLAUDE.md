@@ -91,6 +91,43 @@ curl -X POST http://127.0.0.1:8420/admin/bootstrap  # dev-only, creates realm+ad
 
 `--dev` auto-enables the in-process **mailcatcher** email transport. All outbound emails are captured and visible at `http://127.0.0.1:8420/dev/mail`. No Docker or external mail server needed.
 
+### Bootstrap & Browser Login (dev-only)
+
+The bootstrap endpoint is **idempotent** — safe to call multiple times.
+
+```bash
+# 1. Start the server (in background or a separate terminal)
+make dev &
+# Wait for: "listening on 127.0.0.1:8420"
+
+# 2. Bootstrap — creates the system realm + an admin user + an API token
+BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
+REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
+ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
+
+echo "Realm:  $REALM_ID"
+echo "Token:  $ADMIN_TOKEN"
+```
+
+**Browser login:** navigate to `http://127.0.0.1:8420/ui/admin/login` and sign in with:
+
+| Field    | Value             |
+|----------|-------------------|
+| Email    | `admin@hearth.test` |
+| Password | `HearthTest123!`  |
+
+A successful login drops you at the admin dashboard (`/admin`).
+
+**API usage with the token:**
+
+```bash
+# Example: list realms
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:8420/admin/realms | jq .
+```
+
+> The `access_token` from bootstrap is a long-lived admin Bearer token. Use it for REST API calls in tests and scripts. It is **not** a session cookie — browser pages require the cookie set by the login form above.
+
 ## Reference Documents
 
 Read these before writing code. They are the canonical source of truth:
