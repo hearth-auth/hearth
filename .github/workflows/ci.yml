@@ -217,6 +217,13 @@ jobs:
       - name: make openapi-check (regenerate and fail if openapi.json drifts — HEA-972)
         run: make openapi-check
 
+      # HEA-860: explicit named gate for the adversarial fingerprint-bypass test
+      # (HEA-836 AC). The test also runs as part of `make check` above; this
+      # step gives it a distinct, auditable entry in the CI log and branch
+      # protection UI so the security property is unambiguously visible.
+      - name: CI gate — adversarial fingerprint-bypass (HEA-836)
+        run: cargo nextest run --workspace -E 'test(different_subnet_produces_different_fingerprint_and_triggers_step_up)'
+
   # ── UI tests — merged smoke/regression/accessibility + exploratory ──────────
   #
   # Previously two separate jobs (ci.ui-tests + ci.ui-tests-exploratory), each
