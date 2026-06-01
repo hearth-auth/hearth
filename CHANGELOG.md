@@ -22,6 +22,47 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `realms.<name>.applications.<key>.profile: "fapi2"` in `hearth.yaml`. The reconciler applies it on
   create and detects drift on subsequent restarts. (HEA-1040)
 
+### Fixed
+
+- **Admin UI defect batch** — 15 confirmed bugs from the 2026-05-31 QA audit (HEA-1089):
+  - Audit log org events no longer display raw UUIDs — resource type mismatch between write path
+    (`"org"`) and display resolver (`"organization"`) is now handled by matching both strings.
+  - Audit "via" metadata pills now show human-readable values: `admin_api` → Admin API, `ui` → UI,
+    `scim` → SCIM, `self` → Self-service.
+  - System Info page shows `(in-memory)` instead of blank when no data directory is configured.
+  - User create/edit validation errors now use human-readable field labels ("First name", "Last name")
+    instead of snake_case identifiers.
+  - Admin actor filter placeholder updated to "email, name, or 'system'".
+  - Audit log expand column now has an accessible `sr-only` header label ("Details").
+  - User list page title now shows "Admin Users" for the system-realm route.
+  - Settings breadcrumb separator changed from `/` to `›`; "Admin" is now a link to `/ui/admin`.
+  - "Admin" breadcrumb link on user list corrected to `/ui/admin` (was `/ui/admin/realms`).
+  - User detail page now renders a breadcrumb (was missing entirely).
+  - Duplicate breadcrumb from `_workspace_tabs.html` removed from user list body.
+  - Admin JS initializers isolated in per-component `try/catch` so a single failure cannot freeze
+    the sidebar "Loading…" spinner.
+  - Bootstrap endpoint returns `409 Conflict` instead of `500` when dev-realm exists but admin user
+    is missing.
+  - Realm-scoped 404 pages now render inside the admin chrome (sidebar, user pill, theme) rather
+    than as a bare unstyled page.
+- **Permission Check UX overhaul** — six operator-visible improvements to the RBAC debug page (HEA-1094):
+  - Empty-state: resolving a user with zero assignments now shows the Roles / Groups / Permissions
+    grid with "—" in each column instead of hiding the panel entirely.
+  - Resolved-user banner: a "Resolved for: Name (email)" summary appears above the results grid
+    after any successful resolution.
+  - Code chips + copy buttons: permission, role, and group items render as `<code>` chips with
+    per-item one-click copy buttons.
+  - Org ID validation: a non-empty malformed org_id now shows an inline error immediately instead
+    of silently running without org scoping.
+  - Scope hint: the OAuth scope input gains a `placeholder` (`openid profile email`) and a
+    short description line below it.
+  - Realm label: the realm line in both tabs now shows `realm_name · <uuid>` so the human label
+    is visible alongside the identifier.
+- **Token Preview endpoint returns 405 no more** — the RBAC debug token-preview route was
+  registered as POST-only while the JS client sends a GET with a `?user_id=` query param; every
+  button click returned 405 and the result panel never appeared. Route changed to GET; handler
+  extractor changed from `axum::Form` (body) to `axum::extract::Query` (query params) (HEA-1092).
+
 ### Changed
 
 - **_hyperscript removed** — all admin-UI interactivity now expressed as vanilla-JS components via

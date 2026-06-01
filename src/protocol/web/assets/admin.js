@@ -1,8 +1,7 @@
-// Hearth admin UI behaviours — Alpine-free, CSP `script-src 'self'` safe.
+// Hearth admin UI behaviours — vanilla JS, CSP `script-src 'self'` safe.
 //
-// Layout reactivity (sidebar, realm nav, toasts, realm pill) is handled by
-// vanilla JS classes below. Tab/form interactivity uses Hyperscript `_="..."`
-// attributes directly in templates (see HEA-850).
+// All layout reactivity (sidebar, realm nav, toasts, realm pill) and
+// tab/form interactivity is handled by the vanilla JS classes below.
 
 // =========================================================================
 // SidebarManager — mobile sidebar toggle
@@ -917,7 +916,7 @@ class ConfigEditor {
         orphanEl.innerHTML = errorKeys
           .filter(k => !this.hasInlineError(k))
           .map(k => `<div class="mt-1.5 ml-6 flex items-start gap-1.5 text-xs text-danger-fg">
-            <code class="shrink-0 rounded-sm bg-danger/[0.12] px-1 py-0.5 font-mono text-[11px]">${escHtml(k)}</code>
+            <code class="shrink-0 rounded-sm bg-danger/[0.12] px-1 py-0.5 font-mono text-[11px]">${escHtml(humanizeFieldPath(k))}</code>
             <span>${escHtml(this.errors[k])}</span></div>`).join('');
       }
     } else {
@@ -1187,6 +1186,14 @@ class ConfigEditor {
 // Utility helpers
 // =========================================================================
 
+// Converts a dot-delimited snake_case config field path into a human-readable
+// label, e.g. "storage.data_dir" → "Storage › Data Dir".
+function humanizeFieldPath(path) {
+  return path.split('.').map(seg =>
+    seg.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+  ).join(' › ');
+}
+
 // HTML-safe escaping for template literals in ConfigEditor
 function escHtml(s) {
   return String(s)
@@ -1344,7 +1351,6 @@ document.body.addEventListener('htmx:afterSwap', function(e) {
 
 // =========================================================================
 // initKeyboardShortcutOverlay — wire up the keyboard shortcut help overlay
-// (replaces the Hyperscript _="..." attributes removed from _layout.html)
 // =========================================================================
 
 function initKeyboardShortcutOverlay() {
@@ -1379,18 +1385,19 @@ function initKeyboardShortcutOverlay() {
 // =========================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
-  new SidebarManager();
-  new RealmNav(document.getElementById('realm-nav'));
-  new ToastManager();
-  initRealmPill();
-  initRealmWizard();
-  initOrgListBulkActions();
-  initRolesTab(document.querySelector('[data-roles-tab]'));
-  initPasswordStrength();
-  initAttrRows();
-  initConfigEditor();
-  initFormSubmitProtection();
-  initKeyboardShortcutOverlay();
+  const run = (label, fn) => { try { fn(); } catch (e) { console.error(`[admin] ${label} init failed:`, e); } };
+  run('SidebarManager',         () => new SidebarManager());
+  run('RealmNav',               () => new RealmNav(document.getElementById('realm-nav')));
+  run('ToastManager',           () => new ToastManager());
+  run('initRealmPill',          () => initRealmPill());
+  run('initRealmWizard',        () => initRealmWizard());
+  run('initOrgListBulkActions', () => initOrgListBulkActions());
+  run('initRolesTab',           () => initRolesTab(document.querySelector('[data-roles-tab]')));
+  run('initPasswordStrength',   () => initPasswordStrength());
+  run('initAttrRows',           () => initAttrRows());
+  run('initConfigEditor',       () => initConfigEditor());
+  run('initFormSubmitProtection', () => initFormSubmitProtection());
+  run('initKeyboardShortcutOverlay', () => initKeyboardShortcutOverlay());
 });
 
 // =========================================================================

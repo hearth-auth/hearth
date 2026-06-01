@@ -29,7 +29,7 @@
         class="flex flex-wrap items-end gap-4">
     <div class="min-w-0 flex-1">
       <label for="actor" class="block text-xs font-medium text-ht-content-muted">Actor</label>
-      <input type="text" id="actor" name="actor" value="{{ form_actor }}" placeholder="user UUID or 'system'"
+      <input type="text" id="actor" name="actor" value="{{ form_actor }}" placeholder="email, name, or 'system'"
              hx-get="/ui/admin/realms/{{ realm_name }}/audit" hx-target="#table-body" hx-swap="innerHTML"
              hx-indicator="#audit-spinner" hx-include="closest form"
              hx-trigger="input changed delay:200ms, change delay:200ms"
@@ -107,7 +107,7 @@
     <table class="w-full">
       <thead>
         <tr class="border-b border-divider bg-ht-surface-elevated">
-          <th class="w-8 px-3 py-3"></th>
+          <th class="w-8 px-3 py-3"><span class="sr-only">Details</span></th>
           <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Time</th>
           <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Action</th>
           <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Actor</th>

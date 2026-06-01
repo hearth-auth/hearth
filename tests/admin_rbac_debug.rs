@@ -1,9 +1,9 @@
 //! Integration tests for the RBAC debug / token-preview web-UI endpoints.
 //!
 //! Covers:
-//! - `POST /ui/admin/realms/{realm}/rbac/token-preview` — valid admin + valid UUID
-//! - `POST /ui/admin/realms/{realm}/rbac/token-preview` — valid admin + invalid UUID
-//! - `POST /ui/admin/realms/{realm}/rbac/token-preview` — unauthenticated → 302
+//! - `GET /ui/admin/realms/{realm}/rbac/token-preview?user_id=<uuid>` — valid admin + valid UUID
+//! - `GET /ui/admin/realms/{realm}/rbac/token-preview?user_id=bad` — valid admin + invalid UUID
+//! - `GET /ui/admin/realms/{realm}/rbac/token-preview` — unauthenticated → 302
 
 use std::sync::Arc;
 
@@ -180,11 +180,12 @@ fn admin_cookie(rig: &Rig, csrf: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Token preview — authenticated
+// Token preview — authenticated (GET with query params)
 // ---------------------------------------------------------------------------
 
-/// `POST /ui/admin/realms/{realm}/rbac/token-preview` with a valid user UUID
-/// returns 200 with JSON containing `sub`, `roles`, `groups`, `permissions`.
+/// `GET /ui/admin/realms/{realm}/rbac/token-preview?user_id=<uuid>` with a
+/// valid admin session returns 200 with JSON containing `sub`, `roles`,
+/// `groups`, and `permissions`.
 #[tokio::test]
 async fn token_preview_valid_user_returns_json() {
     let rig = build_rig();
@@ -208,17 +209,16 @@ async fn token_preview_valid_user_returns_json() {
         .expect("create user");
     let user_uuid = user.id().as_uuid().to_string();
 
-    let body = format!("user_id={user_uuid}&_csrf={csrf}");
     let resp = rig
         .app
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri(format!("/ui/admin/realms/{realm}/rbac/token-preview"))
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/token-preview?user_id={user_uuid}"
+                ))
                 .header(header::COOKIE, &cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header("X-CSRF-Token", csrf)
-                .body(Body::from(body))
+                .body(Body::empty())
                 .expect("test invariant"),
         )
         .await
@@ -242,8 +242,8 @@ async fn token_preview_valid_user_returns_json() {
     );
 }
 
-/// `POST /ui/admin/realms/{realm}/rbac/token-preview` with a bad UUID string
-/// returns 200 with a JSON error payload (not a 4xx).
+/// `GET /ui/admin/realms/{realm}/rbac/token-preview?user_id=bad` returns 200
+/// with a JSON error payload (not a 4xx).
 #[tokio::test]
 async fn token_preview_invalid_uuid_returns_json_error() {
     let rig = build_rig();
@@ -251,17 +251,16 @@ async fn token_preview_invalid_uuid_returns_json_error() {
     let cookie = admin_cookie(&rig, csrf);
     let realm = &rig.tenant_realm_name;
 
-    let body = format!("user_id=not-a-uuid&_csrf={csrf}");
     let resp = rig
         .app
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri(format!("/ui/admin/realms/{realm}/rbac/token-preview"))
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/token-preview?user_id=not-a-uuid"
+                ))
                 .header(header::COOKIE, &cookie)
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .header("X-CSRF-Token", csrf)
-                .body(Body::from(body))
+                .body(Body::empty())
                 .expect("test invariant"),
         )
         .await
@@ -280,7 +279,7 @@ async fn token_preview_invalid_uuid_returns_json_error() {
 // Token preview — unauthenticated
 // ---------------------------------------------------------------------------
 
-/// Unauthenticated POST to token-preview redirects to login (302 / 303).
+/// Unauthenticated GET to token-preview redirects to login (302 / 303).
 #[tokio::test]
 async fn token_preview_unauthenticated_redirects() {
     let rig = build_rig();
@@ -290,10 +289,12 @@ async fn token_preview_unauthenticated_redirects() {
         .app
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri(format!("/ui/admin/realms/{realm}/rbac/token-preview"))
-                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from("user_id=00000000-0000-0000-0000-000000000001"))
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/token-preview\
+                     ?user_id=00000000-0000-0000-0000-000000000001"
+                ))
+                .body(Body::empty())
                 .expect("test invariant"),
         )
         .await
@@ -303,5 +304,178 @@ async fn token_preview_unauthenticated_redirects() {
     assert!(
         (300..400).contains(&status),
         "unauthenticated request should redirect, got {status}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RBAC debug page — UX fixes (HEA-1094)
+// ---------------------------------------------------------------------------
+
+/// UX-1: resolving a valid user with no assignments still shows the results
+/// grid (`has_result = true`).  The HTML must include the column headers for
+/// Roles, Groups, and Permissions even when all three lists are empty.
+#[tokio::test]
+async fn debug_empty_assignments_shows_results_grid() {
+    let rig = build_rig();
+    let csrf = "csrf-dbg-empty";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    // Create a user in the tenant realm — no role/group/permission assignments.
+    let user = rig
+        .identity
+        .create_user(
+            &rig.tenant_realm_id,
+            &CreateUserRequest {
+                email: "empty@example.com".to_string(),
+                display_name: "EmptyUser".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let user_uuid = user.id().as_uuid().to_string();
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/debug?user_id={user_uuid}"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    let html = std::str::from_utf8(&bytes).expect("utf8");
+
+    // Results grid section headers must appear even with zero items.
+    assert!(
+        html.contains("Roles (0)"),
+        "empty result should show Roles (0), got: …{html:.200}"
+    );
+    assert!(
+        html.contains("Groups (0)"),
+        "empty result should show Groups (0)"
+    );
+    assert!(
+        html.contains("Permissions (0)"),
+        "empty result should show Permissions (0)"
+    );
+}
+
+/// UX-3: after resolving a valid user, the page renders a "Resolved for:"
+/// banner containing the user's display name.
+#[tokio::test]
+async fn debug_resolved_user_header_present() {
+    let rig = build_rig();
+    let csrf = "csrf-dbg-resolved";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    let user = rig
+        .identity
+        .create_user(
+            &rig.tenant_realm_id,
+            &CreateUserRequest {
+                email: "resolved@example.com".to_string(),
+                display_name: "ResolvedPerson".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let user_uuid = user.id().as_uuid().to_string();
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/debug?user_id={user_uuid}"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    let html = std::str::from_utf8(&bytes).expect("utf8");
+
+    assert!(
+        html.contains("ResolvedPerson"),
+        "resolved user display name must appear in the page"
+    );
+    assert!(
+        html.contains("resolved@example.com"),
+        "resolved user email must appear in the page"
+    );
+}
+
+/// UX-4: submitting a non-empty but malformed org_id shows an inline error
+/// without running the resolution.
+#[tokio::test]
+async fn debug_invalid_org_id_shows_error() {
+    let rig = build_rig();
+    let csrf = "csrf-dbg-orgid";
+    let cookie = admin_cookie(&rig, csrf);
+    let realm = &rig.tenant_realm_name;
+
+    let user = rig
+        .identity
+        .create_user(
+            &rig.tenant_realm_id,
+            &CreateUserRequest {
+                email: "orgtest@example.com".to_string(),
+                display_name: "OrgTest".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let user_uuid = user.id().as_uuid().to_string();
+
+    let resp = rig
+        .app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/ui/admin/realms/{realm}/rbac/debug\
+                     ?user_id={user_uuid}&org_id=not-a-uuid"
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("test invariant"),
+        )
+        .await
+        .expect("test invariant");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+    let html = std::str::from_utf8(&bytes).expect("utf8");
+
+    // Should show an inline error, not the results grid.
+    assert!(
+        html.contains("Invalid org"),
+        "malformed org_id should produce an error message, got: …{html:.200}"
+    );
+    // Must NOT show resolved results when org parse fails.
+    assert!(
+        !html.contains("Resolved for:"),
+        "resolution should not run when org_id is invalid"
     );
 }

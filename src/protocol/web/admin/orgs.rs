@@ -863,7 +863,7 @@ pub async fn admin_org_delete(
 /// `ids` is a comma-separated list of organization UUIDs. We use a
 /// single string rather than `Vec<String>` because axum's default form
 /// extractor (`serde_urlencoded`) does not handle repeated keys; the
-/// client builds the list in Alpine before submitting.
+/// client builds the list via vanilla JS before submitting.
 #[derive(Debug, Deserialize)]
 pub struct BulkDeleteOrgsForm {
     #[serde(default)]
@@ -1768,7 +1768,7 @@ pub async fn admin_api_user_search(
 /// HTMX partial for the RBAC debug page autocomplete. Same backend
 /// search as [`admin_api_user_search`] but renders a click-to-fill
 /// dropdown instead of the org member-picker variant. Kept separate so
-/// the partial template can be self-contained (no parent Alpine state
+/// the partial template can be self-contained (no shared parent state
 /// assumed beyond `userId` + `showDropdown`).
 #[derive(Template)]
 #[template(path = "ui/admin/rbac/_user_search_options.html")]
@@ -1804,7 +1804,7 @@ pub async fn admin_api_rbac_user_search(
 /// `POST /admin/api/config/reload` — triggers config hot-reload.
 ///
 /// `GET /ui/admin/_nav/realms.json` — returns the realm list used by the
-/// sidebar navigation tree. Client-rendered (Alpine.js) so we don't need
+/// sidebar navigation tree. Fetched client-side via `RealmNav` so we don't need
 /// to thread the list through every admin template struct.
 ///
 /// Filters out the system realm (which is reachable via separate top-level

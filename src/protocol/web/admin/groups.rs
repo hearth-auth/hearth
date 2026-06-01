@@ -1038,8 +1038,8 @@ pub async fn admin_group_member_remove(
 ///
 /// `scope` is the composed string consumed by [`parse_rbac_scope`]:
 /// `"realm"` for realm-wide assignments, or `"org:<uuid>"` to bind the
-/// role to an org-scoped context. The Alpine-driven detail-page form
-/// builds this string from two `<select>` widgets before submit.
+/// role to an org-scoped context. The detail-page form builds this
+/// string from two `<select>` widgets before submit.
 #[derive(Debug, Deserialize)]
 pub struct GroupAssignRoleForm {
     #[serde(rename = "_csrf", default)]

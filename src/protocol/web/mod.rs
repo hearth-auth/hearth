@@ -631,7 +631,7 @@ fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
 /// | `/ui/account/sessions` | GET | List the signed-in user's active sessions |
 /// | `/ui/account/sessions/{sid}/revoke` | POST | Revoke one of the user's own sessions |
 /// | `/ui/account/sessions/revoke-others` | POST | Revoke every session except the current one |
-/// | `/ui/admin/users` | GET | Admin users list |
+/// | `/ui/admin` | GET | Admin home (307 → `/ui/admin/realms`) |
 /// | `/ui/admin/users/new` | GET/POST | Create user |
 /// | `/ui/admin/users/{id}` | GET | User detail |
 /// | `/ui/admin/users/{id}/edit` | GET/POST | Edit user |
@@ -781,6 +781,14 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/forgot-password/sent",
             axum::routing::get(handlers::admin_forgot_password_sent),
+        )
+        // Convenience alias: /ui/admin is the admin home per R-2 (UI_ROUTING.md).
+        // Redirects to the realms list which is the canonical admin landing page.
+        .route(
+            "/admin",
+            axum::routing::get(|| async {
+                axum::response::Redirect::temporary("/ui/admin/realms")
+            }),
         )
         .route("/", axum::routing::get(handlers::dashboard))
         .route(
@@ -1149,7 +1157,7 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/admin/realms/{realm}/rbac/token-preview",
-            axum::routing::post(admin::admin_rbac_token_preview),
+            axum::routing::get(admin::admin_rbac_token_preview),
         )
         .route(
             "/admin/realms/{realm}/rbac/permissions",
@@ -1577,9 +1585,6 @@ const COMPONENTS_JS: &[u8] = include_bytes!("assets/components.js");
 /// Replaces the `passkeyLogin` / `passkeyManager` / `passkeyRow` Alpine
 /// components so these pages no longer require `unsafe-eval` in the CSP.
 const PASSKEY_JS: &[u8] = include_bytes!("assets/passkey.js");
-/// Global Alpine.js component registrations and keyboard shortcuts, extracted
-/// from inline `<script>` tags so the CSP can omit `unsafe-inline`.
-const LAYOUT_JS: &[u8] = include_bytes!("assets/layout.js");
 /// Per-page admin scripts extracted from inline `<script>` blocks so the CSP
 /// can stay `script-src 'self'` (HEA-886).
 const ADMIN_SLUG_SYNC_JS: &[u8] = include_bytes!("assets/admin/slug-sync.js");
@@ -1802,7 +1807,6 @@ async fn serve_static(
         "admin/attr-rows.js" => Some((ADMIN_ATTR_ROWS_JS, "application/javascript; charset=utf-8")),
         "dev/mail-detail.js" => Some((DEV_MAIL_DETAIL_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
-        "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
         "favicon.svg" => Some((FAVICON_SVG, "image/svg+xml")),
         "img/hearth-wide-web.svg" => Some((HEARTH_WIDE_SVG, "image/svg+xml")),
         "img/hearth-icon.svg" => Some((HEARTH_ICON_SVG, "image/svg+xml")),

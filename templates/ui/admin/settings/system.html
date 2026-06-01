@@ -1,9 +1,11 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · System Info{% endblock %}
 {% block breadcrumb %}
-  <span class="text-ht-content-muted">Admin</span>
-  <span class="mx-1 text-ht-content-muted">/</span>
-  <span class="text-ht-content-secondary">System Info</span>
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <a href="/ui/admin" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary">System Info</span>
+</nav>
 {% endblock %}
 {% block body %}
 <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -103,7 +105,13 @@
         <dl class="grid gap-4 sm:grid-cols-2">
           <div class="sm:col-span-2">
             <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Data Directory</dt>
-            <dd class="mt-1"><code class="rounded-sm bg-ht-surface-elevated px-1.5 py-0.5 font-mono text-xs text-ht-content-secondary">{{ cfg.storage.data_dir }}</code></dd>
+            <dd class="mt-1">
+              {% if cfg.storage.data_dir.is_empty() %}
+                <span class="text-sm italic text-ht-content-muted">(in-memory)</span>
+              {% else %}
+                <code class="rounded-sm bg-ht-surface-elevated px-1.5 py-0.5 font-mono text-xs text-ht-content-secondary">{{ cfg.storage.data_dir }}</code>
+              {% endif %}
+            </dd>
           </div>
           <div>
             <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">WAL Max Size</dt>

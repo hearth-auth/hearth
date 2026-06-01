@@ -58,15 +58,19 @@
           </label>
           <label class="block">
             <span class="block text-xs font-medium uppercase tracking-wider text-ht-content-muted">OAuth scope (optional)</span>
+            {# UX-5: placeholder + hint #}
             <input type="text" name="scope" value="{{ scope_input }}"
+                   placeholder="openid profile email"
                    class="mt-1 input" />
+            <p class="mt-1 text-xs text-ht-content-muted">Space-separated scopes narrow which permissions are included.</p>
           </label>
         </div>
         <div class="flex items-center gap-3">
           <button type="submit" class="rounded bg-ht-accent px-4 py-2 text-sm font-medium text-ht-surface-base hover:bg-ht-accent-hover">
             Resolve permissions
           </button>
-          <p class="text-xs text-ht-content-muted">Realm: <code class="font-mono">{{ realm_uuid }}</code></p>
+          {# UX-6: realm name + UUID #}
+          <p class="text-xs text-ht-content-muted">Realm: {{ realm_name }} &middot; <code class="font-mono">{{ realm_uuid }}</code></p>
         </div>
       </form>
     </div>
@@ -77,32 +81,94 @@
       </div>
     {% when None %}{% endmatch %}
 
-    {% if !permissions.is_empty() || !roles.is_empty() || !groups.is_empty() %}
-      <div class="mt-6 grid grid-cols-1 gap-6 md:grid-cols-3">
+    {# UX-1: show results grid whenever has_result is true, even if all lists are empty #}
+    {% if has_result %}
+      {# UX-3: resolved user summary banner #}
+      {% match resolved_user %}
+      {% when Some with ((display_name, email)) %}
+      <div class="mt-6 flex items-center gap-2 rounded-md bg-ht-surface-elevated px-4 py-3 ring-1 ring-divider-subtle text-sm">
+        <svg class="h-4 w-4 shrink-0 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+        <span class="text-ht-content-muted">Resolved for:</span>
+        <span class="font-medium text-ht-content-primary">{{ display_name }}</span>
+        <span class="text-ht-content-muted">({{ email }})</span>
+      </div>
+      {% when None %}{% endmatch %}
+
+      <div class="mt-4 grid grid-cols-1 gap-6 md:grid-cols-3">
+
+        {# Roles column #}
         <section class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
           <h2 class="text-sm font-medium uppercase tracking-wider text-ht-content-muted">Roles ({{ roles.len() }})</h2>
-          <ul class="mt-2 space-y-1 font-mono text-sm text-ht-content-primary">
-            {% for role in roles %}
-              <li>{{ role }}</li>
+          {# UX-2: code chips + copy buttons #}
+          {% if roles.is_empty() %}
+            <p class="mt-3 text-sm text-ht-content-muted italic">—</p>
+          {% else %}
+          <ul class="mt-2 space-y-1.5">
+            {% for (i, role) in roles.iter().enumerate() %}
+            <li class="flex items-center justify-between gap-2">
+              <code id="role-{{ i }}" class="min-w-0 truncate rounded bg-ht-surface-base px-2 py-0.5 font-mono text-xs text-ht-content-primary ring-1 ring-divider-subtle">{{ role }}</code>
+              <button type="button"
+                      data-component="copy-to-clipboard"
+                      data-source="#role-{{ i }}"
+                      data-copied-label="✓"
+                      title="Copy"
+                      class="shrink-0 rounded p-1 text-ht-content-muted hover:text-ht-content-secondary hover-bg-divider transition-colors">
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </li>
             {% endfor %}
           </ul>
+          {% endif %}
         </section>
+
+        {# Groups column #}
         <section class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
           <h2 class="text-sm font-medium uppercase tracking-wider text-ht-content-muted">Groups ({{ groups.len() }})</h2>
-          <ul class="mt-2 space-y-1 font-mono text-sm text-ht-content-primary">
-            {% for group in groups %}
-              <li>{{ group }}</li>
+          {% if groups.is_empty() %}
+            <p class="mt-3 text-sm text-ht-content-muted italic">—</p>
+          {% else %}
+          <ul class="mt-2 space-y-1.5">
+            {% for (i, group) in groups.iter().enumerate() %}
+            <li class="flex items-center justify-between gap-2">
+              <code id="group-{{ i }}" class="min-w-0 truncate rounded bg-ht-surface-base px-2 py-0.5 font-mono text-xs text-ht-content-primary ring-1 ring-divider-subtle">{{ group }}</code>
+              <button type="button"
+                      data-component="copy-to-clipboard"
+                      data-source="#group-{{ i }}"
+                      data-copied-label="✓"
+                      title="Copy"
+                      class="shrink-0 rounded p-1 text-ht-content-muted hover:text-ht-content-secondary hover-bg-divider transition-colors">
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </li>
             {% endfor %}
           </ul>
+          {% endif %}
         </section>
+
+        {# Permissions column #}
         <section class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
           <h2 class="text-sm font-medium uppercase tracking-wider text-ht-content-muted">Permissions ({{ permissions.len() }})</h2>
-          <ul class="mt-2 space-y-1 font-mono text-sm text-ht-content-primary">
-            {% for perm in permissions %}
-              <li>{{ perm }}</li>
+          {% if permissions.is_empty() %}
+            <p class="mt-3 text-sm text-ht-content-muted italic">—</p>
+          {% else %}
+          <ul class="mt-2 space-y-1.5">
+            {% for (i, perm) in permissions.iter().enumerate() %}
+            <li class="flex items-center justify-between gap-2">
+              <code id="perm-{{ i }}" class="min-w-0 truncate rounded bg-ht-surface-base px-2 py-0.5 font-mono text-xs text-ht-content-primary ring-1 ring-divider-subtle">{{ perm }}</code>
+              <button type="button"
+                      data-component="copy-to-clipboard"
+                      data-source="#perm-{{ i }}"
+                      data-copied-label="✓"
+                      title="Copy"
+                      class="shrink-0 rounded p-1 text-ht-content-muted hover:text-ht-content-secondary hover-bg-divider transition-colors">
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </li>
             {% endfor %}
           </ul>
+          {% endif %}
         </section>
+
       </div>
     {% endif %}
   </div>
@@ -124,7 +190,8 @@
                 class="rounded bg-ht-accent px-4 py-2 text-sm font-medium text-ht-surface-base hover:bg-ht-accent-hover disabled:opacity-50 disabled:cursor-not-allowed">
           Preview token
         </button>
-        <p class="text-xs text-ht-content-muted">Realm: <code class="font-mono">{{ realm_uuid }}</code></p>
+        {# UX-6: realm name + UUID #}
+        <p class="text-xs text-ht-content-muted">Realm: {{ realm_name }} &middot; <code class="font-mono">{{ realm_uuid }}</code></p>
       </div>
     </div>
 

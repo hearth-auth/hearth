@@ -1491,13 +1491,13 @@ impl EmbeddedIdentityEngine {
         status: UserStatus,
     ) -> Result<User, IdentityError> {
         let email = validation::validate_email(&request.email)?;
-        let first_name = validation::validate_name_part(&request.first_name, "first_name")?;
-        let last_name = validation::validate_name_part(&request.last_name, "last_name")?;
+        let first_name = validation::validate_name_part(&request.first_name, "First name")?;
+        let last_name = validation::validate_name_part(&request.last_name, "Last name")?;
         let display_name = if request.display_name.trim().is_empty() {
             let synthesized = format!("{} {}", first_name, last_name).trim().to_string();
             if synthesized.is_empty() {
                 return Err(IdentityError::InvalidInput {
-                    reason: "display_name or first_name/last_name required".to_string(),
+                    reason: "Display name or first/last name is required".to_string(),
                 });
             }
             validation::validate_display_name(&synthesized)?
@@ -3558,13 +3558,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // 3a. Apply first_name change if requested
         if let Some(ref new_first) = request.first_name {
-            let normalized = validation::validate_name_part(new_first, "first_name")?;
+            let normalized = validation::validate_name_part(new_first, "First name")?;
             user.set_first_name(normalized);
         }
 
         // 3b. Apply last_name change if requested
         if let Some(ref new_last) = request.last_name {
-            let normalized = validation::validate_name_part(new_last, "last_name")?;
+            let normalized = validation::validate_name_part(new_last, "Last name")?;
             user.set_last_name(normalized);
         }
 
@@ -9835,13 +9835,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         // 1. Validate and normalize input (same invariants as create_user)
         let email = validation::validate_email(&request.email)?;
-        let first_name = validation::validate_name_part(&request.first_name, "first_name")?;
-        let last_name = validation::validate_name_part(&request.last_name, "last_name")?;
+        let first_name = validation::validate_name_part(&request.first_name, "First name")?;
+        let last_name = validation::validate_name_part(&request.last_name, "Last name")?;
         let display_name = if request.display_name.trim().is_empty() {
             let synthesized = format!("{} {}", first_name, last_name).trim().to_string();
             if synthesized.is_empty() {
                 return Err(IdentityError::InvalidInput {
-                    reason: "display_name or first_name/last_name required".to_string(),
+                    reason: "Display name or first/last name is required".to_string(),
                 });
             }
             validation::validate_display_name(&synthesized)?

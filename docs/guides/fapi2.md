@@ -4,12 +4,6 @@
 **Task:** Enable FAPI 2.0 enforcement, register compliant clients, and validate the PAR → JAR → JARM
 authorization flow.
 
-> **Note — realm-level `fapi_profile` is not yet operator-configurable.** The engine supports
-> `FapiProfile::Baseline` and `FapiProfile::Advanced` internally, but the `fapi_profile` key is not
-> yet exposed in `hearth.yaml` or via `PATCH /admin/realms/{id}/config`. Per-client FAPI 2.0
-> (described in §3) is fully functional. Track the linked engineering issue for realm-level support.
-> All other sections of this guide reflect shipped, tested behavior.
-
 ---
 
 ## 1. When to Use FAPI 2.0
@@ -42,35 +36,58 @@ Advanced corresponds most closely to Keycloak's "FAPI 1 Advanced (OpenID Connect
 
 ---
 
-## 2. Realm-Level FAPI Profile (Pending)
+## 2. Realm-Level FAPI Profile
 
-> **Engineering gap:** `fapi_profile` in `RealmConfig` is not yet reachable via `hearth.yaml`
-> or `PATCH /admin/realms/{id}/config`. When this gap is resolved, the configuration will look
-> like:
->
-> ```yaml
-> # hearth.yaml — future syntax, not yet supported
-> realms:
->   - name: banking
->     fapi_profile: baseline   # or: advanced
-> ```
->
-> Until then, use per-client FAPI 2.0 (§3), which is fully functional today and enforces the
-> same DPoP, PAR, and `private_key_jwt` requirements on a per-client basis.
+Set `fapi_profile` on a realm to enforce FAPI 2.0 constraints on **every** client in that realm,
+regardless of the client's individual `profile` setting.
 
-**What realm-level `fapi_profile` does when enabled (for reference):**
+### `hearth.yaml` configuration
+
+```yaml
+realms:
+  - name: banking
+    fapi_profile: baseline   # "baseline" | "advanced"
+```
+
+Valid values:
 
 - `baseline` — all authorization requests in the realm must use PAR + PKCE S256. Clients that call
   `/authorize` directly (without a `request_uri`) receive `400 invalid_request`.
-- `advanced` — all of the above plus: JAR required in the PAR body; JARM required; any client
-  without `authorization_signed_response_alg` set is rejected.
+- `advanced` — all Baseline requirements plus: JAR required inside the PAR body; JARM required;
+  any client without `authorization_signed_response_alg` set is rejected.
+- Absent / `null` — standard OAuth 2.0 / OIDC rules apply; no FAPI constraints forced.
+
+### Runtime update via Admin API
+
+```bash
+# Enable FAPI 2.0 Baseline for an existing realm
+curl -s -X PATCH "$ISSUER/admin/realms/$REALM_ID/config" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fapi_profile": "baseline"}'
+
+# Upgrade to Advanced
+curl -s -X PATCH "$ISSUER/admin/realms/$REALM_ID/config" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fapi_profile": "advanced"}'
+
+# Remove realm-level FAPI enforcement (revert to standard)
+curl -s -X PATCH "$ISSUER/admin/realms/$REALM_ID/config" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fapi_profile": null}'
+```
+
+Unknown values (`"enterprise"`, etc.) return `400 Bad Request`.
 
 ---
 
 ## 3. Register a FAPI 2.0 Client
 
-Per-client FAPI 2.0 is enabled by setting `profile: "fapi2"` at registration. This is the
-primary operator-facing configuration path available today.
+Per-client FAPI 2.0 is enabled by setting `profile: "fapi2"` at registration. Use this when
+only specific clients in a realm require FAPI 2.0 constraints; use realm-level `fapi_profile`
+(§2) to enforce FAPI across all clients in a realm.
 
 ### Requirements
 
