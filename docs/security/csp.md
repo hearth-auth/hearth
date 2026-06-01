@@ -1,7 +1,7 @@
 # Content Security Policy — Design Rationale
 
-> **Status:** Migration complete (HEA-850).  
-> **Last reviewed:** 2026-05-26 (HEA-850)  
+> **Status:** Migration complete (HEA-850, HEA-1049).  
+> **Last reviewed:** 2026-06-01 (HEA-1049 — Hyperscript removed)  
 > **Implemented in:** `src/protocol/web/security.rs`
 
 ## Current policy
@@ -18,7 +18,9 @@ base-uri    'self'
 ```
 
 Both `'unsafe-eval'` and `'unsafe-inline'` have been removed. Alpine.js was the
-sole reason they existed; it has been fully replaced by HTMX + Hyperscript (HEA-850).
+original reason they existed; it was replaced first by Hyperscript (HEA-850), then
+Hyperscript itself was replaced by vanilla JS components (HEA-1049). The policy has
+been strict throughout all three generations.
 
 ## Prior gaps (now resolved)
 
@@ -27,18 +29,19 @@ sole reason they existed; it has been fully replaced by HTMX + Hyperscript (HEA-
 **Previously required by:** Alpine.js v3 evaluated directive expressions
 (`x-show="open"`, `:class="…"`) via `new Function()`.
 
-**Resolution (HEA-850):** Alpine removed. Layout reactivity (sidebar, realm nav,
-toasts, realm pill) is handled by vanilla JS classes in `admin.js`. Template
-interactions use Hyperscript `_="..."` attributes, which are interpreted by the
-library's own parser — no `eval()` or `new Function()` involved.
+**Resolution (HEA-850 → HEA-1049):** Alpine removed; Hyperscript subsequently also
+removed. All interactivity is now vanilla JS via `data-component` attributes backed
+by `components.js`. Layout managers (SidebarManager, RealmNav, ToastManager) live
+in `admin.js`. No `eval()` or `new Function()` anywhere in the stack.
 
 ### GAP-5: `unsafe-inline` on `style-src`
 
 **Previously required by:** Alpine injected inline `style="display: none;"`
 attributes for `x-show`/`x-cloak` toggling.
 
-**Resolution (HEA-850):** Hyperscript uses CSS class toggling (`.hidden`) instead
-of inline styles. No inline style injection occurs.
+**Resolution (HEA-850 → HEA-1049):** Visibility is controlled via CSS class toggling
+(`.hidden`) in both the Hyperscript era and the current `components.js` era.
+No inline style injection occurs.
 
 ## Migration summary
 
@@ -51,6 +54,7 @@ All Alpine.js usage across ~40 templates was replaced across HEA-824 child issue
 | Complex components (config editor, WebAuthn) | HEA-848, HEA-849 | Done |
 | WebAuthn passkey flows | HEA-849 | Done (SecurityAuditor reviewed) |
 | Layout, remaining tabs, password strength | HEA-850 | Done |
+| Hyperscript removed → vanilla JS `components.js` | HEA-1049 | Done |
 
 ## Alternatives considered
 
@@ -63,6 +67,6 @@ All Alpine.js usage across ~40 templates was replaced across HEA-824 child issue
 ## References
 
 - [OWASP CSP Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html)
-- [Hyperscript](https://hyperscript.org) — eval-free; directive strings parsed by its own interpreter.
 - `src/protocol/web/security.rs` — policy implementation
-- `src/protocol/web/assets/admin.js` — vanilla JS layout managers (SidebarManager, RealmNav, ToastManager)
+- `src/protocol/web/assets/admin.js` — layout managers (SidebarManager, RealmNav, ToastManager)
+- `src/protocol/web/assets/components.js` — vanilla JS `data-component` UI components
