@@ -11,6 +11,10 @@
 #  - Copyleft families (GPL, AGPL, LGPL, SSPL, BUSL, OSL, EUPL, CDDL, CPL, EPL):
 #    rejected (not listed here)
 #  - All other non-permissive licenses: rejected by default
+#
+# PROJECT LICENSE: Hearth is Apache-2.0. AGPL is banned for ALL crates in this
+# workspace, including the hearth crate itself. Do NOT add an
+# [[licenses.exceptions]] entry allowing AGPL here. See ARCHITECTURE.md §15.1.
 allow = [
     "Apache-2.0",
     # Apache-2.0 WITH LLVM-exception: used by 17 Bytecode Alliance / WASI packages
