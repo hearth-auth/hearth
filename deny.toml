@@ -36,6 +36,15 @@ allow = [
     "Zlib",
 ]
 
+# hearth itself is licensed AGPL-3.0-only (per ARCHITECTURE.md §15.1).
+# AGPL is intentionally absent from the global allow list to prevent any
+# transitive dependency from silently introducing copyleft obligations.
+# This per-crate exception permits hearth's own AGPL declaration while
+# keeping AGPL blocked for all other crates in the dependency graph.
+[[licenses.exceptions]]
+allow = ["AGPL-3.0-only"]
+name = "hearth"
+
 # r-efi ships as "Apache-2.0 OR LGPL-2.0-or-later". We elect Apache-2.0 here.
 # LGPL-2.0-or-later is not in the allow list above, so cargo-deny would normally
 # reject the disjunction; this per-crate exception pins r-efi to Apache-2.0 only.
