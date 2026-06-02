@@ -2402,7 +2402,19 @@ async fn token_exchange_impl(
                     .map(str::to_string),
             };
             let realm_str = realm_id.as_uuid().to_string();
-            match state.identity.password_grant_token(&realm_id, &request) {
+            let identity = Arc::clone(&state.identity);
+            let realm_id_2 = realm_id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                identity.password_grant_token(&realm_id_2, &request)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "password_grant spawn_blocking panicked");
+                Err(crate::identity::IdentityError::Internal {
+                    reason: e.to_string(),
+                })
+            });
+            match result {
                 Ok(response) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -6683,7 +6695,19 @@ async fn realm_token_exchange(
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string),
             };
-            match state.identity.password_grant_token(&realm_id, &request) {
+            let identity = Arc::clone(&state.identity);
+            let realm_id_2 = realm_id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                identity.password_grant_token(&realm_id_2, &request)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "password_grant spawn_blocking panicked");
+                Err(crate::identity::IdentityError::Internal {
+                    reason: e.to_string(),
+                })
+            });
+            match result {
                 Ok(response) => (
                     StatusCode::OK,
                     Json(serde_json::json!({

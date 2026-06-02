@@ -229,148 +229,15 @@ pub const SYSTEM_REALM_PROTECTED: &str = "HEARTH_SYSTEM_REALM_PROTECTED";
 
 // ── Mapping ────────────────────────────────────────────────────────────────────
 
-/// Maps an [`crate::identity::IdentityError`] variant to a stable error code.
+/// Maps an [`crate::identity::IdentityError`] to a stable wire error code.
+///
+/// Delegates to [`crate::identity::IdentityError::wire_error_code`] — the
+/// match lives in the identity crate so the protocol layer does not need to
+/// pattern-match on identity internals.
 ///
 /// Returns `None` for server-side (5xx) errors to avoid leaking internal detail.
-#[allow(clippy::too_many_lines)] // TODO: split this function
 pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option<&'static str> {
-    use crate::identity::IdentityError;
-
-    match err {
-        IdentityError::TokenExpired => Some(TOKEN_EXPIRED),
-        IdentityError::TokenRevoked => Some(TOKEN_REVOKED),
-        IdentityError::InvalidToken => Some(TOKEN_INVALID),
-        IdentityError::TokenTooLarge { .. } => Some(TOKEN_TOO_LARGE),
-
-        IdentityError::InvalidCredential { .. } => Some(INVALID_CREDENTIAL),
-        IdentityError::CredentialNotFound => Some(INVALID_CREDENTIAL),
-        IdentityError::InvalidClient | IdentityError::InvalidClientSecret => Some(INVALID_CLIENT),
-        IdentityError::InvalidClientAssertion { .. } => Some(INVALID_CLIENT_ASSERTION),
-        IdentityError::InvalidAuthorizationCode | IdentityError::InvalidGrant { .. } => {
-            Some(INVALID_GRANT)
-        }
-        IdentityError::DeviceCodeExpired => Some(DEVICE_CODE_EXPIRED),
-        IdentityError::InvalidRedirectUri => Some(INVALID_REDIRECT_URI),
-        IdentityError::UnsupportedGrantType => Some(UNSUPPORTED_GRANT_TYPE),
-
-        IdentityError::MfaRequired => Some(MFA_REQUIRED),
-        IdentityError::InvalidMfaCode => Some(MFA_INVALID_CODE),
-        IdentityError::MfaNotEnabled => Some(MFA_NOT_ENABLED),
-        IdentityError::MfaAlreadyEnabled => Some(MFA_ALREADY_ENABLED),
-
-        IdentityError::WebAuthnRegistrationFailed { .. } => Some(WEBAUTHN_REGISTRATION_FAILED),
-        IdentityError::WebAuthnAuthenticationFailed { .. } => Some(WEBAUTHN_AUTHENTICATION_FAILED),
-        IdentityError::WebAuthnCredentialNotFound => Some(WEBAUTHN_CREDENTIAL_NOT_FOUND),
-        IdentityError::InvalidAttestation { .. } => Some(INVALID_ATTESTATION),
-        IdentityError::InvalidAssertion { .. } => Some(INVALID_ASSERTION),
-        IdentityError::JwtBearerAssertionInvalid { .. } => Some(JWT_BEARER_ASSERTION_INVALID),
-
-        IdentityError::AuthorizationPending => Some(AUTHORIZATION_PENDING),
-        IdentityError::SlowDown => Some(SLOW_DOWN),
-        IdentityError::DeviceCodeDenied => Some(DEVICE_CODE_DENIED),
-
-        IdentityError::RateLimited => Some(RATE_LIMITED),
-        IdentityError::SessionLimitExceeded { .. } => Some(SESSION_LIMIT_EXCEEDED),
-
-        IdentityError::UserNotVerified => Some(EMAIL_UNVERIFIED),
-        IdentityError::PasswordExpired => Some(PASSWORD_EXPIRED),
-        IdentityError::PasswordReused => Some(PASSWORD_REUSED),
-        IdentityError::PasswordCompromised => Some(PASSWORD_COMPROMISED),
-        IdentityError::AuthMethodNotAllowed { .. } => Some(AUTH_METHOD_NOT_ALLOWED),
-        IdentityError::StepUpChallengeRequired => Some(STEP_UP_CHALLENGE_REQUIRED),
-        IdentityError::EnrollMfaRequired => Some(ENROLL_MFA_REQUIRED),
-        IdentityError::RequiredActionsBlocking { .. } => Some(REQUIRED_ACTIONS_PENDING),
-        IdentityError::InvalidSmsOtp => Some(INVALID_SMS_OTP),
-        IdentityError::SmsResendLimitExceeded => Some(SMS_RESEND_LIMIT_EXCEEDED),
-
-        IdentityError::RealmNotFound
-        | IdentityError::UserNotFound
-        | IdentityError::ClientNotFound
-        | IdentityError::WebhookNotFound
-        | IdentityError::ConsentNotFound => Some(NOT_FOUND),
-        IdentityError::SessionNotFound => Some(SESSION_NOT_FOUND),
-        IdentityError::SessionVersionDisabled => Some(SESSION_VERSION_DISABLED),
-
-        IdentityError::RealmSuspended => Some(REALM_SUSPENDED),
-
-        IdentityError::InvalidInput { .. } | IdentityError::InvalidAttribute { .. } => {
-            Some(INVALID_INPUT)
-        }
-
-        IdentityError::DuplicateEmail => Some(DUPLICATE_EMAIL),
-        IdentityError::DuplicateRealmName => Some(DUPLICATE_REALM_NAME),
-
-        IdentityError::OrganizationNotFound => Some(ORG_NOT_FOUND),
-        IdentityError::OrganizationSuspended => Some(ORG_SUSPENDED),
-        IdentityError::AlreadyMember => Some(ORG_ALREADY_MEMBER),
-        IdentityError::NotAMember => Some(ORG_NOT_MEMBER),
-        IdentityError::LastOwner => Some(ORG_LAST_OWNER),
-        IdentityError::MemberLimitReached => Some(ORG_MEMBER_LIMIT),
-        IdentityError::DuplicateOrgSlug => Some(ORG_DUPLICATE_SLUG),
-
-        IdentityError::InvitationInvalid => Some(INVITATION_INVALID),
-        IdentityError::DuplicateInvitation => Some(INVITATION_DUPLICATE),
-
-        IdentityError::RegistrationDisabled => Some(REGISTRATION_DISABLED),
-        IdentityError::RegistrationDomainNotAllowed { .. } => Some(REGISTRATION_DOMAIN_NOT_ALLOWED),
-        IdentityError::RegistrationRequiresInvitation => Some(REGISTRATION_REQUIRES_INVITATION),
-
-        IdentityError::MagicLinkTokenInvalid => Some(MAGIC_LINK_INVALID),
-        IdentityError::VerificationTokenInvalid => Some(VERIFICATION_TOKEN_INVALID),
-        IdentityError::PasswordResetTokenInvalid => Some(PASSWORD_RESET_TOKEN_INVALID),
-
-        IdentityError::ConsentRequired => Some(CONSENT_REQUIRED),
-        IdentityError::ConsentTicketNotFound | IdentityError::ConsentTicketExpired => {
-            Some(CONSENT_TICKET_INVALID)
-        }
-        IdentityError::ConsentScopeNotRequested => Some(CONSENT_SCOPE_NOT_REQUESTED),
-
-        IdentityError::FederationUnknownConnector => Some(FEDERATION_UNKNOWN_CONNECTOR),
-        IdentityError::FederationInvalidState => Some(FEDERATION_INVALID_STATE),
-        IdentityError::FederationUpstreamError { .. } => Some(FEDERATION_UPSTREAM_ERROR),
-        IdentityError::FederationTokenVerificationFailed => {
-            Some(FEDERATION_TOKEN_VERIFICATION_FAILED)
-        }
-        IdentityError::FederationEmailNotVerified => Some(FEDERATION_EMAIL_NOT_VERIFIED),
-        IdentityError::FederationLinkConfirmationRequired { .. } => {
-            Some(FEDERATION_LINK_CONFIRMATION_REQUIRED)
-        }
-        IdentityError::FederationNotLinked => Some(FEDERATION_NOT_LINKED),
-        IdentityError::FederationAlreadyLinked => Some(FEDERATION_ALREADY_LINKED),
-
-        IdentityError::SamlParse { .. }
-        | IdentityError::SamlSignature
-        | IdentityError::SamlExpired
-        | IdentityError::SamlReplay
-        | IdentityError::SamlAudienceMismatch
-        | IdentityError::SamlIssuerMismatch
-        | IdentityError::SamlDestinationMismatch
-        | IdentityError::SamlUnsupportedAlgorithm
-        | IdentityError::SamlInvalidAuthnRequest { .. } => Some(SAML_INVALID),
-        IdentityError::SamlMetadataFetch { .. } => Some(SAML_METADATA_FETCH_FAILED),
-        IdentityError::SamlUnknownSp | IdentityError::SamlUnknownIdp => Some(SAML_ENTITY_NOT_FOUND),
-
-        IdentityError::DuplicateScimExternalId => Some(DUPLICATE_SCIM_EXTERNAL_ID),
-
-        IdentityError::Unauthorized => Some(FORBIDDEN),
-        IdentityError::SystemRealmProtected { .. } => Some(SYSTEM_REALM_PROTECTED),
-
-        IdentityError::InvalidPushedAuthorizationRequest => Some("invalid_request"),
-        IdentityError::InvalidJar { .. } => Some("invalid_request_object"),
-        IdentityError::FapiViolation { .. } => Some("fapi_violation"),
-
-        IdentityError::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
-        IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => Some("use_dpop_nonce"),
-        IdentityError::DPopBindingMismatch => Some("invalid_token"),
-
-        // 5xx — do not leak internal detail
-        IdentityError::SigningError { .. }
-        | IdentityError::Storage(_)
-        | IdentityError::Serialization { .. }
-        | IdentityError::Internal { .. }
-        | IdentityError::ConfigInvalid { .. }
-        | IdentityError::AuditFailure { .. } => None,
-    }
+    err.wire_error_code()
 }
 
 #[cfg(test)]

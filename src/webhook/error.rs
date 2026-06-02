@@ -3,6 +3,7 @@
 use crate::core::WebhookId;
 
 /// Errors that can occur in the webhook engine.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum WebhookError {
     /// A storage I/O error occurred.

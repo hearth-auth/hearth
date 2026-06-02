@@ -38,6 +38,7 @@ use crate::storage::{EmbeddedStorageEngine, ScanEntry, StorageConfig, StorageEng
 // ── Error types ───────────────────────────────────────────────────────────────
 
 /// Error produced by cluster-layer storage operations.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ClusterError {
     /// This node is not the Raft leader; clients should redirect.
@@ -58,6 +59,7 @@ pub enum ClusterError {
 }
 
 /// Error produced when building a [`ClusterEngine`].
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ClusterBuildError {
     #[error("failed to open Raft log store: {0}")]

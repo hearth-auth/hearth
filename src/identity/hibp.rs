@@ -10,6 +10,7 @@ use ring::digest;
 use thiserror::Error;
 
 /// Error returned by the HIBP breach-check client.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum HibpError {
     /// The HIBP API was unreachable (network error, timeout, or non-2xx response).
