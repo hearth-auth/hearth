@@ -2419,7 +2419,14 @@ impl EmbeddedIdentityEngine {
             .get(realm_id, &jti_key)
             .map_err(Self::storage_err)?
         {
-            let stored_exp = i64::from_be_bytes(stored.try_into().unwrap_or([0u8; 8]));
+            let bytes: [u8; 8] =
+                stored
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| IdentityError::Internal {
+                        reason: format!("JTI entry has unexpected length {}", stored.len()),
+                    })?;
+            let stored_exp = i64::from_be_bytes(bytes);
             let now_secs = self.clock.now().as_micros() / 1_000_000;
             if now_secs <= stored_exp.saturating_add(CLOCK_SKEW_SECS) {
                 return Err(IdentityError::JwtBearerAssertionInvalid {
