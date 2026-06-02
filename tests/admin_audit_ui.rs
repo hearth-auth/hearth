@@ -58,6 +58,7 @@ struct Rig {
     tenant_realm_id: RealmId,
 }
 
+#[allow(clippy::too_many_lines)] // TODO: split this function
 fn build_rig() -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();

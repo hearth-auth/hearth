@@ -1643,6 +1643,7 @@ impl RealmYamlConfig {
     ///
     /// `web_theme_css` is populated by the caller (main.rs) after reading
     /// the optional CSS file from disk; it is `None` here.
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     pub fn to_realm_config(
         &self,
         global: &AuthConfig,

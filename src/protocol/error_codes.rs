@@ -221,6 +221,7 @@ pub const SYSTEM_REALM_PROTECTED: &str = "HEARTH_SYSTEM_REALM_PROTECTED";
 /// Maps an [`crate::identity::IdentityError`] variant to a stable error code.
 ///
 /// Returns `None` for server-side (5xx) errors to avoid leaking internal detail.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option<&'static str> {
     use crate::identity::IdentityError;
 

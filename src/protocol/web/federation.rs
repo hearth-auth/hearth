@@ -143,6 +143,7 @@ pub async fn callback(
     callback_impl(state, headers, realm_id, q).await
 }
 
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn callback_impl(
     state: Arc<WebState>,
     headers: HeaderMap,

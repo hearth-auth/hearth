@@ -114,6 +114,7 @@ pub fn build_response_xml(b: &ResponseBuilder<'_>) -> String {
 }
 
 /// Parses a SAML `<Response>` and its `<Assertion>` children.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().expand_empty_elements = false;

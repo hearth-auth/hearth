@@ -536,6 +536,7 @@ async fn byte_cap_refuses_issuance() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn oauth_path_permissions_cap_refuses_issuance() {
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = h.create_realm();

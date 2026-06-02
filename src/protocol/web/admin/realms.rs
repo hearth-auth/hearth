@@ -914,6 +914,7 @@ struct AuditRowsTemplate {
 }
 
 /// `GET /ui/admin/audit`.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn admin_audit_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,

@@ -257,6 +257,7 @@ impl Config {
     ///
     /// Unlike [`validate`], this does **not** short-circuit — all validation
     /// rules are checked and every problem is returned.
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     pub fn validate_all(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
@@ -398,6 +399,7 @@ impl Config {
     ///
     /// Called automatically by [`from_yaml_str`] and [`from_file`].
     /// Dev-mode configs skip certain checks (e.g., empty `data_dir`).
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     fn validate(&self) -> Result<(), ConfigError> {
         // Port: valid TCP port range
         if self.server.port == 0 {
@@ -1352,6 +1354,7 @@ fn validate_realm_web_configs_all(
 }
 
 /// Collects per-realm auth config validation issues.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 fn validate_realm_auth_configs_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     issues: &mut Vec<ValidationIssue>,

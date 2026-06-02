@@ -185,6 +185,7 @@ impl EmbeddedStorageEngine {
     /// Opens the storage engine with a custom filesystem implementation.
     ///
     /// Used by the simulation crate to inject faults via a `FaultFs`.
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     pub fn open_with_fs(config: StorageConfig, fs: Arc<dyn Fs>) -> Result<Self, StorageError> {
         fs.create_dir_all(&config.data_dir)?;
 

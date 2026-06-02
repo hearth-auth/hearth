@@ -174,6 +174,7 @@ async fn default_profile_suppresses_roles_for_third_party() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn required_scopes_gate_uses_granted_not_requested() {
     let h = common::TestHarness::embedded().await.expect("harness");
 

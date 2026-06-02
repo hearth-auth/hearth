@@ -351,6 +351,7 @@ enum AppAction {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn main() {
     let cli = Cli::parse();
 
@@ -1269,6 +1270,7 @@ async fn run_serve(
                                         device_codes = stats.device_codes_deleted,
                                         pending_tickets = stats.pending_tickets_deleted,
                                         grant_families = stats.grant_families_deleted,
+                                        rate_trackers_pruned = stats.rate_trackers_pruned,
                                         errors = stats.errors,
                                         "cleanup: swept expired entities",
                                     );
@@ -2717,6 +2719,7 @@ fn run_migrate_auth0(
 /// Opens the storage engine, exports all (or a filtered) set of realms into a
 /// zstd-compressed `.hearth-backup` archive, and prints a per-realm entity count
 /// summary.  Exit code 0 on full success, 2 on any fatal error.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 fn run_backup_create(
     output: Option<&std::path::Path>,
     realm_filter: Option<&str>,

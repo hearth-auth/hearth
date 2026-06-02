@@ -3593,6 +3593,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(user)
     }
 
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     fn delete_user(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError> {
         // 1. Load user to get email for index cleanup
         let user = self
@@ -3793,6 +3794,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.device_fp.delete_all_for_user(realm_id, user_id)
     }
 
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     fn set_password(
         &self,
         realm_id: &RealmId,
@@ -4070,6 +4072,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     fn create_session(
         &self,
         realm_id: &RealmId,
@@ -4473,6 +4476,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )
     }
 
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     fn issue_tokens_with_context(
         &self,
         realm_id: &RealmId,
@@ -5837,6 +5841,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
     // ===== Self-service registration =====
 
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     fn register_user(
         &self,
         realm_id: &RealmId,
@@ -11404,6 +11409,7 @@ mod tests {
     // ===== Rate-limit durability: in-memory trackers cleared on restart (HEA-1139) =====
 
     #[test]
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     fn restart_clears_in_memory_rate_trackers() {
         // Per CONFIGURATION.md §security.rate_limiting: magic-link, password-reset,
         // IP-login, and registration rate trackers are in-memory only and do NOT

@@ -439,6 +439,67 @@ async fn on_conflict_skip_migrates_non_conflicting() {
 // Scenario 7: idempotent resume — already-completed migration is a no-op
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Scenario 8: progress and completion markers are durably written to storage
+// ---------------------------------------------------------------------------
+
+/// Verifies that after a successful migration the storage contains both the
+/// per-user progress marker *and* the overall completion marker in the system
+/// realm.  If either `put()` call were silently dropped (e.g. reverted to
+/// `let _ = ...` without the warn path), re-running the migration would no
+/// longer be a no-op — this test would still pass, but the existing
+/// `completed_migration_is_idempotent` test would fail.  Together they pin
+/// the full idempotency contract.
+#[tokio::test]
+async fn progress_and_completion_markers_written() {
+    use hearth::core::RealmId;
+
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let identity = h.identity();
+    let rbac = h.rbac();
+    let storage = h.storage();
+
+    let src = make_realm(identity, "markers-src");
+    let dst = make_realm(identity, "markers-dst");
+    let user = make_user(identity, &src, "judy@example.com");
+
+    let report = execute_cross_realm_migration(
+        identity,
+        rbac,
+        storage,
+        &src,
+        &dst,
+        "markers-src",
+        &default_opts(true),
+    )
+    .expect("migration should succeed");
+    assert_eq!(report.migrated, 1);
+
+    // System realm == nil UUID (same constant used in cross_realm.rs).
+    let sys = RealmId::new(uuid::Uuid::nil());
+
+    // Per-user progress marker must be written.
+    let user_uuid = user.id().as_uuid();
+    let progress_key = format!("config:migration:progress:markers-src:{user_uuid}").into_bytes();
+    assert!(
+        storage
+            .get(&sys, &progress_key)
+            .expect("storage get progress key")
+            .is_some(),
+        "per-user progress marker must be written after successful migration"
+    );
+
+    // Overall completion marker must be written.
+    let completed_key = b"config:migration:completed:markers-src".to_vec();
+    assert!(
+        storage
+            .get(&sys, &completed_key)
+            .expect("storage get completion key")
+            .is_some(),
+        "completion marker must be written after all users are migrated"
+    );
+}
+
 #[tokio::test]
 async fn completed_migration_is_idempotent() {
     let h = common::TestHarness::embedded().await.expect("harness");

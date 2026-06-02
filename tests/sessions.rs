@@ -430,6 +430,7 @@ async fn session_fixation_prevention() {
 // ===== Enumeration resistance: all failure modes indistinguishable =====
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn enumeration_resistance() {
     use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
     use hearth::core::FakeClock;

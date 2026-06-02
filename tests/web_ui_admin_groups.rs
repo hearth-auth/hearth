@@ -222,6 +222,7 @@ async fn groups_list_renders_empty_state_for_admin() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn admin_can_create_view_and_delete_a_group() {
     let rig = build_rig();
     let csrf = "csrf-roundtrip";
