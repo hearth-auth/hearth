@@ -18,7 +18,6 @@ use axum::middleware::Next;
 use axum::response::Redirect;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -7841,6 +7840,7 @@ struct EndSessionParams {
 ///
 /// All parameters are optional; when neither `id_token_hint` nor a session
 /// can be inferred, the endpoint returns 400.
+#[allow(clippy::too_many_lines)]
 async fn end_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -7882,19 +7882,27 @@ async fn end_session(
     };
 
     // Fan out back-channel logout notifications asynchronously (fire-and-forget).
+    // ureq is a blocking client; run each POST on the blocking thread pool.
     for target in result.backchannel_targets {
         tokio::spawn(async move {
-            let client = HttpClient::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_default();
-            let outcome = client
-                .post(&target.uri)
-                .form(&[("logout_token", &target.logout_token)])
-                .send()
-                .await;
-            if let Err(e) = outcome {
-                tracing::warn!(uri = %target.uri, error = %e, "backchannel logout delivery failed");
+            let uri = target.uri.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                let body = form_urlencoded::Serializer::new(String::new())
+                    .append_pair("logout_token", &target.logout_token)
+                    .finish();
+                ureq::post(&target.uri)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .send(body.as_bytes())
+            })
+            .await;
+            match outcome {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(uri = %uri, error = %e, "backchannel logout delivery failed");
+                }
+                Err(e) => {
+                    tracing::warn!(uri = %uri, error = %e, "backchannel logout spawn_blocking panicked");
+                }
             }
         });
     }
