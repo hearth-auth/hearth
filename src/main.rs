@@ -1492,6 +1492,49 @@ async fn run_serve(
         })
         .collect();
 
+    // Derive the DPoP nonce HMAC secret from config.
+    //
+    // When `security.dpop_nonce_secret` is absent or `"auto"`, a fresh
+    // 32-byte key is generated via `ring`'s CSPRNG. When an explicit 64-char
+    // hex value is provided, it is decoded; any other value is a fatal error.
+    let dpop_nonce_secret: [u8; 32] = {
+        let raw = config
+            .security
+            .dpop_nonce_secret
+            .as_deref()
+            .unwrap_or("auto");
+        if raw == "auto" {
+            use ring::rand::SecureRandom as _;
+            let rng = ring::rand::SystemRandom::new();
+            let mut bytes = [0u8; 32];
+            rng.fill(&mut bytes)
+                .map_err(|_| "failed to generate dpop_nonce_secret: ring CSPRNG error")?;
+            info!("dpop_nonce_secret: auto-generated (ephemeral; configure security.dpop_nonce_secret for persistence)");
+            bytes
+        } else {
+            if raw.len() != 64 {
+                return Err(format!(
+                    "security.dpop_nonce_secret must be 64 hex chars (32 bytes) or \"auto\", got {} chars",
+                    raw.len()
+                ).into());
+            }
+            let mut bytes = [0u8; 32];
+            for (i, chunk) in raw.as_bytes().chunks(2).enumerate() {
+                let hex = std::str::from_utf8(chunk)
+                    .map_err(|_| "security.dpop_nonce_secret contains non-UTF8 bytes")?;
+                bytes[i] = u8::from_str_radix(hex, 16).map_err(|_| {
+                    format!("security.dpop_nonce_secret: invalid hex byte '{hex}' at position {i}")
+                })?;
+            }
+            bytes
+        }
+    };
+    assert_ne!(
+        dpop_nonce_secret,
+        [0u8; 32],
+        "dpop_nonce_secret must not be the zero key — use \"auto\" or supply a real 32-byte hex secret"
+    );
+
     let app_state = if config.dev_mode {
         Arc::new(
             AppState::new_dev(
@@ -1502,7 +1545,8 @@ async fn run_serve(
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
-            .with_trusted_proxies(api_trusted_proxies.clone()),
+            .with_trusted_proxies(api_trusted_proxies.clone())
+            .with_dpop_nonce_secret(dpop_nonce_secret),
         )
     } else {
         Arc::new(
@@ -1514,7 +1558,8 @@ async fn run_serve(
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
-            .with_trusted_proxies(api_trusted_proxies.clone()),
+            .with_trusted_proxies(api_trusted_proxies.clone())
+            .with_dpop_nonce_secret(dpop_nonce_secret),
         )
     };
 

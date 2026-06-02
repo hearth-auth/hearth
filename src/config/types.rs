@@ -778,6 +778,19 @@ pub struct SecurityYaml {
     /// Global rate-limiting thresholds (overrides compiled-in defaults).
     #[serde(default)]
     pub rate_limiting: Option<GlobalRateLimitYaml>,
+    /// 32-byte HMAC secret for stateless DPoP nonce generation (RFC 9449).
+    ///
+    /// Accepted values:
+    /// - Absent / `"auto"` (default): a fresh random key is generated at each startup.
+    ///   This is secure for single-node deployments but means all outstanding DPoP
+    ///   proofs are invalidated on restart.
+    /// - A 64-character lowercase hex string: decoded to 32 bytes and used verbatim.
+    ///   Use this to keep nonces valid across rolling restarts or in multi-node
+    ///   deployments where all nodes must share the same key.
+    ///
+    /// **Never use the zero key `0000…` in production.** The server rejects it at startup.
+    #[serde(default)]
+    pub dpop_nonce_secret: Option<String>,
 }
 
 /// `security.rate_limiting` — operator-tunable per-IP and per-account thresholds.

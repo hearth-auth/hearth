@@ -229,6 +229,15 @@ impl AppState {
         self.cluster = Some(engine);
         self
     }
+
+    /// Sets the 32-byte HMAC secret used for stateless DPoP nonce generation.
+    ///
+    /// **Must be called before serving any requests.** The zero key `[0u8; 32]`
+    /// is rejected at startup by an assertion in `main.rs`.
+    pub fn with_dpop_nonce_secret(mut self, secret: [u8; 32]) -> Self {
+        self.dpop_nonce_secret = secret;
+        self
+    }
 }
 
 /// Authenticated admin context extracted from request headers.
@@ -1097,7 +1106,15 @@ async fn create_user(
 
     let request = crate::identity::CreateUserRequest::from(body);
 
-    match state.identity.create_user(&realm_id, &request) {
+    let identity = Arc::clone(&state.identity);
+    let result = tokio::task::spawn_blocking(move || identity.create_user(&realm_id, &request))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "create_user spawn_blocking panicked");
+            Err(crate::identity::IdentityError::Storage(Box::new(e)))
+        });
+
+    match result {
         Ok(user) => (
             StatusCode::CREATED,
             Json(proto_to_rest_json(&pb::User::from(&user))),
@@ -3247,7 +3264,16 @@ async fn admin_create_user(
 
     let request = crate::identity::CreateUserRequest::from(body);
 
-    match state.identity.create_user(&auth.realm_id, &request) {
+    let identity = Arc::clone(&state.identity);
+    let realm_id = auth.realm_id.clone();
+    let result = tokio::task::spawn_blocking(move || identity.create_user(&realm_id, &request))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "admin_create_user spawn_blocking panicked");
+            Err(crate::identity::IdentityError::Storage(Box::new(e)))
+        });
+
+    match result {
         Ok(user) => {
             let _ = state.audit.append(&CreateAuditEvent {
                 realm_id: auth.realm_id.clone(),
