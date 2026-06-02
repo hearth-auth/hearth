@@ -188,6 +188,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Backup restore body capped at 4 GiB (HEA-1130)** — `POST /admin/backup/restore` previously
+  used `DefaultBodyLimit::disable()`, allowing any admin-token holder to stream an arbitrarily
+  large body and exhaust heap memory. The limit is now `4 GiB` — sufficient for the largest
+  expected backup archives while preventing OOM-kill from malicious uploads. The handler
+  already streams the body to a temporary file rather than buffering in memory, so this limit
+  gates TCP ingress rather than in-process RAM.
+
 - **DPoP nonce secret wired from config (HEA-1125)** — `AppState` was initialised with
   `dpop_nonce_secret = [0u8; 32]` in all three constructors, making the HMAC-SHA256 nonce
   generation trivially predictable and defeating DPoP replay protection. The secret is now
