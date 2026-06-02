@@ -49,7 +49,7 @@
       {% when Some with (url) %}
         <a href="{{ url }}" class="ml-1 text-ht-content-secondary underline decoration-divider-subtle decoration-1 underline-offset-2 transition-colors hover:text-ht-content-brand hover:decoration-ht-content-brand">{{ row.resource_display }}</a>
       {% when None %}
-        <span class="ml-1">{{ row.resource_display }}</span>
+        <span class="ml-1 font-mono text-xs text-ht-content-muted">{{ row.resource_display }}</span>
     {% endmatch %}
   </td>
   <td class="px-4 py-3">

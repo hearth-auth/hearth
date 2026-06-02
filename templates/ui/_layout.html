@@ -110,7 +110,7 @@
            realm is auto-expanded and highlighted. The active page
            (server-rendered `active` value) is matched inside the expanded
            subtree. #}
-        <div x-data="realmNav('{{ active }}')" x-init="load()">
+        <div x-data="realmNav('{{ active }}')">
           <p class="mb-2 px-2 font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-ht-content-muted">Realms</p>
           <template x-if="loading">
             <p class="px-2 text-xs text-ht-content-muted">Loading…</p>

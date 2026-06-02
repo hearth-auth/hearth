@@ -49,7 +49,11 @@ document.addEventListener('alpine:init', () => {
       const m = window.location.pathname.match(/^\/ui\/admin\/realms\/([^\/?#]+)(?:\/|$)/);
       return m ? decodeURIComponent(m[1]) : '';
     },
-    async load() {
+    // Alpine v3 auto-calls init() as proxy.init() so `this` is correctly bound
+    // to the reactive component. Using x-init="load()" instead would invoke
+    // the function via Alpine's `with($data)` evaluator as a plain call,
+    // losing the `this` binding and throwing before the try/finally block.
+    async init() {
       this.currentRealm = this.deriveCurrentRealm();
       try {
         const res = await fetch('/ui/admin/api/nav/realms', { credentials: 'same-origin' });
