@@ -1,17 +1,23 @@
-//! Adversarial regression tests for HEA-799 — gRPC cross-realm BFLA.
+//! Adversarial regression tests for HEA-799: gRPC cross-realm BFLA.
 //!
-//! Verifies that all five realm-management gRPC handlers enforce a system-realm
-//! gate so that an admin of realm A cannot read or mutate realm B.
+//! ## Coverage matrix
 //!
-//! Scenario: realm-A admin token + `x-realm-id: realm-a` calling any realm
-//! management RPC must receive `PermissionDenied`, not `Ok`.
+//! | Scenario | Test |
+//! |---|---|
+//! | realm-A admin → delete realm-B | `cross_realm_delete_realm_denied` |
+//! | realm-A admin → get realm-B | `cross_realm_get_realm_denied` |
+//! | realm-A admin → update realm-B | `cross_realm_update_realm_denied` |
+//! | realm-A admin → create_realm | `cross_realm_create_realm_denied` |
+//! | realm-A admin → list_realms | `list_realms_scoped_to_own_realm` |
+//! | system admin → get realm-A | `system_admin_can_get_any_realm` (positive) |
+//! | realm-A admin → get realm-A | `realm_admin_can_get_own_realm` (positive) |
 
 mod common;
 
 use std::sync::Arc;
 
 use hearth::core::RealmId;
-use hearth::identity::{CreateUserRequest, SessionContext};
+use hearth::identity::{CreateRealmRequest, CreateUserRequest, SessionContext};
 use hearth::protocol::admin_auth::AdminRateLimiter;
 use hearth::protocol::grpc::identity::IdentityAdminSvc;
 use hearth::protocol::grpc::server::GrpcState;
@@ -19,302 +25,348 @@ use hearth::protocol::proto::identity::v1::{
     self as pb, identity_admin_service_server::IdentityAdminService,
 };
 use hearth::rbac::{AssignRoleRequest, Scope as RbacScope, Subject};
-use tonic::Request;
+use tonic::{Code, Request};
 
-// ---------------------------------------------------------------------------
-// Harness
-// ---------------------------------------------------------------------------
-
-struct BflaRig {
-    _h: common::TestHarness,
-    /// Token issued for realm-A admin — must be rejected by realm RPCs.
-    realm_a_token: String,
-    realm_a_id: RealmId,
-    /// Token issued for system-realm admin — must be accepted by realm RPCs.
-    sys_token: String,
-    sys_realm_id: RealmId,
-    /// A second realm created so get/update/delete have a target.
-    victim_realm_id: RealmId,
-    svc: IdentityAdminSvc,
+fn system_realm_id() -> RealmId {
+    RealmId::new(uuid::Uuid::nil())
 }
 
-async fn setup() -> BflaRig {
-    let h = common::TestHarness::embedded().await.expect("harness");
+fn make_svc(h: &common::TestHarness) -> IdentityAdminSvc {
+    IdentityAdminSvc::new(GrpcState::new(
+        h.identity_arc(),
+        h.rbac_arc(),
+        h.audit_arc(),
+        Arc::new(AdminRateLimiter::new()),
+    ))
+}
 
-    // ---- system realm ----
-    let sys_realm_id = RealmId::new(uuid::Uuid::nil());
-    h.rbac().seed_realm(&sys_realm_id).expect("seed sys realm");
-    let sys_user = h
+/// Creates a realm, seeds RBAC, creates an admin user, and returns (realm_id, access_token).
+fn setup_realm_admin(h: &common::TestHarness, suffix: &str) -> (RealmId, String) {
+    let realm = h
         .identity()
-        .create_admin_user(&CreateUserRequest {
-            email: format!("sysadmin-{}@example.com", uuid::Uuid::new_v4()),
-            display_name: "SysAdmin".into(),
-            first_name: String::new(),
-            last_name: String::new(),
-            attributes: Default::default(),
+        .create_realm(&CreateRealmRequest {
+            name: format!("bfla-{suffix}"),
+            config: None,
         })
-        .expect("sys user");
-    let sys_admin_role = h
-        .rbac()
-        .get_role_by_name(&sys_realm_id, "realm.admin")
-        .expect("lookup")
-        .expect("role");
-    h.rbac()
-        .assign_role(
-            &sys_realm_id,
-            &AssignRoleRequest {
-                subject: Subject::User(sys_user.id().clone()),
-                role_id: sys_admin_role.id,
-                scope: RbacScope::Realm,
-                assigned_by: None,
-            },
-        )
-        .expect("assign sys role");
-    let sys_session = h
-        .identity()
-        .create_session(&sys_realm_id, sys_user.id(), &SessionContext::default())
-        .expect("sys session");
-    let sys_token = h
-        .identity()
-        .issue_tokens(&sys_realm_id, sys_user.id(), sys_session.id())
-        .expect("sys tokens")
-        .access_token()
-        .to_string();
+        .expect("create realm");
+    let realm_id = realm.id().clone();
+    h.rbac().seed_realm(&realm_id).expect("seed rbac");
 
-    // ---- realm A (attacker's realm) ----
-    let realm_a_id = h.create_realm();
-    h.rbac().seed_realm(&realm_a_id).expect("seed realm A");
-    let a_user = h
+    let user = h
         .identity()
         .create_user(
-            &realm_a_id,
+            &realm_id,
             &CreateUserRequest {
-                email: format!("admin-a-{}@example.com", uuid::Uuid::new_v4()),
-                display_name: "AdminA".into(),
+                email: format!("admin-{suffix}@bfla.test"),
+                display_name: "Test Admin".into(),
                 first_name: String::new(),
                 last_name: String::new(),
                 attributes: Default::default(),
             },
         )
-        .expect("realm A user");
-    let a_admin_role = h
+        .expect("create user");
+
+    let role = h
         .rbac()
-        .get_role_by_name(&realm_a_id, "realm.admin")
-        .expect("lookup")
-        .expect("role");
+        .get_role_by_name(&realm_id, "realm.admin")
+        .expect("get role")
+        .expect("realm.admin role must exist after seed");
     h.rbac()
         .assign_role(
-            &realm_a_id,
+            &realm_id,
             &AssignRoleRequest {
-                subject: Subject::User(a_user.id().clone()),
-                role_id: a_admin_role.id,
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
                 scope: RbacScope::Realm,
                 assigned_by: None,
             },
         )
-        .expect("assign A role");
-    let a_session = h
+        .expect("assign realm.admin");
+
+    let session = h
         .identity()
-        .create_session(&realm_a_id, a_user.id(), &SessionContext::default())
-        .expect("A session");
-    let realm_a_token = h
+        .create_session(&realm_id, user.id(), &SessionContext::default())
+        .expect("create session");
+    let token = h
         .identity()
-        .issue_tokens(&realm_a_id, a_user.id(), a_session.id())
-        .expect("A tokens")
+        .issue_tokens(&realm_id, user.id(), session.id())
+        .expect("issue tokens")
         .access_token()
         .to_string();
 
-    // ---- realm B (victim realm) ----
-    let victim_realm_id = h.create_realm();
-
-    let state = GrpcState::new(
-        h.identity_arc(),
-        h.rbac_arc(),
-        h.audit_arc(),
-        Arc::new(AdminRateLimiter::new()),
-    );
-    let svc = IdentityAdminSvc::new(state);
-
-    BflaRig {
-        _h: h,
-        realm_a_token,
-        realm_a_id,
-        sys_token,
-        sys_realm_id,
-        victim_realm_id,
-        svc,
-    }
+    (realm_id, token)
 }
 
-/// Build a request with the given token and realm-id metadata.
-fn req_with<T>(msg: T, token: &str, realm_id: &RealmId) -> Request<T> {
+/// Creates an admin user in the system realm and returns their access token.
+fn setup_system_admin(h: &common::TestHarness) -> String {
+    let sys = system_realm_id();
+    h.rbac().seed_realm(&sys).expect("seed system rbac");
+
+    let user = h
+        .identity()
+        .create_admin_user(&CreateUserRequest {
+            email: format!("sysadmin-{}@bfla.test", uuid::Uuid::new_v4()),
+            display_name: "Sys Admin".into(),
+            first_name: String::new(),
+            last_name: String::new(),
+            attributes: Default::default(),
+        })
+        .expect("create system admin user");
+
+    let role = h
+        .rbac()
+        .get_role_by_name(&sys, "realm.admin")
+        .expect("get role")
+        .expect("realm.admin must exist after seed");
+    h.rbac()
+        .assign_role(
+            &sys,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: RbacScope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign realm.admin to system admin");
+
+    let session = h
+        .identity()
+        .create_session(&sys, user.id(), &SessionContext::default())
+        .expect("create session");
+    h.identity()
+        .issue_tokens(&sys, user.id(), session.id())
+        .expect("issue tokens")
+        .access_token()
+        .to_string()
+}
+
+fn grpc_req<T>(realm_id: &RealmId, token: &str, msg: T) -> Request<T> {
     let mut r = Request::new(msg);
     r.metadata_mut().insert(
         "authorization",
-        format!("Bearer {token}").parse().expect("auth meta"),
+        format!("Bearer {token}").parse().expect("valid header"),
     );
     r.metadata_mut().insert(
         "x-realm-id",
-        realm_id.as_uuid().to_string().parse().expect("realm meta"),
+        realm_id
+            .as_uuid()
+            .to_string()
+            .parse()
+            .expect("valid header"),
     );
     r
 }
 
 // ---------------------------------------------------------------------------
-// Rejection tests — realm-A admin must be denied on every realm RPC
+// Adversarial tests — cross-realm calls must be rejected
 // ---------------------------------------------------------------------------
 
+/// Realm-A admin calling delete_realm on realm-B must get PermissionDenied.
 #[tokio::test]
-async fn list_realms_rejects_non_system_realm_admin() {
-    let rig = setup().await;
-    let result = rig
-        .svc
-        .list_realms(req_with(
-            pb::ListRealmsRequest {
-                cursor: None,
-                limit: None,
+async fn cross_realm_delete_realm_denied() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let svc = make_svc(&h);
+
+    let (realm_a, token_a) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+    let (realm_b, _token_b) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+
+    let result = svc
+        .delete_realm(grpc_req(
+            &realm_a,
+            &token_a,
+            pb::DeleteRealmRequest {
+                id: realm_b.as_uuid().to_string(),
             },
-            &rig.realm_a_token,
-            &rig.realm_a_id,
         ))
         .await;
-    let err = result.expect_err("must be rejected");
+
+    assert!(
+        result.is_err(),
+        "cross-realm delete_realm must be denied, got Ok"
+    );
     assert_eq!(
-        err.code(),
-        tonic::Code::PermissionDenied,
-        "list_realms: {err}"
+        result.unwrap_err().code(),
+        Code::PermissionDenied,
+        "must return PermissionDenied"
     );
 }
 
+/// Realm-A admin calling get_realm on realm-B must get PermissionDenied.
 #[tokio::test]
-async fn get_realm_rejects_non_system_realm_admin() {
-    let rig = setup().await;
-    let result = rig
-        .svc
-        .get_realm(req_with(
+async fn cross_realm_get_realm_denied() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let svc = make_svc(&h);
+
+    let (realm_a, token_a) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+    let (realm_b, _token_b) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+
+    let result = svc
+        .get_realm(grpc_req(
+            &realm_a,
+            &token_a,
             pb::GetRealmRequest {
-                id: rig.victim_realm_id.as_uuid().to_string(),
+                id: realm_b.as_uuid().to_string(),
             },
-            &rig.realm_a_token,
-            &rig.realm_a_id,
         ))
         .await;
-    let err = result.expect_err("must be rejected");
-    assert_eq!(
-        err.code(),
-        tonic::Code::PermissionDenied,
-        "get_realm: {err}"
-    );
+
+    assert!(result.is_err(), "cross-realm get_realm must be denied");
+    assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
 }
 
+/// Realm-A admin calling update_realm on realm-B must get PermissionDenied.
 #[tokio::test]
-async fn create_realm_rejects_non_system_realm_admin() {
-    let rig = setup().await;
-    let result = rig
-        .svc
-        .create_realm(req_with(
-            pb::CreateRealmRequest {
-                name: "attacker-created".into(),
-                config: None,
-            },
-            &rig.realm_a_token,
-            &rig.realm_a_id,
-        ))
-        .await;
-    let err = result.expect_err("must be rejected");
-    assert_eq!(
-        err.code(),
-        tonic::Code::PermissionDenied,
-        "create_realm: {err}"
-    );
-}
+async fn cross_realm_update_realm_denied() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let svc = make_svc(&h);
 
-#[tokio::test]
-async fn update_realm_rejects_non_system_realm_admin() {
-    let rig = setup().await;
-    let result = rig
-        .svc
-        .update_realm(req_with(
+    let (realm_a, token_a) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+    let (realm_b, _token_b) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+
+    let result = svc
+        .update_realm(grpc_req(
+            &realm_a,
+            &token_a,
             pb::UpdateRealmCall {
-                id: rig.victim_realm_id.as_uuid().to_string(),
+                id: realm_b.as_uuid().to_string(),
                 body: Some(pb::UpdateRealmRequest {
-                    name: Some("hijacked".into()),
-                    status: None,
-                    config: None,
+                    name: Some("pwned".into()),
+                    ..Default::default()
                 }),
             },
-            &rig.realm_a_token,
-            &rig.realm_a_id,
         ))
         .await;
-    let err = result.expect_err("must be rejected");
-    assert_eq!(
-        err.code(),
-        tonic::Code::PermissionDenied,
-        "update_realm: {err}"
-    );
+
+    assert!(result.is_err(), "cross-realm update_realm must be denied");
+    assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
 }
 
+/// Non-system realm admin calling create_realm must get PermissionDenied.
+/// Only system-realm admins may create new realms.
 #[tokio::test]
-async fn delete_realm_rejects_non_system_realm_admin() {
-    let rig = setup().await;
-    let result = rig
-        .svc
-        .delete_realm(req_with(
-            pb::DeleteRealmRequest {
-                id: rig.victim_realm_id.as_uuid().to_string(),
+async fn cross_realm_create_realm_denied() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let svc = make_svc(&h);
+
+    let (realm_a, token_a) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+
+    let result = svc
+        .create_realm(grpc_req(
+            &realm_a,
+            &token_a,
+            pb::CreateRealmRequest {
+                name: format!("new-realm-{}", uuid::Uuid::new_v4()),
+                config: None,
             },
-            &rig.realm_a_token,
-            &rig.realm_a_id,
         ))
         .await;
-    let err = result.expect_err("must be rejected");
-    assert_eq!(
-        err.code(),
-        tonic::Code::PermissionDenied,
-        "delete_realm: {err}"
+
+    assert!(
+        result.is_err(),
+        "non-system realm admin must not be able to create realms"
     );
+    assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
 }
 
-// ---------------------------------------------------------------------------
-// Acceptance test — system-realm admin must succeed
-// ---------------------------------------------------------------------------
-
+/// Realm-A admin calling list_realms must see only their own realm, not realm-B.
 #[tokio::test]
-async fn system_realm_admin_can_list_realms() {
-    let rig = setup().await;
-    let result = rig
-        .svc
-        .list_realms(req_with(
+async fn list_realms_scoped_to_own_realm() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let svc = make_svc(&h);
+
+    let (realm_a, token_a) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+    let (realm_b, _token_b) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+
+    let page = svc
+        .list_realms(grpc_req(
+            &realm_a,
+            &token_a,
             pb::ListRealmsRequest {
+                limit: None,
                 cursor: None,
-                limit: Some(10),
             },
-            &rig.sys_token,
-            &rig.sys_realm_id,
         ))
-        .await;
+        .await
+        .expect("list_realms must succeed for own realm")
+        .into_inner();
+
+    assert_eq!(
+        page.items.len(),
+        1,
+        "realm-A admin must see exactly one realm in the list"
+    );
+    assert_eq!(
+        page.items[0].id,
+        realm_a.as_uuid().to_string(),
+        "the single returned realm must be realm-A"
+    );
     assert!(
-        result.is_ok(),
-        "system admin must be able to list realms: {result:?}"
+        !page
+            .items
+            .iter()
+            .any(|r| r.id == realm_b.as_uuid().to_string()),
+        "realm-B must not appear in realm-A admin's list_realms response"
     );
 }
 
+// ---------------------------------------------------------------------------
+// Positive tests — legitimate access must still work
+// ---------------------------------------------------------------------------
+
+/// System realm admin can call get_realm on any tenant realm.
 #[tokio::test]
-async fn system_realm_admin_can_get_realm() {
-    let rig = setup().await;
-    let result = rig
-        .svc
-        .get_realm(req_with(
+async fn system_admin_can_get_any_realm() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let svc = make_svc(&h);
+
+    let sys_token = setup_system_admin(&h);
+    let (realm_a, _token_a) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+
+    let result = svc
+        .get_realm(grpc_req(
+            &system_realm_id(),
+            &sys_token,
             pb::GetRealmRequest {
-                id: rig.victim_realm_id.as_uuid().to_string(),
+                id: realm_a.as_uuid().to_string(),
             },
-            &rig.sys_token,
-            &rig.sys_realm_id,
         ))
         .await;
+
     assert!(
         result.is_ok(),
-        "system admin must be able to get realm: {result:?}"
+        "system realm admin must be able to get any realm, got: {result:?}"
+    );
+    assert_eq!(
+        result.unwrap().into_inner().id,
+        realm_a.as_uuid().to_string()
+    );
+}
+
+/// Regular realm admin can call get_realm on their own realm.
+#[tokio::test]
+async fn realm_admin_can_get_own_realm() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let svc = make_svc(&h);
+
+    let (realm_a, token_a) = setup_realm_admin(&h, &uuid::Uuid::new_v4().to_string());
+
+    let result = svc
+        .get_realm(grpc_req(
+            &realm_a,
+            &token_a,
+            pb::GetRealmRequest {
+                id: realm_a.as_uuid().to_string(),
+            },
+        ))
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "realm admin must be able to get own realm, got: {result:?}"
+    );
+    assert_eq!(
+        result.unwrap().into_inner().id,
+        realm_a.as_uuid().to_string()
     );
 }

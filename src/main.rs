@@ -668,10 +668,15 @@ async fn run_serve(
                 cap
             });
 
+            if !config.storage.fsync {
+                tracing::warn!(
+                    "storage.fsync=false is ignored in production mode — WAL durability is non-negotiable; \
+                     use dev mode or a custom WalConfig if you need fsync disabled"
+                );
+            }
             let mut storage_config = StorageConfig::production(
                 PathBuf::from(&config.storage.data_dir),
                 config.storage.wal_max_size_bytes,
-                config.storage.fsync,
                 config.storage.memtable_flush_bytes,
                 hot_tier_capacity,
             );

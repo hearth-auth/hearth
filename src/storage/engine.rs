@@ -87,6 +87,12 @@ impl StorageConfig {
     /// Creates a production storage configuration from operator-facing
     /// settings.
     ///
+    /// WAL fsync is **always enabled** in production mode — this is a
+    /// hard durability guarantee. Operators who need fsync disabled for
+    /// benchmarking or development must use [`StorageConfig::dev`] or
+    /// construct `WalConfig` directly with `SyncMode::None` and accept the
+    /// durability loss explicitly.
+    ///
     /// Wires the `[storage]` YAML section values into the internal
     /// `WalConfig`, `MemtableConfig`, and `TieredConfig`. Callers should
     /// pre-compute `hot_tier_capacity` — either from the explicit
@@ -95,7 +101,6 @@ impl StorageConfig {
     pub fn production(
         data_dir: PathBuf,
         wal_max_size_bytes: u64,
-        fsync: bool,
         memtable_flush_bytes: u64,
         hot_tier_capacity: usize,
     ) -> Self {
@@ -104,11 +109,7 @@ impl StorageConfig {
             data_dir,
             wal_config: WalConfig {
                 max_size: wal_max_size_bytes,
-                sync_mode: if fsync {
-                    SyncMode::EveryWrite
-                } else {
-                    SyncMode::None
-                },
+                sync_mode: SyncMode::EveryWrite,
             },
             memtable_config: MemtableConfig {
                 flush_threshold_bytes: usize::try_from(memtable_flush_bytes).unwrap_or(usize::MAX),
@@ -154,17 +155,26 @@ pub struct EmbeddedStorageEngine {
     /// Write-ahead log for durability.
     wal: Wal,
     /// Active in-memory sorted store.
-    active_memtable: Memtable,
+    ///
+    /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it
+    /// without a circular ownership dependency at construction time.
+    active_memtable: Arc<Memtable>,
     /// On-disk SST files, newest first.
-    sst_readers: ArcSwap<Vec<SstReader>>,
+    ///
+    /// Wrapped in `Arc<ArcSwap<...>>` for the same reason as `active_memtable`.
+    sst_readers: Arc<ArcSwap<Vec<SstReader>>>,
     /// In-memory hot tier for frequently accessed data.
     hot_tier: HotTier,
     /// Base data directory.
     data_dir: PathBuf,
     /// Serializes flush operations.
-    flush_lock: Mutex<()>,
+    ///
+    /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it.
+    flush_lock: Arc<Mutex<()>>,
     /// Monotonically increasing SST file counter.
-    sst_counter: std::sync::atomic::AtomicU64,
+    ///
+    /// Wrapped in `Arc` so the WAL's pre-rotate flush callback can share it.
+    sst_counter: Arc<std::sync::atomic::AtomicU64>,
     /// Filesystem abstraction for fault injection in simulation tests.
     fs: Arc<dyn Fs>,
     /// Key registry for per-realm KEK management.
@@ -216,7 +226,7 @@ impl EmbeddedStorageEngine {
 
         // Open WAL with encryption
         let wal_path = config.data_dir.join("hearth.wal");
-        let wal = Wal::open_with_fs(
+        let mut wal = Wal::open_with_fs(
             &wal_path,
             config.wal_config,
             Arc::clone(&fs),
@@ -294,14 +304,98 @@ impl EmbeddedStorageEngine {
 
         let hot_tier = HotTier::new(config.tiered_config);
 
+        // Arc-wrap the shared state needed by both the engine and the WAL's
+        // pre-rotate flush callback.
+        let active_memtable = Arc::new(memtable);
+        let sst_readers = Arc::new(ArcSwap::from_pointee(sst_readers));
+        let flush_lock = Arc::new(Mutex::new(()));
+        let sst_counter = Arc::new(std::sync::atomic::AtomicU64::new(max_sst_num + 1));
+
+        // Inject a pre-rotate callback so the WAL flushes the memtable to SST
+        // before truncating. Without this, a kill -9 between truncation and the
+        // next regular flush would lose all writes since the last SST flush.
+        {
+            let cb_memtable = Arc::clone(&active_memtable);
+            let cb_sst_readers = Arc::clone(&sst_readers);
+            let cb_flush_lock = Arc::clone(&flush_lock);
+            let cb_sst_counter = Arc::clone(&sst_counter);
+            let cb_data_dir = config.data_dir.clone();
+            let cb_key_registry = Arc::clone(&key_registry);
+            let cb_system_realm = system_realm.clone();
+            let cb_fs = Arc::clone(&fs);
+
+            wal.set_pre_rotate_fn(move || {
+                let Ok(_guard) = cb_flush_lock.lock() else {
+                    return Err(StorageError::Io(std::io::Error::other(
+                        "flush mutex poisoned",
+                    )));
+                };
+                let entries = cb_memtable.iter_all();
+                if entries.is_empty() {
+                    return Ok(());
+                }
+                let sst_num = cb_sst_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let sst_path = cb_data_dir.join(format!("{sst_num:06}.sst"));
+                let system_kek = cb_key_registry
+                    .get_kek_for_realm(&cb_system_realm)
+                    .ok_or_else(|| StorageError::Crypto {
+                        reason: "system KEK not found during WAL rotation flush".to_string(),
+                    })?;
+                let system_kek_id = cb_key_registry.kek_id_for_realm(&cb_system_realm);
+                let dek = encryption::generate_dek()?;
+                let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
+                SstWriter::write_sst_with_fs(
+                    &sst_path,
+                    &entries,
+                    &*cb_fs,
+                    sst_num,
+                    &dek,
+                    &enc_header,
+                )?;
+                // Rebuild SST reader list, inserting the new file
+                let mut all_sst_paths: Vec<(PathBuf, u64)> = cb_fs
+                    .read_dir(&cb_data_dir)?
+                    .into_iter()
+                    .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+                    .filter_map(|p| {
+                        let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
+                        Some((p, num))
+                    })
+                    .collect();
+                all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num));
+                let mut rebuilt = Vec::new();
+                for (path, n) in &all_sst_paths {
+                    let (kek_id, enc_hdr) = match sst::read_encryption_header(path, &*cb_fs) {
+                        Ok(h) => h,
+                        Err(_) => continue,
+                    };
+                    let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
+                    let kek = match cb_key_registry.get_kek_for_realm(&realm_for_kek) {
+                        Some(k) => k,
+                        None => continue,
+                    };
+                    let file_dek = match encryption::unwrap_dek(&enc_hdr, &kek) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    if let Ok(reader) = SstReader::open_with_fs(path, &*cb_fs, *n, &file_dek) {
+                        rebuilt.push(reader);
+                    }
+                }
+                cb_sst_readers.store(Arc::new(rebuilt));
+                cb_memtable.clear()?;
+                Ok(())
+            });
+        }
+
         Ok(Self {
             wal,
-            active_memtable: memtable,
-            sst_readers: ArcSwap::from_pointee(sst_readers),
+            active_memtable,
+            sst_readers,
             hot_tier,
             data_dir: config.data_dir,
-            flush_lock: Mutex::new(()),
-            sst_counter: std::sync::atomic::AtomicU64::new(max_sst_num + 1),
+            flush_lock,
+            sst_counter,
             fs,
             key_registry,
             system_realm,
@@ -519,8 +613,10 @@ impl EmbeddedStorageEngine {
 impl StorageEngine for EmbeddedStorageEngine {
     fn get(&self, realm_id: &RealmId, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         // 1. Hot tier (lock-free, O(1))
-        if let Some(value) = self.hot_tier.get(realm_id, key) {
-            return Ok(Some(value));
+        // HotTier::get returns Arc<[u8]> to avoid a heap clone inside the hot tier.
+        // We convert to Vec<u8> here at the StorageEngine trait boundary.
+        if let Some(arc_val) = self.hot_tier.get(realm_id, key) {
+            return Ok(Some(arc_val.to_vec()));
         }
 
         // 2. Active memtable
@@ -1426,6 +1522,95 @@ mod tests {
             assert!(
                 !raw.windows(sentinel.len()).any(|w| w == sentinel),
                 "WAL file contains plaintext sentinel — WAL encryption-at-rest not working"
+            );
+        }
+    }
+
+    // ── F3 regression: production() must always fsync ─────────────────────────
+
+    /// `StorageConfig::production()` must unconditionally use `SyncMode::EveryWrite`.
+    /// Before HEA-1180, the constructor accepted a `fsync: bool` that could silently
+    /// disable WAL durability in production.
+    #[test]
+    fn production_config_always_fsyncs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = StorageConfig::production(
+            dir.path().to_path_buf(),
+            64 * 1024 * 1024,
+            4 * 1024 * 1024,
+            1000,
+        );
+        assert_eq!(
+            cfg.wal_config.sync_mode,
+            SyncMode::EveryWrite,
+            "production() must always use SyncMode::EveryWrite"
+        );
+    }
+
+    // ── F2 regression: hot-tier get must be zero-alloc ───────────────────────
+
+    /// Verifies that `HotTier::get` returns `Arc<[u8]>` and that the Arc is the
+    /// same allocation as the one stored in the tier (pointer equality, not just
+    /// value equality), confirming no extra copy was made on cache hit.
+    #[test]
+    fn hot_tier_get_returns_shared_arc_no_extra_copy() {
+        use crate::storage::tiered::{HotTier, TieredConfig};
+        let tier = HotTier::new(TieredConfig {
+            hot_tier_capacity: 10,
+            eviction_batch_size: 10,
+        });
+        let realm = RealmId::generate();
+        tier.promote(&realm, b"key", b"data");
+
+        let first = tier.get(&realm, b"key").expect("should be cached");
+        let second = tier.get(&realm, b"key").expect("should still be cached");
+
+        // Arc::ptr_eq checks that both point to the same backing allocation.
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "two successive gets should return the same Arc allocation"
+        );
+        assert_eq!(&*first, b"data" as &[u8]);
+    }
+
+    // ── F1 regression: WAL rotation must flush memtable before truncating ─────
+
+    /// After WAL rotation, all data that was in the memtable must be readable
+    /// from the SST layer. Before HEA-1180 the WAL was truncated without flushing,
+    /// so a simulated kill after rotation would lose those writes.
+    #[test]
+    fn wal_rotation_flushes_memtable_to_sst_before_truncating() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Use a tiny WAL (4 KiB) so rotation triggers quickly.
+        let mut config = StorageConfig::test_config(dir.path().to_path_buf());
+        config.wal_config.max_size = 4 * 1024;
+        let engine = EmbeddedStorageEngine::open(config).expect("open");
+        let realm = RealmId::generate();
+
+        // Write enough data to force WAL rotation; values are 512 bytes each.
+        let big_val = vec![0xABu8; 512];
+        for i in 0u32..16 {
+            engine
+                .put(&realm, format!("rot-key-{i:04}").as_bytes(), &big_val)
+                .expect("put");
+        }
+
+        // After rotation the pre_rotate_fn must have produced at least one SST.
+        let sst_readers = engine.sst_readers.load();
+        assert!(
+            !sst_readers.is_empty(),
+            "WAL rotation must have triggered a memtable flush → at least one SST must exist"
+        );
+
+        // Every key we wrote must still be readable after rotation.
+        for i in 0u32..16 {
+            let got = engine
+                .get(&realm, format!("rot-key-{i:04}").as_bytes())
+                .expect("get");
+            assert_eq!(
+                got.as_deref(),
+                Some(big_val.as_slice()),
+                "rot-key-{i:04} must be readable after WAL rotation"
             );
         }
     }
