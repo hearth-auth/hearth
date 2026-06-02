@@ -1631,6 +1631,7 @@ struct SessionListTemplate {
     sessions: Vec<SessionRow>,
     next_cursor: Option<String>,
     realm_name: String,
+    current_page: String,
     /// `true` when the page is rendering the cross-realm aggregation at
     /// `/ui/admin/sessions` (no `?realm=` / `?admin_target=`). The list
     /// template uses this to swap the heading and reveal the Realm
@@ -1787,6 +1788,7 @@ pub async fn admin_sessions_list(
                 sessions: rows,
                 next_cursor: page.next_cursor,
                 realm_name: realm_name.clone(),
+                current_page: "Sessions".to_string(),
                 is_global: false,
                 status_filter: status_filter.clone(),
                 count_active,
@@ -2658,6 +2660,7 @@ pub async fn admin_users_bulk_action(
 struct UserImportTemplate {
     error: Option<String>,
     realm_name: String,
+    current_page: String,
     list_url: String,
     chrome: bool,
     active: &'static str,
@@ -2682,6 +2685,7 @@ pub async fn admin_users_import_form(
     render(&UserImportTemplate {
         error: None,
         realm_name: realm_name.clone(),
+        current_page: "Import Users".to_string(),
         list_url: format!("/ui/admin/realms/{realm_name}/users"),
         chrome: true,
         active: "users",
@@ -2768,6 +2772,7 @@ pub async fn admin_users_import_submit(
             return render(&UserImportTemplate {
                 error: Some("No file uploaded.".to_string()),
                 realm_name: realm_name.clone(),
+                current_page: "Import Users".to_string(),
                 list_url: format!("/ui/admin/realms/{realm_name}/users"),
                 chrome: true,
                 active: "users",
@@ -2790,6 +2795,7 @@ pub async fn admin_users_import_submit(
             return render(&UserImportTemplate {
                 error: Some("File is not valid UTF-8.".to_string()),
                 realm_name: realm_name.clone(),
+                current_page: "Import Users".to_string(),
                 list_url: format!("/ui/admin/realms/{realm_name}/users"),
                 chrome: true,
                 active: "users",
@@ -2810,6 +2816,7 @@ pub async fn admin_users_import_submit(
         return render(&UserImportTemplate {
             error: Some("Email column mapping is required.".to_string()),
             realm_name: realm_name.clone(),
+            current_page: "Import Users".to_string(),
             list_url: format!("/ui/admin/realms/{realm_name}/users"),
             chrome: true,
             active: "users",
@@ -2988,6 +2995,7 @@ pub async fn admin_admin_users_import_form(
     render(&UserImportTemplate {
         error: None,
         realm_name: String::new(),
+        current_page: "Import Users".to_string(),
         list_url: "/ui/admin/admin-users".to_string(),
         chrome: true,
         active: "admin-users",
@@ -3062,6 +3070,7 @@ pub async fn admin_admin_users_import_submit(
         render(&UserImportTemplate {
             error: Some(error),
             realm_name: String::new(),
+            current_page: "Import Users".to_string(),
             list_url: "/ui/admin/admin-users".to_string(),
             chrome: true,
             active: "admin-users",

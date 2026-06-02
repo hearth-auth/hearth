@@ -1,15 +1,7 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · {{ group.name }}{% endblock %}
+{% block breadcrumb %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endblock %}
 {% block body %}
-{% include "ui/admin/realms/_workspace_tabs.html" %}
-
-<div class="mb-6 flex flex-wrap items-center gap-2 text-sm text-ht-content-muted">
-  <a href="/ui/admin/realms/{{ realm_name }}/groups"
-     class="hover:text-ht-content-primary">Groups</a>
-  <span>›</span>
-  <span class="text-ht-content-secondary">{{ group.name }}</span>
-</div>
-
 <div class="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
   <div>
     <h1 class="font-display text-2xl font-medium text-ht-content-primary">{{ group.name }}</h1>

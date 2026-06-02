@@ -899,6 +899,7 @@ pub async fn admin_rbac_permissions(
 struct RoleNewTemplate {
     error: Option<String>,
     realm_name: String,
+    current_page: String,
     form_name: String,
     form_description: String,
     form_scope_kind: String,
@@ -921,6 +922,7 @@ impl RoleNewTemplate {
         Self {
             error: None,
             realm_name,
+            current_page: "New Role".to_string(),
             form_name: String::new(),
             form_description: String::new(),
             form_scope_kind: "realm".to_string(),
@@ -1067,6 +1069,7 @@ struct RoleDetailTemplate {
     role: Role,
     scope: String,
     realm_name: String,
+    current_page: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -1102,6 +1105,7 @@ pub async fn admin_role_detail(
                 role,
                 scope,
                 realm_name: target.0.name().to_string(),
+                current_page: "Roles".to_string(),
                 chrome: true,
                 active: "rbac_roles",
                 user_email: Some(session.user_email.clone()),
@@ -1133,6 +1137,7 @@ struct RoleEditTemplate {
     role: Role,
     error: Option<String>,
     realm_name: String,
+    current_page: String,
     form_name: String,
     form_description: String,
     form_scope_kind: String,
@@ -1174,6 +1179,7 @@ impl RoleEditTemplate {
             role,
             error: None,
             realm_name,
+            current_page: "Edit Role".to_string(),
             form_name,
             form_description,
             form_scope_kind,
@@ -1374,6 +1380,7 @@ struct RbacRolesTemplate {
     /// Rows for each role in the current realm.
     roles: Vec<RoleRow>,
     realm_name: String,
+    current_page: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -1427,6 +1434,7 @@ pub async fn admin_rbac_roles(
     render(&RbacRolesTemplate {
         roles,
         realm_name: target.0.name().to_string(),
+        current_page: "Roles".to_string(),
         chrome: true,
         active: "rbac_roles",
         user_email: Some(session.user_email.clone()),

@@ -1,20 +1,11 @@
 {# Shared realm-workspace breadcrumb.
-   Renders `Realms › {realm_name}` above any list/detail page inside a tenant
-   realm. The tab bar that used to live here was removed (HEA-629) — it
-   duplicated the sidebar's per-realm subtree. Navigation between sub-pages
-   now happens through the sidebar; the realm overview page (linked from the
-   breadcrumb's realm-name segment) is the fallback hub when the sidebar is
-   collapsed or on mobile.
-
-   Required struct fields on the caller:
-     - realm_name: String           // realm slug, used in path-based URLs
-
-   Per UI_ROUTING.md R-1, every realm-scoped URL is built as
-   `/ui/admin/realms/{realm_name}/...` — there is no `?realm=` query
-   parameter and no `target_realm_name: Option<...>` matching.
+   Renders `Realms › {realm_name} › {current_page}` inside a nav landmark.
+   Required struct fields: realm_name: String, current_page: String
 #}
-<div class="mb-6 flex flex-wrap items-center gap-2 text-sm">
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
   <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Realms</a>
   <span class="text-ht-content-muted">›</span>
-  <a href="/ui/admin/realms/{{ realm_name }}" class="font-medium text-ht-content-secondary hover:text-ht-content-primary">{{ realm_name }}</a>
-</div>
+  <a href="/ui/admin/realms/{{ realm_name }}" class="text-ht-content-secondary hover:text-ht-content-primary">{{ realm_name }}</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary" aria-current="page">{{ current_page }}</span>
+</nav>

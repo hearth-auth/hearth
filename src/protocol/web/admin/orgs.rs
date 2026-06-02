@@ -70,6 +70,7 @@ struct OrgListTemplate {
     next_cursor: Option<String>,
     search_query: String,
     realm_name: String,
+    current_page: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -128,6 +129,7 @@ pub async fn admin_orgs_list(
             next_cursor: page.next_cursor,
             search_query,
             realm_name: target.0.name().to_string(),
+            current_page: "Organizations".to_string(),
             chrome: true,
             active: "organizations",
             user_email: Some(session.user_email.clone()),
@@ -157,6 +159,7 @@ pub async fn admin_orgs_list(
 struct OrgNewTemplate {
     error: Option<String>,
     realm_name: String,
+    current_page: String,
     form_name: String,
     form_slug: String,
     form_description: String,
@@ -193,6 +196,7 @@ pub async fn admin_org_create_form(
     render(&OrgNewTemplate {
         error: None,
         realm_name: target.0.name().to_string(),
+        current_page: "New Organization".to_string(),
         form_name: String::new(),
         form_slug: String::new(),
         form_description: String::new(),
@@ -357,6 +361,7 @@ pub async fn admin_org_create_submit(
         Err(IdentityError::DuplicateOrgSlug) => render(&OrgNewTemplate {
             error: Some("An organization with that slug already exists.".to_string()),
             realm_name: realm_name.clone(),
+            current_page: "New Organization".to_string(),
             form_name: form.name,
             form_slug: form.slug,
             form_description: form.description,
@@ -379,6 +384,7 @@ pub async fn admin_org_create_submit(
             render(&OrgNewTemplate {
                 error: Some(format!("Unable to create organization: {e}")),
                 realm_name: realm_name.clone(),
+                current_page: "New Organization".to_string(),
                 form_name: form.name,
                 form_slug: form.slug,
                 form_description: form.description,
@@ -420,6 +426,7 @@ pub struct MemberView {
 struct OrgDetailTemplate {
     org: Organization,
     realm_name: String,
+    current_page: String,
     /// Org UUID string — shared with embedded partials via `{% include %}`.
     org_id: String,
     members: Vec<MemberWithAccess>,
@@ -560,6 +567,7 @@ pub async fn admin_org_detail(
     let mut response = render(&OrgDetailTemplate {
         org,
         realm_name: target.0.name().to_string(),
+        current_page: "Organizations".to_string(),
         org_id: org_id_str,
         members,
         member_count,
@@ -601,6 +609,7 @@ pub async fn admin_org_detail(
 struct OrgEditTemplate {
     org: Organization,
     realm_name: String,
+    current_page: String,
     error: Option<String>,
     form_name: String,
     form_description: String,
@@ -667,6 +676,7 @@ pub async fn admin_org_edit_form(
                 form_max_members: org.config().max_members,
                 org,
                 realm_name: target.0.name().to_string(),
+                current_page: "Edit Organization".to_string(),
                 error: None,
                 form_attributes,
                 attr_fields,

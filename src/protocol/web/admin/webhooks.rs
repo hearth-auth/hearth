@@ -33,6 +33,7 @@ pub struct DeliveryRow {
 struct WebhookListTemplate {
     webhooks: Vec<WebhookRow>,
     realm_name: String,
+    current_page: String,
     flash_message: Option<String>,
     /// Active workspace tab label (used by `_workspace_tabs.html` include).
     /// Cursor for the next page of results; `None` when on the last page.
@@ -94,6 +95,7 @@ pub async fn admin_webhooks_list(
     render(&WebhookListTemplate {
         webhooks: webhook_rows,
         realm_name,
+        current_page: "Webhooks".to_string(),
         flash_message,
         next_cursor: None,
         chrome: true,
@@ -151,6 +153,7 @@ fn available_event_types(subscribed: &[String]) -> Vec<WebhookEventType> {
 #[allow(dead_code)]
 struct WebhookNewTemplate {
     realm_name: String,
+    current_page: String,
     form_url: String,
     form_secret: String,
     form_enabled: bool,
@@ -179,6 +182,7 @@ pub async fn admin_webhook_create_form(
 ) -> Response {
     render(&WebhookNewTemplate {
         realm_name: target.0.name().to_string(),
+        current_page: "Add Webhook".to_string(),
         form_url: String::new(),
         form_secret: String::new(),
         form_enabled: true,
@@ -233,6 +237,7 @@ pub async fn admin_webhook_create_submit(
     if form.url.trim().is_empty() {
         return render(&WebhookNewTemplate {
             realm_name,
+            current_page: "Add Webhook".to_string(),
             form_url: form.url.clone(),
             form_secret: form.secret.clone(),
             form_enabled: form.enabled.is_some(),
@@ -283,6 +288,7 @@ pub async fn admin_webhook_create_submit(
             tracing::warn!(error = %e, "create_webhook failed");
             render(&WebhookNewTemplate {
                 realm_name,
+                current_page: "Add Webhook".to_string(),
                 form_url: form.url.clone(),
                 form_secret: form.secret.clone(),
                 form_enabled: form.enabled.is_some(),
@@ -433,6 +439,7 @@ pub async fn admin_webhook_test_ping(
 struct WebhookEditTemplate {
     webhook_id: String,
     realm_name: String,
+    current_page: String,
     form_url: String,
     form_secret: String,
     form_enabled: bool,
@@ -479,6 +486,7 @@ pub async fn admin_webhook_edit_form(
     render(&WebhookEditTemplate {
         webhook_id: wh.id().as_uuid().to_string(),
         realm_name: target.0.name().to_string(),
+        current_page: "Edit Webhook".to_string(),
         form_url: wh.url.clone(),
         form_secret: wh.secret.clone().unwrap_or_default(),
         form_enabled: wh.enabled,
@@ -538,6 +546,7 @@ pub async fn admin_webhook_edit_submit(
         render(&WebhookEditTemplate {
             webhook_id: wid.as_uuid().to_string(),
             realm_name: realm_name.clone(),
+            current_page: "Edit Webhook".to_string(),
             form_url: form.url.clone(),
             form_secret: form.secret.clone(),
             form_enabled: form.enabled.is_some(),

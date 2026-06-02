@@ -1,13 +1,7 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Edit Webhook{% endblock %}
+{% block breadcrumb %}{% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}{% endblock %}
 {% block body %}
-{% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}
-
-<div class="mb-2 flex flex-wrap items-center gap-2 text-sm text-ht-content-muted">
-  <a href="/ui/admin/realms/{{ realm_name }}/webhooks" class="hover:text-ht-content-primary">Webhooks</a>
-  <span>›</span>
-  <span class="text-ht-content-secondary">Edit</span>
-</div>
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Edit webhook</h1>
   <p class="mt-1 text-sm text-ht-content-muted">Update the endpoint URL, signing secret, or event subscriptions for this webhook.</p>

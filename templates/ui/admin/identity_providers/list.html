@@ -1,7 +1,7 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Identity Providers{% endblock %}
+{% block breadcrumb %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endblock %}
 {% block body %}
-{% include "ui/admin/realms/_workspace_tabs.html" %}
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Identity Providers</h1>
   <p class="mt-1 text-sm text-ht-content-muted">Social login and enterprise SSO connectors configured for this realm.</p>

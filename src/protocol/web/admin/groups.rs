@@ -20,6 +20,7 @@ struct GroupListTemplate {
     next_cursor: Option<String>,
     search_query: String,
     realm_name: String,
+    current_page: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -72,6 +73,7 @@ pub async fn admin_groups_list(
             next_cursor: page.next_cursor,
             search_query,
             realm_name: target.0.name().to_string(),
+            current_page: "Groups".to_string(),
             chrome: true,
             active: "groups",
             user_email: Some(session.user_email.clone()),
@@ -102,6 +104,7 @@ pub async fn admin_groups_list(
 struct GroupNewTemplate {
     error: Option<String>,
     realm_name: String,
+    current_page: String,
     form_name: String,
     form_slug: String,
     form_description: String,
@@ -128,6 +131,7 @@ pub async fn admin_group_create_form(
     render(&GroupNewTemplate {
         error: None,
         realm_name: target.0.name().to_string(),
+        current_page: "New Group".to_string(),
         form_name: String::new(),
         form_slug: String::new(),
         form_description: String::new(),
@@ -206,6 +210,7 @@ pub async fn admin_group_create_submit(
             render(&GroupNewTemplate {
                 error: Some(msg),
                 realm_name: realm_name.clone(),
+                current_page: "New Group".to_string(),
                 form_name: form.name,
                 form_slug: form.slug,
                 form_description: form.description,
@@ -337,6 +342,7 @@ pub struct GroupRoleAssignmentView {
 struct GroupDetailTemplate {
     group: Group,
     realm_name: String,
+    current_page: String,
     /// Group UUID string — shared with the embedded `_member_row.html`
     /// partial so member-row form actions can use the parent group's ID.
     group_id: String,
@@ -464,6 +470,7 @@ pub async fn admin_group_detail(
     render(&GroupDetailTemplate {
         group,
         realm_name: target.0.name().to_string(),
+        current_page: "Groups".to_string(),
         group_id: group_id_str,
         members,
         member_count,
@@ -577,6 +584,7 @@ fn build_group_member_views(
 struct GroupEditTemplate {
     group: Group,
     realm_name: String,
+    current_page: String,
     error: Option<String>,
     form_name: String,
     form_slug: String,
@@ -613,6 +621,7 @@ pub async fn admin_group_edit_form(
             render(&GroupEditTemplate {
                 group,
                 realm_name: target.0.name().to_string(),
+                current_page: "Edit Group".to_string(),
                 error: None,
                 form_name,
                 form_slug,
@@ -702,6 +711,7 @@ pub async fn admin_group_edit_submit(
             render(&GroupEditTemplate {
                 group,
                 realm_name: realm_name.clone(),
+                current_page: "Edit Group".to_string(),
                 error: Some(msg),
                 form_name: form.name,
                 form_slug: form.slug,

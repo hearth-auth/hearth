@@ -1,8 +1,7 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Webhooks{% endblock %}
+{% block breadcrumb %}{% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}{% endblock %}
 {% block body %}
-{% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}
-
 <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
   <div>
     <h1 class="font-display text-2xl font-medium text-ht-content-primary">Webhooks</h1>

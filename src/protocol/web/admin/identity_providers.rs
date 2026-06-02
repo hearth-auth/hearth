@@ -75,6 +75,7 @@ impl From<IdpConfig> for IdpDetailRow {
 struct IdpListTemplate {
     providers: Vec<IdpRow>,
     realm_name: String,
+    current_page: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -99,6 +100,7 @@ pub async fn admin_idp_list(
         Ok(idps) => render(&IdpListTemplate {
             providers: idps.into_iter().map(IdpRow::from).collect(),
             realm_name: target.0.name().to_string(),
+            current_page: "Identity Providers".to_string(),
             chrome: true,
             active: "identity_providers",
             user_email: Some(session.user_email.clone()),
@@ -128,6 +130,7 @@ struct IdpDetailTemplate {
     idp: IdpDetailRow,
     idp_id: String,
     realm_name: String,
+    current_page: String,
     callback_url: String,
     chrome: bool,
     active: &'static str,
@@ -162,6 +165,7 @@ pub async fn admin_idp_detail(
             idp_id: idp_id.as_uuid().to_string(),
             idp: IdpDetailRow::from(config),
             realm_name,
+            current_page: "Identity Providers".to_string(),
             callback_url,
             chrome: true,
             active: "identity_providers",

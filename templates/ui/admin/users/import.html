@@ -1,13 +1,7 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Import Users{% endblock %}
+{% block breadcrumb %}{% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}{% endblock %}
 {% block body %}
-{% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}
-
-<div class="mb-2 flex flex-wrap items-center gap-2 text-sm text-ht-content-muted">
-  <a href="{{ list_url }}" class="hover:text-ht-content-primary">Users</a>
-  <span>›</span>
-  <span class="text-ht-content-secondary">Import CSV</span>
-</div>
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Import users from CSV</h1>
   <p class="mt-1 text-sm text-ht-content-muted">Upload a CSV file to create or update users in bulk. Email is required; name and role are optional.</p>

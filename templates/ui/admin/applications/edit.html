@@ -1,16 +1,7 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Edit {{ app.client_name() }}{% endblock %}
+{% block breadcrumb %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endblock %}
 {% block body %}
-{% include "ui/admin/realms/_workspace_tabs.html" %}
-<div class="mb-6 flex flex-wrap items-center gap-2 text-sm text-ht-content-muted">
-  <a href="/ui/admin/realms/{{ realm_name }}/applications"
-     class="hover:text-ht-content-primary">Applications</a>
-  <span>›</span>
-  <a href="/ui/admin/realms/{{ realm_name }}/applications/{{ app.client_id().as_uuid() }}"
-     class="hover:text-ht-content-primary">{{ app.client_name() }}</a>
-  <span>›</span>
-  <span class="text-ht-content-secondary">Edit</span>
-</div>
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Edit {{ app.client_name() }}</h1>
 </div>

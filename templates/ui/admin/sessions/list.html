@@ -1,9 +1,7 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Sessions{% endblock %}
+{% block breadcrumb %}{% if !is_global %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}{% endblock %}
 {% block body %}
-{% if !is_global %}
-{% include "ui/admin/realms/_workspace_tabs.html" %}
-{% endif %}
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">
     {% if is_global %}All sessions{% else %}Sessions{% endif %}
