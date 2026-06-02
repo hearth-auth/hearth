@@ -17,9 +17,7 @@ mod common;
 use std::sync::Arc;
 
 use hearth::core::RealmId;
-use hearth::identity::{
-    CreateRealmRequest, CreateUserRequest, SessionContext,
-};
+use hearth::identity::{CreateRealmRequest, CreateUserRequest, SessionContext};
 use hearth::protocol::admin_auth::AdminRateLimiter;
 use hearth::protocol::grpc::identity::IdentityAdminSvc;
 use hearth::protocol::grpc::server::GrpcState;
@@ -151,7 +149,11 @@ fn grpc_req<T>(realm_id: &RealmId, token: &str, msg: T) -> Request<T> {
     );
     r.metadata_mut().insert(
         "x-realm-id",
-        realm_id.as_uuid().to_string().parse().expect("valid header"),
+        realm_id
+            .as_uuid()
+            .to_string()
+            .parse()
+            .expect("valid header"),
     );
     r
 }
@@ -300,7 +302,10 @@ async fn list_realms_scoped_to_own_realm() {
         "the single returned realm must be realm-A"
     );
     assert!(
-        !page.items.iter().any(|r| r.id == realm_b.as_uuid().to_string()),
+        !page
+            .items
+            .iter()
+            .any(|r| r.id == realm_b.as_uuid().to_string()),
         "realm-B must not appear in realm-A admin's list_realms response"
     );
 }

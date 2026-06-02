@@ -403,6 +403,13 @@ pub struct Wal {
     /// Retained for potential re-open after rotation in future phases.
     #[allow(dead_code)]
     fs: Arc<dyn Fs>,
+    /// Called inside `rotate_locked` before the WAL is truncated.
+    ///
+    /// The storage engine injects a memtable-to-SST flush callback here so
+    /// that all in-memory data is durable before the WAL segment is reused.
+    /// Without this, a `kill -9` between truncation and the next regular
+    /// memtable flush would lose every write since the last SST flush.
+    pre_rotate_fn: Option<Arc<dyn Fn() -> Result<(), StorageError> + Send + Sync>>,
 }
 
 impl Wal {
@@ -482,6 +489,7 @@ impl Wal {
             config,
             rotation: Mutex::new(RotationState { dek, enc_header }),
             record_counter: AtomicU64::new(record_count),
+            pre_rotate_fn: None,
             kek: kek.clone_key(),
             kek_id,
             fs,
@@ -666,7 +674,27 @@ impl Wal {
         Ok(())
     }
 
+    /// Registers a callback that is invoked inside `rotate_locked` before the
+    /// WAL segment is truncated.
+    ///
+    /// The callback MUST flush all in-memory data to a durable layer (e.g.,
+    /// memtable → SST) so that a crash between truncation and the next
+    /// regular flush does not lose data. The callback is called while the WAL
+    /// file mutex is held; it must not call any WAL methods or a deadlock
+    /// will occur.
+    pub(crate) fn set_pre_rotate_fn(
+        &mut self,
+        f: impl Fn() -> Result<(), StorageError> + Send + Sync + 'static,
+    ) {
+        self.pre_rotate_fn = Some(Arc::new(f));
+    }
+
     /// Rotates the WAL file by truncating and writing a fresh encryption header.
+    ///
+    /// Calls `pre_rotate_fn` (if set) before truncating, ensuring in-memory
+    /// data is flushed to a durable store first. A `kill -9` after truncation
+    /// but before the next regular flush would otherwise lose all writes since
+    /// the last SST flush.
     fn rotate_locked(&self, file: &mut dyn FsFile) -> Result<(), StorageError> {
         // Generate new per-segment DEK and encrypt with the KEK
         let new_dek = encryption::generate_dek()?;
@@ -674,6 +702,12 @@ impl Wal {
         kek_bytes.copy_from_slice(self.kek.as_bytes());
         let kek = encryption::KeyEncryptionKey::from_bytes(kek_bytes);
         let new_enc_header = encryption::wrap_dek(&new_dek, &kek, self.kek_id)?;
+
+        // Flush memtable → SST before truncating so the WAL contents are
+        // durable on disk. If this errors, abort — do NOT truncate.
+        if let Some(ref flush) = self.pre_rotate_fn {
+            flush()?;
+        }
 
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;
