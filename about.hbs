@@ -1,0 +1,20 @@
+Hearth Third-Party Notices
+==========================
+
+Hearth bundles the following third-party libraries. Their copyright notices
+and license texts are reproduced below in full to satisfy the attribution
+requirements of each license, including the CDLA-Permissive-2.0 data license
+covering the Mozilla CA certificate bundle distributed with webpki-roots.
+
+{{#each overview}}
+================================================================================
+License: {{spdx-id}}
+
+Packages using this license:
+{{#each used_by}}  · {{this.crate.name}} {{this.crate.version}}{{#if this.crate.repository}} — {{this.crate.repository}}{{/if}}
+{{/each}}
+--------------------------------------------------------------------------------
+{{text}}
+{{/each}}
+================================================================================
+End of Hearth Third-Party Notices

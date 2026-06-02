@@ -1,0 +1,34 @@
+# cargo-about configuration for NOTICES.txt generation.
+#
+# This accepted list mirrors deny.toml [licenses].allow so cargo-about can
+# resolve every crate in the dependency tree without erroring. License policy
+# enforcement is handled by cargo-deny; this file only drives NOTICES output.
+#
+# CDLA-Permissive-2.0 covers the Mozilla CA certificate store bundled inside
+# webpki-roots. It imposes only an attribution obligation on binary distributions
+# (no source-disclosure requirement), which this tooling satisfies.
+
+accepted = [
+    "Apache-2.0",
+    # Apache-2.0 WITH LLVM-exception: Bytecode Alliance / WASI packages.
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    # MIT-0: MIT with the attribution clause removed.
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MPL-2.0",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "0BSD",
+    "Unlicense",
+    "CC0-1.0",
+    # CDLA-Permissive-2.0: webpki-roots / Mozilla CA store attribution.
+    "CDLA-Permissive-2.0",
+    "Zlib",
+    # Appears in r-efi's disjunctive "Apache-2.0 OR LGPL-2.0-or-later" expression.
+    # cargo-deny elects Apache-2.0 via its per-crate exception; listed here only so
+    # cargo-about can resolve the disjunction without erroring.
+    "LGPL-2.0-or-later",
+]

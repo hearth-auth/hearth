@@ -71,3 +71,6 @@ go-gin
 *.cache
 
 .claude/scheduled_tasks.lock
+
+# Generated attribution file (produced by `make notices` / release workflow)
+NOTICES.txt

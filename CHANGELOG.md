@@ -9,6 +9,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`make notices` target** — generates `NOTICES.txt` containing copyright notices and full license
+  texts for all bundled third-party dependencies via `cargo-about`. Required for attribution-compliant
+  binary release artifacts; satisfies the CDLA-Permissive-2.0 attribution obligation on `webpki-roots`
+  (Mozilla CA store) and the copyright-retention requirements of MIT/BSD/Apache crates. `NOTICES.txt`
+  is bundled in every GitHub Release alongside the binary and SBOM. (HEA-916)
+
 - **`make license-check` CI gate** — `cargo deny check licenses advisories bans` now runs as a
   required PR-blocking step in CI and is available locally via `make license-check`. Any PR that
   introduces a crate with a copyleft, unknown, or non-permissive license is rejected. (HEA-915)

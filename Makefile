@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check license-check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt check license-check notices css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -80,6 +80,13 @@ check: clippy fmt test-quality test
 ## or explicitly banned packages. Run standalone or via ci-local-fast.
 license-check:
 	cargo deny check licenses advisories bans
+
+## Generate NOTICES.txt with copyright and license text for all bundled dependencies.
+## Required for attribution-compliant binary release artifacts.
+## Requires cargo-about: cargo install cargo-about
+## The output is gitignored — regenerate before each release via `make notices`.
+notices:
+	cargo about generate about.hbs -o NOTICES.txt
 
 ## Grep-based guardrail against false-confidence test patterns
 ## (weak is_ok/is_err asserts, unconditional sleeps, untracked #[ignore]).

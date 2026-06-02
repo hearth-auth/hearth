@@ -104,7 +104,38 @@ jobs:
           path: ${{ matrix.artifact }}
           if-no-files-found: error
 
-  # ── 2. CycloneDX SBOM ─────────────────────────────────────────────────────
+  # ── 2. NOTICES (third-party attribution) ──────────────────────────────────
+  notices:
+    name: Generate NOTICES.txt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ubuntu-notices-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-about
+        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285 # v2
+        with:
+          tool: cargo-about@0.6.4
+
+      - name: Generate NOTICES.txt
+        run: make notices
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hearth-notices
+          path: NOTICES.txt
+          if-no-files-found: error
+
+  # ── 3. CycloneDX SBOM ─────────────────────────────────────────────────────
   sbom:
     name: Generate CycloneDX SBOM
     runs-on: ubuntu-latest
@@ -138,10 +169,10 @@ jobs:
           path: hearth-sbom.cdx.json
           if-no-files-found: error
 
-  # ── 3. Compute SHA-256 hashes (SLSA subjects) ─────────────────────────────
+  # ── 4. Compute SHA-256 hashes (SLSA subjects) ─────────────────────────────
   hash:
     name: Compute artifact hashes
-    needs: [build, sbom]
+    needs: [build, sbom, notices]
     runs-on: ubuntu-latest
     outputs:
       hashes: ${{ steps.hash.outputs.hashes }}
@@ -160,13 +191,14 @@ jobs:
             hearth-linux-arm64 \
             hearth-darwin-amd64 \
             hearth-darwin-arm64 \
-            hearth-sbom.cdx.json | base64 -w 0)
+            hearth-sbom.cdx.json \
+            NOTICES.txt | base64 -w 0)
           echo "hashes=$hashes" >> "$GITHUB_OUTPUT"
 
-  # ── 4. Cosign keyless signing ──────────────────────────────────────────────
+  # ── 5. Cosign keyless signing ──────────────────────────────────────────────
   sign:
     name: Sign with cosign (keyless OIDC)
-    needs: [build, sbom]
+    needs: [build, sbom, notices]
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for OIDC token exchange
@@ -184,7 +216,7 @@ jobs:
       - name: Sign artifacts
         working-directory: artifacts
         run: |
-          for f in hearth-linux-amd64 hearth-linux-arm64 hearth-darwin-amd64 hearth-darwin-arm64 hearth-sbom.cdx.json; do
+          for f in hearth-linux-amd64 hearth-linux-arm64 hearth-darwin-amd64 hearth-darwin-arm64 hearth-sbom.cdx.json NOTICES.txt; do
             cosign sign-blob --yes \
               --output-signature "${f}.sig" \
               --output-certificate "${f}.pem" \
@@ -199,7 +231,7 @@ jobs:
             artifacts/*.pem
           if-no-files-found: error
 
-  # ── 5. SLSA L1 provenance ─────────────────────────────────────────────────
+  # ── 6. SLSA L1 provenance ─────────────────────────────────────────────────
   # Runs in a slsa-github-generator-controlled job to establish the attestation.
   provenance:
     needs: [hash]
@@ -212,7 +244,7 @@ jobs:
       base64-subjects: "${{ needs.hash.outputs.hashes }}"
       upload-assets: true
 
-  # ── 6. Publish GitHub Release ─────────────────────────────────────────────
+  # ── 7. Publish GitHub Release ─────────────────────────────────────────────
   release:
     name: Publish GitHub Release
     needs: [sign, provenance]
@@ -235,6 +267,7 @@ jobs:
             dist/hearth-darwin-amd64
             dist/hearth-darwin-arm64
             dist/hearth-sbom.cdx.json
+            dist/NOTICES.txt
             dist/*.sig
             dist/*.pem
           generate_release_notes: true
