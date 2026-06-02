@@ -193,6 +193,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Fixed
 
+- **Sidebar REALMS section no longer shows "Loading…" indefinitely** — the sidebar realm tree
+  now uses synchronous `init()` with explicit proxy capture instead of `async init()`, ensuring
+  the fetch's `.finally()` handler always fires and clears the loading state regardless of Alpine
+  version behaviour (HEA-1106).
+- **Dual ember gradient on empty-state pages** — the secondary CTA in the empty-state panels
+  for Webhooks and Organizations no longer uses `btn-ember`; it now uses the muted outline
+  button style, so `btn-ember` appears at most once per visible region as required by THEME.md
+  (HEA-1106).
+- **Missing breadcrumbs on RBAC sub-pages** — the Permissions, Scope Bundles, and Permission
+  Check pages now render `Realms › {realm} › {page}` breadcrumb nav in the header, consistent
+  with the Roles page (HEA-1106).
+
 - **Browser login bypassed required-action gates** — `login_submit_impl` now intercepts
   pending required actions between credential verification and session issuance.  Users with
   `UPDATE_PASSWORD` or `VERIFY_EMAIL` actions are redirected to the required-action

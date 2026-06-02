@@ -49,23 +49,17 @@ document.addEventListener('alpine:init', () => {
       const m = window.location.pathname.match(/^\/ui\/admin\/realms\/([^\/?#]+)(?:\/|$)/);
       return m ? decodeURIComponent(m[1]) : '';
     },
-    // Alpine v3 auto-calls init() as proxy.init() so `this` is correctly bound
-    // to the reactive component. Using x-init="load()" instead would invoke
-    // the function via Alpine's `with($data)` evaluator as a plain call,
-    // losing the `this` binding and throwing before the try/finally block.
-    async init() {
-      this.currentRealm = this.deriveCurrentRealm();
-      try {
-        const res = await fetch('/ui/admin/api/nav/realms', { credentials: 'same-origin' });
-        if (res.ok) {
-          const data = await res.json();
-          this.realms = data.realms || [];
-        }
-      } catch (e) {
-        // sidebar tree is non-essential
-      } finally {
-        this.loading = false;
-      }
+    // Capture `this` (the Alpine proxy) synchronously so Promise callbacks
+    // always mutate the reactive object — async init() can silently drop
+    // reactivity if the microtask runs before Alpine's proxy is fully wired.
+    init() {
+      const d = this;
+      d.currentRealm = d.deriveCurrentRealm();
+      fetch('/ui/admin/api/nav/realms', { credentials: 'same-origin' })
+        .then(res => res.ok ? res.json() : null)
+        .then(data => { if (data) d.realms = data.realms || []; })
+        .catch(() => { /* sidebar tree is non-essential */ })
+        .finally(() => { d.loading = false; });
     },
   }));
 
