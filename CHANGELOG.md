@@ -193,6 +193,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Fixed
 
+- **Realm-not-found 404 now renders inside admin chrome (HEA-1116)** — navigating to any
+  `/ui/admin/realms/{nonexistent-realm}/*` URL now shows the 404 error inside the normal admin
+  sidebar and header instead of a bare unstyled page. The `TargetRealm` extractor re-reads the
+  session cookie on the not-found path and renders with chrome when the user is authenticated.
+
 - **Sidebar REALMS section no longer shows "Loading…" indefinitely** — the sidebar realm tree
   now uses synchronous `init()` with explicit proxy capture instead of `async init()`, ensuring
   the fetch's `.finally()` handler always fires and clears the loading state regardless of Alpine
