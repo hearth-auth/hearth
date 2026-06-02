@@ -1,5 +1,12 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Migration History{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary">Migration History</span>
+</nav>
+{% endblock %}
 {% block body %}
 <div class="mb-6 flex items-center justify-between gap-4">
   <div>
