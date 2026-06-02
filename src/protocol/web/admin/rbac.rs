@@ -259,6 +259,8 @@ struct ScopeRow {
 struct RbacScopesTemplate {
     /// Scope bundle rows for the current realm.
     scopes: Vec<ScopeRow>,
+    /// Realm slug for the breadcrumb nav.
+    realm_name: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -318,6 +320,7 @@ pub async fn admin_rbac_scopes(
 
     render(&RbacScopesTemplate {
         scopes,
+        realm_name: target.0.name().to_string(),
         chrome: true,
         active: "rbac_scopes",
         user_email: Some(session.user_email.clone()),
@@ -715,6 +718,8 @@ pub async fn admin_org_member_revoke_perm(
 struct RbacPermissionsTemplate {
     /// One row per known permission (declared in YAML or referenced by a role).
     permissions: Vec<PermissionRow>,
+    /// Realm slug for the breadcrumb nav.
+    realm_name: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -846,6 +851,7 @@ pub async fn admin_rbac_permissions(
 
     render(&RbacPermissionsTemplate {
         permissions,
+        realm_name: target.0.name().to_string(),
         chrome: true,
         active: "rbac_permissions",
         user_email: Some(session.user_email.clone()),
