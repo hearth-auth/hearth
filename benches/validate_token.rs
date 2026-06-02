@@ -106,21 +106,22 @@ const VALIDATE_TOKEN_P99: Duration = Duration::from_millis(1);
 
 /// Maximum heap allocations per `validate_token` invocation.
 ///
-/// JWT decoding allocates owned strings for each `TokenClaims` field
-/// (`sub`, `iss`, `aud`, `sid`, `tid`, `token_type`, optional fields) plus
-/// temporary `Vec<u8>` buffers for base64 and JSON decoding — approximately
-/// 20–30 allocations on the HEA-736 baseline.  The ceiling is 2× that
-/// baseline to tolerate minor serde_json / base64 version drift while still
+/// After S12-F1 (session cache) and S12-F2 (token claims cache), the warm
+/// hot path avoids both the `StorageEngine::get` call and the
+/// `serde_json::from_slice::<TokenClaims>` parse.  What remains is a
+/// `TokenClaims::clone()` from the Arc (≈5-6 String clones for the named
+/// fields) plus ArcSwap `load()` fence overhead — roughly 10-15 allocations.
+/// The ceiling is set to 20 to give headroom for minor dependency drift while
 /// catching regressions (new `format!()`, `clone()`, or boxing on the path).
-const MAX_ALLOCS_PER_CALL: usize = 64;
+const MAX_ALLOCS_PER_CALL: usize = 20;
 
 /// Samples collected per percentile gate.
 const GATE_SAMPLES: usize = 10_000;
 
 /// Warm-up iterations discarded before gate measurement begins.
 ///
-/// Primes the ArcSwap realm-status cache and session hot tier so we measure
-/// steady-state latency, not cold-start penalty.
+/// Primes the ArcSwap realm-status cache, session cache, and token claims
+/// cache so we measure steady-state latency, not cold-start penalty.
 const GATE_WARMUP: usize = 500;
 
 /// Rounds used to amortize per-call allocation counting noise.

@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **`validate_token` hot-path allocation reduced** — two in-process `ArcSwap` caches were added
+  to `EmbeddedIdentityEngine`: a session cache (keyed by `(RealmId, SessionId)`) eliminates the
+  `StorageEngine::get` call on every token validation for active sessions, and a token claims cache
+  (keyed by SHA-256 of the raw JWT) eliminates the `serde_json::from_slice::<TokenClaims>`
+  allocation for repeated validations of the same access token. The `validate_token` allocation
+  gate (`benches/validate_token.rs`) is tightened from 64 to 20 allocations per warm call.
+  (HEA-1183)
+
 - **`PATCH` replaces `PUT` for partial-update admin endpoints** — `PUT /admin/realms/{id}`,
   `PUT /admin/roles/{id}`, `PUT /admin/groups/{id}`, and `PUT /admin/applications/{id}` are now
   `PATCH` to correctly signal partial-update semantics (RFC 5789). All four endpoints and their
