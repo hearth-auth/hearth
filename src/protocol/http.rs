@@ -76,6 +76,17 @@ const BODY_LIMIT_DEFAULT: usize = 1024 * 1024;
 /// of resource-exhaustion attempts.
 const BODY_LIMIT_SMALL: usize = 64 * 1024;
 
+/// Maximum body size (4 GiB) for the `POST /admin/backup/restore` endpoint.
+///
+/// The restore endpoint accepts a multipart upload containing a full backup
+/// archive, which may legitimately be several gigabytes for large realms.
+/// This cap prevents an admin-token holder from streaming an arbitrarily
+/// large body that would exhaust heap memory and trigger OOM-kill.
+///
+/// Backups are streamed to a temporary file before parsing, so this limit
+/// gates network ingress rather than in-process RAM usage.
+pub const BACKUP_RESTORE_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
+
 /// Shared application state passed to all route handlers.
 pub struct AppState {
     /// The identity engine for all domain operations.
@@ -556,7 +567,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/backup", axum::routing::post(admin_backup_create))
         .route(
             "/backup/restore",
-            axum::routing::post(admin_backup_restore).route_layer(DefaultBodyLimit::disable()),
+            axum::routing::post(admin_backup_restore)
+                .route_layer(DefaultBodyLimit::max(BACKUP_RESTORE_BODY_LIMIT)),
         )
         .route(
             "/realms/{realm_id}/users/{user_id}/required-actions",

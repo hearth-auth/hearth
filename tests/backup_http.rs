@@ -16,7 +16,7 @@ use axum::http::{Request, StatusCode};
 use hearth::backup::BackupArchive;
 use hearth::core::RealmId;
 use hearth::identity::{CreateUserRequest, SessionContext};
-use hearth::protocol::http::{router, AppState};
+use hearth::protocol::http::{router, AppState, BACKUP_RESTORE_BODY_LIMIT};
 use hearth::rbac::{AssignRoleRequest, Scope, Subject};
 use tower::ServiceExt as _;
 
@@ -449,5 +449,65 @@ async fn backup_restore_invalid_mode_returns_400() {
             .unwrap_or("")
             .contains("unknown mode"),
         "error must mention 'unknown mode'"
+    );
+}
+
+// ===== POST /admin/backup/restore — body size limit =====
+
+/// Verifies that `BACKUP_RESTORE_BODY_LIMIT` is a finite, sane value so the
+/// restore endpoint cannot be used for an OOM DoS (HEA-1130).
+///
+/// Also verifies that axum's `DefaultBodyLimit::max` middleware correctly
+/// returns 413 when the body exceeds the configured cap, using a minimal
+/// in-test router with a small limit (to avoid sending gigabytes in CI).
+#[tokio::test]
+async fn backup_restore_body_limit_is_enforced() {
+    use axum::extract::DefaultBodyLimit;
+    use axum::response::IntoResponse;
+    use axum::routing::post;
+    use axum::Router;
+
+    // The production constant must be positive and ≤ 8 GiB — evaluated at
+    // compile time so this is a hard guarantee, not a runtime check.
+    const _: () = assert!(BACKUP_RESTORE_BODY_LIMIT > 0);
+    const _: () = assert!(BACKUP_RESTORE_BODY_LIMIT <= 8 * 1024 * 1024 * 1024);
+
+    // Build a minimal test router using the same DefaultBodyLimit::max wiring
+    // as the production route (just with a small cap to avoid sending GiB).
+    // This proves the middleware returns 413 for oversized bodies.
+    //
+    // Note: `Multipart` is lazy — it only reads the body when fields are iterated,
+    // so the limit isn't enforced until actual field reads. `Bytes` reads the
+    // entire body eagerly, making the 413 deterministic at extraction time.
+    // The production handler's `Multipart` hits the same limited body stream
+    // when it iterates fields; the 413 manifests there instead of at creation.
+    const TEST_LIMIT: usize = 512;
+
+    async fn noop(_body: axum::body::Bytes) -> impl IntoResponse {
+        StatusCode::OK
+    }
+
+    let app = Router::new().route(
+        "/restore",
+        post(noop).route_layer(DefaultBodyLimit::max(TEST_LIMIT)),
+    );
+
+    // Body of TEST_LIMIT + 1 bytes exceeds the cap → expect 413.
+    let oversized_body = vec![b'x'; TEST_LIMIT + 1];
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/restore")
+                .body(Body::from(oversized_body))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "restore endpoint must return 413 when body exceeds the configured limit"
     );
 }
