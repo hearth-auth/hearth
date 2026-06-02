@@ -852,22 +852,68 @@ pub struct RealmConfig {
     pub adaptive_mfa: AdaptiveMfaConfig,
 }
 
-/// Configuration for the HIBP Pwned Passwords k-anonymity breach-check.
+/// Which breach-check backend a realm uses.
 ///
-/// Only the first 5 hex characters of the SHA-1 hash are sent to the HIBP
-/// Range API — no plaintext password or full hash leaves the process.
+/// `Online` queries the HIBP Range API (requires outbound HTTPS to
+/// `api.pwnedpasswords.com`). `Offline` binary-searches a locally-provided
+/// sorted SHA-1 corpus file — suitable for air-gapped deployments.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BreachCheckMode {
+    /// Query the HIBP k-anonymity Range API (default).
+    #[default]
+    Online,
+    /// Binary-search a local sorted corpus of 20-byte raw SHA-1 hashes.
+    ///
+    /// The file must contain SHA-1 hashes in network byte order (big-endian),
+    /// sorted lexicographically, with no separators between entries.
+    /// Size must be an exact multiple of 20 bytes.
+    ///
+    /// Build the corpus from the HIBP Pwned Passwords sorted-SHA1 download:
+    /// ```text
+    /// # strip the ":COUNT" suffix and convert hex → binary
+    /// awk -F: '{print $1}' pwned-passwords-sha1-sorted.txt \
+    ///   | xxd -r -p > breach_corpus.bin
+    /// ```
+    Offline {
+        /// Absolute path to the binary corpus file.
+        corpus_path: std::path::PathBuf,
+        /// Emit a startup warning if the corpus file is older than this many days.
+        /// `0` disables the age check. Defaults to 90.
+        #[serde(default = "BreachCheckMode::default_max_corpus_age_days")]
+        max_corpus_age_days: u32,
+    },
+}
+
+impl BreachCheckMode {
+    fn default_max_corpus_age_days() -> u32 {
+        90
+    }
+}
+
+/// Configuration for the breached-password check.
+///
+/// When `mode` is `online` (default), only the first 5 hex characters of the
+/// SHA-1 hash are sent to the HIBP Range API — no plaintext password or full
+/// hash leaves the process. When `mode` is `offline`, no network call is made.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BreachCheckConfig {
-    /// When `true`, every password-set or password-change call queries the HIBP
-    /// Range API before accepting the new credential.
+    /// When `true`, every password-set or password-change call runs the breach check.
     pub enabled: bool,
-    /// Request timeout for the HIBP API in milliseconds.
+    /// Which backend to use for breach detection.
     ///
-    /// Defaults to 3000 ms. On timeout the call fails-open (password accepted,
-    /// `BreachCheckUnavailable` audit event emitted).
+    /// Defaults to `online` (HIBP API). Set to `offline` with a `corpus_path`
+    /// for air-gapped deployments.
+    #[serde(default)]
+    pub mode: BreachCheckMode,
+    /// Request timeout for the online HIBP API in milliseconds.
+    ///
+    /// Ignored when `mode` is `offline`. Defaults to 3000 ms. On timeout the
+    /// call fails-open (password accepted, `BreachCheckUnavailable` audit event
+    /// emitted).
     pub timeout_ms: u64,
     /// Optional HIBP API key. When non-empty, sent as the `hibp-api-key` header.
-    /// Required for paid HIBP Enterprise plans.
+    /// Required for paid HIBP Enterprise plans. Ignored when `mode` is `offline`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hibp_api_key: String,
 }
@@ -877,6 +923,7 @@ impl Default for BreachCheckConfig {
         Self {
             // Safe migration default: disabled so existing realms are unaffected.
             enabled: false,
+            mode: BreachCheckMode::Online,
             timeout_ms: 3000,
             hibp_api_key: String::new(),
         }

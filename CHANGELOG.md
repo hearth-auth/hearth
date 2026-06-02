@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Offline breach corpus for air-gapped realms (HEA-96)** — `BreachCheckConfig` gains a new
+  `mode` field (`online` | `offline`). When set to `offline`, a locally-provided binary corpus
+  of sorted 20-byte SHA-1 hashes is binary-searched instead of calling the HIBP API, enabling
+  NIST SP 800-63B breach checking in networks without outbound internet access. Configure via
+  `breach_check.mode = offline` and `breach_check.mode.corpus_path = /path/to/corpus.bin`.
+  Existing configs that omit `mode` continue to behave as `online` with no changes required.
+
 - **SMS MFA realm config (HEA-855)** — `RealmConfig` gains two new optional fields:
   `sms_otp_expiry_seconds` (override default OTP lifetime per realm) and
   `sms_otp_max_attempts` (override maximum guess attempts per realm). Both are

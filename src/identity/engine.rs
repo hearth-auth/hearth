@@ -407,6 +407,12 @@ pub struct EmbeddedIdentityEngine {
     /// Shared across all password-set/-change operations. Uses an injectable
     /// transport so tests can stub out network I/O.
     hibp: Arc<crate::identity::hibp::HibpClient>,
+    /// Optional offline breach corpus for air-gapped deployments.
+    ///
+    /// Loaded once at startup when any realm config specifies
+    /// `breach_check.mode = offline`. `None` when all realms use online mode
+    /// or breach checking is disabled.
+    offline_corpus: Option<Arc<crate::identity::breach_corpus::OfflineBreachCorpus>>,
     /// Device fingerprint store for adaptive (risk-based) MFA.
     ///
     /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
@@ -622,7 +628,7 @@ impl EmbeddedIdentityEngine {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
         let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage)?);
         let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
-        let engine = Self {
+        let mut engine = Self {
             storage,
             clock,
             config,
@@ -646,11 +652,13 @@ impl EmbeddedIdentityEngine {
             webauthn_challenges: WebAuthnChallengeStore::new(),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
+            offline_corpus: None,
             device_fp,
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
         engine.populate_realm_status_cache()?;
+        engine.try_load_offline_corpus();
         Ok(engine)
     }
 
@@ -773,6 +781,62 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Scans all realms for an offline breach corpus config and loads the first
+    /// one found. Called once at startup, after realm seeding.
+    ///
+    /// Logs a warning if the corpus file cannot be loaded (fail-open — startup
+    /// continues, breach check will emit `BreachCheckUnavailable` events for
+    /// passwords submitted to offline-mode realms until the file is fixed).
+    fn try_load_offline_corpus(&mut self) {
+        use crate::identity::types::BreachCheckMode;
+
+        let sys_realm = keys::system_realm_id();
+        let realm_prefix = keys::realm_id_scan_prefix();
+        let realm_end = keys::prefix_end(&realm_prefix);
+
+        let entries = match self.storage.scan(&sys_realm, &realm_prefix, &realm_end) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "offline corpus scan: storage error; skipping");
+                return;
+            }
+        };
+
+        for entry in &entries {
+            let realm = match serde_json::from_slice::<crate::identity::types::Realm>(&entry.value)
+            {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            let bc = realm.config().breach_check.clone();
+            if let BreachCheckMode::Offline {
+                corpus_path,
+                max_corpus_age_days,
+            } = bc.mode
+            {
+                match crate::identity::breach_corpus::OfflineBreachCorpus::load(
+                    &corpus_path,
+                    max_corpus_age_days,
+                ) {
+                    Ok(corpus) => {
+                        self.offline_corpus = Some(Arc::new(corpus));
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            corpus_path = %corpus_path.display(),
+                            error = %e,
+                            "offline breach corpus could not be loaded; \
+                             offline-mode realms will fail-open on breach checks"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     /// Creates a new identity engine with a pre-existing signing key.
     ///
     /// Used for testing with a known key or for key restoration from storage.
@@ -786,7 +850,7 @@ impl EmbeddedIdentityEngine {
     ) -> Self {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
         let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
-        let engine = Self {
+        let mut engine = Self {
             storage,
             clock,
             config,
@@ -810,6 +874,7 @@ impl EmbeddedIdentityEngine {
             webauthn_challenges: WebAuthnChallengeStore::new(),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
+            offline_corpus: None,
             device_fp,
         };
         // Best-effort: if seeding fails here, tests that expect a system
@@ -817,6 +882,7 @@ impl EmbeddedIdentityEngine {
         // constructor swallows so existing test harnesses don't break.
         let _ = engine.seed_system_realm_if_absent();
         let _ = engine.populate_realm_status_cache();
+        engine.try_load_offline_corpus();
         engine
     }
 
@@ -829,6 +895,19 @@ impl EmbeddedIdentityEngine {
         transport: std::sync::Arc<dyn crate::identity::hibp::HibpTransport>,
     ) -> Self {
         self.hibp = Arc::new(crate::identity::hibp::HibpClient::with_transport(transport));
+        self
+    }
+
+    /// Installs an offline breach corpus for air-gapped deployments.
+    ///
+    /// When set, realms configured with `breach_check.mode = offline` will
+    /// binary-search this corpus instead of calling the HIBP API.
+    #[allow(dead_code)]
+    pub(crate) fn with_offline_corpus(
+        mut self,
+        corpus: crate::identity::breach_corpus::OfflineBreachCorpus,
+    ) -> Self {
+        self.offline_corpus = Some(Arc::new(corpus));
         self
     }
 
@@ -3637,43 +3716,78 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             )?;
         }
 
-        // HIBP k-anonymity breach check.
-        // Only the 5-char SHA-1 prefix is sent to the API; no PII leaves the process (AC-2).
+        // Breached-password check — online (HIBP) or offline (local corpus).
+        // Only the 5-char SHA-1 prefix is sent in online mode; no PII leaves the process (AC-2).
         if let Some(realm) = self.get_realm(realm_id)? {
             let bc = &realm.config().breach_check;
             if bc.enabled {
-                let api_key = if bc.hibp_api_key.is_empty() {
-                    None
-                } else {
-                    Some(bc.hibp_api_key.as_str())
-                };
-                match self.hibp.is_pwned(password.as_bytes(), api_key) {
-                    Ok(true) => {
-                        // Compromised — reject and audit (AC-1).
-                        let _ = self.record_audit(
-                            realm_id,
-                            None,
-                            crate::audit::AuditAction::PasswordCompromisedRejected,
-                            "credential",
-                            &user_id.as_uuid().to_string(),
-                        );
-                        return Err(IdentityError::PasswordCompromised);
+                use crate::identity::types::BreachCheckMode;
+                match &bc.mode {
+                    BreachCheckMode::Offline { .. } => {
+                        match &self.offline_corpus {
+                            Some(corpus) => {
+                                if corpus.is_pwned(password.as_bytes()) {
+                                    let _ = self.record_audit(
+                                        realm_id,
+                                        None,
+                                        crate::audit::AuditAction::PasswordCompromisedRejected,
+                                        "credential",
+                                        &user_id.as_uuid().to_string(),
+                                    );
+                                    return Err(IdentityError::PasswordCompromised);
+                                }
+                            }
+                            None => {
+                                // Corpus not loaded — fail-open and audit, same as HIBP timeout.
+                                tracing::warn!(
+                                    user_id = %user_id.as_uuid(),
+                                    "offline breach corpus not loaded; accepting password (fail-open)"
+                                );
+                                let _ = self.record_audit(
+                                    realm_id,
+                                    None,
+                                    crate::audit::AuditAction::BreachCheckUnavailable,
+                                    "credential",
+                                    &user_id.as_uuid().to_string(),
+                                );
+                            }
+                        }
                     }
-                    Ok(false) => {}
-                    Err(e) => {
-                        // HIBP unavailable — fail-open and audit (AC-3).
-                        tracing::warn!(
-                            user_id = %user_id.as_uuid(),
-                            reason = %e,
-                            "HIBP breach-check unavailable; accepting password (fail-open)"
-                        );
-                        let _ = self.record_audit(
-                            realm_id,
-                            None,
-                            crate::audit::AuditAction::BreachCheckUnavailable,
-                            "credential",
-                            &user_id.as_uuid().to_string(),
-                        );
+                    BreachCheckMode::Online => {
+                        let api_key = if bc.hibp_api_key.is_empty() {
+                            None
+                        } else {
+                            Some(bc.hibp_api_key.as_str())
+                        };
+                        match self.hibp.is_pwned(password.as_bytes(), api_key) {
+                            Ok(true) => {
+                                // Compromised — reject and audit (AC-1).
+                                let _ = self.record_audit(
+                                    realm_id,
+                                    None,
+                                    crate::audit::AuditAction::PasswordCompromisedRejected,
+                                    "credential",
+                                    &user_id.as_uuid().to_string(),
+                                );
+                                return Err(IdentityError::PasswordCompromised);
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                // HIBP unavailable — fail-open and audit (AC-3).
+                                tracing::warn!(
+                                    user_id = %user_id.as_uuid(),
+                                    reason = %e,
+                                    "HIBP breach-check unavailable; accepting password (fail-open)"
+                                );
+                                let _ = self.record_audit(
+                                    realm_id,
+                                    None,
+                                    crate::audit::AuditAction::BreachCheckUnavailable,
+                                    "credential",
+                                    &user_id.as_uuid().to_string(),
+                                );
+                            }
+                        }
                     }
                 }
             }
