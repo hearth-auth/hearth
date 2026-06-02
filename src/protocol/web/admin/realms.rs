@@ -148,7 +148,7 @@ pub async fn admin_realm_detail(
                 realm_theme_css: state.realm_theme_css(),
             })
         }
-        Ok(None) => super::handlers_common::not_found("Realm not found"),
+        Ok(None) => super::handlers_common::not_found_authed(&state, &session, "Realm not found."),
         Err(e) => {
             tracing::warn!(error = %e, "get_realm failed");
             super::handlers_common::server_error()
@@ -189,7 +189,7 @@ pub async fn admin_realm_delete(
                     Redirect::to("/ui/admin/realms").into_response()
                 }
                 Err(IdentityError::RealmNotFound) => {
-                    super::handlers_common::not_found("Realm not found")
+                    super::handlers_common::not_found_authed(&state, &session, "Realm not found.")
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "delete_realm failed");
@@ -200,7 +200,7 @@ pub async fn admin_realm_delete(
         Ok(Some(_)) => super::handlers_common::bad_request(
             "Only archived realms can be permanently deleted. Remove the realm from hearth.yaml and restart to archive it first.",
         ),
-        Ok(None) => super::handlers_common::not_found("Realm not found"),
+        Ok(None) => super::handlers_common::not_found_authed(&state, &session, "Realm not found."),
         Err(e) => {
             tracing::warn!(error = %e, "get_realm failed");
             super::handlers_common::server_error()

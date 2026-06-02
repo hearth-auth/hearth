@@ -1486,7 +1486,7 @@ pub async fn admin_realm_claims(
 
     let realm = match state.identity.get_realm(&realm_id) {
         Ok(Some(r)) => r,
-        _ => return super::handlers_common::not_found("Realm not found"),
+        _ => return super::handlers_common::not_found_authed(&state, &session, "Realm not found."),
     };
 
     // Attempt to find the claim profile from config (YAML-managed) or fall
