@@ -4,13 +4,13 @@
 //! Depends on `storage` (for persistence) and `core` (for shared types).
 //! May call `authz` (lateral dependency). Never the reverse.
 
+pub(crate) mod breach_corpus;
 pub mod claims_config;
 pub(crate) mod cleanup;
 pub(crate) mod credentials;
 pub mod device_fingerprint;
 pub mod device_fp;
 pub mod email;
-pub(crate) mod breach_corpus;
 mod engine;
 pub mod error;
 pub mod federation;
@@ -60,15 +60,15 @@ pub use tokens::{
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
     canonicalize_scopes, AdaptiveMfaConfig, AttributeDefinition, AttributeDefinitions,
-    AttributeType, BreachCheckConfig, BreachCheckMode, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
-    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    CreateWebhookRequest, CredentialExport, DcrPolicy, ImportClientRequest, ImportUserRequest,
-    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
-    OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
-    PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
-    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
-    RequiredActionTokenResponse, Session, SessionContext, UpdateOrganizationRequest,
-    UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
+    AttributeType, BreachCheckConfig, BreachCheckMode, BulkResult, ConsentDecision,
+    ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
+    CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
+    ImportClientRequest, ImportUserRequest, InvitationStatus, MigrationReport, Organization,
+    OrganizationConfig, OrganizationInvitation, OrganizationMembership, OrganizationRole,
+    OrganizationStatus, Page, PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm,
+    RealmConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
+    RequiredAction, RequiredActionTokenResponse, Session, SessionContext,
+    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{

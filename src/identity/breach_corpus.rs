@@ -319,6 +319,9 @@ mod tests {
         // SHA-1("password") = 5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8
         let hash = sha1_of(b"password");
         let hex = hex::encode(hash);
-        assert_eq!(hex.to_uppercase(), "5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8");
+        assert_eq!(
+            hex.to_uppercase(),
+            "5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8"
+        );
     }
 }

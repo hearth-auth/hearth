@@ -9,9 +9,9 @@
             aria-expanded="false"
             aria-label="Expand event detail"
             _="on click
-                 toggle .bg-ht-surface-overlay on my closest <tr>
-                 toggle .rotate-90 on the first <svg> in me
-                 toggle .hidden on the next <tr> from my closest <tr>
+                 toggle .bg-ht-surface-overlay on (closest <tr/>)
+                 toggle .rotate-90 on the first <svg/> in me
+                 toggle .hidden on the next <tr/> from (closest <tr/>)
                  if @aria-expanded == 'false'
                    set @aria-expanded to 'true'
                    set @aria-label to 'Collapse event detail'
