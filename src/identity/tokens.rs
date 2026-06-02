@@ -60,6 +60,8 @@ impl Audience {
 
     /// Returns `true` if the audience includes `candidate`.
     pub fn contains(&self, candidate: &str) -> bool {
+        // `aud` is a public URL claim in the JWT payload, not a secret —
+        // non-constant-time comparison is intentional here.
         match self {
             Self::Single(a) => a == candidate,
             Self::Multi(list) => list.iter().any(|a| a == candidate),

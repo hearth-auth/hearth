@@ -883,7 +883,11 @@ pub async fn login_submit(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    login_submit_impl(state, headers, form, RealmSource::Path(None))
+    tokio::task::spawn_blocking(move || {
+        login_submit_impl(state, headers, form, RealmSource::Path(None))
+    })
+    .await
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Handles login submission at `/ui/realms/<name>/login`.
@@ -893,7 +897,11 @@ pub async fn login_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    login_submit_impl(state, headers, form, RealmSource::Path(Some(realm_name)))
+    tokio::task::spawn_blocking(move || {
+        login_submit_impl(state, headers, form, RealmSource::Path(Some(realm_name)))
+    })
+    .await
+    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Handles admin login submission at `/ui/admin/login`. On success,
@@ -903,7 +911,9 @@ pub async fn admin_login_submit(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    login_submit_impl(state, headers, form, RealmSource::Admin)
+    tokio::task::spawn_blocking(move || login_submit_impl(state, headers, form, RealmSource::Admin))
+        .await
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Shared login submit. On success: creates a session, issues the
