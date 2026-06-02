@@ -1498,9 +1498,28 @@ pub fn router(state: WebState) -> Router {
 
 /// Default 404 handler. Returns the branded error page rather than letting
 /// axum fall through to a bare `404 Not Found` text body.
-async fn serve_branded_404(req: axum::extract::Request) -> Response {
-    let path = req.uri().path().to_string();
-    handlers_common::not_found(&format!("No page exists at {path}."))
+///
+/// When the requester holds a valid session (authenticated admin), renders
+/// inside the full admin nav shell so the user can navigate back without
+/// retracing the URL bar. Falls back to the chrome-free public layout for
+/// unauthenticated visitors.
+async fn serve_branded_404(
+    State(state): State<Arc<WebState>>,
+    req: axum::extract::Request,
+) -> Response {
+    use axum::extract::FromRequestParts as _;
+    let (mut parts, _body) = req.into_parts();
+    // Try to resolve a session from cookies; silently ignore auth failures so
+    // unauthenticated visitors receive the public layout rather than a redirect.
+    let session = auth::UiSession::from_request_parts(&mut parts, &state)
+        .await
+        .ok();
+    let path = parts.uri.path().to_owned();
+    let msg = format!("No page exists at {path}.");
+    match session {
+        Some(ref s) => handlers_common::not_found_authed(state.as_ref(), s, &msg),
+        None => handlers_common::not_found(&msg),
+    }
 }
 
 /// Serves the Hearth flame as `image/svg+xml`. Works for both `.ico` and
