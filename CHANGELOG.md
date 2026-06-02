@@ -29,6 +29,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `realms.<name>.applications.<key>.profile: "fapi2"` in `hearth.yaml`. The reconciler applies it on
   create and detects drift on subsequent restarts. (HEA-1040)
 
+### Security
+
+- **JTI corruption no longer bypasses replay protection** — a malformed (wrong-length) WAL entry for
+  a JWT Bearer assertion JTI previously silently decoded as epoch-0 expiry, causing the replay check
+  to pass and enabling token replay. The engine now returns an `Internal` error on unexpected byte
+  length, preventing silent overwrites of valid entries (HEA-1136).
+
 ### Fixed
 
 - **Admin UI defect batch** — 15 confirmed bugs from the 2026-05-31 QA audit (HEA-1089):
