@@ -11,6 +11,7 @@ use arc_swap::ArcSwap;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::SecureRandom;
+use secrecy::ExposeSecret;
 use zeroize::Zeroizing;
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
@@ -25,6 +26,7 @@ use crate::identity::credentials::{self, CleartextPassword, CredentialConfig, St
 use crate::identity::device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore};
 use crate::identity::error::IdentityError;
 use crate::identity::keys;
+use crate::identity::session_version::SessionVersionStore;
 /// Encodes bytes as lowercase hexadecimal.
 fn hex_encode(bytes: &[u8]) -> String {
     bytes
@@ -141,7 +143,7 @@ struct StoredEmailVerification {
 use crate::identity::oidc::{
     ApplicationStatus, AuthorizationRequest, AuthorizationResponse, BackchannelTarget,
     CodeChallengeMethod, FrontchannelTarget, OAuthClient, OidcConfig, OidcDiscoveryDocument,
-    OidcTokenResponse, RegisterClientRequest, RpLogoutRequest, RpLogoutResult,
+    OidcTokenResponse, RegisterClientRequest, ResponseMode, RpLogoutRequest, RpLogoutResult,
     StoredAuthorizationCode, StoredDeviceCode, StoredGrantFamily, TokenExchangeRequest,
 };
 use crate::identity::tokens::{
@@ -155,8 +157,8 @@ use crate::identity::types::{
     ImportUserRequest, InvitationStatus, Organization, OrganizationInvitation,
     OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
     PendingAuthorizationRequest, Realm, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, Session, SessionContext, UpdateOrganizationRequest, UpdateRealmRequest,
-    UpdateUserRequest, User, UserStatus,
+    RegistrationPolicy, Session, SessionContext, SessionLimitPolicy, UpdateOrganizationRequest,
+    UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::webauthn::{
@@ -393,6 +395,17 @@ pub struct EmbeddedIdentityEngine {
     ip_login_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Pending `WebAuthn` challenges awaiting completion.
     webauthn_challenges: WebAuthnChallengeStore,
+    /// Per-user locks for serializing concurrent `create_session` calls.
+    ///
+    /// Prevents TOCTOU races when enforcing `max_concurrent_sessions`: the
+    /// read (count live sessions) and the write (create or evict + create)
+    /// must be atomic per user. Key format: `"{realm_uuid}:{user_uuid}"`.
+    session_limit_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-realm locks for atomic JTI check-and-consume in the JWT Bearer grant.
+    ///
+    /// Eliminates the TOCTOU window between `storage.get` and `storage.put`
+    /// in replay prevention. One lock per realm; created on first use.
+    jti_locks: Mutex<HashMap<RealmId, Arc<Mutex<()>>>>,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
     /// Realm ops are not on the hot path, and a realm record and its
@@ -407,17 +420,17 @@ pub struct EmbeddedIdentityEngine {
     /// Shared across all password-set/-change operations. Uses an injectable
     /// transport so tests can stub out network I/O.
     hibp: Arc<crate::identity::hibp::HibpClient>,
-    /// Optional offline breach corpus for air-gapped deployments.
-    ///
-    /// Loaded once at startup when any realm config specifies
-    /// `breach_check.mode = offline`. `None` when all realms use online mode
-    /// or breach checking is disabled.
-    offline_corpus: Option<Arc<crate::identity::breach_corpus::OfflineBreachCorpus>>,
     /// Device fingerprint store for adaptive (risk-based) MFA.
     ///
     /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
     /// timestamps. Shared across all realms — storage is realm-scoped internally.
     device_fp: Arc<DeviceFingerprintStore>,
+    /// Session-version store for the `sv` claim (HEA-930).
+    ///
+    /// Provides bump, delta-feed, and snapshot operations on the `ssv:` key
+    /// namespace. Shared with the `SvBumper` trait implementation so the RBAC
+    /// engine can trigger bumps without importing from the identity layer.
+    sv_store: Arc<SessionVersionStore>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -628,7 +641,11 @@ impl EmbeddedIdentityEngine {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
         let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage)?);
         let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
-        let mut engine = Self {
+        let sv_store = Arc::new(SessionVersionStore::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        ));
+        let engine = Self {
             storage,
             clock,
             config,
@@ -650,15 +667,16 @@ impl EmbeddedIdentityEngine {
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
+            session_limit_locks: Mutex::new(HashMap::new()),
+            jti_locks: Mutex::new(HashMap::new()),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
-            offline_corpus: None,
             device_fp,
+            sv_store,
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
         engine.populate_realm_status_cache()?;
-        engine.try_load_offline_corpus();
         Ok(engine)
     }
 
@@ -781,62 +799,6 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Scans all realms for an offline breach corpus config and loads the first
-    /// one found. Called once at startup, after realm seeding.
-    ///
-    /// Logs a warning if the corpus file cannot be loaded (fail-open — startup
-    /// continues, breach check will emit `BreachCheckUnavailable` events for
-    /// passwords submitted to offline-mode realms until the file is fixed).
-    fn try_load_offline_corpus(&mut self) {
-        use crate::identity::types::BreachCheckMode;
-
-        let sys_realm = keys::system_realm_id();
-        let realm_prefix = keys::realm_id_scan_prefix();
-        let realm_end = keys::prefix_end(&realm_prefix);
-
-        let entries = match self.storage.scan(&sys_realm, &realm_prefix, &realm_end) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(error = %e, "offline corpus scan: storage error; skipping");
-                return;
-            }
-        };
-
-        for entry in &entries {
-            let realm = match serde_json::from_slice::<crate::identity::types::Realm>(&entry.value)
-            {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-
-            let bc = realm.config().breach_check.clone();
-            if let BreachCheckMode::Offline {
-                corpus_path,
-                max_corpus_age_days,
-            } = bc.mode
-            {
-                match crate::identity::breach_corpus::OfflineBreachCorpus::load(
-                    &corpus_path,
-                    max_corpus_age_days,
-                ) {
-                    Ok(corpus) => {
-                        self.offline_corpus = Some(Arc::new(corpus));
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            corpus_path = %corpus_path.display(),
-                            error = %e,
-                            "offline breach corpus could not be loaded; \
-                             offline-mode realms will fail-open on breach checks"
-                        );
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
     /// Creates a new identity engine with a pre-existing signing key.
     ///
     /// Used for testing with a known key or for key restoration from storage.
@@ -850,7 +812,11 @@ impl EmbeddedIdentityEngine {
     ) -> Self {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
         let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
-        let mut engine = Self {
+        let sv_store = Arc::new(SessionVersionStore::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        ));
+        let engine = Self {
             storage,
             clock,
             config,
@@ -872,17 +838,18 @@ impl EmbeddedIdentityEngine {
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
+            session_limit_locks: Mutex::new(HashMap::new()),
+            jti_locks: Mutex::new(HashMap::new()),
             realm_ops_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
-            offline_corpus: None,
             device_fp,
+            sv_store,
         };
         // Best-effort: if seeding fails here, tests that expect a system
         // realm will notice and surface it. `new()` panics on failure; this
         // constructor swallows so existing test harnesses don't break.
         let _ = engine.seed_system_realm_if_absent();
         let _ = engine.populate_realm_status_cache();
-        engine.try_load_offline_corpus();
         engine
     }
 
@@ -895,19 +862,6 @@ impl EmbeddedIdentityEngine {
         transport: std::sync::Arc<dyn crate::identity::hibp::HibpTransport>,
     ) -> Self {
         self.hibp = Arc::new(crate::identity::hibp::HibpClient::with_transport(transport));
-        self
-    }
-
-    /// Installs an offline breach corpus for air-gapped deployments.
-    ///
-    /// When set, realms configured with `breach_check.mode = offline` will
-    /// binary-search this corpus instead of calling the HIBP API.
-    #[allow(dead_code)]
-    pub(crate) fn with_offline_corpus(
-        mut self,
-        corpus: crate::identity::breach_corpus::OfflineBreachCorpus,
-    ) -> Self {
-        self.offline_corpus = Some(Arc::new(corpus));
         self
     }
 
@@ -1537,13 +1491,13 @@ impl EmbeddedIdentityEngine {
         status: UserStatus,
     ) -> Result<User, IdentityError> {
         let email = validation::validate_email(&request.email)?;
-        let first_name = validation::validate_name_part(&request.first_name, "first_name")?;
-        let last_name = validation::validate_name_part(&request.last_name, "last_name")?;
+        let first_name = validation::validate_name_part(&request.first_name, "First name")?;
+        let last_name = validation::validate_name_part(&request.last_name, "Last name")?;
         let display_name = if request.display_name.trim().is_empty() {
             let synthesized = format!("{} {}", first_name, last_name).trim().to_string();
             if synthesized.is_empty() {
                 return Err(IdentityError::InvalidInput {
-                    reason: "display_name or first_name/last_name required".to_string(),
+                    reason: "Display name or first/last name is required".to_string(),
                 });
             }
             validation::validate_display_name(&synthesized)?
@@ -1821,6 +1775,7 @@ impl EmbeddedIdentityEngine {
         user_id: &UserId,
         now_secs: i64,
         claims: &TokenClaims,
+        dpop_jkt: Option<&str>,
     ) -> Result<TokenPair, IdentityError> {
         let family_key = keys::encode_grant_family(fid);
         let family_bytes = self
@@ -1835,6 +1790,29 @@ impl EmbeddedIdentityEngine {
 
         if family.revoked {
             return Err(IdentityError::TokenRevoked);
+        }
+
+        // FAPI 2.0: DPoP sender-constrained tokens are mandatory on the refresh
+        // path, mirroring the gate at exchange_authorization_code (§5.3.3).
+        // Check both per-client profile AND realm-level fapi_profile so that
+        // standard-profile clients in a Baseline/Advanced realm cannot bypass
+        // the sender-constraint requirement on refresh (mirrors HEA-1022 fix).
+        if let Some(ref client_id) = family.client_id {
+            if let Some(client) = self.get_client(realm_id, client_id)? {
+                let realm_fapi = self
+                    .get_realm(realm_id)?
+                    .ok_or(IdentityError::RealmNotFound)?
+                    .config()
+                    .fapi_profile;
+                let fapi_enforced = client.profile().is_fapi2() || realm_fapi.is_some();
+                if fapi_enforced && dpop_jkt.is_none() {
+                    return Err(IdentityError::FapiViolation {
+                        reason: "FAPI 2.0 requires sender-constrained tokens; \
+                                 include a DPoP proof and dpop_jkt in the token request"
+                            .to_string(),
+                    });
+                }
+            }
         }
 
         // Verify the incoming refresh token matches the current hash
@@ -1927,10 +1905,15 @@ impl EmbeddedIdentityEngine {
             nonce: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
+            org_groups: claims.org_groups.clone(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: family.amr_values.clone(),
+            cnf: dpop_jkt.map(|jkt| crate::identity::tokens::CnfClaim {
+                jkt: jkt.to_string(),
+            }),
             custom: claims.custom.clone(),
+            sv: claims.sv,
         };
         let new_refresh_claims = TokenClaims {
             sub: user_id.to_string(),
@@ -1948,10 +1931,13 @@ impl EmbeddedIdentityEngine {
             nonce: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
+            org_groups: Vec::new(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            cnf: None,
             custom: claims.custom.clone(),
+            sv: None,
         };
 
         let new_access = signing_key.issue_token(&new_access_claims)?;
@@ -2301,7 +2287,15 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    fn build_discovery_document(&self, issuer: &str) -> OidcDiscoveryDocument {
+    fn build_discovery_document(
+        &self,
+        issuer: &str,
+        realm_config: Option<&crate::identity::types::RealmConfig>,
+    ) -> OidcDiscoveryDocument {
+        let fapi_profile = realm_config.and_then(|c| c.fapi_profile).map(|p| match p {
+            crate::identity::types::FapiProfile::Baseline => "baseline".to_string(),
+            crate::identity::types::FapiProfile::Advanced => "advanced".to_string(),
+        });
         OidcDiscoveryDocument {
             issuer: issuer.to_string(),
             authorization_endpoint: format!("{issuer}/authorize"),
@@ -2309,7 +2303,13 @@ impl EmbeddedIdentityEngine {
             jwks_uri: format!("{issuer}/.well-known/jwks.json"),
             userinfo_endpoint: format!("{issuer}/userinfo"),
             response_types_supported: vec!["code".to_string()],
-            response_modes_supported: vec!["query".to_string(), "fragment".to_string()],
+            response_modes_supported: vec![
+                "query".to_string(),
+                "fragment".to_string(),
+                "query.jwt".to_string(),
+                "fragment.jwt".to_string(),
+                "jwt".to_string(),
+            ],
             subject_types_supported: vec!["public".to_string()],
             id_token_signing_alg_values_supported: vec!["EdDSA".to_string()],
             scopes_supported: vec![
@@ -2331,6 +2331,7 @@ impl EmbeddedIdentityEngine {
             token_endpoint_auth_methods_supported: vec![
                 "none".to_string(),
                 "client_secret_post".to_string(),
+                "private_key_jwt".to_string(),
             ],
             code_challenge_methods_supported: vec!["S256".to_string()],
             grant_types_supported: vec![
@@ -2338,6 +2339,7 @@ impl EmbeddedIdentityEngine {
                 "refresh_token".to_string(),
                 "client_credentials".to_string(),
                 "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
             ],
             registration_endpoint: Some(format!("{issuer}/register")),
             device_authorization_endpoint: Some(format!("{issuer}/device/authorize")),
@@ -2348,6 +2350,16 @@ impl EmbeddedIdentityEngine {
             end_session_endpoint: Some(format!("{issuer}/end_session")),
             backchannel_logout_supported: true,
             backchannel_logout_session_supported: true,
+            pushed_authorization_request_endpoint: Some(format!("{issuer}/as/par")),
+            dpop_signing_alg_values_supported: vec!["ES256".to_string(), "EdDSA".to_string()],
+            request_object_signing_alg_values_supported: vec![
+                "RS256".to_string(),
+                "PS256".to_string(),
+                "ES256".to_string(),
+                "EdDSA".to_string(),
+            ],
+            authorization_signing_alg_values_supported: vec!["EdDSA".to_string()],
+            fapi_profile,
         }
     }
 
@@ -2407,6 +2419,56 @@ impl EmbeddedIdentityEngine {
                 &user_id_str,
             );
         }
+    }
+
+    /// Returns the per-realm lock for JWT Bearer JTI operations, creating it on first use.
+    fn jwt_bearer_jti_lock(&self, realm_id: &RealmId) -> Arc<Mutex<()>> {
+        let mut map = self.jti_locks.lock().expect("jti_locks poisoned");
+        Arc::clone(
+            map.entry(realm_id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Atomically checks and consumes a JWT Bearer assertion JTI for replay prevention.
+    ///
+    /// Stores the JTI with its expiry time (big-endian i64 `assertion_exp`). On lookup the
+    /// stored expiry is compared against `now`: if the original assertion is still within
+    /// its validity window (plus `CLOCK_SKEW_SECS`), the call is rejected as replay.
+    ///
+    /// Lazy expiry: entries are not proactively pruned; they become "expired" once
+    /// `now > stored_exp + CLOCK_SKEW_SECS`. Re-use of an expired JTI is safe because any
+    /// replayed assertion would also fail the `exp` check.
+    ///
+    /// The per-realm mutex eliminates the TOCTOU window between `get` and `put`.
+    fn check_and_consume_jwt_bearer_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        assertion_exp: i64,
+    ) -> Result<(), IdentityError> {
+        let jti_key = keys::encode_jwt_bearer_jti(jti);
+        let lock = self.jwt_bearer_jti_lock(realm_id);
+        let _guard = lock.lock().expect("jwt bearer jti lock poisoned");
+
+        if let Some(stored) = self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+        {
+            let stored_exp = i64::from_be_bytes(stored.try_into().unwrap_or([0u8; 8]));
+            let now_secs = self.clock.now().as_micros() / 1_000_000;
+            if now_secs <= stored_exp.saturating_add(CLOCK_SKEW_SECS) {
+                return Err(IdentityError::JwtBearerAssertionInvalid {
+                    reason: "assertion jti has already been used (replay)".to_string(),
+                });
+            }
+            // Entry is past expiry — safe to overwrite with the new assertion's exp.
+        }
+        self.storage
+            .put(realm_id, &jti_key, &assertion_exp.to_be_bytes())
+            .map_err(Self::storage_err)?;
+        Ok(())
     }
 }
 
@@ -2998,6 +3060,54 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
+        // 8f. Delete all JWT bearer assertion JTIs (replay store).
+        let jb_jti_prefix = keys::jwt_bearer_jti_scan_prefix();
+        let jb_jti_end = keys::prefix_end(&jb_jti_prefix);
+        let jb_jtis = self
+            .storage
+            .scan(realm_id, &jb_jti_prefix, &jb_jti_end)
+            .map_err(Self::storage_err)?;
+        if !jb_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for entry in &jb_jtis {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 8g. Delete all private_key_jwt client assertion JTIs (replay store).
+        let ca_jti_prefix = keys::client_assertion_jti_scan_prefix();
+        let ca_jti_end = keys::prefix_end(&ca_jti_prefix);
+        let ca_jtis = self
+            .storage
+            .scan(realm_id, &ca_jti_prefix, &ca_jti_end)
+            .map_err(Self::storage_err)?;
+        if !ca_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for entry in &ca_jtis {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 8h. Delete all JAR (RFC 9101) signed request object JTIs (replay store).
+        let jar_jti_prefix = keys::jar_jti_scan_prefix();
+        let jar_jti_end = keys::prefix_end(&jar_jti_prefix);
+        let jar_jtis = self
+            .storage
+            .scan(realm_id, &jar_jti_prefix, &jar_jti_end)
+            .map_err(Self::storage_err)?;
+        if !jar_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for entry in &jar_jtis {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
         // 9. Delete realm signing key (check existence first so we can attribute
         //    cascade work even when only the signing key survives a prior crash).
         let key_storage_key = keys::encode_realm_signing_key(realm_id);
@@ -3211,10 +3321,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 nonce: None,
                 roles: Vec::new(),
                 groups: Vec::new(),
+                org_groups: Vec::new(),
                 permissions: Vec::new(),
                 required_actions: remaining,
                 amr: Vec::new(),
+                cnf: None,
                 custom: Default::default(),
+                sv: None,
             };
             let access_token = signing_key.issue_token(&ra_claims)?;
             return Ok(RequiredActionTokenResponse { access_token });
@@ -3445,13 +3558,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // 3a. Apply first_name change if requested
         if let Some(ref new_first) = request.first_name {
-            let normalized = validation::validate_name_part(new_first, "first_name")?;
+            let normalized = validation::validate_name_part(new_first, "First name")?;
             user.set_first_name(normalized);
         }
 
         // 3b. Apply last_name change if requested
         if let Some(ref new_last) = request.last_name {
-            let normalized = validation::validate_name_part(new_last, "last_name")?;
+            let normalized = validation::validate_name_part(new_last, "Last name")?;
             user.set_last_name(normalized);
         }
 
@@ -3681,6 +3794,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
+        // 11. Cascade: delete all device fingerprints (GDPR Art. 17, AC-11).
+        //     Failures here must not block the deletion — fingerprints are
+        //     advisory risk signals, not authoritative data.  The UserDeleted
+        //     audit event already records that erasure happened.
+        let _ = self.device_fp.delete_all_for_user(realm_id, user_id);
+
         self.record_audit(
             realm_id,
             None,
@@ -3690,6 +3809,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )?;
 
         Ok(())
+    }
+
+    fn delete_user_device_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<usize, IdentityError> {
+        self.device_fp.delete_all_for_user(realm_id, user_id)
     }
 
     fn set_password(
@@ -3716,78 +3843,43 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             )?;
         }
 
-        // Breached-password check — online (HIBP) or offline (local corpus).
-        // Only the 5-char SHA-1 prefix is sent in online mode; no PII leaves the process (AC-2).
+        // HIBP k-anonymity breach check.
+        // Only the 5-char SHA-1 prefix is sent to the API; no PII leaves the process (AC-2).
         if let Some(realm) = self.get_realm(realm_id)? {
             let bc = &realm.config().breach_check;
             if bc.enabled {
-                use crate::identity::types::BreachCheckMode;
-                match &bc.mode {
-                    BreachCheckMode::Offline { .. } => {
-                        match &self.offline_corpus {
-                            Some(corpus) => {
-                                if corpus.is_pwned(password.as_bytes()) {
-                                    let _ = self.record_audit(
-                                        realm_id,
-                                        None,
-                                        crate::audit::AuditAction::PasswordCompromisedRejected,
-                                        "credential",
-                                        &user_id.as_uuid().to_string(),
-                                    );
-                                    return Err(IdentityError::PasswordCompromised);
-                                }
-                            }
-                            None => {
-                                // Corpus not loaded — fail-open and audit, same as HIBP timeout.
-                                tracing::warn!(
-                                    user_id = %user_id.as_uuid(),
-                                    "offline breach corpus not loaded; accepting password (fail-open)"
-                                );
-                                let _ = self.record_audit(
-                                    realm_id,
-                                    None,
-                                    crate::audit::AuditAction::BreachCheckUnavailable,
-                                    "credential",
-                                    &user_id.as_uuid().to_string(),
-                                );
-                            }
-                        }
+                let api_key = if bc.hibp_api_key.expose_secret().is_empty() {
+                    None
+                } else {
+                    Some(bc.hibp_api_key.expose_secret().as_str())
+                };
+                match self.hibp.is_pwned(password.as_bytes(), api_key) {
+                    Ok(true) => {
+                        // Compromised — reject and audit (AC-1).
+                        let _ = self.record_audit(
+                            realm_id,
+                            None,
+                            crate::audit::AuditAction::PasswordCompromisedRejected,
+                            "credential",
+                            &user_id.as_uuid().to_string(),
+                        );
+                        return Err(IdentityError::PasswordCompromised);
                     }
-                    BreachCheckMode::Online => {
-                        let api_key = if bc.hibp_api_key.is_empty() {
-                            None
-                        } else {
-                            Some(bc.hibp_api_key.as_str())
-                        };
-                        match self.hibp.is_pwned(password.as_bytes(), api_key) {
-                            Ok(true) => {
-                                // Compromised — reject and audit (AC-1).
-                                let _ = self.record_audit(
-                                    realm_id,
-                                    None,
-                                    crate::audit::AuditAction::PasswordCompromisedRejected,
-                                    "credential",
-                                    &user_id.as_uuid().to_string(),
-                                );
-                                return Err(IdentityError::PasswordCompromised);
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                // HIBP unavailable — fail-open and audit (AC-3).
-                                tracing::warn!(
-                                    user_id = %user_id.as_uuid(),
-                                    reason = %e,
-                                    "HIBP breach-check unavailable; accepting password (fail-open)"
-                                );
-                                let _ = self.record_audit(
-                                    realm_id,
-                                    None,
-                                    crate::audit::AuditAction::BreachCheckUnavailable,
-                                    "credential",
-                                    &user_id.as_uuid().to_string(),
-                                );
-                            }
-                        }
+                    Ok(false) => {}
+                    Err(e) => {
+                        // HIBP unavailable — fail-open and audit (AC-3).
+                        tracing::warn!(
+                            user_id = %user_id.as_uuid(),
+                            reason = %e,
+                            "HIBP breach-check unavailable; accepting password (fail-open)"
+                        );
+                        let _ = self.record_audit(
+                            realm_id,
+                            None,
+                            crate::audit::AuditAction::BreachCheckUnavailable,
+                            "credential",
+                            &user_id.as_uuid().to_string(),
+                        );
                     }
                 }
             }
@@ -3995,7 +4087,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             "credential",
             &user_id.as_uuid().to_string(),
         )?;
-        self.set_password(realm_id, user_id, new_password)
+        self.set_password(realm_id, user_id, new_password)?;
+        // Bump sv for all active sessions — password change is a security event.
+        let retention = self.sv_retention_secs(realm_id);
+        if let Err(e) = self.bump_user_sv_inner(realm_id, user_id, retention) {
+            tracing::warn!(realm=%realm_id, user=%user_id.as_uuid(), error=%e, "sv bump on password change failed");
+        }
+        Ok(())
     }
 
     fn create_session(
@@ -4030,6 +4128,87 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             UserStatus::Active => {}
             UserStatus::PendingVerification => return Err(IdentityError::UserNotVerified),
             UserStatus::Disabled => return Err(IdentityError::Unauthorized),
+        }
+
+        // Enforce per-realm concurrent session limit when configured.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(limit) = realm.config().max_concurrent_sessions {
+                let policy = realm.config().session_over_limit_policy.clone();
+                let lock_key = format!("{}:{}", realm_id.as_uuid(), user_id.as_uuid());
+
+                // Acquire per-user lock — serializes the count-check + create
+                // sequence to prevent TOCTOU races under concurrent logins.
+                let user_lock = {
+                    let mut locks = self
+                        .session_limit_locks
+                        .lock()
+                        .expect("session_limit_locks poisoned");
+                    locks
+                        .entry(lock_key)
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
+                        .clone()
+                };
+                let _guard = user_lock
+                    .lock()
+                    .expect("session_limit_locks user lock poisoned");
+
+                let now = self.clock.now();
+                // Use a large-but-safe limit (u32::MAX avoids the take(limit+1)
+                // overflow that usize::MAX would cause inside list_sessions_by_user).
+                let page =
+                    self.list_sessions_by_user(realm_id, user_id, None, u32::MAX as usize)?;
+                let mut live: Vec<_> = page.items.into_iter().filter(|s| s.is_valid(now)).collect();
+                let active = live.len() as u32;
+
+                if active >= limit {
+                    let evicted = match &policy {
+                        SessionLimitPolicy::RejectNew => {
+                            let ctx = AuditContext {
+                                actor: Actor::User(user_id.clone()),
+                                metadata: Some(serde_json::json!({
+                                    "user_id": user_id.as_uuid().to_string(),
+                                    "evicted": 0u32,
+                                    "policy": "reject_new",
+                                    "limit": limit,
+                                })),
+                            };
+                            let _ = self.record_audit(
+                                realm_id,
+                                Some(&ctx),
+                                AuditAction::SessionLimitEnforced,
+                                "session",
+                                &user_id.as_uuid().to_string(),
+                            );
+                            return Err(IdentityError::SessionLimitExceeded { limit, active });
+                        }
+                        SessionLimitPolicy::EvictOldest => {
+                            let to_evict = (active + 1 - limit) as usize;
+                            live.sort_by_key(|s| s.created_at());
+                            for s in live.iter().take(to_evict) {
+                                let _ = self.revoke_session(realm_id, s.id());
+                            }
+                            to_evict as u32
+                        }
+                    };
+
+                    let ctx = AuditContext {
+                        actor: Actor::User(user_id.clone()),
+                        metadata: Some(serde_json::json!({
+                            "user_id": user_id.as_uuid().to_string(),
+                            "evicted": evicted,
+                            "policy": "evict_oldest",
+                            "limit": limit,
+                        })),
+                    };
+                    let _ = self.record_audit(
+                        realm_id,
+                        Some(&ctx),
+                        AuditAction::SessionLimitEnforced,
+                        "session",
+                        &user_id.as_uuid().to_string(),
+                    );
+                }
+            }
         }
 
         // Generate session
@@ -4119,6 +4298,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Bump session version if sv tracking is enabled for this realm.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if realm.config().session_version.enabled {
+                let retention = realm.config().session_version.delta_retention_seconds;
+                if let Err(e) = self.sv_store.bump(realm_id, session_id, retention) {
+                    tracing::warn!(
+                        session = %session_id.as_uuid(),
+                        error = %e,
+                        "sv bump failed on session revoke"
+                    );
                 }
             }
         }
@@ -4367,11 +4560,58 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         let oid_ref = ctx.oid.as_deref();
 
+        // Resolve the org slug for org_groups path construction. A storage
+        // miss or parse failure is non-fatal: the token is still issued without
+        // org_groups rather than hard-failing a login.
+        let org_slug_owned: Option<String> = if let Some(oid_str) = oid_ref {
+            match oid_str.parse::<crate::core::OrganizationId>() {
+                Ok(org_id) => match self.get_organization(realm_id, &org_id) {
+                    Ok(Some(org)) => Some(org.slug().to_string()),
+                    Ok(None) => {
+                        tracing::warn!(
+                            oid = oid_str,
+                            "org not found during token issuance; org_groups omitted"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            oid = oid_str,
+                            error = %e,
+                            "org lookup failed during token issuance; org_groups omitted"
+                        );
+                        None
+                    }
+                },
+                Err(_) => {
+                    tracing::warn!(
+                        oid = oid_str,
+                        "oid is not a valid OrganizationId; org_groups omitted"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let org_slug_ref = org_slug_owned.as_deref();
+
+        // For Introspection/Decision modes, omit RBAC claims from the JWT:
+        // permissions are sourced live via /introspect or /oauth/authorize.
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let authz_mode = effective_client.access_token_authorization();
+        let access_resolved = if authz_mode == AccessTokenAuthorization::Embedded {
+            &resolved
+        } else {
+            &crate::rbac::ResolvedPermissions::default()
+        };
+        let empty_perm_strs: Vec<String> = Vec::new();
+
         let (roles, groups, permissions, custom) = self.apply_claim_profile(
             realm_id,
             &user,
             effective_client,
-            &resolved,
+            access_resolved,
             &ctx.granted_scopes,
             oid_ref,
             ClaimTarget::AccessToken,
@@ -4392,6 +4632,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             ..self.config.token.clone()
         };
         let realm_issuer = self.realm_issuer_url(realm_id);
+        let effective_perms = if authz_mode == AccessTokenAuthorization::Embedded {
+            if permissions.is_empty() {
+                &perm_strs
+            } else {
+                &permissions
+            }
+        } else {
+            &empty_perm_strs
+        };
+        // Embed sv claim when session-version tracking is enabled for this realm.
+        let sv_claim = self.get_realm(realm_id).ok().flatten().and_then(|realm| {
+            if realm.config().session_version.enabled {
+                Some(self.get_session_sv(realm_id, session_id))
+            } else {
+                None
+            }
+        });
         self.signing_key.issue_token_pair(&IssueTokenRequest {
             sub: &user_id.to_string(),
             sid: &session_id.to_string(),
@@ -4400,15 +4657,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             now,
             config: &effective_token_cfg,
             issuer_override: Some(realm_issuer),
-            roles: &roles,
-            groups: &groups,
-            permissions: if permissions.is_empty() {
-                &perm_strs
+            roles: if authz_mode == AccessTokenAuthorization::Embedded {
+                &roles
             } else {
-                &permissions
+                &[]
             },
+            groups: if authz_mode == AccessTokenAuthorization::Embedded {
+                &groups
+            } else {
+                &[]
+            },
+            org_slug: org_slug_ref,
+            permissions: effective_perms,
             custom,
             resource: ctx.resource.as_ref(),
+            dpop_jkt: None,
+            sv: sv_claim,
         })
     }
 
@@ -4516,6 +4780,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         refresh_token: &str,
+        dpop_jkt: Option<&str>,
     ) -> Result<TokenPair, IdentityError> {
         // Verify Ed25519 signature against realm key (with global-key fallback
         // for Phase 0 realms). Rejects forged/tampered tokens at the crypto
@@ -4599,6 +4864,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 &user_id,
                 now_secs,
                 &claims,
+                dpop_jkt,
             )
         } else {
             // Legacy path: Phase-0 session tokens (fid == None).
@@ -4649,15 +4915,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Validate client name (non-empty, length limit)
         let client_name = validation::validate_client_name(&request.client_name)?;
 
-        // Redirect URIs are optional for `client_credentials` and device_code grants.
-        // For all other grant types, at least one is required.
+        // Redirect URIs are optional for M2M grants (client_credentials, device_code,
+        // jwt-bearer). For all other grant types, at least one is required.
         let has_client_credentials = request
             .grant_types
             .contains(&"client_credentials".to_string());
         let has_device_code = request
             .grant_types
             .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
-        if request.redirect_uris.is_empty() && !has_client_credentials && !has_device_code {
+        let has_jwt_bearer = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
+        if request.redirect_uris.is_empty()
+            && !has_client_credentials
+            && !has_device_code
+            && !has_jwt_bearer
+        {
             return Err(IdentityError::InvalidInput {
                 reason: "at least one redirect URI is required".to_string(),
             });
@@ -4718,6 +4991,40 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         client.set_trust_level(request.trust_level);
         client.set_declared_scopes(request.declared_scopes.clone());
         client.set_consent_spans_orgs(request.consent_spans_orgs);
+        client.set_access_token_authorization(request.access_token_authorization);
+        client.set_jwks(request.jwks.clone());
+        client.set_jwks_uri(request.jwks_uri.clone());
+        if let Some(ref alg) = request.authorization_signed_response_alg {
+            if alg != "EdDSA" {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
+                    ),
+                });
+            }
+            client.set_authorization_signed_response_alg(Some(alg.clone()));
+        }
+
+        // FAPI 2.0 registration constraints.
+        if request.profile.is_fapi2() {
+            // FAPI2 clients must not use client_secret — private_key_jwt only.
+            if request.client_secret.is_some() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "FAPI 2.0 clients must not use client_secret; \
+                             register with jwks or jwks_uri for private_key_jwt authentication"
+                        .to_string(),
+                });
+            }
+            // FAPI2 clients must have a registered JWKS (inline or by URI).
+            if request.jwks.is_none() && request.jwks_uri.is_none() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "FAPI 2.0 clients must register a JWKS (jwks or jwks_uri) \
+                             for private_key_jwt client authentication"
+                        .to_string(),
+                });
+            }
+        }
+        client.set_profile(request.profile);
 
         // Serialize and persist
         let client_bytes =
@@ -4746,11 +5053,89 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &AuthorizationRequest,
     ) -> Result<AuthorizationResponse, IdentityError> {
+        use crate::identity::oidc::{CodeChallengeMethod as CCM, JarmClaims};
+        use crate::identity::types::FapiProfile;
+
+        // Retained for potential future use; FAPI Advanced JAR enforcement
+        // moved to push_authorization_request where the JTI is not yet consumed.
+        let _jar_was_present = request.request.is_some();
+
+        // 0. JAR (RFC 9101): if a signed request object is present, verify it
+        //    and use its claims to override the outer query parameters. This must
+        //    happen before any other validation so that JAR-supplied values
+        //    (state, redirect_uri, scope, …) are used for subsequent checks.
+        let jar_override;
+        let request = if let Some(ref jar_jwt) = request.request {
+            let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
+
+            // JAR client_id claim must match the outer client_id (RFC 9101 §4).
+            if let Some(ref jar_cid) = jar.client_id {
+                if jar_cid != &request.client_id.to_string() {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "client_id in JAR claims does not match the request".to_string(),
+                    });
+                }
+            }
+
+            let ccm = jar.code_challenge_method.as_deref().and_then(|m| {
+                if m == "S256" {
+                    Some(CCM::S256)
+                } else {
+                    None
+                }
+            });
+
+            jar_override = AuthorizationRequest {
+                client_id: request.client_id.clone(),
+                redirect_uri: jar
+                    .redirect_uri
+                    .unwrap_or_else(|| request.redirect_uri.clone()),
+                scope: jar.scope.unwrap_or_else(|| request.scope.clone()),
+                state: jar.state.unwrap_or_else(|| request.state.clone()),
+                resource: jar.resource.or_else(|| request.resource.clone()),
+                response_type: jar
+                    .response_type
+                    .unwrap_or_else(|| request.response_type.clone()),
+                user_id: request.user_id.clone(),
+                code_challenge: jar
+                    .code_challenge
+                    .or_else(|| request.code_challenge.clone()),
+                code_challenge_method: ccm.or_else(|| request.code_challenge_method.clone()),
+                nonce: jar.nonce.or_else(|| request.nonce.clone()),
+                amr_values: request.amr_values.clone(),
+                response_mode: request.response_mode.clone(),
+                request: None, // consumed — prevent re-entry
+                via_par: request.via_par,
+            };
+            &jar_override
+        } else {
+            request
+        };
+
         // 1. Validate response_type
         if request.response_type != "code" {
             return Err(IdentityError::InvalidInput {
                 reason: "response_type must be 'code'".to_string(),
             });
+        }
+
+        // 1b. Validate response_mode (if provided)
+        if let Some(mode) = &request.response_mode {
+            let supported = [
+                ResponseMode::Query,
+                ResponseMode::Fragment,
+                ResponseMode::QueryJwt,
+                ResponseMode::FragmentJwt,
+                ResponseMode::Jwt,
+            ];
+            if !supported.contains(mode) {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!(
+                        "unsupported response_mode '{}'; supported: query, fragment, query.jwt, fragment.jwt, jwt",
+                        mode.as_str()
+                    ),
+                });
+            }
         }
 
         // 2. Validate state is non-empty (CSRF protection)
@@ -4761,7 +5146,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // 2a. Realm lifecycle guard — suspended/archived realms must not issue codes.
-        self.require_active_realm(realm_id)?;
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        if realm.status() != crate::identity::types::RealmStatus::Active {
+            return Err(IdentityError::RealmSuspended);
+        }
 
         // 2b. Nonce replay protection (when enforcement is enabled)
         if self.config.oidc.enforce_nonces {
@@ -4794,6 +5184,65 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             })?;
         if client.status() != ApplicationStatus::Active {
             return Err(IdentityError::InvalidClient);
+        }
+
+        // 3b. FAPI 2.0: PAR is mandatory for FAPI2 clients (RFC 9126 §2.4).
+        if client.profile().is_fapi2() && !request.via_par {
+            return Err(IdentityError::FapiViolation {
+                reason: "FAPI 2.0 clients must use Pushed Authorization Requests (PAR); \
+                         obtain a request_uri via POST /as/par before calling /authorize"
+                    .to_string(),
+            });
+        }
+
+        // 3c. Realm-level FAPI 2.0 enforcement gate.
+        //
+        // When a realm has `fapi_profile` configured, ALL clients in the realm
+        // must comply with the corresponding profile constraints. This is additive
+        // to the per-client `ClientProfile::Fapi2` check above.
+        if let Some(profile) = realm.config().fapi_profile {
+            // Baseline + Advanced: PAR required.
+            if !request.via_par {
+                return Err(IdentityError::FapiViolation {
+                    reason: "FAPI 2.0 Baseline requires all authorization requests to go through \
+                             PAR (RFC 9126); use POST /as/par to obtain a request_uri"
+                        .to_string(),
+                });
+            }
+            // Baseline + Advanced: PKCE (S256) is always required.
+            if request.code_challenge.is_none() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "FAPI 2.0 Baseline requires PKCE (code_challenge with S256)"
+                        .to_string(),
+                });
+            }
+            if profile == FapiProfile::Advanced {
+                // JAR is enforced at PAR time (push_authorization_request).
+                // When via_par = true the JAR was already validated there; no re-check here.
+                // Advanced: client must be configured for JARM
+                // (authorization_signed_response_alg must be set).
+                if client.authorization_signed_response_alg().is_none()
+                    && !request
+                        .response_mode
+                        .as_ref()
+                        .map_or(false, |m| m.is_jarm())
+                {
+                    return Err(IdentityError::FapiViolation {
+                        reason: "FAPI 2.0 Advanced requires JARM; register the client with \
+                                 `authorization_signed_response_alg` or pass a JWT response_mode"
+                            .to_string(),
+                    });
+                }
+                // Advanced: client must have a JWKS registered (required for
+                // private_key_jwt token endpoint authentication).
+                if client.jwks().is_none() {
+                    return Err(IdentityError::FapiViolation {
+                        reason: "FAPI 2.0 Advanced requires private_key_jwt client \
+                                 authentication; register a JWKS with the client"
+                            .to_string(),
+                    });
+                }
+            }
         }
 
         // 4. Validate redirect_uri matches a registered URI
@@ -4912,10 +5361,60 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &code_key, &code_bytes)
             .map_err(Self::storage_err)?;
 
+        let issuer = self.config.oidc.issuer.clone();
+
+        // 10. JARM — if a JWT response mode was requested OR the client enforces JARM,
+        //     sign the response. When the client has `authorization_signed_response_alg`
+        //     set, any plain response_mode is upgraded to query.jwt (JARM §4).
+        let response_mode = if client.authorization_signed_response_alg().is_some() {
+            let requested = request.response_mode.clone().unwrap_or(ResponseMode::Query);
+            if requested.is_jarm() {
+                requested
+            } else {
+                ResponseMode::QueryJwt
+            }
+        } else {
+            request.response_mode.clone().unwrap_or(ResponseMode::Query)
+        };
+        if response_mode.is_jarm() {
+            let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+            let now_secs = self.clock.now().as_micros() / 1_000_000;
+            // FAPI 2.0 §5.3.2.3: include s_hash when state is non-empty.
+            // s_hash = BASE64URL(LEFT(SHA-256(ASCII(state)), 16))
+            let s_hash = if client.profile().is_fapi2() && !request.state.is_empty() {
+                use data_encoding::BASE64URL_NOPAD;
+                use ring::digest;
+                let digest = digest::digest(&digest::SHA256, request.state.as_bytes());
+                Some(BASE64URL_NOPAD.encode(&digest.as_ref()[..16]))
+            } else {
+                None
+            };
+            let jarm_claims = JarmClaims {
+                iss: issuer.clone(),
+                aud: request.client_id.to_string(),
+                // FAPI 2.0 §5.3.2.2 requires JARM JWT lifetime ≤ 5 minutes.
+                exp: now_secs + 300,
+                iat: now_secs,
+                jti: uuid::Uuid::new_v4().to_string(),
+                code: raw_code.clone(),
+                state: request.state.clone(),
+                s_hash,
+            };
+            // JARM spec §4.1 requires typ=oauth-authz-resp+jwt (RFC 9101 §2).
+            let jarm_jwt = signing_key.sign_jwt(&jarm_claims, "oauth-authz-resp+jwt")?;
+            return Ok(AuthorizationResponse::new_jarm(
+                raw_code,
+                request.state.clone(),
+                issuer,
+                jarm_jwt,
+                response_mode,
+            ));
+        }
+
         Ok(AuthorizationResponse::new(
             raw_code,
             request.state.clone(),
-            self.config.oidc.issuer.clone(),
+            issuer,
         ))
     }
 
@@ -4971,6 +5470,42 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidAuthorizationCode);
         }
 
+        // 6b. Authenticate the client if a private_key_jwt assertion was provided.
+        // If no assertion is supplied, we must still block private_key_jwt-only clients
+        // (those with an assertion_public_key but no client_secret_hash) from silently
+        // bypassing client authentication.
+        const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+        if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
+            let assertion = request.client_assertion.as_deref().ok_or_else(|| {
+                IdentityError::InvalidClientAssertion {
+                    reason: "client_assertion is required when client_assertion_type is set"
+                        .to_string(),
+                }
+            })?;
+            self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
+        } else {
+            // No assertion presented — reject if the client is registered for private_key_jwt
+            // (has an assertion_public_key but no client_secret_hash). Such clients have no
+            // other authentication channel and must present an assertion on every request.
+            let client_key = keys::encode_oauth_client(&request.client_id);
+            if let Some(client_bytes) = self
+                .storage
+                .get(realm_id, &client_key)
+                .map_err(Self::storage_err)?
+            {
+                if let Ok(client) = serde_json::from_slice::<OAuthClient>(&client_bytes) {
+                    if client.assertion_public_key().is_some()
+                        && client.client_secret_hash().is_none()
+                    {
+                        return Err(IdentityError::InvalidClientAssertion {
+                            reason: "client_assertion is required for private_key_jwt clients"
+                                .to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
         // 7. Validate PKCE if code_challenge was present
         if let Some(ref challenge) = stored_code.code_challenge {
             let verifier = request
@@ -4996,6 +5531,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let client = self
             .get_client(realm_id, &request.client_id)?
             .ok_or(IdentityError::ClientNotFound)?;
+
+        // 8b. FAPI 2.0: DPoP sender-constrained tokens are mandatory.
+        // Check both per-client profile flag AND realm-level fapi_profile so that
+        // clients registered without `profile: fapi2` cannot bypass the realm gate.
+        // Use `.is_some()` (not a variant match) so both Baseline and Advanced are
+        // covered — FAPI 2.0 Baseline §5.3.3 requires sender-constrained tokens too.
+        let realm_fapi = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?
+            .config()
+            .fapi_profile;
+        let fapi_enforced = client.profile().is_fapi2() || realm_fapi.is_some();
+        if fapi_enforced && request.dpop_jkt.is_none() {
+            return Err(IdentityError::FapiViolation {
+                reason: "FAPI 2.0 requires sender-constrained tokens; \
+                         include a DPoP proof and dpop_jkt in the token request"
+                    .to_string(),
+            });
+        }
+
         let scope_value = stored_code.scope.trim().to_string();
         let scope_for_resolver =
             if scope_value.is_empty() || scope_value.split_whitespace().count() != 1 {
@@ -5022,12 +5577,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             })?;
         let granted_scopes: BTreeSet<String> =
             scope_value.split_whitespace().map(str::to_string).collect();
+
+        // For non-Embedded modes, strip RBAC claims from the access token.
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let authz_mode = client.access_token_authorization();
+        let empty_resolved = crate::rbac::ResolvedPermissions::default();
+        let access_resolved = if authz_mode == AccessTokenAuthorization::Embedded {
+            &resolved
+        } else {
+            &empty_resolved
+        };
+
         let (access_roles, access_groups, access_permissions, access_custom) = self
             .apply_claim_profile(
                 realm_id,
                 &user,
                 &client,
-                &resolved,
+                access_resolved,
                 &granted_scopes,
                 None,
                 ClaimTarget::AccessToken,
@@ -5087,6 +5653,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             None => Audience::single(self.config.token.audience.clone()),
         };
 
+        let sv_claim = {
+            let enabled = self
+                .get_realm(realm_id)
+                .ok()
+                .flatten()
+                .map(|r| r.config().session_version.enabled)
+                .unwrap_or(false);
+            if enabled {
+                Some(self.get_session_sv(realm_id, session.id()))
+            } else {
+                None
+            }
+        };
         let access_claims = TokenClaims {
             sub: stored_code.user_id.to_string(),
             iss: self.config.token.issuer.clone(),
@@ -5103,10 +5682,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: access_roles,
             groups: access_groups,
+            org_groups: Vec::new(),
             permissions: access_permissions,
             required_actions: Vec::new(),
             amr: stored_code.amr_values.clone(),
+            cnf: request
+                .dpop_jkt
+                .as_deref()
+                .map(|jkt| crate::identity::tokens::CnfClaim {
+                    jkt: jkt.to_string(),
+                }),
             custom: access_custom,
+            sv: sv_claim,
         };
         let refresh_claims = TokenClaims {
             sub: stored_code.user_id.to_string(),
@@ -5124,10 +5711,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: access_claims.roles.clone(),
             groups: access_claims.groups.clone(),
+            org_groups: Vec::new(),
             permissions: access_claims.permissions.clone(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            cnf: None,
             custom: access_claims.custom.clone(),
+            sv: None,
         };
 
         let access_token =
@@ -5193,10 +5783,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: stored_code.nonce.clone(),
             roles: id_roles,
             groups: id_groups,
+            org_groups: Vec::new(),
             permissions: id_permissions,
             required_actions: Vec::new(),
             amr: stored_code.amr_values.clone(),
+            cnf: None,
             custom: id_custom,
+            sv: None,
         };
         let id_token =
             signing_key
@@ -5223,7 +5816,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     }
 
     fn oidc_discovery(&self) -> OidcDiscoveryDocument {
-        self.build_discovery_document(&self.config.oidc.issuer.clone())
+        self.build_discovery_document(&self.config.oidc.issuer.clone(), None)
     }
 
     fn realm_oidc_discovery(
@@ -5234,7 +5827,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get_realm(realm_id)?
             .ok_or(IdentityError::RealmNotFound)?;
         let issuer = format!("{}/realms/{}", self.config.oidc.issuer, realm.name());
-        Ok(self.build_discovery_document(&issuer))
+        Ok(self.build_discovery_document(&issuer, Some(realm.config())))
     }
 
     // ===== OAuth 2.0 Extended (Step 22) =====
@@ -5265,7 +5858,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
-        // 3. Adaptive step-up MFA check (HEA-836).
+        // 3a. Block token issuance when required actions are pending (HEA-905).
+        //     Checked after password verification so the error is only reachable
+        //     by a caller who knows the password — no enumeration risk.
+        if !user.required_actions().is_empty() {
+            return Err(IdentityError::RequiredActionsBlocking {
+                actions: user.required_actions().to_vec(),
+            });
+        }
+
+        // 3b. Adaptive step-up MFA check (HEA-836).
         //    Only runs when the request carries IP/UA context (ROPC via HTTP).
         if let (Some(ip), Some(ua)) = (&request.client_ip, &request.user_agent) {
             use crate::identity::device_fp::DeviceFingerprintOutcome;
@@ -5276,10 +5878,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             match outcome {
                 DeviceFingerprintOutcome::Skipped | DeviceFingerprintOutcome::Recognised => {
                     // Device is trusted or feature disabled — proceed normally.
-                    // Record/refresh the fingerprint TTL on a recognised hit.
-                    if matches!(outcome, DeviceFingerprintOutcome::Recognised) {
-                        let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
-                    }
+                    // check_and_refresh already refreshed the TTL on a recognised hit;
+                    // step-5 below handles recording on a first-seen device path.
                 }
                 DeviceFingerprintOutcome::StepUpRequired => {
                     // User has an enrolled factor — require MFA challenge.
@@ -5387,6 +5987,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let _ = self.record_device_fingerprint(realm_id, user.id(), ip, ua);
         }
 
+        // 6. Emit StepUpMfaCompleted so incident responders can correlate trigger → resolution.
+        let audit_ctx = AuditContext {
+            actor: Actor::User(user.id().clone()),
+            metadata: Some(serde_json::json!({
+                "user_id": user.id().as_uuid().to_string()
+            })),
+        };
+        if let Err(e) = self.record_audit(
+            realm_id,
+            Some(&audit_ctx),
+            AuditAction::StepUpMfaCompleted,
+            "user",
+            &user.id().as_uuid().to_string(),
+        ) {
+            tracing::warn!(error = %e, "StepUpMfaCompleted audit write failed — event lost");
+        }
+
         Ok(crate::identity::oidc::PasswordGrantResponse {
             access_token: token_pair.access_token().to_string(),
             refresh_token: token_pair.refresh_token().to_string(),
@@ -5429,13 +6046,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::UnsupportedGrantType);
         }
 
-        // 3. Verify client secret
-        let secret_hash = client
-            .client_secret_hash()
-            .ok_or(IdentityError::InvalidClientSecret)?;
-        let valid = credentials::verify_raw_secret(request.client_secret.as_bytes(), secret_hash)?;
-        if !valid {
-            return Err(IdentityError::InvalidClientSecret);
+        // 3. Authenticate client: private_key_jwt takes precedence over client_secret
+        const PRIVATE_KEY_JWT_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+        if request.client_assertion_type.as_deref() == Some(PRIVATE_KEY_JWT_TYPE) {
+            let assertion = request.client_assertion.as_deref().ok_or_else(|| {
+                IdentityError::InvalidClientAssertion {
+                    reason: "client_assertion is required when client_assertion_type is set"
+                        .to_string(),
+                }
+            })?;
+            self.verify_client_assertion(realm_id, &request.client_id, assertion)?;
+        } else {
+            let secret = request
+                .client_secret
+                .as_deref()
+                .ok_or(IdentityError::InvalidClientSecret)?;
+            let secret_hash = client
+                .client_secret_hash()
+                .ok_or(IdentityError::InvalidClientSecret)?;
+            let valid = credentials::verify_raw_secret(secret.as_bytes(), secret_hash)?;
+            if !valid {
+                return Err(IdentityError::InvalidClientSecret);
+            }
         }
 
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
@@ -5462,10 +6094,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             nonce: None,
             roles: Vec::new(),
             groups: Vec::new(),
+            org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            cnf: request
+                .dpop_jkt
+                .as_deref()
+                .map(|jkt| crate::identity::tokens::CnfClaim {
+                    jkt: jkt.to_string(),
+                }),
             custom: std::collections::BTreeMap::new(),
+            sv: None, // sessionless — no sv
         };
 
         let access_token =
@@ -5481,6 +6121,590 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             self.config.token.access_token_ttl_secs,
             scope,
         ))
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        skip(self, request),
+        fields(
+            hearth_realm_id = %realm_id,
+            hearth_oauth_client_id = %request.client_id,
+            hearth_oauth_grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        )
+    )]
+    fn jwt_bearer_token(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::oidc::JwtBearerRequest,
+    ) -> Result<crate::identity::oidc::ClientCredentialsResponse, IdentityError> {
+        // 1. Load client
+        let client_key = keys::encode_oauth_client(&request.client_id);
+        let client_bytes = self
+            .storage
+            .get(realm_id, &client_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidClient)?;
+        let client: OAuthClient =
+            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        // 2. Verify grant type is allowed for this client
+        if !client
+            .grant_types()
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string())
+        {
+            return Err(IdentityError::UnsupportedGrantType);
+        }
+
+        // 3. Resolve the registered assertion public key (base64url raw 32-byte Ed25519)
+        let pk_b64 = client.assertion_public_key().ok_or_else(|| {
+            IdentityError::JwtBearerAssertionInvalid {
+                reason: "no assertion public key registered for this client".to_string(),
+            }
+        })?;
+        let pk_bytes = URL_SAFE_NO_PAD.decode(pk_b64).map_err(|_| {
+            IdentityError::JwtBearerAssertionInvalid {
+                reason: "client has an invalid assertion public key".to_string(),
+            }
+        })?;
+
+        // 4. Verify assertion JWT signature (EdDSA only, rejects alg:none, HMAC, etc.)
+        let assertion_claims = tokens::verify_assertion_signature(&request.assertion, &pk_bytes)
+            .map_err(|_| IdentityError::JwtBearerAssertionInvalid {
+                reason: "assertion signature verification failed".to_string(),
+            })?;
+
+        // 5. Validate RFC 7523 §3 required claims
+        let now = self.clock.now();
+        let now_secs = now.as_micros() / 1_000_000;
+
+        // iss MUST equal the client_id (RFC 7523 §3 requirement)
+        if assertion_claims.iss != request.client_id.to_string() {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "iss claim must equal the client_id".to_string(),
+            });
+        }
+
+        // sub MUST equal client_id (RFC 7523 §3 / OIDC Core §9)
+        if assertion_claims.sub != request.client_id.to_string() {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "sub claim must equal the client_id".to_string(),
+            });
+        }
+
+        // exp MUST be in the future
+        if now_secs >= assertion_claims.exp {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "assertion has expired".to_string(),
+            });
+        }
+
+        // exp MUST NOT be more than 10 minutes in the future.
+        // Unbounded lifetimes defeat replay protection when jti recycling windows are large.
+        const MAX_ASSERTION_LIFETIME_SECS: i64 = 600;
+        if assertion_claims.exp - now_secs > MAX_ASSERTION_LIFETIME_SECS {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "assertion lifetime exceeds maximum allowed duration".to_string(),
+            });
+        }
+
+        // aud MUST contain this realm's issuer URL (the token endpoint base)
+        let expected_aud = self.realm_issuer_url(realm_id);
+        if !assertion_claims.aud.contains(&expected_aud) {
+            return Err(IdentityError::JwtBearerAssertionInvalid {
+                reason: "aud claim does not match the token endpoint issuer".to_string(),
+            });
+        }
+
+        // 6. jti is mandatory — without it any intercepted assertion is replayable
+        // for its full validity window.
+        let jti = assertion_claims.jti.as_ref().ok_or_else(|| {
+            IdentityError::JwtBearerAssertionInvalid {
+                reason: "jti claim is required".to_string(),
+            }
+        })?;
+
+        // 6b. Atomic JTI check-and-consume with exp-bounded lazy expiry (HIGH-1/CRIT-2)
+        self.check_and_consume_jwt_bearer_jti(realm_id, jti, assertion_claims.exp)?;
+
+        // 7. Validate requested scope against the client's declared scopes
+        self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
+
+        // 8. Issue sessionless access token (same pattern as client_credentials)
+        let iat = now_secs;
+        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+        let scope = request.scope.clone();
+        let access_claims = TokenClaims {
+            sub: assertion_claims.sub,
+            iss: self.config.token.issuer.clone(),
+            aud: Audience::single(self.config.token.audience.clone()),
+            exp: iat + self.config.token.access_token_ttl_secs,
+            iat,
+            sid: "none".to_string(),
+            tid: realm_id.to_string(),
+            oid: None,
+            token_type: "access".to_string(),
+            jti: Some(uuid::Uuid::new_v4().to_string()),
+            fid: None,
+            scope: scope.clone(),
+            nonce: None,
+            roles: Vec::new(),
+            groups: Vec::new(),
+            org_groups: Vec::new(),
+            permissions: Vec::new(),
+            required_actions: Vec::new(),
+            amr: vec!["jwtbearer".to_string()],
+            cnf: request
+                .dpop_jkt
+                .as_deref()
+                .map(|jkt| crate::identity::tokens::CnfClaim {
+                    jkt: jkt.to_string(),
+                }),
+            custom: std::collections::BTreeMap::new(),
+            sv: None, // JWT bearer — sessionless
+        };
+
+        let access_token =
+            signing_key
+                .issue_token(&access_claims)
+                .map_err(|e| IdentityError::SigningError {
+                    reason: format!("failed to issue access token: {e}"),
+                })?;
+
+        Ok(crate::identity::oidc::ClientCredentialsResponse::new(
+            access_token,
+            "Bearer".to_string(),
+            self.config.token.access_token_ttl_secs,
+            scope,
+        ))
+    }
+
+    /// Verifies a `private_key_jwt` client assertion per RFC 7523 §2.2.
+    ///
+    /// Validates signature, `iss == client_id`, `sub == client_id`, `exp`, `aud`,
+    /// and JTI replay protection. Returns `Ok(())` on success; returns
+    /// `InvalidClientAssertion` on any failure so callers cannot distinguish
+    /// individual check failures (enumeration resistance).
+    fn verify_client_assertion(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        assertion: &str,
+    ) -> Result<(), IdentityError> {
+        // Load client to retrieve the registered public key.
+        let client_key = keys::encode_oauth_client(client_id);
+        let client_bytes = self
+            .storage
+            .get(realm_id, &client_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidClient)?;
+        let client: OAuthClient =
+            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        let pk_b64 =
+            client
+                .assertion_public_key()
+                .ok_or_else(|| IdentityError::InvalidClientAssertion {
+                    reason: "no assertion public key registered for this client".to_string(),
+                })?;
+        let pk_bytes =
+            URL_SAFE_NO_PAD
+                .decode(pk_b64)
+                .map_err(|_| IdentityError::InvalidClientAssertion {
+                    reason: "client has an invalid assertion public key".to_string(),
+                })?;
+
+        // Verify EdDSA signature — rejects alg:none, HMAC, RSA, etc.
+        let claims = tokens::verify_assertion_signature(assertion, &pk_bytes).map_err(|_| {
+            IdentityError::InvalidClientAssertion {
+                reason: "assertion signature verification failed".to_string(),
+            }
+        })?;
+
+        // iss MUST equal client_id (RFC 7523 §3)
+        if claims.iss != client_id.to_string() {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "iss claim must equal the client_id".to_string(),
+            });
+        }
+
+        // sub MUST equal client_id (RFC 7523 §3 / OIDC Core §9)
+        if claims.sub != client_id.to_string() {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "sub claim must equal the client_id".to_string(),
+            });
+        }
+
+        // exp MUST be in the future
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if now_secs >= claims.exp {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "assertion has expired".to_string(),
+            });
+        }
+
+        // exp MUST NOT be more than 5 minutes in the future (FAPI / RFC 7523 best practice).
+        // Unbounded lifetimes defeat replay protection when jti is absent.
+        const MAX_ASSERTION_LIFETIME_SECS: i64 = 300;
+        if claims.exp - now_secs > MAX_ASSERTION_LIFETIME_SECS {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "assertion lifetime exceeds 5 minutes".to_string(),
+            });
+        }
+
+        // aud MUST contain this realm's token endpoint URL
+        let expected_aud = self.realm_issuer_url(realm_id);
+        if !claims.aud.contains(&expected_aud) {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "aud claim does not match the token endpoint issuer".to_string(),
+            });
+        }
+
+        // jti MUST be present — RFC 7523 §3 SHOULD, upgraded to MUST here for replay
+        // prevention. Without jti, any intercepted assertion is replayable for its full
+        // validity window.
+        let jti = claims
+            .jti
+            .as_ref()
+            .ok_or_else(|| IdentityError::InvalidClientAssertion {
+                reason: "jti claim is required for private_key_jwt assertions".to_string(),
+            })?;
+
+        // JTI replay protection — each JTI may only be used once per realm.
+        let jti_key = keys::encode_client_assertion_jti(jti);
+        if self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::InvalidClientAssertion {
+                reason: "assertion jti has already been used (replay)".to_string(),
+            });
+        }
+        self.storage
+            .put(realm_id, &jti_key, b"1")
+            .map_err(Self::storage_err)?;
+
+        Ok(())
+    }
+
+    fn verify_jar(
+        &self,
+        realm_id: &RealmId,
+        client_id: &crate::core::ClientId,
+        request_jwt: &str,
+    ) -> Result<crate::identity::oidc::JarClaims, IdentityError> {
+        use crate::identity::federation::oidc as fed_oidc;
+        use crate::identity::oidc::JarClaims;
+
+        #[derive(serde::Deserialize)]
+        struct JarHeader {
+            alg: String,
+            #[serde(default)]
+            kid: Option<String>,
+        }
+
+        // 1. Parse JWT structure
+        let parts: Vec<&str> = request_jwt.split('.').collect();
+        if parts.len() != 3 {
+            return Err(IdentityError::InvalidJar {
+                reason: "malformed JWT".to_string(),
+            });
+        }
+
+        // 2. Decode and parse header — reject alg:none immediately.
+        let header_bytes =
+            URL_SAFE_NO_PAD
+                .decode(parts[0])
+                .map_err(|_| IdentityError::InvalidJar {
+                    reason: "invalid JWT header encoding".to_string(),
+                })?;
+        let header: JarHeader =
+            serde_json::from_slice(&header_bytes).map_err(|_| IdentityError::InvalidJar {
+                reason: "invalid JWT header".to_string(),
+            })?;
+        let alg = header.alg.as_str();
+        if alg.eq_ignore_ascii_case("none") {
+            return Err(IdentityError::InvalidJar {
+                reason: "alg:none is not permitted in signed request objects".to_string(),
+            });
+        }
+        if alg != "EdDSA" && alg != "RS256" && alg != "ES256" && alg != "PS256" {
+            return Err(IdentityError::InvalidJar {
+                reason: format!(
+                    "unsupported algorithm '{alg}'; supported: RS256, PS256, ES256, EdDSA"
+                ),
+            });
+        }
+
+        // 3. Load client and resolve registered JWKS.
+        let client_key = keys::encode_oauth_client(client_id);
+        let client_bytes = self
+            .storage
+            .get(realm_id, &client_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidClient)?;
+        let client: OAuthClient =
+            serde_json::from_slice(&client_bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        let jwks_json = client.jwks().ok_or_else(|| IdentityError::InvalidJar {
+            reason: "client has no registered jwks for JAR verification".to_string(),
+        })?;
+
+        // 4. Parse the JWKS and select the matching key.
+        #[derive(serde::Deserialize)]
+        struct JwksContainer {
+            keys: Vec<fed_oidc::Jwk>,
+        }
+        let jwks: JwksContainer =
+            serde_json::from_str(jwks_json).map_err(|_| IdentityError::InvalidJar {
+                reason: "client jwks is not valid JSON".to_string(),
+            })?;
+
+        let kid = header.kid.as_deref();
+        let selected = if let Some(k) = kid {
+            jwks.keys.iter().find(|j| j.kid.as_deref() == Some(k))
+        } else if jwks.keys.len() == 1 {
+            jwks.keys.first()
+        } else {
+            None
+        }
+        .ok_or_else(|| IdentityError::InvalidJar {
+            reason: "no matching key found in client jwks".to_string(),
+        })?;
+
+        // 5. Verify signature based on key type.
+        match alg {
+            "EdDSA" => {
+                if selected.crv.as_deref() != Some("Ed25519") {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "EdDSA JWK must have crv=Ed25519".to_string(),
+                    });
+                }
+                let x_b64 = selected
+                    .x
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "EdDSA JWK missing 'x' parameter".to_string(),
+                    })?;
+                let pk_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(x_b64)
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "EdDSA JWK 'x' is not valid base64url".to_string(),
+                        })?;
+                let signing_input = format!("{}.{}", parts[0], parts[1]);
+                let sig_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(parts[2])
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "invalid signature encoding".to_string(),
+                        })?;
+                let public_key =
+                    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &pk_bytes);
+                public_key
+                    .verify(signing_input.as_bytes(), &sig_bytes)
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "EdDSA signature verification failed".to_string(),
+                    })?;
+            }
+            "RS256" => {
+                fed_oidc::verify_rs256(request_jwt, selected).map_err(|_| {
+                    IdentityError::InvalidJar {
+                        reason: "RS256 signature verification failed".to_string(),
+                    }
+                })?;
+            }
+            "PS256" => {
+                if selected.kty != "RSA" {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "PS256 requires an RSA key (kty=RSA)".to_string(),
+                    });
+                }
+                let n_b64 = selected
+                    .n
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "PS256 JWK missing 'n' parameter".to_string(),
+                    })?;
+                let e_b64 = selected
+                    .e
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "PS256 JWK missing 'e' parameter".to_string(),
+                    })?;
+                let n = URL_SAFE_NO_PAD
+                    .decode(n_b64)
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "PS256 JWK 'n' is not valid base64url".to_string(),
+                    })?;
+                let e = URL_SAFE_NO_PAD
+                    .decode(e_b64)
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "PS256 JWK 'e' is not valid base64url".to_string(),
+                    })?;
+                let signing_input = format!("{}.{}", parts[0], parts[1]);
+                let sig_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(parts[2])
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "invalid signature encoding".to_string(),
+                        })?;
+                let components = ring::signature::RsaPublicKeyComponents {
+                    n: n.as_slice(),
+                    e: e.as_slice(),
+                };
+                components
+                    .verify(
+                        &ring::signature::RSA_PSS_2048_8192_SHA256,
+                        signing_input.as_bytes(),
+                        &sig_bytes,
+                    )
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "PS256 signature verification failed".to_string(),
+                    })?;
+            }
+            "ES256" => {
+                if selected.kty != "EC" {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "ES256 requires an EC key (kty=EC)".to_string(),
+                    });
+                }
+                if selected.crv.as_deref() != Some("P-256") {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "ES256 JWK must have crv=P-256".to_string(),
+                    });
+                }
+                let x_b64 = selected
+                    .x
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "ES256 JWK missing 'x' parameter".to_string(),
+                    })?;
+                let y_b64 = selected
+                    .y
+                    .as_deref()
+                    .ok_or_else(|| IdentityError::InvalidJar {
+                        reason: "ES256 JWK missing 'y' parameter".to_string(),
+                    })?;
+                let x_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(x_b64)
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "ES256 JWK 'x' is not valid base64url".to_string(),
+                        })?;
+                let y_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(y_b64)
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "ES256 JWK 'y' is not valid base64url".to_string(),
+                        })?;
+                // ring expects uncompressed point: 0x04 || x || y
+                let mut pk_bytes = Vec::with_capacity(1 + x_bytes.len() + y_bytes.len());
+                pk_bytes.push(0x04);
+                pk_bytes.extend_from_slice(&x_bytes);
+                pk_bytes.extend_from_slice(&y_bytes);
+                let signing_input = format!("{}.{}", parts[0], parts[1]);
+                let sig_bytes =
+                    URL_SAFE_NO_PAD
+                        .decode(parts[2])
+                        .map_err(|_| IdentityError::InvalidJar {
+                            reason: "invalid signature encoding".to_string(),
+                        })?;
+                let public_key = ring::signature::UnparsedPublicKey::new(
+                    &ring::signature::ECDSA_P256_SHA256_FIXED,
+                    &pk_bytes,
+                );
+                public_key
+                    .verify(signing_input.as_bytes(), &sig_bytes)
+                    .map_err(|_| IdentityError::InvalidJar {
+                        reason: "ES256 signature verification failed".to_string(),
+                    })?;
+            }
+            _ => unreachable!("alg already restricted to EdDSA/RS256/ES256/PS256 above"),
+        }
+
+        // 6. Decode claims.
+        let claims_bytes =
+            URL_SAFE_NO_PAD
+                .decode(parts[1])
+                .map_err(|_| IdentityError::InvalidJar {
+                    reason: "invalid claims encoding".to_string(),
+                })?;
+        let claims: JarClaims =
+            serde_json::from_slice(&claims_bytes).map_err(|_| IdentityError::InvalidJar {
+                reason: "invalid claims payload".to_string(),
+            })?;
+
+        // 7. Validate iss == client_id.
+        if claims.iss != client_id.to_string() {
+            return Err(IdentityError::InvalidJar {
+                reason: "iss claim must equal the client_id".to_string(),
+            });
+        }
+
+        // 8. Validate aud contains the realm issuer URL — exact match required (RFC 9101 §4).
+        let expected_aud = self.realm_issuer_url(realm_id);
+        let aud_ok = match &claims.aud {
+            crate::identity::tokens::Audience::Single(s) => s == &expected_aud,
+            crate::identity::tokens::Audience::Multi(v) => v.iter().any(|a| a == &expected_aud),
+        };
+        if !aud_ok {
+            return Err(IdentityError::InvalidJar {
+                reason: "aud claim does not include the authorization server issuer".to_string(),
+            });
+        }
+
+        // 9. Validate exp is in the future.
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if now_secs >= claims.exp {
+            return Err(IdentityError::InvalidJar {
+                reason: "request object has expired".to_string(),
+            });
+        }
+
+        // 10. Validate nbf is not in the future if present (RFC 7519 §4.1.5).
+        if let Some(nbf) = claims.nbf {
+            if now_secs < nbf {
+                return Err(IdentityError::InvalidJar {
+                    reason: "request object is not yet valid (nbf)".to_string(),
+                });
+            }
+        }
+
+        // 11. JTI replay prevention — RFC 9101 §4 requires jti.
+        let jti = claims
+            .jti
+            .as_deref()
+            .ok_or_else(|| IdentityError::InvalidJar {
+                reason: "jti claim is required in signed request objects".to_string(),
+            })?;
+        let jti_key = keys::encode_jar_jti(jti);
+        if self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::InvalidJar {
+                reason: "jti has already been used (replay)".to_string(),
+            });
+        }
+        // Store expiry as 8-byte little-endian i64 (Unix seconds) so the
+        // background sweeper in cleanup::sweep_jar_jtis() can purge entries
+        // once they can no longer represent a valid JWT (exp + clock skew).
+        let jar_jti_expires_at = claims.exp.saturating_add(CLOCK_SKEW_SECS);
+        self.storage
+            .put(realm_id, &jti_key, &jar_jti_expires_at.to_le_bytes())
+            .map_err(Self::storage_err)?;
+
+        Ok(claims)
     }
 
     fn device_authorize(
@@ -5708,10 +6932,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     nonce: None,
                     roles: Vec::new(),
                     groups: Vec::new(),
+                    org_groups: Vec::new(),
                     permissions: Vec::new(),
                     required_actions: Vec::new(),
                     amr: Vec::new(),
+                    cnf: None,
                     custom: std::collections::BTreeMap::new(),
+                    sv: None,
                 };
                 let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
                 let id_token = signing_key.issue_token(&id_token_claims).map_err(|e| {
@@ -5734,6 +6961,224 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 ))
             }
         }
+    }
+
+    fn push_authorization_request(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::oidc::PushedAuthorizationRequest,
+    ) -> Result<crate::identity::oidc::PushedAuthorizationResponse, IdentityError> {
+        use crate::identity::keys;
+        use crate::identity::oidc::{CodeChallengeMethod, StoredPushedAuthorizationRequest};
+        use crate::identity::types::FapiProfile;
+
+        let realm = self
+            .get_realm(realm_id)?
+            .ok_or(IdentityError::RealmNotFound)?;
+        if realm.status() != crate::identity::types::RealmStatus::Active {
+            return Err(IdentityError::RealmSuspended);
+        }
+
+        // FAPI 2.0 pre-JAR gate: only the JAR-required check can safely fire here,
+        // because the PKCE check must use `effective_code_challenge` (which may come
+        // from inside the signed JAR per RFC 9101 §6.1).
+        if let Some(profile) = realm.config().fapi_profile {
+            // Advanced: JAR (signed request object) is mandatory.
+            if profile == FapiProfile::Advanced && request.request.is_none() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "FAPI 2.0 Advanced requires a signed request object (JAR, RFC 9101)"
+                        .to_string(),
+                });
+            }
+        }
+
+        // JAR (RFC 9101): if a signed request object is present, verify it and
+        // use its claims to override the plain-text request parameters.
+        let (
+            effective_redirect_uri,
+            effective_scope,
+            effective_state,
+            effective_resource,
+            effective_response_type,
+            effective_code_challenge,
+            effective_code_challenge_method,
+            effective_nonce,
+            effective_response_mode,
+        ) = if let Some(ref jar_jwt) = request.request {
+            let jar = self.verify_jar(realm_id, &request.client_id, jar_jwt)?;
+            // JAR client_id claim must match the outer client_id.
+            if let Some(ref jar_cid) = jar.client_id {
+                if jar_cid != &request.client_id.to_string() {
+                    return Err(IdentityError::InvalidJar {
+                        reason: "client_id in JAR claims does not match the request".to_string(),
+                    });
+                }
+            }
+            let ccm = jar.code_challenge_method.as_deref().and_then(|m| {
+                if m == "S256" {
+                    Some(CodeChallengeMethod::S256)
+                } else {
+                    None
+                }
+            });
+            (
+                jar.redirect_uri
+                    .unwrap_or_else(|| request.redirect_uri.clone()),
+                jar.scope.unwrap_or_else(|| request.scope.clone()),
+                jar.state.unwrap_or_else(|| request.state.clone()),
+                jar.resource.or_else(|| request.resource.clone()),
+                jar.response_type
+                    .unwrap_or_else(|| request.response_type.clone()),
+                jar.code_challenge
+                    .or_else(|| request.code_challenge.clone()),
+                ccm.or_else(|| request.code_challenge_method.clone()),
+                jar.nonce.or_else(|| request.nonce.clone()),
+                // JAR response_mode takes precedence over the outer param (RFC 9101 §4).
+                jar.response_mode.or_else(|| request.response_mode.clone()),
+            )
+        } else {
+            (
+                request.redirect_uri.clone(),
+                request.scope.clone(),
+                request.state.clone(),
+                request.resource.clone(),
+                request.response_type.clone(),
+                request.code_challenge.clone(),
+                request.code_challenge_method.clone(),
+                request.nonce.clone(),
+                request.response_mode.clone(),
+            )
+        };
+
+        // FAPI 2.0 post-JAR gate: PKCE must be checked against `effective_code_challenge`
+        // so that clients who supply it only inside the JAR (RFC 9101 §6.1) are accepted.
+        if realm.config().fapi_profile.is_some() {
+            // Baseline + Advanced: PKCE (S256) is always required, even for confidential
+            // clients. The `require_pkce_for_confidential_clients` config flag has no
+            // effect under a FAPI profile.
+            if effective_code_challenge.is_none() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "FAPI 2.0 Baseline requires PKCE (code_challenge with S256)"
+                        .to_string(),
+                });
+            }
+        }
+
+        if effective_response_type != "code" {
+            return Err(IdentityError::InvalidInput {
+                reason: "response_type must be 'code'".to_string(),
+            });
+        }
+        if effective_state.is_empty() {
+            return Err(IdentityError::InvalidInput {
+                reason: "state must not be empty".to_string(),
+            });
+        }
+
+        let client = self
+            .get_client(realm_id, &request.client_id)?
+            .ok_or(IdentityError::ClientNotFound)?;
+
+        if !client.redirect_uris().contains(&effective_redirect_uri) {
+            return Err(IdentityError::InvalidRedirectUri);
+        }
+
+        let pkce_required =
+            !client.is_confidential() || self.config.oidc.require_pkce_for_confidential_clients;
+        if pkce_required && effective_code_challenge.is_none() {
+            return Err(IdentityError::InvalidInput {
+                reason: "PKCE is required (code_challenge with S256 must be supplied)".to_string(),
+            });
+        }
+        if effective_code_challenge.is_some()
+            && !matches!(
+                effective_code_challenge_method,
+                Some(CodeChallengeMethod::S256)
+            )
+        {
+            return Err(IdentityError::InvalidInput {
+                reason: "code_challenge requires code_challenge_method=S256".to_string(),
+            });
+        }
+
+        let now = self.clock.now();
+        let ttl_secs: i64 = 90;
+        let expires_at = now.add_micros(ttl_secs * 1_000_000);
+        let request_uri_id = uuid::Uuid::new_v4().to_string();
+
+        let stored = StoredPushedAuthorizationRequest {
+            request_uri_id: request_uri_id.clone(),
+            client_id: request.client_id.clone(),
+            redirect_uri: effective_redirect_uri,
+            scope: effective_scope,
+            state: effective_state,
+            resource: effective_resource,
+            response_type: effective_response_type,
+            code_challenge: effective_code_challenge,
+            code_challenge_method: effective_code_challenge_method,
+            nonce: effective_nonce,
+            response_mode: effective_response_mode,
+            created_at: now,
+            expires_at,
+            used: false,
+        };
+
+        let key = keys::encode_par_request(&request_uri_id);
+        let value = serde_json::to_vec(&stored).map_err(|e| IdentityError::Internal {
+            reason: format!("failed to serialize PAR request: {e}"),
+        })?;
+        self.storage
+            .put(realm_id, &key, &value)
+            .map_err(Self::storage_err)?;
+
+        Ok(crate::identity::oidc::PushedAuthorizationResponse {
+            request_uri: format!("urn:ietf:params:oauth:request_uri:{request_uri_id}"),
+            expires_in: ttl_secs,
+        })
+    }
+
+    #[allow(private_interfaces)]
+    fn consume_par(
+        &self,
+        realm_id: &RealmId,
+        request_uri: &str,
+    ) -> Result<crate::identity::oidc::StoredPushedAuthorizationRequest, IdentityError> {
+        use crate::identity::keys;
+
+        const URN_PREFIX: &str = "urn:ietf:params:oauth:request_uri:";
+        let request_uri_id = request_uri
+            .strip_prefix(URN_PREFIX)
+            .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
+
+        let key = keys::encode_par_request(request_uri_id);
+        let raw = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidPushedAuthorizationRequest)?;
+
+        let mut stored: crate::identity::oidc::StoredPushedAuthorizationRequest =
+            serde_json::from_slice(&raw).map_err(|e| IdentityError::Internal {
+                reason: format!("failed to deserialize PAR request: {e}"),
+            })?;
+
+        if stored.used {
+            return Err(IdentityError::InvalidPushedAuthorizationRequest);
+        }
+        let now = self.clock.now();
+        if now >= stored.expires_at {
+            return Err(IdentityError::InvalidPushedAuthorizationRequest);
+        }
+
+        stored.used = true;
+        let updated = serde_json::to_vec(&stored).map_err(|e| IdentityError::Internal {
+            reason: format!("failed to serialize updated PAR request: {e}"),
+        })?;
+        self.storage
+            .put(realm_id, &key, &updated)
+            .map_err(Self::storage_err)?;
+
+        Ok(stored)
     }
 
     fn revoke_token(
@@ -5898,7 +7343,49 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        // 6. Active — return metadata
+        // 6. Look up the introspecting client's authorization mode and, for
+        // Introspection/Decision clients, emit live RBAC data so resource
+        // servers have a single authoritative source for permissions.
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let authz_mode = request
+            .introspecting_client_id
+            .as_ref()
+            .and_then(|cid| self.get_client(realm_id, cid).ok().flatten())
+            .map(|c| c.access_token_authorization())
+            .unwrap_or(AccessTokenAuthorization::Embedded);
+
+        let (live_permissions, live_roles, live_groups) =
+            if authz_mode != AccessTokenAuthorization::Embedded {
+                // Parse user_id from sub — client-credential tokens use a client
+                // UUID as sub, which won't parse as a UserId; they get no live data.
+                let sub_str = &claims.sub;
+                let user_uuid_str = sub_str.strip_prefix("user_").unwrap_or(sub_str);
+                if let Ok(user_uuid) = uuid::Uuid::parse_str(user_uuid_str) {
+                    let user_id = crate::core::UserId::new(user_uuid);
+                    let org_id: Option<crate::core::OrganizationId> =
+                        claims.oid.as_deref().and_then(|o| {
+                            uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
+                                .ok()
+                                .map(crate::core::OrganizationId::new)
+                        });
+                    let resolved_live = self
+                        .rbac
+                        .resolve_permissions(&user_id, realm_id, org_id.as_ref(), None)
+                        .unwrap_or_default();
+                    let perms: Vec<String> = resolved_live
+                        .permissions
+                        .iter()
+                        .map(|p| p.as_str().to_string())
+                        .collect();
+                    (perms, resolved_live.roles, resolved_live.groups)
+                } else {
+                    (vec![], vec![], vec![])
+                }
+            } else {
+                (vec![], vec![], vec![])
+            };
+
+        // 7. Active — return metadata
         Ok(IntrospectionResponse {
             active: true,
             scope: claims.scope,
@@ -5909,6 +7396,96 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             token_type: Some(claims.token_type),
             iss: Some(claims.iss),
             aud: Some(claims.aud.base().to_string()),
+            mode: Some(authz_mode),
+            permissions: live_permissions,
+            roles: live_roles,
+            groups: live_groups,
+        })
+    }
+
+    fn decide_token_permission(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::oidc::DecidePermissionRequest,
+    ) -> Result<crate::identity::oidc::DecidePermissionResponse, IdentityError> {
+        use crate::identity::oidc::DecidePermissionResponse;
+        use crate::rbac::Permission;
+
+        // Validate signature + realm binding — fail-closed on any error.
+        let Ok(claims) = self.verify_token_signature_for_realm(realm_id, &request.token) else {
+            return Ok(DecidePermissionResponse { allowed: false });
+        };
+        if claims.tid.parse::<RealmId>().ok().as_ref() != Some(realm_id) {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
+        if !claims.aud.contains(&self.config.token.audience) {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
+
+        // Expiry check.
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if now_secs >= claims.exp || claims.iat > now_secs + CLOCK_SKEW_SECS {
+            return Ok(DecidePermissionResponse { allowed: false });
+        }
+
+        // Session / JTI revocation check.
+        if claims.sid != "none" {
+            let sid_str = claims.sid.strip_prefix("session_").unwrap_or(&claims.sid);
+            if let Ok(uuid) = uuid::Uuid::parse_str(sid_str) {
+                if self.get_session(realm_id, &SessionId::new(uuid))?.is_none() {
+                    return Ok(DecidePermissionResponse { allowed: false });
+                }
+            }
+        } else if let Some(ref jti) = claims.jti {
+            let jti_key = keys::encode_revoked_jti(jti);
+            if self
+                .storage
+                .get(realm_id, &jti_key)
+                .map_err(Self::storage_err)?
+                .is_some()
+            {
+                return Ok(DecidePermissionResponse { allowed: false });
+            }
+        }
+
+        // Parse user from sub — client-credential tokens are never allowed
+        // through the decision endpoint (no user context to check against).
+        let sub_str = &claims.sub;
+        let user_uuid_str = sub_str.strip_prefix("user_").unwrap_or(sub_str);
+        let user_uuid = match uuid::Uuid::parse_str(user_uuid_str) {
+            Ok(u) => u,
+            Err(_) => return Ok(DecidePermissionResponse { allowed: false }),
+        };
+        let user_id = crate::core::UserId::new(user_uuid);
+
+        // Validate requested permission string.
+        let Ok(permission) = Permission::new(&request.permission) else {
+            return Ok(DecidePermissionResponse { allowed: false });
+        };
+
+        // Parse optional org scoping.
+        let org_id: Option<crate::core::OrganizationId> =
+            request.organization_id.as_deref().and_then(|o| {
+                uuid::Uuid::parse_str(o.strip_prefix("org_").unwrap_or(o))
+                    .ok()
+                    .map(crate::core::OrganizationId::new)
+            });
+
+        // Apply scope narrowing from the token if present.
+        let scope_str = claims.scope.as_deref();
+        let scope_single = scope_str.filter(|s| s.split_whitespace().count() == 1);
+
+        let resolved =
+            match self
+                .rbac
+                .resolve_permissions(&user_id, realm_id, org_id.as_ref(), scope_single)
+            {
+                Ok(r) => r,
+                Err(_) => return Ok(DecidePermissionResponse { allowed: false }),
+            };
+
+        Ok(DecidePermissionResponse {
+            allowed: resolved.permissions.contains(&permission),
         })
     }
 
@@ -6147,6 +7724,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<Option<Vec<String>>, IdentityError> {
         match self.load_mfa_state(realm_id, user_id)? {
             Some(state) if !state.enabled => Ok(state.pending_recovery_codes),
+            _ => Ok(None),
+        }
+    }
+
+    fn load_pending_totp_secret(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Option<String>, IdentityError> {
+        match self.load_mfa_state(realm_id, user_id)? {
+            Some(state) if !state.enabled => Ok(Some(state.secret_base32)),
             _ => Ok(None),
         }
     }
@@ -7499,6 +9087,49 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if let Some(status) = request.status {
             client.set_status(status);
         }
+        if let Some(pk) = &request.assertion_public_key {
+            // Validate base64url decodes to exactly 32 bytes (Ed25519 public key)
+            if let Some(key_str) = pk {
+                let decoded =
+                    URL_SAFE_NO_PAD
+                        .decode(key_str)
+                        .map_err(|_| IdentityError::InvalidInput {
+                            reason: "assertion_public_key must be base64url-encoded".to_string(),
+                        })?;
+                if decoded.len() != 32 {
+                    return Err(IdentityError::InvalidInput {
+                        reason: "assertion_public_key must be a 32-byte Ed25519 public key"
+                            .to_string(),
+                    });
+                }
+            }
+            client.set_assertion_public_key(pk.clone());
+        }
+        if let Some(mode) = request.access_token_authorization {
+            client.set_access_token_authorization(mode);
+        }
+        if let Some(alg_opt) = &request.authorization_signed_response_alg {
+            if let Some(alg) = alg_opt {
+                if alg != "EdDSA" {
+                    return Err(IdentityError::InvalidInput {
+                        reason: format!(
+                            "unsupported authorization_signed_response_alg '{alg}'; supported: EdDSA"
+                        ),
+                    });
+                }
+            }
+            client.set_authorization_signed_response_alg(alg_opt.clone());
+        }
+        if let Some(profile) = request.profile {
+            if profile.is_fapi2() && client.client_secret_hash().is_some() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "Cannot set FAPI 2.0 profile on a client with a client_secret; \
+                             remove the secret first or register a new FAPI2 client"
+                        .to_string(),
+                });
+            }
+            client.set_profile(profile);
+        }
 
         let updated_bytes =
             serde_json::to_vec(&client).map_err(|e| IdentityError::Serialization {
@@ -7535,6 +9166,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
+
+        if client.profile().is_fapi2() {
+            return Err(IdentityError::FapiViolation {
+                reason: "FAPI 2.0 clients must not use client_secret".to_string(),
+            });
+        }
 
         if !client.is_confidential() {
             return Err(IdentityError::InvalidInput {
@@ -7947,6 +9584,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(pending)
     }
 
+    fn sign_jarm_error_jwt(
+        &self,
+        realm_id: &RealmId,
+        client_id: &str,
+        error: &str,
+        error_description: &str,
+        state_param: &str,
+    ) -> Result<String, IdentityError> {
+        use crate::identity::oidc::JarmErrorClaims;
+        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        let claims = JarmErrorClaims {
+            iss: self.config.oidc.issuer.clone(),
+            aud: client_id.to_string(),
+            // FAPI 2.0 §5.3.2.2 requires JARM JWT lifetime ≤ 5 minutes.
+            exp: now_secs + 300,
+            iat: now_secs,
+            jti: uuid::Uuid::new_v4().to_string(),
+            error: error.to_string(),
+            error_description: error_description.to_string(),
+            state: state_param.to_string(),
+        };
+        signing_key.sign_jwt(&claims, "oauth-authz-resp+jwt")
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn issue_authorization_code(
         &self,
@@ -7960,6 +9622,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         code_challenge_method: Option<CodeChallengeMethod>,
         nonce: Option<String>,
         amr_values: Vec<String>,
+        response_mode: Option<crate::identity::oidc::ResponseMode>,
+        jar_request: Option<String>,
+        via_par: bool,
     ) -> Result<AuthorizationResponse, IdentityError> {
         let request = AuthorizationRequest {
             client_id: client_id.clone(),
@@ -7973,6 +9638,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             code_challenge_method,
             nonce,
             amr_values,
+            response_mode,
+            request: jar_request,
+            via_par,
         };
         self.authorize(realm_id, &request)
     }
@@ -8167,13 +9835,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         // 1. Validate and normalize input (same invariants as create_user)
         let email = validation::validate_email(&request.email)?;
-        let first_name = validation::validate_name_part(&request.first_name, "first_name")?;
-        let last_name = validation::validate_name_part(&request.last_name, "last_name")?;
+        let first_name = validation::validate_name_part(&request.first_name, "First name")?;
+        let last_name = validation::validate_name_part(&request.last_name, "Last name")?;
         let display_name = if request.display_name.trim().is_empty() {
             let synthesized = format!("{} {}", first_name, last_name).trim().to_string();
             if synthesized.is_empty() {
                 return Err(IdentityError::InvalidInput {
-                    reason: "display_name or first_name/last_name required".to_string(),
+                    reason: "Display name or first/last name is required".to_string(),
                 });
             }
             validation::validate_display_name(&synthesized)?
@@ -8288,7 +9956,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let has_device_code = request
             .grant_types
             .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string());
-        if request.redirect_uris.is_empty() && !has_client_credentials && !has_device_code {
+        let has_jwt_bearer = request
+            .grant_types
+            .contains(&"urn:ietf:params:oauth:grant-type:jwt-bearer".to_string());
+        if request.redirect_uris.is_empty()
+            && !has_client_credentials
+            && !has_device_code
+            && !has_jwt_bearer
+        {
             return Err(IdentityError::InvalidInput {
                 reason: "at least one redirect URI is required".to_string(),
             });
@@ -10007,6 +11682,36 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(out)
     }
 
+    fn update_webhook(
+        &self,
+        realm_id: &RealmId,
+        webhook_id: &WebhookId,
+        req: &crate::identity::UpdateWebhookRequest,
+    ) -> Result<crate::identity::Webhook, IdentityError> {
+        use crate::identity::types::Webhook;
+        let existing = self
+            .get_webhook(realm_id, webhook_id)?
+            .ok_or(IdentityError::WebhookNotFound)?;
+        let now = self.clock.now();
+        let updated = Webhook::new(
+            existing.id().clone(),
+            realm_id.clone(),
+            req.url.clone(),
+            req.secret.clone(),
+            req.events.clone(),
+            req.enabled,
+            existing.created_at,
+            now,
+        );
+        let value = serde_json::to_vec(&updated).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &keys::encode_webhook_id(webhook_id), &value)
+            .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        Ok(updated)
+    }
+
     fn delete_webhook(
         &self,
         realm_id: &RealmId,
@@ -10063,6 +11768,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         Ok(stats)
+    }
+
+    fn sweep_expired_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        now_secs: i64,
+    ) -> Result<(u64, u64), IdentityError> {
+        let stats =
+            crate::identity::cleanup::sweep_fingerprints(realm_id, self.storage.as_ref(), now_secs)
+                .map_err(|e| IdentityError::Storage(Box::new(e)))?;
+        Ok((stats.evicted, stats.active))
     }
 
     // ===== SAML =====
@@ -10499,18 +12215,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if !cfg.enabled {
             return Ok(DeviceFingerprintOutcome::Skipped);
         }
-        // Fail-secure (BLK-2): enabled=true with empty HMAC secret is a misconfiguration
-        // that must surface as an error — silently skipping would issue tokens without
-        // the intended fingerprint gate (fail-open).
-        if cfg.fingerprint_hmac_secret.is_empty() {
+        // Fail-secure (BLK-2): enabled=true with empty or short HMAC secret is a
+        // misconfiguration that must surface as an error — silently skipping would issue
+        // tokens without the intended fingerprint gate (fail-open).
+        // NIST SP 800-107 recommends HMAC keys ≥ hash output length (32 bytes for SHA-256).
+        if cfg.fingerprint_hmac_secret.expose_secret().len() < 32 {
             return Err(IdentityError::Internal {
-                reason: "adaptive_mfa.enabled=true but fingerprint_hmac_secret is empty"
-                    .to_string(),
+                reason: format!(
+                    "adaptive_mfa.enabled=true but fingerprint_hmac_secret is too short ({} bytes, minimum 32)",
+                    cfg.fingerprint_hmac_secret.expose_secret().len()
+                ),
             });
         }
 
         let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
-            &cfg.fingerprint_hmac_secret,
+            cfg.fingerprint_hmac_secret.expose_secret(),
             user_id,
             ip,
             user_agent,
@@ -10535,13 +12254,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     actor: Actor::User(user_id.clone()),
                     metadata,
                 };
-                let _ = self.record_audit(
+                if let Err(e) = self.record_audit(
                     realm_id,
                     Some(&ctx),
                     AuditAction::StepUpMfaTriggered,
                     "user",
                     &user_id.as_uuid().to_string(),
-                );
+                ) {
+                    tracing::warn!(error = %e, "StepUpMfaTriggered audit write failed — event lost");
+                }
 
                 // AC-6 vs AC-8: check whether user has an enrolled MFA factor.
                 let has_mfa = self.mfa_enabled(realm_id, user_id).unwrap_or(false)
@@ -10574,11 +12295,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Ok(());
         }
         // Misconfiguration guard: skip recording silently when secret is empty.
-        if cfg.fingerprint_hmac_secret.is_empty() {
+        if cfg.fingerprint_hmac_secret.expose_secret().is_empty() {
             return Ok(());
         }
         let hmac = crate::identity::device_fp::DeviceFingerprintStore::derive_hmac(
-            &cfg.fingerprint_hmac_secret,
+            cfg.fingerprint_hmac_secret.expose_secret(),
             user_id,
             ip,
             user_agent,
@@ -10735,6 +12456,54 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
     }
+
+    fn sv_list_deltas(
+        &self,
+        realm_id: &RealmId,
+        since: u64,
+        limit: usize,
+    ) -> Result<Option<crate::identity::session_version::SvDeltaResponse>, IdentityError> {
+        self.sv_store.list_deltas(realm_id, since, limit)
+    }
+
+    fn sv_snapshot(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<crate::identity::session_version::SvSnapshotResponse, IdentityError> {
+        self.sv_store.snapshot(realm_id)
+    }
+
+    fn sv_bump_session(
+        &self,
+        realm_id: &RealmId,
+        session_id: &SessionId,
+    ) -> Result<u64, IdentityError> {
+        let retention = self.sv_retention_secs(realm_id);
+        let enabled = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Err(IdentityError::SessionVersionDisabled);
+        }
+        self.sv_store.bump(realm_id, session_id, retention)
+    }
+
+    fn sv_bump_all(&self, realm_id: &RealmId) -> Result<usize, IdentityError> {
+        let retention = self.sv_retention_secs(realm_id);
+        let enabled = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Err(IdentityError::SessionVersionDisabled);
+        }
+        self.sv_store.bump_all(realm_id, retention)
+    }
 }
 
 /// Generates and stores a new OTP then dispatches the SMS.
@@ -10797,6 +12566,56 @@ fn classify_phc_algorithm(phc: &str) -> Option<crate::identity::credentials::Pas
         Some(PasswordAlgorithm::Pbkdf2Sha256)
     } else {
         None
+    }
+}
+
+impl EmbeddedIdentityEngine {
+    /// Returns the current session-version for `session_id`, or `1` if not tracked.
+    pub(crate) fn get_session_sv(&self, realm_id: &RealmId, session_id: &SessionId) -> u64 {
+        self.sv_store.get_version(realm_id, session_id).unwrap_or(1)
+    }
+
+    /// Bumps session versions for all active sessions of `user_id`.
+    pub(crate) fn bump_user_sv_inner(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        retention_secs: u64,
+    ) -> Result<usize, IdentityError> {
+        self.sv_store
+            .bump_user_sessions(realm_id, user_id, retention_secs)
+    }
+
+    /// Returns the sv `delta_retention_seconds` config for a realm, or 3600 as default.
+    pub(crate) fn sv_retention_secs(&self, realm_id: &RealmId) -> u64 {
+        self.get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.delta_retention_seconds)
+            .unwrap_or(3600)
+    }
+}
+
+impl crate::rbac::SvBumper for EmbeddedIdentityEngine {
+    fn bump_user_sessions(&self, realm_id: &RealmId, user_id: &UserId) {
+        let enabled = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return;
+        }
+        let retention = self.sv_retention_secs(realm_id);
+        if let Err(e) = self.bump_user_sv_inner(realm_id, user_id, retention) {
+            tracing::warn!(
+                realm = %realm_id,
+                user = %user_id.as_uuid(),
+                error = %e,
+                "sv bump_user_sessions failed (rbac trigger)"
+            );
+        }
     }
 }
 
@@ -12168,6 +13987,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize should succeed");
@@ -12202,6 +14024,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -12214,6 +14039,9 @@ mod tests {
                     code: auth_response.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange code");
@@ -12261,6 +14089,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -12273,6 +14104,9 @@ mod tests {
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(result1.is_ok(), "first exchange should succeed");
@@ -12285,6 +14119,9 @@ mod tests {
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -12317,6 +14154,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -12332,6 +14172,9 @@ mod tests {
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -12391,6 +14234,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -12404,6 +14250,9 @@ mod tests {
                     code: auth_response.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("first exchange");
@@ -12416,6 +14265,9 @@ mod tests {
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://app.example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -12448,6 +14300,9 @@ mod tests {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         );
         assert!(
@@ -12480,6 +14335,9 @@ mod tests {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         );
         assert!(
@@ -12817,6 +14675,9 @@ mod tests {
                 nonce: Some("unique-nonce-abc".to_string()),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         );
         assert!(result.is_ok(), "first use of nonce should succeed");
@@ -12836,6 +14697,9 @@ mod tests {
                 nonce: Some("unique-nonce-abc".to_string()),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         );
         assert!(
@@ -12858,6 +14722,9 @@ mod tests {
                 nonce: Some("different-nonce-xyz".to_string()),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         );
         assert!(result.is_ok(), "different nonce should succeed");
@@ -12916,6 +14783,9 @@ mod tests {
                     nonce: Some("same-nonce".to_string()),
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             );
             assert!(
@@ -12946,6 +14816,9 @@ mod tests {
             nonce: Some(nonce.to_string()),
             resource: None,
             amr_values: Vec::new(),
+            response_mode: None,
+            request: None,
+            via_par: false,
         };
 
         // Use the nonce at t=0.
@@ -13005,6 +14878,9 @@ mod tests {
                 nonce: Some(format!("batch-a-nonce-{i}")),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -13032,6 +14908,9 @@ mod tests {
                 nonce: Some(format!("batch-b-nonce-{i}")),
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             };
             assert!(engine.authorize(&realm, &req).is_ok());
         }
@@ -13856,8 +15735,11 @@ mod tests {
                 &realm_id,
                 &ClientCredentialsRequest {
                     client_id: client.client_id().clone(),
-                    client_secret: secret.clone(),
+                    client_secret: Some(secret.clone()),
                     scope: Some("read write".to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("client_credentials_token should succeed");
@@ -13886,8 +15768,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: "wrong-secret".to_string(),
+                client_secret: Some("wrong-secret".to_string()),
                 scope: None,
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
 
@@ -13924,8 +15809,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: "anything".to_string(),
+                client_secret: Some("anything".to_string()),
                 scope: None,
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
 
@@ -14024,6 +15912,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -14036,6 +15927,9 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange code");
@@ -14051,7 +15945,7 @@ mod tests {
         // Advance clock and refresh
         clock.advance(60 * 1_000_000); // 60 seconds in microseconds
         let new_tokens = engine
-            .refresh_tokens(&realm_id, tokens.refresh_token())
+            .refresh_tokens(&realm_id, tokens.refresh_token(), None)
             .expect("refresh should succeed");
 
         // New tokens are different
@@ -14064,7 +15958,7 @@ mod tests {
         assert_eq!(new_refresh_claims.fid, refresh_claims.fid);
 
         // Old refresh token is now rejected (rotation)
-        let result = engine.refresh_tokens(&realm_id, tokens.refresh_token());
+        let result = engine.refresh_tokens(&realm_id, tokens.refresh_token(), None);
         assert!(
             matches!(result, Err(IdentityError::TokenRevoked)),
             "old refresh token should be rejected after rotation, got: {result:?}"
@@ -14097,7 +15991,7 @@ mod tests {
             .issue_token(&forged_claims)
             .expect("issue forged token");
 
-        let result = engine.refresh_tokens(&realm_id, &forged_token);
+        let result = engine.refresh_tokens(&realm_id, &forged_token, None);
         assert!(
             matches!(result, Err(IdentityError::InvalidToken)),
             "subject/session mismatch must be rejected, got: {result:?}"
@@ -14139,6 +16033,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -14150,6 +16047,9 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange code");
@@ -14168,7 +16068,7 @@ mod tests {
             .encode(serde_json::to_vec(&forged_claims).expect("serialize forged refresh claims"));
         let forged_token = format!("{}.{}.{}", parts[0], forged_payload, parts[2]);
 
-        let result = engine.refresh_tokens(&realm_id, &forged_token);
+        let result = engine.refresh_tokens(&realm_id, &forged_token, None);
         assert!(
             matches!(result, Err(IdentityError::InvalidToken)),
             "forged no-fid payload must be rejected, got: {result:?}"
@@ -14253,6 +16153,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -14265,6 +16168,9 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/callback".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange code");
@@ -14281,7 +16187,7 @@ mod tests {
             .expect("revoke should succeed");
 
         // Refresh is now rejected
-        let result = engine.refresh_tokens(&realm_id, tokens.refresh_token());
+        let result = engine.refresh_tokens(&realm_id, tokens.refresh_token(), None);
         assert!(
             matches!(result, Err(IdentityError::TokenRevoked)),
             "refresh should fail after revocation, got: {result:?}"
@@ -14310,6 +16216,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: tokens.access_token().to_string(),
                     token_type_hint: None,
+                    introspecting_client_id: None,
                 },
             )
             .expect("introspect should succeed");
@@ -14353,6 +16260,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: tokens.access_token().to_string(),
                     token_type_hint: None,
+                    introspecting_client_id: None,
                 },
             )
             .expect("introspect should succeed");
@@ -14373,6 +16281,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: "not-a-valid-token".to_string(),
                     token_type_hint: None,
+                    introspecting_client_id: None,
                 },
             )
             .expect("introspect should succeed even for invalid tokens");
@@ -14433,6 +16342,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -14445,6 +16357,9 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange");
@@ -14455,13 +16370,13 @@ mod tests {
         // Legitimate user rotates (advance clock for unique tokens)
         clock.advance(1_000_000);
         let new_pair = engine
-            .refresh_tokens(&realm_id, &stolen_refresh)
+            .refresh_tokens(&realm_id, &stolen_refresh, None)
             .expect("legitimate rotation");
         let legitimate_refresh = new_pair.refresh_token().to_string();
 
         // Attacker uses the stolen (old) refresh token
         clock.advance(1_000_000);
-        let attack_result = engine.refresh_tokens(&realm_id, &stolen_refresh);
+        let attack_result = engine.refresh_tokens(&realm_id, &stolen_refresh, None);
         assert!(
             attack_result.is_err(),
             "stolen refresh token must be rejected"
@@ -14469,7 +16384,7 @@ mod tests {
 
         // Legitimate user's new refresh token should ALSO be revoked
         // (entire grant family revoked due to theft detection)
-        let legitimate_result = engine.refresh_tokens(&realm_id, &legitimate_refresh);
+        let legitimate_result = engine.refresh_tokens(&realm_id, &legitimate_refresh, None);
         assert!(
             legitimate_result.is_err(),
             "legitimate refresh token must also be revoked after theft detection"
@@ -14514,8 +16429,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: "wrong-secret-456".to_string(),
+                client_secret: Some("wrong-secret-456".to_string()),
                 scope: None,
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -14528,8 +16446,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: String::new(),
+                client_secret: Some(String::new()),
                 scope: None,
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -14543,8 +16464,11 @@ mod tests {
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: fake_client_id,
-                client_secret: "any-secret".to_string(),
+                client_secret: Some("any-secret".to_string()),
                 scope: None,
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         );
         assert!(
@@ -14668,6 +16592,9 @@ mod tests {
                         nonce: None,
                                             resource: None,
                                             amr_values: Vec::new(),
+                                        response_mode: None,
+                                        request: None,
+                                        via_par: false,
                     }).expect("authorize");
 
                     let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -14675,6 +16602,9 @@ mod tests {
                         code: auth.code().to_string(),
                         redirect_uri: "https://app.example.com/cb".to_string(),
                         code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                        dpop_jkt: None,
+                        client_assertion_type: None,
+                        client_assertion: None,
                     }).expect("exchange");
 
                     access_tokens.push(tokens.access_token().to_string());
@@ -14690,6 +16620,7 @@ mod tests {
                             if let Ok(new_pair) = engine.refresh_tokens(
                                 &realm_id,
                                 &refresh_tokens[idx],
+                                None,
                             ) {
                                 access_tokens[idx] = new_pair.access_token().to_string();
                                 refresh_tokens[idx] = new_pair.refresh_token().to_string();
@@ -14717,6 +16648,7 @@ mod tests {
                         &TokenIntrospectionRequest {
                             token: token.clone(),
                             token_type_hint: None,
+                            introspecting_client_id: None,
                         },
                     ).expect("introspect");
                     if resp.active {
@@ -14779,6 +16711,9 @@ mod tests {
                     nonce: None,
                                     resource: None,
                                     amr_values: Vec::new(),
+                                response_mode: None,
+                                request: None,
+                                via_par: false,
                 }).expect("authorize");
 
                 let tokens = engine.exchange_authorization_code(&realm_id, &TokenExchangeRequest {
@@ -14786,6 +16721,9 @@ mod tests {
                     code: auth.code().to_string(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 }).expect("exchange");
 
                 let mut current_refresh = tokens.refresh_token().to_string();
@@ -14795,7 +16733,7 @@ mod tests {
                     // Advance clock 1 second to get unique timestamps
                     clock.advance(1_000_000);
 
-                    let new_pair = engine.refresh_tokens(&realm_id, &current_refresh)
+                    let new_pair = engine.refresh_tokens(&realm_id, &current_refresh, None)
                         .unwrap_or_else(|e| panic!("rotation {i} failed: {e}"));
 
                     old_refresh_tokens.push(current_refresh);
@@ -14807,6 +16745,7 @@ mod tests {
                         &TokenIntrospectionRequest {
                             token: current_refresh.clone(),
                             token_type_hint: None,
+                            introspecting_client_id: None,
                         },
                     ).expect("introspect current");
                     prop_assert!(resp.active, "current refresh token must be active at rotation {}", i);
@@ -14814,7 +16753,7 @@ mod tests {
 
                 // After all rotations, none of the old refresh tokens should work
                 for (i, old_token) in old_refresh_tokens.iter().enumerate() {
-                    let result = engine.refresh_tokens(&realm_id, old_token);
+                    let result = engine.refresh_tokens(&realm_id, old_token, None);
                     // First old token reuse triggers theft detection
                     if result.is_err() {
                         // After theft detection, all tokens in the family are revoked
@@ -15339,6 +17278,8 @@ mod tests {
             code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
             code_challenge_method: Some("S256".to_string()),
             nonce: None,
+            response_mode: None,
+            authorization_signed_response_alg: None,
             created_at: now,
             expires_at: now.add_micros(600_000_000),
         };
@@ -15369,6 +17310,8 @@ mod tests {
             code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
             code_challenge_method: Some("S256".to_string()),
             nonce: None,
+            response_mode: None,
+            authorization_signed_response_alg: None,
             created_at: now,
             expires_at: now.add_micros(600_000_000),
         };
@@ -15397,6 +17340,59 @@ mod tests {
             .get_consent(&realm, &user, &client)
             .expect("get")
             .is_none());
+    }
+
+    // ===== Delete cascades to device fingerprints (GDPR Art.17 / AC-11) =====
+
+    #[test]
+    fn delete_user_cascades_device_fingerprints() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+
+        // Record two fingerprints for the user.
+        let secret = "test-secret-at-least-32-bytes-long!!";
+        let hmac1 = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.0.1.1", "UA/1");
+        let hmac2 = DeviceFingerprintStore::derive_hmac(secret, user.id(), "10.0.2.1", "UA/1");
+        engine
+            .device_fp
+            .record(&realm, user.id(), &hmac1, 30)
+            .expect("record fp1");
+        engine
+            .device_fp
+            .record(&realm, user.id(), &hmac2, 30)
+            .expect("record fp2");
+
+        // Confirm both are recognised before deletion.
+        assert_eq!(
+            engine
+                .device_fp
+                .check_and_refresh(&realm, user.id(), &hmac1, 30)
+                .expect("check1"),
+            crate::identity::device_fp::FingerprintResult::Recognised,
+            "fp1 must be recognised before delete"
+        );
+
+        // Delete the user — cascade must erase both fingerprints.
+        engine.delete_user(&realm, user.id()).expect("delete user");
+
+        // Both fingerprints must now be gone.
+        assert_eq!(
+            engine
+                .device_fp
+                .check_and_refresh(&realm, user.id(), &hmac1, 30)
+                .expect("check1-after"),
+            crate::identity::device_fp::FingerprintResult::Unrecognised,
+            "fp1 must be erased after delete_user"
+        );
+        assert_eq!(
+            engine
+                .device_fp
+                .check_and_refresh(&realm, user.id(), &hmac2, 30)
+                .expect("check2-after"),
+            crate::identity::device_fp::FingerprintResult::Unrecognised,
+            "fp2 must be erased after delete_user"
+        );
     }
 
     #[test]
@@ -15704,6 +17700,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize");
@@ -15716,13 +17715,16 @@ mod tests {
                     client_id: client.client_id().clone(),
                     redirect_uri: "https://app.example.com/cb".to_string(),
                     code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             )
             .expect("exchange");
 
         // Real refresh works
         engine
-            .refresh_tokens(&realm_id, response.refresh_token())
+            .refresh_tokens(&realm_id, response.refresh_token(), None)
             .expect("legitimate refresh should succeed");
 
         // Craft a forged refresh token with a different signing key
@@ -15738,7 +17740,7 @@ mod tests {
             .issue_token(&forged_claims)
             .expect("issue forged refresh");
 
-        let result = engine.refresh_tokens(&realm_id, &forged_token);
+        let result = engine.refresh_tokens(&realm_id, &forged_token, None);
         assert!(result.is_err(), "forged refresh token must be rejected");
     }
 
@@ -15819,6 +17821,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: tokens.access_token().to_string(),
                     token_type_hint: Some("access_token".to_string()),
+                    introspecting_client_id: None,
                 },
             )
             .expect("real introspection");
@@ -15843,6 +17846,7 @@ mod tests {
                 &TokenIntrospectionRequest {
                     token: forged_token,
                     token_type_hint: Some("access_token".to_string()),
+                    introspecting_client_id: None,
                 },
             )
             .expect("forged introspection should not error");
@@ -15944,6 +17948,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect_err("must reject public client with no PKCE");
@@ -15977,6 +17984,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect_err("must reject challenge without S256 method");
@@ -16049,6 +18059,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("confidential client must succeed without PKCE");
@@ -16177,6 +18190,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect_err("invalid scope chars must be rejected");
@@ -16209,6 +18225,9 @@ mod tests {
                     nonce: None,
                     resource: None,
                     amr_values: Vec::new(),
+                    response_mode: None,
+                    request: None,
+                    via_par: false,
                 },
             )
             .expect("authorize must succeed");
@@ -16435,6 +18454,161 @@ mod tests {
         assert!(
             matches!(ip_rate_result, Err(IdentityError::RateLimited)),
             "IP should be rate-limited after step-up MFA failure, got: {ip_rate_result:?}"
+        );
+    }
+
+    // ===== PAR (RFC 9126) unit tests =====
+    //
+    // These live here rather than in tests/par.rs because `consume_par`
+    // returns `StoredPushedAuthorizationRequest` which is pub(crate).
+
+    fn par_setup_engine_and_public_client() -> (
+        tempfile::TempDir,
+        EmbeddedIdentityEngine,
+        Arc<FakeClock>,
+        RealmId,
+        crate::identity::oidc::OAuthClient,
+    ) {
+        use crate::identity::oidc::RegisterClientRequest;
+        let (dir, engine, clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let client = engine
+            .register_client(
+                &realm,
+                &RegisterClientRequest {
+                    client_name: "PAR Public Client".to_string(),
+                    redirect_uris: vec!["https://example.com/callback".to_string()],
+                    client_secret: None,
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: false,
+                    client_logo_url: None,
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+        (dir, engine, clock, realm, client)
+    }
+
+    fn par_pkce_challenge() -> (String, String) {
+        use data_encoding::BASE64URL_NOPAD;
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = BASE64URL_NOPAD
+            .encode(ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes()).as_ref());
+        (verifier.to_string(), challenge)
+    }
+
+    fn par_request(
+        client_id: crate::core::ClientId,
+        challenge: &str,
+    ) -> crate::identity::oidc::PushedAuthorizationRequest {
+        crate::identity::oidc::PushedAuthorizationRequest {
+            client_id,
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: "openid".to_string(),
+            state: "state-xyz".to_string(),
+            resource: None,
+            response_type: "code".to_string(),
+            code_challenge: Some(challenge.to_string()),
+            code_challenge_method: Some(crate::identity::oidc::CodeChallengeMethod::S256),
+            nonce: None,
+            request: None,
+            response_mode: None,
+        }
+    }
+
+    #[test]
+    fn par_consume_happy_path_marks_used() {
+        let (_dir, engine, _clock, realm, client) = par_setup_engine_and_public_client();
+        let (_, challenge) = par_pkce_challenge();
+
+        let resp = engine
+            .push_authorization_request(
+                &realm,
+                &par_request(client.client_id().clone(), &challenge),
+            )
+            .expect("push");
+        let stored = engine
+            .consume_par(&realm, &resp.request_uri)
+            .expect("first consume must succeed");
+
+        assert_eq!(stored.state, "state-xyz");
+        assert!(
+            stored.used,
+            "stored entry must be marked used after consume"
+        );
+    }
+
+    #[test]
+    fn par_single_use_enforced() {
+        let (_dir, engine, _clock, realm, client) = par_setup_engine_and_public_client();
+        let (_, challenge) = par_pkce_challenge();
+
+        let resp = engine
+            .push_authorization_request(
+                &realm,
+                &par_request(client.client_id().clone(), &challenge),
+            )
+            .expect("push");
+
+        engine
+            .consume_par(&realm, &resp.request_uri)
+            .expect("first consume");
+        let second = engine.consume_par(&realm, &resp.request_uri);
+        assert!(
+            matches!(
+                second,
+                Err(IdentityError::InvalidPushedAuthorizationRequest)
+            ),
+            "second consume must be rejected as replay, got: {second:?}"
+        );
+    }
+
+    #[test]
+    fn par_expired_rejected() {
+        let (_dir, engine, clock, realm, client) = par_setup_engine_and_public_client();
+        let (_, challenge) = par_pkce_challenge();
+
+        let resp = engine
+            .push_authorization_request(
+                &realm,
+                &par_request(client.client_id().clone(), &challenge),
+            )
+            .expect("push");
+
+        clock.advance(91 * 1_000_000); // 91 seconds past the 90-second TTL
+
+        let result = engine.consume_par(&realm, &resp.request_uri);
+        assert!(
+            matches!(
+                result,
+                Err(IdentityError::InvalidPushedAuthorizationRequest)
+            ),
+            "expired request_uri must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn par_unknown_uri_rejected() {
+        let (_dir, engine, _clock, realm, _client) = par_setup_engine_and_public_client();
+        let bogus = "urn:ietf:params:oauth:request_uri:00000000-0000-0000-0000-000000000000";
+        assert!(
+            matches!(
+                engine.consume_par(&realm, bogus),
+                Err(IdentityError::InvalidPushedAuthorizationRequest)
+            ),
+            "unknown request_uri must return InvalidPushedAuthorizationRequest"
+        );
+    }
+
+    #[test]
+    fn par_malformed_uri_prefix_rejected() {
+        let (_dir, engine, _clock, realm, _client) = par_setup_engine_and_public_client();
+        assert!(
+            matches!(
+                engine.consume_par(&realm, "not-a-urn"),
+                Err(IdentityError::InvalidPushedAuthorizationRequest)
+            ),
+            "malformed request_uri must return InvalidPushedAuthorizationRequest"
         );
     }
 }

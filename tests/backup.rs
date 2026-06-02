@@ -236,12 +236,15 @@ async fn test_restore_preserves_signing_keys() {
         fid: None,
         scope: None,
         nonce: None,
+        cnf: None,
         roles: Vec::new(),
         groups: Vec::new(),
+        org_groups: Vec::new(),
         permissions: Vec::new(),
         custom: BTreeMap::new(),
         required_actions: Vec::new(),
         amr: Vec::new(),
+        sv: None,
     };
     let pre_restore_jwt = src_signing_key.issue_token(&claims).expect("issue jwt");
 

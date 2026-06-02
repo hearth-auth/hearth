@@ -43,8 +43,8 @@ struct UserListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rows-only partial returned when the user list is filtered live via
@@ -116,8 +116,8 @@ pub async fn admin_users_list(
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Err(e) => {
@@ -189,8 +189,8 @@ pub async fn admin_admin_users_list(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Err(e) => {
@@ -217,6 +217,8 @@ struct UserNewTemplate {
     /// Human-readable summary of the realm's password policy, shown as helper
     /// text below the password input. Empty string when no policy is configured.
     password_policy_hint: String,
+    /// Schema-defined attributes paired with submitted values (empty = no attrs).
+    attr_fields: Vec<(crate::identity::AttributeDefinition, String)>,
     // Chrome fields.
     chrome: bool,
     active: &'static str,
@@ -227,8 +229,8 @@ struct UserNewTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/users/new`.
@@ -237,13 +239,21 @@ pub async fn admin_user_create_form(
     RequireAdmin(session): RequireAdmin,
     AxumPath(realm_name): AxumPath<String>,
 ) -> Response {
-    let password_policy_hint = state
-        .identity
-        .get_realm_by_name(&realm_name)
-        .ok()
-        .flatten()
+    let realm = state.identity.get_realm_by_name(&realm_name).ok().flatten();
+    let password_policy_hint = realm
+        .as_ref()
         .and_then(|r| r.config().password_policy.clone())
         .map(build_password_policy_hint)
+        .unwrap_or_default();
+    let attr_fields: Vec<(crate::identity::AttributeDefinition, String)> = realm
+        .as_ref()
+        .and_then(|r| r.config().attribute_definitions.as_ref())
+        .map(|d| {
+            d.users
+                .iter()
+                .map(|def| (def.clone(), String::new()))
+                .collect()
+        })
         .unwrap_or_default();
 
     render(&UserNewTemplate {
@@ -254,6 +264,7 @@ pub async fn admin_user_create_form(
         form_first_name: String::new(),
         form_last_name: String::new(),
         password_policy_hint,
+        attr_fields,
         chrome: true,
         active: "users",
         user_email: Some(session.user_email.clone()),
@@ -263,8 +274,8 @@ pub async fn admin_user_create_form(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -305,8 +316,43 @@ pub struct CreateUserForm {
     pub last_name: String,
     #[serde(default)]
     pub password: String,
+    /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
+    pub attr_keys: Vec<String>,
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
+    pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+}
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateUserForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        Ok(Self {
+            email: super::handlers_common::form_scalar(&p, "email"),
+            display_name: super::handlers_common::form_scalar(&p, "display_name"),
+            first_name: super::handlers_common::form_scalar(&p, "first_name"),
+            last_name: super::handlers_common::form_scalar(&p, "last_name"),
+            password: super::handlers_common::form_scalar(&p, "password"),
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
 }
 
 /// `POST /ui/admin/users/new`.
@@ -315,7 +361,7 @@ pub async fn admin_user_create_submit(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    FriendlyForm(form): FriendlyForm<CreateUserForm>,
+    form: CreateUserForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -329,13 +375,45 @@ pub async fn admin_user_create_submit(
         .map(build_password_policy_hint)
         .unwrap_or_default();
 
+    let form_attributes: Vec<(String, String)> = form
+        .attr_keys
+        .iter()
+        .zip(form.attr_vals.iter())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let attr_defs = target
+        .0
+        .config()
+        .attribute_definitions
+        .as_ref()
+        .map(|d| d.users.clone())
+        .unwrap_or_default();
+
+    let attributes: std::collections::BTreeMap<String, String> =
+        form_attributes.iter().cloned().collect();
+
     let req = CreateUserRequest {
         email: form.email.clone(),
         display_name: form.display_name.clone(),
         first_name: form.first_name.clone(),
         last_name: form.last_name.clone(),
-        attributes: Default::default(),
+        attributes,
     };
+
+    // Re-populate attr_fields for error re-renders.
+    let attr_fields: Vec<(crate::identity::AttributeDefinition, String)> = attr_defs
+        .into_iter()
+        .map(|def| {
+            let val = form_attributes
+                .iter()
+                .find(|(k, _)| k == &def.key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            (def, val)
+        })
+        .collect();
 
     let render_error = |error: String| {
         render(&UserNewTemplate {
@@ -346,6 +424,7 @@ pub async fn admin_user_create_submit(
             form_first_name: form.first_name.clone(),
             form_last_name: form.last_name.clone(),
             password_policy_hint: password_policy_hint.clone(),
+            attr_fields: attr_fields.clone(),
             chrome: true,
             active: "users",
             user_email: Some(session.user_email.clone()),
@@ -355,17 +434,30 @@ pub async fn admin_user_create_submit(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         })
     };
 
-    match state.identity.create_user(target.id(), &req) {
+    // The system realm guards `create_user` to prevent non-admin accounts.
+    // Use the dedicated `create_admin_user` bypass and then grant the admin role.
+    let is_system = crate::identity::keys::is_system_realm(target.id());
+    let create_result = if is_system {
+        state.identity.create_admin_user(&req)
+    } else {
+        state.identity.create_user(target.id(), &req)
+    };
+
+    match create_result {
         Ok(user) => {
-            // Set the initial password.
+            // Set the initial password. If this fails, delete the partially
+            // created user and surface the error rather than leaving an
+            // account that can never log in.
             let pw = CleartextPassword::from_string(form.password);
             if let Err(e) = state.identity.set_password(target.id(), user.id(), &pw) {
                 tracing::warn!(error = %e, "set initial password after create_user failed");
+                let _ = state.identity.delete_user(target.id(), user.id());
+                return render_error(format!("Password error: {e}"));
             }
 
             // Activate the user (skip email verification for admin-created users).
@@ -380,6 +472,14 @@ pub async fn admin_user_create_submit(
                 },
             );
 
+            // For system-realm users, grant the realm.admin role so they can
+            // actually sign in as administrators.
+            if is_system {
+                if let Err(e) = set_user_admin(&state, target.id(), user.id(), true) {
+                    tracing::warn!(error = %e, "failed to assign realm.admin to new admin user");
+                }
+            }
+
             // Audit.
             audit_user_event(&state, &session, &target.0, user.id(), "create");
             Redirect::to(&format!(
@@ -393,9 +493,10 @@ pub async fn admin_user_create_submit(
             render_error("A user with that email already exists.".to_string())
         }
         Err(IdentityError::InvalidInput { reason }) => render_error(reason),
+        Err(IdentityError::InvalidAttribute { reason }) => render_error(reason),
         Err(e) => {
             tracing::warn!(error = %e, "create_user failed");
-            render_error("Unable to create user right now.".to_string())
+            render_error(format!("Unable to create user: {e}"))
         }
     }
 }
@@ -489,7 +590,7 @@ struct UserDetailTemplate {
     available_permissions: Vec<String>,
     /// Fully resolved effective permission names for this user.
     effective_permissions: Vec<String>,
-    /// JSON object mapping role UUID → sorted permission strings, for Alpine.js.
+    /// JSON object mapping role UUID → sorted permission strings, for in-browser lookup.
     role_perms_json: String,
     /// User attributes as sorted `(key, value)` pairs.
     attributes: Vec<(String, String)>,
@@ -503,8 +604,8 @@ struct UserDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Template for the Roles tab HTMX partial.
@@ -516,7 +617,7 @@ struct UserRolesTabTemplate {
     role_assignments: Vec<UserRoleAssignmentRow>,
     available_roles: Vec<AvailableRole>,
     available_orgs: Vec<AvailableOrg>,
-    /// JSON object mapping role UUID → sorted permission strings, for Alpine.js in-browser lookup.
+    /// JSON object mapping role UUID → sorted permission strings, for in-browser lookup.
     role_perms_json: String,
     csrf: Option<String>,
 }
@@ -689,7 +790,7 @@ pub async fn admin_user_detail(
         })
         .collect();
 
-    // Build role_id → [permissions] JSON map for Alpine.js in-browser lookup.
+    // Build role_id → [permissions] JSON map for in-browser permission lookup.
     let role_perms_map: std::collections::HashMap<&str, &[String]> = available_roles
         .iter()
         .map(|r| (r.id.as_str(), r.permissions.as_slice()))
@@ -771,17 +872,22 @@ pub async fn admin_user_detail(
         narrow: false,
         product_name: state.product_name_for(target.id()),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
 /// `POST /ui/admin/users/:id/reset-password` — sends a password reset email.
+///
+/// When called via HTMX (`HX-Request: true`) returns a small success HTML
+/// fragment that replaces the action bar in-place. For non-HTMX callers
+/// the original redirect-with-flash behaviour is preserved.
 pub async fn admin_user_send_reset(
     State(state): State<Arc<WebState>>,
-    RequireAdmin(_session): RequireAdmin,
+    RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
+    htmx: super::templates::IsHtmx,
 ) -> Response {
     let uid = match user_id.parse::<uuid::Uuid>() {
         Ok(u) => crate::core::UserId::new(u),
@@ -797,21 +903,33 @@ pub async fn admin_user_send_reset(
         }
     };
 
+    let user_email = user.email().to_string();
     match state
         .identity
-        .request_password_reset(target.id(), user.email())
+        .request_password_reset(target.id(), &user_email)
     {
         Ok(Some(_token)) => {
-            // Token generated — in production, the email service sends it.
-            // For now, flash success.
-            tracing::info!(user_id = %uid, "admin triggered password reset");
+            tracing::info!(user_id = %uid, admin = %session.user_email, "admin triggered password reset");
         }
-        Ok(None) => {
-            // Rate-limited or other reason no token was generated
-        }
+        Ok(None) => {}
         Err(e) => {
             tracing::warn!(error = %e, "request_password_reset failed");
         }
+    }
+
+    if htmx.0 {
+        // Return an inline success badge that swaps in place of the form.
+        let fragment = format!(
+            r#"<span class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium bg-success/[0.12] text-success-fg">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+              Reset email sent to {user_email}
+            </span>"#
+        );
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::OK)
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body(axum::body::Body::from(fragment))
+            .unwrap_or_else(|_| super::handlers_common::server_error());
     }
 
     Redirect::to(&format!(
@@ -931,8 +1049,8 @@ struct AdminMfaCodesResetTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `POST /ui/admin/users/:id/reset-mfa-codes` — regenerates recovery codes for the user.
@@ -973,8 +1091,8 @@ pub async fn admin_user_reset_mfa_codes(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             };
             render(&tmpl)
         }
@@ -1101,8 +1219,8 @@ struct UserEditTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// View model for a user's organization membership (displayed on user edit page).
@@ -1124,7 +1242,9 @@ pub async fn admin_user_edit_form(
 ) -> Response {
     let uid = match user_id.parse::<uuid::Uuid>() {
         Ok(u) => crate::core::UserId::new(u),
-        Err(_) => return super::handlers_common::not_found("User not found"),
+        Err(_) => {
+            return super::handlers_common::not_found_authed(&state, &session, "User not found")
+        }
     };
 
     match state.identity.get_user(target.id(), &uid) {
@@ -1176,11 +1296,11 @@ pub async fn admin_user_edit_form(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
-        Ok(None) => super::handlers_common::not_found("User not found"),
+        Ok(None) => super::handlers_common::not_found_authed(&state, &session, "User not found"),
         Err(e) => {
             tracing::warn!(error = %e, "get_user failed");
             super::handlers_common::server_error()
@@ -1205,13 +1325,48 @@ pub struct EditUserForm {
     #[serde(default)]
     pub admin: Option<String>,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
-    #[serde(default, rename = "attr_key")]
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_keys: Vec<String>,
-    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
-    #[serde(default, rename = "attr_val")]
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+}
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for EditUserForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        let admin_val = super::handlers_common::form_scalar(&p, "admin");
+        Ok(Self {
+            email: super::handlers_common::form_scalar(&p, "email"),
+            display_name: super::handlers_common::form_scalar(&p, "display_name"),
+            first_name: super::handlers_common::form_scalar(&p, "first_name"),
+            last_name: super::handlers_common::form_scalar(&p, "last_name"),
+            status: super::handlers_common::form_scalar(&p, "status"),
+            admin: if admin_val.is_empty() {
+                None
+            } else {
+                Some(admin_val)
+            },
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
 }
 
 /// `POST /ui/admin/users/:id/edit`.
@@ -1220,7 +1375,7 @@ pub async fn admin_user_edit_submit(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, user_id)): AxumPath<(String, String)>,
-    FriendlyForm(form): FriendlyForm<EditUserForm>,
+    form: EditUserForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -1236,7 +1391,7 @@ pub async fn admin_user_edit_submit(
         .attr_keys
         .iter()
         .zip(form.attr_vals.iter())
-        .filter(|(k, _)| !k.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let req = UpdateUserRequest {
@@ -1292,6 +1447,9 @@ pub async fn admin_user_edit_submit(
             &form,
         ),
         Err(IdentityError::InvalidInput { reason }) => {
+            render_edit_error(&state, &session, &target.0, &uid, &reason, &form)
+        }
+        Err(IdentityError::InvalidAttribute { reason }) => {
             render_edit_error(&state, &session, &target.0, &uid, &reason, &form)
         }
         Err(IdentityError::UserNotFound) => super::handlers_common::not_found("User not found"),
@@ -1384,7 +1542,7 @@ fn render_edit_error(
                 .attr_keys
                 .iter()
                 .zip(form.attr_vals.iter())
-                .filter(|(k, _)| !k.is_empty())
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             let attr_defs = target
@@ -1426,8 +1584,8 @@ fn render_edit_error(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         None => super::handlers_common::not_found("User not found"),
@@ -1501,8 +1659,8 @@ struct SessionListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query params for the sessions list page. Extends pagination with an
@@ -1643,8 +1801,8 @@ pub async fn admin_sessions_list(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Err(e) => {
@@ -1789,8 +1947,8 @@ struct AdminUserConsentsTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/users/{id}/applications` — lists every OAuth consent the
@@ -1844,11 +2002,10 @@ pub async fn admin_user_consents_list(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: String::new(),
-        realm_theme_css: None,
+        realm_theme_url: None,
+        inline_theme_css: None,
     };
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 
@@ -2511,8 +2668,8 @@ struct UserImportTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms/{realm}/users/import`
@@ -2535,8 +2692,8 @@ pub async fn admin_users_import_form(
         narrow: false,
         product_name: state.product_name_for(target.id()),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -2621,8 +2778,8 @@ pub async fn admin_users_import_submit(
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             });
         }
     };
@@ -2643,8 +2800,8 @@ pub async fn admin_users_import_submit(
                 narrow: false,
                 product_name: state.product_name_for(target.id()),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             });
         }
     };
@@ -2663,8 +2820,8 @@ pub async fn admin_users_import_submit(
             narrow: false,
             product_name: state.product_name_for(target.id()),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         });
     }
 
@@ -2817,6 +2974,140 @@ fn process_csv_import(
     }
 
     summary
+}
+
+// ---------------------------------------------------------------------------
+// Admin-users import (system-realm aliases — no realm path segment)
+// ---------------------------------------------------------------------------
+
+/// `GET /ui/admin/admin-users/import` — import form scoped to the system realm.
+pub async fn admin_admin_users_import_form(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(session): RequireAdmin,
+) -> Response {
+    render(&UserImportTemplate {
+        error: None,
+        realm_name: String::new(),
+        list_url: "/ui/admin/admin-users".to_string(),
+        chrome: true,
+        active: "admin-users",
+        user_email: Some(session.user_email.clone()),
+        is_admin: true,
+        flash: None,
+        csrf: session.csrf.clone(),
+        narrow: false,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    })
+}
+
+/// `GET /ui/admin/admin-users/import/template.csv` — blank CSV template for admin users.
+pub async fn admin_admin_users_import_template_csv(
+    RequireAdmin(_session): RequireAdmin,
+) -> Response {
+    let csv = "email,name,role\nexample@company.com,Jane Doe,admin\n";
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("Content-Type", "text/csv; charset=utf-8")
+        .header(
+            "Content-Disposition",
+            "attachment; filename=\"users_template.csv\"",
+        )
+        .body(axum::body::Body::from(csv))
+        .unwrap_or_else(|_| super::handlers_common::server_error())
+}
+
+/// `POST /ui/admin/admin-users/import` — process uploaded CSV for the system realm.
+pub async fn admin_admin_users_import_submit(
+    State(state): State<Arc<WebState>>,
+    RequireAdmin(session): RequireAdmin,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let system_realm = crate::identity::keys::system_realm_id();
+
+    let mut csv_bytes: Option<Vec<u8>> = None;
+    let mut col_email = String::new();
+    let mut col_name = String::new();
+    let mut col_role = String::new();
+    let mut csrf_token = String::new();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name().unwrap_or("") {
+            "csv_file" => {
+                csv_bytes = field.bytes().await.ok().map(|b| b.to_vec());
+            }
+            "col_email" => {
+                col_email = field.text().await.unwrap_or_default();
+            }
+            "col_name" => {
+                col_name = field.text().await.unwrap_or_default();
+            }
+            "col_role" => {
+                col_role = field.text().await.unwrap_or_default();
+            }
+            "_csrf" => {
+                csrf_token = field.text().await.unwrap_or_default();
+            }
+            _ => {}
+        }
+    }
+
+    if let Err(resp) = verify_csrf_form_field(&session, &csrf_token) {
+        return resp;
+    }
+
+    let render_error = |error: String| {
+        render(&UserImportTemplate {
+            error: Some(error),
+            realm_name: String::new(),
+            list_url: "/ui/admin/admin-users".to_string(),
+            chrome: true,
+            active: "admin-users",
+            user_email: Some(session.user_email.clone()),
+            is_admin: true,
+            flash: None,
+            csrf: session.csrf.clone(),
+            narrow: false,
+            product_name: state.product_name.clone(),
+            logo_url: state.logo_url.clone(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
+        })
+    };
+
+    let bytes = match csv_bytes {
+        Some(b) if !b.is_empty() => b,
+        _ => return render_error("No file uploaded.".to_string()),
+    };
+
+    let text = match String::from_utf8(bytes) {
+        Ok(t) => t,
+        Err(_) => return render_error("File is not valid UTF-8.".to_string()),
+    };
+
+    if col_email.is_empty() {
+        return render_error("Email column mapping is required.".to_string());
+    }
+
+    let summary = process_csv_import(
+        &state,
+        &system_realm,
+        &text,
+        &col_email,
+        &col_name,
+        &col_role,
+    );
+    let flash = format!(
+        "import_done:created={},updated={},skipped={},errors={}",
+        summary.created,
+        summary.updated,
+        summary.skipped,
+        summary.errors.len()
+    );
+
+    Redirect::to(&format!("/ui/admin/admin-users?flash={flash}")).into_response()
 }
 
 // ---------------------------------------------------------------------------

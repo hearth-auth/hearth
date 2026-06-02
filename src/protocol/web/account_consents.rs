@@ -55,8 +55,8 @@ struct ConsentsIndexTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl ConsentsIndexTemplate {
@@ -78,8 +78,8 @@ impl ConsentsIndexTemplate {
             narrow: true,
             product_name,
             logo_url,
-            theme_css: String::new(),
-            realm_theme_css: None,
+            realm_theme_url: None,
+            inline_theme_css: None,
         }
     }
 }
@@ -99,8 +99,8 @@ struct AccountApplicationsTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -126,8 +126,8 @@ pub async fn account_applications(
         narrow: true,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -143,8 +143,7 @@ pub async fn consents_index(State(state): State<Arc<WebState>>, session: UiSessi
         state.product_name.clone(),
         state.logo_url.clone(),
     );
-    tmpl.theme_css.clone_from(&state.theme_css);
-    tmpl.realm_theme_css = state.realm_theme_css();
+    tmpl.realm_theme_url = state.realm_theme_url();
     render(&tmpl)
 }
 

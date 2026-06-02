@@ -100,6 +100,9 @@ fn bench_auth_code_exchange(c: &mut Criterion) {
                         code_challenge_method: None,
                         nonce: None,
                         amr_values: vec![],
+                        response_mode: None,
+                        request: None,
+                        via_par: false,
                     },
                 )
                 .expect("authorize");
@@ -112,6 +115,9 @@ fn bench_auth_code_exchange(c: &mut Criterion) {
                     code: auth.code().to_string(),
                     redirect_uri: "https://bench.example.com/callback".to_string(),
                     code_verifier: None,
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             );
             assert!(result.is_ok());

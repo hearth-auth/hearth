@@ -1,24 +1,14 @@
 {% for row in events %}
-{# Each row manages its own open/closed state independently via Hyperscript.
-   The detail row below is a sibling <tr> rendered immediately after,
-   hidden until the toggle is clicked — no HTMX round-trip needed since
-   the full event payload is embedded in the server render. #}
-<tr class="border-b border-divider-subtle hover-bg-divider{% if row.action_high_severity %} border-l-2 border-l-amber-400/60{% endif %}">
+{# Each row manages its own open/closed state independently via the
+   data-component system. The detail row below is a sibling <tr> rendered
+   immediately after, hidden until the toggle is clicked — no HTMX round-trip
+   needed since the full event payload is embedded in the server render. #}
+<tr data-audit-row class="border-b border-divider-subtle hover-bg-divider{% if row.action_high_severity %} border-l-2 border-l-amber-400/60{% endif %}">
   <td class="w-8 px-3 py-3">
     <button type="button"
             aria-expanded="false"
             aria-label="Expand event detail"
-            _="on click
-                 toggle .bg-ht-surface-overlay on (closest <tr/>)
-                 toggle .rotate-90 on the first <svg/> in me
-                 toggle .hidden on the next <tr/> from (closest <tr/>)
-                 if @aria-expanded == 'false'
-                   set @aria-expanded to 'true'
-                   set @aria-label to 'Collapse event detail'
-                 else
-                   set @aria-expanded to 'false'
-                   set @aria-label to 'Expand event detail'
-                 end"
+            data-component="audit-expand"
             class="flex h-5 w-5 items-center justify-center rounded text-ht-content-muted transition-transform hover:text-ht-content-secondary focus:outline-none focus:ring-1 focus:ring-ht-content-brand">
       <svg class="h-3.5 w-3.5 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
     </button>
@@ -49,7 +39,7 @@
       {% when Some with (url) %}
         <a href="{{ url }}" class="ml-1 text-ht-content-secondary underline decoration-divider-subtle decoration-1 underline-offset-2 transition-colors hover:text-ht-content-brand hover:decoration-ht-content-brand">{{ row.resource_display }}</a>
       {% when None %}
-        <span class="ml-1 font-mono text-xs text-ht-content-muted">{{ row.resource_display }}</span>
+        <span class="ml-1">{{ row.resource_display }}</span>
     {% endmatch %}
   </td>
   <td class="px-4 py-3">
@@ -69,7 +59,7 @@
     {% endif %}
   </td>
 </tr>
-<tr class="hidden border-b border-divider-subtle bg-ht-surface-overlay">
+<tr data-audit-detail class="hidden border-b border-divider-subtle bg-ht-surface-overlay">
   <td colspan="6" class="px-6 py-4">
     {% include "ui/admin/audit/_detail.html" %}
   </td>

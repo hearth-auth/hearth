@@ -116,6 +116,13 @@ struct JwtHeader {
     kid: String,
 }
 
+/// Confirmation claim (RFC 7800 §3.1) — carries the JWK thumbprint for DPoP binding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CnfClaim {
+    /// JWK thumbprint (RFC 7638) of the client's proof-of-possession key.
+    pub jkt: String,
+}
+
 /// JWT claims (payload).
 ///
 /// Contains standard claims plus Hearth-specific claims for session
@@ -167,6 +174,13 @@ pub struct TokenClaims {
     /// authorization request, the ID token MUST include it unmodified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+    /// DPoP confirmation claim (RFC 7800 / RFC 9449).
+    ///
+    /// Present only on DPoP-bound access tokens. Contains the JWK thumbprint
+    /// of the client key used to prove possession. Resource servers MUST
+    /// require a matching DPoP proof when this field is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<CnfClaim>,
     /// Role names the subject holds in this realm (and, if `oid` is
     /// present, in that organization). Informational; authoritative
     /// authorization reads exclusively from `permissions`.
@@ -176,6 +190,13 @@ pub struct TokenClaims {
     /// Informational; see `permissions` for the authoritative set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// Org-scoped group paths, present only when the token is issued in an
+    /// organization context. Each entry is `/org-slug/group-name`, matching
+    /// the Keycloak 26.6 `groups` path convention for multi-org tenancy.
+    /// Downstream services should prefer these paths over the flat `groups`
+    /// claim when determining org-membership context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub org_groups: Vec<String>,
     /// Flat, de-duplicated, sorted permission set resolved at token-issue
     /// time. Client and server authorization checks read exclusively from
     /// this field.
@@ -194,9 +215,40 @@ pub struct TokenClaims {
     /// Non-empty only when explicit MFA was performed during token issuance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub amr: Vec<String>,
+    /// Session-version claim (RFC: HEA-930).
+    ///
+    /// Present only in access tokens issued while `session_version.enabled = true`
+    /// for the realm. Resource servers check `sv >= min_accepted_sv[sid]`
+    /// using a locally-cached version map polled from the delta feed.
+    /// Absent for client-credentials tokens (sessionless) and for realms
+    /// where `session_version.enabled = false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sv: Option<u64>,
     /// Declaratively-mapped custom claims emitted at the top level.
     #[serde(default, flatten)]
     pub custom: BTreeMap<String, serde_json::Value>,
+}
+
+/// Minimal JWT claims for RFC 7523 JWT Bearer assertion validation.
+///
+/// Client-issued assertions only carry standard JWT claims — they do not
+/// have Hearth-specific fields such as `sid`, `tid`, or `token_type`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JwtAssertionClaims {
+    /// Issuer — MUST equal the `client_id` per RFC 7523 §3.
+    pub iss: String,
+    /// Subject — the principal on whose behalf the token is issued.
+    pub sub: String,
+    /// Audience — MUST contain the token endpoint URI.
+    pub aud: Audience,
+    /// Expiration time (Unix seconds).
+    pub exp: i64,
+    /// JWT ID for replay prevention (RFC 7523 §3 recommends inclusion).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
+    /// Issued-at time (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iat: Option<i64>,
 }
 
 /// A pair of access and refresh tokens.
@@ -419,6 +471,38 @@ impl SigningKey {
         Ok(format!("{signing_input}.{sig_b64}"))
     }
 
+    /// Issues a JWT bearer assertion for use with the RFC 7523 grant.
+    ///
+    /// The resulting JWT is signed with this key and contains only the
+    /// [`JwtAssertionClaims`] payload.  Clients building machine-to-machine
+    /// integrations call this to generate the `assertion` parameter before
+    /// posting to the token endpoint.
+    pub fn issue_assertion_jwt(
+        &self,
+        claims: &JwtAssertionClaims,
+    ) -> Result<String, IdentityError> {
+        let header = JwtHeader {
+            alg: JWT_ALGORITHM.to_string(),
+            typ: JWT_TYPE.to_string(),
+            kid: self.key_id.clone(),
+        };
+
+        let header_json =
+            serde_json::to_vec(&header).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let claims_json = serde_json::to_vec(claims).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(&header_json);
+        let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let sig_b64 = URL_SAFE_NO_PAD.encode(self.sign(signing_input.as_bytes()));
+
+        Ok(format!("{signing_input}.{sig_b64}"))
+    }
+
     /// Issues an OIDC back-channel logout token (OIDC BCL §2.4).
     ///
     /// The `typ` header is set to `"logout+JWT"` to distinguish logout tokens
@@ -455,7 +539,9 @@ impl SigningKey {
     /// need a distinct `typ` to prevent cross-context token confusion
     /// (RFC 8725 §3.11). The caller controls the `typ` string and is
     /// responsible for using a value that does not collide with `"JWT"` or
-    /// `"logout+JWT"`.
+    /// `"logout+JWT"`. Note: `issue_token()` legitimately produces `typ: "JWT"`
+    /// for access/refresh tokens; the collision prohibition applies only to
+    /// direct callers of *this* function (e.g. JARM responses, client assertions).
     pub(crate) fn sign_jwt<T: serde::Serialize>(
         &self,
         claims: &T,
@@ -502,6 +588,17 @@ impl SigningKey {
             None => Audience::single(&request.config.audience),
         };
 
+        // Build org-scoped group paths when the token is in an org context.
+        // Format: `/org-slug/group-name` — mirrors Keycloak 26.6 path convention.
+        let org_groups: Vec<String> = match request.org_slug {
+            Some(slug) if !request.groups.is_empty() => request
+                .groups
+                .iter()
+                .map(|g| format!("/{slug}/{g}"))
+                .collect(),
+            _ => Vec::new(),
+        };
+
         let access_claims = TokenClaims {
             sub: request.sub.to_string(),
             iss: iss.clone(),
@@ -516,11 +613,16 @@ impl SigningKey {
             fid: None,
             scope: None,
             nonce: None,
+            cnf: request.dpop_jkt.as_deref().map(|jkt| CnfClaim {
+                jkt: jkt.to_string(),
+            }),
             roles: request.roles.to_vec(),
             groups: request.groups.to_vec(),
+            org_groups: org_groups.clone(),
             permissions: request.permissions.to_vec(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            sv: request.sv,
             custom: request.custom.clone(),
         };
 
@@ -538,11 +640,14 @@ impl SigningKey {
             fid: None,
             scope: None,
             nonce: None,
+            cnf: None, // DPoP binding is on access tokens only
             roles: Vec::new(),
             groups: Vec::new(),
+            org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            sv: None, // sv is never present on refresh tokens
             custom: BTreeMap::new(),
         };
 
@@ -582,6 +687,9 @@ pub struct IssueTokenRequest<'a> {
     pub roles: &'a [String],
     /// Resolved group slugs to embed. Empty Vec is legal.
     pub groups: &'a [String],
+    /// Organization slug, used to build `org_groups` paths (`/slug/group`).
+    /// Must be `Some` when `oid` is `Some` and the token carries groups.
+    pub org_slug: Option<&'a str>,
     /// Resolved flat permission set. Empty Vec is legal. Caller is
     /// responsible for enforcing size caps per `AUTHORIZATION.md § 2.6`.
     pub permissions: &'a [String],
@@ -590,6 +698,14 @@ pub struct IssueTokenRequest<'a> {
     /// Optional RFC 8707 resource indicator. When present, the resource URI
     /// is appended to the `aud` claim as a second entry.
     pub resource: Option<&'a Uri>,
+    /// JWK thumbprint for DPoP binding (RFC 9449). When set, the issued
+    /// access token will carry a `cnf.jkt` claim.
+    pub dpop_jkt: Option<String>,
+    /// Current session version for the `sv` claim (HEA-930).
+    ///
+    /// `Some(n)` when `session_version.enabled = true` for the realm and
+    /// this is an access token bound to a session. `None` otherwise.
+    pub sv: Option<u64>,
 }
 
 /// Validates a JWT's signature and returns the decoded claims.
@@ -660,6 +776,55 @@ pub fn validate_token_with_time(
     if now_secs >= claims.exp {
         return Err(IdentityError::TokenExpired);
     }
+    Ok(claims)
+}
+
+/// Validates a JWT bearer assertion's Ed25519 signature and returns the decoded claims.
+///
+/// Performs:
+/// 1. Header parsing — rejects any algorithm other than `EdDSA`
+/// 2. Ed25519 signature verification against the provided public key bytes
+/// 3. Claims decoding into [`JwtAssertionClaims`]
+///
+/// Does NOT check expiration or audience — callers must perform those checks.
+/// The `typ` header is not enforced so that client-issued assertions that
+/// omit or customise it remain accepted.
+pub fn verify_assertion_signature(
+    token: &str,
+    public_key_bytes: &[u8],
+) -> Result<JwtAssertionClaims, IdentityError> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(IdentityError::InvalidToken);
+    }
+
+    // Reject any algorithm other than EdDSA — no HS*, no RS*, no alg:none.
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let header: JwtHeader =
+        serde_json::from_slice(&header_bytes).map_err(|_| IdentityError::InvalidToken)?;
+    if header.alg != JWT_ALGORITHM {
+        return Err(IdentityError::InvalidToken);
+    }
+
+    // Verify Ed25519 signature
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let public_key = signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
+    public_key
+        .verify(signing_input.as_bytes(), &sig_bytes)
+        .map_err(|_| IdentityError::InvalidToken)?;
+
+    // Decode claims
+    let claims_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let claims: JwtAssertionClaims =
+        serde_json::from_slice(&claims_bytes).map_err(|_| IdentityError::InvalidToken)?;
+
     Ok(claims)
 }
 
@@ -1107,12 +1272,15 @@ mod tests {
             fid: None,
             scope: None,
             nonce: None,
+            cnf: None,
             roles: Vec::new(),
             groups: Vec::new(),
+            org_groups: Vec::new(),
             permissions: Vec::new(),
             custom: BTreeMap::new(),
             required_actions: Vec::new(),
             amr: Vec::new(),
+            sv: None,
         }
     }
 
@@ -1259,9 +1427,12 @@ mod tests {
                 issuer_override: None,
                 roles: &[],
                 groups: &[],
+                org_slug: None,
                 permissions: &[],
                 custom: BTreeMap::new(),
                 resource: None,
+                dpop_jkt: None,
+                sv: None,
             })
             .expect("issue pair");
 
@@ -1297,9 +1468,12 @@ mod tests {
                 issuer_override: None,
                 roles: &[],
                 groups: &[],
+                org_slug: None,
                 permissions: &[],
                 custom: BTreeMap::new(),
                 resource: None,
+                dpop_jkt: None,
+                sv: None,
             })
             .expect("reissue pair");
 

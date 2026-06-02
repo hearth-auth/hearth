@@ -1,5 +1,22 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · {{ user.display_name() }}{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  {% if realm_name == "system" %}
+    <a href="/ui/admin" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
+    <span class="text-ht-content-muted">›</span>
+    <a href="/ui/admin/admin-users" class="text-ht-content-secondary hover:text-ht-content-primary">Admin Users</a>
+  {% else %}
+    <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Realms</a>
+    <span class="text-ht-content-muted">›</span>
+    <a href="/ui/admin/realms/{{ realm_name }}" class="text-ht-content-secondary hover:text-ht-content-primary">{{ realm_name }}</a>
+    <span class="text-ht-content-muted">›</span>
+    <a href="/ui/admin/realms/{{ realm_name }}/users" class="text-ht-content-secondary hover:text-ht-content-primary">Users</a>
+  {% endif %}
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary" aria-current="page">{{ user.display_name() }}</span>
+</nav>
+{% endblock %}
 {% block body %}
 {# Header. Identity (display name + role chip + email-as-subtitle) on the    #}
 {# left, primary action on the right. The 2026-04-30 UX audit caught the    #}
@@ -82,54 +99,36 @@
 {# Actions bar #}
 <div class="mt-6 rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
   <div class="flex flex-wrap items-center gap-3">
-    <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/reset-password">
+    <form id="reset-pw-form"
+          hx-post="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/reset-password"
+          hx-target="#reset-pw-form"
+          hx-swap="outerHTML">
       {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-      <button type="button"
+      <button type="submit"
               class="rounded px-3 py-1.5 text-sm font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
-              _="on click
-                   if @data-confirming is 'yes'
-                     call (closest <form/>).submit()
-                   else
-                     set @data-confirming to 'yes'
-                     set @class to 'btn-ember rounded px-3 py-1.5 text-sm font-medium'
-                     set my textContent to 'Confirm: send reset email to {{ user.email() }}'
-                     wait 4s then
-                     if @data-confirming is 'yes'
-                       set @data-confirming to 'no'
-                       set @class to 'rounded px-3 py-1.5 text-sm font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider'
-                       set my textContent to 'Send password reset'
-                     end
-                   end">Send password reset</button>
+              data-component="two-step-confirm"
+              data-confirm-label="Confirm: send reset email to {{ user.email() }}"
+              data-confirm-class="btn-ember rounded px-3 py-1.5 text-sm font-medium">Send password reset</button>
     </form>
     {% if mfa_enabled %}
     <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/disable-mfa">
       {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-      <button type="button"
+      <button type="submit"
               class="rounded px-3 py-1.5 text-sm font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
-              _="on click
-                   if @data-confirming is 'yes'
-                     call (closest <form/>).submit()
-                   else
-                     set @data-confirming to 'yes'
-                     set @class to 'btn-danger rounded px-3 py-1.5 text-sm font-medium'
-                     set my textContent to 'Confirm disable MFA'
-                   end">Disable MFA</button>
+              data-component="two-step-confirm"
+              data-confirm-label="Confirm disable MFA"
+              data-confirm-class="btn-danger rounded px-3 py-1.5 text-sm font-medium">Disable MFA</button>
     </form>
     {% endif %}
     {% match masked_phone %}
       {% when Some with (_) %}
       <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/remove-phone">
         {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-        <button type="button"
+        <button type="submit"
                 class="rounded px-3 py-1.5 text-sm font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
-                _="on click
-                     if @data-confirming is 'yes'
-                       call (closest <form/>).submit()
-                     else
-                       set @data-confirming to 'yes'
-                       set @class to 'btn-danger rounded px-3 py-1.5 text-sm font-medium'
-                       set my textContent to 'Confirm remove phone'
-                     end">Remove phone</button>
+                data-component="two-step-confirm"
+                data-confirm-label="Confirm remove phone"
+                data-confirm-class="btn-danger rounded px-3 py-1.5 text-sm font-medium">Remove phone</button>
       </form>
       {% when None %}
     {% endmatch %}
@@ -137,7 +136,7 @@
 </div>
 
 {# Access across this realm — tabbed card #}
-<div class="mt-6 rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ tab: 'roles' }">
+<div class="mt-6 rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" data-component="tabs">
   {# Card header #}
   <div class="flex flex-col gap-3 border-b border-divider-subtle px-6 pt-5 sm:flex-row sm:items-center sm:justify-between">
     <div>
@@ -152,23 +151,23 @@
     </div>
     {# Tab buttons #}
     <div class="flex gap-1 self-end sm:self-auto">
-      <button @click="tab = 'roles'" type="button"
-              :class="tab === 'roles' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
+      <button type="button"
+              data-tab="roles" aria-selected="true"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Roles
       </button>
-      <button @click="tab = 'extra'" type="button"
-              :class="tab === 'extra' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
+      <button type="button"
+              data-tab="extra"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Extra Permissions
       </button>
-      <button @click="tab = 'effective'" type="button"
-              :class="tab === 'effective' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
+      <button type="button"
+              data-tab="effective"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Effective
       </button>
-      <button @click="tab = 'attrs'" type="button"
-              :class="tab === 'attrs' ? 'bg-ht-divider/[0.10] text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary hover:bg-ht-divider/[0.07]'"
+      <button type="button"
+              data-tab="attrs"
               class="rounded px-3 py-1.5 text-xs font-medium transition-colors">
         Attributes
       </button>
@@ -176,21 +175,21 @@
   </div>
 
   {# Roles tab #}
-  <div x-show="tab === 'roles'" class="p-6">
+  <div id="roles-panel" data-tab-panel="roles" class="p-6">
     <div id="roles-tab-content">
       {% include "ui/admin/users/_roles_tab.html" %}
     </div>
   </div>
 
   {# Extra Permissions tab #}
-  <div x-show="tab === 'extra'" class="p-6">
+  <div id="extra-panel" data-tab-panel="extra" class="p-6 hidden">
     <div id="permissions-tab-content">
       {% include "ui/admin/users/_permissions_tab.html" %}
     </div>
   </div>
 
   {# Effective Permissions tab #}
-  <div x-show="tab === 'effective'" class="p-6">
+  <div id="effective-panel" data-tab-panel="effective" class="p-6 hidden">
     {% if effective_permissions.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No effective permissions resolved for this user.</p>
     {% else %}
@@ -205,7 +204,7 @@
   </div>
 
   {# Attributes tab #}
-  <div x-show="tab === 'attrs'" class="p-6">
+  <div id="attrs-panel" data-tab-panel="attrs" class="p-6 hidden">
     {% if attributes.is_empty() %}
       <p class="py-4 text-center text-sm text-ht-content-muted">No attributes set on this user.</p>
     {% else %}
@@ -240,7 +239,7 @@
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Created</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Expires</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
-        <th class="px-3 py-2"></th>
+        <th class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>
@@ -297,7 +296,7 @@
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Credential ID</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Algorithm</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Discoverable</th>
-        <th class="px-3 py-2"></th>
+        <th class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>
@@ -371,19 +370,18 @@
   <h2 class="text-base font-semibold text-danger-fg">Danger zone</h2>
   <p class="mt-1 text-sm text-ht-content-secondary">Deleting this user is permanent and cannot be undone.</p>
   <button type="button"
-          _="on click call #user-delete-dialog.showModal()"
+          data-component="show-dialog" data-target="#user-delete-dialog"
           class="mt-4 btn-danger rounded px-4 py-2 text-sm font-semibold">
     Delete user
   </button>
 
   <dialog id="user-delete-dialog"
-          class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50"
-          _="on click(event) if event.target is me call me.close() end">
+          class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50">
     <h3 class="text-lg font-semibold text-ht-content-primary">Delete user?</h3>
     <p class="mt-2 text-sm text-ht-content-muted">This will permanently delete <strong>{{ user.display_name() }}</strong>. This action cannot be undone.</p>
     <div class="mt-6 flex justify-end gap-3">
       <button type="button"
-              _="on click call #user-delete-dialog.close()"
+              data-component="show-dialog" data-action="close"
               class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
         Cancel
       </button>

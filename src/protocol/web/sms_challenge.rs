@@ -92,6 +92,13 @@ struct SmsMfaState {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     nonce: String,
     response_type: String,
+    /// Whether the originating request went through PAR (RFC 9126).
+    ///
+    /// Restored in `sms_challenge_post` so `issue_code_and_redirect` can
+    /// pass `via_par = true` to the engine — FAPI Baseline/Advanced realms
+    /// reject code issuance when this flag is `false`.
+    #[serde(default)]
+    via_par: bool,
 }
 
 /// Issues an HMAC-signed SMS MFA pending cookie value.
@@ -167,6 +174,7 @@ pub fn sms_mfa_challenge_check(
     q: &AuthorizeQuery,
     _headers: &axum::http::HeaderMap,
     _now: Timestamp,
+    via_par: bool,
 ) -> Option<Response> {
     // 1. Is SMS MFA required for this realm?
     let realm_obj = state.identity.get_realm(realm).ok().flatten()?;
@@ -243,6 +251,7 @@ pub fn sms_mfa_challenge_check(
                     code_challenge_method: q.code_challenge_method.clone(),
                     nonce: q.nonce.clone(),
                     response_type: q.response_type.clone(),
+                    via_par,
                 };
                 if let Some(cookie) =
                     issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie)
@@ -272,6 +281,7 @@ pub fn sms_mfa_challenge_check(
         code_challenge_method: q.code_challenge_method.clone(),
         nonce: q.nonce.clone(),
         response_type: q.response_type.clone(),
+        via_par,
     };
 
     let Some(cookie) = issue_sms_mfa_cookie(&state.cookie_secret, user_id, &state_cookie) else {
@@ -306,8 +316,8 @@ struct SmsChallengeTemplate {
     flash: Option<super::templates::Flash>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,8 +353,8 @@ pub async fn sms_challenge_get(
         flash: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -424,8 +434,8 @@ pub async fn sms_challenge_post(
             flash: None,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         });
     }
 
@@ -484,6 +494,9 @@ pub async fn sms_challenge_post(
                 code_challenge_method,
                 nonce,
                 vec!["sms".to_string()],
+                None,
+                None,              // jar_request — SMS MFA resume uses pre-validated params
+                sms_state.via_par, // propagated from originating authorize request
             );
             append_cookie(&mut response, &clear);
             response
@@ -511,8 +524,8 @@ pub async fn sms_challenge_post(
                 flash: None,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
     }
@@ -578,26 +591,30 @@ mod tests {
             code_challenge_method: "S256".to_string(),
             nonce: "nonce456".to_string(),
             response_type: "code".to_string(),
+            via_par: false,
         };
 
-        let cookie_header = issue_sms_mfa_cookie(&secret, &user_id, &s).unwrap();
+        let cookie_header = issue_sms_mfa_cookie(&secret, &user_id, &s)
+            .expect("issue_sms_mfa_cookie should succeed");
         // Extract the cookie value from the Set-Cookie header string.
         let value = cookie_header
             .strip_prefix(&format!("{SMS_MFA_COOKIE}="))
-            .unwrap()
+            .expect("cookie header should start with cookie name")
             .split(';')
             .next()
-            .unwrap()
+            .expect("split should yield at least one segment")
             .to_string();
 
         // Build a fake header map with the cookie.
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_str(&format!("{SMS_MFA_COOKIE}={value}")).unwrap(),
+            axum::http::HeaderValue::from_str(&format!("{SMS_MFA_COOKIE}={value}"))
+                .expect("cookie value should be a valid header value"),
         );
 
-        let decoded = read_sms_mfa_cookie(&secret, &user_id, &headers).unwrap();
+        let decoded = read_sms_mfa_cookie(&secret, &user_id, &headers)
+            .expect("read_sms_mfa_cookie should succeed");
         assert_eq!(decoded.otp_nonce, "test-nonce-abc");
         assert_eq!(decoded.masked_phone, "+1***-***-1234");
         assert_eq!(decoded.scope, "openid profile");
@@ -622,21 +639,24 @@ mod tests {
             code_challenge_method: String::new(),
             nonce: String::new(),
             response_type: "code".to_string(),
+            via_par: false,
         };
 
-        let cookie_header = issue_sms_mfa_cookie(&secret, &user_a, &s).unwrap();
+        let cookie_header = issue_sms_mfa_cookie(&secret, &user_a, &s)
+            .expect("issue_sms_mfa_cookie should succeed");
         let value = cookie_header
             .strip_prefix(&format!("{SMS_MFA_COOKIE}="))
-            .unwrap()
+            .expect("cookie header should start with cookie name")
             .split(';')
             .next()
-            .unwrap()
+            .expect("split should yield at least one segment")
             .to_string();
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            axum::http::HeaderValue::from_str(&format!("{SMS_MFA_COOKIE}={value}")).unwrap(),
+            axum::http::HeaderValue::from_str(&format!("{SMS_MFA_COOKIE}={value}"))
+                .expect("cookie value should be a valid header value"),
         );
 
         // user_a's cookie must not validate under user_b.

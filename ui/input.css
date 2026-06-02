@@ -239,6 +239,11 @@
 }
 
 /* YAML editor — custom scrollbar + styling */
+.yaml-editor,
+.yaml-mirror {
+  tab-size: 2;
+  -moz-tab-size: 2;
+}
 .yaml-editor {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--ht-divider) 15%, transparent) transparent;
@@ -260,6 +265,32 @@
 
 /* Alpine x-cloak: hide elements until Alpine initialises */
 [x-cloak] { display: none !important; }
+
+/* Native <dialog> element — resets browser defaults for Tailwind-styled modals.
+   backdrop styling uses solid black/50 since <dialog>::backdrop is not a Tailwind target. */
+dialog {
+  border: none;
+  padding: 0;
+  color: inherit;
+  background-color: var(--ht-surface-elevated);
+}
+dialog::backdrop {
+  background: rgb(0 0 0 / 0.5);
+}
+
+/* Hyperscript tab button states — paired with .hs-tab-active class toggling.
+   Apply .hs-tab-btn to all tab buttons in a strip; toggle .hs-tab-active with Hyperscript. */
+.hs-tab-btn:not(.hs-tab-active) {
+  color: var(--ht-content-secondary);
+}
+.hs-tab-btn:not(.hs-tab-active):hover {
+  color: var(--ht-content-primary);
+  background-color: color-mix(in srgb, var(--ht-divider) 7%, transparent);
+}
+.hs-tab-btn.hs-tab-active {
+  background-color: color-mix(in srgb, var(--ht-divider) 10%, transparent);
+  color: var(--ht-content-primary);
+}
 
 /* HTMX indicator: show spinner while request is in flight */
 .htmx-indicator {

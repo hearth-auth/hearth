@@ -1,8 +1,8 @@
 # Hearth Rust SDK
 
-> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/sdk-spec.md).
+> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/specs/SDK.md).
 
-Rust SDK for the [Hearth](https://github.com/therecluse26/hearth) identity platform.
+Rust SDK for the [Hearth](https://github.com/hearth-auth/hearth) identity platform.
 
 ## Installation
 
@@ -11,27 +11,113 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 hearth-sdk = { path = "../sdks/rust" }  # or from crates.io once published
+
+# Enable Tower middleware for resource-server use:
+# hearth-sdk = { path = "../sdks/rust", features = ["tower-middleware"] }
 ```
 
 ## Quickstart
 
 ```rust
-use hearth_sdk::{HearthClient, HearthConfig};
+use hearth_sdk::HearthClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = HearthClient::new(HearthConfig {
-        issuer_url: "https://hearth.example.com".to_string(),
-        client_id: Some("my-app".to_string()),
-        ..Default::default()
-    })?;
+    let client = HearthClient::new("https://hearth.example.com", "my-realm");
 
-    // Verify a token received in a request
-    let claims = client.verify_token("eyJ...").await?;
-    println!("Subject: {}", claims.subject());
-    println!("Has admin role: {}", claims.has_role("admin"));
+    // Exchange an auth code for tokens
+    let tokens = client.exchange_code("code", "client_id", "client_secret", "https://...", None).await?;
+
+    // Local RBAC predicate (no network call)
+    let allowed = HearthClient::has_permission(&tokens.access_token, "documents.read")?;
 
     Ok(())
+}
+```
+
+## Permission Delivery Modes
+
+Hearth supports three modes for how authorization data reaches your resource server.
+The mode must match the `access_token_authorization` field configured on the OAuth client.
+
+| Mode | How it works | Network calls |
+|------|--------------|---------------|
+| `Embedded` (default) | RBAC claims baked into the JWT at issuance | None |
+| `Introspection` | JWT carries only identity; resource server calls `/introspect` | Per-request |
+| `Decision` | JWT carries only identity; resource server calls `POST /oauth/authorize` | Per-request |
+
+> **Design constraint**: the SDK never infers mode from whether `permissions` is present
+> in the token. Mode must always be configured explicitly (HEA-921).
+
+### Programmatic check
+
+```rust
+use hearth_sdk::{HearthClient, AccessTokenAuthorization, CheckPermissionOpts};
+
+let client = HearthClient::new("https://hearth.example.com", "my-realm");
+
+// Embedded — local check, no network
+let allowed = client.check_permission(
+    &access_token,
+    "documents.write",
+    AccessTokenAuthorization::Embedded,
+    CheckPermissionOpts::default(),
+).await?;
+
+// Decision — calls POST /oauth/authorize
+let allowed = client.check_permission(
+    &access_token,
+    "documents.write",
+    AccessTokenAuthorization::Decision,
+    CheckPermissionOpts::default(),
+).await?;
+
+// Introspection — calls POST /introspect with client credentials
+let allowed = client.check_permission(
+    &access_token,
+    "documents.write",
+    AccessTokenAuthorization::Introspection,
+    CheckPermissionOpts {
+        client_credentials: Some(("my-client-id".into(), "my-client-secret".into())),
+        ..Default::default()
+    },
+).await?;
+```
+
+### Tower middleware (feature `tower-middleware`)
+
+```rust
+use hearth_sdk::{HearthClient, AccessTokenAuthorization, CheckPermissionOpts};
+use hearth_sdk::middleware::RequirePermissionLayer;
+
+let client = HearthClient::new("https://hearth.example.com", "my-realm");
+
+let app = axum::Router::new()
+    .route("/docs", axum::routing::post(create_doc))
+    .layer(RequirePermissionLayer::new(
+        client,
+        "documents.write",
+        AccessTokenAuthorization::Decision,
+        CheckPermissionOpts::default(),
+    ));
+```
+
+HTTP responses from the middleware:
+
+| Outcome | Status |
+|---------|--------|
+| Missing `Authorization` header | `401 Unauthorized` |
+| Permission denied or mode mismatch | `403 Forbidden` |
+| Decision endpoint unreachable (fail-closed) | `503 Service Unavailable` |
+| Allowed | Forwarded to downstream handler |
+
+### Raw introspection
+
+```rust
+let resp = client.introspect(&access_token, "client-id", "client-secret").await?;
+if resp.active {
+    println!("Mode: {:?}", resp.mode);
+    println!("Permissions: {:?}", resp.permissions);
 }
 ```
 
@@ -41,9 +127,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Method | Description |
 |--------|-------------|
-| `HearthClient::new(config)` | Construct a new client; auto-discovers OIDC endpoints |
-| `verify_token(token)` | Verify a JWT and return typed Claims |
-| `introspect(token)` | Call the introspection endpoint (RFC 7662) |
+| `HearthClient::new(base_url, realm_id)` | Construct a new client |
+| `check_permission(token, permission, mode, opts)` | Mode-aware async permission check |
+| `introspect(token, client_id, client_secret)` | Call `POST /introspect` (RFC 7662) |
+| `has_permission(token, permission)` | Local JWT decode check (sync) |
+| `has_role(token, role)` | Local JWT decode check (sync) |
+| `in_group(token, group_slug)` | Local JWT decode check (sync) |
+| `authorize(...)` | Begin OAuth authorization code flow |
+| `exchange_code(...)` | Exchange auth code for tokens |
+| `refresh_tokens(...)` | Refresh an access token |
+| `userinfo(access_token)` | Fetch OIDC UserInfo |
+| `jwks()` | Fetch realm JWKS |
 
 ### Claims API (spec §4)
 
@@ -51,15 +145,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 |--------|---------|
 | `subject()` | `&str` |
 | `issuer()` | `&str` |
-| `audiences()` | `&[String]` |
-| `expiry()` | `DateTime<Utc>` |
-| `issued_at()` | `DateTime<Utc>` |
-| `jwt_id()` | `&str` |
-| `scope()` | `&str` |
-| `scopes()` | `Vec<&str>` |
-| `has_scope(s)` | `bool` |
-| `has_role(r)` | `bool` |
-| `has_permission(p)` | `bool` |
+| `audiences()` | `Vec<String>` |
+| `expiry()` | `Option<i64>` |
+| `issuedAt()` | `Option<i64>` |
+| `jwtID()` | `Option<&str>` |
+| `scopes()` | `Vec<String>` |
+| `hasScope(s)` | `bool` |
+| `hasRole(r)` | `bool` |
+| `hasPermission(p)` | `bool` |
 | `get(claim)` | `Option<&serde_json::Value>` |
 
 ### Error Types (spec §5)
@@ -75,22 +168,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `TokenIssuerError` | `iss` mismatch |
 | `TokenAudienceError` | `aud` mismatch |
 | `IntrospectionError` | Introspection endpoint error |
+| `ModeMismatch` | Server echoed a different mode than configured |
+| `AuthorizationFailed` | Decision endpoint network/parse error (fail-closed) |
 
 ## Troubleshooting
 
-**`DiscoveryError` on startup** — verify `issuer_url` is reachable and returns a valid `/.well-known/openid-configuration` document.
+**`DiscoveryError` on startup** — verify the base URL is reachable and returns a valid `/.well-known/openid-configuration` document.
 
-**`JWKSFetchError` during verification** — check network connectivity to the JWKS endpoint. The SDK retries once on a cache miss before returning this error.
+**`ModeMismatch` on introspection** — the token was issued by a client configured for a different `access_token_authorization` mode. Ensure the SDK's `expected_mode` matches the OAuth client's server-side configuration.
+
+**`AuthorizationFailed` (503 from middleware)** — the Decision-mode `/oauth/authorize` endpoint is unreachable. Check connectivity to the Hearth server. The SDK is fail-closed: when in doubt, access is denied.
 
 **`TokenExpiredError`** — the token's `exp` claim is in the past. Refresh the token or re-authenticate.
 
-**`TokenInvalidError`** — the JWT signature does not match any key in the JWKS. If the server recently rotated keys, the SDK will re-fetch once automatically; persistent failures indicate a key mismatch.
+**`TokenInvalidError`** — the JWT signature is malformed. Persistent failures indicate a key mismatch.
 
-**`TokenAudienceError`** — the token's `aud` claim does not contain the configured `client_id`. Verify `client_id` matches the audience your authorization server issues.
+**`TokenAudienceError`** — the token's `aud` claim does not match. Verify `client_id` configuration.
 
 ## Spec Conformance
 
-This SDK is audited against the [Hearth SDK Common Specification](../../docs/sdk-spec.md). CI enforces conformance on every PR via `scripts/check-sdk-conformance.sh`.
+This SDK is audited against the [Hearth SDK Common Specification](../../docs/specs/SDK.md). CI enforces conformance on every PR via `scripts/check-sdk-conformance.sh`.
 
 ## License
 

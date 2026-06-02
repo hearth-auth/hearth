@@ -10,8 +10,8 @@ const config = {
   // Update url and baseUrl when GitHub Pages / custom domain is configured.
   // For a custom domain (e.g. docs.hearth.io) set baseUrl: '/'.
   // For a GitHub Pages project site (org.github.io/hearth) set baseUrl: '/hearth/'.
-  url: 'https://hearthid.dev',
-  baseUrl: '/',
+  url: 'https://hearth-auth.github.io',
+  baseUrl: '/hearth/',
 
   organizationName: 'hearth-id',
   projectName: 'hearth',

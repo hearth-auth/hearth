@@ -192,6 +192,7 @@ impl Config {
                 log_level: "debug".to_string(),
                 log_format: "text".to_string(),
                 otlp: None,
+                dev_mode: true,
             },
             operational: OperationalConfig::default(),
             email: EmailConfig::default(),
@@ -1046,19 +1047,19 @@ fn validate_sms_twilio(sms: &SmsConfig) -> Result<(), ConfigError> {
 
 /// Validates AWS SNS SMS transport configuration.
 fn validate_sms_awssns(sms: &SmsConfig) -> Result<(), ConfigError> {
-    let sns = sms.aws_sns.as_ref().ok_or_else(|| {
+    let aws_sns = sms.aws_sns.as_ref().ok_or_else(|| {
         invalid(
             "sms.aws_sns",
             "aws_sns block is required when sms.transport is awssns",
         )
     })?;
-    if sns.region.is_empty() {
+    if aws_sns.region.is_empty() {
         return Err(invalid("sms.aws_sns.region", "must not be empty"));
     }
-    if sns.access_key_id.is_empty() {
+    if aws_sns.access_key_id.is_empty() {
         return Err(invalid("sms.aws_sns.access_key_id", "must not be empty"));
     }
-    if sns.secret_access_key.is_empty() {
+    if aws_sns.secret_access_key.is_empty() {
         return Err(invalid(
             "sms.aws_sns.secret_access_key",
             "must not be empty",
@@ -1069,10 +1070,8 @@ fn validate_sms_awssns(sms: &SmsConfig) -> Result<(), ConfigError> {
 
 /// Accumulating SMS validator (used by `validate_all`).
 fn validate_sms_all(sms: &SmsConfig, issues: &mut Vec<ValidationIssue>) {
-    if let Err(e) = validate_sms(sms) {
-        if let ConfigError::ValidationError { field, reason } = e {
-            issues.push(ValidationIssue { field, reason });
-        }
+    if let Err(ConfigError::ValidationError { field, reason }) = validate_sms(sms) {
+        issues.push(ValidationIssue { field, reason });
     }
 }
 

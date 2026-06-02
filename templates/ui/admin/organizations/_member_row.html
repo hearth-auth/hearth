@@ -3,8 +3,7 @@
    Expects: org_id (String), m (MemberWithAccess), available_roles, csrf.
    Per-member grantable permissions live on `m.available_permissions` (already
    excludes direct grants and role-inherited permissions for this member). #}
-<tbody id="member-{{ m.view.membership.user_id().as_uuid() }}"
-       x-data="{ addRoleOpen: false, addPermOpen: false, expandedRole: null }">
+<tbody id="member-{{ m.view.membership.user_id().as_uuid() }}">
   <tr class="border-b border-divider-faint">
     <td class="px-3 py-3">
       <a href="/ui/admin/realms/{{ realm_name }}/users/{{ m.view.membership.user_id().as_uuid() }}" class="group">
@@ -19,9 +18,9 @@
         {% for ra in m.rbac_roles %}
         <span class="inline-flex items-center gap-1 rounded-full bg-teal-bg px-2 py-0.5 text-xs font-medium text-teal-fg">
           <button type="button"
-                  @click="expandedRole = (expandedRole === '{{ ra.assignment_id }}' ? null : '{{ ra.assignment_id }}')"
-                  class="cursor-pointer hover:underline focus:outline-none"
-                  :title="expandedRole === '{{ ra.assignment_id }}' ? 'Hide permissions' : 'Show {{ ra.permissions.len() }} permission{% if ra.permissions.len() != 1 %}s{% endif %}'">
+                  data-component="disclosure" data-target="#role-perms-{{ ra.assignment_id }}"
+                  title="Show {{ ra.permissions.len() }} permission{% if ra.permissions.len() != 1 %}s{% endif %}"
+                  class="cursor-pointer hover:underline focus:outline-none">
             {{ ra.role_name }}
           </button>
           <form method="post"
@@ -41,7 +40,10 @@
         {% endfor %}
 
         {% if !available_roles.is_empty() %}
-        <button @click="addRoleOpen = !addRoleOpen; addPermOpen = false" type="button"
+        <button type="button"
+                data-component="disclosure"
+                data-target="#add-role-{{ m.view.membership.user_id().as_uuid() }}"
+                data-also-hide="#add-perm-{{ m.view.membership.user_id().as_uuid() }}"
                 class="inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-xs text-ht-content-muted transition-colors hover:bg-teal-bg hover:text-teal-fg">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="currentColor" class="h-3 w-3"><path d="M6.75 3.25a.75.75 0 0 0-1.5 0v2h-2a.75.75 0 0 0 0 1.5h2v2a.75.75 0 0 0 1.5 0v-2h2a.75.75 0 0 0 0-1.5h-2v-2Z"/></svg>
           Role
@@ -51,7 +53,7 @@
 
       {# Inherited-permissions preview for whichever role chip was clicked. #}
       {% for ra in m.rbac_roles %}
-      <div x-show="expandedRole === '{{ ra.assignment_id }}'" x-cloak class="mt-2">
+      <div id="role-perms-{{ ra.assignment_id }}" class="mt-2 hidden">
         {% if ra.permissions.is_empty() %}
         <p class="text-xs italic text-ht-content-muted">This role grants no permissions.</p>
         {% else %}
@@ -67,13 +69,12 @@
 
       {# Assign role inline form #}
       {% if !available_roles.is_empty() %}
-      <div x-show="addRoleOpen" x-cloak class="mt-2">
+      <div id="add-role-{{ m.view.membership.user_id().as_uuid() }}" class="mt-2 hidden">
         <form method="post"
               action="/ui/admin/realms/{{ realm_name }}/organizations/{{ org_id }}/members/{{ m.view.membership.user_id().as_uuid() }}/rbac/assign"
               hx-post="/ui/admin/realms/{{ realm_name }}/organizations/{{ org_id }}/members/{{ m.view.membership.user_id().as_uuid() }}/rbac/assign"
               hx-target="#member-{{ m.view.membership.user_id().as_uuid() }}"
               hx-swap="outerHTML"
-              @submit="addRoleOpen = false"
               class="flex flex-wrap items-center gap-2">
           {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
           <select name="role_id"
@@ -83,7 +84,9 @@
             {% endfor %}
           </select>
           <button type="submit" class="btn-ember rounded px-2 py-1 text-xs font-semibold text-graphite-950">Assign</button>
-          <button type="button" @click="addRoleOpen = false" class="text-xs text-ht-content-muted hover:text-ht-content-secondary">Cancel</button>
+          <button type="button"
+                  data-component="hide-target" data-target="#add-role-{{ m.view.membership.user_id().as_uuid() }}"
+                  class="text-xs text-ht-content-muted hover:text-ht-content-secondary">Cancel</button>
         </form>
       </div>
       {% endif %}
@@ -112,7 +115,10 @@
         </span>
         {% endfor %}
 
-        <button @click="addPermOpen = !addPermOpen; addRoleOpen = false" type="button"
+        <button type="button"
+                data-component="disclosure"
+                data-target="#add-perm-{{ m.view.membership.user_id().as_uuid() }}"
+                data-also-hide="#add-role-{{ m.view.membership.user_id().as_uuid() }}"
                 class="inline-flex items-center gap-0.5 rounded-full px-2 py-0.5 text-xs text-ht-content-muted transition-colors hover:bg-steel-bg hover:text-ht-content-primary">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="currentColor" class="h-3 w-3"><path d="M6.75 3.25a.75.75 0 0 0-1.5 0v2h-2a.75.75 0 0 0 0 1.5h2v2a.75.75 0 0 0 1.5 0v-2h2a.75.75 0 0 0 0-1.5h-2v-2Z"/></svg>
           Perm
@@ -120,13 +126,12 @@
       </div>
 
       {# Grant permission inline form #}
-      <div x-show="addPermOpen" x-cloak class="mt-2">
+      <div id="add-perm-{{ m.view.membership.user_id().as_uuid() }}" class="mt-2 hidden">
         <form method="post"
               action="/ui/admin/realms/{{ realm_name }}/organizations/{{ org_id }}/members/{{ m.view.membership.user_id().as_uuid() }}/permissions/grant"
               hx-post="/ui/admin/realms/{{ realm_name }}/organizations/{{ org_id }}/members/{{ m.view.membership.user_id().as_uuid() }}/permissions/grant"
               hx-target="#member-{{ m.view.membership.user_id().as_uuid() }}"
               hx-swap="outerHTML"
-              @submit="addPermOpen = false"
               class="flex flex-wrap items-center gap-2">
           {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
           <input type="hidden" name="scope" value="org:{{ org_id }}">
@@ -142,7 +147,9 @@
           </select>
           <button type="submit" class="btn-ember rounded px-2 py-1 text-xs font-semibold text-graphite-950">Grant</button>
           {% endif %}
-          <button type="button" @click="addPermOpen = false" class="text-xs text-ht-content-muted hover:text-ht-content-secondary">Cancel</button>
+          <button type="button"
+                  data-component="hide-target" data-target="#add-perm-{{ m.view.membership.user_id().as_uuid() }}"
+                  class="text-xs text-ht-content-muted hover:text-ht-content-secondary">Cancel</button>
         </form>
       </div>
     </td>
@@ -178,14 +185,15 @@
         <form hx-post="/ui/admin/realms/{{ realm_name }}/organizations/{{ org_id }}/members/{{ m.view.membership.user_id().as_uuid() }}/remove"
               hx-target="#member-{{ m.view.membership.user_id().as_uuid() }}"
               hx-swap="outerHTML"
-              x-data="{ confirm: false }"
               class="inline-block">
           {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-          <button :type="confirm ? 'submit' : 'button'"
-                  @click="!confirm && (confirm = true)"
-                  :class="confirm ? 'btn-danger' : 'border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider'"
-                  class="rounded px-2 py-1 text-xs font-medium"
-                  x-text="confirm ? 'Confirm' : 'Remove'"></button>
+          <button type="submit"
+                  class="rounded px-2 py-1 text-xs font-medium border border-strong bg-ht-surface-elevated text-ht-content-secondary hover-bg-divider"
+                  data-component="two-step-confirm"
+                  data-confirm-label="Confirm"
+                  data-confirm-class="btn-danger rounded px-2 py-1 text-xs font-medium">
+            Remove
+          </button>
         </form>
         {% endif %}
       </div>

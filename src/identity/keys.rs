@@ -19,6 +19,26 @@ use crate::core::{
     ClientId, IdpId, InvitationId, OrganizationId, RealmId, SessionId, UserId, WebhookId,
 };
 
+// ───────────────────────────────────────────────────────────────────────
+// ssv: (session-version) key namespace
+// Kept separate from ses: so the hot-path session lookup is unaffected.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Prefix for per-session version counters.
+///
+/// Format: `ssv:sid:{session_uuid}` → 8 bytes little-endian u64
+const SSV_SESSION_PREFIX: &str = "ssv:sid:";
+
+/// Key for the realm-scoped monotonic bump-sequence counter.
+///
+/// Format: `ssv:seq` → 8 bytes little-endian u64
+const SSV_SEQ_KEY: &str = "ssv:seq";
+
+/// Prefix for delta log entries (append-only, TTL-bounded).
+///
+/// Format: `ssv:delta:{seq:020}` → JSON `SvDeltaEntry`
+const SSV_DELTA_PREFIX: &str = "ssv:delta:";
+
 /// Prefix for user primary keys.
 const USER_ID_PREFIX: &str = "usr:id:";
 
@@ -64,6 +84,15 @@ const USER_CODE_PREFIX: &str = "oauth:ucode:";
 
 /// Prefix for revoked token JTI storage (sessionless token revocation).
 const REVOKED_JTI_PREFIX: &str = "oauth:revjti:";
+
+/// Prefix for JWT bearer assertion JTI replay store (RFC 7523).
+const JWT_BEARER_JTI_PREFIX: &str = "oauth:jb-jti:";
+
+/// Prefix for `private_key_jwt` client assertion JTI replay store (RFC 7523 §2.2).
+const CLIENT_ASSERTION_JTI_PREFIX: &str = "oauth:ca-jti:";
+
+/// Prefix for JAR (RFC 9101) signed request object JTI replay store.
+const JAR_JTI_PREFIX: &str = "oauth:jar-jti:";
 
 /// Prefix for OAuth consent record storage.
 const OAUTH_CONSENT_PREFIX: &str = "oauth:consent:";
@@ -625,6 +654,55 @@ pub(crate) fn password_reset_scan_prefix() -> Vec<u8> {
 /// that cannot be revoked via session revocation.
 pub(crate) fn encode_revoked_jti(jti: &str) -> Vec<u8> {
     format!("{REVOKED_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Encodes the storage key for a consumed JWT bearer assertion JTI.
+///
+/// Format: `oauth:jb-jti:{jti}`
+///
+/// Used for JWT bearer (RFC 7523) JTI replay prevention.  Stored per-realm;
+/// survives engine restarts; pruned only on realm deletion.
+pub(crate) fn encode_jwt_bearer_jti(jti: &str) -> Vec<u8> {
+    format!("{JWT_BEARER_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all JWT bearer assertion JTIs in a realm.
+///
+/// Used during cascade realm deletion to purge the replay store.
+pub(crate) fn jwt_bearer_jti_scan_prefix() -> Vec<u8> {
+    JWT_BEARER_JTI_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the storage key for a consumed `private_key_jwt` assertion JTI.
+///
+/// Format: `oauth:ca-jti:{jti}`
+///
+/// Used for RFC 7523 §2.2 `private_key_jwt` JTI replay prevention.
+pub(crate) fn encode_client_assertion_jti(jti: &str) -> Vec<u8> {
+    format!("{CLIENT_ASSERTION_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all `private_key_jwt` assertion JTIs in a realm.
+///
+/// Used during cascade realm deletion to purge the replay store.
+pub(crate) fn client_assertion_jti_scan_prefix() -> Vec<u8> {
+    CLIENT_ASSERTION_JTI_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the storage key for a JAR (RFC 9101) signed request object JTI.
+///
+/// Format: `oauth:jar-jti:{jti}`
+///
+/// Used for RFC 9101 §4 JAR replay prevention.
+pub(crate) fn encode_jar_jti(jti: &str) -> Vec<u8> {
+    format!("{JAR_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all JAR JTIs in a realm.
+///
+/// Used during cascade realm deletion to purge the replay store.
+pub(crate) fn jar_jti_scan_prefix() -> Vec<u8> {
+    JAR_JTI_PREFIX.as_bytes().to_vec()
 }
 
 // ===== OAuth consent key encoding =====
@@ -1326,6 +1404,16 @@ pub(crate) fn device_fp_scan_prefix(user_id: &UserId) -> Vec<u8> {
     format!("{DEVICE_FP_PREFIX}{}:", user_id.as_uuid()).into_bytes()
 }
 
+/// Returns the realm-wide device-fingerprint scan prefix.
+///
+/// Format: `dfp:user:`
+///
+/// Use with [`prefix_end`] to scan **all** fingerprints in a realm, across
+/// every user.  Intended for the proactive background sweeper.
+pub(crate) fn device_fp_global_scan_prefix() -> Vec<u8> {
+    DEVICE_FP_PREFIX.as_bytes().to_vec()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  SMS OTP keys
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1371,6 +1459,57 @@ pub(crate) fn encode_sms_resend_count(phone_hash8: &str) -> Vec<u8> {
 #[allow(dead_code)]
 pub(crate) fn sms_resend_count_scan_prefix() -> Vec<u8> {
     SMS_RESEND_COUNT_PREFIX.as_bytes().to_vec()
+}
+
+/// Prefix for Pushed Authorization Request entries (RFC 9126).
+const PAR_PREFIX: &str = "oauth:par:";
+
+/// Encodes the storage key for a PAR entry by its UUID.
+pub(crate) fn encode_par_request(request_uri_id: &str) -> Vec<u8> {
+    format!("{PAR_PREFIX}{request_uri_id}").into_bytes()
+}
+
+/// Scan prefix for all PAR entries in a realm.
+#[allow(dead_code)]
+pub(crate) fn par_scan_prefix() -> Vec<u8> {
+    PAR_PREFIX.as_bytes().to_vec()
+}
+
+// ===== Session-version key encoding =====
+
+/// Encodes the per-session version counter key.
+///
+/// Format: `ssv:sid:{session_uuid}`
+pub(crate) fn encode_ssv_session(session_id: &SessionId) -> Vec<u8> {
+    format!("{SSV_SESSION_PREFIX}{}", session_id.as_uuid()).into_bytes()
+}
+
+/// Returns the realm-scoped monotonic sequence counter key.
+///
+/// Format: `ssv:seq`
+pub(crate) fn ssv_seq_key() -> Vec<u8> {
+    SSV_SEQ_KEY.as_bytes().to_vec()
+}
+
+/// Encodes a delta log entry key for the given sequence number.
+///
+/// Format: `ssv:delta:{seq:020}` — zero-padded for lexicographic ordering.
+pub(crate) fn encode_ssv_delta(seq: u64) -> Vec<u8> {
+    format!("{SSV_DELTA_PREFIX}{seq:020}").into_bytes()
+}
+
+/// Returns the scan prefix for all per-session version counter keys.
+///
+/// Format: `ssv:sid:`
+pub(crate) fn encode_ssv_session_prefix() -> Vec<u8> {
+    SSV_SESSION_PREFIX.as_bytes().to_vec()
+}
+
+/// Returns the scan prefix for all delta log entries.
+///
+/// Format: `ssv:delta:`
+pub(crate) fn ssv_delta_scan_prefix() -> Vec<u8> {
+    SSV_DELTA_PREFIX.as_bytes().to_vec()
 }
 
 #[cfg(test)]

@@ -62,6 +62,7 @@ use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{ClientId, RealmId, Timestamp, UserId};
 use crate::identity::{
     canonicalize_scopes, CodeChallengeMethod, IdentityError, PendingAuthorizationRequest,
+    ResponseMode,
 };
 
 use super::auth::{CookieSecret, UiSession};
@@ -111,6 +112,21 @@ pub struct AuthorizeQuery {
     /// OIDC `prompt` parameter. Supported: `none`, `consent`, or empty.
     #[serde(default)]
     pub prompt: String,
+    /// JARM response mode (`query.jwt`, `fragment.jwt`, `jwt`).
+    ///
+    /// Absent means default `query` mode (plain code redirect).
+    #[serde(default)]
+    pub response_mode: Option<String>,
+    /// Signed JAR JWT (RFC 9101). When present, all authorization parameters
+    /// are taken from the JWT payload; other query params (except `client_id`)
+    /// serve only as defaults.
+    #[serde(default)]
+    pub request: Option<String>,
+    /// PAR `request_uri` (RFC 9126). When present, this handler calls
+    /// `consume_par` to expand the pre-validated stored parameters and
+    /// sets `via_par = true` on the resulting authorization request.
+    #[serde(default)]
+    pub request_uri: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -149,8 +165,8 @@ struct ConsentTemplate {
     flash: Option<super::templates::Flash>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,17 +212,163 @@ async fn authorize_get_impl(
     q: &AuthorizeQuery,
     headers: &axum::http::HeaderMap,
 ) -> Response {
-    // 1. Basic parameter validation before we reveal anything about the client.
+    // Compute wall-clock time early so it's available for both the PAR path
+    // (which now runs MFA intercepts) and the non-PAR path below.
+    let now = Timestamp::from_micros(now_micros());
+
+    // 0. PAR path: when `request_uri` is present, consume the stored entry to
+    //    expand the pre-validated parameters and set `via_par = true`.  This
+    //    must run before the JAR check because a PAR submission may itself
+    //    have contained a JAR — the stored params are already the effective
+    //    values; no re-extraction is needed here.
+    //
+    //    MFA interstitials (required-action, SMS) are also invoked here so
+    //    that FAPI realms requiring PAR can still enforce MFA.  The cookie
+    //    state written by each intercept carries `via_par = true` so that
+    //    the resume path calls `issue_authorization_code` with the correct
+    //    flag (FAPI gate rejects `via_par = false`).
+    if let Some(ref request_uri) = q.request_uri {
+        let stored = match state.identity.consume_par(realm, request_uri) {
+            Ok(s) => s,
+            Err(IdentityError::InvalidPushedAuthorizationRequest) => {
+                return handlers_common::bad_request("invalid or expired request_uri");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "consume_par failed in authorize_get_impl");
+                return handlers_common::server_error();
+            }
+        };
+
+        // RFC 9126 §4: if client_id is present in the query string, it MUST
+        // match the client_id stored in the PAR entry.
+        if !q.client_id.is_empty() {
+            let q_client_id = match uuid::Uuid::parse_str(&q.client_id) {
+                Ok(u) => ClientId::new(u),
+                Err(_) => {
+                    return handlers_common::bad_request("invalid client_id");
+                }
+            };
+            if q_client_id != stored.client_id {
+                return handlers_common::bad_request(
+                    "client_id mismatch with pushed authorization request",
+                );
+            }
+        }
+
+        // Build an AuthorizeQuery from the stored PAR params so the MFA
+        // intercepts below can use the same q-accepting API.
+        let par_q = AuthorizeQuery {
+            client_id: stored.client_id.to_string(),
+            redirect_uri: stored.redirect_uri.clone(),
+            response_type: stored.response_type.clone(),
+            scope: stored.scope.clone(),
+            state: stored.state.clone(),
+            code_challenge: stored.code_challenge.clone().unwrap_or_default(),
+            code_challenge_method: match stored.code_challenge_method {
+                Some(CodeChallengeMethod::S256) => "S256".to_string(),
+                None => String::new(),
+            },
+            nonce: stored.nonce.clone().unwrap_or_default(),
+            prompt: String::new(),
+            response_mode: stored.response_mode.clone(),
+            request: None,
+            request_uri: None,
+        };
+
+        // Required-action intercept: carries via_par=true in OidcParams so
+        // resume_oidc_flow passes it to issue_authorization_code.
+        if let Some(ra_response) = super::required_action::required_action_check(
+            state,
+            realm,
+            &session.user_id,
+            &par_q,
+            headers,
+            now,
+            true, // via_par
+        ) {
+            return ra_response;
+        }
+
+        // SMS MFA intercept: carries via_par=true in SmsMfaState cookie so
+        // sms_challenge_post passes it to issue_code_and_redirect.
+        if let Some(sms_response) = super::sms_challenge::sms_mfa_challenge_check(
+            state,
+            realm,
+            &session.user_id,
+            &par_q,
+            headers,
+            now,
+            true, // via_par
+        ) {
+            return sms_response;
+        }
+
+        return issue_code_and_redirect(
+            state,
+            realm,
+            &session.user_id,
+            &stored.client_id,
+            &stored.redirect_uri,
+            &stored.scope,
+            &stored.state,
+            stored.code_challenge,
+            stored.code_challenge_method,
+            stored.nonce,
+            Vec::new(),
+            None, // response_mode — PAR stores these; extend when needed
+            None, // jar_request — already consumed at PAR push time
+            true, // via_par
+        );
+    }
+
+    // 1. client_id is always required (JAR and non-JAR alike).
+    let Ok(client_uuid) = uuid::Uuid::parse_str(&q.client_id) else {
+        return handlers_common::bad_request("invalid client_id");
+    };
+    let client_id = ClientId::new(client_uuid);
+
+    // 1b. When a signed request object (JAR) is present, outer params other
+    //     than `client_id` are ignored — the engine verifies the JWT and
+    //     extracts authoritative values from its claims. Skip response_type /
+    //     state / redirect_uri checks here; the engine enforces them after
+    //     JAR extraction. Never redirect for JAR errors (open-redirect risk).
+    if q.request.is_some() {
+        // Load client to confirm it exists; redirect_uri check is deferred.
+        match state.identity.get_client(realm, &client_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => return handlers_common::bad_request("unknown client"),
+            Err(e) => {
+                tracing::warn!(error = %e, "authorize_get(JAR): get_client failed");
+                return handlers_common::server_error();
+            }
+        }
+        return issue_code_and_redirect(
+            state,
+            realm,
+            &session.user_id,
+            &client_id,
+            &q.redirect_uri,
+            &q.scope,
+            &q.state,
+            optional(&q.code_challenge),
+            None,
+            optional(&q.nonce),
+            Vec::new(),
+            q.response_mode
+                .as_deref()
+                .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok()),
+            q.request.clone(),
+            false, // JAR path: not via PAR (JAR != PAR)
+        );
+    }
+
+    // Non-JAR path: validate outer params normally.
     if q.response_type != "code" {
         return handlers_common::bad_request("response_type must be 'code'");
     }
     if q.state.is_empty() {
         return handlers_common::bad_request("state parameter is required for CSRF protection");
     }
-    let Ok(client_uuid) = uuid::Uuid::parse_str(&q.client_id) else {
-        return handlers_common::bad_request("invalid client_id");
-    };
-    let client_id = ClientId::new(client_uuid);
 
     // 2. Load the client and validate redirect_uri BEFORE any error
     //    redirect — per RFC 6749 §4.1.2.1, we must only redirect errors
@@ -228,27 +390,35 @@ async fn authorize_get_impl(
         "" => None,
         "S256" => Some(CodeChallengeMethod::S256),
         _ => {
-            return redirect_with_oauth_error(
+            return jarm_aware_error_redirect(
+                state,
+                realm,
+                &client_id.to_string(),
                 &q.redirect_uri,
                 "invalid_request",
                 "unsupported code_challenge_method",
                 &q.state,
+                client.authorization_signed_response_alg(),
             );
         }
     };
 
     // 3b. Public clients MUST supply PKCE S256 (RFC 9700 / HEA-501 F-01).
     if !client.is_confidential() && q.code_challenge.is_empty() {
-        return redirect_with_oauth_error(
+        return jarm_aware_error_redirect(
+            state,
+            realm,
+            &client_id.to_string(),
             &q.redirect_uri,
             "invalid_request",
             "public clients must use PKCE with code_challenge_method=S256",
             &q.state,
+            client.authorization_signed_response_alg(),
         );
     }
 
     // 4. Required-action intercept (AC-1): runs after auth, before code issuance.
-    let now = Timestamp::from_micros(now_micros());
+    // `now` was computed at the top of this function (before the PAR block).
     if let Some(ra_response) = super::required_action::required_action_check(
         state,
         realm,
@@ -256,6 +426,7 @@ async fn authorize_get_impl(
         q,
         headers,
         now,
+        false, // not via PAR (non-PAR path; PAR path returned early above)
     ) {
         return ra_response;
     }
@@ -270,6 +441,7 @@ async fn authorize_get_impl(
         q,
         headers,
         now,
+        false, // not via PAR (non-PAR path; PAR path returned early above)
     ) {
         return sms_response;
     }
@@ -303,6 +475,22 @@ async fn authorize_get_impl(
 
     let bypass = !client.require_consent() || (covered && !force_prompt);
 
+    let parsed_response_mode = if let Some(mode_str) = q.response_mode.as_deref() {
+        match mode_str.parse::<crate::identity::ResponseMode>() {
+            Ok(m) => Some(m),
+            Err(_) => {
+                return redirect_with_oauth_error(
+                    &q.redirect_uri,
+                    "invalid_request",
+                    "unsupported_response_mode",
+                    &q.state,
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     if bypass {
         return issue_code_and_redirect(
             state,
@@ -316,17 +504,24 @@ async fn authorize_get_impl(
             code_challenge_method,
             optional(&q.nonce),
             Vec::new(),
+            parsed_response_mode,
+            None,  // jar_request — already handled above for JAR path
+            false, // not via PAR (direct /authorize)
         );
     }
 
     if silent_only {
         // OIDC Core §3.1.2.1: when `prompt=none` and consent is needed,
         // respond with `error=consent_required` on the redirect URI.
-        return redirect_with_oauth_error(
+        return jarm_aware_error_redirect(
+            state,
+            realm,
+            &client_id.to_string(),
             &q.redirect_uri,
             "consent_required",
             "user consent required",
             &q.state,
+            client.authorization_signed_response_alg(),
         );
     }
 
@@ -341,6 +536,10 @@ async fn authorize_get_impl(
         code_challenge: optional(&q.code_challenge),
         code_challenge_method: code_challenge_method.as_ref().map(|_| "S256".to_string()),
         nonce: optional(&q.nonce),
+        response_mode: q.response_mode.clone(),
+        authorization_signed_response_alg: client
+            .authorization_signed_response_alg()
+            .map(str::to_string),
         created_at: now,
         expires_at: now.add_micros(CONSENT_TICKET_TTL_SECS * 1_000_000),
     };
@@ -425,7 +624,7 @@ pub async fn consent_page(
         .collect();
 
     let admin = super::handlers::is_admin(state.as_ref(), &session);
-    let mut tmpl = ConsentTemplate {
+    let tmpl = ConsentTemplate {
         client_name: client.client_name().to_string(),
         client_logo_url: client.client_logo_url().map(str::to_string),
         scopes,
@@ -439,10 +638,9 @@ pub async fn consent_page(
         flash: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
-    tmpl.theme_css.clone_from(&state.theme_css);
     render(&tmpl)
 }
 
@@ -574,6 +772,27 @@ pub async fn consent_submit(
                     None
                 }
             });
+            let pending_response_mode = if let Some(mode_str) = pending.response_mode.as_deref() {
+                match mode_str.parse::<ResponseMode>() {
+                    Ok(m) => Some(m),
+                    Err(_) => {
+                        let mut err_response = jarm_aware_error_redirect(
+                            &state,
+                            &session.realm_id,
+                            &pending.client_id.to_string(),
+                            &pending.redirect_uri,
+                            "invalid_request",
+                            "unsupported_response_mode",
+                            &pending.state,
+                            pending.authorization_signed_response_alg.as_deref(),
+                        );
+                        append_cookie(&mut err_response, &clear_cookie);
+                        return err_response;
+                    }
+                }
+            } else {
+                None
+            };
             let mut response = issue_code_and_redirect(
                 &state,
                 &session.realm_id,
@@ -586,6 +805,9 @@ pub async fn consent_submit(
                 method,
                 pending.nonce.clone(),
                 Vec::new(),
+                pending_response_mode,
+                None,  // jar_request — consent was already approved; no JAR needed
+                false, // not via PAR (direct /authorize)
             );
             append_cookie(&mut response, &clear_cookie);
             response
@@ -600,11 +822,15 @@ pub async fn consent_submit(
                 &pending.requested_scopes,
                 "self",
             );
-            let mut response = redirect_with_oauth_error(
+            let mut response = jarm_aware_error_redirect(
+                &state,
+                &session.realm_id,
+                &pending.client_id.to_string(),
                 &pending.redirect_uri,
                 "access_denied",
                 "user denied authorization",
                 &pending.state,
+                pending.authorization_signed_response_alg.as_deref(),
             );
             append_cookie(&mut response, &clear_cookie);
             response
@@ -738,6 +964,9 @@ pub(super) fn issue_code_and_redirect(
     code_challenge_method: Option<CodeChallengeMethod>,
     nonce: Option<String>,
     amr_values: Vec<String>,
+    response_mode: Option<crate::identity::ResponseMode>,
+    jar_request: Option<String>,
+    via_par: bool,
 ) -> Response {
     match state.identity.issue_authorization_code(
         realm,
@@ -750,17 +979,12 @@ pub(super) fn issue_code_and_redirect(
         code_challenge_method,
         nonce,
         amr_values,
+        response_mode,
+        jar_request,
+        via_par,
     ) {
         Ok(resp) => {
-            // RFC 9207: include iss= in authorization response to prevent mix-up attacks
-            let location = append_query(
-                redirect_uri,
-                &[
-                    ("code", resp.code()),
-                    ("state", resp.state()),
-                    ("iss", resp.iss()),
-                ],
-            );
+            let location = build_authorization_redirect(redirect_uri, &resp);
             Redirect::to(&location).into_response()
         }
         Err(e) => {
@@ -768,6 +992,78 @@ pub(super) fn issue_code_and_redirect(
             handlers_common::server_error()
         }
     }
+}
+
+/// Builds the redirect location string from an `AuthorizationResponse`.
+///
+/// JARM modes wrap all response parameters in a signed JWT (RFC 9207 §4.3):
+/// * `query.jwt` / `jwt` → `redirect_uri?response=<jwt>`
+/// * `fragment.jwt` → `redirect_uri#response=<jwt>`
+///
+/// Plain modes send individual parameters per RFC 6749 §4.1.2 + RFC 9207 §4.1:
+/// * `fragment` → hash-fragment delivery of `code`, `state`, `iss`
+/// * `query` (default) → query-string delivery of `code`, `state`, `iss`
+pub(super) fn build_authorization_redirect(
+    redirect_uri: &str,
+    resp: &crate::identity::AuthorizationResponse,
+) -> String {
+    match resp.response_mode() {
+        ResponseMode::QueryJwt | ResponseMode::Jwt => append_query(
+            redirect_uri,
+            &[("response", resp.jarm_jwt().unwrap_or_default())],
+        ),
+        ResponseMode::FragmentJwt => append_fragment(
+            redirect_uri,
+            &[("response", resp.jarm_jwt().unwrap_or_default())],
+        ),
+        ResponseMode::Fragment => append_fragment(
+            redirect_uri,
+            &[
+                ("code", resp.code()),
+                ("state", resp.state()),
+                ("iss", resp.iss()),
+            ],
+        ),
+        ResponseMode::Query => append_query(
+            redirect_uri,
+            &[
+                ("code", resp.code()),
+                ("state", resp.state()),
+                ("iss", resp.iss()),
+            ],
+        ),
+    }
+}
+
+/// Builds an OAuth error redirect, JWT-wrapping it when the client requires JARM (§4.3).
+///
+/// When `jarm_alg` is `Some`, signs a `JarmErrorClaims` JWT with the realm key and
+/// redirects as `?response=<jwt>`. Falls back to plain query params on signing failure.
+pub(super) fn jarm_aware_error_redirect(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    client_id: &str,
+    redirect_uri: &str,
+    error: &str,
+    description: &str,
+    state_param: &str,
+    jarm_alg: Option<&str>,
+) -> Response {
+    if jarm_alg.is_some() {
+        match state
+            .identity
+            .sign_jarm_error_jwt(realm, client_id, error, description, state_param)
+        {
+            Ok(jwt) => {
+                let location = append_query(redirect_uri, &[("response", &jwt)]);
+                return axum::response::Redirect::to(&location).into_response();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "sign_jarm_error_jwt failed, falling back to plain redirect");
+            }
+        }
+    }
+    redirect_with_oauth_error(redirect_uri, error, description, state_param)
 }
 
 /// Builds a redirect URI with OAuth error parameters (RFC 6749 §4.1.2.1).
@@ -799,6 +1095,29 @@ pub(super) fn append_query(base: &str, params: &[(&str, &str)]) -> String {
             continue;
         }
         out.push(if first { '?' } else { '&' });
+        first = false;
+        percent_encode_into(k, &mut out);
+        out.push('=');
+        percent_encode_into(v, &mut out);
+    }
+    out
+}
+
+/// Appends parameters to the fragment (hash) portion of a URI.
+///
+/// Used for `response_mode=fragment` and `response_mode=fragment.jwt`. The
+/// fragment is always appended after any existing query string, using `#`
+/// as separator.  Per RFC 3986, the fragment is the last component and a URI
+/// may have at most one `#`, so we always use `#` then `&` for subsequent params.
+pub(super) fn append_fragment(base: &str, params: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(base.len() + 64);
+    out.push_str(base);
+    let mut first = true;
+    for (k, v) in params {
+        if v.is_empty() {
+            continue;
+        }
+        out.push(if first { '#' } else { '&' });
         first = false;
         percent_encode_into(k, &mut out);
         out.push('=');
@@ -912,5 +1231,89 @@ mod tests {
     fn append_query_percent_encodes_reserved() {
         let out = append_query("https://app/cb", &[("state", "a b&c=d")]);
         assert!(out.contains("state=a%20b%26c%3Dd"), "got: {out}");
+    }
+
+    #[test]
+    fn append_fragment_uses_hash() {
+        let out = append_fragment("https://app/cb", &[("code", "abc"), ("state", "xyz")]);
+        assert_eq!(out, "https://app/cb#code=abc&state=xyz");
+    }
+
+    #[test]
+    fn append_fragment_skips_empty_values() {
+        let out = append_fragment("https://app/cb", &[("response", "jwt123"), ("extra", "")]);
+        assert_eq!(out, "https://app/cb#response=jwt123");
+    }
+
+    #[test]
+    fn build_redirect_query_jwt_produces_response_param() {
+        use crate::identity::oidc::{AuthorizationResponse, ResponseMode};
+        let resp = AuthorizationResponse::new_jarm(
+            "authcode".to_string(),
+            "mystate".to_string(),
+            "https://as.example.com".to_string(),
+            "eyJhbGci.payload.sig".to_string(),
+            ResponseMode::QueryJwt,
+        );
+        let location = build_authorization_redirect("https://app/cb", &resp);
+        assert!(
+            location.starts_with("https://app/cb?response="),
+            "query.jwt must use ?response=, got: {location}"
+        );
+        assert!(!location.contains("code="), "must not expose code=");
+    }
+
+    #[test]
+    fn build_redirect_fragment_jwt_uses_hash() {
+        use crate::identity::oidc::{AuthorizationResponse, ResponseMode};
+        let resp = AuthorizationResponse::new_jarm(
+            "authcode".to_string(),
+            "mystate".to_string(),
+            "https://as.example.com".to_string(),
+            "eyJhbGci.payload.sig".to_string(),
+            ResponseMode::FragmentJwt,
+        );
+        let location = build_authorization_redirect("https://app/cb", &resp);
+        assert!(
+            location.starts_with("https://app/cb#response="),
+            "fragment.jwt must use #response=, got: {location}"
+        );
+    }
+
+    #[test]
+    fn build_redirect_plain_query_has_code_state_iss() {
+        use crate::identity::oidc::AuthorizationResponse;
+        let resp = AuthorizationResponse::new(
+            "authcode".to_string(),
+            "mystate".to_string(),
+            "https://as.example.com".to_string(),
+        );
+        let location = build_authorization_redirect("https://app/cb", &resp);
+        assert!(location.contains("code=authcode"), "got: {location}");
+        assert!(location.contains("state=mystate"), "got: {location}");
+        assert!(location.contains("iss="), "got: {location}");
+        assert!(!location.contains("response="), "got: {location}");
+        assert!(
+            location.contains('?'),
+            "must use query string, got: {location}"
+        );
+    }
+
+    #[test]
+    fn build_redirect_jwt_mode_uses_query() {
+        use crate::identity::oidc::{AuthorizationResponse, ResponseMode};
+        // response_mode=jwt defaults to query delivery for code flow
+        let resp = AuthorizationResponse::new_jarm(
+            "code".to_string(),
+            "st".to_string(),
+            "https://as.example.com".to_string(),
+            "jwt.tok.en".to_string(),
+            ResponseMode::Jwt,
+        );
+        let location = build_authorization_redirect("https://app/cb", &resp);
+        assert!(
+            location.contains("?response="),
+            "jwt mode must use query delivery, got: {location}"
+        );
     }
 }

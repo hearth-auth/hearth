@@ -20,7 +20,7 @@ private const val CLOCK_SKEW_SECONDS = 5
 /**
  * JWT signature verifier backed by a [JwksClient].
  *
- * Implements the mandatory validation order from sdk-spec.md §2:
+ * Implements the mandatory validation order from SDK.md §2:
  * 1. Signature against JWKS (RS256 / ES256)
  * 2. `exp` claim
  * 3. `iss` matches configured issuer

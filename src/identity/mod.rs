@@ -4,12 +4,12 @@
 //! Depends on `storage` (for persistence) and `core` (for shared types).
 //! May call `authz` (lateral dependency). Never the reverse.
 
-pub(crate) mod breach_corpus;
 pub mod claims_config;
 pub(crate) mod cleanup;
 pub(crate) mod credentials;
 pub mod device_fingerprint;
 pub mod device_fp;
+pub mod dpop;
 pub mod email;
 mod engine;
 pub mod error;
@@ -22,6 +22,7 @@ pub mod oidc;
 pub mod onboarding;
 pub mod ra_token;
 pub mod reconcile;
+pub mod session_version;
 pub mod sms;
 pub mod tokens;
 pub(crate) mod totp;
@@ -41,34 +42,39 @@ pub use engine::{
 pub use error::IdentityError;
 pub use magic_link::MagicLinkResponse;
 pub use oidc::{
-    fuzz_parse_token_exchange, ApplicationStatus, AuthorizationRequest, AuthorizationResponse,
-    ClientCredentialsRequest, ClientCredentialsResponse, ClientTrustLevel, CodeChallengeMethod,
+    fuzz_parse_token_exchange, AccessTokenAuthorization, ApplicationStatus, AuthorizationRequest,
+    AuthorizationResponse, ClientCredentialsRequest, ClientCredentialsResponse, ClientProfile,
+    ClientTrustLevel, CodeChallengeMethod, DecidePermissionRequest, DecidePermissionResponse,
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
-    IntrospectionResponse, OAuthClient, OidcConfig, OidcDiscoveryDocument, OidcTokenResponse,
-    PasswordGrantRequest, PasswordGrantResponse, RegisterClientRequest, StepUpMfaGrantRequest,
-    TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest,
-    UserInfoResponse,
+    IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
+    OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
+    PushedAuthorizationRequest, PushedAuthorizationResponse, RegisterClientRequest, ResponseMode,
+    StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
+    UpdateClientRequest, UserInfoResponse,
 };
+pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
     LoggingSmsSender, SharedSmsSender, SmsError, SmsMessage, SmsSecret, SmsSender, SnsSmsSender,
     StubSmsHttpTransport, TwilioSmsSender,
 };
 pub use tokens::{
-    decode_claims_unverified, validate_token_with_time, verify_token_signature, IssueTokenRequest,
-    Jwk, JwksDocument, SigningKey, TokenClaims, TokenConfig, TokenPair, REQUIRED_ACTION_TOKEN_TYPE,
+    decode_claims_unverified, validate_token_with_time, verify_assertion_signature,
+    verify_token_signature, CnfClaim, IssueTokenRequest, Jwk, JwksDocument, JwtAssertionClaims,
+    SigningKey, TokenClaims, TokenConfig, TokenPair, REQUIRED_ACTION_TOKEN_TYPE,
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
     canonicalize_scopes, AdaptiveMfaConfig, AttributeDefinition, AttributeDefinitions,
-    AttributeType, BreachCheckConfig, BreachCheckMode, BulkResult, ConsentDecision,
-    ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
-    CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
-    ImportClientRequest, ImportUserRequest, InvitationStatus, MigrationReport, Organization,
-    OrganizationConfig, OrganizationInvitation, OrganizationMembership, OrganizationRole,
-    OrganizationStatus, Page, PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm,
-    RealmConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
-    RequiredAction, RequiredActionTokenResponse, Session, SessionContext,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus, Webhook,
+    AttributeType, BreachCheckConfig, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
+    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
+    CreateWebhookRequest, CredentialExport, DcrPolicy, FapiProfile, ImportClientRequest,
+    ImportUserRequest, InvitationStatus, MigrationReport, Organization, OrganizationConfig,
+    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
+    PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
+    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
+    RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
+    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
+    UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -273,6 +279,20 @@ pub trait IdentityEngine: Send + Sync {
     /// Returns `IdentityError::UserNotFound` if the user does not exist.
     fn delete_user(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError>;
 
+    /// Deletes all device fingerprints for a user (GDPR Art. 17 / AC-11).
+    ///
+    /// Used by the admin erasure endpoint
+    /// (`DELETE /admin/users/{id}/device-fingerprints`) to satisfy DSAR
+    /// erasure demands without deleting the entire account.
+    ///
+    /// Returns the number of fingerprint records removed. Does not error if
+    /// the user has no fingerprints — returns `Ok(0)`.
+    fn delete_user_device_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<usize, IdentityError>;
+
     /// Sets (or replaces) the password for a user.
     ///
     /// Hashes the password using Argon2id with the configured parameters
@@ -452,10 +472,15 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// The refresh token's session must still be valid. The session's TTL
     /// is also refreshed. Returns a new token pair with updated expiration.
+    ///
+    /// `dpop_jkt` is the JWK thumbprint extracted from the DPoP proof header on
+    /// the current request (RFC 9449). FAPI 2.0 clients require it; the
+    /// refreshed access token will carry `cnf.jkt` bound to this thumbprint.
     fn refresh_tokens(
         &self,
         realm_id: &RealmId,
         refresh_token: &str,
+        dpop_jkt: Option<&str>,
     ) -> Result<TokenPair, IdentityError>;
 
     /// Returns the JWKS document containing public keys for external verification.
@@ -567,6 +592,18 @@ pub trait IdentityEngine: Send + Sync {
         request: &ClientCredentialsRequest,
     ) -> Result<ClientCredentialsResponse, IdentityError>;
 
+    /// Issues an access token via the JWT Bearer Grant (RFC 7523).
+    ///
+    /// Validates the JWT assertion against the client's registered Ed25519
+    /// public key, enforces RFC 7523 §3 claim constraints (`iss`, `aud`,
+    /// `exp`), and prevents JTI replay.  Issues a sessionless access token
+    /// analogous to the client credentials grant.
+    fn jwt_bearer_token(
+        &self,
+        realm_id: &RealmId,
+        request: &JwtBearerRequest,
+    ) -> Result<ClientCredentialsResponse, IdentityError>;
+
     /// Authenticates an OAuth confidential client using its client secret.
     ///
     /// Returns `Ok(())` only when the client exists in the target realm,
@@ -577,6 +614,33 @@ pub trait IdentityEngine: Send + Sync {
         client_id: &ClientId,
         client_secret: &str,
     ) -> Result<(), IdentityError>;
+
+    /// Verifies a `private_key_jwt` client assertion per RFC 7523 §2.2.
+    ///
+    /// Validates signature, `iss == sub == client_id`, `exp` in the future,
+    /// `aud` contains the realm issuer URL, and JTI replay prevention.
+    fn verify_client_assertion(
+        &self,
+        realm_id: &RealmId,
+        client_id: &ClientId,
+        assertion: &str,
+    ) -> Result<(), IdentityError>;
+
+    /// Verifies a JAR (RFC 9101) signed request object.
+    ///
+    /// Looks up the client's registered `jwks`, selects the key matching the
+    /// JWT header `kid`/`alg`, verifies the signature (EdDSA or RS256), and
+    /// validates `iss == client_id`, `aud` contains the realm issuer URL, and
+    /// `exp` is in the future. Returns the decoded [`JarClaims`] on success.
+    ///
+    /// Rejects `alg: none`, missing JWKS, unknown `kid`, and any claim
+    /// validation failure with [`IdentityError::InvalidJar`].
+    fn verify_jar(
+        &self,
+        realm_id: &RealmId,
+        client_id: &ClientId,
+        request_jwt: &str,
+    ) -> Result<JarClaims, IdentityError>;
 
     /// Initiates a Device Authorization Grant (RFC 8628).
     ///
@@ -613,6 +677,28 @@ pub trait IdentityEngine: Send + Sync {
     ///
     /// For access tokens: extracts session ID and revokes the session.
     /// For refresh tokens: looks up the grant family and marks it revoked.
+    /// Pushes authorization parameters to the PAR endpoint (RFC 9126).
+    ///
+    /// Validates the client, redirect URI, and PKCE (required for public
+    /// clients), then stores the parameters under a 90-second TTL.
+    /// Returns a `request_uri` the client passes to `/authorize`.
+    fn push_authorization_request(
+        &self,
+        realm_id: &RealmId,
+        request: &PushedAuthorizationRequest,
+    ) -> Result<PushedAuthorizationResponse, IdentityError>;
+
+    /// Consumes a stored PAR entry identified by its `request_uri`.
+    ///
+    /// Returns the stored parameters on success. The entry is atomically
+    /// marked used; subsequent calls return `InvalidPushedAuthorizationRequest`.
+    #[allow(private_interfaces)]
+    fn consume_par(
+        &self,
+        realm_id: &RealmId,
+        request_uri: &str,
+    ) -> Result<oidc::StoredPushedAuthorizationRequest, IdentityError>;
+
     fn revoke_token(
         &self,
         realm_id: &RealmId,
@@ -628,6 +714,19 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         request: &TokenIntrospectionRequest,
     ) -> Result<IntrospectionResponse, IdentityError>;
+
+    /// Evaluates whether the bearer token holder has a specific permission
+    /// (`POST /oauth/authorize` — decision endpoint, HEA-922).
+    ///
+    /// Validates the token (signature, expiry, session, revocation), resolves
+    /// the subject's live RBAC permissions, and returns `allowed: true` only
+    /// when the resolved set contains the requested permission.  Fail-closed:
+    /// any validation or resolution error returns `allowed: false`.
+    fn decide_token_permission(
+        &self,
+        realm_id: &RealmId,
+        request: &oidc::DecidePermissionRequest,
+    ) -> Result<oidc::DecidePermissionResponse, IdentityError>;
 
     // ===== MFA / TOTP (Step 23) =====
 
@@ -699,6 +798,16 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         user_id: &UserId,
     ) -> Result<Option<Vec<String>>, IdentityError>;
+
+    /// Returns the base32-encoded pending TOTP secret if the user has a pending
+    /// enrollment that is not yet confirmed. Returns `None` if MFA is already
+    /// enabled or there is no pending enrollment. Used to re-populate the QR
+    /// code and secret on failed activation attempts.
+    fn load_pending_totp_secret(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+    ) -> Result<Option<String>, IdentityError>;
 
     // ===== WebAuthn / Passkeys (Step 24) =====
 
@@ -1252,11 +1361,30 @@ pub trait IdentityEngine: Send + Sync {
         ticket: &str,
     ) -> Result<Option<PendingAuthorizationRequest>, IdentityError>;
 
+    /// Signs a JARM error response JWT for mandatory-JARM clients (JARM §4.3).
+    ///
+    /// Called from the authorization endpoint when an error must be returned to
+    /// a client whose `authorization_signed_response_alg` is set. The resulting
+    /// JWT carries `error` + `error_description` + `state` so the client can
+    /// verify the error with the same signature check it applies to success
+    /// responses. The `typ` header is `oauth-authz-resp+jwt`.
+    fn sign_jarm_error_jwt(
+        &self,
+        realm_id: &RealmId,
+        client_id: &str,
+        error: &str,
+        error_description: &str,
+        state_param: &str,
+    ) -> Result<String, IdentityError>;
+
     /// Issues an authorization code for a previously-approved authorization
     /// request. Unlike [`IdentityEngine::authorize`], this variant skips
     /// the consent gating and is called only after consent has been
     /// recorded (or explicitly bypassed for a trusted client). Returns
     /// the authorization code response.
+    /// `jar_request`: when `Some`, the signed request object (RFC 9101) is
+    /// verified against the client's JWKS and its claims override the other
+    /// parameters. Pass `None` for non-JAR flows.
     #[allow(clippy::too_many_arguments)]
     fn issue_authorization_code(
         &self,
@@ -1270,6 +1398,9 @@ pub trait IdentityEngine: Send + Sync {
         code_challenge_method: Option<CodeChallengeMethod>,
         nonce: Option<String>,
         amr_values: Vec<String>,
+        response_mode: Option<ResponseMode>,
+        jar_request: Option<String>,
+        via_par: bool,
     ) -> Result<AuthorizationResponse, IdentityError>;
 
     // ===== External IdP federation (Phase 2: Gap #5) =====
@@ -1573,6 +1704,16 @@ pub trait IdentityEngine: Send + Sync {
     /// Lists all webhooks registered in a realm, in insertion order.
     fn list_webhooks(&self, realm_id: &RealmId) -> Result<Vec<Webhook>, IdentityError>;
 
+    /// Updates an existing webhook's configuration.
+    ///
+    /// Returns `WebhookNotFound` when no webhook with that ID exists in the realm.
+    fn update_webhook(
+        &self,
+        realm_id: &RealmId,
+        webhook_id: &WebhookId,
+        req: &UpdateWebhookRequest,
+    ) -> Result<Webhook, IdentityError>;
+
     /// Deletes a webhook from the realm.
     fn delete_webhook(
         &self,
@@ -1590,6 +1731,17 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
     ) -> Result<crate::identity::cleanup::CleanupStats, IdentityError>;
+
+    /// Proactively evicts expired device-fingerprint entries from `realm_id`.
+    ///
+    /// Scans all `dfp:user:*` keys and deletes any whose 8-byte LE i64 expiry
+    /// (Unix seconds) is <= `now_secs`. Returns `(evicted, active)` counts.
+    /// Called by the background dfp sweeper task on a configurable interval.
+    fn sweep_expired_fingerprints(
+        &self,
+        realm_id: &RealmId,
+        now_secs: i64,
+    ) -> Result<(u64, u64), IdentityError>;
 
     /// Probes the underlying storage engine for basic liveness.
     ///
@@ -1693,4 +1845,36 @@ pub trait IdentityEngine: Send + Sync {
         otp_hmac_key_bytes: &[u8],
         now_unix_ts: u64,
     ) -> Result<(), IdentityError>;
+
+    // ------- Session-version feed -------
+
+    /// Returns delta entries with `seq > since` (up to `limit`).
+    ///
+    /// Returns `None` when `since` is older than the retention window;
+    /// callers must fall back to [`Self::sv_snapshot`].
+    fn sv_list_deltas(
+        &self,
+        realm_id: &RealmId,
+        since: u64,
+        limit: usize,
+    ) -> Result<Option<SvDeltaResponse>, IdentityError>;
+
+    /// Returns a point-in-time snapshot of `{session_id → min_sv}` for the realm.
+    fn sv_snapshot(&self, realm_id: &RealmId) -> Result<SvSnapshotResponse, IdentityError>;
+
+    /// Manually bumps the session version for a single session.
+    ///
+    /// Returns `IdentityError::SessionVersionDisabled` when the feature is
+    /// off for the realm.
+    fn sv_bump_session(
+        &self,
+        realm_id: &RealmId,
+        session_id: &SessionId,
+    ) -> Result<u64, IdentityError>;
+
+    /// Bumps all active sessions in the realm (admin operation).
+    ///
+    /// Returns `IdentityError::SessionVersionDisabled` when the feature is
+    /// off for the realm.
+    fn sv_bump_all(&self, realm_id: &RealmId) -> Result<usize, IdentityError>;
 }

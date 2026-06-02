@@ -9,6 +9,7 @@
 pub use crate::identity::device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore};
 
 use crate::core::UserId;
+use crate::identity::keys;
 
 /// Derive a stable storage key for a `(user, ip, user_agent)` triple.
 ///
@@ -25,5 +26,8 @@ pub fn derive_fingerprint_key(
 ) -> String {
     let hmac =
         DeviceFingerprintStore::derive_hmac(secret, user_id, ip_prefix, user_agent_normalized);
-    format!("dev:fp:{}:{}", user_id.as_uuid(), hex::encode(hmac))
+    let hmac_hex = hex::encode(hmac);
+    // INVARIANT: encode_device_fp produces ASCII-only bytes (uuid + hex chars).
+    #[allow(clippy::unwrap_used)]
+    String::from_utf8(keys::encode_device_fp(user_id, &hmac_hex)).unwrap()
 }

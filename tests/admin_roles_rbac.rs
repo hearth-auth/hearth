@@ -1,7 +1,7 @@
 //! Integration tests for admin HTTP role CRUD.
 //!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 — `admin_roles_rbac:crud`,
-//! `duplicate_slug_rejected`, `cycle_on_composition_rejected`, `cross_realm_isolation`.
+//! Scenarios: `crud`, `duplicate_slug_rejected`, `cycle_on_composition_rejected`,
+//! `cross_realm_isolation`.
 
 mod common;
 

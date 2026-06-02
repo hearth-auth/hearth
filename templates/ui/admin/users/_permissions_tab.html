@@ -1,4 +1,4 @@
-<div x-data="{ grantOpen: false, scopeType: 'realm', selectedOrg: '' }">
+<div>
 
   {# Permissions inherited from role assignments, grouped by source role (read-only) #}
   {% if !role_inherited_groups.is_empty() %}
@@ -57,25 +57,26 @@
 
   {# Grant Permission form #}
   <div class="mt-5 border-t border-divider-faint pt-4">
-    <button @click="grantOpen = !grantOpen" type="button"
+    <button type="button"
+            data-component="disclosure"
+            data-target="#grant-perm-form"
+            data-label-open="Cancel"
+            data-label-close="Grant Permission"
+            data-label-target="#grant-perm-label"
             class="inline-flex items-center gap-1.5 text-sm font-medium text-teal-fg transition-colors hover:text-teal-fg/80">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="h-4 w-4">
         <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
       </svg>
-      <span x-text="grantOpen ? 'Cancel' : 'Grant Permission'"></span>
+      <span id="grant-perm-label">Grant Permission</span>
     </button>
 
-    <div x-show="grantOpen" x-cloak class="mt-4 rounded-lg border border-white/[0.10] bg-ht-surface-base p-4">
+    <div id="grant-perm-form" class="mt-4 hidden rounded-lg border border-white/[0.10] bg-ht-surface-base p-4">
       <form method="post"
             action="/ui/admin/realms/{{ realm_name }}/users/{{ user_id }}/permissions/grant"
             hx-post="/ui/admin/realms/{{ realm_name }}/users/{{ user_id }}/permissions/grant"
             hx-target="#permissions-tab-content"
-            hx-swap="innerHTML"
-            @submit="grantOpen = false">
+            hx-swap="innerHTML">
         {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-
-        {# Hidden scope field — kept in sync by Alpine #}
-        <input type="hidden" name="scope" :value="scopeType === 'org' && selectedOrg ? 'org:' + selectedOrg : 'realm'">
 
         <div class="grid gap-4 sm:grid-cols-2">
           <div>
@@ -94,20 +95,27 @@
             <p class="mt-1 text-xs text-ht-content-muted">Dot-separated segments, e.g. <code class="font-mono">billing.read</code></p>
           </div>
 
-          <div>
+          <div data-component="scope-selector">
             <label class="mb-1.5 block font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Scope</label>
+            {# Hidden scope field — kept in sync by ScopeSelector component #}
+            <input type="hidden" id="perm-scope-value" name="scope" value="realm" data-scope-value>
             <div class="flex flex-col gap-2">
               <label class="flex cursor-pointer items-center gap-2 text-sm text-ht-content-secondary">
-                <input type="radio" value="realm" x-model="scopeType" class="accent-teal-fg">
+                <input type="radio" name="scope_type" value="realm" checked
+                       data-scope-radio
+                       class="accent-teal-fg">
                 Realm-wide
               </label>
               {% if !available_orgs.is_empty() %}
               <label class="flex cursor-pointer items-center gap-2 text-sm text-ht-content-secondary">
-                <input type="radio" value="org" x-model="scopeType" class="accent-teal-fg">
+                <input type="radio" name="scope_type" value="org"
+                       data-scope-radio
+                       class="accent-teal-fg">
                 Organization
               </label>
-              <div x-show="scopeType === 'org'" x-cloak class="ml-6">
-                <select x-model="selectedOrg"
+              <div id="perm-org-div" data-scope-org-panel class="ml-6 hidden">
+                <select id="perm-org-select"
+                        data-scope-org-select
                         class="w-full rounded-sm border border-white/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
                   <option value="">— pick an org —</option>
                   {% for org in available_orgs %}

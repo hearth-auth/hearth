@@ -1,7 +1,7 @@
 """Hearth identity platform Python SDK.
 
 Provides HearthClient (auth flows, RBAC predicates), AdminClient
-(user/realm CRUD), and all request/response types.
+(user/realm CRUD), mode-aware middleware, and all request/response types.
 """
 
 from .client import HearthClient
@@ -18,9 +18,13 @@ from .errors import (
     TokenIssuerError,
     TokenAudienceError,
     IntrospectionError,
+    RequiredActionError,
+    AuthorizationModeMismatchError,
 )
 from .claims import Claims
+from .middleware import RequirePermissionMiddleware, WsgiPermissionMiddleware
 from .types import (
+    AccessTokenAuthorizationMode,
     BootstrapResponse,
     User,
     CreateUserRequest,
@@ -35,12 +39,31 @@ from .types import (
     MePermissionsResponse,
     OAuthClient,
     RegisterClientRequest,
+    CreateClientRequest,
+    UpdateClientRequest,
+    Role,
+    CreateRoleRequest,
+    UpdateRoleRequest,
+    Group,
+    CreateGroupRequest,
+    UpdateGroupRequest,
+    OrgMember,
+    AddOrgMemberRequest,
     JwksDocument,
+    IntrospectRequest,
+    IntrospectResponse,
+    CheckPermissionRequest,
+    CheckPermissionResponse,
 )
 
 __all__ = [
+    # Clients
     "HearthClient",
     "AdminClient",
+    # Middleware
+    "RequirePermissionMiddleware",
+    "WsgiPermissionMiddleware",
+    # Errors
     "HearthError",
     "HearthSdkError",
     "ConfigurationError",
@@ -52,7 +75,12 @@ __all__ = [
     "TokenIssuerError",
     "TokenAudienceError",
     "IntrospectionError",
+    "RequiredActionError",
+    "AuthorizationModeMismatchError",
+    # Claims
     "Claims",
+    # Types
+    "AccessTokenAuthorizationMode",
     "BootstrapResponse",
     "User",
     "CreateUserRequest",
@@ -67,5 +95,19 @@ __all__ = [
     "MePermissionsResponse",
     "OAuthClient",
     "RegisterClientRequest",
+    "CreateClientRequest",
+    "UpdateClientRequest",
+    "Role",
+    "CreateRoleRequest",
+    "UpdateRoleRequest",
+    "Group",
+    "CreateGroupRequest",
+    "UpdateGroupRequest",
+    "OrgMember",
+    "AddOrgMemberRequest",
     "JwksDocument",
+    "IntrospectRequest",
+    "IntrospectResponse",
+    "CheckPermissionRequest",
+    "CheckPermissionResponse",
 ]

@@ -45,10 +45,10 @@ test.describe('Sidebar navigation', () => {
     const seed = loadSeed();
     await page.goto(`${BASE_URL}/ui/admin/realms/${seed.realmName}/users`);
 
-    // The Alpine-rendered realm pill has an x-text="realm" span in the header.
+    // The realm pill span is populated by initRealmPill() in admin.js.
     // Using getByText would also match the breadcrumb link for the same realm
     // name, triggering a strict-mode violation; target the pill span directly.
-    const pill = page.locator('header span[x-text="realm"]');
+    const pill = page.locator('header span#realm-pill-text');
     await expect(pill).toHaveText(seed.realmName, { timeout: 10_000 });
   });
 
@@ -57,7 +57,7 @@ test.describe('Sidebar navigation', () => {
     await page.goto(`${BASE_URL}/ui/admin/realms/${seed.realmName}/users`);
 
     const nav = page.locator('nav[aria-label="Admin"]');
-    // Wait for AlpineJS to render the realm nav from /ui/admin/api/nav/realms
+    // Wait for RealmNav to render from /ui/admin/api/nav/realms
     await expect(nav.getByText(seed.realmName)).toBeVisible({ timeout: 10_000 });
 
     // At least one sub-page link visible under the expanded realm.

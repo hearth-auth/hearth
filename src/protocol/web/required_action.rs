@@ -42,7 +42,7 @@ use crate::identity::CodeChallengeMethod;
 use crate::identity::RequiredAction;
 use crate::identity::{CleartextPassword, SessionContext, UpdateUserRequest};
 use crate::protocol::web::auth::{issue_auth_cookies, IssuedCookies};
-use crate::protocol::web::oauth_consent::AuthorizeQuery;
+use crate::protocol::web::oauth_consent::{build_authorization_redirect, AuthorizeQuery};
 
 use super::handlers::append_cookie;
 use super::handlers_common;
@@ -71,8 +71,8 @@ struct ActionPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rendered by `GET /required-action/UPDATE_PASSWORD` (and re-rendered on validation failure).
@@ -91,8 +91,8 @@ struct UpdatePasswordPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `application/x-www-form-urlencoded` body for `POST /required-action/UPDATE_PASSWORD`.
@@ -132,6 +132,7 @@ pub fn required_action_check(
     q: &AuthorizeQuery,
     headers: &HeaderMap,
     now: Timestamp,
+    via_par: bool,
 ) -> Option<Response> {
     let user = state.identity.get_user(realm, user_id).ok().flatten()?;
 
@@ -167,6 +168,8 @@ pub fn required_action_check(
             Some(q.state.clone())
         },
         response_type: q.response_type.clone(),
+        response_mode: q.response_mode.clone().filter(|m| !m.is_empty()),
+        via_par,
     };
 
     let token = match state
@@ -327,8 +330,8 @@ pub async fn action_page(
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -452,6 +455,11 @@ pub fn resume_oidc_flow(
         Some(oidc_params.code_challenge.clone())
     };
 
+    let response_mode = oidc_params
+        .response_mode
+        .as_deref()
+        .and_then(|m| m.parse::<crate::identity::ResponseMode>().ok());
+
     match state.identity.issue_authorization_code(
         realm,
         &user_id,
@@ -463,16 +471,12 @@ pub fn resume_oidc_flow(
         code_challenge_method,
         oidc_params.nonce.clone(),
         Vec::new(),
+        response_mode,
+        None,                // jar_request — RA resume restores pre-validated params
+        oidc_params.via_par, // propagated from the original authorize request
     ) {
         Ok(resp) => {
-            let location = build_redirect_location(
-                &oidc_params.redirect_uri,
-                &[
-                    ("code", resp.code()),
-                    ("state", resp.state()),
-                    ("iss", resp.iss()),
-                ],
-            );
+            let location = build_authorization_redirect(&oidc_params.redirect_uri, &resp);
             let mut response = Redirect::to(&location).into_response();
             append_cookie(&mut response, &clear_cookie);
             response
@@ -621,8 +625,8 @@ struct VerifyEmailPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rendered by `GET /required-action/VERIFY_EMAIL/confirm` when the token is
@@ -640,8 +644,8 @@ struct VerifyEmailExpiredTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query parameters for `GET /required-action/VERIFY_EMAIL/confirm`.
@@ -805,8 +809,8 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -949,8 +953,8 @@ fn render_verify_email_expired(state: &Arc<WebState>) -> Response {
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -1137,8 +1141,8 @@ fn render_update_password_form(state: &Arc<WebState>, error: Option<&str>) -> Re
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -1161,8 +1165,8 @@ struct EnrollPhoneOtpPageTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rendered by `POST /required-action/ENROLL_PHONE_OTP/send` on success.
@@ -1173,8 +1177,8 @@ struct EnrollPhoneOtpVerifyTemplate {
     masked_phone: String,
     /// Raw phone (for hidden form fields).
     phone: String,
-    /// Opaque nonce returned by `issue_sms_otp`.
-    nonce: String,
+    /// Opaque nonce returned by `issue_sms_otp`; `None` in rate-limited renders.
+    nonce: Option<String>,
     error: Option<String>,
     chrome: bool,
     active: &'static str,
@@ -1185,8 +1189,8 @@ struct EnrollPhoneOtpVerifyTemplate {
     csrf: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_PHONE_OTP/send`.
@@ -1268,7 +1272,7 @@ pub async fn enroll_phone_otp_send(
                 // Return the verify page with a warning rather than blocking —
                 // the real OTP was already sent recently (rate limit window).
                 &phone,
-                "rate-limited",
+                None,
                 Some("A code was recently sent to this number. Please wait before requesting another."),
             );
         }
@@ -1281,7 +1285,7 @@ pub async fn enroll_phone_otp_send(
         }
     };
 
-    render_enroll_phone_verify(&state, &phone, &nonce, None)
+    render_enroll_phone_verify(&state, &phone, Some(&nonce), None)
 }
 
 /// Verifies the submitted OTP code, stores the phone as verified, clears
@@ -1325,7 +1329,7 @@ pub async fn enroll_phone_otp_verify_submit(
         return render_enroll_phone_verify(
             &state,
             &phone,
-            &form.nonce,
+            Some(&form.nonce),
             Some("Invalid submission."),
         );
     }
@@ -1342,7 +1346,7 @@ pub async fn enroll_phone_otp_verify_submit(
             return render_enroll_phone_verify(
                 &state,
                 &phone,
-                &form.nonce,
+                Some(&form.nonce),
                 Some("That code is incorrect or has expired. Try again or request a new code."),
             );
         }
@@ -1425,8 +1429,8 @@ fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Respo
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -1434,13 +1438,13 @@ fn render_enroll_phone_page(state: &Arc<WebState>, error: Option<&str>) -> Respo
 fn render_enroll_phone_verify(
     state: &Arc<WebState>,
     phone: &str,
-    nonce: &str,
+    nonce: Option<&str>,
     error: Option<&str>,
 ) -> Response {
     let tmpl = EnrollPhoneOtpVerifyTemplate {
         masked_phone: mask_phone(phone),
         phone: phone.to_string(),
-        nonce: nonce.to_string(),
+        nonce: nonce.map(str::to_string),
         error: error.map(str::to_string),
         chrome: false,
         active: "",
@@ -1451,8 +1455,8 @@ fn render_enroll_phone_verify(
         csrf: None,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     };
     render(&tmpl)
 }
@@ -1525,25 +1529,6 @@ fn now_micros() -> i64 {
         .unwrap_or(0)
 }
 
-/// Appends query parameters to a redirect URI.  Replicates the logic from
-/// [`super::oauth_consent`] without a cross-module dependency.
-fn build_redirect_location(base: &str, params: &[(&str, &str)]) -> String {
-    let mut out = String::with_capacity(base.len() + 64);
-    out.push_str(base);
-    let mut first = !base.contains('?');
-    for (k, v) in params {
-        if v.is_empty() {
-            continue;
-        }
-        out.push(if first { '?' } else { '&' });
-        first = false;
-        percent_encode_into(k, &mut out);
-        out.push('=');
-        percent_encode_into(v, &mut out);
-    }
-    out
-}
-
 fn percent_encode_into(value: &str, out: &mut String) {
     use std::fmt::Write as _;
     for b in value.bytes() {
@@ -1561,6 +1546,41 @@ fn percent_encode_into(value: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build_redirect_location(base: &str, params: &[(&str, &str)]) -> String {
+        use std::fmt::Write as _;
+        let mut out = base.to_string();
+        let mut first = true;
+        for (k, v) in params {
+            if v.is_empty() {
+                continue;
+            }
+            out.push(if first { '?' } else { '&' });
+            first = false;
+            for b in k.bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(b as char);
+                    }
+                    _ => {
+                        let _ = write!(out, "%{b:02X}");
+                    }
+                }
+            }
+            out.push('=');
+            for b in v.bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        out.push(b as char);
+                    }
+                    _ => {
+                        let _ = write!(out, "%{b:02X}");
+                    }
+                }
+            }
+        }
+        out
+    }
 
     #[test]
     fn build_redirect_location_appends_params() {

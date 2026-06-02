@@ -6,6 +6,17 @@ const GENERATED_DIR: &str = "src/protocol/generated";
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     compile_tailwind_if_available();
 
+    // When SKIP_PROTO_BUILD is set, skip protoc and pbjson.  The generated
+    // Rust files in src/protocol/generated/ are used directly by include!().
+    if std::env::var("SKIP_PROTO_BUILD").is_ok() {
+        println!(
+            "cargo:warning=SKIP_PROTO_BUILD set — using checked-in generated files in src/protocol/generated/"
+        );
+        println!("cargo:rerun-if-changed=proto/");
+        println!("cargo:rerun-if-changed=build.rs");
+        return Ok(());
+    }
+
     let proto_dir = PathBuf::from("proto");
     let protos = &[
         "proto/hearth/identity/v1/identity.proto",
@@ -32,12 +43,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // types and service traits/clients. The file descriptor set is shared
     // with pbjson below.
     let proto_dir_str = proto_dir.to_str().expect("proto dir is valid UTF-8");
+    let mut includes: Vec<String> = vec![proto_dir_str.to_string()];
+
+    // Include googleapis protos (needed for google.api.http annotations).
+    // Accept colon-separated overrides via PROTOC_INCLUDE, then fall back to
+    // the buf module cache at ~/.cache/buf/v3/modules/.
+    if let Ok(extra) = std::env::var("PROTOC_INCLUDE") {
+        for p in extra.split(':').filter(|s| !s.is_empty()) {
+            includes.push(p.to_string());
+        }
+    } else {
+        if let Some(path) = find_googleapis_in_buf_cache() {
+            includes.push(path);
+        }
+        // Also include standard protobuf WKT (google/protobuf/descriptor.proto etc.).
+        // Some protoc binaries (statically-linked, Nix-packaged) don't bundle these.
+        if let Some(wkt) = find_protobuf_wkt_includes() {
+            includes.push(wkt);
+        }
+    }
+
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
         .out_dir(&generated)
         .file_descriptor_set_path(&descriptor_path)
-        .compile_protos(protos, &[proto_dir_str])?;
+        .compile_protos(
+            protos,
+            includes
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )?;
 
     // Duplicate the descriptor set into the generated dir so tonic-reflection
     // can `include_bytes!` it at compile time without relying on OUT_DIR
@@ -62,6 +100,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Finds the standard protobuf WKT include directory.
+///
+/// `google/protobuf/descriptor.proto` is required by `google/api/annotations.proto`.
+/// Some protoc binaries (statically-linked, Nix-packaged) do not bundle these, so
+/// we search for them in common system and Nix-store locations.
+fn find_protobuf_wkt_includes() -> Option<String> {
+    // Explicit env override takes priority.
+    if let Ok(p) = std::env::var("PROTOBUF_INCLUDE") {
+        let candidate = PathBuf::from(&p);
+        if candidate.join("google/protobuf/descriptor.proto").exists() {
+            return Some(p);
+        }
+    }
+
+    // Search Nix store — any versioned protobuf package has `include/`.
+    if let Ok(entries) = std::fs::read_dir("/nix/store") {
+        let mut candidates: Vec<PathBuf> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name();
+                let n = name.to_string_lossy();
+                if n.contains("protobuf-") && !n.contains("protobuf-c") {
+                    let p = e.path().join("include");
+                    if p.join("google/protobuf/descriptor.proto").exists() {
+                        return Some(p);
+                    }
+                }
+                None
+            })
+            .collect();
+        // Prefer highest version number (last lexicographically among vNN.M paths).
+        candidates.sort();
+        if let Some(best) = candidates.last() {
+            if let Some(s) = best.to_str() {
+                return Some(s.to_string());
+            }
+        }
+    }
+
+    // Fall back to common Unix system paths.
+    for dir in &["/usr/include", "/usr/local/include"] {
+        let p = PathBuf::from(dir);
+        if p.join("google/protobuf/descriptor.proto").exists() {
+            if let Some(s) = p.to_str() {
+                return Some(s.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+/// Finds the googleapis proto include directory from buf's module cache.
+///
+/// Buf caches remote modules under `~/.cache/buf/v3/modules/`. The googleapis
+/// module lives under `buf.build/googleapis/googleapis/<digest>/files`. We
+/// scan for a digest directory that contains `google/api/annotations.proto`.
+fn find_googleapis_in_buf_cache() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let base = PathBuf::from(home).join(".cache/buf/v3/modules");
+    // Walk two levels of hash-bucketed directories to find the googleapis module.
+    for bucket in std::fs::read_dir(&base).ok()?.flatten() {
+        let googleapis_dir = bucket.path().join("buf.build/googleapis/googleapis");
+        if !googleapis_dir.is_dir() {
+            continue;
+        }
+        for digest in std::fs::read_dir(&googleapis_dir).ok()?.flatten() {
+            let files_dir = digest.path().join("files");
+            if files_dir.join("google/api/annotations.proto").exists() {
+                if let Some(s) = files_dir.to_str() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Compiles `ui/input.css` → `src/protocol/web/assets/app.css` when the
 /// Tailwind CLI shim is present. No-op on fresh clones without the CLI, so
 /// `cargo build` still works for anyone who just wants the server binary —
@@ -84,7 +200,7 @@ fn compile_tailwind_if_available() {
         return;
     }
 
-    let output = Command::new(&cli)
+    let output = Command::new("./tailwindcss")
         .current_dir("ui")
         .args([
             "-i",

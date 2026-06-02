@@ -4,7 +4,7 @@
 //! state change flows through the identity, authorization, or audit
 //! engines. Templates live under `templates/ui/`, compiled into the
 //! binary by the askama derive macro; static assets (`htmx.min.js`,
-//! `alpine.min.js`, `admin.js`, fonts, `app.css`) are embedded via
+//! `admin.js`, `components.js`, fonts, `app.css`) are embedded via
 //! `include_bytes!`. No third-party script/font origins needed (HEA-630).
 //!
 //! # Submodules
@@ -58,6 +58,7 @@ pub mod handlers;
 pub(crate) mod handlers_common;
 pub mod mailcatcher;
 pub mod oauth_consent;
+pub mod openapi;
 pub mod realm_resolver;
 pub mod required_action;
 pub mod saml;
@@ -354,6 +355,15 @@ impl WebState {
         self
     }
 
+    /// Returns the global theme CSS for inline embedding when non-empty.
+    ///
+    /// Always returns `None` — theme CSS is served as an external stylesheet at
+    /// `/ui/static/theme.css` so the CSP `style-src 'self'` directive is not
+    /// weakened with `'unsafe-inline'`.
+    pub fn inline_theme_css(&self) -> Option<String> {
+        None
+    }
+
     /// Sets the global theme CSS (named theme + optional custom CSS).
     /// Served at `GET /ui/static/theme.css`. Also computes and caches the
     /// `ETag` for conditional-request support.
@@ -467,7 +477,7 @@ impl WebState {
     /// the process-global `current_realm` cache. Prefer this in pre-auth
     /// handlers where the realm is resolved from the URL or cookie.
     #[must_use]
-    pub fn realm_theme_css_for(&self, realm_id: &RealmId) -> Option<String> {
+    pub fn realm_theme_url_for(&self, realm_id: &RealmId) -> Option<String> {
         let id = realm_id.as_uuid().to_string();
         self.realm_themes.get(&id).cloned()
     }
@@ -502,16 +512,21 @@ impl WebState {
         self.current_realm.read().ok().and_then(|g| g.clone())
     }
 
-    /// Returns the per-realm theme CSS for the currently-pinned realm,
-    /// or `None` if no per-realm theme is configured.
+    /// Returns the external CSS URL for the per-realm theme, or `None` if the
+    /// realm has no theme configured.
     ///
-    /// Used by all authenticated handlers to populate `realm_theme_css`
-    /// in template structs, enabling inline per-realm CSS overrides.
+    /// Used by all authenticated handlers to populate `realm_theme_url` in
+    /// template structs. The URL points to `/ui/static/realm-theme/{uuid}`,
+    /// which is served without inline injection and satisfies `style-src 'self'`.
     #[must_use]
-    pub fn realm_theme_css(&self) -> Option<String> {
+    pub fn realm_theme_url(&self) -> Option<String> {
         let realm_id = self.current_realm()?;
         let id = realm_id.as_uuid().to_string();
-        self.realm_themes.get(&id).cloned()
+        if self.realm_themes.contains_key(&id) {
+            Some(format!("/ui/static/realm-theme/{id}"))
+        } else {
+            None
+        }
     }
 }
 
@@ -616,7 +631,7 @@ fn web_civil_from_days(z: i64) -> (i64, i64, i64) {
 /// | `/ui/account/sessions` | GET | List the signed-in user's active sessions |
 /// | `/ui/account/sessions/{sid}/revoke` | POST | Revoke one of the user's own sessions |
 /// | `/ui/account/sessions/revoke-others` | POST | Revoke every session except the current one |
-/// | `/ui/admin/users` | GET | Admin users list |
+/// | `/ui/admin` | GET | Admin home (307 → `/ui/admin/realms`) |
 /// | `/ui/admin/users/new` | GET/POST | Create user |
 /// | `/ui/admin/users/{id}` | GET | User detail |
 /// | `/ui/admin/users/{id}/edit` | GET/POST | Edit user |
@@ -766,6 +781,14 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/forgot-password/sent",
             axum::routing::get(handlers::admin_forgot_password_sent),
+        )
+        // Convenience alias: /ui/admin is the admin home per R-2 (UI_ROUTING.md).
+        // Redirects to the realms list which is the canonical admin landing page.
+        .route(
+            "/admin",
+            axum::routing::get(|| async {
+                axum::response::Redirect::temporary("/ui/admin/realms")
+            }),
         )
         .route("/", axum::routing::get(handlers::dashboard))
         .route(
@@ -987,6 +1010,15 @@ pub fn router(state: WebState) -> Router {
             "/admin/admin-users/new",
             axum::routing::get(admin::admin_admin_user_create_alias),
         )
+        .route(
+            "/admin/admin-users/import",
+            axum::routing::get(admin::admin_admin_users_import_form)
+                .post(admin::admin_admin_users_import_submit),
+        )
+        .route(
+            "/admin/admin-users/import/template.csv",
+            axum::routing::get(admin::admin_admin_users_import_template_csv),
+        )
         // --- Migration history + orphan recovery ---
         .route(
             "/admin/migrations",
@@ -1125,7 +1157,7 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/admin/realms/{realm}/rbac/token-preview",
-            axum::routing::post(admin::admin_rbac_token_preview),
+            axum::routing::get(admin::admin_rbac_token_preview),
         )
         .route(
             "/admin/realms/{realm}/rbac/permissions",
@@ -1427,6 +1459,11 @@ pub fn router(state: WebState) -> Router {
             axum::routing::post(admin::admin_webhook_test_ping),
         )
         .route(
+            "/admin/realms/{realm}/webhooks/{id}/edit",
+            axum::routing::get(admin::admin_webhook_edit_form)
+                .post(admin::admin_webhook_edit_submit),
+        )
+        .route(
             "/admin/realms/{realm}/webhooks/{id}/delete",
             axum::routing::post(admin::admin_webhook_delete),
         )
@@ -1498,28 +1535,9 @@ pub fn router(state: WebState) -> Router {
 
 /// Default 404 handler. Returns the branded error page rather than letting
 /// axum fall through to a bare `404 Not Found` text body.
-///
-/// When the requester holds a valid session (authenticated admin), renders
-/// inside the full admin nav shell so the user can navigate back without
-/// retracing the URL bar. Falls back to the chrome-free public layout for
-/// unauthenticated visitors.
-async fn serve_branded_404(
-    State(state): State<Arc<WebState>>,
-    req: axum::extract::Request,
-) -> Response {
-    use axum::extract::FromRequestParts as _;
-    let (mut parts, _body) = req.into_parts();
-    // Try to resolve a session from cookies; silently ignore auth failures so
-    // unauthenticated visitors receive the public layout rather than a redirect.
-    let session = auth::UiSession::from_request_parts(&mut parts, &state)
-        .await
-        .ok();
-    let path = parts.uri.path().to_owned();
-    let msg = format!("No page exists at {path}.");
-    match session {
-        Some(ref s) => handlers_common::not_found_authed(state.as_ref(), s, &msg),
-        None => handlers_common::not_found(&msg),
-    }
+async fn serve_branded_404(req: axum::extract::Request) -> Response {
+    let path = req.uri().path().to_string();
+    handlers_common::not_found(&format!("No page exists at {path}."))
 }
 
 /// Serves the Hearth flame as `image/svg+xml`. Works for both `.ico` and
@@ -1559,24 +1577,25 @@ fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
 
 /// HTMX v1.9.12 — pinned, checksum recorded in `assets/CHECKSUMS.txt`.
 const HTMX_JS: &[u8] = include_bytes!("assets/htmx.min.js");
-/// Alpine.js v3 — vendored so CSP can drop `cdn.jsdelivr.net` (HEA-630).
-const ALPINE_JS: &[u8] = include_bytes!("assets/alpine.min.js");
-/// Alpine component registrations for every `/ui/**` template (HEA-630).
-/// Extracting them here lets CSP use `script-src 'self'` without `unsafe-inline`.
+/// Admin UI vanilla-JS helpers (sidebar, realm nav, toasts, form init). Alpine-free (HEA-850).
 const ADMIN_JS: &[u8] = include_bytes!("assets/admin.js");
+/// Vanilla-JS component library — mounts [data-component="…"] attributes (HEA-1049).
+const COMPONENTS_JS: &[u8] = include_bytes!("assets/components.js");
 /// Eval-free vanilla JS for WebAuthn (passkey) ceremonies (HEA-849).
 /// Replaces the `passkeyLogin` / `passkeyManager` / `passkeyRow` Alpine
 /// components so these pages no longer require `unsafe-eval` in the CSP.
 const PASSKEY_JS: &[u8] = include_bytes!("assets/passkey.js");
-/// Global Alpine.js component registrations and keyboard shortcuts, extracted
-/// from inline `<script>` tags so the CSP can omit `unsafe-inline`.
-const LAYOUT_JS: &[u8] = include_bytes!("assets/layout.js");
-/// Dev mailcatcher tab-switcher — extracted from mail_detail.html inline script
-/// so CSP `script-src 'self'` is satisfied on dev mail pages (HEA-886).
-const MAIL_JS: &[u8] = include_bytes!("assets/mail.js");
-/// Hyperscript 0.9.13 — eval-free declarative scripting library (HEA-824).
-/// Used to replace Alpine.js patterns that require `unsafe-eval` in CSP.
-const HYPERSCRIPT_JS: &[u8] = include_bytes!("assets/hyperscript.min.js");
+/// Per-page admin scripts extracted from inline `<script>` blocks so the CSP
+/// can stay `script-src 'self'` (HEA-886).
+const ADMIN_SLUG_SYNC_JS: &[u8] = include_bytes!("assets/admin/slug-sync.js");
+const ADMIN_WEBHOOKS_NEW_JS: &[u8] = include_bytes!("assets/admin/webhooks-new.js");
+const ADMIN_USERS_IMPORT_JS: &[u8] = include_bytes!("assets/admin/users-import.js");
+const ADMIN_USERS_LIST_JS: &[u8] = include_bytes!("assets/admin/users-list.js");
+const ADMIN_USERS_NEW_JS: &[u8] = include_bytes!("assets/admin/users-new.js");
+const ADMIN_RBAC_DEBUG_JS: &[u8] = include_bytes!("assets/admin/rbac-debug.js");
+const ADMIN_ATTR_ROWS_JS: &[u8] = include_bytes!("assets/admin/attr-rows.js");
+/// Standalone dev-mailcatcher detail-page script (HEA-886).
+const DEV_MAIL_DETAIL_JS: &[u8] = include_bytes!("assets/dev/mail-detail.js");
 /// Self-hosted Fraunces upright woff2 (HEA-630).
 const FONT_FRAUNCES: &[u8] = include_bytes!("assets/fonts/fraunces-latin.woff2");
 /// Self-hosted Fraunces italic woff2 (HEA-630).
@@ -1767,12 +1786,27 @@ async fn serve_static(
     // Other embedded assets are immutable for the life of this binary.
     let embedded: Option<(&[u8], &str)> = match file.as_str() {
         "htmx.min.js" => Some((HTMX_JS, "application/javascript; charset=utf-8")),
-        "alpine.min.js" => Some((ALPINE_JS, "application/javascript; charset=utf-8")),
         "admin.js" => Some((ADMIN_JS, "application/javascript; charset=utf-8")),
+        "components.js" => Some((COMPONENTS_JS, "application/javascript; charset=utf-8")),
+        "admin/slug-sync.js" => Some((ADMIN_SLUG_SYNC_JS, "application/javascript; charset=utf-8")),
+        "admin/webhooks-new.js" => Some((
+            ADMIN_WEBHOOKS_NEW_JS,
+            "application/javascript; charset=utf-8",
+        )),
+        "admin/users-import.js" => Some((
+            ADMIN_USERS_IMPORT_JS,
+            "application/javascript; charset=utf-8",
+        )),
+        "admin/users-list.js" => {
+            Some((ADMIN_USERS_LIST_JS, "application/javascript; charset=utf-8"))
+        }
+        "admin/users-new.js" => Some((ADMIN_USERS_NEW_JS, "application/javascript; charset=utf-8")),
+        "admin/rbac-debug.js" => {
+            Some((ADMIN_RBAC_DEBUG_JS, "application/javascript; charset=utf-8"))
+        }
+        "admin/attr-rows.js" => Some((ADMIN_ATTR_ROWS_JS, "application/javascript; charset=utf-8")),
+        "dev/mail-detail.js" => Some((DEV_MAIL_DETAIL_JS, "application/javascript; charset=utf-8")),
         "passkey.js" => Some((PASSKEY_JS, "application/javascript; charset=utf-8")),
-        "layout.js" => Some((LAYOUT_JS, "application/javascript; charset=utf-8")),
-        "mail.js" => Some((MAIL_JS, "application/javascript; charset=utf-8")),
-        "hyperscript.min.js" => Some((HYPERSCRIPT_JS, "application/javascript; charset=utf-8")),
         "favicon.svg" => Some((FAVICON_SVG, "image/svg+xml")),
         "img/hearth-wide-web.svg" => Some((HEARTH_WIDE_SVG, "image/svg+xml")),
         "img/hearth-icon.svg" => Some((HEARTH_ICON_SVG, "image/svg+xml")),
@@ -1835,10 +1869,6 @@ mod tests {
         // Compile-time embedded — check lengths so future drops to zero bytes
         // (e.g. a broken build.rs) surface as a test failure.
         assert!(HTMX_JS.len() > 1024, "htmx.min.js seems too small");
-        assert!(
-            HYPERSCRIPT_JS.len() > 1024,
-            "hyperscript.min.js seems too small"
-        );
         assert!(
             APP_CSS_FALLBACK.len() > 64,
             "app.css fallback seems too small"

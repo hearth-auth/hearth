@@ -13,11 +13,15 @@ export type {
 
 // Error types (spec §5).
 export {
+  AuthorizationModeMismatchError,
   ConfigurationError,
   DiscoveryError,
   HearthSdkError,
   IntrospectionError,
   JWKSFetchError,
+  RequiredActionError,
+  SessionVersionCacheStaleError,
+  SessionVersionRevokedError,
   TokenAudienceError,
   TokenExpiredError,
   TokenInvalidError,
@@ -25,12 +29,16 @@ export {
   TokenNotYetValidError,
 } from "./errors.js";
 
+// Mode-aware middleware (HEA-923).
+export { requirePermission } from "./middleware.js";
+export type { PermissionChecker, RequirePermissionOptions } from "./middleware.js";
+
 // Claims API (spec §4).
 export { Claims } from "./claims.js";
 
 // Lower-level API client (kept for backwards-compatibility).
 export { HearthApiClient, HearthError } from "./client.js";
-export type { HearthApiClientConfig } from "./client.js";
+export type { HearthApiClientConfig, HandleCallbackParams } from "./client.js";
 export { AdminClient } from "./admin.js";
 export { createHearth } from "./hearth.js";
 export type {
@@ -48,7 +56,9 @@ export {
 } from "./react.js";
 export type { HearthProviderProps } from "./react.js";
 export type {
+  AccessTokenAuthorizationMode,
   AuthorizeParams,
+  AuthorizePermissionOptions,
   AuthorizeResponse,
   BootstrapResponse,
   CreateRealmParams,
@@ -60,6 +70,7 @@ export type {
   PageResponse,
   RegisterClientParams,
   Realm,
+  SessionVersionConfig,
   TokenExchangeParams,
   TokenResponse,
   UpdateRealmParams,
@@ -67,3 +78,4 @@ export type {
   User,
   UserInfoResponse,
 } from "./types.js";
+export { SessionVersionCache } from "./session-version-cache.js";

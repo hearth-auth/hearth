@@ -12,7 +12,7 @@
 #                   current required-checks list. Does NOT call PATCH. Default
 #                   when no flag is given.
 #   --apply         Send the PATCH to GitHub. Requires GH_TOKEN / `gh auth` with
-#                   `repo` scope (Admin on therecluse26/hearth or owner-scoped).
+#                   `repo` scope (Admin on hearth-auth/hearth or owner-scoped).
 #   --rollback FILE Restore required_status_checks from a JSON snapshot file
 #                   captured by a prior --apply (written to
 #                   `scripts/.hea-684-rollback-<timestamp>.json`).
@@ -65,7 +65,7 @@ TARGET_CHECKS=(
   "CI / sdk-node (18.x)"
   "CI / sdk-node (20.x)"
   "CI / sdk-node (22.x)"
-  "CI / sdk-conformance (docs/sdk-spec.md)"
+  "CI / sdk-conformance (docs/specs/SDK.md)"
   "Security / codeql (rust)"
   "Security / codeql (go)"
   "Security / codeql (javascript-typescript)"

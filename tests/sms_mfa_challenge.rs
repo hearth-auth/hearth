@@ -226,6 +226,9 @@ async fn sms_amr_claim_in_tokens() {
             Some(CodeChallengeMethod::S256),
             None,
             vec!["sms".to_string()],
+            None,
+            None,
+            false,
         )
         .expect("issue_authorization_code");
 
@@ -238,6 +241,9 @@ async fn sms_amr_claim_in_tokens() {
                 code: auth_resp.code().to_string(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange_authorization_code");
@@ -285,6 +291,9 @@ async fn no_sms_mfa_means_empty_amr() {
             Some(CodeChallengeMethod::S256),
             None,
             Vec::new(),
+            None,
+            None,
+            false,
         )
         .expect("issue_authorization_code");
 
@@ -297,6 +306,9 @@ async fn no_sms_mfa_means_empty_amr() {
                 code: auth_resp.code().to_string(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange_authorization_code");
@@ -409,6 +421,9 @@ async fn sms_amr_preserved_through_refresh() {
             Some(CodeChallengeMethod::S256),
             None,
             vec!["sms".to_string()],
+            None,
+            None,
+            false,
         )
         .expect("issue_authorization_code");
 
@@ -421,13 +436,16 @@ async fn sms_amr_preserved_through_refresh() {
                 code: auth_resp.code().to_string(),
                 redirect_uri: "https://app.example.com/cb".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code");
 
     let refreshed = h
         .identity()
-        .refresh_tokens(&realm, tokens.refresh_token())
+        .refresh_tokens(&realm, tokens.refresh_token(), None)
         .expect("refresh tokens");
 
     let claims = hearth::identity::decode_claims_unverified(refreshed.access_token())

@@ -41,6 +41,10 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 | `make ui-coverage-check` | Diff crawl manifest vs declared routes → `reports/coverage-gaps.txt` |
 | `make ui-test-visual` | Visual regression baselines; `UPDATE=1` locks new snapshots |
 | `make ui-test-cross-browser` | Smoke + flows + regression on Chromium, Firefox, WebKit |
+| `make ci-local-fast` | Host-side mirror of PR-blocking CI (7 checks, ~5 min) — run before push |
+| `make ci-local-full` | Full container reproduction via `act` (~10-15 min) — use when `ci-local-fast` passes but CI fails, or when editing workflow files |
+| `make sdk-smoke-local` | Build hearth, boot `--dev`, run TS + Go SDK example smokes, tear down |
+| `cd sdks/php && composer test` | Run PHP SDK unit tests (smoke-test the PHP SDK locally) |
 
 ### UI Test Pre-commit Workflow
 
@@ -70,7 +74,7 @@ Reports land in `tests/ui/reports/`:
 
 **Build prerequisites:**
 - `PROTOC` env var must point to `protoc` (or set `make PROTOC=protoc check`).
-- `buf` is optional unless editing `proto/**/*.proto`.
+- `buf` is **required** — install via `brew install bufbuild/buf/buf` or https://buf.build/docs/installation. The pre-commit hook and CI both invoke it.
 - `ui/tailwindcss` must be present for CSS changes (`make tailwind-install`).
 - `hearth.yaml` is **gitignored** — copy from `hearth.example.yaml`.
 
@@ -87,15 +91,59 @@ curl -X POST http://127.0.0.1:8420/admin/bootstrap  # dev-only, creates realm+ad
 
 `--dev` auto-enables the in-process **mailcatcher** email transport. All outbound emails are captured and visible at `http://127.0.0.1:8420/dev/mail`. No Docker or external mail server needed.
 
+### Bootstrap & Browser Login (dev-only)
+
+The bootstrap endpoint is **idempotent** — safe to call multiple times.
+
+```bash
+# 1. Start the server (in background or a separate terminal)
+make dev &
+# Wait for: "listening on 127.0.0.1:8420"
+
+# 2. Bootstrap — creates the system realm + an admin user + an API token
+BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
+REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
+ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
+
+echo "Realm:  $REALM_ID"
+echo "Token:  $ADMIN_TOKEN"
+```
+
+**Browser login:** navigate to `http://127.0.0.1:8420/ui/admin/login` and sign in with:
+
+| Field    | Value             |
+|----------|-------------------|
+| Email    | `admin@hearth.test` |
+| Password | `HearthTest123!`  |
+
+A successful login drops you at the admin dashboard (`/admin`).
+
+**API usage with the token:**
+
+```bash
+# Example: list realms
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:8420/admin/realms | jq .
+```
+
+> The `access_token` from bootstrap is a long-lived admin Bearer token. Use it for REST API calls in tests and scripts. It is **not** a session cookie — browser pages require the cookie set by the login form above.
+
 ## Reference Documents
 
 Read these before writing code. They are the canonical source of truth:
 
 - `docs/specs/ARCHITECTURE.md` — structural rules (MUST/SHOULD per RFC 2119).
 - `docs/specs/AUTHORIZATION.md` — normative spec for roles, groups, permissions, JWT claims, SDK contract.
+- `docs/specs/AUTHZ_EXPANSION.md` — custom permissions, scopes, configurable claim profiles. Hybrid spec + phase tracker.
+- `docs/specs/OIDC.md` — OIDC + OAuth 2.0 + FAPI 2.0 security profile. Normative for FAPI work.
+- `docs/specs/CONFIGURATION.md` — full `hearth.yaml` reference.
+- `docs/specs/UI_ROUTING.md` — realm-name and admin-route reservation rules.
 - `docs/specs/TESTING.md` — eight testing layers, TDD workflow, tooling, CI tiers.
 - `docs/specs/TEST_SCENARIOS.md` — granular checkbox-tracked scenario checklist.
 - `docs/specs/IMPLEMENTATION_ORDER.md` — **mandatory build sequence.** Do not skip ahead.
+- `docs/specs/PROTO.md` — **proto authoring guide.** RPC naming, `google.api.http` conventions, `json_name`, backward-compat rules. Read before touching `proto/`.
+- `docs/specs/SDK.md` — common SDK contract every Hearth client SDK must satisfy.
+- `docs/specs/AGENT_AUTH.md` — agent identity & authorization. **Partial: DPoP + token exchange foundations shipped; Agent entity, delegation, MCP, approval, AATs NOT YET IMPLEMENTED.** Check the status banner at the top before coding against any section.
 - `docs/vision/VISION.md` — design rationale, performance targets, competitive positioning.
 - `docs/specs/THEME.md` — mandatory design theme for all UI code.
 

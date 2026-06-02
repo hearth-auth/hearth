@@ -579,12 +579,7 @@ impl TargetRealm {
     /// realm name, and a 500 `Response` on engine error.
     #[allow(clippy::result_large_err)]
     pub fn from_name(state: &Arc<WebState>, name: &str) -> Result<Self, Response> {
-        resolve_named_realm(state, name)?.ok_or_else(|| {
-            render_status(
-                &super::handlers_common::NotFoundTemplate::new("Realm not found.".to_string()),
-                StatusCode::NOT_FOUND,
-            )
-        })
+        resolve_named_realm(state, name)
     }
 }
 
@@ -639,17 +634,18 @@ where
         // cookie or query override and no fallback. If the path
         // doesn't carry a realm, the request is rejected.
         if let Some(name) = path_realm_segment(parts.uri.path()) {
-            match resolve_named_realm(&web_state, &name) {
-                Ok(Some(realm)) => return Ok(realm),
+            // System realm is handled by resolve_named_realm (always Ok or 500, never 404).
+            if name == crate::identity::keys::SYSTEM_REALM_NAME {
+                return resolve_named_realm(&web_state, &name);
+            }
+            // For named realms, try to get session context so a not-found renders
+            // inside the admin chrome rather than as a bare unstyled page.
+            return match web_state.identity.get_realm_by_name(&name) {
+                Ok(Some(realm)) => Ok(TargetRealm(realm)),
                 Ok(None) => {
-                    // Realm slug not found. If the request carries a valid
-                    // session (RequireAdmin runs before TargetRealm in every
-                    // handler that uses both), re-read the cookie to render
-                    // the 404 inside the admin chrome so the user keeps their
-                    // sidebar and can navigate back without retracing the URL.
                     let session = UiSession::from_request_parts(parts, state).await.ok();
-                    return Err(match session.as_ref() {
-                        Some(s) => super::handlers_common::not_found_authed(
+                    Err(match session {
+                        Some(ref s) => super::handlers_common::not_found_authed(
                             &web_state,
                             s,
                             "Realm not found.",
@@ -660,10 +656,16 @@ where
                             ),
                             StatusCode::NOT_FOUND,
                         ),
-                    });
+                    })
                 }
-                Err(response) => return Err(response),
-            }
+                Err(e) => {
+                    tracing::warn!(error = %e, realm = %name, "TargetRealm: get_realm_by_name failed");
+                    Err(render_status(
+                        &super::handlers_common::ServerErrorTemplate::new(),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    ))
+                }
+            };
         }
 
         // No realm context resolved. Reject deliberately rather than
@@ -720,19 +722,12 @@ fn path_realm_segment(path: &str) -> Option<String> {
 /// `/ui/admin/realms/system/users/*` by passing the resolved `Realm::name()`
 /// into templates. Rather than rejecting "system" here, we look it up directly
 /// by nil UUID so those URLs round-trip correctly.
-///
-/// Returns `Ok(None)` when the realm name is unknown (not found in storage),
-/// allowing callers to render the 404 with or without session chrome. Returns
-/// `Err` only on internal storage errors.
-#[allow(clippy::result_large_err)]
-fn resolve_named_realm(
-    web_state: &Arc<WebState>,
-    name: &str,
-) -> Result<Option<TargetRealm>, Response> {
+#[allow(clippy::result_large_err)] // Response is inherently ~128B; boxing on the rare failure path isn't worth the extra heap alloc on each successful call.
+fn resolve_named_realm(web_state: &Arc<WebState>, name: &str) -> Result<TargetRealm, Response> {
     if name == crate::identity::keys::SYSTEM_REALM_NAME {
         let system_id = crate::identity::keys::system_realm_id();
         return match web_state.identity.get_realm(&system_id) {
-            Ok(Some(realm)) => Ok(Some(TargetRealm(realm))),
+            Ok(Some(realm)) => Ok(TargetRealm(realm)),
             Ok(None) => {
                 tracing::warn!("resolve_named_realm: system realm not found in storage");
                 Err(render_status(
@@ -750,8 +745,11 @@ fn resolve_named_realm(
         };
     }
     match web_state.identity.get_realm_by_name(name) {
-        Ok(Some(realm)) => Ok(Some(TargetRealm(realm))),
-        Ok(None) => Ok(None),
+        Ok(Some(realm)) => Ok(TargetRealm(realm)),
+        Ok(None) => Err(render_status(
+            &super::handlers_common::NotFoundTemplate::new("Realm not found.".to_string()),
+            StatusCode::NOT_FOUND,
+        )),
         Err(e) => {
             tracing::warn!(error = %e, realm = %name, "TargetRealm: get_realm_by_name failed");
             Err(render_status(

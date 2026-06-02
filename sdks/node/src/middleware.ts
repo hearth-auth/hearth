@@ -2,8 +2,12 @@
 
 import { HearthClient } from "./client.js";
 import type { HearthConfig } from "./config.js";
+import { resolveConfig } from "./config.js";
+import { IntrospectionClient } from "./introspect.js";
+import { AuthorizeClient } from "./authorize.js";
 import type { VerifiedToken } from "./token.js";
-import { TokenVerificationError } from "./errors.js";
+import type { AccessTokenAuthorizationMode } from "./token.js";
+import { TokenVerificationError, AuthorizationModeError, RequiredActionError } from "./errors.js";
 
 // No import from 'express' or 'fastify' — decoupled from any framework.
 
@@ -16,6 +20,17 @@ export interface MiddlewareOptions extends HearthConfig {
   requiredRole?: string;
   /** If provided, return 403 when the verified token is missing this permission. */
   requiredPermission?: string;
+  /**
+   * Authorization mode to enforce. Defaults to `"embedded"` (JWT claims only).
+   *
+   * - `"embedded"`: check permissions/roles from JWT claims — no network calls.
+   * - `"introspection"`: call `/introspect` for live RBAC data; reject on mode mismatch.
+   * - `"decision"`: call `POST /oauth/authorize` per-request; fail-closed on network errors.
+   *
+   * IMPORTANT: absence of `permissions` in a token MUST NOT silently fall back to
+   * a different mode. Set `expectedMode` explicitly for any non-embedded behavior.
+   */
+  expectedMode?: AccessTokenAuthorizationMode;
 }
 
 const WWW_AUTHENTICATE = 'Bearer realm="hearth"';
@@ -69,21 +84,88 @@ function sendForbidden(res: MinimalResponse): void {
   else if (res.send) res.send(body);
 }
 
-function checkAuthorization(token: VerifiedToken, opts: MiddlewareOptions): boolean {
+/** Check scope and role from JWT claims — always used for embedded mode. */
+function checkScopeAndRole(token: VerifiedToken, opts: MiddlewareOptions): boolean {
   if (opts.requiredScope && !token.hasScope(opts.requiredScope)) return false;
   if (opts.requiredRole && !token.hasRole(opts.requiredRole)) return false;
-  if (opts.requiredPermission && !token.hasPermission(opts.requiredPermission)) return false;
   return true;
+}
+
+type AuthDecision = "allow" | "deny_forbidden" | "deny_unauthorized";
+
+/** Embedded: all checks from JWT claims — no network calls. */
+function checkEmbedded(token: VerifiedToken, opts: MiddlewareOptions): AuthDecision {
+  if (!checkScopeAndRole(token, opts)) return "deny_forbidden";
+  if (opts.requiredPermission && !token.hasPermission(opts.requiredPermission)) return "deny_forbidden";
+  return "allow";
+}
+
+/** Introspection: call /introspect for live RBAC; enforce mode echo match. */
+async function checkIntrospection(
+  token: string,
+  introspectionClient: IntrospectionClient,
+  opts: MiddlewareOptions,
+  verifiedToken: VerifiedToken,
+): Promise<AuthDecision> {
+  // Scope/role are still checked from JWT (lightweight, no extra roundtrip)
+  if (!checkScopeAndRole(verifiedToken, opts)) return "deny_forbidden";
+
+  let result: Awaited<ReturnType<IntrospectionClient["introspect"]>>;
+  try {
+    result = await introspectionClient.introspect(token, "access_token");
+  } catch {
+    return "deny_forbidden";
+  }
+
+  if (!result.active) return "deny_unauthorized";
+
+  // Mode-echo check: server must confirm the token was issued for introspection mode.
+  if (result.mode !== undefined && result.mode !== opts.expectedMode) {
+    // Typed error for callers who inspect the cause, but middleware is fail-closed.
+    const _ = new AuthorizationModeError(opts.expectedMode!, result.mode);
+    void _;
+    return "deny_forbidden";
+  }
+
+  if (opts.requiredPermission) {
+    const livePermissions = result.permissions ?? [];
+    if (!livePermissions.includes(opts.requiredPermission)) return "deny_forbidden";
+  }
+
+  return "allow";
+}
+
+/** Decision: per-request POST /oauth/authorize — fail-closed. */
+async function checkDecision(
+  token: string,
+  authorizeClient: AuthorizeClient,
+  opts: MiddlewareOptions,
+  verifiedToken: VerifiedToken,
+): Promise<AuthDecision> {
+  if (!checkScopeAndRole(verifiedToken, opts)) return "deny_forbidden";
+
+  if (opts.requiredPermission) {
+    const result = await authorizeClient.decide(token, opts.requiredPermission);
+    if (!result.allowed) return "deny_forbidden";
+  }
+
+  return "allow";
 }
 
 /** Express-compatible middleware factory. Attaches verified token to `req.hearthToken`. */
 export function hearthMiddleware(options: MiddlewareOptions) {
+  const resolved = resolveConfig(options);
   const client = new HearthClient(options);
+  const introspectionClient = new IntrospectionClient(resolved, async () => {
+    throw new Error("Discovery not available in middleware context; configure introspection_endpoint explicitly");
+  });
+  const authorizeClient = new AuthorizeClient(resolved);
   const required = options.required !== false;
+  const mode: AccessTokenAuthorizationMode = options.expectedMode ?? "embedded";
 
   return async (req: ExpressRequest, res: MinimalResponse, next: NextFn): Promise<void> => {
-    const token = extractBearer(req.headers);
-    if (!token) {
+    const rawToken = extractBearer(req.headers);
+    if (!rawToken) {
       if (required) {
         sendUnauthorized(res, "Bearer token required");
         return;
@@ -94,7 +176,7 @@ export function hearthMiddleware(options: MiddlewareOptions) {
 
     let verified: VerifiedToken;
     try {
-      verified = await client.verifyToken(token);
+      verified = await client.verifyToken(rawToken);
     } catch (err) {
       if (required) {
         const desc = err instanceof TokenVerificationError ? err.message : "Token verification failed";
@@ -105,7 +187,27 @@ export function hearthMiddleware(options: MiddlewareOptions) {
       return;
     }
 
-    if (!checkAuthorization(verified, options)) {
+    // §6 Rule 6: required_action tokens must never be accepted for general API access
+    if (verified.tokenType() === "required_action") {
+      const err = new RequiredActionError(verified.requiredActions());
+      sendUnauthorized(res, "Token requires completion of required actions");
+      throw err;
+    }
+
+    let decision: AuthDecision;
+    if (mode === "introspection") {
+      decision = await checkIntrospection(rawToken, introspectionClient, options, verified);
+    } else if (mode === "decision") {
+      decision = await checkDecision(rawToken, authorizeClient, options, verified);
+    } else {
+      decision = checkEmbedded(verified, options);
+    }
+
+    if (decision === "deny_unauthorized") {
+      sendUnauthorized(res, "Token is no longer active");
+      return;
+    }
+    if (decision === "deny_forbidden") {
       sendForbidden(res);
       return;
     }
@@ -130,8 +232,14 @@ interface FastifyReply {
 
 /** Fastify hook/plugin factory. Attaches verified token to `request.hearthToken`. */
 export function hearthFastifyHook(options: MiddlewareOptions) {
+  const resolved = resolveConfig(options);
   const client = new HearthClient(options);
+  const introspectionClient = new IntrospectionClient(resolved, async () => {
+    throw new Error("Discovery not available in middleware context; configure introspection_endpoint explicitly");
+  });
+  const authorizeClient = new AuthorizeClient(resolved);
   const required = options.required !== false;
+  const mode: AccessTokenAuthorizationMode = options.expectedMode ?? "embedded";
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const authHeader = request.headers["authorization"];
@@ -146,10 +254,10 @@ export function hearthFastifyHook(options: MiddlewareOptions) {
       return;
     }
 
-    const token = authHeader.slice(7);
+    const rawToken = authHeader.slice(7);
     let verified: VerifiedToken;
     try {
-      verified = await client.verifyToken(token);
+      verified = await client.verifyToken(rawToken);
     } catch (err) {
       if (required) {
         const desc = err instanceof TokenVerificationError ? err.message : "Token verification failed";
@@ -162,7 +270,36 @@ export function hearthFastifyHook(options: MiddlewareOptions) {
       return;
     }
 
-    if (!checkAuthorization(verified, options)) {
+    // §6 Rule 6: required_action tokens must never be accepted for general API access
+    if (verified.tokenType() === "required_action") {
+      const err = new RequiredActionError(verified.requiredActions());
+      reply.header("WWW-Authenticate", WWW_AUTHENTICATE).code(401).send({
+        error: "unauthorized",
+        error_description: "Token requires completion of required actions",
+      });
+      throw err;
+    }
+
+    // Reuse Express-side request wrapper for auth-options check
+    const minimalReq = { headers: request.headers as Record<string, string | string[] | undefined> };
+    let decision: AuthDecision;
+    if (mode === "introspection") {
+      decision = await checkIntrospection(rawToken, introspectionClient, options, verified);
+    } else if (mode === "decision") {
+      decision = await checkDecision(rawToken, authorizeClient, options, verified);
+    } else {
+      decision = checkEmbedded(verified, options);
+    }
+    void minimalReq;
+
+    if (decision === "deny_unauthorized") {
+      reply.header("WWW-Authenticate", WWW_AUTHENTICATE).code(401).send({
+        error: "unauthorized",
+        error_description: "Token is no longer active",
+      });
+      return;
+    }
+    if (decision === "deny_forbidden") {
       reply.code(403).send({
         error: "forbidden",
         error_description: "Insufficient scope, role, or permission",

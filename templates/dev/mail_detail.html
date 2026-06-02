@@ -6,7 +6,7 @@
   <title>Hearth Mailcatcher · {{ email.subject }}</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/ui/static/app.css">
-  <script src="/ui/static/mail.js" defer></script>
+  <script src="/ui/static/dev/mail-detail.js" defer></script>
 </head>
 <body class="min-h-screen bg-ht-surface-base text-ht-content-primary">
 
@@ -22,7 +22,7 @@
         </h1>
       </div>
       <form method="post" action="/dev/mail/{{ email.id }}/delete"
-            onsubmit="return confirm('Delete this email?')"
+            data-mail-delete
             class="shrink-0">
         <button type="submit"
                 class="rounded border border-danger/40 px-3 py-1.5 text-xs font-medium text-danger hover:bg-danger/10 transition-colors">
@@ -51,15 +51,15 @@
 
     {# Tab bar #}
     <div class="border-b border-white/6" role="tablist">
-      <button id="btn-html" role="tab" aria-selected="true"
+      <button id="btn-html" type="button" role="tab" aria-selected="true" data-mail-tab="html"
               class="px-4 py-2 text-sm font-medium border-b-2 border-transparent [&[aria-selected=true]]:border-ht-content-brand [&[aria-selected=true]]:text-ht-content-primary text-ht-content-muted hover:text-ht-content-secondary transition-colors">
         HTML
       </button>
-      <button id="btn-text" role="tab" aria-selected="false"
+      <button id="btn-text" type="button" role="tab" aria-selected="false" data-mail-tab="text"
               class="px-4 py-2 text-sm font-medium border-b-2 border-transparent [&[aria-selected=true]]:border-ht-content-brand [&[aria-selected=true]]:text-ht-content-primary text-ht-content-muted hover:text-ht-content-secondary transition-colors">
         Plain text
       </button>
-      <button id="btn-headers" role="tab" aria-selected="false"
+      <button id="btn-headers" type="button" role="tab" aria-selected="false" data-mail-tab="headers"
               class="px-4 py-2 text-sm font-medium border-b-2 border-transparent [&[aria-selected=true]]:border-ht-content-brand [&[aria-selected=true]]:text-ht-content-primary text-ht-content-muted hover:text-ht-content-secondary transition-colors">
         Headers
       </button>

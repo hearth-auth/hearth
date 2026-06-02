@@ -391,6 +391,7 @@ async fn diff_detects_application_added() {
             trust_level: None,
             declared_scopes: None,
             consent_spans_orgs: None,
+            profile: None,
         },
     );
     realm_v2.applications = Some(apps);
@@ -431,6 +432,7 @@ async fn diff_detects_application_removed() {
             trust_level: None,
             declared_scopes: None,
             consent_spans_orgs: None,
+            profile: None,
         },
     );
     realm_v1.applications = Some(apps);

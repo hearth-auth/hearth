@@ -6,7 +6,6 @@
   <td class="px-4 py-3">
     <input type="checkbox" value="{{ o.id().as_uuid() }}"
            aria-label="Select {{ o.name() }}"
-           @change="$dispatch('org-checked')"
            class="row-check h-4 w-4 rounded border-divider bg-ht-surface-elevated">
   </td>
   <td class="px-4 py-3">

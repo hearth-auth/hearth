@@ -79,8 +79,8 @@ struct OrgListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/organizations`.
@@ -137,8 +137,8 @@ pub async fn admin_orgs_list(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_organizations failed");
@@ -172,8 +172,8 @@ struct OrgNewTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/organizations/new`.
@@ -207,8 +207,8 @@ pub async fn admin_org_create_form(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -227,13 +227,41 @@ pub struct CreateOrgForm {
     )]
     pub max_members: Option<u32>,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
-    #[serde(default, rename = "attr_key")]
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_keys: Vec<String>,
-    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
-    #[serde(default, rename = "attr_val")]
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+}
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateOrgForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        Ok(Self {
+            name: super::handlers_common::form_scalar(&p, "name"),
+            slug: super::handlers_common::form_scalar(&p, "slug"),
+            description: super::handlers_common::form_scalar(&p, "description"),
+            max_members: super::handlers_common::form_opt_u32(&p, "max_members"),
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
 }
 
 /// `POST /ui/admin/organizations/new`.
@@ -242,7 +270,7 @@ pub async fn admin_org_create_submit(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    FriendlyForm(form): FriendlyForm<CreateOrgForm>,
+    form: CreateOrgForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -272,7 +300,7 @@ pub async fn admin_org_create_submit(
         .attr_keys
         .iter()
         .zip(form.attr_vals.iter())
-        .filter(|(k, _)| !k.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -343,8 +371,8 @@ pub async fn admin_org_create_submit(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "create_organization failed");
@@ -365,8 +393,8 @@ pub async fn admin_org_create_submit(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
     }
@@ -416,8 +444,8 @@ struct OrgDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query params for org detail page (flash messages via PRG).
@@ -548,8 +576,8 @@ pub async fn admin_org_detail(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     });
     if had_flash {
         if let Ok(value) =
@@ -591,8 +619,8 @@ struct OrgEditTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/organizations/:id/edit`.
@@ -651,8 +679,8 @@ pub async fn admin_org_edit_form(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Ok(None) => super::handlers_common::not_found("Organization not found"),
@@ -678,13 +706,41 @@ pub struct EditOrgForm {
     )]
     pub max_members: Option<u32>,
     /// Attribute keys submitted as repeated form fields. Paired with `attr_val`.
-    #[serde(default, rename = "attr_key")]
+    #[serde(
+        default,
+        rename = "attr_key",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_keys: Vec<String>,
-    /// Attribute values submitted as repeated form fields. Paired with `attr_key`.
-    #[serde(default, rename = "attr_val")]
+    /// Attribute values submitted as repeated form fields. Paired with `attr_val`.
+    #[serde(
+        default,
+        rename = "attr_val",
+        deserialize_with = "super::handlers_common::string_or_vec"
+    )]
     pub attr_vals: Vec<String>,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+}
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for EditOrgForm {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = <axum::body::Bytes as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map_err(|e| e.into_response())?;
+        let p = super::handlers_common::collect_form_pairs(&bytes);
+        Ok(Self {
+            name: super::handlers_common::form_scalar(&p, "name"),
+            description: super::handlers_common::form_scalar(&p, "description"),
+            status: super::handlers_common::form_scalar(&p, "status"),
+            max_members: super::handlers_common::form_opt_u32(&p, "max_members"),
+            attr_keys: super::handlers_common::form_vec(&p, "attr_key"),
+            attr_vals: super::handlers_common::form_vec(&p, "attr_val"),
+            csrf: super::handlers_common::form_scalar(&p, "_csrf"),
+        })
+    }
 }
 
 /// `POST /ui/admin/organizations/:id/edit`.
@@ -693,7 +749,7 @@ pub async fn admin_org_edit_submit(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath((_realm_name, oid)): AxumPath<(String, String)>,
-    FriendlyForm(form): FriendlyForm<EditOrgForm>,
+    form: EditOrgForm,
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
@@ -726,7 +782,7 @@ pub async fn admin_org_edit_submit(
         .attr_keys
         .iter()
         .zip(form.attr_vals.iter())
-        .filter(|(k, _)| !k.is_empty())
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -807,7 +863,7 @@ pub async fn admin_org_delete(
 /// `ids` is a comma-separated list of organization UUIDs. We use a
 /// single string rather than `Vec<String>` because axum's default form
 /// extractor (`serde_urlencoded`) does not handle repeated keys; the
-/// client builds the list in Alpine before submitting.
+/// client builds the list via vanilla JS before submitting.
 #[derive(Debug, Deserialize)]
 pub struct BulkDeleteOrgsForm {
     #[serde(default)]
@@ -944,8 +1000,8 @@ struct MemberPickerRowsTemplate {
     available_roles: Vec<AvailableRole>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Template for a single member row (`<tbody>`). Included by `detail.html` in the
@@ -1029,8 +1085,8 @@ pub async fn admin_org_member_picker(
         available_roles,
         product_name: String::new(),
         logo_url: String::new(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: None,
+        realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 
@@ -1677,8 +1733,8 @@ struct UserSearchResultsTemplate {
     query: String,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/api/users/search?q=...` — returns HTML fragment for HTMX.
@@ -1704,15 +1760,15 @@ pub async fn admin_api_user_search(
         query,
         product_name: String::new(),
         logo_url: String::new(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: None,
+        realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 
 /// HTMX partial for the RBAC debug page autocomplete. Same backend
 /// search as [`admin_api_user_search`] but renders a click-to-fill
 /// dropdown instead of the org member-picker variant. Kept separate so
-/// the partial template can be self-contained (no parent Alpine state
+/// the partial template can be self-contained (no shared parent state
 /// assumed beyond `userId` + `showDropdown`).
 #[derive(Template)]
 #[template(path = "ui/admin/rbac/_user_search_options.html")]
@@ -1748,7 +1804,7 @@ pub async fn admin_api_rbac_user_search(
 /// `POST /admin/api/config/reload` — triggers config hot-reload.
 ///
 /// `GET /ui/admin/_nav/realms.json` — returns the realm list used by the
-/// sidebar navigation tree. Client-rendered (Alpine.js) so we don't need
+/// sidebar navigation tree. Fetched client-side via `RealmNav` so we don't need
 /// to thread the list through every admin template struct.
 ///
 /// Filters out the system realm (which is reachable via separate top-level

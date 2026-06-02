@@ -103,6 +103,34 @@ class Claims:
         """Return True iff the token contains the given scope."""
         return scope in self.scopes()
 
+    def scope(self) -> str:
+        """Return the ``scope`` claim as a space-delimited string (spec §4)."""
+        return str(self._payload.get("scope", ""))
+
+    def in_group(self, group_id: str) -> bool:
+        """Return True iff the token's ``groups`` claim contains the given group."""
+        groups: List[str] = self._payload.get("groups", []) or []
+        return group_id in groups
+
+    def in_org(self, org_id: str) -> bool:
+        """Return True iff the token's ``oid`` claim matches org_id (exact)."""
+        oid = self._payload.get("oid")
+        return oid == org_id if oid is not None else False
+
+    def token_type(self) -> str:
+        """Return the ``token_type`` claim (``'access'``, ``'refresh'``, or ``'required_action'``)."""
+        return str(self._payload.get("token_type", ""))
+
+    def organization_id(self) -> Optional[str]:
+        """Return the ``oid`` (organization ID) claim, or None if absent."""
+        val = self._payload.get("oid")
+        return str(val) if val is not None else None
+
+    def org_groups(self) -> List[str]:
+        """Return the ``org_groups`` claim (Keycloak-style paths, e.g. ``/org-slug/group``)."""
+        val = self._payload.get("org_groups", []) or []
+        return [str(g) for g in val]
+
     def hasRole(self, role: str) -> bool:
         """Return True iff the token's ``roles`` claim contains the given role."""
         roles: List[str] = self._payload.get("roles", [])

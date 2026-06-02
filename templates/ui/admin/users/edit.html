@@ -1,5 +1,24 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Edit {{ user.display_name() }}{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  {% if realm_name == "system" %}
+    <a href="/ui/admin" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
+    <span class="text-ht-content-muted">›</span>
+    <a href="/ui/admin/admin-users" class="text-ht-content-secondary hover:text-ht-content-primary">Admin Users</a>
+  {% else %}
+    <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Realms</a>
+    <span class="text-ht-content-muted">›</span>
+    <a href="/ui/admin/realms/{{ realm_name }}" class="text-ht-content-secondary hover:text-ht-content-primary">{{ realm_name }}</a>
+    <span class="text-ht-content-muted">›</span>
+    <a href="/ui/admin/realms/{{ realm_name }}/users" class="text-ht-content-secondary hover:text-ht-content-primary">Users</a>
+  {% endif %}
+  <span class="text-ht-content-muted">›</span>
+  <a href="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}{% if realm_name == "system" %}?admin_target=system{% endif %}" class="text-ht-content-secondary hover:text-ht-content-primary">{{ user.display_name() }}</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary" aria-current="page">Edit</span>
+</nav>
+{% endblock %}
 {% block body %}
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Edit user</h1>
@@ -82,46 +101,40 @@
           {% endif %}
           <input type="hidden" name="attr_key" value="{{ def.key }}">
           {% if def.is_boolean() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
                 <option value="true" {% if current_val == "true" %}selected{% endif %}>true</option>
                 <option value="false" {% if current_val == "false" %}selected{% endif %}>false</option>
               </select>
             {% else if def.is_enum() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
                 {% for ev in def.enum_values %}
                   <option value="{{ ev }}" {% if current_val == ev.as_str() %}selected{% endif %}>{{ ev }}</option>
                 {% endfor %}
               </select>
             {% else if def.is_number() %}
-              <input type="number" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+              <input type="number" name="attr_val" value="{{ current_val }}" class="mt-1 input" {% if def.required %}required{% endif %}>
             {% else %}
-              <input type="text" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+              <input type="text" name="attr_val" value="{{ current_val }}" class="mt-1 input" {% if def.required %}required{% endif %}>
           {% endif %}
         </div>
       {% endfor %}
     </div>
     {% else %}
-    <div x-data="attrRows()">
+    <div data-attr-rows>
       <h3 class="mb-2 text-sm font-semibold text-ht-content-secondary">Attributes</h3>
       <div id="attr-rows" class="space-y-2">
         {% for (k, v) in form_attributes %}
         <div class="flex gap-2 items-center attr-row">
           <input type="text" name="attr_key" value="{{ k }}" placeholder="key" class="input flex-1">
           <input type="text" name="attr_val" value="{{ v }}" placeholder="value" class="input flex-1">
-          <button type="button" @click="removeRow($el)" class="text-ht-content-muted hover:text-danger-fg text-sm px-2">✕</button>
+          <button type="button" data-remove-attr-row
+                  class="text-ht-content-muted hover:text-danger-fg text-sm px-2">✕</button>
         </div>
         {% endfor %}
-        <template x-for="row in rows" :key="row.id">
-          <div class="flex gap-2 items-center attr-row">
-            <input type="text" name="attr_key" placeholder="key" class="input flex-1">
-            <input type="text" name="attr_val" placeholder="value" class="input flex-1">
-            <button type="button" @click="removeRow($el)" class="text-ht-content-muted hover:text-danger-fg text-sm px-2">✕</button>
-          </div>
-        </template>
       </div>
-      <button type="button" @click="addRow()" class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
+      <button type="button" data-add-attr-row class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
     </div>
     {% endif %}
 
@@ -170,3 +183,4 @@
   {% endif %}
 </div>
 {% endblock %}
+{% block scripts %}<script src="/ui/static/admin/attr-rows.js"></script>{% endblock %}

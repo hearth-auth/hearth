@@ -5,7 +5,7 @@
 //! - AC 3.4.3 — `sms_otp_expiry_seconds` configurable via PATCH /admin/realms/{realm}/config
 //! - AC 3.4.4 — `sms_otp_max_attempts` configurable via PATCH /admin/realms/{realm}/config
 //! - AC 3.4.2 — POST /ui/admin/realms/{realm}/users/{id}/remove-phone clears phone +
-//!              adds ENROLL_PHONE_OTP to required_actions (engine-layer test)
+//!   adds ENROLL_PHONE_OTP to required_actions (engine-layer test)
 
 mod common;
 
@@ -389,17 +389,18 @@ async fn remove_phone_idempotent_when_no_phone_set() {
         new_actions.push(RequiredAction::EnrollPhoneOtp);
     }
 
-    let result = h.identity().update_user(
-        &realm,
-        user.id(),
-        &UpdateUserRequest {
-            phone_number: Some(None),
-            phone_verified: Some(false),
-            required_actions: Some(new_actions),
-            ..Default::default()
-        },
-    );
-    assert!(result.is_ok(), "remove-phone when no phone must succeed");
+    h.identity()
+        .update_user(
+            &realm,
+            user.id(),
+            &UpdateUserRequest {
+                phone_number: Some(None),
+                phone_verified: Some(false),
+                required_actions: Some(new_actions),
+                ..Default::default()
+            },
+        )
+        .expect("remove-phone when no phone must succeed");
 }
 
 #[tokio::test]

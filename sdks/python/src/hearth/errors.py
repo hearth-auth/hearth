@@ -92,3 +92,36 @@ class IntrospectionError(HearthSdkError):
     def __init__(self, message: str, cause: Optional[Exception] = None):
         self.cause = cause
         super().__init__(message)
+
+
+class RequiredActionError(HearthSdkError):
+    """Raised when a token has token_type == 'required_action' (spec §5, §6).
+
+    The token is structurally valid but scoped only to completing pending
+    actions — it MUST NOT be accepted for general API access.
+    """
+
+    def __init__(
+        self,
+        required_actions: List[str],
+        redirect_uri: Optional[str] = None,
+        message: Optional[str] = None,
+    ):
+        self.required_actions = required_actions
+        self.redirect_uri = redirect_uri
+        default_msg = f"Required actions pending: {required_actions}"
+        super().__init__(message or default_msg)
+
+
+class AuthorizationModeMismatchError(HearthSdkError):
+    """Raised when the introspection response echoes a mode that does not match the configured mode.
+
+    Per spec §15.3: middleware MUST reject the request rather than silently falling back.
+    """
+
+    def __init__(self, expected: str, actual: str):
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f'Authorization mode mismatch: expected "{expected}", got "{actual}"'
+        )

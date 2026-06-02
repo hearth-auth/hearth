@@ -21,8 +21,8 @@ struct AppListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/applications`.
@@ -50,8 +50,8 @@ pub async fn admin_apps_list(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_clients failed");
@@ -79,8 +79,8 @@ struct AppDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/applications/:id`.
@@ -109,8 +109,8 @@ pub async fn admin_app_detail(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Ok(None) => super::handlers_common::not_found("Application not found"),
         Err(e) => {
@@ -161,8 +161,8 @@ pub async fn admin_app_regenerate_secret(
                     narrow: false,
                     product_name: state.product_name.clone(),
                     logo_url: state.logo_url.clone(),
-                    theme_css: state.theme_css.clone(),
-                    realm_theme_css: state.realm_theme_css(),
+                    realm_theme_url: state.realm_theme_url(),
+                    inline_theme_css: state.inline_theme_css(),
                 }),
                 _ => Redirect::to(&format!(
                     "/ui/admin/realms/{}/applications/{}",
@@ -233,6 +233,7 @@ struct AppNewTemplate {
     form_require_consent: bool,
     form_declared_scopes: String,
     form_client_logo_url: String,
+    form_access_token_authorization: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -242,8 +243,8 @@ struct AppNewTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl AppNewTemplate {
@@ -263,6 +264,7 @@ impl AppNewTemplate {
             form_require_consent: true,
             form_declared_scopes: String::new(),
             form_client_logo_url: String::new(),
+            form_access_token_authorization: "embedded".to_string(),
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -272,8 +274,8 @@ impl AppNewTemplate {
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }
     }
 }
@@ -318,6 +320,8 @@ pub struct AppCreateForm {
     pub declared_scopes: String,
     #[serde(default)]
     pub client_logo_url: String,
+    #[serde(default)]
+    pub access_token_authorization: String,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -377,6 +381,13 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         Some(form.client_logo_url.clone())
     };
 
+    use crate::identity::oidc::AccessTokenAuthorization;
+    let access_token_authorization = match form.access_token_authorization.as_str() {
+        "introspection" => AccessTokenAuthorization::Introspection,
+        "decision" => AccessTokenAuthorization::Decision,
+        _ => AccessTokenAuthorization::Embedded,
+    };
+
     RegisterClientRequest {
         client_name: form.client_name.clone(),
         redirect_uris,
@@ -388,6 +399,11 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         trust_level,
         declared_scopes,
         consent_spans_orgs: false,
+        access_token_authorization,
+        jwks: None,
+        jwks_uri: None,
+        authorization_signed_response_alg: None,
+        profile: crate::identity::ClientProfile::Standard,
     }
 }
 
@@ -436,6 +452,7 @@ pub async fn admin_app_create_submit(
             tpl.form_require_consent = form.require_consent == "1";
             tpl.form_declared_scopes = form.declared_scopes.clone();
             tpl.form_client_logo_url = form.client_logo_url.clone();
+            tpl.form_access_token_authorization = form.access_token_authorization.clone();
             render(&tpl)
         }
         Err(e) => {
@@ -468,6 +485,7 @@ struct AppEditTemplate {
     form_require_consent: bool,
     form_declared_scopes: String,
     form_client_logo_url: String,
+    form_access_token_authorization: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -477,8 +495,8 @@ struct AppEditTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl AppEditTemplate {
@@ -509,6 +527,14 @@ impl AppEditTemplate {
         let slug = app.slug().to_string();
         let require_consent = app.require_consent();
 
+        use crate::identity::oidc::AccessTokenAuthorization;
+        let access_token_authorization_mode = match app.access_token_authorization() {
+            AccessTokenAuthorization::Introspection => "introspection",
+            AccessTokenAuthorization::Decision => "decision",
+            _ => "embedded",
+        }
+        .to_string();
+
         Self {
             app,
             error: None,
@@ -524,6 +550,7 @@ impl AppEditTemplate {
             form_require_consent: require_consent,
             form_declared_scopes: declared_scopes,
             form_client_logo_url: client_logo_url,
+            form_access_token_authorization: access_token_authorization_mode,
             chrome: true,
             active: "applications",
             user_email: Some(session.user_email.clone()),
@@ -533,8 +560,8 @@ impl AppEditTemplate {
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }
     }
 }
@@ -600,6 +627,8 @@ pub struct AppEditForm {
     pub declared_scopes: String,
     #[serde(default)]
     pub client_logo_url: String,
+    #[serde(default)]
+    pub access_token_authorization: String,
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
 }
@@ -683,6 +712,13 @@ pub async fn admin_app_edit_submit(
         Some(form.slug.clone())
     };
 
+    use crate::identity::oidc::AccessTokenAuthorization;
+    let access_token_authorization = Some(match form.access_token_authorization.as_str() {
+        "introspection" => AccessTokenAuthorization::Introspection,
+        "decision" => AccessTokenAuthorization::Decision,
+        _ => AccessTokenAuthorization::Embedded,
+    });
+
     let req = UpdateClientRequest {
         client_name: if form.client_name.is_empty() {
             None
@@ -701,6 +737,10 @@ pub async fn admin_app_edit_submit(
         frontchannel_logout_uri: None,
         post_logout_redirect_uris: None,
         status: None,
+        assertion_public_key: None,
+        access_token_authorization,
+        authorization_signed_response_alg: None,
+        profile: None,
     };
 
     let realm_name = target.0.name().to_string();
@@ -724,6 +764,7 @@ pub async fn admin_app_edit_submit(
                     let mut tpl = AppEditTemplate::from_client(app, realm_name, &session, &state);
                     tpl.error = Some(reason);
                     tpl.form_client_name = form.client_name.clone();
+                    tpl.form_access_token_authorization = form.access_token_authorization.clone();
                     render(&tpl)
                 }
                 _ => super::handlers_common::server_error(),

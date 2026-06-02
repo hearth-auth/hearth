@@ -30,8 +30,8 @@ test.describe('Account settings page', () => {
     await page.fill('input[name="confirm_password"]', 'NewPassword!9876543');
     await page.click('form[action="/ui/account/password"] button[type="submit"]');
 
-    // Server re-renders the page with an error alert — still on /ui/account
-    await expect(page.locator('[role="alert"]')).toBeVisible({ timeout: 10_000 });
+    // Server re-renders the page with an inline error above the password form
+    await expect(page.locator('#password-change-error')).toBeVisible({ timeout: 10_000 });
     await expect(page).toHaveURL(/\/ui\/account/);
   });
 

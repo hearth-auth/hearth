@@ -1,213 +1,193 @@
 # FAPI 2.0 Operator Guide
 
-**Financial-grade API Security Profile 2.0** — how to enable, configure, and validate Hearth's
-FAPI 2.0 support for regulated environments such as open banking, payment initiation, and
-government identity programs.
-
-> **Engineering status** — FAPI 2.0 shipped in PR #128 (commit eeca42f). The `fapi_profile`
-> YAML key is tracked in [HEA-1040](/HEA/issues/HEA-1040) and will be wired in the next minor
-> release. Until then, use the Admin API PATCH route described in §2 to activate the profile.
+**Audience:** Operators deploying Hearth in financial-grade or regulated environments.
+**Task:** Enable FAPI 2.0 enforcement, register compliant clients, and validate the PAR → JAR → JARM
+authorization flow.
 
 ---
 
-## Table of Contents
+## 1. When to Use FAPI 2.0
 
-1. [When to use FAPI 2.0](#1-when-to-use-fapi-20)
-2. [Enable FAPI 2.0 at realm level](#2-enable-fapi-20-at-realm-level)
-3. [Register a FAPI 2.0 client](#3-register-a-fapi-20-client)
-4. [PAR — Pushed Authorization Requests](#4-par--pushed-authorization-requests)
-5. [JAR — JWT Authorization Requests](#5-jar--jwt-authorization-requests)
-6. [JARM — JWT Authorization Response Mode](#6-jarm--jwt-authorization-response-mode)
-7. [DPoP token binding](#7-dpop-token-binding)
-8. [Testing FAPI 2.0 compliance](#8-testing-fapi-20-compliance)
-9. [Common misconfiguration errors](#9-common-misconfiguration-errors)
+Use FAPI 2.0 when any of the following apply:
 
----
+| Context | Trigger |
+|---------|---------|
+| Open Banking APIs (UK, EU, Brazil, Australia) | Regulatory mandate |
+| Payment initiation services (PSD2) | PSD2 / EBA RTS requirement |
+| High-value API access (healthcare, insurance) | Internal security policy |
+| OAuth 2.0 Security BCP compliance audits | RFC 9700 / OpenID FAPI 2.0 profile requirement |
+| Any API where token replay = financial loss | Threat model |
 
-## 1. When to use FAPI 2.0
+FAPI 2.0 layered requirements in Hearth:
 
-FAPI 2.0 is the right choice when:
+| Requirement | Baseline | Advanced |
+|-------------|----------|----------|
+| PAR mandatory (RFC 9126) | ✓ | ✓ |
+| PKCE S256 mandatory (RFC 7636) | ✓ | ✓ |
+| `iss` in every redirect response (RFC 9207) | ✓ | ✓ |
+| JAR mandatory — signed request object (RFC 9101) | | ✓ |
+| JARM mandatory — JWT-wrapped response | | ✓ |
+| `private_key_jwt` only — no `client_secret` | | ✓ |
+| DPoP sender-constrained tokens (RFC 9449) | ✓ | ✓ |
 
-| Scenario | Why FAPI 2.0 |
-|----------|-------------|
-| Open banking / PSD2 | Mandatory in EU, UK, Brazil, Australia by regulation |
-| Payment initiation APIs | Requires binding access tokens to client key material (DPoP) |
-| Account aggregation (FDX, CDR) | US/AU data-sharing mandates require PAR + PKCE S256 |
-| High-value B2B APIs | Protect against authorization code interception and CSRF |
-| Government identity (eIDAS 2) | Level of Assurance High requires phishing-resistant auth |
-
-### FAPI 2.0 Baseline vs Advanced
-
-| Feature | Plain OAuth 2.1 | FAPI 2.0 Baseline | FAPI 2.0 Advanced |
-|---------|----------------|-------------------|-------------------|
-| PKCE required | S256 recommended | **S256 mandatory** | **S256 mandatory** |
-| PAR required | No | **Yes** | **Yes** |
-| `private_key_jwt` auth | Optional | **Mandatory** | **Mandatory** |
-| `client_secret` allowed | Yes | **No** | **No** |
-| JAR (signed request object) | Optional | Optional | **Mandatory** |
-| JARM (signed response) | Optional | Optional | **Mandatory** |
-| DPoP token binding | Optional | Optional | **Mandatory** |
-| `response_type` | code, token | **code only** | **code only** |
-
-Use **Baseline** for open banking read-only APIs and most PSD2 AIS flows.
-Use **Advanced** for payment initiation (PIS), high-value data write operations, and eIDAS LoA High.
+**Keycloak equivalent:** Keycloak's FAPI 1.0 Advanced / FAPI CIBA profiles are analogous to
+Hearth's per-client `profile: fapi2`. Hearth does not implement CIBA (yet). Hearth FAPI 2.0
+Advanced corresponds most closely to Keycloak's "FAPI 1 Advanced (OpenID Connect)" client policy.
 
 ---
 
-## 2. Enable FAPI 2.0 at realm level
+## 2. Realm-Level FAPI Profile
 
-### Via hearth.yaml (requires HEA-1040)
+Set `fapi_profile` on a realm to enforce FAPI 2.0 constraints on **every** client in that realm,
+regardless of the client's individual `profile` setting.
+
+### `hearth.yaml` configuration
 
 ```yaml
 realms:
-  banking:
-    fapi_profile: baseline   # or: advanced
-    auth:
-      mfa_required: true
-      mfa_methods:
-        - webauthn            # FAPI 2.0 Advanced recommends phishing-resistant MFA
-    token:
-      access_token_ttl: "5m"
-      refresh_token_ttl: "8h"
+  - name: banking
+    fapi_profile: baseline   # "baseline" | "advanced"
 ```
 
-> **Note:** The `fapi_profile` YAML key is pending [HEA-1040](/HEA/issues/HEA-1040). Use the
-> Admin API method below until the key is available.
+Valid values:
 
-### Via Admin API (available now)
+- `baseline` — all authorization requests in the realm must use PAR + PKCE S256. Clients that call
+  `/authorize` directly (without a `request_uri`) receive `400 invalid_request`.
+- `advanced` — all Baseline requirements plus: JAR required inside the PAR body; JARM required;
+  any client without `authorization_signed_response_alg` set is rejected.
+- Absent / `null` — standard OAuth 2.0 / OIDC rules apply; no FAPI constraints forced.
+
+### Runtime update via Admin API
 
 ```bash
-# Activate FAPI 2.0 Baseline on the "banking" realm
-curl -s -X PATCH https://auth.example.com/admin/realms/banking \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+# Enable FAPI 2.0 Baseline for an existing realm
+curl -s -X PATCH "$ISSUER/admin/realms/$REALM_ID/config" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "fapi_profile": "baseline"
-  }'
+  -d '{"fapi_profile": "baseline"}'
 
-# Activate FAPI 2.0 Advanced
-curl -s -X PATCH https://auth.example.com/admin/realms/banking \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+# Upgrade to Advanced
+curl -s -X PATCH "$ISSUER/admin/realms/$REALM_ID/config" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "fapi_profile": "advanced"
-  }'
+  -d '{"fapi_profile": "advanced"}'
+
+# Remove realm-level FAPI enforcement (revert to standard)
+curl -s -X PATCH "$ISSUER/admin/realms/$REALM_ID/config" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"fapi_profile": null}'
 ```
 
-### What changes when a FAPI profile is active
-
-Hearth enforces these constraints **server-side** — a client cannot opt out by omitting
-parameters:
-
-| Enforcement | Baseline | Advanced |
-|-------------|----------|----------|
-| Reject authorization requests not submitted via PAR | Yes | Yes |
-| Reject PKCE methods other than S256 | Yes | Yes |
-| Reject `client_secret_basic` / `client_secret_post` auth | Yes | Yes |
-| Reject authorization requests without a signed JAR | No | Yes |
-| Reject token requests without a valid DPoP proof | No | Yes |
-| Force `response_mode=jwt` (JARM) | No | Yes |
+Unknown values (`"enterprise"`, etc.) return `400 Bad Request`.
 
 ---
 
-## 3. Register a FAPI 2.0 client
+## 3. Register a FAPI 2.0 Client
 
-FAPI 2.0 clients **must**:
-- Authenticate with `private_key_jwt` (Ed25519 or ES256 key pair)
-- Register a JWKS URI or inline JWK set
-- **Not** use `client_secret`
+Per-client FAPI 2.0 is enabled by setting `profile: "fapi2"` at registration. Use this when
+only specific clients in a realm require FAPI 2.0 constraints; use realm-level `fapi_profile`
+(§2) to enforce FAPI across all clients in a realm.
 
-### Step 1 — Generate a signing key pair
+### Requirements
 
-```bash
-# ES256 (P-256) — widely supported by conformance tools
-openssl ecparam -name prime256v1 -genkey -noout -out client.key.pem
-openssl ec -in client.key.pem -pubout -out client.pub.pem
+| Field | Required | Forbidden |
+|-------|----------|-----------|
+| `profile` | `"fapi2"` | |
+| `jwks` | JWKS JSON string with the client's public key | |
+| `client_secret` | | Must be absent — FAPI 2.0 clients authenticate with `private_key_jwt` |
+| `redirect_uris` | At least one HTTPS URI | `http://` (non-TLS) |
+| `response_type` | `"code"` only | `"token"`, `"id_token"` |
 
-# Convert to JWK (requires python-jose or jwcrypto)
-python3 - <<'EOF'
-from jwcrypto import jwk
-import json
-
-with open("client.key.pem", "rb") as f:
-    key = jwk.JWK.from_pem(f.read())
-
-key["kid"] = "banking-client-2026-01"
-key["use"] = "sig"
-key["alg"] = "ES256"
-
-print("Private JWK (keep secret):")
-print(json.dumps(key.export_private(as_dict=True), indent=2))
-print("\nPublic JWK (register with Hearth):")
-print(json.dumps(key.export_public(as_dict=True), indent=2))
-EOF
-```
-
-### Step 2 — Register the client via Admin API
+### Generate a key pair
 
 ```bash
-curl -s -X POST https://auth.example.com/admin/realms/banking/clients \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_id": "payment-initiation-service",
-    "name": "Payment Initiation Service",
-    "confidential": true,
-    "token_endpoint_auth_method": "private_key_jwt",
-    "jwks": {
-      "keys": [
-        {
-          "kty": "EC",
-          "crv": "P-256",
-          "kid": "banking-client-2026-01",
-          "use": "sig",
-          "alg": "ES256",
-          "x": "<base64url-encoded-x>",
-          "y": "<base64url-encoded-y>"
-        }
-      ]
-    },
-    "grant_types": ["authorization_code", "refresh_token"],
-    "redirect_uris": ["https://app.example.com/callback"],
-    "require_pushed_authorization_requests": true,
-    "declared_scopes": ["openid", "accounts", "payments"]
-  }'
+# Generate Ed25519 private key
+openssl genpkey -algorithm ed25519 -out client.key
+
+# Extract public key
+openssl pkey -in client.key -pubout -out client.pub
+
+# Get the raw 32-byte public key as base64url (for JWKS x coordinate)
+openssl pkey -in client.key -pubout -outform DER | tail -c 32 | base64 -w0 | \
+  tr '+/' '-_' | tr -d '='
+# → e.g. "ySW5vc7X8jSWdgMDfNNHrxRoCLvkSqV_EXAMPLE"
 ```
 
-Alternatively, register a `jwks_uri` instead of inline `jwks` to allow key rotation without
-re-registering:
+Build the JWKS JSON with your public key:
 
 ```json
 {
-  "jwks_uri": "https://app.example.com/.well-known/jwks.json"
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "alg": "EdDSA",
+      "kid": "my-fapi-key-1",
+      "x": "<base64url-encoded-public-key>"
+    }
+  ]
 }
 ```
 
-### Step 3 — Verify registration
+### Register via Admin API
 
 ```bash
-curl -s https://auth.example.com/admin/realms/banking/clients/payment-initiation-service \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  | jq '.token_endpoint_auth_method, .require_pushed_authorization_requests'
-# "private_key_jwt"
-# true
+REALM_ID="<realm-uuid>"
+ADMIN_TOKEN="<hearth-admin-token>"
+ISSUER="https://auth.example.com"
+
+curl -s -X POST "$ISSUER/admin/applications" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Realm-ID: $REALM_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "My FAPI 2.0 Client",
+    "profile": "fapi2",
+    "redirect_uris": ["https://app.example.com/callback"],
+    "grant_types": ["authorization_code"],
+    "response_types": ["code"],
+    "jwks": "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"alg\":\"EdDSA\",\"kid\":\"my-fapi-key-1\",\"x\":\"<base64url-public-key>\"}]}",
+    "authorization_signed_response_alg": "EdDSA"
+  }'
+```
+
+**Successful response (201 Created):**
+
+```json
+{
+  "client_id": "<uuid>",
+  "client_name": "My FAPI 2.0 Client",
+  "profile": "fapi2",
+  "redirect_uris": ["https://app.example.com/callback"],
+  "jwks": "...",
+  "authorization_signed_response_alg": "EdDSA"
+}
+```
+
+**Rejected — `client_secret` present:**
+```json
+{ "error": "invalid_client_metadata", "error_description": "FAPI 2.0 clients must use private_key_jwt" }
+```
+
+**Rejected — `jwks` missing:**
+```json
+{ "error": "invalid_client_metadata", "error_description": "FAPI 2.0 clients must register a JWKS" }
 ```
 
 ### Dynamic Client Registration (RFC 7591)
 
-FAPI 2.0 clients may also register via the DCR endpoint. When a FAPI profile is active, the
-DCR endpoint enforces the same constraints (rejects `client_secret`, requires JWKS):
+Alternatively, use the realm-scoped dynamic registration endpoint:
 
 ```bash
-curl -s -X POST https://auth.example.com/realms/banking/register \
+curl -s -X POST "$ISSUER/realms/<realm-name>/register" \
   -H "Content-Type: application/json" \
   -d '{
-    "client_name": "Payment App",
+    "client_name": "My FAPI 2.0 Client",
+    "profile": "fapi2",
     "redirect_uris": ["https://app.example.com/callback"],
-    "token_endpoint_auth_method": "private_key_jwt",
-    "jwks_uri": "https://app.example.com/.well-known/jwks.json",
-    "grant_types": ["authorization_code", "refresh_token"],
-    "scope": "openid accounts payments"
+    "jwks": "...",
+    "authorization_signed_response_alg": "EdDSA"
   }'
 ```
 
@@ -215,470 +195,386 @@ curl -s -X POST https://auth.example.com/realms/banking/register \
 
 ## 4. PAR — Pushed Authorization Requests
 
-PAR (RFC 9126) moves all authorization parameters out of the browser redirect URL and into a
-server-to-server POST. This prevents:
-- Authorization code injection (attacker swaps `code` in the redirect)
-- CSRF via crafted `state` in open redirectors
-- Parameter tampering in the browser
+In FAPI 2.0, clients must never call `/authorize` directly. Instead they push the authorization
+parameters first, receive a `request_uri`, then redirect the user agent with only that URI.
 
-### Standard OAuth 2.1 flow vs FAPI 2.0 flow
-
+**Flow:**
 ```
-Standard OAuth 2.1:
-  Browser → GET /authorize?response_type=code&client_id=...&scope=...&redirect_uri=...
-
-FAPI 2.0 with PAR:
-  Server  → POST /par        (all parameters in body, signed with private_key_jwt)
-          ← { request_uri, expires_in }
-  Browser → GET /authorize?client_id=...&request_uri=urn:hearth:par:...
+Client → POST /realms/{realm}/as/par   → 201 { request_uri, expires_in }
+Client → redirect user to /realms/{realm}/authorize?request_uri=urn:...&client_id=...
+User  → authenticates with Hearth
+Hearth → redirect to redirect_uri?code=...&iss=...
+Client → POST /realms/{realm}/token (with DPoP proof)
 ```
 
-### Step 1 — Push authorization request
+### Step 1: Push the authorization request
 
 ```bash
-# Build client_assertion (private_key_jwt) — see §5 for a signing helper
-CLIENT_ASSERTION=$(python3 sign_jar.py \
-  --client-id payment-initiation-service \
-  --key client.key.pem \
-  --audience https://auth.example.com/realms/banking/par)
+ISSUER="https://auth.example.com"
+REALM="banking"
+CLIENT_ID="<client-uuid>"
+VERIFIER="dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+CHALLENGE=$(echo -n "$VERIFIER" | openssl dgst -sha256 -binary | base64 -w0 | tr '+/' '-_' | tr -d '=')
 
-curl -s -X POST https://auth.example.com/realms/banking/par \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "client_id=payment-initiation-service" \
-  --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  --data-urlencode "client_assertion=${CLIENT_ASSERTION}" \
-  --data-urlencode "response_type=code" \
-  --data-urlencode "scope=openid accounts" \
-  --data-urlencode "redirect_uri=https://app.example.com/callback" \
-  --data-urlencode "code_challenge=${CODE_CHALLENGE}" \
-  --data-urlencode "code_challenge_method=S256" \
-  --data-urlencode "state=$(openssl rand -hex 16)" \
-  --data-urlencode "nonce=$(openssl rand -hex 16)"
+curl -s -X POST "$ISSUER/realms/$REALM/as/par" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"client_id\": \"$CLIENT_ID\",
+    \"redirect_uri\": \"https://app.example.com/callback\",
+    \"scope\": \"openid\",
+    \"response_type\": \"code\",
+    \"state\": \"$(openssl rand -hex 16)\",
+    \"nonce\": \"$(openssl rand -hex 16)\",
+    \"code_challenge\": \"$CHALLENGE\",
+    \"code_challenge_method\": \"S256\"
+  }"
 ```
 
-**Response:**
-
+**Response (201 Created):**
 ```json
 {
-  "request_uri": "urn:hearth:par:banking:a1b2c3d4e5f6",
-  "expires_in": 60
+  "request_uri": "urn:ietf:params:oauth:request_uri:abc123def456",
+  "expires_in": 90
 }
 ```
 
-The `request_uri` is single-use and expires in 60 seconds. Hearth rejects it after first use
-or after expiry.
+The `request_uri` is valid for 90 seconds and may only be consumed once.
 
-### Step 2 — Redirect the browser
+### Step 2: Redirect the user
+
+Build the authorization redirect URL:
 
 ```
 https://auth.example.com/realms/banking/authorize
-  ?client_id=payment-initiation-service
-  &request_uri=urn:hearth:par:banking:a1b2c3d4e5f6
+  ?request_uri=urn:ietf:params:oauth:request_uri:abc123def456
+  &client_id=<client-uuid>
 ```
 
-No other parameters are accepted in the authorization redirect when a `request_uri` is present.
-
-### Step 3 — Exchange code at token endpoint
-
-```bash
-curl -s -X POST https://auth.example.com/realms/banking/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "grant_type=authorization_code" \
-  --data-urlencode "code=${CODE}" \
-  --data-urlencode "redirect_uri=https://app.example.com/callback" \
-  --data-urlencode "code_verifier=${CODE_VERIFIER}" \
-  --data-urlencode "client_id=payment-initiation-service" \
-  --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  --data-urlencode "client_assertion=${CLIENT_ASSERTION}"
+**Rejected — direct `/authorize` without PAR (FAPI 2.0 client):**
+```
+HTTP 400
+{ "error": "invalid_request", "error_description": "FAPI 2.0 clients must use PAR" }
 ```
 
 ---
 
 ## 5. JAR — JWT Authorization Requests
 
-JAR (RFC 9101) signs all authorization parameters as a JWT. Combined with PAR, this provides
-**integrity protection** — the authorization server can verify the parameters were issued by the
-registered client and were not tampered with in transit.
+JAR (RFC 9101) places the authorization parameters inside a signed JWT. Under FAPI Advanced (§2),
+JAR is required inside the PAR body. With per-client FAPI 2.0, JAR is optional but strongly
+recommended.
 
-JAR is **optional** for FAPI 2.0 Baseline and **mandatory** for Advanced.
+### Building a JAR JWT
 
-### Building a signed request object
+The JAR JWT must be signed with the client's private key (matching the registered JWKS).
+
+Required claims:
+
+| Claim | Value |
+|-------|-------|
+| `iss` | Client ID (prefixed: `client:<uuid>`) |
+| `aud` | Realm issuer URL (`https://auth.example.com/realms/<name>`) |
+| `iat` | Current Unix timestamp (seconds) |
+| `exp` | `iat + 60` — max 300 seconds |
+| `client_id` | Client ID (prefixed) |
+| `redirect_uri` | Must match registered redirect URI |
+| `scope` | Space-separated scopes |
+| `response_type` | `code` |
+| `code_challenge` | PKCE challenge |
+| `code_challenge_method` | `S256` |
+
+**Example (Python — signing with Ed25519):**
 
 ```python
-#!/usr/bin/env python3
-# sign_jar.py — build a signed JWT authorization request object
-import argparse, time, secrets, json
-from jwcrypto import jwk, jwt
+import jwt  # PyJWT >= 2.0
+import time
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--client-id", required=True)
-parser.add_argument("--key", required=True, help="Path to PEM private key")
-parser.add_argument("--audience", required=True, help="PAR or authorize endpoint URL")
-parser.add_argument("--kid", default="banking-client-2026-01")
-# Authorization params
-parser.add_argument("--scope", default="openid accounts")
-parser.add_argument("--redirect-uri", required=True)
-parser.add_argument("--code-challenge", required=True)
-parser.add_argument("--state", default=None)
-parser.add_argument("--nonce", default=None)
-args = parser.parse_args()
-
-with open(args.key, "rb") as f:
-    key = jwk.JWK.from_pem(f.read())
-    key["kid"] = args.kid
+with open("client.key", "rb") as f:
+    private_key = load_pem_private_key(f.read(), password=None)
 
 now = int(time.time())
-claims = {
-    # JWT claims
-    "iss": args.client_id,
-    "sub": args.client_id,
-    "aud": args.audience,
-    "iat": now,
-    "exp": now + 60,
-    "jti": secrets.token_urlsafe(16),
-    # Authorization request claims
-    "response_type": "code",
-    "client_id": args.client_id,
-    "scope": args.scope,
-    "redirect_uri": args.redirect_uri,
-    "code_challenge": args.code_challenge,
-    "code_challenge_method": "S256",
-    "state": args.state or secrets.token_hex(16),
-    "nonce": args.nonce or secrets.token_hex(16),
-}
+client_id = "client:<your-client-uuid>"
+issuer = "https://auth.example.com/realms/banking"
 
-token = jwt.JWT(header={"alg": "ES256", "kid": args.kid}, claims=claims)
-token.make_signed_token(key)
-print(token.serialize())
+jar = jwt.encode(
+    {
+        "iss": client_id,
+        "aud": issuer,
+        "iat": now,
+        "exp": now + 60,
+        "client_id": client_id,
+        "redirect_uri": "https://app.example.com/callback",
+        "scope": "openid",
+        "response_type": "code",
+        "code_challenge": "<your-pkce-challenge>",
+        "code_challenge_method": "S256",
+        "state": "<random-state>",
+        "nonce": "<random-nonce>",
+    },
+    private_key,
+    algorithm="EdDSA",
+    headers={"kid": "my-fapi-key-1"},
+)
 ```
 
-### Using JAR with PAR (PAR+JAR combined — recommended for Advanced)
+### PAR with JAR
+
+Include the signed JWT as the `request` field in the PAR body:
 
 ```bash
-REQUEST_OBJECT=$(python3 sign_jar.py \
-  --client-id payment-initiation-service \
-  --key client.key.pem \
-  --audience https://auth.example.com/realms/banking/par \
-  --redirect-uri https://app.example.com/callback \
-  --code-challenge "${CODE_CHALLENGE}")
-
-# Build client_assertion separately (authenticates the client to the PAR endpoint)
-CLIENT_ASSERTION=$(python3 sign_jar.py \
-  --client-id payment-initiation-service \
-  --key client.key.pem \
-  --audience https://auth.example.com/realms/banking/par \
-  --redirect-uri https://app.example.com/callback \
-  --code-challenge "${CODE_CHALLENGE}")
-
-curl -s -X POST https://auth.example.com/realms/banking/par \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "client_id=payment-initiation-service" \
-  --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  --data-urlencode "client_assertion=${CLIENT_ASSERTION}" \
-  --data-urlencode "request=${REQUEST_OBJECT}"
+curl -s -X POST "$ISSUER/realms/$REALM/as/par" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"client_id\": \"$CLIENT_ID\",
+    \"request\": \"$JAR_JWT\"
+  }"
 ```
 
-When a `request` parameter is present, Hearth validates the JWT signature against the
-registered JWKS, then extracts all authorization parameters from the JWT payload. Parameters
-outside the JWT are ignored (except `client_id` and `client_assertion*` which are always
-read from the form body for authentication).
+Claims in the JAR override any matching query parameters. The PAR response is the same
+`{ request_uri, expires_in }` structure.
+
+**Rejected — JAR signature invalid:**
+```json
+{ "error": "invalid_request_object", "error_description": "JAR signature verification failed" }
+```
+
+**Rejected — `client_id` in JAR does not match query parameter:**
+```json
+{ "error": "invalid_request", "error_description": "JAR client_id mismatch" }
+```
 
 ---
 
 ## 6. JARM — JWT Authorization Response Mode
 
-JARM (JWT Secured Authorization Response Mode, FAPI 2.0 §4.3.1) wraps the authorization
-response in a signed JWT delivered as a single `response` query parameter. This prevents:
-- Injection of a code from another session
-- Leaking response parameters in server logs (via `response_mode=form_post.jwt`)
+JARM wraps the authorization response in a signed JWT instead of plain query parameters.
+For clients registered with `authorization_signed_response_alg: "EdDSA"`, JARM is always
+applied — Hearth upgrades `response_mode=query` to `response_mode=query.jwt` automatically.
 
-JARM is **optional** for FAPI 2.0 Baseline and **mandatory** for Advanced.
+### What changes in the redirect
 
-### Requesting JARM
-
-Add `response_mode=jwt` to the PAR body:
-
-```bash
-curl -s -X POST https://auth.example.com/realms/banking/par \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "client_id=payment-initiation-service" \
-  --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  --data-urlencode "client_assertion=${CLIENT_ASSERTION}" \
-  --data-urlencode "response_type=code" \
-  --data-urlencode "response_mode=jwt" \
-  --data-urlencode "scope=openid accounts" \
-  --data-urlencode "redirect_uri=https://app.example.com/callback" \
-  --data-urlencode "code_challenge=${CODE_CHALLENGE}" \
-  --data-urlencode "code_challenge_method=S256" \
-  --data-urlencode "state=${STATE}"
+**Standard (non-JARM):**
+```
+https://app.example.com/callback?code=abc123&state=xyz&iss=https://auth.example.com/realms/banking
 ```
 
-### JARM redirect response
-
-Instead of:
+**JARM (`query.jwt`):**
 ```
-https://app.example.com/callback?code=abc123&state=xyz
+https://app.example.com/callback?response=eyJhbGci...
 ```
 
-Hearth redirects to:
-```
-https://app.example.com/callback?response=eyJhbGciOiJFZERTQSIsImtpZCI6...
-```
+The `response` parameter is a compact JWT signed with the realm's Ed25519 key. Verify it against
+the realm JWKS at `GET /realms/<name>/.well-known/jwks.json`.
 
-### Decoding the JARM response
-
-```python
-from jwcrypto import jwt, jwk
-import urllib.request, json
-
-# Fetch Hearth's public signing key from the JWKS endpoint
-with urllib.request.urlopen(
-    "https://auth.example.com/realms/banking/certs"
-) as r:
-    keyset = jwk.JWKSet.from_json(r.read())
-
-response_jwt = "<value of ?response= parameter>"
-tok = jwt.JWT(key=keyset, jwt=response_jwt)
-claims = json.loads(tok.claims)
-
-print(claims["code"])   # authorization code
-print(claims["state"])  # must match the state you sent in the PAR request
-print(claims["iss"])    # must equal the issuer (https://auth.example.com/realms/banking)
-```
-
-**Decoded JARM claims:**
-
-| Claim | Value | Notes |
-|-------|-------|-------|
-| `iss` | Hearth issuer URL | Verify this matches the realm's `oidc.issuer` |
-| `aud` | `client_id` | Must match your registered client ID |
-| `exp` | Unix timestamp | Short-lived (≤ 600 s); reject expired responses |
-| `code` | Authorization code | Single-use |
-| `state` | Echoed from request | Verify against stored state to prevent CSRF |
-
-### JARM error responses
-
-On error, Hearth also wraps the response in a signed JARM JWT:
+### JARM JWT structure
 
 ```json
 {
   "iss": "https://auth.example.com/realms/banking",
-  "aud": "payment-initiation-service",
-  "exp": 1748556000,
-  "error": "access_denied",
-  "error_description": "User denied the authorization request",
-  "state": "abc123"
+  "aud": "client:<uuid>",
+  "exp": 1234567890,
+  "iat": 1234567830,
+  "jti": "<unique-id>",
+  "code": "<authorization-code>",
+  "state": "<echoed-state>",
+  "s_hash": "<state-hash>"     ← only for FAPI 2.0 clients
 }
 ```
 
-### Response mode variants
+The `s_hash` claim is present only for FAPI 2.0 clients. It binds the response to the original
+state value, preventing state-injection attacks:
 
-| `response_mode` | Delivery | Notes |
-|----------------|----------|-------|
-| `jwt` | Redirect with `?response=` | Default JARM mode |
-| `form_post.jwt` | HTTP POST with `response=` form field | Avoids logging in referrer headers |
-| `fragment.jwt` | Redirect with `#response=` | Native apps / SPA only |
+```
+s_hash = BASE64URL( LEFT( SHA-256( ASCII(state) ), 16 ) )
+```
+
+### JARM error responses
+
+Authorization failures for FAPI/JARM clients also produce a JWT-wrapped error:
+
+```json
+{
+  "iss": "https://auth.example.com/realms/banking",
+  "aud": "client:<uuid>",
+  "exp": 1234567890,
+  "iat": 1234567830,
+  "jti": "<unique-id>",
+  "error": "invalid_request",
+  "error_description": "PKCE required"
+}
+```
+
+### Response modes
+
+| Mode | Delivery | Use case |
+|------|----------|----------|
+| `query.jwt` | `?response=<jwt>` | Server-side web apps |
+| `fragment.jwt` | `#response=<jwt>` | SPAs / native apps |
+| `jwt` | Alias for `query.jwt` | Convenience |
 
 ---
 
-## 7. DPoP token binding
+## 7. Token Exchange with DPoP
 
-DPoP (Demonstrating Proof of Possession, RFC 9449) binds access tokens to the client's private
-key. Even if a token is stolen, it cannot be used by an attacker who does not hold the matching
-private key.
+FAPI 2.0 clients must prove possession of a private key at the token endpoint (DPoP, RFC 9449).
+Requests without a valid `DPoP` header are rejected with `invalid_dpop_proof`.
 
-DPoP is **optional** for FAPI 2.0 Baseline and **mandatory** for Advanced.
+### Build a DPoP proof
 
-### How DPoP works
-
-1. Client generates an ephemeral key pair (one per session is fine; per-request is safer).
-2. Client sends a `DPoP` header containing a signed JWT proof on every token endpoint request.
-3. Hearth issues a DPoP-bound token (includes `cnf.jkt` = JWK thumbprint of the public key).
-4. Resource servers verify the DPoP proof on every API call.
-
-### Token exchange with DPoP
-
-```bash
-# 1. Build a DPoP proof JWT
-DPOP_PROOF=$(python3 - <<'EOF'
-import time, secrets, json
-from jwcrypto import jwk, jwt
-
-# Load (or generate) the client's DPoP key
-with open("dpop.key.pem", "rb") as f:
-    dpop_key = jwk.JWK.from_pem(f.read())
-
-public_jwk = json.loads(dpop_key.export_public())
+```python
+import jwt
+import time
+import hashlib
+import base64
 
 now = int(time.time())
-claims = {
-    "jti": secrets.token_urlsafe(16),
-    "htm": "POST",
-    "htu": "https://auth.example.com/realms/banking/token",
-    "iat": now,
-    "exp": now + 60,
-}
 
-token = jwt.JWT(
-    header={"alg": "ES256", "typ": "dpop+jwt", "jwk": public_jwk},
-    claims=claims
+# token_endpoint_url = the URL you are sending the POST to
+token_url = "https://auth.example.com/realms/banking/token"
+
+dpop_proof = jwt.encode(
+    {
+        "jti": "<random-uuid>",
+        "htm": "POST",          # HTTP method
+        "htu": token_url,       # HTTP target URI (no query string)
+        "iat": now,
+        "exp": now + 30,
+    },
+    private_key,
+    algorithm="EdDSA",
+    headers={
+        "typ": "dpop+jwt",
+        "jwk": {                # Embed the PUBLIC key, not the private key
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": "<base64url-public-key>"
+        }
+    },
 )
-token.make_signed_token(dpop_key)
-print(token.serialize())
-EOF
-)
-
-# 2. Exchange the authorization code with the DPoP proof
-curl -s -X POST https://auth.example.com/realms/banking/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -H "DPoP: ${DPOP_PROOF}" \
-  --data-urlencode "grant_type=authorization_code" \
-  --data-urlencode "code=${CODE}" \
-  --data-urlencode "redirect_uri=https://app.example.com/callback" \
-  --data-urlencode "code_verifier=${CODE_VERIFIER}" \
-  --data-urlencode "client_id=payment-initiation-service" \
-  --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  --data-urlencode "client_assertion=${CLIENT_ASSERTION}"
 ```
 
-**Response** — Hearth returns a DPoP-bound access token:
-
-```json
-{
-  "access_token": "eyJ...",
-  "token_type": "DPoP",
-  "expires_in": 300,
-  "refresh_token": "...",
-  "scope": "openid accounts"
-}
-```
-
-Note `"token_type": "DPoP"` (not `"Bearer"`). The access token's payload includes:
-
-```json
-{
-  "cnf": {
-    "jkt": "<SHA-256 thumbprint of the client's DPoP public key>"
-  }
-}
-```
-
-Resource servers must verify that the `DPoP` header on every API request:
-- Contains a valid signature by the key matching `cnf.jkt`
-- Has `htm` matching the HTTP method and `htu` matching the request URL
-- Has `iat` within an acceptable clock skew (Hearth issues tokens with ±30 s tolerance)
-
----
-
-## 8. Testing FAPI 2.0 compliance
-
-### Smoke tests with curl
-
-The following sequence validates the full FAPI 2.0 Baseline PAR+PKCE flow against a running
-Hearth instance:
+### Exchange the authorization code
 
 ```bash
-#!/bin/bash
-set -euo pipefail
-BASE="https://auth.example.com/realms/banking"
-CLIENT_ID="payment-initiation-service"
-
-# 1. Generate PKCE
-CODE_VERIFIER=$(openssl rand -base64 48 | tr -d '=+/' | cut -c1-64)
-CODE_CHALLENGE=$(echo -n "$CODE_VERIFIER" | openssl dgst -binary -sha256 | openssl base64 | tr '+/' '-_' | tr -d '=')
-
-# 2. Build client_assertion
-CLIENT_ASSERTION=$(python3 sign_jar.py \
-  --client-id "$CLIENT_ID" \
-  --key client.key.pem \
-  --audience "$BASE/par" \
-  --redirect-uri "https://app.example.com/callback" \
-  --code-challenge "$CODE_CHALLENGE")
-
-# 3. PAR
-PAR_RESPONSE=$(curl -sf -X POST "$BASE/par" \
+curl -s -X POST "$ISSUER/realms/$REALM/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
+  -H "DPoP: $DPOP_PROOF" \
+  --data-urlencode "grant_type=authorization_code" \
+  --data-urlencode "code=$AUTH_CODE" \
+  --data-urlencode "redirect_uri=https://app.example.com/callback" \
   --data-urlencode "client_id=$CLIENT_ID" \
   --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-  --data-urlencode "client_assertion=$CLIENT_ASSERTION" \
-  --data-urlencode "response_type=code" \
-  --data-urlencode "scope=openid accounts" \
-  --data-urlencode "redirect_uri=https://app.example.com/callback" \
-  --data-urlencode "code_challenge=$CODE_CHALLENGE" \
-  --data-urlencode "code_challenge_method=S256" \
-  --data-urlencode "state=test-state-$(date +%s)")
-
-REQUEST_URI=$(echo "$PAR_RESPONSE" | jq -r '.request_uri')
-echo "✓ PAR succeeded: $REQUEST_URI"
-
-# 4. Verify /par rejects missing client_assertion (must return 401)
-HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/par" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "client_id=$CLIENT_ID" \
-  --data-urlencode "response_type=code" \
-  --data-urlencode "scope=openid" \
-  --data-urlencode "redirect_uri=https://app.example.com/callback")
-[[ "$HTTP_STATUS" == "401" ]] && echo "✓ Rejected missing client_assertion" \
-  || echo "✗ Expected 401, got $HTTP_STATUS"
-
-# 5. Verify /authorize rejects direct (non-PAR) requests (must return 400)
-HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-  "$BASE/authorize?response_type=code&client_id=$CLIENT_ID&scope=openid&redirect_uri=https://app.example.com/callback")
-[[ "$HTTP_STATUS" == "400" ]] && echo "✓ Rejected non-PAR authorize request" \
-  || echo "✗ Expected 400, got $HTTP_STATUS"
-
-echo "Smoke tests complete. Continue with user-interactive flow manually."
+  --data-urlencode "client_assertion=$CLIENT_ASSERTION_JWT" \
+  --data-urlencode "code_verifier=$VERIFIER"
 ```
 
-### OpenID Foundation conformance suite
+`client_assertion` is a short-lived JWT signed with the client private key (separate from the
+DPoP proof). See RFC 7523 for the assertion structure.
 
-The authoritative FAPI 2.0 conformance test suite is run by the OpenID Foundation:
-
-1. **Register** at <https://www.certification.openid.net>
-2. Choose **FAPI 2.0 Security Profile** → **Baseline** or **Advanced**
-3. Configure the test plan:
-   - `discovery_url`: `https://auth.example.com/realms/banking/.well-known/openid-configuration`
-   - `client_id`: your registered FAPI client ID
-   - `jwks`: your client's public JWK set
-   - `redirect_uri`: a URI registered with the conformance suite
-4. Run all test variants (happy path, error injection, replay attacks)
-5. Download the certification package; required for open banking certifications in EU/UK/AU
-
-### Key test scenarios to cover
-
-| Scenario | Expected result |
-|----------|----------------|
-| PAR with valid `private_key_jwt` | 201 + `request_uri` |
-| PAR with expired `client_assertion` | 401 `invalid_client` |
-| `/authorize` without `request_uri` (FAPI active) | 400 `invalid_request` |
-| `/authorize` with reused `request_uri` | 400 `invalid_request` |
-| Token exchange without PKCE verifier | 400 `invalid_grant` |
-| Token exchange with wrong `code_verifier` | 400 `invalid_grant` |
-| Token exchange with `client_secret_basic` (FAPI active) | 401 `invalid_client` |
-| DPoP proof with wrong `htm` | 401 `use_dpop_nonce` or `invalid_dpop_proof` |
-| JARM response signature verification | Must verify against `/certs` JWKS |
+**Rejected — DPoP header missing (FAPI 2.0 client):**
+```json
+{ "error": "invalid_dpop_proof", "error_description": "DPoP proof required for FAPI 2.0 clients" }
+```
 
 ---
 
-## 9. Common misconfiguration errors
+## 8. Testing FAPI 2.0 Compliance
 
-| Error | HTTP | `error` | Cause and fix |
-|-------|------|---------|---------------|
-| Missing PAR step | 400 | `invalid_request` | Realm has `fapi_profile` active; all authorization requests must go through `/par` first |
-| `client_secret_basic` auth | 401 | `invalid_client` | FAPI 2.0 disallows shared secrets; switch to `private_key_jwt` |
-| Wrong `code_challenge_method` | 400 | `invalid_request` | Must be `S256`; `plain` is rejected under FAPI |
-| Expired `request_uri` | 400 | `invalid_request` | `/par` URIs expire in 60 s; do not cache them across requests |
-| Reused `request_uri` | 400 | `invalid_request` | Each PAR URI is single-use |
-| `client_assertion` audience mismatch | 401 | `invalid_client` | Set `aud` to the exact endpoint URL (e.g., `/par` or `/token`) |
-| `client_assertion` expired | 401 | `invalid_client` | `exp` must be ≤ 60 s from `iat`; check server clock sync (NTP) |
-| Missing `kid` in JWKS | 400 | `invalid_request` | Every JWK registered with Hearth must have a `kid`; Hearth uses it to select the verification key |
-| JAR `request` parameter missing (Advanced) | 400 | `invalid_request` | FAPI 2.0 Advanced requires a signed `request` JWT in the PAR body |
-| DPoP proof missing (Advanced) | 400 | `use_dpop_nonce` | Include a `DPoP` header on every token endpoint request under Advanced profile |
-| `response_mode` not `jwt` (Advanced) | 400 | `invalid_request` | Set `response_mode=jwt` in the PAR body; JARM is mandatory for Advanced |
-| Wrong issuer in JARM | Reject | (client-side) | `iss` in the JARM JWT must match your realm's `oidc.issuer`; verify before accepting the code |
+### Discover the FAPI profile
+
+Check the realm discovery document to confirm FAPI enforcement is active:
+
+```bash
+curl -s "https://auth.example.com/realms/banking/.well-known/openid-configuration" | \
+  python3 -m json.tool | grep -E 'fapi|par|pushed|require'
+```
+
+For a realm with `fapi_profile: advanced`, the discovery document includes:
+```json
+{
+  "pushed_authorization_request_endpoint": "https://auth.example.com/realms/banking/as/par",
+  "require_pushed_authorization_requests": true,
+  "request_parameter_supported": true,
+  "authorization_signing_alg_values_supported": ["EdDSA"],
+  "authorization_response_iss_parameter_supported": true,
+  "fapi_profile": "advanced"
+}
+```
+
+For standard realms, `fapi_profile` is absent and `require_pushed_authorization_requests` is
+`false`.
+
+### Smoke test — per-client FAPI 2.0
+
+Run these checks after registering a FAPI 2.0 client:
+
+```bash
+# 1. Verify direct /authorize is rejected
+curl -s -X POST "$ISSUER/realms/$REALM/authorize" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"'$CLIENT_ID'","redirect_uri":"https://app.example.com/callback","scope":"openid","response_type":"code","code_challenge":"'$CHALLENGE'","code_challenge_method":"S256"}' \
+  | python3 -m json.tool
+# Expected: { "error": "invalid_request", "error_description": "FAPI 2.0 clients must use PAR" }
+
+# 2. Verify PAR without PKCE is rejected
+curl -s -X POST "$ISSUER/realms/$REALM/as/par" \
+  -H "Content-Type: application/json" \
+  -d '{"client_id":"'$CLIENT_ID'","redirect_uri":"https://app.example.com/callback","scope":"openid","response_type":"code"}' \
+  | python3 -m json.tool
+# Expected: { "error": "invalid_request", "error_description": "PKCE required" }
+
+# 3. Verify token exchange without DPoP is rejected
+curl -s -X POST "$ISSUER/realms/$REALM/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "grant_type=authorization_code" \
+  --data-urlencode "code=fake-code" \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  | python3 -m json.tool
+# Expected: { "error": "invalid_dpop_proof", ... }
+```
+
+### OpenID Foundation FAPI Conformance Suite
+
+The [OpenID FAPI Conformance Suite](https://openid.net/certification/fapi_op_testing/) tests
+server conformance against the full FAPI 2.0 Security Profile. To run it against a local
+Hearth instance:
+
+1. Expose Hearth over HTTPS (use a reverse proxy or `make dev` with an ngrok tunnel).
+2. Point the suite at `https://<your-host>/realms/<realm-name>/.well-known/openid-configuration`.
+3. Select **FAPI 2.0 Security Profile SP1** (Baseline) or **SP1 + JARM + PAR + JAR** (Advanced).
+4. Register a test client using the suite's JWKS when prompted.
+
+Hearth's internal test suite covers the conformance scenarios in `tests/fapi_conformance.rs` and
+`tests/fapi2_conformance.rs`.
 
 ---
 
-*See [docs/specs/OIDC.md §2](../specs/OIDC.md#2-fapi-20-security-profile) for the normative
-implementation spec. See [hearth-yaml-examples.md — Example 41](hearth-yaml-examples.md#example-41--fapi-20-realm-banking)
-for a copy-paste YAML configuration.*
+## 9. Common Misconfiguration Errors
+
+| Error | HTTP status | Cause | Fix |
+|-------|-------------|-------|-----|
+| `invalid_client_metadata: FAPI 2.0 clients must use private_key_jwt` | 400 | `client_secret` present in registration | Remove `client_secret` |
+| `invalid_client_metadata: FAPI 2.0 clients must register a JWKS` | 400 | `jwks` missing in registration | Add `jwks` with client public key |
+| `invalid_request: FAPI 2.0 clients must use PAR` | 400 | Client called `/authorize` directly | Submit PAR first; use `request_uri` |
+| `invalid_request: code_challenge required` | 400 | PKCE challenge missing in PAR body | Add `code_challenge` + `code_challenge_method=S256` |
+| `invalid_request: PKCE method must be S256` | 400 | `code_challenge_method=plain` used | Use `S256` only |
+| `invalid_dpop_proof: DPoP proof required for FAPI 2.0 clients` | 400 | Token request missing `DPoP` header | Build and attach a DPoP proof JWT |
+| `invalid_dpop_proof: DPoP htm mismatch` | 400 | DPoP `htm` claim doesn't match HTTP method | Set `htm: "POST"` |
+| `invalid_dpop_proof: DPoP htu mismatch` | 400 | DPoP `htu` claim is the wrong URL | Use the exact token endpoint URL (no query string) |
+| `invalid_request_object: JAR signature verification failed` | 400 | JAR JWT signed with wrong key | Sign with the private key matching the registered JWKS |
+| `invalid_request: JAR client_id mismatch` | 400 | `client_id` in JAR ≠ `client_id` query param | Set both to the same prefixed client ID |
+| `invalid_request: request_uri expired or already consumed` | 400 | PAR `request_uri` older than 90 s or replayed | Push a fresh PAR request |
+
+---
+
+## See Also
+
+- [docs/specs/OIDC.md §2](../specs/OIDC.md#2-fapi-20-security-profile) — normative spec for FAPI 2.0 enforcement rules
+- [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-2_0-security-profile.html) — OpenID Foundation spec
+- [RFC 9126 — PAR](https://www.rfc-editor.org/rfc/rfc9126)
+- [RFC 9101 — JAR](https://www.rfc-editor.org/rfc/rfc9101)
+- [RFC 9449 — DPoP](https://www.rfc-editor.org/rfc/rfc9449)
+- [RFC 7523 — `private_key_jwt`](https://www.rfc-editor.org/rfc/rfc7523)
+- Conformance tests: `tests/fapi_conformance.rs`, `tests/fapi2_conformance.rs`, `tests/jarm.rs`,
+  `tests/jar.rs`, `tests/par.rs`

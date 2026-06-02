@@ -193,7 +193,7 @@ The only places where trait-based dependency injection is used are true environm
 
 Everything else uses real implementations, including the storage engine, the permission graph, and the crypto stack.
 
-The 2026-05-16 audit confirmed this approach at scale: all 98 `#[cfg(test)]` blocks in `src/` are standard unit-test modules — no production code paths are gated by a test flag (category D clean). The improvable findings that *were* uncovered (assertion quality, setup discards, stale ignores) belong to different anti-pattern categories; mocking over-reach was not a problem because this policy is enforced from day one. See the [audit report](../audit/test-suite-audit-2026-05-16.md) and the [Test Quality Anti-Patterns](#test-quality-anti-patterns) section below.
+A repo-wide audit confirmed this approach at scale: all `#[cfg(test)]` blocks in `src/` are standard unit-test modules — no production code paths are gated by a test flag (category D clean). The improvable findings that *were* uncovered (assertion quality, setup discards, stale ignores) belong to different anti-pattern categories; mocking over-reach was not a problem because this policy is enforced from day one. See the [Test Quality Anti-Patterns](#test-quality-anti-patterns) section below.
 
 ---
 
@@ -405,7 +405,7 @@ Coverage reports are generated on every merge to main and published as CI artifa
 
 ## Test Quality Anti-Patterns
 
-The following anti-patterns produce tests that compile and pass without actually verifying the behavior they claim to test — a phenomenon called *false confidence*. Each entry states a MUST NOT rule, shows a concrete counter-example, and gives the recommended alternative. The taxonomy was defined in the [HEA-565 audit plan](/HEA/issues/HEA-565#document-plan) and applied across the codebase in the [2026-05-16 audit report](../audit/test-suite-audit-2026-05-16.md), which found 27 improvable findings across 193 total hits.
+The following anti-patterns produce tests that compile and pass without actually verifying the behavior they claim to test — a phenomenon called *false confidence*. Each entry states a MUST NOT rule, shows a concrete counter-example, and gives the recommended alternative. The taxonomy was defined in the [HEA-565 audit plan](/HEA/issues/HEA-565#document-plan).
 
 > **CI enforcement**: `scripts/check-test-quality.sh` (wired into `make check`, `make ci-fast`, and the GitHub Actions `check` job) fails the build on new occurrences of the most mechanical anti-patterns. See the [CI enforcement](#ci-enforcement-scriptscheck-test-qualitysh) subsection at the bottom of this section for the exact rules and the per-line escape hatch.
 
@@ -561,7 +561,7 @@ async fn server_mode_crud() { ... }
 
 ### CI enforcement (`scripts/check-test-quality.sh`)
 
-A grep-based linter prevents re-introduction of the mechanical anti-patterns the [2026-05-16 audit](../audit/test-suite-audit-2026-05-16.md) cleaned up. It runs as part of `make check`, `make ci-fast`, and the `check` job in `.github/workflows/ci.yml`, so a PR that introduces a banned pattern fails CI with a clear error message.
+A grep-based linter prevents re-introduction of the mechanical anti-patterns documented in this section. It runs as part of `make check`, `make ci-fast`, and the `check` job in `.github/workflows/ci.yml`, so a PR that introduces a banned pattern fails CI with a clear error message.
 
 **Rules (fail the build):**
 

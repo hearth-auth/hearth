@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::config::{Config, EmailTransport, EnvVarWarningKind, SmsTransport, ValidationIssue};
+use hearth::config::{Config, EmailTransport, SmsTransport, ValidationIssue};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::email::mailcatcher::{
     generate_password, MailcatcherSender, MailcatcherState,
@@ -30,7 +30,7 @@ use hearth::protocol;
 use hearth::protocol::http::{self, AppState};
 use hearth::protocol::tls::{build_server_config, ReloadableTlsConfig, TlsConfigParams};
 use hearth::protocol::web::{self, WebState};
-use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
+use hearth::rbac::{EmbeddedRbacEngine, RbacEngine, SvBumper};
 use hearth::storage::{CompactionConfig, EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
 /// Hearth — a purpose-built identity database.
@@ -552,6 +552,7 @@ async fn run_serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config(dev, config_path.as_deref())?;
+    let serve_start = std::time::Instant::now();
 
     // Apply CLI overrides
     if let Some(port) = port_override {
@@ -568,29 +569,44 @@ async fn run_serve(
 
     // Safety-net: print config warnings to stderr before tracing initialises
     // so they are visible even if the subscriber setup fails.
-    for w in &config.config_warnings {
-        eprintln!(
-            "[hearth] config warning: {} — {}",
-            w.var_name,
-            w.kind_label()
-        );
+    if !config.config_warnings.is_empty() {
+        let n = config.config_warnings.len();
+        if n > 3 {
+            let preview = config.config_warnings[..3]
+                .iter()
+                .map(|w| w.var_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!(
+                "[hearth] {n} env-var config warnings; vars: {preview} and {} more",
+                n - 3
+            );
+        } else {
+            let inline = config
+                .config_warnings
+                .iter()
+                .map(|w| format!("{} ({})", w.var_name, w.kind_label()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            eprintln!("[hearth] config warnings: {inline}");
+        }
     }
 
     // Initialize tracing (and optional OTLP export).
     // The guard must be held for the process lifetime to ensure the batch
     // exporter is flushed on shutdown.
+    config.observability.dev_mode = config.dev_mode;
     let _tracing_guard = hearth::telemetry::init(&config.observability);
 
-    // Log config warnings through the structured tracing pipeline
-    for w in &config.config_warnings {
-        match w.kind {
-            EnvVarWarningKind::Missing => {
-                warn!(var = %w.var_name, "config references unset environment variable — substituted empty string");
-            }
-            EnvVarWarningKind::Empty => {
-                warn!(var = %w.var_name, "environment variable is set but empty — this is likely a misconfiguration");
-            }
-        }
+    // Single structured warning after tracing init — vars array is JSON-serialisable
+    // in JSON log sinks (HEARTH_LOG_FORMAT=json) and debug-formatted in text sinks.
+    if !config.config_warnings.is_empty() {
+        let vars = config
+            .config_warnings
+            .iter()
+            .map(|w| w.var_name.as_str())
+            .collect::<Vec<_>>();
+        warn!(vars = ?vars, "config references unset or empty environment variables");
     }
 
     info!(
@@ -856,25 +872,30 @@ async fn run_serve(
     // Extract cleanup config before identity_config is consumed by the engine.
     let cleanup_enabled = identity_config.cleanup.enabled;
     let cleanup_interval_secs = identity_config.cleanup.interval_secs;
+    let dfp_sweeper_interval_secs = identity_config.cleanup.dfp_sweeper_interval_secs;
 
     // Build the RBAC engine before the identity engine — identity depends on rbac.
-    let rbac_engine: Arc<dyn RbacEngine> = Arc::new(EmbeddedRbacEngine::new(
+    let raw_rbac_engine = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
     ));
+    let rbac_engine: Arc<dyn RbacEngine> = Arc::clone(&raw_rbac_engine) as Arc<dyn RbacEngine>;
 
     let audit_engine: Arc<dyn hearth::audit::AuditEngine> = Arc::new(EmbeddedAuditEngine::new(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
     ));
 
-    let identity_engine: Arc<dyn IdentityEngine> = Arc::new(EmbeddedIdentityEngine::with_rbac(
+    let raw_identity_engine = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
         Arc::clone(&clock),
         identity_config,
         Arc::clone(&rbac_engine),
         Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
     )?);
+    // Wire session-version bumping so RBAC changes invalidate standing tokens.
+    raw_rbac_engine.init_sv_bumper(Arc::clone(&raw_identity_engine) as Arc<dyn SvBumper>);
+    let identity_engine: Arc<dyn IdentityEngine> = raw_identity_engine;
 
     // Build the PermissionRegistry from the initial config and wrap it in an
     // ArcSwap for zero-downtime hot-swap on SIGHUP.  The registry is rebuilt
@@ -926,15 +947,6 @@ async fn run_serve(
             let password = std::env::var("HEARTH_MAILCATCHER_PASSWORD")
                 .unwrap_or_else(|_| generate_password());
             let state = Arc::new(MailcatcherState::new(password));
-            // Print prominent startup banner.
-            println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            println!("  MailcatcherSender active");
-            println!(
-                "  Inbox:    http://{}:{}/dev/mail",
-                config.server.bind_address, config.server.port
-            );
-            println!("  Password: {}", state.password);
-            println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
             Some(state)
         } else {
             None
@@ -978,17 +990,23 @@ async fn run_serve(
     } else {
         PathBuf::from(&config.storage.data_dir)
     };
-    if config.onboarding.enabled {
-        if let Err(e) = onboarding::ensure_setup_token(
+    let setup_token: Option<String> = if config.onboarding.enabled {
+        match onboarding::ensure_setup_token(
             identity_engine.as_ref(),
             &data_dir,
             Some(&base_url),
             Some(email_service.as_ref()),
             config.onboarding.notification_email.as_deref(),
         ) {
-            error!(error = %e, "failed to ensure setup token; onboarding will be unavailable");
+            Ok(token) => token,
+            Err(e) => {
+                error!(error = %e, "failed to ensure setup token; onboarding will be unavailable");
+                None
+            }
         }
-    }
+    } else {
+        None
+    };
 
     // Load the previous config snapshot (absent on first startup) so we can
     // compute a typed diff against the current config before reconciliation.
@@ -1270,6 +1288,74 @@ async fn run_serve(
                         break;
                     }
                 }
+            }
+        });
+    }
+
+    // Background device-fingerprint TTL sweeper (GDPR proactive eviction).
+    if cleanup_enabled && dfp_sweeper_interval_secs > 0 {
+        let dfp_engine = Arc::clone(&identity_engine);
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(dfp_sweeper_interval_secs));
+            // Skip the immediate first tick so the server finishes warm-up.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let mut cursor = None::<String>;
+                let mut total_evicted: u64 = 0;
+                let mut total_active: u64 = 0;
+                loop {
+                    let page = match dfp_engine.list_realms(cursor.as_deref(), 100) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            warn!(error = %e, "dfp_sweeper: realm enumeration failed, retrying next tick");
+                            break;
+                        }
+                    };
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    for realm in &page.items {
+                        match dfp_engine.sweep_expired_fingerprints(realm.id(), now_secs) {
+                            Ok((evicted, active)) => {
+                                total_evicted += evicted;
+                                total_active += active;
+                                if evicted > 0 {
+                                    info!(
+                                        realm = %realm.name(),
+                                        evicted,
+                                        active,
+                                        "dfp_sweeper: evicted expired fingerprints",
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    realm = %realm.name(),
+                                    error = %e,
+                                    "dfp_sweeper: sweep failed for realm",
+                                );
+                            }
+                        }
+                    }
+                    cursor = page.next_cursor;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                // Realistic eviction/active counts never approach 2^53, so the
+                // u64 → f64 conversion is lossless in practice. Prometheus
+                // counter/gauge APIs accept f64 only.
+                #[allow(clippy::cast_precision_loss)]
+                let evicted_f64 = total_evicted as f64;
+                #[allow(clippy::cast_precision_loss)]
+                let active_f64 = total_active as f64;
+                hearth::metrics::metrics()
+                    .dfp_sweeper_evicted_total
+                    .inc_by(evicted_f64);
+                hearth::metrics::metrics().dfp_keys_active.set(active_f64);
             }
         });
     }
@@ -1669,6 +1755,44 @@ async fn run_serve(
     std::fs::write(&pid_file_path, std::process::id().to_string())
         .unwrap_or_else(|e| warn!(error = %e, "failed to write PID file"));
 
+    // Consolidated startup info panel — printed once after all init completes,
+    // suppressed in JSON mode so log pipelines stay machine-readable.
+    if config.observability.log_format != "json" {
+        let mc_info = mailcatcher_state
+            .as_ref()
+            .map(|s| (format!("http://{addr}/dev/mail"), s.password.clone()));
+        let (wal_size, sst_count, data_dir_bytes) = collect_storage_stats(&data_dir);
+        let stats = StartupStats {
+            realm_count: config.realms.as_ref().map(|r| r.len()).unwrap_or(0),
+            federation_count: config
+                .realms
+                .as_ref()
+                .map(|realms| {
+                    realms
+                        .values()
+                        .filter_map(|r| r.federation.as_ref())
+                        .map(|f| f.providers.len())
+                        .sum()
+                })
+                .unwrap_or(0),
+            email_transport: email_transport_label(config.email.transport),
+            tls: config.server.tls_cert_path.is_some(),
+            oidc_issuer: config.oidc.issuer.clone(),
+            cluster_peers: config.cluster.as_ref().map(|c| c.peers.len()),
+            wal_size,
+            sst_count,
+            data_dir_bytes,
+            startup_ms: u64::try_from(serve_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        };
+        print_startup_panel(
+            addr,
+            dev,
+            setup_token.as_deref(),
+            mc_info.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
+            &stats,
+        );
+    }
+
     // Check for TLS configuration
     if let (Some(cert_path), Some(key_path)) =
         (&config.server.tls_cert_path, &config.server.tls_key_path)
@@ -1743,6 +1867,143 @@ async fn run_serve(
     let _ = std::fs::remove_file(&pid_file_path);
     info!("Hearth server stopped");
     Ok(())
+}
+
+// Unicode full-block logo — █ (U+2588), 5 contiguous letter rows.
+const HEARTH_LOGO: &str = "\
+\x20 ██   ██ ███████  █████  ██████  ████████ ██   ██\n\
+\x20 ██   ██ ██      ██   ██ ██   ██    ██    ██   ██\n\
+\x20 ███████ █████   ███████ ██████     ██    ███████\n\
+\x20 ██   ██ ██      ██   ██ ██  ██     ██    ██   ██\n\
+\x20 ██   ██ ███████ ██   ██ ██   ██    ██    ██   ██";
+
+struct StartupStats {
+    realm_count: usize,
+    federation_count: usize,
+    email_transport: &'static str,
+    tls: bool,
+    oidc_issuer: Option<String>,
+    cluster_peers: Option<usize>,
+    wal_size: Option<u64>,
+    sst_count: usize,
+    data_dir_bytes: u64,
+    startup_ms: u64,
+}
+
+// Prints the logo + consolidated startup info panel to stdout (raw — never
+// in log sinks). Call only when log_format != "json".
+fn print_startup_panel(
+    addr: std::net::SocketAddr,
+    dev_mode: bool,
+    setup_token: Option<&str>,
+    mailcatcher: Option<(&str, &str)>,
+    stats: &StartupStats,
+) {
+    let base = format!("http://{addr}");
+    let dev_badge = if dev_mode { "  [dev]" } else { "" };
+    println!();
+    println!("{HEARTH_LOGO}");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!(
+        "  Identity · Auth · RBAC   v{}{}",
+        env!("CARGO_PKG_VERSION"),
+        dev_badge
+    );
+    println!("  ─────────────────────────────────────────────────");
+    // URL links — labels padded to 7 chars so values align at column 11.
+    println!("  API:     {base}");
+    println!("  Admin:   {base}/ui");
+    if let Some(issuer) = &stats.oidc_issuer {
+        println!("  Issuer:  {issuer}");
+    }
+    if let Some(token) = setup_token {
+        println!("  Setup:   {base}/ui/setup?token={token}");
+    }
+    if let Some((inbox_url, password)) = mailcatcher {
+        println!("  Mail:    {inbox_url}  pw: {password}");
+    }
+    println!("  ─────────────────────────────────────────────────");
+    // Environment stats
+    let mut env_line = format!(
+        "  Realms: {}   ·   Email: {}   ·   TLS: {}",
+        stats.realm_count,
+        stats.email_transport,
+        if stats.tls { "on" } else { "off" }
+    );
+    if stats.federation_count > 0 {
+        env_line.push_str(&format!("   ·   Connectors: {}", stats.federation_count));
+    }
+    if let Some(peers) = stats.cluster_peers {
+        env_line.push_str(&format!(
+            "   ·   Cluster: {} peer{}",
+            peers,
+            if peers == 1 { "" } else { "s" }
+        ));
+    }
+    println!("{env_line}");
+    // Storage stats
+    let mut storage_parts: Vec<String> = Vec::new();
+    if let Some(wal) = stats.wal_size {
+        storage_parts.push(format!("WAL {}", fmt_bytes(wal)));
+    }
+    storage_parts.push(format!(
+        "{} SST{}",
+        stats.sst_count,
+        if stats.sst_count == 1 { "" } else { "s" }
+    ));
+    if stats.data_dir_bytes > 0 {
+        storage_parts.push(fmt_bytes(stats.data_dir_bytes));
+    }
+    println!("  Storage: {}", storage_parts.join("  ·  "));
+    println!("  Startup: {} ms", stats.startup_ms);
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+}
+
+fn collect_storage_stats(data_dir: &std::path::Path) -> (Option<u64>, usize, u64) {
+    let wal_size = std::fs::metadata(data_dir.join("hearth.wal"))
+        .ok()
+        .map(|m| m.len());
+    let (sst_count, total_bytes) = std::fs::read_dir(data_dir)
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let path = e.path();
+                    let size = e.metadata().ok().map(|m| m.len()).unwrap_or(0);
+                    Some((path.extension()?.to_str()? == "sst", size))
+                })
+                .fold((0usize, 0u64), |(ssts, total), (is_sst, size)| {
+                    (ssts + usize::from(is_sst), total + size)
+                })
+        })
+        .unwrap_or((0, 0));
+    (wal_size, sst_count, total_bytes)
+}
+
+#[allow(clippy::cast_precision_loss)]
+// INVARIANT: precision loss is acceptable here — this function formats byte sizes
+// for human-readable display (e.g. "1.2 GB"). Sub-MB precision is irrelevant.
+fn fmt_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{} KB", bytes / 1024)
+    }
+}
+
+fn email_transport_label(t: EmailTransport) -> &'static str {
+    match t {
+        EmailTransport::Log => "log",
+        EmailTransport::Smtp => "smtp",
+        EmailTransport::Sendgrid => "sendgrid",
+        EmailTransport::Postmark => "postmark",
+        EmailTransport::Mailgun => "mailgun",
+        EmailTransport::Mailtrap => "mailtrap",
+        EmailTransport::Mailcatcher => "mailcatcher",
+    }
 }
 
 /// Builds the outbound email sender from configuration.
@@ -2764,21 +3025,24 @@ fn build_all_engines(
     storage: Arc<dyn StorageEngine>,
 ) -> Result<AllEngines, Box<dyn std::error::Error>> {
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
-    let rbac = Arc::new(EmbeddedRbacEngine::new(
+    let raw_rbac = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage),
         Arc::clone(&clock),
-    )) as Arc<dyn hearth::rbac::RbacEngine>;
+    ));
+    let rbac = Arc::clone(&raw_rbac) as Arc<dyn hearth::rbac::RbacEngine>;
     let audit = Arc::new(EmbeddedAuditEngine::new(
         Arc::clone(&storage),
         Arc::clone(&clock),
     )) as Arc<dyn hearth::audit::AuditEngine>;
-    let identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
+    let raw_identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage),
         clock,
         IdentityConfig::default(),
         Arc::clone(&rbac),
         Arc::clone(&audit),
-    )?) as Arc<dyn hearth::identity::IdentityEngine>;
+    )?);
+    raw_rbac.init_sv_bumper(Arc::clone(&raw_identity) as Arc<dyn SvBumper>);
+    let identity = raw_identity as Arc<dyn hearth::identity::IdentityEngine>;
     Ok((identity, Arc::clone(&audit), rbac))
 }
 
@@ -2797,21 +3061,24 @@ fn build_engines(
     } else {
         IdentityConfig::default()
     };
-    let rbac = Arc::new(EmbeddedRbacEngine::new(
+    let raw_rbac = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage),
         Arc::clone(&clock),
-    )) as Arc<dyn hearth::rbac::RbacEngine>;
+    ));
+    let rbac = Arc::clone(&raw_rbac) as Arc<dyn hearth::rbac::RbacEngine>;
     let audit = Arc::new(EmbeddedAuditEngine::new(
         Arc::clone(&storage),
         Arc::clone(&clock),
     )) as Arc<dyn hearth::audit::AuditEngine>;
-    let identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
+    let raw_identity = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage),
         clock,
         identity_config,
         Arc::clone(&rbac),
         Arc::clone(&audit),
-    )?) as Arc<dyn hearth::identity::IdentityEngine>;
+    )?);
+    raw_rbac.init_sv_bumper(Arc::clone(&raw_identity) as Arc<dyn SvBumper>);
+    let identity = raw_identity as Arc<dyn hearth::identity::IdentityEngine>;
     Ok((identity, rbac))
 }
 

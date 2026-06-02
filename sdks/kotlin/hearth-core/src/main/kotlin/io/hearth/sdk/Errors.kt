@@ -50,3 +50,38 @@ class ApiError(
     message: String,
     cause: Throwable? = null,
 ) : HearthException(message, cause)
+
+/**
+ * Thrown when the `mode` field echoed in an introspection response does not match
+ * the SDK's configured expectation (HEA-922).
+ *
+ * Per design constraint: mode must be validated explicitly; the SDK MUST NOT silently
+ * tolerate a server returning a different mode than the one configured for this resource server.
+ */
+class AuthorizationModeMismatchError(
+    val expected: String,
+    val actual: String,
+    message: String = "Authorization mode mismatch: expected \"$expected\", got \"$actual\"",
+) : HearthException(message)
+
+/** POST /oauth/authorize endpoint unreachable or returned a non-2xx response. */
+class AuthorizeError(message: String, cause: Throwable? = null) :
+    HearthException(message, cause)
+
+/**
+ * Thrown when a token with `token_type === "required_action"` is presented as a regular
+ * access token (sdk-spec §5, §6).
+ *
+ * This token is valid but scoped only to completing the pending required actions — it
+ * MUST NOT be accepted for general API access.
+ *
+ * @param requiredActions Pending action names from the token's `required_actions` claim
+ *                        (e.g. `["VERIFY_EMAIL", "UPDATE_PASSWORD"]`).
+ * @param redirectUri     Optional URL to the Hearth interstitial page for the required actions.
+ */
+class RequiredActionError(
+    val requiredActions: List<String>,
+    val redirectUri: String? = null,
+    message: String = "Token requires completion of required actions: $requiredActions",
+    cause: Throwable? = null,
+) : HearthException(message, cause)

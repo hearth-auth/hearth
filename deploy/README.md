@@ -151,24 +151,84 @@ The unit file ships with these restrictions enabled by default:
 - Kubernetes ≥ 1.24
 - Helm ≥ 3.10
 - A default `StorageClass` (for the PVC)
+- `cert-manager` (optional, recommended for TLS via Let's Encrypt)
+- `nginx-ingress-controller` (optional, recommended for Ingress)
 
-### Quick install
+### End-to-end production install
+
+The chart ships a ready-to-use production profile at
+`deploy/helm/hearth/values-prod.yaml`. Follow these steps to go from zero to a
+running identity server with TLS.
+
+**Step 1 — Create the namespace**
 
 ```bash
-helm install hearth ./deploy/helm/hearth \
-  --namespace hearth \
-  --create-namespace \
-  --set ingress.enabled=true \
-  --set ingress.hosts[0].host=auth.example.com \
-  --set ingress.hosts[0].paths[0].path=/ \
-  --set ingress.hosts[0].paths[0].pathType=Prefix
+kubectl create namespace hearth
+```
+
+**Step 2 — Edit the production values**
+
+```bash
+cp deploy/helm/hearth/values-prod.yaml my-values.yaml
+```
+
+Open `my-values.yaml` and replace the placeholders:
+
+| Field | Example | Notes |
+|---|---|---|
+| `ingress.hosts[0].host` | `auth.company.com` | Your public domain |
+| `ingress.tls[0].hosts[0]` | `auth.company.com` | Must match the host |
+| `config.oidc.issuer` | `https://auth.company.com` | Returned in OIDC discovery |
+| `config.email.smtp.*` | `smtp.company.com` | Mail server settings |
+| `secret.env.SMTP_PASSWORD` | `""` | Inject via ESO or sealed-secrets |
+
+> **Security note:** Do not commit plaintext secret values. Use the
+> [External Secrets Operator](https://external-secrets.io/) or
+> [sealed-secrets](https://github.com/bitnami-labs/sealed-secrets) to source
+> `secret.env` values from your secrets manager.
+
+**Step 3 — Install**
+
+```bash
+helm install hearth deploy/helm/hearth \
+  -f my-values.yaml \
+  --namespace hearth
+```
+
+**Step 4 — Bootstrap the first realm and admin token** *(first install only)*
+
+```bash
+# Wait for the pod to be ready
+kubectl wait --for=condition=ready pod \
+  -l app.kubernetes.io/name=hearth \
+  -n hearth --timeout=120s
+
+# Forward the admin port temporarily
+kubectl port-forward -n hearth svc/hearth 8420:8420 &
+
+# Bootstrap (creates the default realm, admin user, and a bootstrap token)
+curl -s -X POST http://127.0.0.1:8420/admin/bootstrap | jq .
+
+# Kill the port-forward when done
+kill %1
+```
+
+**Step 5 — Verify**
+
+```bash
+# OIDC discovery document (requires ingress to be live)
+curl https://auth.company.com/.well-known/openid-configuration | jq .issuer
 ```
 
 ### Upgrade
 
 ```bash
-helm upgrade hearth ./deploy/helm/hearth --namespace hearth
+helm upgrade hearth deploy/helm/hearth -f my-values.yaml --namespace hearth
 ```
+
+Helm upgrades are rolling (zero-downtime) by default. Because Hearth's
+ConfigMap and Secret are checksummed in the pod annotations, any config change
+automatically triggers a new rollout.
 
 ### Values reference
 
@@ -183,15 +243,21 @@ helm upgrade hearth ./deploy/helm/hearth --namespace hearth
 | `ingress.enabled` | `false` | Create Ingress |
 | `ingress.className` | `""` | IngressClass name |
 | `config.*` | see `values.yaml` | Hearth YAML config |
-| `secret.tlsCert` | `""` | PEM TLS certificate |
-| `secret.tlsKey` | `""` | PEM TLS private key |
+| `secret.tlsCert` | `""` | PEM TLS certificate (pod-level TLS) |
+| `secret.tlsKey` | `""` | PEM TLS private key (pod-level TLS) |
 | `secret.env` | `{}` | Injected as env vars (e.g. `SMTP_PASSWORD`) |
 | `resources.requests.cpu` | `100m` | CPU request |
 | `resources.requests.memory` | `128Mi` | Memory request |
+| `podDisruptionBudget.enabled` | `false` | Enable PDB |
+| `autoscaling.enabled` | `false` | Enable HPA |
 
-Full reference: [`helm/hearth/values.yaml`](helm/hearth/values.yaml).
+Full reference: [`helm/hearth/values.yaml`](helm/hearth/values.yaml).  
+Production profile: [`helm/hearth/values-prod.yaml`](helm/hearth/values-prod.yaml).
 
 ### Exposing with cert-manager
+
+The production profile already includes the cert-manager annotations. If you
+are configuring from scratch:
 
 ```yaml
 # my-values.yaml
@@ -219,7 +285,7 @@ config:
 ```
 
 ```bash
-helm install hearth ./deploy/helm/hearth -f my-values.yaml -n hearth --create-namespace
+helm install hearth deploy/helm/hearth -f my-values.yaml -n hearth --create-namespace
 ```
 
 ### Providing secrets
@@ -242,7 +308,34 @@ config:
 
 ### Scaling note
 
-Hearth uses an embedded storage engine (WAL + SSTs on a PVC). Multiple replicas sharing a `ReadWriteOnce` volume is not supported. For high availability, use `ReadWriteMany` storage or a remote backend (roadmap item). The `autoscaling` value block is available but disabled by default.
+Hearth uses an embedded storage engine (WAL + SSTs on a PVC). Multiple replicas
+sharing a `ReadWriteOnce` volume is not supported. For high availability, use
+`ReadWriteMany` storage or a remote backend (roadmap item). The `autoscaling`
+value block is present but disabled by default.
+
+> **Note on StatefulSet vs Deployment:** The chart currently uses `Deployment +
+> PVC`. Because the WAL is single-writer and `fsync`-bound, switching to
+> `StatefulSet` would be more correct for HA (one pod ↔ one WAL volume). This
+> is tracked as a future opt-in via a `controller.kind` value — see the
+> discussion on the parent epic.
+
+### Linting and snapshot tests
+
+Two Makefile targets validate the chart locally:
+
+```bash
+# Lint the chart (runs helm lint)
+make helm-lint
+
+# Diff rendered templates against committed snapshots
+make helm-template
+
+# Update snapshots after intentional chart changes
+make helm-template UPDATE=1
+```
+
+Snapshots live at `deploy/helm/hearth/tests/` and are CI-gated by
+`.github/workflows/helm.yml`.
 
 ### Uninstall
 

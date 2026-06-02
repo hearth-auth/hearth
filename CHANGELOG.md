@@ -16,6 +16,749 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `breach_check.mode = offline` and `breach_check.mode.corpus_path = /path/to/corpus.bin`.
   Existing configs that omit `mode` continue to behave as `online` with no changes required.
 
+- **`fapi_profile` realm config key** — operators can now set `fapi_profile: "baseline"` or
+  `fapi_profile: "advanced"` under `realms.<name>` in `hearth.yaml` to enforce FAPI 2.0 Security
+  Profile constraints on all clients in that realm at startup. Unknown values are a hard error.
+  (HEA-1040)
+
+- **`PATCH /admin/realms/{id}/config` accepts `fapi_profile`** — the admin config patch endpoint
+  now accepts `"fapi_profile": "baseline"`, `"fapi_profile": "advanced"`, or `"fapi_profile": null`
+  (to clear). Returns 400 for unrecognised values. (HEA-1040)
+
+- **`profile` application config key** — per-client FAPI 2.0 profile can now be declared in
+  `realms.<name>.applications.<key>.profile: "fapi2"` in `hearth.yaml`. The reconciler applies it on
+  create and detects drift on subsequent restarts. (HEA-1040)
+
+### Fixed
+
+- **Admin UI defect batch** — 15 confirmed bugs from the 2026-05-31 QA audit (HEA-1089):
+  - Audit log org events no longer display raw UUIDs — resource type mismatch between write path
+    (`"org"`) and display resolver (`"organization"`) is now handled by matching both strings.
+  - Audit "via" metadata pills now show human-readable values: `admin_api` → Admin API, `ui` → UI,
+    `scim` → SCIM, `self` → Self-service.
+  - System Info page shows `(in-memory)` instead of blank when no data directory is configured.
+  - User create/edit validation errors now use human-readable field labels ("First name", "Last name")
+    instead of snake_case identifiers.
+  - Admin actor filter placeholder updated to "email, name, or 'system'".
+  - Audit log expand column now has an accessible `sr-only` header label ("Details").
+  - User list page title now shows "Admin Users" for the system-realm route.
+  - Settings breadcrumb separator changed from `/` to `›`; "Admin" is now a link to `/ui/admin`.
+  - "Admin" breadcrumb link on user list corrected to `/ui/admin` (was `/ui/admin/realms`).
+  - User detail page now renders a breadcrumb (was missing entirely).
+  - Duplicate breadcrumb from `_workspace_tabs.html` removed from user list body.
+  - Admin JS initializers isolated in per-component `try/catch` so a single failure cannot freeze
+    the sidebar "Loading…" spinner.
+  - Bootstrap endpoint returns `409 Conflict` instead of `500` when dev-realm exists but admin user
+    is missing.
+  - Realm-scoped 404 pages now render inside the admin chrome (sidebar, user pill, theme) rather
+    than as a bare unstyled page.
+- **Permission Check UX overhaul** — six operator-visible improvements to the RBAC debug page (HEA-1094):
+  - Empty-state: resolving a user with zero assignments now shows the Roles / Groups / Permissions
+    grid with "—" in each column instead of hiding the panel entirely.
+  - Resolved-user banner: a "Resolved for: Name (email)" summary appears above the results grid
+    after any successful resolution.
+  - Code chips + copy buttons: permission, role, and group items render as `<code>` chips with
+    per-item one-click copy buttons.
+  - Org ID validation: a non-empty malformed org_id now shows an inline error immediately instead
+    of silently running without org scoping.
+  - Scope hint: the OAuth scope input gains a `placeholder` (`openid profile email`) and a
+    short description line below it.
+  - Realm label: the realm line in both tabs now shows `realm_name · <uuid>` so the human label
+    is visible alongside the identifier.
+- **Token Preview endpoint returns 405 no more** — the RBAC debug token-preview route was
+  registered as POST-only while the JS client sends a GET with a `?user_id=` query param; every
+  button click returned 405 and the result panel never appeared. Route changed to GET; handler
+  extractor changed from `axum::Form` (body) to `axum::extract::Query` (query params) (HEA-1092).
+
+### Changed
+
+- **_hyperscript removed** — all admin-UI interactivity now expressed as vanilla-JS components via
+  `data-component` attributes backed by `components.js`. CSP unchanged (still `script-src 'self'`).
+  No operator action required (HEA-1049).
+
+- **CI required-check renamed: `sdk-conformance (docs/sdk-spec.md)` → `sdk-conformance (docs/specs/SDK.md)`.**
+  The SDK common-spec doc moved from `docs/sdk-spec.md` to `docs/specs/SDK.md` to co-locate
+  with the other canonical specs in `docs/specs/`. The CI job name in `.github/workflows/ci.yml`
+  and the entry in `scripts/ci-required-checks-migrate.sh` updated to match. **Operators must
+  re-run `scripts/ci-required-checks-migrate.sh --apply` (or update GitHub branch protection
+  manually) so the required-check name matches the new job.** All inbound SDK README,
+  CHANGELOG, and code-comment links updated.
+
+### Fixed
+
+- **Storage: memtable flushed before WAL rotation** — the storage engine now
+  flushes the active memtable to an SST before truncating the WAL on rotation.
+  Previously, up to `storage.memtable_flush_bytes` (default 4 MiB) of data
+  could be lost if the process crashed between a WAL rotation and the next
+  flush cycle. Triggered only when WAL size exceeds `storage.wal_max_bytes`
+  (default 64 MiB), so small/dev deployments were not at risk (HEA-1050).
+
+### Added
+
+- **Startup panel shows env and storage stats (HEA-1032)** — the info panel printed after bind
+  now includes a stats section: realm count, email transport, TLS status, OIDC issuer (when
+  configured), federation connector count (when > 0), cluster peer count (when in cluster mode),
+  WAL file size, SST file count, total data-directory size, and startup duration in ms. Stats are
+  derived from config (zero-cost) or a single `fs::read_dir` pass (cheap). No storage-engine
+  lock and no heap allocation after startup.
+
+- **ASCII HEARTH banner + consolidated startup info panel (HEA-1047)** — `hearth serve` now
+  prints a block-letter ASCII art banner before tracing init, followed by a single info panel
+  after the server binds showing API URL, Admin UI URL, first-run Setup URL (when a
+  `.setup_token` exists), and Mail inbox URL + password (when mailcatcher is active). Both are
+  suppressed when `log_format: json` so machine-readable log pipelines are unaffected.
+  The mid-init mailcatcher box that previously appeared during startup has been removed and
+  consolidated into the panel.
+
+- **Dev-mode pretty log formatter (HEA-1046)** — when `--dev` is active or stdout is a TTY,
+  the log output switches to a compact human-readable format: `HH:MM:SS` timestamps, ANSI-colored
+  level labels (TTY only), and abbreviated target paths (last two `::` segments, e.g.
+  `identity::engine` instead of `hearth::identity::engine`). JSON output (`log_format: json`) is
+  unaffected.
+
+### Fixed
+
+- **"Generate YAML" button on Admin → Migration History now works** — the per-orphan
+  disclosure button on `/ui/admin/migrations` carried an inline hyperscript expression
+  (`closest <div.p-4/>`) whose hyphenated class selector was parsed as a math subtraction,
+  causing the hyperscript parser to reject the whole handler and leaving the button inert.
+  The handler now targets the form panel by id (`#orphan-form-{loop.index}`), matching the
+  existing convention in `templates/ui/admin/organizations/_member_row.html`.
+
+- **Default log filter now suppresses noisy third-party crates (HEA-1045)** — globset, h2,
+  hyper, and tower are capped at `warn` in the default `EnvFilter`, eliminating regex-conversion
+  debug lines from normal `make dev` output. `RUST_LOG` still overrides everything when set.
+
+- **Migration history timestamps now human-readable (HEA-1037 / BUG-13)** — the Completed and
+  Detected columns in the Migration History admin page were displaying raw RFC 3339 strings
+  (e.g. `2024-03-15T14:30:00Z`). The view layer now formats them as `15 Mar 2024 14:30 UTC`.
+
+- **Org/user create forms now show the free-form attribute section (HEA-1031)** — when no
+  attribute definitions are configured for a realm, the create forms for organizations and users
+  showed nothing under the Attributes heading. The `{% else %}` branch rendering the dynamic
+  add/remove UI was missing. Also removed CSP-violating inline `<script>` blocks from all four
+  affected templates (create + edit for org and user); logic moved to the new
+  `/ui/static/admin/attr-rows.js` external file which is served from the same origin and
+  therefore permitted by `script-src 'self'`.
+
+- **Org and user attribute fields now submit correctly with a single attribute row (HEA-1031)**
+  — submitting a create or edit form for an organization or user with exactly one attribute
+  row produced a 400 error. Root cause: `serde_urlencoded` 0.7.x calls `visit_str` (not
+  `visit_seq`) when a repeated key appears once, but `Vec<String>` only accepts `visit_seq`.
+  A new `string_or_vec` deserializer handles both shapes; applied to `attr_keys`/`attr_vals`
+  in `CreateOrgForm`, `EditOrgForm`, `CreateUserForm`, and `EditUserForm`.
+
+- **Org and user attribute forms now submit correctly with two or more attribute rows (HEA-1031)**
+  — submitting a create or edit form with ≥2 attribute rows (i.e. in realms that have
+  schema-defined attribute definitions) produced a 400 "We couldn't read that form" error.
+  Root cause: serde's struct deserializer rejects duplicate field names before
+  `deserialize_with` is invoked, making the `string_or_vec` helper ineffective for the
+  multi-row case. All four form structs (`CreateUserForm`, `EditUserForm`, `CreateOrgForm`,
+  `EditOrgForm`) now implement `axum::extract::FromRequest` directly, parsing the raw body
+  with `form_urlencoded::parse` so all occurrences of `attr_key` and `attr_val` are
+  collected in order without hitting serde's duplicate-field guard.
+
+- **Optional enum/boolean attribute fields no longer produce validation errors when left blank (HEA-1031)**
+  — selecting no option on an optional enum or boolean select (e.g. "Is Contractor") submitted an
+  empty string that the server rejected as "not in allowed values". The four attribute form
+  handlers now strip pairs with empty values before validation; optional blank fields are treated
+  as absent. Required attribute fields left blank now correctly surface a "required attribute
+  missing" server error, and all four templates add the HTML `required` attribute to schema-
+  defined inputs so the browser blocks submission before the server is reached.
+
+- **Submit buttons now show a loading state immediately on form submission (HEA-1031)**
+  — clicking Save/Create multiple times while the server processed the request could trigger
+  duplicate submissions. `initFormSubmitProtection()` in `admin.js` disables the submit button
+  and shows "Saving…" as soon as the form passes browser validation, preventing double-submits.
+
+- **Organization slug field now enforces valid slug characters client-side (HEA-1037 / BUG-14)**
+  — the Create Organization form was missing an HTML `pattern` attribute on the slug input,
+  allowing browsers to accept strings that the server would reject. `pattern="[a-z0-9][a-z0-9-]*"`
+  now matches the server-side constraint (3–63 chars, lowercase alphanum + hyphens).
+
+- **Unlabeled action column headers in admin tables (HEA-1037 / BUG-15)** — axe-core flagged
+  empty `<th></th>` cells at the rightmost position of every list table as accessibility
+  violations. All 16 affected table headers now carry `aria-label="Actions"`.
+
+- **Audit hash chain integrity preserved across server restarts (HEA-1036)** — the in-memory
+  chain cursor was lost on restart, causing the first post-restart `append()` to incorrectly
+  treat the realm as empty and chain from the genesis hash. The engine already recovered
+  correctly via `get_last_hash()` (a storage scan), but the regression test was absent,
+  leaving the invariant unverifiable. Test added; integrity check now passes across restart.
+
+### Security
+
+- **JAR `response_mode` override now enforced (HEA-1008)** — `JarClaims` lacked a
+  `response_mode` field, so a JAR JWT could not override the outer query-string
+  `response_mode`.  A network attacker who stripped the outer parameter could downgrade
+  a JARM response to plain `query` mode.  `response_mode` is now deserialized from the
+  JAR and takes precedence over the outer value in both `authorize()` and
+  `push_authorization_request()` (RFC 9101 §4).  `StoredPushedAuthorizationRequest`
+  also persists the effective `response_mode` so the PAR→authorize path honours it.
+
+- **JAR JTI replay store now expires entries (HEA-1009)** — JAR (RFC 9101) JTI entries
+  were previously stored indefinitely, allowing unbounded storage growth for any
+  authenticated client. Each entry now carries an 8-byte expiry timestamp
+  (`claims.exp + 60 s clock-skew margin`) and is purged by the existing periodic
+  cleanup sweeper (`sweep_expired`). Replay prevention is unaffected — the read-path
+  check is value-format agnostic.
+
+- **FAPI 2.0 profile mutation now guarded against client_secret retention (HEA-1021)** —
+  `update_client` rejected the `profile → Fapi2` transition if the existing client already
+  held a `client_secret_hash`, closing a gap where a Standard confidential client could be
+  silently "upgraded" to FAPI 2.0 while retaining its symmetric secret in violation of
+  FAPI 2.0 §5.3.1.1. Additionally, `regenerate_client_secret` now returns `FapiViolation`
+  for any FAPI 2.0 client before reaching the `is_confidential` check, so no admin can
+  issue or refresh a secret on a FAPI 2.0 client regardless of stored state.
+
+- **DPoP sender-constraint now enforced for all clients in FAPI Baseline realms (HEA-1022)** —
+  The realm-level DPoP gate in `exchange_authorization_code` only checked for
+  `FapiProfile::Advanced`; a `Standard`-profile client in a FAPI Baseline realm could
+  exchange an authorization code without a DPoP proof, receiving a non-sender-constrained
+  access token. The gate now uses `fapi_profile.is_some()`, covering both Baseline and
+  Advanced — consistent with FAPI 2.0 Baseline §5.3.3.
+
+- **JAR `request` field now propagated through HTTP PAR endpoint (HEA-1019)** —
+  The HTTP PAR body deserialiser (`HttpParRequest`) was missing the `request`
+  field, so signed JAR JWTs sent by FAPI Advanced clients were silently dropped
+  before reaching the engine. This caused every HTTP PAR call to an Advanced
+  FAPI realm to return `invalid_request` (JAR required) regardless of whether
+  the client supplied one. The field is now forwarded to the domain layer;
+  FAPI Advanced clients can complete PAR using the HTTP endpoint.
+
+- **RFC 9126 §4 `client_id` mismatch check in PAR-backed authorize (HEA-1018)** —
+  The `POST /v1/authorize` and `GET /ui/oauth/authorize` handlers previously did
+  not verify that the `client_id` in the request matched the `client_id` stored
+  with the pushed authorization request. An attacker who obtained a `request_uri`
+  (e.g. via referrer leakage) could have submitted it under a different client
+  identity. Both handlers now return `invalid_request` when the `client_id`
+  parameter is present and does not match the stored PAR entry. Two new HTTP-layer
+  regression tests cover replay attacks (FAPI-B-09) and `client_id` mismatch
+  (FAPI-B-10).
+
+- **PAR `request_uri` now consumed in HTTP authorize handler (HEA-1017)** —
+  `GET /ui/oauth/authorize` and `POST /v1/authorize` previously ignored the
+  `request_uri` query/body parameter, causing FAPI 2.0 Baseline realms to
+  reject every browser-based authorization request (the handler always passed
+  `via_par = false`). Both handlers now call `consume_par` when `request_uri`
+  is present, expand the pre-validated stored parameters, and set `via_par =
+  true` — enabling FAPI 2.0 Baseline and Advanced clients to complete the
+  authorization code flow. The gRPC `OAuthService.Authorize` RPC gains the
+  same PAR expansion. `AuthorizationRequest` in the gRPC/REST proto gains an
+  optional `request_uri` field (field 10).
+
+- **FAPI 2.0 DPoP enforcement on `refresh_token` grant — realm-level gate added (HEA-1024)** —
+  The realm-level DPoP gate was only applied to `exchange_authorization_code`, not
+  `refresh_tokens`. A standard-profile client in a FAPI Baseline or Advanced realm could
+  refresh its access token without a DPoP proof, receiving an unbounded token with no
+  `cnf.jkt` claim. `rotate_grant_family` now checks both the per-client profile and the
+  realm's `fapi_profile`; refreshes without DPoP are rejected with `invalid_dpop_proof`
+  when either gate applies. The HTTP `refresh_token` response also now correctly sets
+  `token_type: DPoP` when a DPoP thumbprint is present (RFC 9449 §7). Regression test:
+  FAPI-B-11.
+
+- **FAPI 2.0 DPoP enforcement on `refresh_token` grant (HEA-1016)** — FAPI 2.0
+  clients must now supply a DPoP proof on every token endpoint call, including
+  `grant_type=refresh_token`. Requests without a DPoP header are rejected with
+  `invalid_dpop_proof`. The refreshed access token carries `cnf.jkt` bound to
+  the thumbprint extracted from the proof, preventing unbounded token issuance.
+  Standard clients are unaffected.
+
+- **JARM JWT token-type confusion fix (HEA-1004)** — JARM JWTs now carry
+  `typ: "oauth-authz-resp+jwt"` (IANA-registered media type per JARM §4.1 /
+  RFC 9101 §2) instead of the generic `"JWT"`. This gives explicit RFC 8725
+  §3.11 token-type discrimination: `validate_token` rejects JARM JWTs
+  as Bearer tokens at the `typ`-header check before any claim parsing.
+  JARM JWT lifetime capped at 300 s (FAPI 2.0 §5.3.2.2) and `iat` claim added.
+
+### Added
+
+- **JAR on direct `/authorize` (HEA-983)** — the `GET /authorize` endpoint now
+  accepts a `request=<signed-JWT>` parameter (RFC 9101). When present, Hearth
+  verifies the JWT signature against the client's registered JWKS (EdDSA, RS256,
+  PS256, ES256), enforces `iss == client_id`, `aud == realm issuer URL`, `exp`,
+  `nbf`, and per-realm JTI replay prevention, then uses the JWT claims to
+  override the outer query parameters before processing the authorization request.
+  Discovery now advertises `request_object_signing_alg_values_supported:
+  ["RS256", "PS256", "ES256", "EdDSA"]`.
+
+- **JARM — JWT Authorization Response Mode (HEA-979)** — clients may request
+  `response_mode=jwt`, `query.jwt`, or `fragment.jwt` to receive the
+  authorization response wrapped in a realm-signed EdDSA JWT containing
+  `{iss, aud, exp, code, state}`. The redirect carries `response=<jwt>` instead
+  of plain `code=...&state=...`, providing end-to-end integrity for the browser
+  redirect. Discovery now advertises `query.jwt`, `fragment.jwt`, and `jwt` in
+  `response_modes_supported` (OAuth 2.0 JARM).
+
+- **FAPI 2.0 Security Profile — per-client `ClientProfile::Fapi2` (HEA-980)** —
+  individual OAuth 2.0 clients may now be registered with `"profile": "fapi2"`.
+  Clients in this profile must use `private_key_jwt` (no `client_secret`), must
+  register a JWKS, must submit every authorization request via PAR (`via_par`),
+  must supply a DPoP proof at the token endpoint, and receive `s_hash` in JARM
+  responses when `state` is present. Standard clients in the same realm are
+  completely unaffected. See `docs/specs/OIDC.md §2.2` for the full normative
+  spec (HEA-980).
+
+- **FAPI 2.0 Security Profile enforcement (HEA-987)** — realms may now declare
+  `fapi_profile: baseline` or `fapi_profile: advanced` in their configuration.
+  **Baseline** mandates PAR (RFC 9126) and PKCE (S256) on every authorization
+  request. **Advanced** additionally requires JAR (RFC 9101) in the PAR body,
+  JARM (`authorization_signed_response_alg` on the client), and a registered
+  client JWKS (`private_key_jwt`). The OIDC discovery document now advertises
+  `fapi_profile` when a realm is in either mode. Clients in non-FAPI realms are
+  unaffected (HEA-987).
+
+- **Mandatory JARM per client (HEA-986)** — `OAuthClient` now carries an
+  `authorization_signed_response_alg` field (`EdDSA` only). When set via
+  `RegisterClientRequest` or `UpdateClientRequest`, every authorization response
+  for that client is automatically promoted to JARM regardless of the
+  `response_mode` in the request — a plain `query` or `fragment` request is
+  silently upgraded to `query.jwt`. Registration rejects unsupported algorithm
+  values at creation time. Discovery advertises
+  `authorization_signing_alg_values_supported: ["EdDSA"]` (HEA-986).
+
+- **`private_key_jwt` client authentication (HEA-984)** — confidential clients
+  can now authenticate to the token endpoint by presenting a self-signed EdDSA
+  JWT assertion (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`)
+  instead of a `client_secret`. Hearth verifies the assertion against the
+  client's registered Ed25519 public key, enforces `iss`/`sub == client_id`,
+  `aud == realm issuer URL`, `exp` in the future, and replay prevention via
+  per-realm JTI tracking. Discovery advertises `private_key_jwt` in
+  `token_endpoint_auth_methods_supported` (RFC 7523 §2.2 / OIDC Core §9).
+
+### Security
+
+- **JWT Bearer grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`) hardening (HEA-999)** —
+  several security gaps in the RFC 7523 JWT Bearer token endpoint are resolved:
+  - `jti` is now mandatory; assertions without a JWT ID are rejected (`invalid_grant`).
+  - `sub` must equal `client_id` (RFC 7523 §3 / OIDC Core §9); mismatches are rejected.
+  - Assertion lifetime is capped at 10 minutes; requests with `exp > now + 600 s` fail.
+  - JTI store migrated to exp-bounded values with `saturating_add` overflow safety; entries
+    auto-expire after their validity window so storage does not grow unboundedly.
+  - The JTI check-and-consume is now atomic per realm (per-realm mutex), eliminating the
+    TOCTOU race between `storage.get` and `storage.put`.
+
+- **Token endpoint client-auth error normalization (HEA-994)** — all client
+  authentication failures on the token endpoint now return HTTP 401
+  `"invalid_client"` regardless of whether the client ID is unknown or the
+  credential is wrong. Previously `InvalidClient` returned HTTP 400, creating
+  a distinguishable oracle for client ID enumeration (OAuth 2.0 Security BCP
+  §2.2 / RFC 6749 §5.2). gRPC `InvalidClientAssertion` also no longer leaks
+  the internal reason string to callers (HEA-992).
+
+- **`private_key_jwt` JTI replay-store purged on realm deletion (HEA-995)** —
+  `oauth:ca-jti:*` sentinels are now swept during cascade realm delete,
+  preventing unbounded storage growth when realms are recycled.
+
+- **Session limit enforcement hardening (HEA-982)** — five findings from the
+  HEA-981 security review are resolved:
+  - **SEC-1 (TOCTOU):** The per-user lock now covers the session write; the
+    count → evict → write sequence is fully atomic under one guard.
+  - **SEC-2 (Default policy):** `SessionLimitPolicy` default changed from
+    `EvictOldest` to `RejectNew`. Operators opt in to eviction via
+    `session_over_limit_policy = "evict_oldest"`. Prevents attacker-driven
+    silent eviction of victim sessions.
+  - **SEC-3 (Silent fallback):** An unrecognised `session_over_limit_policy`
+    string now returns a hard `RegistryError::InvalidRealmConfigField` at
+    config parse time instead of silently falling back to the default.
+  - **SEC-4 (gRPC information leak):** The gRPC error message for session
+    limit exceeded is now the generic string `"session limit reached"`;
+    active count and configured limit are no longer exposed to callers.
+  - **SEC-5 (Fail-open):** A `get_realm` storage error during session
+    creation now propagates to the caller and rejects the session, rather
+    than skipping limit enforcement and proceeding.
+
+- **Unknown `response_mode` rejected with `invalid_request` (HEA-1005)** —
+  two call sites in the OAuth authorization handler previously used `.ok()` to
+  silently discard `response_mode` parse failures, causing unrecognized values
+  (typos, unsupported modes such as `"form_post.jwt"`) to fall through to plain
+  `query` mode. A client requiring JARM would receive an unprotected plain-text
+  redirect with no error signal, defeating the integrity guarantee JARM provides.
+  Both the bypass path (direct code issue without consent page) and the consent
+  completion path now return an `invalid_request` redirect immediately when the
+  `response_mode` value cannot be parsed (FAPI 2.0 / RFC 9207 / JARM spec
+  compliance, Medium severity).
+
+### Added
+
+- **`private_key_jwt` client authentication (HEA-984)** — Confidential clients can now
+  authenticate to the token endpoint using RFC 7523 §2.2 `private_key_jwt` assertions instead
+  of a `client_secret`. Clients register an Ed25519 public key via `assertion_public_key`;
+  the AS verifies the self-signed JWT, enforces `iss == sub == client_id`, checks `aud` against
+  the realm issuer URL, validates `exp`, and prevents JTI replay. Both `authorization_code` and
+  `client_credentials` grant types are supported. Discovery advertises
+  `token_endpoint_auth_methods_supported: ["none", "client_secret_post", "private_key_jwt"]`.
+
+- **RFC 9207 authorization response `iss` — formal test coverage (HEA-985)** —
+  Added `tests/rfc9207_iss.rs` with 6 integration tests confirming that every
+  successful authorization response carries a non-empty `iss` parameter matching
+  the OIDC discovery document issuer, that the discovery document advertises
+  `authorization_response_iss_parameter_supported: true` (both global and per-realm),
+  and that `iss` is stable across repeated requests.
+
+- **Helm chart lint + template-test CI (HEA-974)** — `make helm-lint` runs `helm lint` against
+  `deploy/helm/hearth/`; `make helm-template` renders the chart with both `values.yaml` and the
+  new `values-prod.yaml` production profile and diffs the output against committed snapshots in
+  `deploy/helm/hearth/tests/`. A new `.github/workflows/helm.yml` CI job runs both gates on every
+  PR or push that touches `deploy/helm/**`. `deploy/README.md` now includes an end-to-end
+  production install walkthrough (`helm install hearth deploy/helm/hearth -f values-prod.yaml`).
+
+- **Proto governance gates (HEA-973)** — `buf` is now required and governed across the full
+  development workflow. `buf lint` and `buf format` run in the pre-commit hook whenever
+  `.proto` files are staged (format → lint → regenerate, atomic commit). A dedicated
+  `.github/workflows/proto.yml` CI job runs `buf lint`, `buf format --diff --exit-code`, and
+  `buf breaking --against main` on every proto-touching PR. New Makefile targets:
+  `make proto-format` (in-place reformat), `make proto-format-check` (CI drift gate).
+  `docs/specs/PROTO.md` documents RPC naming conventions, `google.api.http` bindings,
+  `json_name` usage, backward-compatibility rules, and pre-existing lint exceptions.
+
+- **OpenAPI 3.0 spec served from binary (HEA-972)** — `GET /openapi.json` and
+  `GET /openapi.yaml` now serve a merged OpenAPI 3.0 spec; `GET /docs` serves Swagger UI.
+  All 63 proto RPCs annotated with `google.api.http` bindings; `docs/api/openapi.json` is the
+  canonical committed artifact (82 paths, produced by `make openapi`).  A drift gate in
+  `tests/openapi.rs` fails the build if the committed spec diverges from the route table.
+  `docs/api/grpc-only.txt` enumerates the 21 RPCs that are intentionally gRPC-only (HEA-972).
+
+- **Concurrent session limits (HEA-971)** — `RealmConfig` gains `max_concurrent_sessions: Option<u32>`
+  and `session_over_limit_policy: SessionLimitPolicy` (`reject_new` | `evict_oldest`, default
+  `reject_new`). When the limit is reached, `RejectNew` returns HTTP 429 / gRPC
+  `RESOURCE_EXHAUSTED` with error code `session_limit_exceeded`; `EvictOldest` revokes the
+  oldest active session and allows the new one. Configurable globally under `[session]`
+  (`session_max_concurrent`, `session_over_limit_policy`) and per-realm in `hearth.yaml`.
+  Each enforcement writes a `session_limit_enforced` audit event (HEA-971).
+
+- **Kotlin SDK spec conformance (HEA-964)** — `Claims` gains four new accessors:
+  `inOrg(o)`, `tokenType()`, `organizationId()`, `orgGroups()`; new `RequiredActionError`
+  with `requiredActions: List<String>` and optional `redirectUri`; `requirePermission`
+  middleware rejects `token_type=required_action` tokens with `RequiredActionError` across
+  all modes (EMBEDDED/DECISION/INTROSPECTION) before any network call (spec §6 rule 6);
+  `AdminClient` gains `realmId` constructor param + `X-Realm-ID` header on every request,
+  full CRUD for OAuth clients (`/admin/clients`), roles (`/admin/roles`),
+  groups (`/admin/groups`), and org memberships (`/admin/orgs/{id}/members`) with
+  corresponding types (`Role`, `Group`, `OrgMember`, etc.) (HEA-964).
+
+- **Rust SDK spec conformance (HEA-965)** — `Claims` gains six new accessors:
+  `scope()`, `inGroup(g)`, `inOrg(o)`, `tokenType()`, `organizationId()`,
+  `orgGroups()`; new `RequiredActionError` variant with `required_actions: Vec<String>`
+  and optional `redirect_uri`; Tower middleware short-circuits `token_type=required_action`
+  tokens with HTTP 401 before any permission check (spec §6 rule 6); `AdminClient`
+  gains full CRUD for OAuth clients (`/admin/clients`), roles (`/admin/roles`),
+  groups (`/admin/groups`), and org memberships (`/admin/orgs/{id}/members`) with
+  corresponding request/response types.
+
+- **Go SDK spec conformance (HEA-961)** — `Claims` gains six new accessors:
+  `Scope()`, `InGroup(g)`, `InOrg(o)`, `TokenType()`, `OrganizationId()`,
+  `OrgGroups()`; new `RequiredActionError` with `RequiredActions []string` and
+  optional `RedirectURI`; middleware adds `OnRequiredAction` callback and rejects
+  `token_type=required_action` tokens with HTTP 401 (spec §6 rule 6); `AdminClient`
+  gains full CRUD for OAuth clients (`/admin/clients`), roles (`/admin/roles`),
+  groups (`/admin/groups`), and org memberships (`/admin/orgs/{id}/members`);
+  `ListUsers` and `ListRealms` now accept `ListOptions{Limit, Cursor}` for cursor
+  pagination.
+
+- **Python SDK spec conformance (HEA-962)** — `Claims` gains six new accessors:
+  `scope()`, `in_group(g)`, `in_org(o)`, `token_type()`, `organization_id()`,
+  `org_groups()`; new `RequiredActionError` with `required_actions: list[str]`
+  and optional `redirect_uri`; WSGI + ASGI middleware now return `401` (not `403`)
+  for `required_action` tokens (spec §6 rule 6); `AdminClient` gains full CRUD for
+  OAuth clients (`/admin/clients`), roles (`/admin/roles`), groups (`/admin/groups`),
+  and org memberships (`/admin/orgs/{id}/members`).
+
+- **TypeScript browser SDK spec §4/§5/§7 conformance (HEA-960)** — `Claims` class
+  gains six new accessors: `scope()`, `inGroup(g)`, `inOrg(o)`, `tokenType()`,
+  `organizationId()`, `orgGroups()`; new `RequiredActionError` type with
+  `requiredActions: string[]` and optional `redirectUri`;
+  `HearthApiClient.handleCallback()` exchanges the PKCE auth code and throws
+  `RequiredActionError` when the returned token has `token_type === "required_action"`
+  or the callback URL carries `required_action_redirect_uri`.
+
+- **Node SDK spec conformance (HEA-959)** — `@hearth/node` now fully implements the
+  SDK spec (§4 Claims, §5 Errors, §6 Middleware, §12 AdminClient):
+  - Claims: `audiences()` (was `audience()`), `expiry()` (was `expiresAt()`), plus new
+    `jwtID()`, `inGroup()`, `inOrg()`, `tokenType()`, `organizationId()`, `orgGroups()`.
+  - Errors: `JWKSFetchError` (renamed from `JwksFetchError`), `TokenNotYetValidError`,
+    `TokenInvalidError`, `TokenIssuerError`, `TokenAudienceError`, `RequiredActionError`
+    (with `requiredActions: string[]` and optional `redirectUri`).
+  - Middleware: detects `token_type === "required_action"` and responds 401 + throws
+    `RequiredActionError` (Express and Fastify adapters).
+  - `AdminClient` — new separate entry point; takes `(base_url, realm_id, access_token)`;
+    sends `X-Realm-ID` header on every request; full CRUD + list for users, realms,
+    clients, roles, groups, and org memberships.
+
+- **PHP SDK Phase 1** — core scaffold at `sdks/php/`: `composer.json` (PHP 8.1+,
+  PSR-4/PSR-12, `lcobucci/jwt` v5, Guzzle, PSR-7/15/17/18 interfaces),
+  10 exception classes, 4 type classes (`IntrospectionResult`, `TokenResponse`,
+  `UserInfoResponse`, `PageResponse<T>`), `Claims` (17 spec-compliant accessors),
+  `JwksClient` (OKP/Ed25519 with 5-rule JWKS caching contract), `TokenVerifier`
+  (libsodium Ed25519 + exp/iss/aud/iat validation), `IntrospectionClient` (RFC 7662),
+  `HearthClient` (OIDC discovery, code exchange, verifyToken, getUserInfo),
+  `AdminClient` (CRUD + paginated list for users, realms, clients, roles, groups,
+  org memberships), `Middleware/HearthMiddleware` (PSR-15 Bearer auth, required-action
+  detection). Includes PHPUnit 10 stub test suite and PHPStan level-8 config (HEA-954).
+
+### Security
+
+- **ReDoS fix in Node SDK error sanitizer** — replaced the backtracking regex in
+  `sdks/node/src/errors.ts` `sanitize()` with a linear O(n) charcode scan; a crafted
+  input like `eyJeyJeyJ…` (no dots) caused O(n²) regex backtracking in V8 on any
+  `HearthError` message containing JWT-shaped tokens (HEA-958, CodeQL CWE-1333).
+
+- **Patch example project vulnerabilities (Groups C + D)** — upgraded Go example
+  (`examples/go-gin`) via `go get -u ./...`: `gin` 1.10→1.12, `golang.org/x/crypto`
+  0.29→0.52, `net` 0.25→0.55, plus all transitive stdlib-linked deps. Upgraded
+  TypeScript example (`examples/typescript-nextjs`) to `next@15.5.18` (fixes
+  GHSA-9g9p-9gw9-jx7f DoS) with `postcss` override `^8.5.15` (fixes GHSA-qx2v-qp2m-jg93
+  XSS). Both examples now build with `npm audit` reporting 0 vulnerabilities. Resolves
+  60 Group C + D security alerts (HEA-953).
+
+- **Patch docs-site npm vulnerabilities (Group B)** — upgraded `@docusaurus/core` and
+  `@docusaurus/preset-classic` from 3.5.2 → 3.10.1; added `overrides` for
+  `serialize-javascript` (→ ^7.0.0, fixes GHSA-5c6j-r48x-rmvq HIGH XSS/code-injection),
+  `uuid` (→ ^11.0.0, fixes GHSA-w5hq-g745-h8pq buffer-bounds), and `webpackbar`
+  (existing). Resolves all 9 Group B security alerts; `npm audit` now reports 0
+  vulnerabilities in docs-site (HEA-952).
+
+- **Pin GitHub Actions to SHA hashes** — all `uses:` references in `release.yml`,
+  `docs-site.yml`, and `sdk-smoke.yml` are now pinned to immutable 40-char commit SHAs
+  (e.g. `actions/checkout@34e114...` `# v4`) to eliminate supply-chain risk from mutable
+  tags. Resolves 26 Dependabot/security alerts. `slsa-framework/slsa-github-generator` is
+  exempt as a reusable-workflow call; that alert is dismissed as a false positive (HEA-951).
+
+### Changed
+
+- **License** — re-licensed from AGPL-3.0-only (dual-license) to Apache-2.0. `LICENSE-COMMERCIAL`
+  and `NOTICE` dual-license overlay removed. `LICENSE` now contains the Apache 2.0 text (HEA-912).
+
+### Added
+
+- **Session-version (`sv`) revocation** — access tokens now carry an `sv` claim (monotonic
+  `u64`) when `session_version.enabled = true` in the realm config. Resource servers can
+  poll the delta feed to detect revoked sessions without waiting for token expiry. The `sv`
+  counter is bumped automatically on: logout, admin session revoke, password change, role
+  assignment/unassignment, and group membership add/remove. New endpoints:
+  - `GET /oauth/session-versions?realm=<id>&since=<seq>` — paginated delta feed; returns
+    `null` when `since` is behind the retention window (`delta_retention_seconds`, default
+    3600). Requires `hearth.sv_feed` or `hearth.admin` permission.
+  - `GET /oauth/session-versions/snapshot?realm=<id>` — gzip-compressed full snapshot of
+    current per-session minimum `sv` values.
+  - `POST /admin/sessions/{id}/sv-bump` — admin: force-bump a single session.
+  - `POST /admin/realms/{id}/sv-bump-all` — admin: force-bump every tracked session in the
+    realm (returns count).
+  The `hearth.sv_feed` permission is seeded in all new realms via `seed_realm`. When
+  `session_version.enabled = false` (default) the claim is omitted and all sv endpoints
+  return 404 (HEA-932).
+
+- **Session-version revocation operator guide (HEA-934)** — new how-to at
+  `docs/guides/session-version-revocation.md` covering: when to enable `sv`, poll interval
+  and stale threshold tradeoffs, bump trigger table, `sv-bump-all` use cases, fail-closed
+  behavior (`reject` vs `introspect` fallback), DPoP/MFA interaction notes, and delta feed
+  reference. `AUTHORIZATION.md` § 14 updated from roadmap placeholder to implemented status.
+
+- **Admin UI client form exposes `access_token_authorization` mode** — the application
+  create and edit forms in the Admin UI now include a Permission delivery mode picker
+  (`Embedded`, `Introspection`, `Decision`) bound to `OAuthClient.access_token_authorization`.
+  The client list and detail pages display the current mode. A warning banner appears when
+  `Decision` mode is selected on a public (SPA/mobile) client (HEA-931).
+
+- **Org-scoped group paths in OIDC token claims** — tokens issued in an organization
+  context now carry an `org_groups` claim (`Vec<String>`) alongside the existing flat
+  `groups` claim. Each entry uses the `/org-slug/group-name` path format, matching
+  Keycloak 26.6 conventions and enabling downstream services to determine org-membership
+  context in multi-org tenancy scenarios. The flat `groups` claim is preserved unchanged
+  for backward compatibility. Tokens without an org context do not emit `org_groups`
+  (HEA-909).
+
+- **JWT Bearer Token Grant (RFC 7523)** — clients can now authenticate using a self-signed
+  Ed25519 JWT assertion instead of a client secret. Register a 32-byte base64url-encoded
+  Ed25519 public key on any `OAuthClient` via `assertion_public_key`. The grant type
+  `urn:ietf:params:oauth:grant-type:jwt-bearer` is now listed in OIDC discovery
+  `grant_types_supported`. JTI replay prevention is enforced per-realm. Supported on both
+  `POST /token` and `POST /realms/{realm}/token` endpoints (HEA-908).
+
+- **Permission-delivery modes guide (HEA-929)** — new operator how-to at
+  `docs/guides/permission-delivery.md` covering `embedded`, `introspection`, and `decision`
+  modes: decision tree, latency tradeoff table, wire-shape examples, security rules per mode,
+  and Keycloak comparison table. `docs/specs/AUTHORIZATION.md` extended with normative
+  §15 (wire shapes, security rules, revocation caveat, latency targets, client config).
+  `docs/specs/ARCHITECTURE.md` §4.2.1 updated to classify `/introspect` and
+  `POST /oauth/authorize` as off-hot-path.
+
+- **Node SDK: `authorize()` + mode-aware middleware (HEA-924)** — the Node.js server SDK
+  at `sdks/node/` now exposes the three permission-delivery modes introduced in HEA-922:
+  - `HearthClient.authorize(token, permission, opts?)` — calls `POST /oauth/authorize` for
+    Decision-mode resource servers. Fail-closed: returns `{ allowed: false }` on any network
+    or server error. Pass `realm_id` in `HearthConfig` to include `X-Realm-ID`.
+  - `IntrospectionResult` extended with `mode`, `permissions`, `roles`, and `groups` fields
+    populated by Hearth for Introspection/Decision clients.
+  - `hearthMiddleware` / `hearthFastifyHook` accept `expectedMode` (`"embedded"` |
+    `"introspection"` | `"decision"`). MUST NOT silently fall back to a different mode when
+    `permissions` is absent from the JWT — absence of `permissions` never changes authorization
+    behavior unless `expectedMode` is changed. Fail-closed: network errors on `/introspect`
+    or `/oauth/authorize` result in 403.
+  - Mode-echo validation: in `introspection` mode, if the server echoes a different
+    `mode` than `expectedMode`, the request is rejected (fail-closed 403).
+  New exports: `AccessTokenAuthorizationMode`, `AuthorizationModeError`, `AuthorizeError`,
+  `AuthorizeClient`, `AuthorizeOptions`, `AuthorizeResult`.
+  New config fields: `realm_id`, `authorize_endpoint`.
+
+- **TypeScript SDK: `authorize()` + mode-aware middleware (HEA-923)** — the TypeScript SDK
+  at `sdks/typescript/` now exposes the three permission-delivery modes introduced in HEA-922:
+  - `HearthClient.authorize(token, permission, opts?)` — calls `POST /oauth/authorize` for
+    Decision-mode resource servers. Fail-closed: returns `false` on any network or server error.
+    Requires `realmId` in `HearthClientConfig`.
+  - `HearthClient.introspect(token)` — wraps RFC 7662 introspection with optional mode-echo
+    validation. Throws `AuthorizationModeMismatchError` when `expectedMode` is configured and
+    the server returns a different `mode` field.
+  - `requirePermission(permission, opts)` — framework-agnostic middleware factory. Takes an
+    explicit `mode` (`"embedded"` | `"introspection"` | `"decision"`); MUST NOT silently fall
+    back to a different mode when `permissions` is absent from the JWT. Returns a
+    `(token: string) => Promise<boolean>` checker.
+  New exports: `AccessTokenAuthorizationMode`, `AuthorizePermissionOptions`,
+  `AuthorizationModeMismatchError`, `requirePermission`, `PermissionChecker`,
+  `RequirePermissionOptions`.
+
+- **Three access-token authorization modes (HEA-922)** — `OAuthClient` now has an
+  `access_token_authorization` field with three modes:
+  - `embedded` (default) — RBAC claims (`permissions`, `roles`, `groups`) are embedded in
+    the JWT at issuance, enabling fully stateless validation by resource servers.
+  - `introspection` — JWT carries only identity claims; resource servers call
+    `POST /realms/{realm}/introspect` for live RBAC data. The introspection response
+    now includes `mode`, `permissions`, `roles`, and `groups` fields for
+    Introspection/Decision clients.
+  - `decision` — JWT carries only identity claims; resource servers call the new
+    `POST /oauth/authorize` endpoint per-request for a binary allow/deny answer.
+  The `POST /oauth/authorize` endpoint validates the bearer token (signature, expiry,
+  session liveness) and then resolves live RBAC to check the requested permission.
+  Fails closed on any validation error. Admin API and gRPC `OAuthService.Decide` rpc
+  updated accordingly. Existing clients without an explicit mode default to `embedded`
+  for full backward compatibility.
+
+- **DPoP (Demonstrating Proof-of-Possession — RFC 9449)** — token endpoints now
+  validate DPoP proof JWTs (`alg`, `jwk`, `htu`, `htm`, `iat`, `jti`). Access tokens
+  issued with a proof carry `cnf.jkt` (JWK thumbprint) binding. Replay prevention via
+  in-process JTI cache with TTL-based eviction. Stateless HMAC-SHA256 nonce generation
+  with 5-minute sliding windows. `DPoP-Nonce` header returned on every token response.
+  `dpop_signing_alg_values_supported: [ES256, EdDSA]` added to OIDC discovery (HEA-907).
+
+### Security
+
+- **Required-actions bypass via ROPC closed (HEA-905)** — `password_grant_token` now checks
+  `user.required_actions()` after credential verification and returns `RequiredActionsBlocking`
+  when any actions are pending. HTTP surface maps this to `400 {"error":"required_actions_pending",
+  "actions":[...]}`. Previously only the browser-path interstitial enforced this gate, allowing
+  clients using the direct password grant to obtain valid access tokens despite pending
+  `UPDATE_PASSWORD`, `VERIFY_EMAIL`, or `ENROLL_PHONE_OTP` requirements.
+
+- **GDPR Art.17: device fingerprint erasure cascade + admin API (HEA-875)** — `delete_user`
+  now cascades to all `dfp:user:{uid}:*` storage entries so right-to-erasure is complete.
+  New endpoint `DELETE /admin/users/{id}/device-fingerprints` (AC-11) lets operators satisfy
+  DSAR erasure requests without deleting the entire account; returns `{"erased": N}` and
+  emits a `DeviceFingerprintsErased` audit event. Also fixed: `derive_fingerprint_key` helper
+  was producing keys with the stale `dev:fp:` prefix instead of the correct `dfp:user:` prefix.
+
+- **CSP regression fix: inline styles eliminated (HEA-876)** — Two regressions from the
+  HEA-850 `style-src 'self'` hardening are resolved. Theme CSS is now served via external
+  `<link>` tags (`/ui/static/theme.css`, `/ui/static/realm-theme/{id}`) instead of inline
+  `<style>` blocks. HTMX's startup `insertAdjacentHTML` style injection for `.htmx-indicator`
+  is suppressed with `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>`;
+  indicator styles are declared in `app.css` instead.
+
+- **CSP hardened: `unsafe-eval` and `unsafe-inline` removed (HEA-850)** — Alpine.js
+  has been fully replaced by HTMX + Hyperscript across all ~40 admin templates.
+  Layout reactivity (sidebar toggle, realm nav tree, toast notifications, realm pill)
+  is now handled by vanilla JS classes (`SidebarManager`, `RealmNav`, `ToastManager`)
+  in `admin.js`. Template interactions use Hyperscript `_="..."` attributes, which are
+  eval-free. The CSP is now `script-src 'self'; style-src 'self'` with no unsafe
+  keywords. Resolves GAP-4 and GAP-5 from the original security audit.
+
+- **Pushed Authorization Request endpoint (RFC 9126, HEA-906)** — `POST /as/par` (global)
+  and `POST /{realm}/as/par` (realm-scoped) accept authorization parameters from clients and
+  return a `request_uri` with a 90-second TTL. The `request_uri` is single-use; replaying it
+  returns `invalid_request`. PKCE (`S256`) is required for public clients. The OIDC discovery
+  document now includes `pushed_authorization_request_endpoint`. Expired PAR entries are
+  removed by the periodic background sweeper (`CleanupStats.par_requests_deleted`).
+
+- **`make ci-local-full`** — full container reproduction of PR-blocking GHA
+  workflows via `nektos/act`; catches workflow-file errors and toolchain drift
+  that the host-side `ci-local-fast` cannot. Targets 10–15 min cold on a
+  developer's host. See `CONTRIBUTING.md` for install instructions and
+  known-skipped workflows ([HEA-891](/HEA/issues/HEA-891)).
+- **`make ci-local-fast`** — single target that runs the seven PR-blocking CI
+  checks on the developer's host in ~5 min cold: `test-quality`, `check`
+  (clippy + fmt + nextest), `css-check`, `proto-check`, `cargo deny`,
+  `sdk-conformance`, and `sdk-smoke-local` (HEA-890).
+- **`make sdk-smoke-local`** — builds hearth (debug), boots `--dev` on a random
+  free port, runs TypeScript/Next.js and Go/Gin SDK example smokes, then tears
+  down. Mirrors the `sdk-smoke` CI workflow without requiring Docker (HEA-890).
+
+### Fixed
+
+- **Admin sidebar chevron icon (HEA-886)** — the realm-tree expand chevron in
+  the admin sidebar was rendered as `<polyline points="M9 18 15 12 9 6">` —
+  path-language passed to a polyline element silently produced no output. The
+  helper now dispatches `d` for `<path>` and `points` for `<polyline>`/
+  `<polygon>` based on the requested SVG tag.
+
+### Security
+
+- **CSP `script-src 'self'`: 10 inline `<script>` blocks extracted (HEA-886)** —
+  Per-page inline scripts in admin templates (`groups/new`, `webhooks/new`,
+  `settings/editor`, `users/import`, `users/list`, `users/new`,
+  `organizations/new`, `organizations/edit`, `rbac/debug`) and the dev
+  mailcatcher (`dev/mail_detail`) now load from cacheable external files under
+  `/ui/static/admin/*.js` and `/ui/static/dev/mail-detail.js`. Template-rendered
+  values are passed via `data-*` attributes (e.g. `data-slug-touched`,
+  `data-test-ping-url`, `data-total-users`). The dev mail detail page also
+  loses its inline `onclick="showTab(...)"` and `onsubmit="return confirm(...)"`
+  handlers in favour of `addEventListener`-based dispatch. CSP stays
+  `script-src 'self'` (no nonce, no `'unsafe-inline'`).
+
+- **GDPR Art.17: device fingerprint erasure cascade + admin API (HEA-875)** — `delete_user`
+  now cascades to all `dfp:user:{uid}:*` storage entries so right-to-erasure is complete.
+  New endpoint `DELETE /admin/users/{id}/device-fingerprints` (AC-11) lets operators satisfy
+  DSAR erasure requests without deleting the entire account; returns `{"erased": N}` and
+  emits a `DeviceFingerprintsErased` audit event. Also fixed: `derive_fingerprint_key` helper
+  was producing keys with the stale `dev:fp:` prefix instead of the correct `dfp:user:` prefix.
+
+- **CSP regression fix: inline styles eliminated (HEA-876)** — Two regressions from the
+  HEA-850 `style-src 'self'` hardening are resolved. Theme CSS is now served via external
+  `<link>` tags (`/ui/static/theme.css`, `/ui/static/realm-theme/{id}`) instead of inline
+  `<style>` blocks. HTMX's startup `insertAdjacentHTML` style injection for `.htmx-indicator`
+  is suppressed with `<meta name="htmx-config" content='{"includeIndicatorStyles":false}'>`;
+  indicator styles are declared in `app.css` instead.
+
+- **CSP hardened: `unsafe-eval` and `unsafe-inline` removed (HEA-850)** — Alpine.js
+  has been fully replaced by HTMX + Hyperscript across all ~40 admin templates.
+  Layout reactivity (sidebar toggle, realm nav tree, toast notifications, realm pill)
+  is now handled by vanilla JS classes (`SidebarManager`, `RealmNav`, `ToastManager`)
+  in `admin.js`. Template interactions use Hyperscript `_="..."` attributes, which are
+  eval-free. The CSP is now `script-src 'self'; style-src 'self'` with no unsafe
+  keywords. Resolves GAP-4 and GAP-5 from the original security audit.
+
+### Added
+
+- **Device fingerprint proactive TTL sweeper (HEA-862)** — a background task now
+  runs every 6 hours (configurable via `identity.cleanup.dfp_sweeper_interval_secs`)
+  and evicts expired `dfp:user:*` storage entries across all realms. This satisfies
+  the GDPR 30-day retention window for users who stop logging in. Two new Prometheus
+  metrics are exported: `hearth_dfp_sweeper_evicted_total` (cumulative counter of
+  evicted entries) and `hearth_dfp_keys_active` (gauge, sampled per sweep). Errors
+  are logged at `WARN` level and do not crash the process.
+
+- **Device fingerprint HMAC secrets pipeline (HEA-858)** — operator guidance, Helm
+  wiring, and CI guard for the per-realm `adaptive_mfa.fingerprint_hmac_secret`
+  introduced by HEA-836. `hearth.example.yaml` now documents the
+  `${HEARTH_REALM_<NAME>_FINGERPRINT_HMAC_SECRET}` env-substitution pattern;
+  `deploy/helm/hearth/values.yaml` documents the matching `secret.env` naming
+  convention; `docs/guides/security-hardening.md` adds a "Device fingerprint HMAC
+  secret" section with generation, storage, and a step-by-step rotation runbook
+  (including blast-radius notes — rotation invalidates the per-realm device
+  recognition cache, briefly increasing step-up MFA challenges). A new CI guard
+  (`scripts/check-secret-hygiene.sh`, run from the `filter` job on every PR)
+  fails the build if any tracked file contains a `fingerprint_hmac_secret`
+  literal that is not an empty string, a `${VAR}` substitution, or a documented
+  test sentinel.
+
 - **SMS MFA realm config (HEA-855)** — `RealmConfig` gains two new optional fields:
   `sms_otp_expiry_seconds` (override default OTP lifetime per realm) and
   `sms_otp_max_attempts` (override maximum guess attempts per realm). Both are
@@ -29,6 +772,23 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   re-enroll on next login. Exposed as `POST /ui/admin/realms/{realm}/users/{id}/remove-phone`.
 
 ### Security
+
+- **Sensitive config fields wrapped in `SecretString` (HEA-869)** — `AdaptiveMfaConfig.fingerprint_hmac_secret`
+  and `BreachCheckConfig.hibp_api_key` were typed as `String` with `#[derive(Debug)]`, which exposed
+  their plaintext values in any `{:?}` output (tracing debug logs, assertion panics, `dbg!` macro).
+  Both fields are now `secrecy::SecretString`; `Debug` is implemented manually and emits `[REDACTED]`.
+  Call sites updated to call `.expose_secret()` only at the point of cryptographic use (CWE-532, High).
+
+- **Step-up MFA follow-up hardening (HEA-861)** — four deferred findings from the
+  HEA-836 SecurityAuditor re-review resolved: (1) duplicate `record_device_fingerprint`
+  call removed from the `Recognised` path (triple write on every recognised login);
+  (2) silent `let _ =` discard on `StepUpMfaTriggered` audit replaced with
+  `tracing::warn` so broken audit pipelines surface in logs; (3) `StepUpMfaCompleted`
+  audit event added to `step_up_mfa_grant_token` on success, enabling
+  trigger → resolution correlation; (4) `fingerprint_hmac_secret` minimum-length
+  guard tightened to ≥ 32 bytes (NIST SP 800-107 / SHA-256 output length) — secrets
+  shorter than 32 bytes with `adaptive_mfa.enabled=true` now fail-secure with a
+  configuration error.
 
 - **Step-up MFA rate-limit gaps closed (HEA-836)** — three additional findings
   from the SecurityAuditor re-review resolved: the pre-flight IP rate-limit check
@@ -815,7 +1575,7 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 ### Changed
 
 - **Authorization engine** — replaced Zanzibar/relationship-tuple engine with claims-based RBAC; permissions are now embedded in JWTs at issuance time rather than checked at request time.
-- **License** — promoted to AGPL-3.0-only (`LICENSE`) for OpenSSF machine-detectability; commercial licensing available (see `docs/vision/VISION.md`).
+- **License** — Apache-2.0 (`LICENSE`).
 - **Admin handler organization** — split `admin.rs` (~10 000 lines) into seven per-entity submodules for maintainability.
 - **OIDC `iss` claim source** — now reads from `config.oidc.issuer` (not `config.token.issuer`) so the ID token issuer always matches the discovery document (OIDC Core §2 compliance).
 - **Storage `put_batch` API** — all multi-record writes (user import, audit chain) go through a single WAL frame with CRC; a crash mid-batch leaves no partial state on replay.

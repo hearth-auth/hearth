@@ -1,0 +1,976 @@
+openapi: 3.0.3
+info:
+  title: Hearth API — supplement
+  description: |
+    Hand-written routes that have no proto service definition yet.
+    These are merged with docs/api/openapi.proto-derived.json by `make openapi`
+    to produce docs/api/openapi.json (the authoritative merged spec).
+    When HEA-969 adds proto definitions for these endpoints, remove them here.
+  version: 0.1.0
+
+paths:
+  # ── Health / liveness ────────────────────────────────────────────────────
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: health
+      tags: [Ops]
+      responses:
+        "200":
+          description: Server is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /healthz:
+    get:
+      summary: Liveness probe (alias)
+      operationId: healthz
+      tags: [Ops]
+      responses:
+        "200":
+          description: Server is alive
+
+  /readyz:
+    get:
+      summary: Readiness probe
+      operationId: readyz
+      tags: [Ops]
+      responses:
+        "200":
+          description: Server is ready to serve traffic
+        "503":
+          description: Server is not yet ready
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      operationId: metrics
+      tags: [Ops]
+      responses:
+        "200":
+          description: Prometheus exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  # ── OIDC Discovery ───────────────────────────────────────────────────────
+  /.well-known/openid-configuration:
+    get:
+      summary: OIDC Discovery document (global realm)
+      operationId: oidcDiscovery
+      tags: [OIDC]
+      responses:
+        "200":
+          description: OpenID Connect discovery metadata (RFC 8414)
+
+  /jwks:
+    get:
+      summary: JWKS — public signing keys (alias)
+      operationId: jwks
+      tags: [OIDC]
+      responses:
+        "200":
+          description: JSON Web Key Set
+
+  /certs:
+    get:
+      summary: JWKS — public signing keys (alias)
+      operationId: certs
+      tags: [OIDC]
+      responses:
+        "200":
+          description: JSON Web Key Set
+
+  /.well-known/jwks.json:
+    get:
+      summary: JWKS — public signing keys
+      operationId: jwksWellKnown
+      tags: [OIDC]
+      responses:
+        "200":
+          description: JSON Web Key Set
+
+  # ── User self-service ────────────────────────────────────────────────────
+  /users:
+    post:
+      summary: Register a new user (public)
+      operationId: createUser
+      tags: [Users]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: User created
+
+  /userinfo:
+    get:
+      summary: UserInfo endpoint (OIDC Core §5.3)
+      operationId: userinfo
+      tags: [OIDC]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User profile claims
+
+  /v1/me/permissions:
+    get:
+      summary: Resolve the authenticated user's effective permissions
+      operationId: mePermissions
+      tags: [Users]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Roles, groups, and permissions resolved fresh (not from JWT)
+
+  # ── OAuth self-service ───────────────────────────────────────────────────
+  /oauth/consents:
+    get:
+      summary: List the authenticated user's active consents
+      operationId: selfListConsents
+      tags: [OAuth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: List of active consents
+
+  /oauth/consents/{client_id}:
+    delete:
+      summary: Revoke a single consent
+      operationId: selfRevokeConsent
+      tags: [OAuth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: client_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Consent revoked
+
+  /oauth/authorize:
+    post:
+      summary: Per-request permission decision (HEA-922)
+      operationId: oauthDecide
+      tags: [OAuth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Decision result
+
+  /oauth/session-versions:
+    get:
+      summary: Session-version delta feed
+      operationId: oauthSvDeltaFeed
+      tags: [OAuth]
+      responses:
+        "200":
+          description: Delta feed of session-version changes
+
+  /oauth/session-versions/snapshot:
+    get:
+      summary: Session-version snapshot
+      operationId: oauthSvSnapshot
+      tags: [OAuth]
+      responses:
+        "200":
+          description: Full session-version snapshot
+
+  # ── Pushed authorization request ─────────────────────────────────────────
+  /as/par:
+    post:
+      summary: Pushed Authorization Request (RFC 9126)
+      operationId: pushedAuthorizationRequest
+      tags: [OAuth]
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: Request URI created
+
+  # ── Token endpoint (RFC 6749) ────────────────────────────────────────────
+  /end_session:
+    get:
+      summary: End-session / logout endpoint (OIDC RP-Initiated Logout)
+      operationId: endSessionGet
+      tags: [OIDC]
+      responses:
+        "302":
+          description: Redirect to post-logout URI
+    post:
+      summary: End-session / logout endpoint (OIDC RP-Initiated Logout)
+      operationId: endSessionPost
+      tags: [OIDC]
+      responses:
+        "302":
+          description: Redirect to post-logout URI
+
+  # ── Magic link ───────────────────────────────────────────────────────────
+  /v1/{realm}/auth/magic-link:
+    post:
+      summary: Request a magic-link (passwordless) email for a realm
+      operationId: magicLinkRequest
+      tags: [Auth]
+      parameters:
+        - name: realm
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "204":
+          description: Magic link email queued (or rate-limited silently)
+
+  # ── WebAuthn ─────────────────────────────────────────────────────────────
+  /webauthn/register/begin:
+    post:
+      summary: Begin WebAuthn credential registration
+      operationId: webauthnRegisterBegin
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: PublicKeyCredentialCreationOptions JSON
+
+  /webauthn/register/complete:
+    post:
+      summary: Complete WebAuthn credential registration
+      operationId: webauthnRegisterComplete
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Credential stored
+
+  /webauthn/auth/begin:
+    post:
+      summary: Begin WebAuthn authentication ceremony
+      operationId: webauthnAuthBegin
+      tags: [Auth]
+      responses:
+        "200":
+          description: PublicKeyCredentialRequestOptions JSON
+
+  /webauthn/auth/complete:
+    post:
+      summary: Complete WebAuthn authentication ceremony
+      operationId: webauthnAuthComplete
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Tokens issued
+
+  /webauthn/credentials:
+    get:
+      summary: List the authenticated user's WebAuthn credentials
+      operationId: webauthnListCredentials
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: List of registered credentials
+
+  /webauthn/credentials/{credential_id}:
+    delete:
+      summary: Delete a WebAuthn credential
+      operationId: webauthnDeleteCredential
+      tags: [Auth]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: credential_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Credential deleted
+
+  # ── Admin — bootstrap (dev only) ─────────────────────────────────────────
+  /admin/bootstrap:
+    post:
+      summary: Dev bootstrap (--dev mode only)
+      operationId: adminBootstrap
+      tags: [Admin]
+      responses:
+        "200":
+          description: Bootstrap result with admin token
+
+  # ── Admin — sessions ─────────────────────────────────────────────────────
+  /admin/sessions/{session_id}/sv-bump:
+    post:
+      summary: Bump session version (invalidates existing tokens)
+      operationId: adminSvBumpSession
+      tags: [Admin]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Session version bumped
+
+  # ── Admin — realm operations ──────────────────────────────────────────────
+  /admin/realms/{id}/rotate-signing-key:
+    post:
+      summary: Rotate the realm's Ed25519 signing key
+      operationId: adminRotateRealmSigningKey
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: New signing key published
+
+  /admin/realms/{id}/branding:
+    get:
+      summary: Get realm branding config
+      operationId: adminGetRealmBranding
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Branding config
+    patch:
+      summary: Patch realm branding config
+      operationId: adminPatchRealmBranding
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Updated branding config
+
+  /admin/realms/{id}/email-templates:
+    get:
+      summary: List email templates for a realm
+      operationId: adminListRealmEmailTemplates
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of email templates
+
+  /admin/realms/{id}/email-templates/{kind}:
+    get:
+      summary: Get an email template
+      operationId: adminGetRealmEmailTemplate
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Email template
+    put:
+      summary: Replace an email template
+      operationId: adminPutRealmEmailTemplate
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Updated template
+    delete:
+      summary: Delete an email template (revert to default)
+      operationId: adminDeleteRealmEmailTemplate
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Template deleted
+
+  /admin/realms/{realm_id}/config:
+    patch:
+      summary: Patch realm config
+      operationId: adminPatchRealmConfig
+      tags: [Admin]
+      parameters:
+        - name: realm_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Updated config
+
+  /admin/realms/{realm_id}/sv-bump-all:
+    post:
+      summary: Bump all session versions in a realm
+      operationId: adminSvBumpAll
+      tags: [Admin]
+      parameters:
+        - name: realm_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: All session versions bumped
+
+  /admin/realms/{realm_id}/users/{user_id}/required-actions:
+    patch:
+      summary: Patch required actions for a user
+      operationId: adminPatchUserRequiredActions
+      tags: [Admin]
+      parameters:
+        - name: realm_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Updated required actions
+
+  # ── Admin — users (extra operations) ─────────────────────────────────────
+  /admin/users/bulk:
+    post:
+      summary: Bulk create or disable users
+      operationId: adminBulkUsers
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Bulk operation result
+
+  /admin/users/import:
+    post:
+      summary: Import users (migration)
+      operationId: adminImportUsers
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Import result
+
+  /admin/users/export:
+    get:
+      summary: Export users
+      operationId: adminExportUsers
+      tags: [Admin]
+      responses:
+        "200":
+          description: Exported users
+
+  /admin/users/{id}/device-fingerprints:
+    delete:
+      summary: Delete all device fingerprints for a user
+      operationId: adminDeleteUserDeviceFingerprints
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Fingerprints deleted
+
+  # ── Admin — webhooks ──────────────────────────────────────────────────────
+  /admin/webhooks:
+    get:
+      summary: List webhooks
+      operationId: adminListWebhooks
+      tags: [Admin]
+      responses:
+        "200":
+          description: List of webhooks
+    post:
+      summary: Create a webhook
+      operationId: adminCreateWebhook
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: Webhook created
+
+  /admin/webhooks/{id}:
+    get:
+      summary: Get a webhook
+      operationId: adminGetWebhook
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Webhook
+    put:
+      summary: Replace a webhook
+      operationId: adminUpdateWebhook
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Updated webhook
+    delete:
+      summary: Delete a webhook
+      operationId: adminDeleteWebhook
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Webhook deleted
+
+  /admin/webhooks/{id}/deliveries:
+    get:
+      summary: List webhook deliveries
+      operationId: adminListWebhookDeliveries
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of delivery attempts
+
+  # ── Admin — backup / restore ──────────────────────────────────────────────
+  /admin/backup:
+    post:
+      summary: Create a backup
+      operationId: adminBackupCreate
+      tags: [Admin]
+      responses:
+        "200":
+          description: Backup archive
+
+  /admin/backup/restore:
+    post:
+      summary: Restore from a backup
+      operationId: adminBackupRestore
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Restore complete
+
+  # ── Admin — cluster ───────────────────────────────────────────────────────
+  /admin/cluster/bootstrap:
+    post:
+      summary: Bootstrap the Raft cluster
+      operationId: adminClusterBootstrap
+      tags: [Cluster]
+      responses:
+        "200":
+          description: Cluster bootstrapped
+
+  /admin/cluster/status:
+    get:
+      summary: Raft cluster status
+      operationId: adminClusterStatus
+      tags: [Cluster]
+      responses:
+        "200":
+          description: Cluster status
+
+  /admin/cluster/transfer-leadership:
+    post:
+      summary: Transfer Raft leadership
+      operationId: adminClusterTransferLeadership
+      tags: [Cluster]
+      responses:
+        "204":
+          description: Leadership transferred
+
+  # ── Admin — assignments (extended) ───────────────────────────────────────
+  /admin/assignments/{id}:
+    delete:
+      summary: Delete a role assignment
+      operationId: adminUnassignRole
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Assignment removed
+
+  # ── SCIM v2 ───────────────────────────────────────────────────────────────
+  /scim/v2/Users:
+    get:
+      summary: SCIM list users
+      operationId: scimListUsers
+      tags: [SCIM]
+      responses:
+        "200":
+          description: SCIM ListResponse
+    post:
+      summary: SCIM create user
+      operationId: scimCreateUser
+      tags: [SCIM]
+      responses:
+        "201":
+          description: SCIM User created
+
+  /scim/v2/Users/{id}:
+    get:
+      summary: SCIM get user
+      operationId: scimGetUser
+      tags: [SCIM]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SCIM User
+    put:
+      summary: SCIM replace user
+      operationId: scimReplaceUser
+      tags: [SCIM]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SCIM User replaced
+    patch:
+      summary: SCIM patch user
+      operationId: scimPatchUser
+      tags: [SCIM]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SCIM User patched
+    delete:
+      summary: SCIM delete user
+      operationId: scimDeleteUser
+      tags: [SCIM]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: SCIM User deleted
+
+  /scim/v2/Groups:
+    get:
+      summary: SCIM list groups
+      operationId: scimListGroups
+      tags: [SCIM]
+      responses:
+        "200":
+          description: SCIM ListResponse
+    post:
+      summary: SCIM create group
+      operationId: scimCreateGroup
+      tags: [SCIM]
+      responses:
+        "201":
+          description: SCIM Group created
+
+  /scim/v2/Groups/{id}:
+    get:
+      summary: SCIM get group
+      operationId: scimGetGroup
+      tags: [SCIM]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SCIM Group
+    put:
+      summary: SCIM replace group
+      operationId: scimReplaceGroup
+      tags: [SCIM]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SCIM Group replaced
+    patch:
+      summary: SCIM patch group
+      operationId: scimPatchGroup
+      tags: [SCIM]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: SCIM Group patched
+    delete:
+      summary: SCIM delete group
+      operationId: scimDeleteGroup
+      tags: [SCIM]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: SCIM Group deleted
+
+  /scim/v2/ServiceProviderConfig:
+    get:
+      summary: SCIM ServiceProviderConfig
+      operationId: scimServiceProviderConfig
+      tags: [SCIM]
+      responses:
+        "200":
+          description: SCIM configuration
+
+  /scim/v2/ResourceTypes:
+    get:
+      summary: SCIM ResourceTypes
+      operationId: scimResourceTypes
+      tags: [SCIM]
+      responses:
+        "200":
+          description: SCIM resource types
+
+  /scim/v2/Schemas:
+    get:
+      summary: SCIM Schemas
+      operationId: scimSchemas
+      tags: [SCIM]
+      responses:
+        "200":
+          description: SCIM schema definitions
+
+  # ── OpenAPI / docs ────────────────────────────────────────────────────────
+  /openapi.json:
+    get:
+      summary: OpenAPI 3.0 specification (JSON)
+      operationId: openapiJson
+      tags: [Docs]
+      responses:
+        "200":
+          description: Merged OpenAPI 3.0 specification
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /openapi.yaml:
+    get:
+      summary: OpenAPI 3.0 specification (YAML)
+      operationId: openapiYaml
+      tags: [Docs]
+      responses:
+        "200":
+          description: Merged OpenAPI 3.0 specification
+          content:
+            text/yaml:
+              schema:
+                type: string
+
+  /docs:
+    get:
+      summary: Swagger UI
+      operationId: swaggerUi
+      tags: [Docs]
+      responses:
+        "200":
+          description: Swagger UI HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

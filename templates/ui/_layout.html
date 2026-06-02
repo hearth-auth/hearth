@@ -9,8 +9,14 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="alternate icon" href="/favicon.ico">
   <link rel="stylesheet" href="/ui/static/app.css">
-  {% if theme_css.is_empty() %}<link rel="stylesheet" href="/ui/static/theme.css">{% else %}<style>{{ theme_css|safe }}</style>{% endif %}
-  {% if let Some(css) = realm_theme_css %}<style>{{ css|safe }}</style>{% endif %}
+  {% match inline_theme_css %}
+    {% when Some with (css) %}<style>{{ css }}</style>
+    {% when None %}<link rel="stylesheet" href="/ui/static/theme.css">
+  {% endmatch %}
+  {% if let Some(url) = realm_theme_url %}<link rel="stylesheet" href="{{ url }}">{% endif %}
+  {# Disable HTMX's inline <style> injection for .htmx-indicator (HEA-876);
+     indicator styles are declared in app.css instead. #}
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false}'>
   {% match csrf %}
     {% when Some with (token) %}
       <meta name="csrf" content="{{ token }}">
@@ -26,20 +32,14 @@
   </a>
   {% if chrome %}
   {# ── Authenticated layout: sidebar + main content ── #}
-  <div class="flex h-screen overflow-hidden bg-ht-surface-base" x-data="{ sidebarOpen: false }">
-    {# Mobile overlay backdrop #}
-    <div x-show="sidebarOpen" x-transition:enter="transition-opacity ease-out duration-200"
-         x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
-         x-transition:leave="transition-opacity ease-in duration-150"
-         x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0"
-         @click="sidebarOpen = false"
-         class="fixed inset-0 z-30 bg-black/50 lg:hidden"
-         x-cloak></div>
+  <div id="layout-root" class="flex h-screen overflow-hidden bg-ht-surface-base">
+    {# Mobile overlay backdrop — toggled by SidebarManager in admin.js #}
+    <div id="sidebar-overlay"
+         class="fixed inset-0 z-30 hidden bg-black/50 lg:hidden"></div>
 
     {# ── Sidebar ── #}
-    <aside :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
-           class="fixed inset-y-0 left-0 z-40 flex w-60 flex-col bg-ht-surface-raised border-r border-divider transition-transform duration-200 lg:translate-x-0 lg:static lg:z-auto"
-           @keydown.escape.window="sidebarOpen = false">
+    <aside id="sidebar"
+           class="fixed inset-y-0 left-0 z-40 flex w-60 -translate-x-full flex-col bg-ht-surface-raised border-r border-divider transition-transform duration-200 lg:translate-x-0 lg:static lg:z-auto">
       {# Brand #}
       <div class="flex h-14 items-center gap-2.5 px-5">
         <a href="/ui" class="flex items-center gap-2.5" aria-label="Home" data-crawl-skip>
@@ -104,47 +104,12 @@
           </ul>
         </div>
 
-        {# Per-realm tree: realms fetched from /ui/admin/api/nav/realms,
-           rendered client-side. The current realm is parsed from the URL
-           path (`/ui/admin/realms/{name}/...`) per UI_ROUTING.md R-1; that
-           realm is auto-expanded and highlighted. The active page
-           (server-rendered `active` value) is matched inside the expanded
-           subtree. #}
-        <div x-data="realmNav('{{ active }}')">
+        {# Per-realm tree: realms fetched by RealmNav in admin.js.
+           The current realm is parsed from the URL path per UI_ROUTING.md R-1;
+           that realm is auto-expanded and highlighted. #}
+        <div id="realm-nav" data-active-page="{{ active }}">
           <p class="mb-2 px-2 font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-ht-content-muted">Realms</p>
-          <template x-if="loading">
-            <p class="px-2 text-xs text-ht-content-muted">Loading…</p>
-          </template>
-          <template x-if="!loading && realms.length === 0">
-            <p class="px-2 text-xs text-ht-content-muted">No realms.</p>
-          </template>
-          <ul class="space-y-0.5" x-show="!loading && realms.length > 0">
-            <template x-for="r in realms" :key="r.name">
-              <li x-data="{ open: r.name === currentRealm }">
-                <button @click="open = !open"
-                        class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium hover-bg-divider"
-                        :class="r.name === currentRealm ? 'text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary'">
-                  <svg class="h-3 w-3 shrink-0 transition-transform" :class="open ? 'rotate-90' : ''" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-                  <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
-                  <span x-text="r.name" :class="r.archived ? 'text-ht-content-muted line-through' : ''"></span>
-                  <template x-if="r.archived">
-                    <span class="ml-auto rounded bg-steel-bg px-1.5 py-0.5 text-[10px] font-medium uppercase text-steel-fg">archived</span>
-                  </template>
-                </button>
-                <ul x-show="open" x-transition.duration.150ms class="ml-3 mt-0.5 space-y-0.5 border-l border-divider pl-2">
-                  <template x-for="link in subPages" :key="link.key">
-                    <li>
-                      <a :href="link.href.replace('{realm}', encodeURIComponent(r.name))"
-                         class="flex items-center gap-2 rounded-md px-2 py-1 text-sm"
-                         :class="(r.name === currentRealm && link.key === activePage) ? 'bg-divider text-ht-content-primary font-medium border-l-2 border-brand' : 'text-ht-content-secondary hover:text-ht-content-primary hover-bg-divider'"
-                         :aria-current="(r.name === currentRealm && link.key === activePage) ? 'page' : undefined"
-                         x-text="link.label"></a>
-                    </li>
-                  </template>
-                </ul>
-              </li>
-            </template>
-          </ul>
+          <p id="realm-nav-loading" class="px-2 text-xs text-ht-content-muted">Loading…</p>
         </div>
         {% endif %}
       </nav>
@@ -180,21 +145,19 @@
     <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {# Top bar #}
       <header class="flex h-14 shrink-0 items-center gap-4 border-b border-divider bg-ht-surface-base px-4">
-        {# Mobile hamburger #}
-        <button @click="sidebarOpen = !sidebarOpen" class="rounded-md p-1.5 text-ht-content-muted hover-bg-divider lg:hidden" aria-label="Toggle sidebar">
+        {# Mobile hamburger — wired by SidebarManager in admin.js #}
+        <button id="sidebar-toggle" class="rounded-md p-1.5 text-ht-content-muted hover-bg-divider lg:hidden" aria-label="Toggle sidebar">
           <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
         </button>
 
         {# Breadcrumb area #}
         <div class="flex min-w-0 flex-1 items-center gap-3 text-sm text-ht-content-muted">
           {% block breadcrumb %}{% endblock %}
-          {# Realm pill: visible on any /ui/admin/realms/{realm}/* route.
-             Alpine extracts the slug from the URL path — no server changes needed. #}
-          <div x-data="{ get realm() { const m = location.pathname.match(/\/ui\/admin\/realms\/([^/]+)/); return m ? decodeURIComponent(m[1]) : ''; } }"
-               x-show="realm" x-cloak
-               class="ml-auto flex shrink-0 items-center gap-1.5 rounded-full bg-ht-surface-elevated px-2.5 py-1 text-xs font-medium text-ht-content-secondary ring-1 ring-divider-subtle">
+          {# Realm pill: shown by initRealmPill() in admin.js when on a realm route #}
+          <div id="realm-pill"
+               class="ml-auto hidden flex shrink-0 items-center gap-1.5 rounded-full bg-ht-surface-elevated px-2.5 py-1 text-xs font-medium text-ht-content-secondary ring-1 ring-divider-subtle">
             <svg class="h-3 w-3 shrink-0 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
-            <span x-text="realm"></span>
+            <span id="realm-pill-text"></span>
           </div>
         </div>
       </header>
@@ -216,17 +179,8 @@
     </div>
   </div>
 
-  {# Toast container (populated by HTMX HX-Trigger events via Alpine) #}
-  <div id="toast-container" class="fixed right-4 top-4 z-50 flex flex-col gap-2"
-       x-data="{ toasts: [] }"
-       @show-toast.window="toasts.push({message: $event.detail.message, kind: $event.detail.kind, id: Date.now()}); setTimeout(() => toasts.shift(), 5000)">
-    <template x-for="toast in toasts" :key="toast.id">
-      <div class="animate-toast-in rounded px-4 py-3 text-sm font-medium shadow-md"
-           :class="toast.kind === 'error' ? 'bg-danger text-ht-content-primary' : 'bg-success text-ht-content-primary'">
-        <span x-text="toast.message"></span>
-      </div>
-    </template>
-  </div>
+  {# Toast container — populated by ToastManager in admin.js #}
+  <div id="toast-container" class="fixed right-4 top-4 z-50 flex flex-col gap-2"></div>
 
   {% else %}
   {# ── Public (unauthenticated) layout: centered card ── #}
@@ -245,37 +199,26 @@
   </div>
   {% endif %}
 
-  {# admin.js registers every Alpine.data() the templates use, so the
-     `alpine:init` listener picks them up before Alpine starts walking
-     the DOM. No SRI hash — admin.js is first-party, changes during
-     development, and is served by the same binary as this HTML, so
-     SRI provides no security benefit here (HEA-630). #}
+  {# components.js: vanilla-JS component library ([data-component] mounter).
+     Loaded with defer so it executes after HTML parsing, before DOMContentLoaded. #}
+  <script src="/ui/static/components.js" defer></script>
+  {# admin.js: layout managers (SidebarManager, RealmNav, ToastManager) +
+     form helpers (initRolesTab, initPasswordStrength, etc.). CSP-safe:
+     no inline scripts, no eval. First-party, same binary as this HTML. #}
   <script src="/ui/static/admin.js"></script>
-  {# passkey.js — eval-free vanilla JS for WebAuthn ceremonies (HEA-849).
-     Replaces the passkeyLogin/passkeyManager/passkeyRow Alpine components
-     so these pages no longer require 'unsafe-eval' in the CSP. #}
+  {# passkey.js — eval-free vanilla JS for WebAuthn ceremonies (HEA-849). #}
   <script src="/ui/static/passkey.js"></script>
-  <script src="/ui/static/alpine.min.js"
-          integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
-          defer></script>
   <script src="/ui/static/htmx.min.js"
           integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"></script>
-  {# Hyperscript 0.9.13 — eval-free declarative scripting (HEA-824).
-     Replaces Alpine.js patterns so CSP can drop 'unsafe-eval'. #}
-  <script src="/ui/static/hyperscript.min.js"
-          integrity="sha384-5yQ5JTatiFEgeiEB4mfkRI3oTGtaNpbJGdcciZ4IEYFpLGt8yDsGAd7tKiMwnX9b"></script>
-
   {# Keyboard-shortcut overlay (global). Shown by the `?` shortcut in
-     admin.js via custom events; ESC fires hearth-shortcut-help-close. #}
+     admin.js via custom events; ESC fires hearth-shortcut-help-close.
+     Event listeners wired in initKeyboardShortcutOverlay() in admin.js. #}
   <div id="keyboard-shortcut-overlay"
-       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden"
-       _="on 'hearth-shortcut-help' from window remove .hidden from me
-          on 'hearth-shortcut-help-close' from window add .hidden to me
-          on click(event) if event.target is me then add .hidden to me end">
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 hidden">
     <div class="w-full max-w-md rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle shadow-md">
       <div class="flex items-start justify-between">
         <h2 class="font-display text-lg font-medium text-ht-content-primary">Keyboard shortcuts</h2>
-        <button _="on click add .hidden to #keyboard-shortcut-overlay"
+        <button id="shortcut-help-close-btn"
                 class="text-ht-content-muted hover:text-ht-content-primary" aria-label="Close">
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>

@@ -281,7 +281,7 @@ impl ConfigSnapshot {
 }
 
 /// Minimal RFC 3339 formatter for a Unix timestamp (UTC, seconds precision).
-#[allow(clippy::many_single_char_names)]
+#[allow(clippy::many_single_char_names, clippy::similar_names)]
 pub(crate) fn format_unix_secs_as_rfc3339(secs: u64) -> String {
     // Days-since-epoch → calendar date via the Gregorian proleptic algorithm
     // (https://howardhinnant.github.io/date_algorithms.html). Single-letter

@@ -1,10 +1,5 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · My Account{% endblock %}
-{% block breadcrumb %}
-<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
-  <span class="font-medium text-ht-content-secondary">My Account</span>
-</nav>
-{% endblock %}
 {% block body %}
 <div class="mb-8">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">My Account</h1>
@@ -18,7 +13,7 @@
 
     {% match password_error %}
       {% when Some with (msg) %}
-        <div class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert">{{ msg }}</div>
+        <div id="password-change-error" class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert">{{ msg }}</div>
       {% when None %}
     {% endmatch %}
 
@@ -131,7 +126,7 @@
           <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Name / ID</th>
           <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Algorithm</th>
           <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Discoverable</th>
-          <th class="px-3 py-2"></th>
+          <th class="px-3 py-2" aria-label="Actions"></th>
         </tr>
       </thead>
       <tbody>
@@ -151,7 +146,7 @@
             {# Edit mode — hidden by default; passkey.js toggles via showEdit() #}
             <div class="passkey-edit-mode flex items-center gap-1.5" hidden>
               <input class="passkey-edit-input rounded border border-strong bg-ht-surface px-2 py-0.5 text-sm text-ht-content-primary focus:outline-none focus:ring-1 focus:ring-ht-brand-deep"
-                     style="width:14rem" />
+                     class="w-56" />
               <button type="button" class="passkey-save text-xs text-ht-content-brand hover:text-ht-brand-deep">Save</button>
               <button type="button" class="passkey-cancel text-xs text-ht-content-muted hover:text-ht-content-secondary">Cancel</button>
             </div>

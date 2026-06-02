@@ -28,7 +28,9 @@
         action="/ui/admin/realms/{{ realm_name }}/organizations/new"
         autocomplete="off"
         class="space-y-4"
-        x-data="{ name: '{{ form_name }}', slug: '{{ form_slug }}', slugTouched: {% if form_slug.is_empty() %}false{% else %}true{% endif %} }">
+        data-slug-sync
+        data-slug-max="63"
+        data-slug-touched="{% if form_slug.is_empty() %}false{% else %}true{% endif %}">
     {% match csrf %}
       {% when Some with (token) %}
         <input type="hidden" name="_csrf" value="{{ token }}">
@@ -43,8 +45,8 @@
              required
              autofocus
              maxlength="80"
-             x-model="name"
-             @input="if (!slugTouched) slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63)"
+             value="{{ form_name }}"
+             data-slug-name
              class="mt-1 input">
     </div>
 
@@ -56,8 +58,9 @@
              required
              minlength="3"
              maxlength="63"
-             x-model="slug"
-             @input="slugTouched = true"
+             pattern="[a-z0-9][a-z0-9-]*"
+             value="{{ form_slug }}"
+             data-slug-target
              class="mt-1 input font-mono">
       <p class="mt-1 text-xs text-ht-content-muted">3–63 characters, lowercase letters, digits, and hyphens. Auto-fills from the name until you edit it.</p>
     </div>
@@ -91,25 +94,31 @@
           {% endif %}
           <input type="hidden" name="attr_key" value="{{ def.key }}">
           {% if def.is_boolean() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value=""></option>
                 <option value="true">true</option>
                 <option value="false">false</option>
               </select>
             {% else if def.is_enum() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value=""></option>
                 {% for ev in def.enum_values %}
                   <option value="{{ ev }}">{{ ev }}</option>
                 {% endfor %}
               </select>
             {% else if def.is_number() %}
-              <input type="number" name="attr_val" class="mt-1 input">
+              <input type="number" name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
             {% else %}
-              <input type="text" name="attr_val" class="mt-1 input">
+              <input type="text" name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
           {% endif %}
         </div>
       {% endfor %}
+    </div>
+    {% else %}
+    <div data-attr-rows>
+      <h3 class="mb-2 text-sm font-semibold text-ht-content-secondary">Attributes</h3>
+      <div id="attr-rows" class="space-y-2"></div>
+      <button type="button" data-add-attr-row class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
     </div>
     {% endif %}
 
@@ -122,5 +131,7 @@
          class="text-sm font-medium text-ht-content-muted hover:text-ht-content-secondary">Cancel</a>
     </div>
   </form>
+  <script src="/ui/static/admin/slug-sync.js" defer></script>
 </div>
 {% endblock %}
+{% block scripts %}<script src="/ui/static/admin/attr-rows.js"></script>{% endblock %}

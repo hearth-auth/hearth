@@ -1,462 +1,1214 @@
-// Hearth admin UI behaviours.
+// Hearth admin UI behaviours — vanilla JS, CSP `script-src 'self'` safe.
 //
-// Every Alpine component used by `/ui/**` templates is registered here so
-// the Content-Security-Policy can ship `script-src 'self' 'unsafe-eval'`
-// without `'unsafe-inline'` (HEA-630). Server-rendered templates pass
-// dynamic values via `data-*` attributes or `<script type="application/json">`
-// tags, both of which are CSP-safe.
-//
-// Alpine v3 standard build still needs `'unsafe-eval'` for inline directive
-// expressions like `:class="..."` / `x-show="..."`. Removing that would
-// require porting to `@alpinejs/csp` and dropping every inline expression —
-// tracked as a follow-up.
+// All layout reactivity (sidebar, realm nav, toasts, realm pill) and
+// tab/form interactivity is handled by the vanilla JS classes below.
 
-document.addEventListener('alpine:init', () => {
-  // -----------------------------------------------------------------------
-  // Layout
-  // -----------------------------------------------------------------------
+// =========================================================================
+// SidebarManager — mobile sidebar toggle
+// =========================================================================
 
-  Alpine.data('withLoading', (message) => ({
-    submitting: false,
-    loadingMessage: message || 'Loading\u2026',
-    submit() { this.submitting = true; }
-  }));
+class SidebarManager {
+  constructor() {
+    this.sidebar = document.getElementById('sidebar');
+    this.overlay = document.getElementById('sidebar-overlay');
+    this.toggle  = document.getElementById('sidebar-toggle');
+    if (!this.sidebar) return;
 
-  // Sidebar realm tree. Fetches realms once at mount, derives the current
-  // realm from `/ui/admin/realms/{name}/...` per UI_ROUTING.md R-1, so the
-  // matching subtree auto-expands and highlights.
-  Alpine.data('realmNav', (activePage) => ({
-    loading: true,
-    realms: [],
-    currentRealm: '',
-    activePage: activePage || '',
-    subPages: [
-      { key: 'overview',           label: 'Overview',          href: '/ui/admin/realms/{realm}' },
-      { key: 'users',              label: 'Users',             href: '/ui/admin/realms/{realm}/users' },
-      { key: 'organizations',      label: 'Organizations',     href: '/ui/admin/realms/{realm}/organizations' },
-      { key: 'groups',             label: 'Groups',            href: '/ui/admin/realms/{realm}/groups' },
-      { key: 'applications',       label: 'Applications',      href: '/ui/admin/realms/{realm}/applications' },
+    this.toggle?.addEventListener('click', () => this.open());
+    this.overlay?.addEventListener('click', () => this.close());
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') this.close();
+    });
+  }
+
+  open() {
+    this.sidebar.classList.remove('-translate-x-full');
+    this.overlay?.classList.remove('hidden');
+  }
+
+  close() {
+    this.sidebar.classList.add('-translate-x-full');
+    this.overlay?.classList.add('hidden');
+  }
+}
+
+// =========================================================================
+// RealmNav — sidebar realm tree (fetches /ui/admin/api/nav/realms)
+// =========================================================================
+
+class RealmNav {
+  constructor(container) {
+    this.container  = container;
+    this.loading    = document.getElementById('realm-nav-loading');
+    if (!this.container) return;
+
+    this.activePage   = container.dataset.activePage || '';
+    const m           = window.location.pathname.match(/^\/ui\/admin\/realms\/([^\/?#]+)(?:\/|$)/);
+    try {
+      this.currentRealm = m ? decodeURIComponent(m[1]) : '';
+    } catch {
+      this.currentRealm = m ? m[1] : '';
+    }
+
+    this.subPages = [
+      { key: 'overview',           label: 'Overview',           href: '/ui/admin/realms/{realm}' },
+      { key: 'users',              label: 'Users',              href: '/ui/admin/realms/{realm}/users' },
+      { key: 'organizations',      label: 'Organizations',      href: '/ui/admin/realms/{realm}/organizations' },
+      { key: 'groups',             label: 'Groups',             href: '/ui/admin/realms/{realm}/groups' },
+      { key: 'applications',       label: 'Applications',       href: '/ui/admin/realms/{realm}/applications' },
       { key: 'identity_providers', label: 'Identity Providers', href: '/ui/admin/realms/{realm}/identity-providers' },
-      { key: 'sessions',           label: 'Sessions',          href: '/ui/admin/realms/{realm}/sessions' },
-      { key: 'webhooks',           label: 'Webhooks',          href: '/ui/admin/realms/{realm}/webhooks' },
-      { key: 'audit',              label: 'Audit Log',         href: '/ui/admin/realms/{realm}/audit' },
-      { key: 'rbac_permissions',   label: 'Permissions',       href: '/ui/admin/realms/{realm}/rbac/permissions' },
-      { key: 'rbac_roles',         label: 'Roles',             href: '/ui/admin/realms/{realm}/rbac/roles' },
-      { key: 'rbac_scopes',        label: 'Scopes',            href: '/ui/admin/realms/{realm}/rbac/scopes' },
-      { key: 'rbac_debug',         label: 'Permission Check',  href: '/ui/admin/realms/{realm}/rbac/debug' },
-    ],
-    deriveCurrentRealm() {
-      const m = window.location.pathname.match(/^\/ui\/admin\/realms\/([^\/?#]+)(?:\/|$)/);
-      return m ? decodeURIComponent(m[1]) : '';
-    },
-    // Capture `this` (the Alpine proxy) synchronously so Promise callbacks
-    // always mutate the reactive object — async init() can silently drop
-    // reactivity if the microtask runs before Alpine's proxy is fully wired.
-    init() {
-      const d = this;
-      d.currentRealm = d.deriveCurrentRealm();
-      fetch('/ui/admin/api/nav/realms', { credentials: 'same-origin' })
-        .then(res => res.ok ? res.json() : null)
-        .then(data => { if (data) d.realms = data.realms || []; })
-        .catch(() => { /* sidebar tree is non-essential */ })
-        .finally(() => { d.loading = false; });
-    },
-  }));
+      { key: 'sessions',           label: 'Sessions',           href: '/ui/admin/realms/{realm}/sessions' },
+      { key: 'webhooks',           label: 'Webhooks',           href: '/ui/admin/realms/{realm}/webhooks' },
+      { key: 'audit',              label: 'Audit Log',          href: '/ui/admin/realms/{realm}/audit' },
+      { key: 'rbac_permissions',   label: 'Permissions',        href: '/ui/admin/realms/{realm}/rbac/permissions' },
+      { key: 'rbac_roles',         label: 'Roles',              href: '/ui/admin/realms/{realm}/rbac/roles' },
+      { key: 'rbac_scopes',        label: 'Scopes',             href: '/ui/admin/realms/{realm}/rbac/scopes' },
+      { key: 'rbac_debug',         label: 'Permission Check',   href: '/ui/admin/realms/{realm}/rbac/debug' },
+    ];
+    this._load();
+  }
 
-  // -----------------------------------------------------------------------
-  // Password strength meter (reset_password)
-  // -----------------------------------------------------------------------
+  async _load() {
+    try {
+      const res = await fetch('/ui/admin/api/nav/realms', { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('nav fetch failed');
+      const data = await res.json();
+      this._render(data.realms || []);
+    } catch {
+      this.loading?.remove();
+      const p = document.createElement('p');
+      p.className = 'px-2 text-xs text-ht-content-muted';
+      p.textContent = 'Could not load realms.';
+      this.container.appendChild(p);
+    }
+  }
 
-  Alpine.data('passwordStrength', () => ({
-    password: '',
-    confirm: '',
-    matchError: false,
-    get strength() {
-      const pw = this.password;
-      if (!pw) return 0;
-      let s = 0;
-      if (pw.length >= 8) s++;
-      if (pw.length >= 12) s++;
-      if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) s++;
-      if (/[0-9]/.test(pw)) s++;
-      if (/[^A-Za-z0-9]/.test(pw)) s++;
-      return Math.min(4, s);
-    },
-    checkMatch() {
-      this.matchError = this.confirm.length > 0 && this.password !== this.confirm;
-    },
-    submit(form) {
-      this.checkMatch();
-      if (!this.matchError) form.submit();
-    },
-  }));
+  _render(realms) {
+    this.loading?.remove();
 
-  // -----------------------------------------------------------------------
-  // Admin → Users → Roles tab
-  // -----------------------------------------------------------------------
+    if (realms.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'px-2 text-xs text-ht-content-muted';
+      p.textContent = 'No realms.';
+      this.container.appendChild(p);
+      return;
+    }
 
-  Alpine.data('rolesTabData', () => ({
-    assignOpen: false,
-    scopeType: 'realm',
-    selectedOrg: '',
-    selectedRoleId: '',
-    rolePerms: {},
-    init() {
-      const data = readJsonScript(this.$el.dataset.bootstrapId);
-      if (data) {
-        this.selectedRoleId = data.selectedRoleId || '';
-        this.rolePerms = data.rolePerms || {};
+    const list = document.createElement('ul');
+    list.className = 'space-y-0.5';
+
+    for (const r of realms) {
+      const isCurrent = r.name === this.currentRealm;
+      const li = document.createElement('li');
+
+      // ── Expand button ──────────────────────────────────────────────
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium hover-bg-divider '
+        + (isCurrent ? 'text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary');
+
+      const chevronSvg = this._svg(
+        'M9 18 15 12 9 6', 'path',
+        'h-3 w-3 shrink-0 transition-transform' + (isCurrent ? ' rotate-90' : '')
+      );
+      const realmIcon = this._bldgSvg();
+      const nameSpan = document.createElement('span');
+      nameSpan.textContent = r.name;
+      if (r.archived) nameSpan.className = 'text-ht-content-muted line-through';
+
+      btn.append(chevronSvg, realmIcon, nameSpan);
+
+      if (r.archived) {
+        const badge = document.createElement('span');
+        badge.className = 'ml-auto rounded bg-steel-bg px-1.5 py-0.5 text-[10px] font-medium uppercase text-steel-fg';
+        badge.textContent = 'archived';
+        btn.appendChild(badge);
       }
-    },
-    get inheritedPerms() { return this.rolePerms[this.selectedRoleId] || []; },
-  }));
 
-  // -----------------------------------------------------------------------
-  // Admin → RBAC debug → Token preview tab
-  // -----------------------------------------------------------------------
+      // ── Sub-pages list ─────────────────────────────────────────────
+      const subUl = document.createElement('ul');
+      subUl.className = 'ml-3 mt-0.5 space-y-0.5 border-l border-divider pl-2';
+      if (!isCurrent) subUl.classList.add('hidden');
 
-  Alpine.data('tokenPreview', () => ({
-    userId: '',
-    result: null,
-    loading: false,
-    previewUrl: '',
-    init() {
-      this.previewUrl = this.$el.dataset.previewUrl || '';
-    },
-    async preview() {
-      if (!this.userId.trim()) return;
-      this.loading = true;
-      this.result = null;
-      try {
-        const csrf = document.querySelector('meta[name="csrf"]')?.getAttribute('content') || '';
-        const body = new URLSearchParams({ user_id: this.userId.trim() });
-        const resp = await fetch(this.previewUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'X-CSRF-Token': csrf,
-          },
-          body: body.toString(),
-        });
-        this.result = await resp.text();
-      } catch (e) {
-        this.result = JSON.stringify({ error: String(e) }, null, 2);
-      } finally {
-        this.loading = false;
+      for (const page of this.subPages) {
+        const isActive = isCurrent && page.key === this.activePage;
+        const subLi = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = page.href.replace('{realm}', encodeURIComponent(r.name));
+        a.className = 'flex items-center gap-2 rounded-md px-2 py-1 text-sm '
+          + (isActive
+            ? 'bg-divider text-ht-content-primary font-medium border-l-2 border-brand'
+            : 'text-ht-content-secondary hover:text-ht-content-primary hover-bg-divider');
+        if (isActive) a.setAttribute('aria-current', 'page');
+        a.textContent = page.label;
+        subLi.appendChild(a);
+        subUl.appendChild(subLi);
       }
-    },
-  }));
 
-  // -----------------------------------------------------------------------
-  // Admin → Users → Edit — dynamic custom-attributes rows
-  // -----------------------------------------------------------------------
+      btn.addEventListener('click', () => {
+        const open = !subUl.classList.contains('hidden');
+        subUl.classList.toggle('hidden', open);
+        chevronSvg.classList.toggle('rotate-90', !open);
+      });
 
-  Alpine.data('attrRows', () => ({
-    rows: [],
-    _nextId: 0,
-    addRow() {
-      this.rows.push({ id: this._nextId++ });
-    },
-    removeRow(el) {
-      const row = el.closest('.attr-row');
-      if (row) row.remove();
-    },
-  }));
+      li.append(btn, subUl);
+      list.appendChild(li);
+    }
+    this.container.appendChild(list);
+  }
 
-  // -----------------------------------------------------------------------
-  // Admin → Settings → Config Editor
-  // -----------------------------------------------------------------------
+  _svg(geometry, tag, cls) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2.5');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('class', cls);
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    el.setAttribute(tag === 'path' ? 'd' : 'points', geometry);
+    svg.appendChild(el);
+    return svg;
+  }
 
-  Alpine.data('configEditor', () => {
+  _bldgSvg() {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('class', 'h-4 w-4 shrink-0');
+    svg.innerHTML = '<rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>';
+    return svg;
+  }
+}
+
+// =========================================================================
+// ToastManager — listens for `show-toast` custom events
+// =========================================================================
+
+class ToastManager {
+  constructor() {
+    this.container = document.getElementById('toast-container');
+    window.addEventListener('show-toast', (e) => this.show(e.detail.message, e.detail.kind));
+  }
+
+  show(message, kind) {
+    if (!this.container) return;
+    const el = document.createElement('div');
+    el.className = 'animate-toast-in rounded px-4 py-3 text-sm font-medium shadow-md '
+      + (kind === 'error' ? 'bg-danger text-ht-content-primary' : 'bg-success text-ht-content-primary');
+    el.textContent = message;
+    this.container.appendChild(el);
+    setTimeout(() => el.remove(), 5000);
+  }
+}
+
+// =========================================================================
+// Realm pill — shows current realm slug in the top bar
+// =========================================================================
+
+function initRealmPill() {
+  const pill = document.getElementById('realm-pill');
+  const text = document.getElementById('realm-pill-text');
+  if (!pill || !text) return;
+  const m = window.location.pathname.match(/\/ui\/admin\/realms\/([^\/?#]+)/);
+  if (m) {
+    text.textContent = decodeURIComponent(m[1]);
+    pill.classList.remove('hidden');
+  }
+}
+
+// =========================================================================
+// Realm wizard — auto-slugs display name → realm name
+// =========================================================================
+
+function initRealmWizard() {
+  const form = document.querySelector('[data-realm-wizard]');
+  if (!form) return;
+
+  const displayInput = form.querySelector('#display_name');
+  const realmInput   = form.querySelector('#realm_name');
+  if (!displayInput || !realmInput) return;
+
+  let nameTouched = realmInput.dataset.realmNameTouched === 'true';
+
+  function toSlug(s) {
+    return s.toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 63);
+  }
+
+  displayInput.addEventListener('input', () => {
+    if (!nameTouched) {
+      realmInput.value = toSlug(displayInput.value);
+    }
+  });
+
+  realmInput.addEventListener('input', () => {
+    nameTouched = true;
+    realmInput.dataset.realmNameTouched = 'true';
+  });
+}
+
+// =========================================================================
+// Org list bulk actions — checkbox selection + confirm-delete
+// =========================================================================
+
+function initOrgListBulkActions() {
+  const form       = document.getElementById('org-bulk-form');
+  const allCheck   = document.getElementById('org-all-check');
+  const idsInput   = document.getElementById('org-ids-input');
+  const actionsEl  = document.getElementById('org-bulk-actions');
+  const countLabel = document.getElementById('org-count-label');
+  const deleteBtn  = document.getElementById('org-delete-btn');
+  if (!form || !allCheck) return;
+
+  const allLabel   = countLabel?.dataset.allLabel || '';
+  const normalCls  = deleteBtn?.dataset.normalClass || '';
+  const dangerCls  = deleteBtn?.dataset.dangerClass || '';
+  let confirmTimer = null;
+  let confirming   = false;
+
+  function getCheckedIds() {
+    return Array.from(form.querySelectorAll('.row-check:checked')).map(el => el.value);
+  }
+
+  function updateState() {
+    const ids    = getCheckedIds();
+    const total  = form.querySelectorAll('.row-check').length;
+    const count  = ids.length;
+
+    if (idsInput) idsInput.value = ids.join(',');
+    if (actionsEl) actionsEl.classList.toggle('hidden', count === 0);
+    if (countLabel) {
+      countLabel.textContent = count > 0 ? `${count} selected` : allLabel;
+    }
+    if (allCheck) {
+      allCheck.checked       = count > 0 && count === total;
+      allCheck.indeterminate = count > 0 && count < total;
+    }
+    // Reset confirm state if selection changes
+    if (confirming) resetDelete();
+  }
+
+  function resetDelete() {
+    confirming = false;
+    clearTimeout(confirmTimer);
+    if (deleteBtn) {
+      deleteBtn.className   = normalCls;
+      deleteBtn.textContent = 'Delete selected';
+    }
+  }
+
+  allCheck.addEventListener('change', () => {
+    form.querySelectorAll('.row-check').forEach(cb => { cb.checked = allCheck.checked; });
+    updateState();
+  });
+
+  form.addEventListener('change', (e) => {
+    if (e.target.classList.contains('row-check')) updateState();
+  });
+
+  deleteBtn?.addEventListener('click', () => {
+    if (confirming) {
+      form.submit();
+    } else {
+      confirming = true;
+      if (deleteBtn) {
+        deleteBtn.className   = dangerCls;
+        deleteBtn.textContent = 'Confirm? Click again';
+      }
+      confirmTimer = setTimeout(resetDelete, 4000);
+    }
+  });
+}
+
+// =========================================================================
+// Roles tab — permissions preview on role select change
+// =========================================================================
+
+function initRolesTab(container) {
+  if (!container) return;
+  const data = readJsonScript('roles-tab-bootstrap');
+  if (!data) return;
+
+  const rolePerms   = data.rolePerms  || {};
+  const select      = container.querySelector('#role-select');
+  const preview     = container.querySelector('#role-perms-preview');
+  const chips       = container.querySelector('#role-perms-chips');
+  const emptyMsg    = container.querySelector('#role-perms-empty');
+  if (!select || !preview || !chips || !emptyMsg) return;
+
+  function updatePreview(roleId) {
+    const perms = rolePerms[roleId] || [];
+    if (perms.length > 0) {
+      chips.innerHTML = perms.map(p =>
+        `<span class="inline-flex items-center rounded-full bg-violet-bg px-2 py-0.5 font-mono text-xs text-violet-fg">${escHtml(p)}</span>`
+      ).join('');
+      preview.classList.remove('hidden');
+      emptyMsg.classList.add('hidden');
+    } else if (roleId) {
+      preview.classList.add('hidden');
+      emptyMsg.classList.remove('hidden');
+    } else {
+      preview.classList.add('hidden');
+      emptyMsg.classList.add('hidden');
+    }
+  }
+
+  select.addEventListener('change', () => updatePreview(select.value));
+  // Show preview for the initially selected role
+  updatePreview(select.value);
+}
+
+// =========================================================================
+// Password strength meter (reset_password.html)
+// =========================================================================
+
+function initPasswordStrength() {
+  const form = document.querySelector('[data-password-strength]');
+  if (!form) return;
+
+  const pwInput    = form.querySelector('#password');
+  const cfmInput   = form.querySelector('#password_confirm');
+  const indicator  = form.querySelector('#password-strength-indicator');
+  const bar        = form.querySelector('#password-strength-bar');
+  const label      = form.querySelector('#password-strength-text');
+  const matchErr   = form.querySelector('#password-match-error');
+  const submitBtn  = form.querySelector('#pw-submit-btn');
+  if (!pwInput || !cfmInput) return;
+
+  const BAR_COLORS   = ['', 'bg-danger', 'bg-warning', 'bg-info', 'bg-success'];
+  const TEXT_COLORS  = ['text-ht-content-muted', 'text-danger-fg', 'text-warning-fg', 'text-info-fg', 'text-success-fg'];
+  const LABELS       = ['', 'Weak — too easy to guess', 'Fair — try adding numbers or symbols', 'Good', 'Strong'];
+
+  function calcStrength(pw) {
+    if (!pw) return 0;
+    let s = 0;
+    if (pw.length >= 8)  s++;
+    if (pw.length >= 12) s++;
+    if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) s++;
+    if (/[0-9]/.test(pw)) s++;
+    if (/[^A-Za-z0-9]/.test(pw)) s++;
+    return Math.min(4, s);
+  }
+
+  function checkMatch() {
+    const mismatch = cfmInput.value.length > 0 && pwInput.value !== cfmInput.value;
+    matchErr?.classList.toggle('hidden', !mismatch);
+    cfmInput.classList.toggle('border-danger', mismatch);
+    if (submitBtn) submitBtn.disabled = mismatch;
+  }
+
+  pwInput.addEventListener('input', () => {
+    const pw = pwInput.value;
+    if (indicator) indicator.classList.toggle('hidden', pw.length === 0);
+    if (pw.length > 0 && bar && label) {
+      const s = calcStrength(pw);
+      bar.style.width  = `${s * 25}%`;
+      bar.className    = 'h-full rounded-full transition-all duration-300 ease-out' + (s > 0 ? ` ${BAR_COLORS[s]}/[0.7]` : '');
+      label.className  = `mt-1 text-xs ${TEXT_COLORS[s]}`;
+      label.textContent = LABELS[s];
+    }
+    checkMatch();
+  });
+
+  cfmInput.addEventListener('input', checkMatch);
+
+  form.addEventListener('submit', (e) => {
+    if (pwInput.value !== cfmInput.value) {
+      e.preventDefault();
+      checkMatch();
+    }
+  });
+}
+
+// =========================================================================
+// Attr rows — dynamic key/value rows in user edit (users/edit.html)
+// =========================================================================
+
+function initAttrRows() {
+  document.addEventListener('click', (e) => {
+    // Add row
+    const addBtn = e.target.closest('[data-add-attr-row]');
+    if (addBtn) {
+      const container = addBtn.closest('[data-attr-rows]');
+      if (!container) return;
+      const rows = container.querySelector('#attr-rows');
+      if (!rows) return;
+      const row = document.createElement('div');
+      row.className = 'flex gap-2 items-center attr-row';
+      row.innerHTML = '<input type="text" name="attr_key" placeholder="key" class="input flex-1">'
+        + '<input type="text" name="attr_val" placeholder="value" class="input flex-1">'
+        + '<button type="button" data-remove-attr-row class="text-ht-content-muted hover:text-danger-fg text-sm px-2">\u2715</button>';
+      rows.appendChild(row);
+    }
+
+    // Remove row
+    const removeBtn = e.target.closest('[data-remove-attr-row]');
+    if (removeBtn) {
+      removeBtn.closest('.attr-row')?.remove();
+    }
+  });
+}
+
+// =========================================================================
+// Config Editor — standalone class (no Alpine, no unsafe-eval)
+// =========================================================================
+//
+// Mounted by editor.html via:
+//   new ConfigEditor().init(document.getElementById('config-editor-root'))
+//
+// DOM protocol:
+//   - Static sections use data-bind="dotted.path" / data-bind-bool="..."
+//   - Error messages use data-error-for="dotted.path"
+//   - Lists use data-list-container="path" + data-list-add="path"
+//   - Email transport subsections use data-show-transport="<value>"
+//   - Realm section is entirely rendered by _renderRealmSection()
+
+class ConfigEditor {
+  constructor() {
+    this.mode = 'visual';
+    this.activeSection = 'server';
+    this.activeRealm = null;
+    this.config = {};
+    this.originalConfig = '{}';
+    this.csrf = '';
+    this.saving = false;
+    this.errors = {};
+    this.validating = false;
+    this.validationPassed = false;
+    this.showingExport = false;
+    this.exportCopied = false;
+    this.exportYaml = '';
+    this.exportLoading = false;
+    this._root = null;
+  }
+
+  init(root) {
+    if (!root) return;
+    this._root = root;
+
+    const fallback = document.getElementById('ssr-editor-fallback');
+    if (fallback) fallback.classList.add('hidden');
+    root.classList.remove('hidden');
+
     const initialConfig = readJsonScript('config-editor-data') || {};
+    this.config = JSON.parse(JSON.stringify(initialConfig));
+    this.originalConfig = JSON.stringify(initialConfig);
+    this.csrf = document.querySelector('meta[name="csrf"]')?.content || '';
+
     const params = new URLSearchParams(window.location.search);
     const linkedSection = params.get('section');
     const linkedRealm = params.get('realm_key');
-    let initialSection = 'server';
-    let initialRealm = null;
     if (linkedSection === 'realms' && linkedRealm) {
-      initialRealm = linkedRealm;
+      this.activeRealm = linkedRealm;
+      this.activeSection = 'realm';
     } else if (linkedSection) {
-      initialSection = linkedSection;
+      this.activeSection = linkedSection;
     }
 
-    return {
-      mode: 'visual',
-      activeSection: initialSection,
-      activeRealm: initialRealm,
-      config: JSON.parse(JSON.stringify(initialConfig)),
-      originalConfig: JSON.stringify(initialConfig),
-      csrf: document.querySelector('meta[name="csrf"]')?.content || '',
-      saving: false,
-      errors: {},
-      validating: false,
-      validationPassed: false,
-      showingExport: false,
-      exportCopied: false,
-      exportYaml: '',
-      exportLoading: false,
+    this._buildSidebar();
+    this._switchSection(this.activeSection, this.activeRealm);
+    this._attachListeners();
+    this._setMode('visual');
+  }
 
-      sections: [
-        { key: 'server', label: 'Server' },
-        { key: 'storage', label: 'Storage' },
-        { key: 'observability', label: 'Logging' },
-        { key: 'operational', label: 'Limits' },
-        { key: 'branding', label: 'Branding' },
-        { key: 'email', label: 'Email' },
-        { key: 'oidc', label: 'OIDC' },
-        { key: 'token', label: 'Tokens' },
-        { key: 'auth', label: 'Auth' },
-        { key: 'onboarding', label: 'Onboarding' },
-      ],
+  _sectionDefs() {
+    return [
+      { key: 'server',       label: 'Server' },
+      { key: 'storage',      label: 'Storage' },
+      { key: 'observability', label: 'Logging' },
+      { key: 'operational',  label: 'Limits' },
+      { key: 'branding',     label: 'Branding' },
+      { key: 'email',        label: 'Email' },
+      { key: 'oidc',         label: 'OIDC' },
+      { key: 'token',        label: 'Tokens' },
+      { key: 'auth',         label: 'Auth' },
+      { key: 'onboarding',   label: 'Onboarding' },
+    ];
+  }
 
-      get realmKeys() { return Object.keys(this.config.realms || {}); },
+  _buildSidebar() {
+    const nav = document.getElementById('config-sections-nav');
+    if (!nav) return;
+    const readOnly = this._root.dataset.readOnly === 'true';
+    const ACTIVE = 'bg-divider text-ht-content-primary';
+    const INACTIVE = 'text-ht-content-secondary hover-bg-divider hover:text-ht-content-primary';
 
-      ensure(path) {
-        const parts = path.split('.');
-        let obj = this.config;
-        for (const p of parts) {
-          if (obj[p] === undefined || obj[p] === null) obj[p] = {};
-          obj = obj[p];
-        }
-      },
+    nav.innerHTML = '<p class="mb-2 font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-ht-content-muted">Sections</p>';
 
-      getVal(path, fallback) {
-        const parts = path.split('.');
-        if (parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) return fallback;
-        let obj = this.config;
-        for (const p of parts) {
-          if (obj === undefined || obj === null) return fallback;
-          obj = obj[p];
-        }
-        return obj !== undefined && obj !== null ? obj : fallback;
-      },
+    for (const sec of this._sectionDefs()) {
+      const isActive = sec.key === this.activeSection && !this.activeRealm;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.navSection = sec.key;
+      btn.className = `block w-full rounded-md px-2 py-1.5 text-left text-sm font-medium transition-colors ${isActive ? ACTIVE : INACTIVE}`;
+      btn.textContent = sec.label;
+      btn.addEventListener('click', () => {
+        this.activeSection = sec.key;
+        this.activeRealm = null;
+        this._updateSidebarActive();
+        this._switchSection(sec.key, null);
+      });
+      nav.appendChild(btn);
+    }
 
-      setVal(path, value) {
-        const parts = path.split('.');
-        if (parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) return;
-        let obj = this.config;
-        for (let i = 0; i < parts.length - 1; i++) {
-          if (obj[parts[i]] === undefined || obj[parts[i]] === null) obj[parts[i]] = {};
-          obj = obj[parts[i]];
-        }
-        const key = parts[parts.length - 1];
-        if (key === '__proto__' || key === 'constructor' || key === 'prototype') return;
-        if (value === '' || value === null) {
-          delete obj[key];
-        } else if (typeof value === 'string' && !value.includes('${')) {
-          if (/^-?\d+$/.test(value)) obj[key] = parseInt(value, 10);
-          else if (/^-?\d+\.\d+$/.test(value)) obj[key] = parseFloat(value);
-          else obj[key] = value;
-        } else {
-          obj[key] = value;
-        }
-        delete this.errors[path];
-      },
+    const realmDiv = document.createElement('div');
+    realmDiv.className = 'mt-4 border-t border-divider-subtle pt-3';
+    realmDiv.innerHTML = '<p class="mb-2 font-mono text-[11px] font-medium uppercase tracking-[0.12em] text-ht-content-muted">Realms</p>';
 
-      addRealm() {
-        const name = prompt('Realm slug (lowercase, hyphens):');
-        if (!name) return;
-        if (!this.config.realms) this.config.realms = {};
-        this.config.realms[name] = {};
+    const realmBtns = document.createElement('div');
+    realmBtns.id = 'realm-nav-buttons';
+    realmDiv.appendChild(realmBtns);
+
+    if (!readOnly) {
+      const addBtn = document.createElement('button');
+      addBtn.type = 'button';
+      addBtn.id = 'add-realm-btn';
+      addBtn.className = 'mt-1 flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-xs font-medium text-teal-fg hover-bg-divider';
+      addBtn.innerHTML = '<svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Add Realm';
+      addBtn.addEventListener('click', () => this._handleAddRealm());
+      realmDiv.appendChild(addBtn);
+    }
+    nav.appendChild(realmDiv);
+    this._refreshRealmNav();
+  }
+
+  _refreshRealmNav() {
+    const container = document.getElementById('realm-nav-buttons');
+    if (!container) return;
+    const ACTIVE = 'bg-divider text-ht-content-primary';
+    const INACTIVE = 'text-ht-content-secondary hover-bg-divider hover:text-ht-content-primary';
+    container.innerHTML = '';
+    for (const rk of Object.keys(this.config.realms || {})) {
+      const isActive = this.activeSection === 'realm' && this.activeRealm === rk;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.navRealm = rk;
+      btn.className = `block w-full rounded-md px-2 py-1.5 text-left text-sm font-medium transition-colors ${isActive ? ACTIVE : INACTIVE}`;
+      btn.textContent = rk;
+      btn.addEventListener('click', () => {
         this.activeSection = 'realm';
-        this.activeRealm = name;
-      },
-      removeRealm(key) {
-        if (!confirm('Remove realm "' + key + '" from config?')) return;
-        delete this.config.realms[key];
-        if (this.activeRealm === key) {
-          this.activeRealm = null;
-          this.activeSection = 'server';
-        }
-      },
+        this.activeRealm = rk;
+        this._updateSidebarActive();
+        this._switchSection('realm', rk);
+      });
+      container.appendChild(btn);
+    }
+  }
 
-      addApp(realm) {
-        const key = prompt('Application key (lowercase, hyphens):');
-        if (!key) return;
-        if (!this.config.realms[realm].applications) this.config.realms[realm].applications = {};
-        this.config.realms[realm].applications[key] = { name: key, redirect_uris: [], grant_types: ['authorization_code'] };
-      },
-      removeApp(realm, key) {
-        if (confirm('Remove application "' + key + '"?')) {
-          delete this.config.realms[realm].applications[key];
-        }
-      },
+  _updateSidebarActive() {
+    const ACTIVE = 'bg-divider text-ht-content-primary';
+    const INACTIVE = 'text-ht-content-secondary hover-bg-divider hover:text-ht-content-primary';
+    document.querySelectorAll('[data-nav-section]').forEach(btn => {
+      const isActive = btn.dataset.navSection === this.activeSection && !this.activeRealm;
+      btn.className = `block w-full rounded-md px-2 py-1.5 text-left text-sm font-medium transition-colors ${isActive ? ACTIVE : INACTIVE}`;
+    });
+    document.querySelectorAll('[data-nav-realm]').forEach(btn => {
+      const isActive = this.activeSection === 'realm' && btn.dataset.navRealm === this.activeRealm;
+      btn.className = `block w-full rounded-md px-2 py-1.5 text-left text-sm font-medium transition-colors ${isActive ? ACTIVE : INACTIVE}`;
+    });
+  }
 
-      addOrg(realm) {
-        const slug = prompt('Organization slug (lowercase, hyphens):');
-        if (!slug) return;
-        if (!this.config.realms[realm].organizations) this.config.realms[realm].organizations = {};
-        this.config.realms[realm].organizations[slug] = { name: slug };
-      },
-      removeOrg(realm, key) {
-        if (confirm('Remove organization "' + key + '"?')) {
-          delete this.config.realms[realm].organizations[key];
-        }
-      },
+  _switchSection(section, realm) {
+    document.querySelectorAll('[data-section]').forEach(el => el.classList.add('hidden'));
+    if (section === 'realm' && realm) {
+      const el = document.getElementById('realm-section');
+      if (el) { el.classList.remove('hidden'); this._renderRealmSection(realm); }
+    } else {
+      const el = document.querySelector(`[data-section="${CSS.escape(section)}"]`);
+      if (el) { el.classList.remove('hidden'); this._populateSection(el); }
+    }
+  }
 
-      getList(path) { return this.getVal(path, []) || []; },
-      addListItem(path) {
-        this.ensure(path.split('.').slice(0, -1).join('.'));
+  _populateSection(container) {
+    container.querySelectorAll('[data-bind]').forEach(el => {
+      const val = this.getVal(el.dataset.bind, '');
+      el.value = val !== undefined && val !== null ? String(val) : '';
+    });
+    container.querySelectorAll('[data-bind-bool]').forEach(sel => {
+      const val = this.getVal(sel.dataset.bindBool, null);
+      sel.value = val === true ? 'true' : val === false ? 'false' : '';
+    });
+    container.querySelectorAll('[data-error-for]').forEach(el => {
+      const msg = this.errors[el.dataset.errorFor];
+      if (msg) { el.textContent = msg; el.classList.remove('hidden'); }
+      else { el.textContent = ''; el.classList.add('hidden'); }
+    });
+    container.querySelectorAll('[data-list-container]').forEach(el => {
+      this._renderList(el, el.dataset.listContainer);
+    });
+    const transportSel = container.querySelector('[data-bind="email.transport"]');
+    if (transportSel) this._updateTransportVisibility(transportSel.value, container);
+  }
+
+  _updateTransportVisibility(transport, container) {
+    container.querySelectorAll('[data-show-transport]').forEach(el => {
+      el.classList.toggle('hidden', el.dataset.showTransport !== transport);
+    });
+  }
+
+  _renderList(container, path) {
+    const items = this.getList(path);
+    container.innerHTML = '';
+    items.forEach((item, idx) => {
+      const row = document.createElement('div');
+      row.className = 'flex gap-2 mt-1';
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.value = String(item);
+      inp.className = 'input flex-1 font-mono text-sm';
+      inp.addEventListener('input', () => {
         const parts = path.split('.');
         let obj = this.config;
         for (let i = 0; i < parts.length - 1; i++) obj = obj[parts[i]];
-        const key = parts[parts.length - 1];
-        if (!Array.isArray(obj[key])) obj[key] = [];
-        obj[key].push('');
-      },
-      removeListItem(path, idx) {
-        const parts = path.split('.');
-        let obj = this.config;
-        for (let i = 0; i < parts.length - 1; i++) obj = obj[parts[i]];
-        obj[parts[parts.length - 1]].splice(idx, 1);
-      },
+        obj[parts[parts.length - 1]][idx] = inp.value;
+      });
+      const rmBtn = document.createElement('button');
+      rmBtn.type = 'button';
+      rmBtn.className = 'shrink-0 text-ht-content-muted hover:text-danger-fg';
+      rmBtn.setAttribute('aria-label', 'Remove');
+      rmBtn.innerHTML = '<svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      rmBtn.addEventListener('click', () => { this.removeListItem(path, idx); this._renderList(container, path); });
+      row.appendChild(inp);
+      row.appendChild(rmBtn);
+      container.appendChild(row);
+    });
+  }
 
-      fieldClass(path) {
-        if (this.errors[path]) {
-          return 'mt-1.5 block w-full rounded-sm border border-danger/60 ring-1 ring-danger/30 bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-danger/60 focus:outline-none focus:ring-1 focus:ring-danger/30';
-        }
-        return 'mt-1.5 block w-full rounded-sm border border-divider bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-brand-ember focus:outline-none focus:ring-1 focus:ring-brand-ember';
-      },
+  _renderRealmSection(realm) {
+    const section = document.getElementById('realm-section');
+    if (!section) return;
+    const rc = (this.config.realms || {})[realm] || {};
+    const readOnly = this._root.dataset.readOnly === 'true';
+    const apps = Object.entries(rc.applications || {});
+    const orgs = Object.entries(rc.organizations || {});
 
-      hasInlineError(key) {
-        try { return !!document.querySelector("p[x-show*=\"errors['" + key + "']\"]"); }
-        catch { return false; }
-      },
+    const appRows = apps.length === 0
+      ? '<p class="text-xs text-ht-content-muted">No applications defined.</p>'
+      : apps.map(([key, app]) => `
+          <div class="flex items-center gap-2 rounded-sm border border-divider-subtle bg-ht-surface-base px-3 py-2">
+            <span class="flex-1 font-mono text-xs text-ht-content-secondary">${escHtml(key)}</span>
+            <span class="text-xs text-ht-content-muted">${escHtml(app.name || key)}</span>
+            ${readOnly ? '' : `<button type="button" data-remove-app="${escAttr(realm)}" data-app-key="${escAttr(key)}" class="text-ht-content-muted hover:text-danger-fg" aria-label="Remove"><svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`}
+          </div>`).join('');
 
-      async validate() {
-        this.validating = true;
-        this.validationPassed = false;
-        try {
-          const resp = await fetch('/ui/admin/settings/editor/visual/validate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
-            body: JSON.stringify(this.config),
-          });
-          const result = await resp.json();
-          const newErrors = {};
-          if (!result.valid && result.errors) {
-            for (const e of result.errors) newErrors[e.field] = e.reason;
+    const orgRows = orgs.length === 0
+      ? '<p class="text-xs text-ht-content-muted">No organizations defined.</p>'
+      : orgs.map(([key, org]) => `
+          <div class="flex items-center gap-2 rounded-sm border border-divider-subtle bg-ht-surface-base px-3 py-2">
+            <span class="flex-1 font-mono text-xs text-ht-content-secondary">${escHtml(key)}</span>
+            <span class="text-xs text-ht-content-muted">${escHtml(org.name || key)}</span>
+            ${readOnly ? '' : `<button type="button" data-remove-org="${escAttr(realm)}" data-org-key="${escAttr(key)}" class="text-ht-content-muted hover:text-danger-fg" aria-label="Remove"><svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`}
+          </div>`).join('');
+
+    section.innerHTML = `
+      <div class="mb-4 flex items-center justify-between">
+        <h2 class="font-mono text-base font-semibold text-ht-content-primary">${escHtml(realm)}</h2>
+        ${readOnly ? '' : `<button type="button" id="remove-realm-btn" data-realm="${escAttr(realm)}" class="text-xs text-danger-fg hover:underline">Remove realm</button>`}
+      </div>
+      <div class="space-y-5">
+        <div>
+          <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-ht-content-muted">Web / UI</h3>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label class="block text-sm font-medium text-ht-content-secondary">Theme</label>
+              <select data-bind="realms.${escAttr(realm)}.web.theme" class="mt-1.5 input">
+                <option value="">— inherit global —</option>
+                <option value="ember">Ember (dark default)</option>
+                <option value="ocean">Ocean</option>
+                <option value="midnight">Midnight</option>
+                <option value="forest">Forest</option>
+                <option value="cloud">Cloud (light)</option>
+                <option value="slate">Slate (light)</option>
+              </select>
+            </div>
+          </div>
+          <div class="mt-3">
+            <label class="block text-sm font-medium text-ht-content-secondary">Custom CSS</label>
+            <textarea data-bind="realms.${escAttr(realm)}.web.custom_css" rows="4"
+              class="mt-1.5 input font-mono text-xs" placeholder="/* custom CSS */"></textarea>
+          </div>
+        </div>
+        <div>
+          <h3 class="mb-3 text-xs font-medium uppercase tracking-wider text-ht-content-muted">Auth Policy</h3>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label class="block text-sm font-medium text-ht-content-secondary">Registration mode</label>
+              <select data-bind="realms.${escAttr(realm)}.auth.registration.mode" class="mt-1.5 input">
+                <option value="">— inherit global —</option>
+                <option value="disabled">Disabled</option>
+                <option value="open">Open</option>
+                <option value="invite_only">Invite Only</option>
+                <option value="domain_restricted">Domain Restricted</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-ht-content-secondary">MFA required</label>
+              <select data-bind-bool="realms.${escAttr(realm)}.auth.mfa_required" class="mt-1.5 input">
+                <option value="">— inherit global —</option>
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="mb-2 flex items-center justify-between">
+            <h3 class="text-xs font-medium uppercase tracking-wider text-ht-content-muted">Applications</h3>
+            ${readOnly ? '' : `<button type="button" data-add-app="${escAttr(realm)}" class="text-xs text-teal-fg hover:underline">+ Add</button>`}
+          </div>
+          <div class="space-y-1">${appRows}</div>
+        </div>
+        <div>
+          <div class="mb-2 flex items-center justify-between">
+            <h3 class="text-xs font-medium uppercase tracking-wider text-ht-content-muted">Organizations</h3>
+            ${readOnly ? '' : `<button type="button" data-add-org="${escAttr(realm)}" class="text-xs text-teal-fg hover:underline">+ Add</button>`}
+          </div>
+          <div class="space-y-1">${orgRows}</div>
+        </div>
+      </div>`;
+
+    this._attachRealmListeners(section, realm);
+    this._populateSection(section);
+  }
+
+  _attachRealmListeners(section, realm) {
+    section.querySelector('#remove-realm-btn')?.addEventListener('click', (e) => {
+      this.removeRealm(e.currentTarget.dataset.realm);
+    });
+    section.querySelectorAll('[data-add-app]').forEach(btn => {
+      btn.addEventListener('click', () => { this.addApp(btn.dataset.addApp); this._renderRealmSection(btn.dataset.addApp); });
+    });
+    section.querySelectorAll('[data-remove-app]').forEach(btn => {
+      btn.addEventListener('click', () => { this.removeApp(btn.dataset.removeApp, btn.dataset.appKey); this._renderRealmSection(btn.dataset.removeApp); });
+    });
+    section.querySelectorAll('[data-add-org]').forEach(btn => {
+      btn.addEventListener('click', () => { this.addOrg(btn.dataset.addOrg); this._renderRealmSection(btn.dataset.addOrg); });
+    });
+    section.querySelectorAll('[data-remove-org]').forEach(btn => {
+      btn.addEventListener('click', () => { this.removeOrg(btn.dataset.removeOrg, btn.dataset.orgKey); this._renderRealmSection(btn.dataset.removeOrg); });
+    });
+  }
+
+  _attachListeners() {
+    const readOnly = this._root.dataset.readOnly === 'true';
+
+    document.getElementById('mode-visual-btn')?.addEventListener('click', () => this._setMode('visual'));
+    document.getElementById('mode-raw-btn')?.addEventListener('click', () => this._setMode('raw'));
+    document.getElementById('export-btn')?.addEventListener('click', () => this.openExport());
+    document.getElementById('export-close-btn')?.addEventListener('click', () => this._closeExport());
+    document.getElementById('export-close-btn-footer')?.addEventListener('click', () => this._closeExport());
+    document.getElementById('export-copy-btn')?.addEventListener('click', () => this.copyExport());
+    document.getElementById('export-modal')?.addEventListener('click', e => {
+      if (e.target === document.getElementById('export-modal')) this._closeExport();
+    });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && this.showingExport) this._closeExport();
+    });
+
+    if (!readOnly) {
+      document.getElementById('reset-btn')?.addEventListener('click', () => this.reset());
+      document.getElementById('preview-btn')?.addEventListener('click', () => this.preview());
+      document.getElementById('validate-btn')?.addEventListener('click', () => this.validate());
+      document.getElementById('apply-btn')?.addEventListener('click', () => this.apply());
+      document.getElementById('raw-preview-top')?.addEventListener('click', () => this.preview());
+      document.getElementById('raw-preview-bottom')?.addEventListener('click', () => this.preview());
+    }
+
+    // Delegated change/input for data-bind and data-bind-bool
+    const visualPanel = document.getElementById('visual-editor-panel');
+    if (visualPanel) {
+      const handleBind = e => {
+        const el = e.target;
+        if (el.dataset.bind) {
+          this.setVal(el.dataset.bind, el.value);
+          if (el.dataset.bind === 'email.transport') {
+            const sec = el.closest('[data-section="email"]');
+            if (sec) this._updateTransportVisibility(el.value, sec);
           }
-          this.errors = newErrors;
-          if (result.valid) {
-            this.validationPassed = true;
-            setTimeout(() => { this.validationPassed = false; }, 4000);
-          }
-          return result.valid;
-        } finally {
-          this.validating = false;
         }
-      },
-
-      reset() {
-        this.config = JSON.parse(this.originalConfig);
-        this.errors = {};
-        const diff = document.getElementById('diff-output');
-        if (diff) diff.innerHTML = '';
-      },
-
-      resetRawEditor() {
-        const ta = document.getElementById('yaml-editor');
-        if (ta) ta.value = ta.defaultValue;
-        const diff = document.getElementById('diff-output');
-        if (diff) diff.innerHTML = '';
-      },
-
-      async preview() {
-        if (this.mode === 'visual') {
-          const resp = await fetch('/ui/admin/settings/editor/visual/preview', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
-            body: JSON.stringify(this.config),
-          });
-          document.getElementById('diff-output').innerHTML = await resp.text();
-        } else {
-          htmx.ajax('POST', '/ui/admin/settings/editor/preview',
-            { target: '#diff-output', values: { yaml: document.getElementById('yaml-editor').value } });
+        if (el.dataset.bindBool) {
+          const v = el.value === 'true' ? true : el.value === 'false' ? false : null;
+          this.setVal(el.dataset.bindBool, v);
         }
-      },
+      };
+      visualPanel.addEventListener('change', handleBind);
+      visualPanel.addEventListener('input', handleBind);
 
-      syncMirror() {
-        const ta = document.getElementById('yaml-editor');
-        const mirror = document.getElementById('yaml-mirror');
-        if (!ta || !mirror) return;
-        mirror.innerHTML = highlightYaml(ta.value + '\n');
-      },
-      syncMirrorScroll() {
-        const ta = document.getElementById('yaml-editor');
-        const mirror = document.getElementById('yaml-mirror');
-        if (!ta || !mirror) return;
-        mirror.scrollTop = ta.scrollTop;
-        mirror.scrollLeft = ta.scrollLeft;
-      },
+      // list-add delegation
+      visualPanel.addEventListener('click', e => {
+        const btn = e.target.closest('[data-list-add]');
+        if (!btn) return;
+        const path = btn.dataset.listAdd;
+        this.addListItem(path);
+        const cont = visualPanel.querySelector(`[data-list-container="${CSS.escape(path)}"]`);
+        if (cont) this._renderList(cont, path);
+      });
+    }
 
-      async openExport() {
-        this.showingExport = true;
-        this.exportLoading = true;
-        this.exportCopied = false;
-        try {
-          if (this.mode === 'raw') {
-            this.exportYaml = document.getElementById('yaml-editor').value;
-          } else {
-            const resp = await fetch('/ui/admin/settings/editor/visual/export', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
-              body: JSON.stringify(this.config),
-            });
-            if (!resp.ok) throw new Error(await resp.text());
-            this.exportYaml = await resp.text();
-          }
-          this.$nextTick(() => renderExportHighlight(this.exportYaml));
-        } catch (e) {
-          this.exportYaml = '# Error generating YAML:\n# ' + e.message;
-          this.$nextTick(() => renderExportHighlight(this.exportYaml));
-        } finally {
-          this.exportLoading = false;
-        }
-      },
+    // Raw editor sync
+    const yamlEditor = document.getElementById('yaml-editor');
+    const yamlMirror = document.getElementById('yaml-mirror');
+    if (yamlEditor && yamlMirror) {
+      yamlEditor.addEventListener('input', () => { yamlMirror.innerHTML = highlightYaml(yamlEditor.value + '\n'); });
+      yamlEditor.addEventListener('scroll', () => { yamlMirror.scrollTop = yamlEditor.scrollTop; yamlMirror.scrollLeft = yamlEditor.scrollLeft; });
+    }
+  }
 
-      copyExport() {
-        navigator.clipboard.writeText(this.exportYaml).then(() => {
-          this.exportCopied = true;
-          setTimeout(() => { this.exportCopied = false; }, 2000);
+  _setMode(mode) {
+    this.mode = mode;
+    const visual = document.getElementById('visual-editor-panel');
+    const raw = document.getElementById('raw-editor-panel');
+    const visualBtn = document.getElementById('mode-visual-btn');
+    const rawBtn = document.getElementById('mode-raw-btn');
+    const ACTIVE = ['bg-divider', 'text-ht-content-primary'];
+    const INACTIVE = ['text-ht-content-secondary', 'hover-bg-divider'];
+
+    if (mode === 'visual') {
+      visual?.classList.remove('hidden');
+      raw?.classList.add('hidden');
+      visualBtn?.classList.add(...ACTIVE);
+      visualBtn?.classList.remove(...INACTIVE);
+      rawBtn?.classList.remove(...ACTIVE);
+      rawBtn?.classList.add(...INACTIVE);
+    } else {
+      visual?.classList.add('hidden');
+      raw?.classList.remove('hidden');
+      rawBtn?.classList.add(...ACTIVE);
+      rawBtn?.classList.remove(...INACTIVE);
+      visualBtn?.classList.remove(...ACTIVE);
+      visualBtn?.classList.add(...INACTIVE);
+      // Sync mirror when entering raw mode
+      const ta = document.getElementById('yaml-editor');
+      const mirror = document.getElementById('yaml-mirror');
+      if (ta && mirror) { mirror.innerHTML = highlightYaml(ta.value + '\n'); mirror.scrollTop = ta.scrollTop; }
+    }
+  }
+
+  _closeExport() {
+    this.showingExport = false;
+    document.getElementById('export-modal')?.classList.add('hidden');
+  }
+
+  _updateValidationUI() {
+    const successEl = document.getElementById('validation-success');
+    const errorsEl  = document.getElementById('validation-errors');
+    const countEl   = document.getElementById('error-count');
+    const hintEl    = document.getElementById('error-inline-hint');
+    const orphanEl  = document.getElementById('orphan-errors');
+    const errorKeys = Object.keys(this.errors);
+
+    successEl?.classList.toggle('hidden', !this.validationPassed);
+
+    if (errorKeys.length > 0) {
+      errorsEl?.classList.remove('hidden');
+      if (countEl) countEl.textContent = String(errorKeys.length);
+      const hasInline = errorKeys.some(k => this.hasInlineError(k));
+      hintEl?.classList.toggle('hidden', !hasInline);
+      if (orphanEl) {
+        orphanEl.innerHTML = errorKeys
+          .filter(k => !this.hasInlineError(k))
+          .map(k => `<div class="mt-1.5 ml-6 flex items-start gap-1.5 text-xs text-danger-fg">
+            <code class="shrink-0 rounded-sm bg-danger/[0.12] px-1 py-0.5 font-mono text-[11px]">${escHtml(humanizeFieldPath(k))}</code>
+            <span>${escHtml(this.errors[k])}</span></div>`).join('');
+      }
+    } else {
+      errorsEl?.classList.add('hidden');
+    }
+  }
+
+  // ── Business logic ──────────────────────────────────────────────────────
+
+  ensure(path) {
+    const parts = path.split('.');
+    let obj = this.config;
+    for (const p of parts) {
+      if (obj[p] === undefined || obj[p] === null) obj[p] = {};
+      obj = obj[p];
+    }
+  }
+
+  getVal(path, fallback) {
+    const parts = path.split('.');
+    if (parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) return fallback;
+    let obj = this.config;
+    for (const p of parts) {
+      if (obj === undefined || obj === null) return fallback;
+      obj = obj[p];
+    }
+    return obj !== undefined && obj !== null ? obj : fallback;
+  }
+
+  setVal(path, value) {
+    const parts = path.split('.');
+    if (parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) return;
+    let obj = this.config;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (obj[parts[i]] === undefined || obj[parts[i]] === null) obj[parts[i]] = {};
+      obj = obj[parts[i]];
+    }
+    const key = parts[parts.length - 1];
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') return;
+    if (value === '' || value === null) {
+      delete obj[key];
+    } else if (typeof value === 'string' && !value.includes('${')) {
+      if (/^-?\d+$/.test(value)) obj[key] = parseInt(value, 10);
+      else if (/^-?\d+\.\d+$/.test(value)) obj[key] = parseFloat(value);
+      else obj[key] = value;
+    } else {
+      obj[key] = value;
+    }
+    delete this.errors[path];
+  }
+
+  _handleAddRealm() { this.addRealm(); }
+
+  addRealm() {
+    const name = prompt('Realm slug (lowercase, hyphens):');
+    if (!name) return;
+    if (!this.config.realms) this.config.realms = {};
+    this.config.realms[name] = {};
+    this.activeSection = 'realm';
+    this.activeRealm = name;
+    this._refreshRealmNav();
+    this._updateSidebarActive();
+    this._switchSection('realm', name);
+  }
+
+  removeRealm(key) {
+    if (!confirm('Remove realm "' + key + '" from config?')) return;
+    delete this.config.realms[key];
+    if (this.activeRealm === key) { this.activeRealm = null; this.activeSection = 'server'; }
+    this._refreshRealmNav();
+    this._updateSidebarActive();
+    this._switchSection(this.activeSection, this.activeRealm);
+  }
+
+  addApp(realm) {
+    const key = prompt('Application key (lowercase, hyphens):');
+    if (!key) return;
+    if (!this.config.realms[realm].applications) this.config.realms[realm].applications = {};
+    this.config.realms[realm].applications[key] = { name: key, redirect_uris: [], grant_types: ['authorization_code'] };
+  }
+  removeApp(realm, key) { if (confirm('Remove application "' + key + '"?')) delete this.config.realms[realm].applications[key]; }
+
+  addOrg(realm) {
+    const slug = prompt('Organization slug (lowercase, hyphens):');
+    if (!slug) return;
+    if (!this.config.realms[realm].organizations) this.config.realms[realm].organizations = {};
+    this.config.realms[realm].organizations[slug] = { name: slug };
+  }
+  removeOrg(realm, key) { if (confirm('Remove organization "' + key + '"?')) delete this.config.realms[realm].organizations[key]; }
+
+  getList(path) { return this.getVal(path, []) || []; }
+  addListItem(path) {
+    this.ensure(path.split('.').slice(0, -1).join('.'));
+    const parts = path.split('.');
+    let obj = this.config;
+    for (let i = 0; i < parts.length - 1; i++) obj = obj[parts[i]];
+    const key = parts[parts.length - 1];
+    if (!Array.isArray(obj[key])) obj[key] = [];
+    obj[key].push('');
+  }
+  removeListItem(path, idx) {
+    const parts = path.split('.');
+    let obj = this.config;
+    for (let i = 0; i < parts.length - 1; i++) obj = obj[parts[i]];
+    obj[parts[parts.length - 1]].splice(idx, 1);
+  }
+
+  hasInlineError(key) {
+    try { return !!document.querySelector(`[data-error-for="${CSS.escape(key)}"]`); }
+    catch { return false; }
+  }
+
+  async validate() {
+    const btn = document.getElementById('validate-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking\u2026'; }
+    this.validating = true;
+    this.validationPassed = false;
+    try {
+      const resp = await fetch('/ui/admin/settings/editor/visual/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
+        body: JSON.stringify(this.config),
+      });
+      const result = await resp.json();
+      const newErrors = {};
+      if (!result.valid && result.errors) {
+        for (const e of result.errors) newErrors[e.field] = e.reason;
+      }
+      this.errors = newErrors;
+      if (result.valid) {
+        this.validationPassed = true;
+        setTimeout(() => { this.validationPassed = false; this._updateValidationUI(); }, 4000);
+      }
+      this._updateValidationUI();
+      this._switchSection(this.activeSection, this.activeRealm);
+      return result.valid;
+    } finally {
+      this.validating = false;
+      if (btn) { btn.disabled = false; btn.textContent = 'Validate'; }
+    }
+  }
+
+  reset() {
+    this.config = JSON.parse(this.originalConfig);
+    this.errors = {};
+    const diff = document.getElementById('diff-output');
+    if (diff) diff.innerHTML = '';
+    this._switchSection(this.activeSection, this.activeRealm);
+    this._updateValidationUI();
+  }
+
+  resetRawEditor() {
+    const ta = document.getElementById('yaml-editor');
+    if (ta) ta.value = ta.defaultValue;
+    const diff = document.getElementById('diff-output');
+    if (diff) diff.innerHTML = '';
+  }
+
+  async preview() {
+    if (this.mode === 'visual') {
+      const resp = await fetch('/ui/admin/settings/editor/visual/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
+        body: JSON.stringify(this.config),
+      });
+      const el = document.getElementById('diff-output');
+      if (el) el.innerHTML = await resp.text();
+    } else {
+      htmx.ajax('POST', '/ui/admin/settings/editor/preview',
+        { target: '#diff-output', values: { yaml: document.getElementById('yaml-editor').value } });
+    }
+  }
+
+  async openExport() {
+    this.showingExport = true;
+    this.exportLoading = true;
+    this.exportCopied = false;
+    const modal     = document.getElementById('export-modal');
+    const loadingEl = document.getElementById('export-loading');
+    const contentEl = document.getElementById('export-content');
+    if (modal) modal.classList.remove('hidden');
+    if (loadingEl) loadingEl.classList.remove('hidden');
+    if (contentEl) contentEl.classList.add('hidden');
+    try {
+      if (this.mode === 'raw') {
+        this.exportYaml = document.getElementById('yaml-editor')?.value || '';
+      } else {
+        const resp = await fetch('/ui/admin/settings/editor/visual/export', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
+          body: JSON.stringify(this.config),
         });
-      },
+        if (!resp.ok) throw new Error(await resp.text());
+        this.exportYaml = await resp.text();
+      }
+      renderExportHighlight(this.exportYaml);
+    } catch (e) {
+      this.exportYaml = '# Error generating YAML:\n# ' + e.message;
+      renderExportHighlight(this.exportYaml);
+    } finally {
+      this.exportLoading = false;
+      if (loadingEl) loadingEl.classList.add('hidden');
+      if (contentEl) contentEl.classList.remove('hidden');
+    }
+  }
 
-      async apply() {
-        if (this.saving) return;
-        this.saving = true;
-        try {
-          if (this.mode === 'visual') {
-            const valid = await this.validate();
-            if (!valid) { this.saving = false; return; }
-            const resp = await fetch('/ui/admin/settings/editor/visual/apply', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
-              body: JSON.stringify(this.config),
-            });
-            const result = await resp.json();
-            if (result.ok) {
-              window.location.href = '/ui/admin/settings/editor?flash=' + encodeURIComponent(result.message || 'Applied') + '&flash_kind=success';
-            } else {
-              if (result.errors) {
-                const newErrors = {};
-                for (const e of result.errors) newErrors[e.field] = e.reason;
-                this.errors = newErrors;
-              }
-              document.getElementById('diff-output').innerHTML =
-                '<div class="rounded-md bg-danger/[0.12] px-6 py-4 text-sm text-danger-fg ring-1 ring-danger/30">' +
-                '<h3 class="font-semibold">Error</h3><p class="mt-1 font-mono text-xs">' + result.error + '</p></div>';
-            }
-          } else {
-            document.getElementById('apply-form').submit();
+  copyExport() {
+    navigator.clipboard.writeText(this.exportYaml).then(() => {
+      this.exportCopied = true;
+      const btn       = document.getElementById('export-copy-btn');
+      const copyIcon  = document.getElementById('export-copy-icon');
+      const checkIcon = document.getElementById('export-check-icon');
+      const label     = document.getElementById('export-copy-label');
+      if (btn) { btn.classList.remove('btn-ember'); btn.classList.add('bg-success/20', 'text-success-fg'); }
+      copyIcon?.classList.add('hidden');
+      checkIcon?.classList.remove('hidden');
+      if (label) label.textContent = 'Copied!';
+      setTimeout(() => {
+        this.exportCopied = false;
+        if (btn) { btn.classList.add('btn-ember'); btn.classList.remove('bg-success/20', 'text-success-fg'); }
+        copyIcon?.classList.remove('hidden');
+        checkIcon?.classList.add('hidden');
+        if (label) label.textContent = 'Copy';
+      }, 2000);
+    });
+  }
+
+  async apply() {
+    if (this.saving) return;
+    this.saving = true;
+    const applyBtn = document.getElementById('apply-btn');
+    if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = 'Applying\u2026'; }
+    try {
+      if (this.mode === 'visual') {
+        const valid = await this.validate();
+        if (!valid) return;
+        const resp = await fetch('/ui/admin/settings/editor/visual/apply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.csrf },
+          body: JSON.stringify(this.config),
+        });
+        const result = await resp.json();
+        if (result.ok) {
+          window.location.href = '/ui/admin/settings/editor?flash=' + encodeURIComponent(result.message || 'Applied') + '&flash_kind=success';
+        } else {
+          if (result.errors) {
+            const newErrors = {};
+            for (const e of result.errors) newErrors[e.field] = e.reason;
+            this.errors = newErrors;
+            this._updateValidationUI();
+            this._switchSection(this.activeSection, this.activeRealm);
           }
-        } finally {
-          this.saving = false;
+          const diff = document.getElementById('diff-output');
+          if (diff) diff.innerHTML = '<div class="rounded-md bg-danger/[0.12] px-6 py-4 text-sm text-danger-fg ring-1 ring-danger/30"><h3 class="font-semibold">Error</h3><p class="mt-1 font-mono text-xs">' + escHtml(result.error || '') + '</p></div>';
         }
-      },
-    };
-  });
-});
+      } else {
+        document.getElementById('apply-form').submit();
+      }
+    } finally {
+      this.saving = false;
+      if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = 'Apply Changes'; }
+    }
+  }
+}
+
+// =========================================================================
+// Utility helpers
+// =========================================================================
+
+// Converts a dot-delimited snake_case config field path into a human-readable
+// label, e.g. "storage.data_dir" → "Storage › Data Dir".
+function humanizeFieldPath(path) {
+  return path.split('.').map(seg =>
+    seg.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+  ).join(' › ');
+}
+
+// HTML-safe escaping for template literals in ConfigEditor
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function escAttr(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
 
 // Read a JSON payload embedded as `<script type="application/json" id="...">`.
 // Such tags are data, not executable scripts, so CSP `script-src 'self'`
@@ -528,15 +1280,24 @@ function renderExportHighlight(raw) {
   if (target && raw) target.innerHTML = highlightYaml(raw);
 }
 
-// Bridge HTMX HX-Trigger "showToast" events into Alpine's custom event system
+// =========================================================================
+// HTMX event bridge — forward showToast HX-Trigger events to ToastManager
+// =========================================================================
+
 document.body.addEventListener('showToast', function(e) {
   var d = typeof e.detail === 'string' ? JSON.parse(e.detail) : e.detail;
-  window.dispatchEvent(new CustomEvent('show-toast', {detail: d}));
+  window.dispatchEvent(new CustomEvent('show-toast', { detail: d }));
 });
 
-// Global keyboard shortcuts. Bound on `keydown` for cross-browser key
-// reliability, and bail when focus is in a text-bearing control so '/'
-// doesn't steal keystrokes from the inputs we want to focus.
+// Re-init roles tab after HTMX swaps the tab content
+document.body.addEventListener('htmx:afterSwap', function(e) {
+  const rolesTab = e.target.querySelector('[data-roles-tab]');
+  if (rolesTab) initRolesTab(rolesTab);
+});
+
+// =========================================================================
+// Global keyboard shortcuts
+// =========================================================================
 //   /   focus the page-level search box (`#page-search`)
 //   c   click the primary CTA on the page (`#primary-cta`)
 //   ?   open the shortcut overlay
@@ -587,3 +1348,92 @@ document.body.addEventListener('showToast', function(e) {
     }
   });
 })();
+
+// =========================================================================
+// initKeyboardShortcutOverlay — wire up the keyboard shortcut help overlay
+// =========================================================================
+
+function initKeyboardShortcutOverlay() {
+  const overlay = document.getElementById('keyboard-shortcut-overlay');
+  if (!overlay) return;
+
+  window.addEventListener('hearth-shortcut-help', () => {
+    overlay.classList.remove('hidden');
+    window.__hearthShortcutHelpOpen = true;
+  });
+
+  window.addEventListener('hearth-shortcut-help-close', () => {
+    overlay.classList.add('hidden');
+    window.__hearthShortcutHelpOpen = false;
+  });
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      overlay.classList.add('hidden');
+      window.__hearthShortcutHelpOpen = false;
+    }
+  });
+
+  document.getElementById('shortcut-help-close-btn')?.addEventListener('click', () => {
+    overlay.classList.add('hidden');
+    window.__hearthShortcutHelpOpen = false;
+  });
+}
+
+// =========================================================================
+// Bootstrap — initialize all managers on DOMContentLoaded
+// =========================================================================
+
+document.addEventListener('DOMContentLoaded', () => {
+  const run = (label, fn) => { try { fn(); } catch (e) { console.error(`[admin] ${label} init failed:`, e); } };
+  run('SidebarManager',         () => new SidebarManager());
+  run('RealmNav',               () => new RealmNav(document.getElementById('realm-nav')));
+  run('ToastManager',           () => new ToastManager());
+  run('initRealmPill',          () => initRealmPill());
+  run('initRealmWizard',        () => initRealmWizard());
+  run('initOrgListBulkActions', () => initOrgListBulkActions());
+  run('initRolesTab',           () => initRolesTab(document.querySelector('[data-roles-tab]')));
+  run('initPasswordStrength',   () => initPasswordStrength());
+  run('initAttrRows',           () => initAttrRows());
+  run('initConfigEditor',       () => initConfigEditor());
+  run('initFormSubmitProtection', () => initFormSubmitProtection());
+  run('initKeyboardShortcutOverlay', () => initKeyboardShortcutOverlay());
+});
+
+// =========================================================================
+// initConfigEditor — wire up #config-editor-root if present (settings page)
+// =========================================================================
+
+function initConfigEditor() {
+  const root = document.getElementById('config-editor-root');
+  if (!root) return;
+  new ConfigEditor().init(root);
+}
+
+// =========================================================================
+// initFormSubmitProtection — disable submit buttons on valid form submission
+// to prevent accidental double-submits. Fires on the `submit` event so the
+// browser's own constraint validation (required, pattern, etc.) still runs
+// first — the button only locks when the form is actually going to submit.
+// =========================================================================
+
+function initFormSubmitProtection() {
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    var btn = form.querySelector('[type=submit]');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    var original = btn.textContent.trim();
+    btn.textContent = 'Saving\u2026';
+    // Re-enable if the browser navigates back (bfcache restore) so the
+    // button isn't stuck disabled on Back navigation.
+    window.addEventListener('pageshow', function onShow(ev) {
+      if (ev.persisted) {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+      window.removeEventListener('pageshow', onShow);
+    });
+  });
+}

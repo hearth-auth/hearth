@@ -1,10 +1,9 @@
 //! Concurrent role-assignment writes.
 //!
-//! Oracle invariant (from `MIGRATE_TO_RBAC.md` § 9 risk table):
-//! "Concurrent role-assignment writes produce no data corruption — after
-//!  quiescence, `resolve_permissions` returns a set consistent with some
-//!  serializable order of the ops, with no partial index writes or
-//!  dangling assignments."
+//! Oracle invariant: concurrent role-assignment writes produce no data
+//! corruption — after quiescence, `resolve_permissions` returns a set
+//! consistent with some serializable order of the ops, with no partial
+//! index writes or dangling assignments.
 //!
 //! Uses `std::thread::spawn` (like `realm_concurrent_io.rs`) to avoid
 //! pulling tokio into the simulation crate's dependency footprint.

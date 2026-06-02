@@ -73,8 +73,11 @@ fn setup_oauth() -> (
             &realm_id,
             &ClientCredentialsRequest {
                 client_id: client.client_id().clone(),
-                client_secret: secret.to_string(),
+                client_secret: Some(secret.to_string()),
                 scope: Some("read write".to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("client_credentials_token");
@@ -117,8 +120,11 @@ fn bench_client_credentials(c: &mut Criterion) {
                 &realm_id,
                 &ClientCredentialsRequest {
                     client_id: client_id.clone(),
-                    client_secret: secret.clone(),
+                    client_secret: Some(secret.clone()),
                     scope: Some("read".to_string()),
+                    dpop_jkt: None,
+                    client_assertion_type: None,
+                    client_assertion: None,
                 },
             );
             assert!(result.is_ok());
@@ -139,6 +145,7 @@ fn bench_token_introspection(c: &mut Criterion) {
                 &TokenIntrospectionRequest {
                     token: access_token.clone(),
                     token_type_hint: None,
+                    introspecting_client_id: None,
                 },
             );
             assert!(result.is_ok());

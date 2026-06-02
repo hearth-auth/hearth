@@ -60,30 +60,25 @@
   {# Bulk-action wrapper: <form> wraps both the toolbar and the table so
      row checkboxes (`name="ids"`) post with the form. Two-click confirm
      mirrors the per-row revoke pattern. #}
-  <form method="post"
+  <form id="org-bulk-form"
+        method="post"
         action="/ui/admin/realms/{{ realm_name }}/organizations/bulk-delete"
-        x-data="{ selected: 0, confirm: false, allChecked: false, idsCsv: '' }"
-        @org-checked.window="
-          let checked = $el.querySelectorAll('input.row-check:checked');
-          selected = checked.length;
-          idsCsv = Array.from(checked).map(c => c.value).join(',');"
         class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
     {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-    <input type="hidden" name="ids" :value="idsCsv">
+    <input type="hidden" id="org-ids-input" name="ids" value="">
     <div class="flex items-center justify-between gap-3 border-b border-divider-subtle px-4 py-2">
-      <span class="font-mono text-xs text-ht-content-muted" x-text="selected === 0 ? '{{ organizations.len() }} organization{% if organizations.len() != 1 %}s{% endif %}' : selected + ' selected'"></span>
-      <div class="flex items-center gap-2" x-show="selected > 0" x-cloak>
-        <button type="button"
-                @click="
-                  if (!confirm) {
-                    confirm = true;
-                    setTimeout(() => { confirm = false }, 4000);
-                    return;
-                  }
-                  $root.submit();"
-                :class="confirm ? 'btn-danger text-graphite-950' : 'border border-strong bg-ht-surface-elevated text-danger-fg hover-bg-divider'"
-                x-text="confirm ? 'Confirm delete' : 'Delete selected'"
-                class="rounded px-3 py-1 text-xs font-semibold transition-colors"></button>
+      <span id="org-count-label"
+            class="font-mono text-xs text-ht-content-muted"
+            data-all-label="{{ organizations.len() }} organization{% if organizations.len() != 1 %}s{% endif %}">
+        {{ organizations.len() }} organization{% if organizations.len() != 1 %}s{% endif %}
+      </span>
+      <div id="org-bulk-actions" class="hidden flex items-center gap-2">
+        <button id="org-delete-btn" type="button"
+                class="rounded px-3 py-1 text-xs font-semibold transition-colors border border-strong bg-ht-surface-elevated text-danger-fg hover-bg-divider"
+                data-danger-class="rounded px-3 py-1 text-xs font-semibold transition-colors btn-danger text-graphite-950"
+                data-normal-class="rounded px-3 py-1 text-xs font-semibold transition-colors border border-strong bg-ht-surface-elevated text-danger-fg hover-bg-divider">
+          Delete selected
+        </button>
       </div>
     </div>
     <div class="overflow-hidden">
@@ -92,17 +87,14 @@
           <tr class="border-b border-divider bg-ht-surface-elevated">
             <th class="w-8 px-4 py-3">
               <input type="checkbox"
+                     id="org-all-check"
                      aria-label="Select all"
-                     x-model="allChecked"
-                     @change="
-                       $root.querySelectorAll('input.row-check').forEach(c => { c.checked = allChecked });
-                       $dispatch('org-checked');"
                      class="h-4 w-4 rounded border-divider bg-ht-surface-elevated">
             </th>
             <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Name</th>
             <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Slug</th>
             <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
-            <th class="px-4 py-3"></th>
+            <th class="px-4 py-3" aria-label="Actions"></th>
           </tr>
         </thead>
         <tbody id="table-body">

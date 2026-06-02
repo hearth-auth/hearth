@@ -79,46 +79,39 @@
           {% endif %}
           <input type="hidden" name="attr_key" value="{{ def.key }}">
           {% if def.is_boolean() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
                 <option value="true" {% if current_val == "true" %}selected{% endif %}>true</option>
                 <option value="false" {% if current_val == "false" %}selected{% endif %}>false</option>
               </select>
             {% else if def.is_enum() %}
-              <select name="attr_val" class="mt-1 input">
+              <select name="attr_val" class="mt-1 input" {% if def.required %}required{% endif %}>
                 <option value="" {% if current_val.is_empty() %}selected{% endif %}></option>
                 {% for ev in def.enum_values %}
                   <option value="{{ ev }}" {% if current_val == ev.as_str() %}selected{% endif %}>{{ ev }}</option>
                 {% endfor %}
               </select>
             {% else if def.is_number() %}
-              <input type="number" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+              <input type="number" name="attr_val" value="{{ current_val }}" class="mt-1 input" {% if def.required %}required{% endif %}>
             {% else %}
-              <input type="text" name="attr_val" value="{{ current_val }}" class="mt-1 input">
+              <input type="text" name="attr_val" value="{{ current_val }}" class="mt-1 input" {% if def.required %}required{% endif %}>
           {% endif %}
         </div>
       {% endfor %}
     </div>
     {% else %}
-    <div x-data="attrRows()">
+    <div data-attr-rows>
       <h3 class="mb-2 text-sm font-semibold text-ht-content-secondary">Attributes</h3>
       <div id="attr-rows" class="space-y-2">
         {% for (k, v) in form_attributes %}
         <div class="flex gap-2 items-center attr-row">
           <input type="text" name="attr_key" value="{{ k }}" placeholder="key" class="input flex-1">
           <input type="text" name="attr_val" value="{{ v }}" placeholder="value" class="input flex-1">
-          <button type="button" @click="removeRow($el)" class="text-ht-content-muted hover:text-danger-fg text-sm px-2">✕</button>
+          <button type="button" data-remove-attr-row class="text-ht-content-muted hover:text-danger-fg text-sm px-2">&#x2715;</button>
         </div>
         {% endfor %}
-        <template x-for="row in rows" :key="row.id">
-          <div class="flex gap-2 items-center attr-row">
-            <input type="text" name="attr_key" placeholder="key" class="input flex-1">
-            <input type="text" name="attr_val" placeholder="value" class="input flex-1">
-            <button type="button" @click="removeRow($el)" class="text-ht-content-muted hover:text-danger-fg text-sm px-2">✕</button>
-          </div>
-        </template>
       </div>
-      <button type="button" @click="addRow()" class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
+      <button type="button" data-add-attr-row class="mt-2 text-xs font-medium text-ht-content-brand hover:text-ht-brand-deep">+ Add attribute</button>
     </div>
     {% endif %}
 
@@ -133,3 +126,4 @@
   </form>
 </div>
 {% endblock %}
+{% block scripts %}<script src="/ui/static/admin/attr-rows.js"></script>{% endblock %}

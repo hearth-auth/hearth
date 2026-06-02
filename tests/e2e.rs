@@ -96,6 +96,9 @@ async fn developer_onramp_realm_app_oidc_login() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -109,6 +112,9 @@ async fn developer_onramp_realm_app_oidc_login() {
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://app.startup.io/callback".to_string(),
                 code_verifier: Some(code_verifier),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code");
@@ -202,7 +208,7 @@ async fn user_lifecycle_register_authenticate_session_token() {
     // 7. Token refresh works
     let refreshed = harness
         .identity()
-        .refresh_tokens(&realm, tokens.refresh_token())
+        .refresh_tokens(&realm, tokens.refresh_token(), None)
         .expect("refresh");
     let refreshed_claims = harness
         .identity()

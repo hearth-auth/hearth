@@ -1,8 +1,8 @@
 # Hearth TypeScript SDK
 
-TypeScript client for the [Hearth](https://github.com/therecluse26/hearth) identity API.
+TypeScript client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 
-> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/sdk-spec.md).
+> **SDK Specification:** This SDK must conform to the [Hearth SDK Common Specification](../../docs/specs/SDK.md).
 
 ## Installation
 
@@ -474,4 +474,79 @@ class HearthError extends Error {
 
 **`TokenAudienceError`** — the token's `aud` claim does not contain the configured audience. Verify `clientId` matches the audience your authorization server issues.
 
-See [docs/sdk-spec.md](../../docs/sdk-spec.md) Section 5 for the full error taxonomy.
+**`AuthorizationModeMismatchError`** — the server echoed an `access_token_authorization` mode
+that differs from the SDK's `expectedMode` config or the `mode` passed to `requirePermission`.
+Verify the `OAuthClient` admin setting matches the resource server's SDK configuration.
+
+See [docs/specs/SDK.md](../../docs/specs/SDK.md) Section 5 for the full error taxonomy.
+
+---
+
+## Permission delivery modes (HEA-922/923)
+
+Hearth supports three modes for delivering RBAC data to resource servers. Pick one when
+registering the OAuth client; the SDK validates you stay consistent.
+
+### Embedded (default)
+
+RBAC claims (`permissions`, `roles`, `groups`) are embedded in the JWT at issuance. Zero
+network traffic on every request — stateless and fastest.
+
+```typescript
+import { requirePermission } from "@hearth/sdk";
+
+const check = requirePermission("docs.write", {
+  mode: "embedded",
+  client: new HearthClient({ issuerUrl: "https://auth.example.com" }),
+});
+
+// returns true/false synchronously from the JWT; no network call
+const allowed = await check(accessToken);
+```
+
+### Decision (per-request server check)
+
+JWT carries only identity claims. The SDK calls `POST /oauth/authorize` on every check.
+Fail-closed: any network or server error returns `false`.
+
+```typescript
+import { HearthClient, requirePermission } from "@hearth/sdk";
+
+const client = new HearthClient({
+  issuerUrl: "https://auth.example.com",
+  realmId: "<realm-id>",
+});
+
+// Low-level: call authorize() directly
+const allowed = await client.authorize(accessToken, "docs.write");
+
+// Middleware factory
+const check = requirePermission("docs.write", { mode: "decision", client });
+const allowed2 = await check(accessToken);
+```
+
+### Introspection (live RBAC via /introspect)
+
+JWT carries only identity claims. The SDK calls `POST /introspect` and reads live RBAC from
+the response. Throws `AuthorizationModeMismatchError` when the server echoes a mode that
+differs from what the middleware expects.
+
+```typescript
+import { HearthClient, requirePermission } from "@hearth/sdk";
+
+const client = new HearthClient({
+  issuerUrl: "https://auth.example.com",
+  clientId: "<client-id>",
+  clientSecret: "<client-secret>",
+  // optional: validate the server echoes the expected mode
+  expectedMode: "introspection",
+});
+
+const check = requirePermission("docs.write", { mode: "introspection", client });
+const allowed = await check(accessToken);
+```
+
+> **Design constraint**: the SDK MUST NOT silently fall back from one mode to another based on
+> whether `permissions` is present in the JWT. The `mode` must always be set explicitly.
+> Absence of a `permissions` claim in `embedded` mode means the user has no permissions, not
+> that the SDK should try a network call.

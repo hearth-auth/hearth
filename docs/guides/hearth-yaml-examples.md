@@ -47,15 +47,16 @@ All example URLs use `auth.example.com`.
 | 30 | Public OAuth client — SPA | [Part 8](#part-8--rbac--oauth) |
 | 31 | Confidential OAuth client — M2M | [Part 8](#part-8--rbac--oauth) |
 | 32 | First-party SSO — no consent | [Part 8](#part-8--rbac--oauth) |
-| 33 | SCIM provisioning | [Part 9](#part-9--enterprise-integrations) |
-| 34 | SAML SP registration | [Part 9](#part-9--enterprise-integrations) |
-| 35 | Custom claim mappings | [Part 9](#part-9--enterprise-integrations) |
-| 36 | Production observability | [Part 9](#part-9--enterprise-integrations) |
-| 37 | Storage tuning | [Part 9](#part-9--enterprise-integrations) |
-| 38 | Custom branding | [Part 10](#part-10--branding--complex-scenarios) |
-| 39 | High-security / financial services | [Part 10](#part-10--branding--complex-scenarios) |
-| 40 | Full enterprise kitchen sink | [Part 10](#part-10--branding--complex-scenarios) |
-| 41 | FAPI 2.0 realm — banking | [Part 11](#part-11--fapi-20--financial-grade-apis) |
+| 33 | Decision-mode client with `POST /oauth/authorize` | [Part 8](#part-8--rbac--oauth) |
+| 34 | SCIM provisioning | [Part 9](#part-9--enterprise-integrations) |
+| 35 | SAML SP registration | [Part 9](#part-9--enterprise-integrations) |
+| 36 | Custom claim mappings | [Part 9](#part-9--enterprise-integrations) |
+| 37 | Production observability | [Part 9](#part-9--enterprise-integrations) |
+| 38 | Storage tuning | [Part 9](#part-9--enterprise-integrations) |
+| 39 | Custom branding | [Part 10](#part-10--branding--complex-scenarios) |
+| 40 | High-security / financial services (+ FAPI 2.0 client setup) | [Part 10](#part-10--branding--complex-scenarios) |
+| 41 | Full enterprise kitchen sink | [Part 10](#part-10--branding--complex-scenarios) |
+| 42 | Risk-based step-up MFA (adaptive) | [Part 3](#part-3--mfa) |
 
 ---
 
@@ -429,6 +430,70 @@ realms:
 
 ---
 
+### Example 42 — Risk-based step-up MFA (adaptive)
+
+**Audience:** operators who want MFA challenges only when a user logs in from an unrecognised
+device or IP range, rather than on every single login. Useful for consumer applications where
+constant MFA friction hurts retention, or for internal tools where you want a security signal
+without mandatory TOTP enrollment.
+
+Adaptive MFA is separate from, and complementary to, `mfa_required`. A user who already
+passed their regular MFA challenge this session will not be challenged again for a recognised
+device.
+
+```yaml
+oidc:
+  issuer: "https://auth.example.com"
+
+realms:
+  customer-portal:
+    auth:
+      mfa_required: false              # no MFA on every login — only on unknown devices
+      mfa_methods:
+        - totp
+        - webauthn
+      adaptive_mfa:
+        enabled: true
+        recognition_window_days: 30   # device stays "recognised" for 30 days (default)
+        # MUST come from an external secret store — never a literal value.
+        # Generate: openssl rand -base64 32
+        fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
+```
+
+How recognition works:
+
+1. On each login, Hearth computes `HMAC-SHA256(secret, "{user_id}:{ip_/24}:{user_agent_normalized}")`.
+2. If the resulting hex digest is found in the device-fingerprint store and is within
+   `recognition_window_days`, the login proceeds without an additional MFA challenge.
+3. If no match is found, the user is redirected to the MFA challenge page. On success, the
+   fingerprint is stored for future logins.
+
+Combining adaptive MFA with `mfa_required: true` is valid — the step-up fires on unrecognised
+devices; regular enrolled-MFA fires on every login:
+
+```yaml
+    auth:
+      mfa_required: true             # always require MFA
+      mfa_methods:
+        - totp
+      adaptive_mfa:
+        enabled: true
+        recognition_window_days: 7  # tighter recognition window for high-security realms
+        fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
+```
+
+Key operational notes:
+
+- `fingerprint_hmac_secret` must be at least 32 bytes. Hearth fails closed at startup if the
+  value is shorter — no silent fail-open. Generate with `openssl rand -base64 32` (44 chars,
+  well above the minimum).
+- Rotating the secret invalidates every stored fingerprint for the realm — all active users
+  will be challenged once on their next login. Schedule rotations outside peak hours.
+- See [Device fingerprint HMAC secret](security-hardening.md#device-fingerprint-hmac-secret)
+  for the full key-generation, Kubernetes injection, and 9-step rotation runbook.
+
+---
+
 ## Part 4 — Social Login / Federation
 
 > **`hearth.yaml` is the source of truth for federation providers.** The Admin UI's Identity Providers page is a **read-only inspection surface** — you cannot add, edit, or delete connectors from the UI. To add or modify a provider, update `hearth.yaml` and either restart the server or send `SIGHUP` to hot-reload. Removing a provider key from YAML removes the connector; users who authenticated via that provider retain their local identity but can no longer use the federated login.
@@ -458,7 +523,7 @@ realms:
           client_secret: "${GOOGLE_CLIENT_SECRET}"
 ```
 
-- Register your OAuth app at <https://console.cloud.google.com> and set the redirect URI to
+- Register your OAuth app at [https://console.cloud.google.com](https://console.cloud.google.com) and set the redirect URI to
   `https://auth.example.com/v1/federation/callback`.
 - `link_existing_accounts: confirm` (the default) requires the user to authenticate with their
   existing password before Hearth links the Google identity to their account.
@@ -1243,9 +1308,84 @@ realms:
 
 ---
 
+### Example 33 — Decision-mode client with `POST /oauth/authorize`
+
+**Audience:** operators deploying a backend microservice where permission changes must
+take effect immediately, without waiting for a token refresh cycle. Typical use cases:
+financial services, healthcare, or any flow where access can be revoked mid-session.
+
+In decision mode, Hearth issues JWTs that carry only identity claims. The resource server
+calls `POST /oauth/authorize` on every protected request to get a live binary allow/deny.
+
+```yaml
+oidc:
+  issuer: "https://auth.example.com"
+
+realms:
+  acme:
+    permissions:
+      - name: payment.initiate
+        display_name: "Initiate Payments"
+        category: finance
+      - name: payment.approve
+        display_name: "Approve Payments"
+        category: finance
+
+    roles:
+      - name: payment-initiator
+        permissions: [payment.initiate]
+      - name: payment-approver
+        permissions: [payment.approve]
+        parents: [payment-initiator]     # approvers can also initiate
+
+    applications:
+      payments-service:
+        name: "Payments Service"
+        confidential: true
+        client_secret: "${PAYMENTS_CLIENT_SECRET}"
+        grant_types:
+          - client_credentials
+        access_token_authorization: decision
+```
+
+The resource server (pseudocode) verifies each incoming request like this:
+
+```bash
+# Resource server checks permission before processing a payment
+curl -X POST https://auth.example.com/oauth/authorize \
+  -H "Authorization: Bearer ${REQUEST_ACCESS_TOKEN}" \
+  -H "X-Realm-ID: ${REALM_UUID}" \
+  -H "Content-Type: application/json" \
+  -d '{"permission": "payment.initiate"}'
+# → {"allowed": true}  or  {"allowed": false}
+```
+
+For org-scoped checks (user must have the permission within a specific org context):
+
+```bash
+curl -X POST https://auth.example.com/oauth/authorize \
+  -H "Authorization: Bearer ${REQUEST_ACCESS_TOKEN}" \
+  -H "X-Realm-ID: ${REALM_UUID}" \
+  -H "Content-Type: application/json" \
+  -d '{"permission": "payment.initiate", "organization_id": "${ORG_UUID}"}'
+```
+
+Key notes for resource server implementors:
+
+- **Fail-closed:** any non-`{"allowed": true}` response — including network errors, timeouts,
+  and `5xx` — MUST be treated as a denial. Never fail open.
+- **Circuit-break:** wrap the call in a circuit breaker with a short timeout (e.g. 200 ms) to
+  prevent a Hearth slowdown from stalling your entire request path.
+- **Do not cache:** the purpose of decision mode is zero-latency revocation. Caching
+  `allowed: true` even briefly undermines that guarantee.
+- **Not for browsers:** `POST /oauth/authorize` is an internal endpoint. Route only
+  service-to-service traffic to it; do not expose it to the internet.
+
+---
+
 ## Part 9 — Enterprise Integrations
 
-### Example 33 — SCIM provisioning
+### Example 34 — SCIM provisioning
 
 **Audience:** operators whose enterprise customers provision and de-provision user accounts
 from an identity provider (Okta, Azure AD, Workday) using the SCIM 2.0 protocol.
@@ -1282,7 +1422,7 @@ realms:
 
 ---
 
-### Example 34 — SAML SP registration
+### Example 35 — SAML SP registration
 
 **Audience:** operators who need Hearth to act as a SAML Identity Provider, issuing SAML
 assertions to external service providers (Salesforce, Workday, internal wikis, etc.).
@@ -1323,7 +1463,7 @@ realms:
 
 ---
 
-### Example 35 — Custom claim mappings
+### Example 36 — Custom claim mappings
 
 **Audience:** operators who need to add, rename, or gate custom claims in access tokens,
 ID tokens, or the UserInfo endpoint beyond Hearth's default claim set.
@@ -1387,7 +1527,7 @@ realms:
 
 ---
 
-### Example 36 — Production observability
+### Example 37 — Production observability
 
 **Audience:** operators deploying Hearth in a production environment with a centralized log
 aggregator, distributed tracing collector, and ops alerting.
@@ -1422,7 +1562,7 @@ onboarding:
 
 ---
 
-### Example 37 — Storage tuning
+### Example 38 — Storage tuning
 
 **Audience:** operators sizing the hot tier and compaction schedule for production workloads,
 or moving data to a non-default path.
@@ -1451,7 +1591,7 @@ storage:
 
 ## Part 10 — Branding & Complex Scenarios
 
-### Example 38 — Custom branding
+### Example 39 — Custom branding
 
 **Audience:** operators who want to replace Hearth's default logo and theme with their own
 product branding, with per-realm overrides for multi-surface deployments.
@@ -1489,7 +1629,7 @@ realms:
 
 ---
 
-### Example 39 — High-security / financial services
+### Example 40 — High-security / financial services
 
 **Audience:** operators in regulated industries (finance, healthcare, government) who need
 short-lived tokens, strict password policy, mandatory MFA, invite-only registration, and
@@ -1556,9 +1696,35 @@ observability:
 - Registering an application for this realm? Set `require_consent: false` only for
   first-party apps; all third-party integrations must go through consent.
 
+#### FAPI 2.0 with this configuration
+
+The `hearth.yaml` above sets the server-side prerequisites for FAPI 2.0 compliance (TLS required,
+short-lived tokens, MFA, no self-registration). FAPI 2.0 client registration and realm-level FAPI
+profile enforcement are configured via the Admin API — not via `hearth.yaml` today.
+
+After bringing up the server with this config, register a FAPI 2.0 client:
+
+```bash
+# Register a FAPI 2.0 client (no client_secret; JWKS required)
+curl -s -X POST "https://auth.example.com/admin/applications" \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "X-Realm-ID: <realm-uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Open Banking Client",
+    "profile": "fapi2",
+    "redirect_uris": ["https://tpp.example.com/callback"],
+    "grant_types": ["authorization_code"],
+    "jwks": "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"alg\":\"EdDSA\",\"kid\":\"k1\",\"x\":\"<base64url-public-key>\"}]}",
+    "authorization_signed_response_alg": "EdDSA"
+  }'
+```
+
+See [docs/guides/fapi2.md](fapi2.md) for the complete FAPI 2.0 flow (PAR, JAR, JARM, DPoP).
+
 ---
 
-### Example 40 — Full enterprise kitchen sink
+### Example 41 — Full enterprise kitchen sink
 
 **Audience:** operators who need to validate a complete production configuration covering
 multiple realms, MFA, social login, SCIM, SAML, custom RBAC, branding, SMTP, TLS, and
@@ -1784,104 +1950,3 @@ realms:
 
 *Re-check this file when `src/config/types.rs`, `src/identity/federation/`, or
 `src/identity/types.rs` change public API surface (new YAML keys, renamed variants).*
-
----
-
-## Part 11 — FAPI 2.0 / Financial-grade APIs
-
-> **Prerequisites:** FAPI 2.0 support shipped in PR #128. The `fapi_profile` YAML key is
-> tracked in [HEA-1040](/HEA/issues/HEA-1040); use the Admin API PATCH until it lands.
-> Full operator guide: [docs/guides/fapi2.md](fapi2.md).
-
-### Example 41 — FAPI 2.0 realm — banking
-
-**Audience:** operators running open-banking, PSD2, or payment-initiation APIs that must comply
-with FAPI 2.0 Baseline or Advanced security profiles. Pairs with §3–§7 of the
-[FAPI 2.0 guide](fapi2.md).
-
-```yaml
-oidc:
-  issuer: "https://auth.example.com"
-
-server:
-  bind_address: "0.0.0.0"
-  port: 443
-  tls_cert_path: "/etc/hearth/tls/server.crt"
-  tls_key_path:  "/etc/hearth/tls/server.key"
-
-storage:
-  data_dir: "/var/lib/hearth/data"
-  fsync: true
-
-token:
-  access_token_ttl: "5m"          # short-lived; DPoP-bound tokens limit blast radius
-  refresh_token_ttl: "8h"
-
-auth:
-  session_ttl: "8h"
-  mfa_required: true
-  mfa_methods:
-    - webauthn                     # phishing-resistant; recommended for FAPI Advanced
-
-realms:
-  banking:
-    # fapi_profile: baseline       # pending HEA-1040 — use Admin API PATCH for now
-    # fapi_profile: advanced       # Advanced adds mandatory JAR, JARM, DPoP
-    auth:
-      mfa_required: true
-      mfa_methods:
-        - webauthn
-      registration:
-        mode: invite_only          # no self-registration; users created by admins
-      rate_limit:
-        max_failed_logins: 5
-        lockout_duration: "30m"
-    token:
-      access_token_ttl: "5m"
-      refresh_token_ttl: "8h"
-    # Applications are registered via Admin API (not YAML) for FAPI 2.0:
-    # - token_endpoint_auth_method: private_key_jwt
-    # - jwks or jwks_uri (no client_secret)
-    # - require_pushed_authorization_requests: true
-    # See docs/guides/fapi2.md §3 for the full registration curl.
-```
-
-**Activate FAPI 2.0 Baseline via Admin API** (while HEA-1040 is pending):
-
-```bash
-curl -s -X PATCH https://auth.example.com/admin/realms/banking \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"fapi_profile": "baseline"}'
-```
-
-**Register a FAPI 2.0 client** (private_key_jwt, no client_secret):
-
-```bash
-curl -s -X POST https://auth.example.com/admin/realms/banking/clients \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_id": "payment-initiation-service",
-    "name": "Payment Initiation Service",
-    "confidential": true,
-    "token_endpoint_auth_method": "private_key_jwt",
-    "jwks_uri": "https://app.example.com/.well-known/jwks.json",
-    "grant_types": ["authorization_code", "refresh_token"],
-    "redirect_uris": ["https://app.example.com/callback"],
-    "require_pushed_authorization_requests": true,
-    "declared_scopes": ["openid", "accounts", "payments"]
-  }'
-```
-
-- `fapi_profile: baseline` enforces PAR, PKCE S256, and `private_key_jwt` server-side. Clients
-  that omit any of these receive a `400 invalid_request` or `401 invalid_client` before the
-  user ever sees the authorization UI.
-- Set `fapi_profile: advanced` to additionally require JAR (signed request objects), JARM
-  (signed authorization responses), and DPoP token binding — the full PSD2 / FDX mandate stack.
-- `token.access_token_ttl: "5m"` minimizes exposure when access tokens are intercepted; DPoP
-  binding (Advanced) further limits usability to the legitimate client.
-- `mfa_methods: [webauthn]` satisfies FAPI 2.0 Advanced's phishing-resistant authenticator
-  requirement and PSD2 SCA (Strong Customer Authentication) under eIDAS LoA High.
-- See [docs/guides/fapi2.md](fapi2.md) for complete PAR, JAR, JARM, DPoP curl examples and
-  the OpenID Foundation conformance suite walkthrough.

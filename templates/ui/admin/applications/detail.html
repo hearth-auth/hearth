@@ -27,7 +27,7 @@
       Edit
     </a>
     <button type="button"
-            _="on click call #app-delete-dialog.showModal()"
+            data-component="show-dialog" data-target="#app-delete-dialog"
             class="inline-flex items-center gap-1.5 rounded border border-danger/30 bg-danger/[0.06] px-4 py-2 text-sm font-medium text-danger-fg hover:bg-danger/[0.12]">
       <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
       Delete
@@ -40,13 +40,12 @@
     </a>
 
     <dialog id="app-delete-dialog"
-            class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50"
-            _="on click(event) if event.target is me call me.close() end">
+            class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50">
       <h3 class="text-lg font-semibold text-ht-content-primary">Delete application?</h3>
       <p class="mt-2 text-sm text-ht-content-muted">Deleting <strong>{{ app.client_name() }}</strong> is permanent. Any active sessions using this client will stop working.</p>
       <div class="mt-6 flex justify-end gap-3">
         <button type="button"
-                _="on click call #app-delete-dialog.close()"
+                data-component="show-dialog" data-action="close"
                 class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
           Cancel
         </button>
@@ -117,6 +116,18 @@
         {% endif %}
       </dd>
     </div>
+    <div>
+      <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Permission delivery mode</dt>
+      <dd class="mt-1">
+        {% if app.access_token_authorization()|fmt("{:?}") == "Introspection" %}
+          <span class="inline-flex items-center rounded-full bg-steel-bg px-2 py-0.5 text-xs font-medium text-steel-fg">Introspection</span>
+        {% else if app.access_token_authorization()|fmt("{:?}") == "Decision" %}
+          <span class="inline-flex items-center rounded-full bg-warning/[0.12] px-2 py-0.5 text-xs font-medium text-warning-fg">Decision</span>
+        {% else %}
+          <span class="inline-flex items-center rounded-full bg-ht-surface-elevated px-2 py-0.5 text-xs font-medium text-ht-content-muted">Embedded</span>
+        {% endif %}
+      </dd>
+    </div>
     {% if !app.declared_scopes().is_empty() %}
     <div>
       <dt class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Declared scopes</dt>
@@ -136,19 +147,18 @@
   <h2 class="text-base font-semibold text-ht-content-primary">Client secret</h2>
   <p class="mt-1 text-sm text-ht-content-secondary">Generate a new secret. The current secret will stop working immediately.</p>
   <button type="button"
-          _="on click call #app-regen-dialog.showModal()"
+          data-component="show-dialog" data-target="#app-regen-dialog"
           class="mt-4 rounded border border-strong bg-ht-surface-elevated px-4 py-2 text-sm font-semibold text-ht-content-secondary hover-bg-divider">
     Regenerate secret
   </button>
 
   <dialog id="app-regen-dialog"
-          class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50"
-          _="on click(event) if event.target is me call me.close() end">
+          class="w-full max-w-sm rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50">
     <h3 class="text-lg font-semibold text-ht-content-primary">Regenerate client secret?</h3>
     <p class="mt-2 text-sm text-ht-content-muted">This will invalidate the current secret for <strong>{{ app.client_name() }}</strong>. Any integration using the old secret will break.</p>
     <div class="mt-6 flex justify-end gap-3">
       <button type="button"
-              _="on click call #app-regen-dialog.close()"
+              data-component="show-dialog" data-action="close"
               class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
         Cancel
       </button>

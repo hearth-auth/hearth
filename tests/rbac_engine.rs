@@ -1,6 +1,6 @@
 //! Integration tests for the RBAC engine resolution pipeline.
 //!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 scenarios:
+//! Scenarios:
 //! - role composition transitive / cycle / depth cap
 //! - group nesting transitive / cycle / caps
 //! - scope filtering (realm vs org) and scope intersection (OAuth narrowing)

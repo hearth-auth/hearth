@@ -143,3 +143,46 @@ export interface MePermissionsResponse {
   permissions: string[];
   scope: string;
 }
+
+/** The three permission delivery modes introduced in HEA-922. */
+export type AccessTokenAuthorizationMode = "embedded" | "introspection" | "decision";
+
+/** Options for a per-request permission decision call to `POST /oauth/authorize`. */
+export interface AuthorizePermissionOptions {
+  /** Constrain the decision to a specific organization. */
+  organizationId?: string;
+  /** Constrain the decision to a specific resource. */
+  resource?: string;
+}
+
+/**
+ * Configuration for the client-side session-version cache (RFC HEA-930 § 13).
+ *
+ * When enabled, the SDK fetches a snapshot of `{sessionId → minSv}` on startup,
+ * polls `GET /oauth/session-versions` for deltas at `pollIntervalMs` intervals,
+ * and validates the `sv` claim on every `hasPermission` / `hasRole` / `inGroup`
+ * / `inOrg` call without any per-request network hop.
+ */
+export interface SessionVersionConfig {
+  /** Whether session-version validation is enabled. */
+  enabled: boolean;
+  /** Delta feed poll interval in milliseconds. Recommended: 5 000. */
+  pollIntervalMs: number;
+  /**
+   * Maximum cache age before the cache is considered stale, in milliseconds.
+   * MUST be greater than `pollIntervalMs`. Recommended: `pollIntervalMs × 3`.
+   */
+  staleThresholdMs: number;
+  /**
+   * Action when the cache exceeds `staleThresholdMs`:
+   * - `"reject"` — throw {@link SessionVersionCacheStaleError} (fail-closed).
+   * - `"introspect"` — caller should catch {@link SessionVersionCacheStaleError}
+   *   and fall back to the introspection endpoint.
+   */
+  onStale: "reject" | "introspect";
+  /**
+   * Service-to-service access token with `hearth.sv_feed` scope.
+   * Required when `enabled` is `true`.
+   */
+  serviceToken: string;
+}

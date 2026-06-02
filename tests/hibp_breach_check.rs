@@ -16,6 +16,7 @@ use hearth::identity::{
 };
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+use secrecy::SecretString;
 
 // ── Stub transports ──────────────────────────────────────────────────────────
 
@@ -95,9 +96,8 @@ fn create_realm_with_breach_check(
             config: Some(RealmConfig {
                 breach_check: BreachCheckConfig {
                     enabled,
-                    mode: hearth::identity::BreachCheckMode::Online,
                     timeout_ms: 3000,
-                    hibp_api_key: String::new(),
+                    hibp_api_key: SecretString::new(String::new()),
                 },
                 ..RealmConfig::default()
             }),

@@ -16,6 +16,7 @@ use hearth::identity::{
     AdaptiveMfaConfig, CleartextPassword, CreateRealmRequest, CreateUserRequest, IdentityError,
     PasswordGrantRequest, RealmConfig, RequiredAction, StepUpMfaGrantRequest,
 };
+use secrecy::SecretString;
 
 // ──────────────────────────────────────────────────────────────
 // Shared helpers
@@ -28,7 +29,7 @@ fn realm_cfg_with_adaptive(enabled: bool, secret: &str, window_days: u32) -> Rea
         adaptive_mfa: AdaptiveMfaConfig {
             enabled,
             recognition_window_days: window_days,
-            fingerprint_hmac_secret: secret.to_string(),
+            fingerprint_hmac_secret: SecretString::new(secret.into()),
         },
         ..RealmConfig::default()
     }
@@ -822,5 +823,135 @@ async fn major_ua_update_triggers_step_up() {
     assert!(
         matches!(major_bump, IdentityError::StepUpChallengeRequired),
         "expected StepUpChallengeRequired on major UA bump, got: {major_bump:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────
+// INFO-1: step_up_mfa_grant_token emits StepUpMfaCompleted audit event
+// ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn step_up_completion_emits_audit_event() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let secret = "step-up-completed-audit-32bytes!!";
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("stepup-completeaudit-{}", uuid::Uuid::new_v4()),
+            config: Some(realm_cfg_with_adaptive(true, secret, 30)),
+        })
+        .expect("create realm");
+    let user = h
+        .identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: format!("completeaudit-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Completion Audit User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    h.identity()
+        .set_password(
+            realm.id(),
+            user.id(),
+            &CleartextPassword::from_string(PASSWORD.to_string()),
+        )
+        .expect("set password");
+
+    // Enroll TOTP so step-up can be completed.
+    let enrollment = h
+        .identity()
+        .enroll_totp(realm.id(), user.id())
+        .expect("enroll totp");
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&enrollment.secret_base32, now_secs);
+    h.identity()
+        .verify_totp_enrollment(realm.id(), user.id(), &code)
+        .expect("verify enrollment");
+
+    // Complete the step-up MFA challenge.
+    let now_secs2 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let mfa_code = compute_totp_code(&enrollment.secret_base32, now_secs2 + 30);
+    h.identity()
+        .step_up_mfa_grant_token(
+            realm.id(),
+            &StepUpMfaGrantRequest {
+                email: user.email().to_string(),
+                password: PASSWORD.to_string(),
+                mfa_code,
+                scope: None,
+                client_ip: Some("10.30.40.50".to_string()),
+                user_agent: Some("Firefox/127.0".to_string()),
+            },
+        )
+        .expect("step-up completion must succeed");
+
+    // StepUpMfaCompleted must be emitted.
+    let mut query = AuditQuery::for_realm(realm.id().clone());
+    query.action = Some(AuditAction::StepUpMfaCompleted);
+    let events = h.audit().query(&query).expect("query audit");
+    assert!(
+        !events.is_empty(),
+        "StepUpMfaCompleted audit event must be emitted on successful step-up completion"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────
+// LOW-1: HMAC secret shorter than 32 bytes is a hard config error
+// ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn short_hmac_secret_is_a_hard_config_error() {
+    // NIST SP 800-107: HMAC keys must be ≥ hash output length (32 bytes for SHA-256).
+    // A secret shorter than 32 bytes must be rejected fail-secure (not silently skipped).
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("stepup-shortkey-{}", uuid::Uuid::new_v4()),
+            config: Some(realm_cfg_with_adaptive(true, "tooshort", 30)),
+        })
+        .expect("create realm");
+    let user = h
+        .identity()
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: format!("shortkey-{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Short Key User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    h.identity()
+        .set_password(
+            realm.id(),
+            user.id(),
+            &CleartextPassword::from_string(PASSWORD.to_string()),
+        )
+        .expect("set password");
+
+    let err = h
+        .identity()
+        .password_grant_token(
+            realm.id(),
+            &ropc(user.email(), "192.168.1.1", "Mozilla/5.0"),
+        )
+        .expect_err("enabled=true with short secret must return an error");
+    assert!(
+        matches!(err, IdentityError::Internal { .. }),
+        "expected Internal config error for short HMAC secret, got: {err:?}"
     );
 }

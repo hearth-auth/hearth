@@ -1,0 +1,567 @@
+# ============================================================================
+# Hearth — 100% feature-coverage config for admin-UI exercise/test.
+# Single-node, --dev-friendly. Set env vars below before booting.
+# ============================================================================
+#
+# Required env vars (export before `cargo run -- serve -c hearth.yaml`):
+#   HEARTH_MASTER_KEY                                  (envelope encryption)
+#   HEARTH_SMS_OTP_HMAC_KEY                            (SMS OTP HMAC)
+#   HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET
+#   HEARTH_REALM_INTERNAL_TOOLS_FINGERPRINT_HMAC_SECRET
+#   SMTP_USERNAME / SMTP_PASSWORD
+#   SENDGRID_API_KEY / POSTMARK_SERVER_TOKEN / MAILGUN_API_KEY / MAILTRAP_API_KEY
+#   TWILIO_AUTH_TOKEN / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+#   INTERNAL_API_SECRET / DASHBOARD_CLIENT_SECRET / API_GATEWAY_SECRET
+#   GOOGLE_CLIENT_SECRET / MICROSOFT_CLIENT_SECRET / GITHUB_CLIENT_SECRET
+#   OKTA_CLIENT_SECRET
+#   SCIM_BEARER_CUSTOMER / SCIM_BEARER_INTERNAL
+# Generate any HMAC/master key with: openssl rand -hex 32
+# ============================================================================
+
+server:
+  bind_address: "127.0.0.1"
+  port: 8420
+  # --- TLS (uncomment with real paths to exercise HTTPS + auto HTTP→HTTPS redirect) ---
+  # tls_cert_path: "./tls/server.crt"
+  # tls_key_path:  "./tls/server.key"
+  # tls_client_ca_path: "./tls/clients-ca.crt"
+  # tls_require_client_cert: false
+  trusted_proxies:
+    - "127.0.0.1"
+    - "10.0.0.1"
+  trust_forwarded_proto: true
+  default_realm: "customer-portal"
+  grpc_port: 8421
+  grpc_bind_address: "127.0.0.1"
+  assets_dir: "./src/protocol/web/assets"
+
+storage:
+  data_dir: "./data"
+  wal_max_size_bytes: 268435456            # 256 MiB
+  memtable_flush_bytes: 67108864           # 64 MiB
+  hot_tier_capacity: 10000                 # explicit (disables auto-sizing)
+  # hot_tier_max_memory: 536870912          # 512 MiB — ignored when hot_tier_capacity is set
+  fsync: true
+  compaction:
+    enabled: true
+    interval_secs: 3600
+    min_sst_count: 3
+
+observability:
+  log_level: "debug"
+  log_format: "json"
+  otlp:
+    protocol: grpc                          # grpc | http
+    endpoint: "http://localhost:4317"
+    service_name: "hearth"
+    headers:
+      Authorization: "Bearer ${OTLP_TOKEN:-dev-token}"
+
+operational:
+  request_timeout_secs: 30
+  shutdown_timeout_secs: 10
+  max_connections: 1024
+  queue_depth: 4096
+
+metrics:
+  enabled: true
+
+branding:
+  product_name: "Acme Identity"
+  logo_url: "/ui/static/img/hearth-wide-web.svg"
+  theme: ember                              # ember | ocean | midnight | forest | cloud | slate
+  custom_css: "./ui/brand.css"
+
+# ----------------------------------------------------------------------------
+# EMAIL — exercising SMTP (the others are commented to demo their shape).
+# Only one transport is active at a time; comment one out to switch.
+# ----------------------------------------------------------------------------
+email:
+  transport: smtp                           # log | mailcatcher | smtp | sendgrid | postmark | mailgun | mailtrap
+  from: "Acme Identity <noreply@example.com>"
+  smtp:
+    host: "localhost"
+    port: 1025
+    encryption: starttls                    # none | starttls | tls
+    username: "${SMTP_USERNAME}"
+    password: "${SMTP_PASSWORD}"
+  # sendgrid: { api_key: "${SENDGRID_API_KEY}" }
+  # postmark: { server_token: "${POSTMARK_SERVER_TOKEN}" }
+  # mailgun:  { api_key: "${MAILGUN_API_KEY}", domain: "mg.example.com", region: eu }
+  # mailtrap: { api_key: "${MAILTRAP_API_KEY}", inbox_id: 12345 }
+  branding:
+    accent_color: "#E85D04"
+    support_email: "support@example.com"
+    custom_footer_text: "© 2026 Acme Corp. All rights reserved."
+  templates_dir: "./templates/email"
+
+# ----------------------------------------------------------------------------
+# SMS — Twilio active; AWS SNS commented for shape reference.
+# ----------------------------------------------------------------------------
+sms:
+  transport: twilio                         # log | twilio | awssns
+  twilio:
+    account_sid: "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    auth_token: "${TWILIO_AUTH_TOKEN}"
+    from: "+15550001111"
+  # aws_sns:
+  #   region: "us-east-1"
+  #   access_key_id: "${AWS_ACCESS_KEY_ID}"
+  #   secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+  #   sender_id: "Acme"
+
+oidc:
+  issuer: "https://auth.example.com"
+  authorization_code_ttl: "10m"
+  enforce_nonces: true
+  require_pkce_for_confidential_clients: true
+
+token:
+  issuer: "https://auth.example.com"
+  audience: "https://api.example.com"
+  access_token_ttl: "15m"
+  refresh_token_ttl: "7d"
+  signing_key_rotation_grace_period: "24h"
+
+security:
+  rate_limiting:
+    login_per_ip:
+      max_attempts: 10
+      window_seconds: 60
+    login_per_account:
+      max_failures: 5
+      lockout_seconds: 300
+
+auth:
+  session_ttl: "24h"
+  password_memory_cost: 65536               # KiB
+  password_time_cost: 3
+  mfa_required: false
+  passkey_requires_mfa: false
+  session_max_concurrent: 5
+  session_over_limit_policy: "reject_new"   # reject_new | evict_oldest
+
+onboarding:
+  enabled: true
+  base_url: "https://auth.example.com"
+  notification_email: "ops@example.com"
+
+# ============================================================================
+# REALMS — four realms, each exercising a different slice of features.
+# ============================================================================
+realms:
+
+  # --------------------------------------------------------------------------
+  # 1) customer-portal — public B2C/B2B SaaS realm.
+  #    Self-registration, MFA, organizations, OAuth code+PKCE, federation,
+  #    SCIM provisioning, custom attributes, adaptive MFA, declarative RBAC.
+  # --------------------------------------------------------------------------
+  customer-portal:
+    session_ttl: "12h"
+    session_max_concurrent: 3
+    session_over_limit_policy: "evict_oldest"
+    password_memory_cost: 65536
+    password_time_cost: 3
+    rotate_signing_key: false               # set true once to rotate, auto-cleared
+    email:
+      branding:
+        accent_color: "#2563EB"
+        support_email: "help@customer.example.com"
+        custom_footer_text: "Customer Portal — support@customer.example.com"
+    web:
+      theme: cloud                          # light theme
+      custom_css: "/etc/hearth/customer-portal.css"
+      product_name: "Customer Portal"
+    auth:
+      mfa_required: true
+      passkey_requires_mfa: false
+      mfa_methods: [totp, webauthn]
+      allowed_auth_methods: [password, magic_link, passkey]
+      registration:
+        mode: domain_restricted             # disabled | open | invite_only | domain_restricted
+        allowed_domains: [example.com, partners.example.com]
+      dcr:
+        mode: open                          # disabled | open
+      password_policy:
+        min_length: 12
+        require_uppercase: true
+        require_number: true
+        require_special: true
+        not_username: true
+        not_email: true
+        history_depth: 5
+        max_age_days: 90
+      token:
+        access_token_ttl: "30m"
+        refresh_token_ttl: "14d"
+        password_reset_token_ttl: "1h"
+      rate_limit:
+        max_failed_logins: 5
+        lockout_duration: "15m"
+      adaptive_mfa:
+        enabled: true
+        recognition_window_days: 30
+        fingerprint_hmac_secret: "${HEARTH_REALM_CUSTOMER_PORTAL_FINGERPRINT_HMAC_SECRET}"
+    scim:
+      bearer_token: "${SCIM_BEARER_CUSTOMER}"
+    attribute_definitions:
+      users:
+        - { key: department, label: Department, type: string, required: false, description: "Business department" }
+        - { key: employee_id, label: Employee ID, type: string, required: true }
+        - { key: office_count, label: Office Count, type: number, required: false }
+        - { key: is_contractor, label: Is Contractor, type: boolean, required: false }
+        - key: tier
+          label: Subscription Tier
+          type: enum
+          required: false
+          enum_values: [free, pro, enterprise]
+      organizations:
+        - { key: crm_id, label: CRM ID, type: string }
+        - key: contract_tier
+          label: Contract Tier
+          type: enum
+          enum_values: [starter, growth, enterprise]
+        - { key: max_seats, label: Licensed Seats, type: number }
+    organizations:
+      acme-corp:
+        name: "Acme Corporation"
+        description: "Flagship enterprise customer"
+        config: { max_members: 500 }
+      beta-testers:
+        name: "Beta Testers"
+        description: "Early access program"
+        config: { max_members: 50 }
+    applications:
+      web-app:
+        name: "Customer Web App"
+        slug: web-app
+        confidential: false                 # public client (PKCE required)
+        redirect_uris:
+          - "https://app.customer.example.com/callback"
+          - "http://localhost:3000/callback"
+        grant_types: [authorization_code, refresh_token]
+        require_consent: true
+        client_logo_url: "https://cdn.example.com/logo.png"
+        trust_level: third_party            # first_party | third_party
+        declared_scopes: [openid, profile, email, billing:manage]
+        consent_spans_orgs: false
+      mobile-app:
+        name: "Customer Mobile App"
+        slug: mobile-app
+        confidential: false
+        redirect_uris: ["com.customer.app://callback"]
+        grant_types: [authorization_code, refresh_token, urn:ietf:params:oauth:grant-type:device_code]
+        trust_level: third_party
+        declared_scopes: [openid, profile, email]
+    permissions:
+      - { name: billing.read,   display_name: "Read billing",   description: "View invoices and plan",   category: billing }
+      - { name: billing.write,  display_name: "Manage billing", description: "Update payment methods",   category: billing }
+      - { name: reports.export, display_name: "Export reports", description: "Download CSV/PDF reports", category: analytics }
+      - { name: tickets.read,   display_name: "Read tickets",   category: support }
+      - { name: tickets.write,  display_name: "Write tickets",  category: support }
+    roles:
+      - name: support.agent
+        description: "Read-only support staff"
+        scope_kind: realm                   # realm | organization | any
+        permissions: [user.read, org.read, tickets.read, tickets.write, reports.export]
+      - name: org.billing_admin
+        description: "Org-scoped billing manager"
+        scope_kind: organization
+        permissions: [billing.read, billing.write]
+        parents: [org.admin]
+    scopes:
+      - name: billing:manage
+        display_name: "Billing management"
+        description: "Read and write billing data"
+        permissions: [billing.read, billing.write]
+      - name: support:tickets
+        display_name: "Support tickets"
+        description: "Read and write tickets"
+        permissions: [tickets.read, tickets.write]
+    protected_resources:
+      - resource_uri: "https://api.customer.example.com"
+        display_name: "Customer API"
+        scopes:
+          - name: api:read
+            display_name: "Read API"
+            description: "Read-only API access"
+            permissions: [user.read, org.read]
+          - name: api:write
+            display_name: "Write API"
+            description: "Mutating API access"
+            permissions: [user.write, org.write]
+    claims:
+      mappings:
+        - claim: roles
+          source: { source: roles_from_assignments }
+          include_in_access_token: true
+          include_in_id_token: true
+          include_in_userinfo: false
+        - claim: groups
+          source: { source: groups_from_memberships }
+          include_in_access_token: true
+          include_in_id_token: true
+        - claim: permissions
+          source: { source: effective_permissions }
+          include_in_access_token: true
+          include_in_id_token: false
+          required_scopes: [openid]
+        - claim: department
+          source: { source: user_attribute, attribute: department }
+          include_in_access_token: false
+          include_in_id_token: true
+          include_in_userinfo: true
+          first_party_only: false
+        - claim: tenant
+          source: { source: constant, value: "customer" }
+          include_in_access_token: true
+        - claim: admin_roles
+          source: { source: role_subset, prefix: "support." }
+          include_in_access_token: true
+          allowed_clients: [web-app]
+    groups:
+      - { name: "All Customers",  slug: customers,  description: "All customer users" }
+      - { name: "Beta Program",   slug: beta,       description: "Beta opt-in users" }
+    federation:
+      link_existing_accounts: confirm       # disabled | confirm | auto
+      providers:
+        google:
+          type: google
+          display_name: "Sign in with Google"
+          client_id: "1234567890.apps.googleusercontent.com"
+          client_secret: "${GOOGLE_CLIENT_SECRET}"
+          scopes: [openid, email, profile]
+        microsoft:
+          type: microsoft
+          display_name: "Sign in with Microsoft"
+          issuer: "https://login.microsoftonline.com/common/v2.0"
+          client_id: "00000000-0000-0000-0000-000000000000"
+          client_secret: "${MICROSOFT_CLIENT_SECRET}"
+          claim_mappings: { email: upn, name: preferred_username }
+        github:
+          type: github
+          client_id: "Iv1.github_client_id"
+          client_secret: "${GITHUB_CLIENT_SECRET}"
+        okta-saml:
+          type: saml
+          display_name: "Sign in with Okta (SAML)"
+          entity_id: "http://www.okta.com/exk1abc"
+          sso_url: "https://acme.okta.com/app/abc/sso/saml"
+          slo_url: "https://acme.okta.com/app/abc/slo/saml"
+          idp_certificate_pem: |
+            -----BEGIN CERTIFICATE-----
+            MIID...replace-with-real-cert...IDAQAB
+            -----END CERTIFICATE-----
+          sign_authn_requests: true
+          want_assertions_signed: true
+          attribute_map:
+            email: "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"
+            name:  "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"
+
+  # --------------------------------------------------------------------------
+  # 2) internal-tools — enterprise SSO realm.
+  #    First-party clients (no consent), SAML SP (Hearth as IdP),
+  #    strict Argon2, midnight theme, invite-only registration.
+  # --------------------------------------------------------------------------
+  internal-tools:
+    session_ttl: "8h"
+    session_max_concurrent: 10
+    password_memory_cost: 131072            # stricter Argon2
+    password_time_cost: 4
+    web:
+      theme: midnight
+      product_name: "Acme Internal"
+    email:
+      branding:
+        accent_color: "#7C3AED"
+        support_email: "it@example.com"
+    scim:
+      bearer_token: "${SCIM_BEARER_INTERNAL}"
+    auth:
+      mfa_required: true
+      passkey_requires_mfa: true            # regulated: TOTP even after passkey
+      mfa_methods: [totp, webauthn]
+      allowed_auth_methods: [password, passkey]
+      registration:
+        mode: invite_only
+      dcr:
+        mode: disabled
+      password_policy:
+        min_length: 16
+        require_uppercase: true
+        require_number: true
+        require_special: true
+        not_username: true
+        not_email: true
+        history_depth: 10
+        max_age_days: 60
+      token:
+        access_token_ttl: "10m"
+        refresh_token_ttl: "1d"
+        password_reset_token_ttl: "30m"
+      rate_limit:
+        max_failed_logins: 3
+        lockout_duration: "30m"
+      adaptive_mfa:
+        enabled: true
+        recognition_window_days: 14
+        fingerprint_hmac_secret: "${HEARTH_REALM_INTERNAL_TOOLS_FINGERPRINT_HMAC_SECRET}"
+    organizations:
+      platform-team:
+        name: "Platform Team"
+        description: "Infra + SRE"
+      product-team:
+        name: "Product Team"
+    applications:
+      dashboard:
+        name: "Internal Dashboard"
+        slug: dashboard
+        confidential: true
+        client_secret: "${DASHBOARD_CLIENT_SECRET}"
+        redirect_uris: ["https://dashboard.internal.example.com/callback"]
+        grant_types: [authorization_code, refresh_token]
+        require_consent: false              # first-party — skip consent prompt
+        trust_level: first_party
+        consent_spans_orgs: true
+        declared_scopes: [openid, profile, email, admin]
+      api-service:
+        name: "Internal API Service"
+        slug: api-service
+        confidential: true
+        client_secret: "${INTERNAL_API_SECRET}"
+        grant_types: [client_credentials]
+        trust_level: first_party
+        declared_scopes: [admin]
+    saml_service_providers:
+      jira:
+        entity_id: "https://acme.atlassian.net"
+        acs_url: "https://acme.atlassian.net/plugins/servlet/samlconsumer"
+        slo_url: "https://acme.atlassian.net/plugins/servlet/samlslo"
+        sp_certificate_pem: |
+          -----BEGIN CERTIFICATE-----
+          MIID...replace-with-real-cert...IDAQAB
+          -----END CERTIFICATE-----
+        sign_assertions: true
+        sign_responses: true
+        want_authn_requests_signed: false
+        nameid_format: emailAddress         # emailAddress | persistent | transient | unspecified
+        attribute_map:
+          email:      "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"
+          givenName:  "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname"
+          surname:    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname"
+    permissions:
+      - { name: incident.declare,  display_name: "Declare incident",  category: ops }
+      - { name: incident.resolve,  display_name: "Resolve incident",  category: ops }
+      - { name: deploy.production, display_name: "Deploy to prod",    category: ops }
+    roles:
+      - name: sre.oncall
+        scope_kind: realm
+        permissions: [incident.declare, incident.resolve, deploy.production]
+        parents: [realm.admin]
+    groups:
+      - { name: Engineering,  slug: engineering, description: "All engineers" }
+      - { name: SRE,          slug: sre,         description: "Oncall rotation" }
+      - { name: Leadership,   slug: leadership }
+    federation:
+      link_existing_accounts: auto          # auto-link on verified email
+      providers:
+        corp-oidc:
+          type: oidc
+          display_name: "Corporate SSO"
+          issuer: "https://idp.corp.example.com"
+          authorization_endpoint: "https://idp.corp.example.com/authorize"
+          token_endpoint: "https://idp.corp.example.com/token"
+          userinfo_endpoint: "https://idp.corp.example.com/userinfo"
+          jwks_uri: "https://idp.corp.example.com/.well-known/jwks.json"
+          client_id: "hearth-internal"
+          client_secret: "${OKTA_CLIENT_SECRET}"
+          scopes: [openid, email, profile, groups]
+          claim_mappings: { email: mail, name: cn }
+
+  # --------------------------------------------------------------------------
+  # 3) api-gateway — pure machine-to-machine. client_credentials only.
+  #    Exercise: confidential clients, JTI revocation, no MFA, no UI traffic.
+  # --------------------------------------------------------------------------
+  api-gateway:
+    session_ttl: "1h"
+    web:
+      theme: slate
+      product_name: "Acme API Gateway"
+    auth:
+      mfa_required: false
+      allowed_auth_methods: [password]
+      registration: { mode: disabled }
+      dcr: { mode: disabled }
+      token:
+        access_token_ttl: "5m"
+        refresh_token_ttl: "1h"
+    applications:
+      gateway-service:
+        name: "API Gateway Service"
+        slug: gateway-service
+        confidential: true
+        client_secret: "${API_GATEWAY_SECRET}"
+        grant_types: [client_credentials]
+        trust_level: first_party
+        declared_scopes: [api:read, api:write]
+      partner-integration:
+        name: "Partner Integration"
+        slug: partner-integration
+        confidential: true
+        client_secret: "${API_GATEWAY_SECRET}"
+        grant_types: [client_credentials]
+        trust_level: third_party
+        declared_scopes: [api:read]
+    permissions:
+      - { name: gateway.invoke, display_name: "Invoke gateway", category: api }
+    roles:
+      - name: service.client
+        scope_kind: realm
+        permissions: [gateway.invoke]
+
+  # --------------------------------------------------------------------------
+  # 4) legacy-tenant — source realm being migrated out.
+  #    Pairs with `new-tenant` (below) which copies users out.
+  # --------------------------------------------------------------------------
+  legacy-tenant:
+    session_ttl: "24h"
+    web:
+      theme: forest
+      product_name: "Legacy Tenant"
+    auth:
+      registration: { mode: disabled }
+    # archive_drop: true                    # would DROP all data on archive — leave false
+    # To archive this realm permanently: remove this entry; it becomes soft-archived.
+
+  # --------------------------------------------------------------------------
+  # 5) new-tenant — destination realm pulling from legacy-tenant via COPY.
+  #    Use `migrate_from:` instead of `copy_from:` to MOVE (and auto-archive source).
+  # --------------------------------------------------------------------------
+  new-tenant:
+    session_ttl: "24h"
+    web:
+      theme: ocean
+      product_name: "New Tenant"
+    copy_from: legacy-tenant                # `migrate_from: legacy-tenant` would MOVE instead
+    migrate:
+      users: true
+      orgs: true
+      applications: false
+      on_conflict: skip                     # error | skip
+    auth:
+      registration: { mode: open }
+
+# ============================================================================
+# CLUSTER — uncomment for multi-node Raft. Single-node leaves this absent.
+# Requires NTP, port 8421 open between nodes, and per-node TLS leaf certs.
+# ============================================================================
+# cluster:
+#   node_id: 1
+#   peer_address: "10.0.0.1:8421"
+#   peers:
+#     - { id: 2, address: "10.0.0.2:8421" }
+#     - { id: 3, address: "10.0.0.3:8421" }
+#   tls_cert_path:    "/etc/hearth/certs/node1.crt"
+#   tls_key_path:     "/etc/hearth/certs/node1.key"
+#   tls_ca_cert_path: "/etc/hearth/certs/ca.crt"
+#   read_lag_threshold_ms: 500

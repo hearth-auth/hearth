@@ -91,12 +91,15 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         | domain::AuditAction::PasswordCompromisedRejected
         | domain::AuditAction::BreachCheckUnavailable
         | domain::AuditAction::StepUpMfaTriggered
+        | domain::AuditAction::StepUpMfaCompleted
         | domain::AuditAction::SmsOtpEnrollmentStarted
         | domain::AuditAction::SmsOtpEnrollmentVerified
         | domain::AuditAction::SmsOtpEnrollmentFailed
         | domain::AuditAction::SmsMfaChallengeSucceeded
         | domain::AuditAction::SmsMfaChallengeFailed
-        | domain::AuditAction::SmsMfaLocked => pb::AuditAction::Unspecified,
+        | domain::AuditAction::SmsMfaLocked
+        | domain::AuditAction::DeviceFingerprintsErased
+        | domain::AuditAction::SessionLimitEnforced => pb::AuditAction::Unspecified,
     }
 }
 

@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package hearth.events.v1;
 
+import "google/api/annotations.proto";
+
 option go_package = "github.com/hearthdb/hearth/sdks/go/generated/events/v1;eventsv1";
 
 // Categories of security-critical actions recorded in the audit log.
@@ -85,6 +87,7 @@ message CreateAuditEvent {
 }
 
 // Query parameters for filtering audit events.
+// All fields except realm_id become URL query parameters on the HTTP binding.
 message AuditQuery {
   string realm_id = 1;
   optional int64 start_time = 2;
@@ -112,6 +115,10 @@ message VerifyIntegrityResponse {
 }
 
 service AuditService {
-  rpc ListEvents(AuditQuery) returns (AuditEventPage);
+  // Query audit events with optional filters. Maps to GET /admin/audit.
+  rpc ListEvents(AuditQuery) returns (AuditEventPage) {
+    option (google.api.http) = {get: "/admin/audit"};
+  }
+  // Verify the integrity hash chain — gRPC-only (no REST route yet).
   rpc VerifyIntegrity(VerifyIntegrityRequest) returns (VerifyIntegrityResponse);
 }

@@ -163,7 +163,25 @@ Summary of the surface this document is responsible for:
 - **Admin endpoints** under `/admin/roles`, `/admin/groups`, `/admin/users/{id}/roles`, `/admin/groups/{id}/members`, `/admin/groups/{id}/roles` — full CRUD and introspection. Gated by the `hearth.admin` permission. See [AUTHORIZATION.md § 8.2](./AUTHORIZATION.md).
 - **gRPC `RbacAdminService`** — mirror of the admin HTTP surface for service-to-service callers. No service-to-service `Check` RPC; callers decode the JWT locally.
 
-There is no public "check permission now" endpoint. Permission resolution happens at token-issue time; consumers read the resulting claims. This is the same pattern every mainstream JWT-based identity system uses (Auth0, Clerk, Keycloak, Okta).
+#### Permission-delivery modes and hot-path designation
+
+`OAuthClient.access_token_authorization` controls how RBAC data reaches resource
+servers. There are three modes; see [AUTHORIZATION.md § 15](./AUTHORIZATION.md) for the
+normative specification.
+
+**Hot-path designation:**
+
+| Endpoint | Path classification | Reason |
+|---|---|---|
+| Token signature verify + claim read (embedded mode) | **Hot path** | In-process; zero allocations, zero syscalls, no network. |
+| `POST /introspect` | **Off hot path** | Validates signature + session liveness then resolves live RBAC in-process; cost is one network round-trip at the resource server. |
+| `POST /oauth/authorize` | **Off hot path** | Validates token + resolves live RBAC in-process for one permission; cost is one network round-trip at the resource server. |
+
+`embedded` mode preserves the hot-path invariant defined in [§ 3.1](#31-definition): token
+validation requires zero heap allocations, no syscalls, and no `.await` on I/O.
+`introspection` and `decision` modes are off the hot path — they each perform in-process
+token validation and RBAC resolution before responding, but the round-trip latency is
+dominated by the resource server's outbound call, not by Hearth's internal processing.
 
 ### 4.3 API Versioning
 
@@ -497,7 +515,7 @@ src/storage/
 
 - Adding a new dependency MUST be justified in the PR description: what it provides, why a hand-written solution is not appropriate, and its maintenance status (last release, bus factor, known issues).
 - All new dependencies MUST pass `cargo-audit` with no known vulnerabilities.
-- All new dependencies MUST be reviewed for license compatibility. Acceptable: Apache 2.0, MIT, BSD, MPL-2.0. Not acceptable: GPL, AGPL, SSPL. (Note: this refers to *dependency* licenses. Hearth itself is AGPL-3.0 licensed with a commercial option. AGPL/GPL dependencies are banned because they would complicate the commercial license track.)
+- All new dependencies MUST be reviewed for license compatibility. Acceptable: Apache 2.0, MIT, BSD, MPL-2.0. Not acceptable: GPL, AGPL, SSPL. (Hearth is Apache-2.0; copyleft dependencies are banned because they would impose incompatible downstream obligations.)
 - Dependencies MUST NOT introduce a C/C++ build toolchain requirement unless absolutely necessary (`ring` is acceptable; a dependency requiring `cmake` is suspect).
 
 ### 15.2 Approved Crates
@@ -518,9 +536,9 @@ These crates are pre-approved and need no additional justification:
 | CLI | `clap` | Derive-based |
 | Lock-free concurrency | `crossbeam-epoch`, `arc-swap` | |
 | Memory-mapped I/O | `memmap2` | |
-| Raft consensus | `openraft` | Phase 2+ |
-| HTTP framework | TBD | MUST be `tower`-compatible |
-| Time handling | TBD | |
+| Raft consensus | `openraft` | Implemented — `src/cluster/`; gated on `cluster:` config; not yet production-validated at scale |
+| HTTP framework | `axum` | `tower`-compatible |
+| Time handling | `std::time`, `tokio::time` | |
 | Testing | `proptest`, `criterion`, `insta`, `madsim` | Test-only |
 | HTTP client (test) | `reqwest` | Test-only |
 

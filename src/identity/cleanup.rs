@@ -16,7 +16,9 @@
 
 use crate::core::{Clock, RealmId, Timestamp};
 use crate::identity::keys;
-use crate::identity::oidc::{StoredDeviceCode, StoredGrantFamily};
+use crate::identity::oidc::{
+    StoredDeviceCode, StoredGrantFamily, StoredPushedAuthorizationRequest,
+};
 use crate::identity::types::PendingAuthorizationRequest;
 use crate::storage::StorageEngine;
 
@@ -25,12 +27,17 @@ use crate::storage::StorageEngine;
 pub struct CleanupConfig {
     /// Whether periodic cleanup is enabled.
     pub enabled: bool,
-    /// Interval in seconds between cleanup sweeps. 0 disables the
-    /// background task even when `enabled` is true.
+    /// Interval in seconds between OAuth entity cleanup sweeps. 0 disables
+    /// the background task even when `enabled` is true.
     pub interval_secs: u64,
     /// Maximum entities to delete per type per sweep. Bounds worst-case
     /// sweep latency on the first run after feature enablement.
     pub max_per_type: usize,
+    /// Interval in seconds between device-fingerprint TTL sweeps.
+    ///
+    /// Default: 21 600 (6 hours). 0 disables the dfp sweeper even when
+    /// `enabled` is true.
+    pub dfp_sweeper_interval_secs: u64,
 }
 
 impl Default for CleanupConfig {
@@ -39,6 +46,7 @@ impl Default for CleanupConfig {
             enabled: true,
             interval_secs: 300,
             max_per_type: 1000,
+            dfp_sweeper_interval_secs: 21_600,
         }
     }
 }
@@ -54,6 +62,10 @@ pub struct CleanupStats {
     pub pending_tickets_deleted: u64,
     /// Grant families swept.
     pub grant_families_deleted: u64,
+    /// Pushed authorization requests swept.
+    pub par_requests_deleted: u64,
+    /// JAR (RFC 9101) JTI replay-store entries swept.
+    pub jar_jtis_deleted: u64,
     /// Number of entity-type sweeps that encountered an error.
     pub errors: u64,
 }
@@ -65,6 +77,8 @@ impl CleanupStats {
             + self.device_codes_deleted
             + self.pending_tickets_deleted
             + self.grant_families_deleted
+            + self.par_requests_deleted
+            + self.jar_jtis_deleted
     }
 }
 
@@ -130,7 +144,74 @@ pub(crate) fn sweep_expired(
         }
     }
 
+    match sweep_par_requests(realm_id, storage, now, config.max_per_type) {
+        Ok(n) => stats.par_requests_deleted = n,
+        Err(e) => {
+            stats.errors += 1;
+            tracing::warn!(
+                realm = %realm_id,
+                error = %e,
+                "cleanup: PAR request sweep failed"
+            );
+        }
+    }
+
+    let now_secs = now.as_micros() / 1_000_000;
+    match sweep_jar_jtis(realm_id, storage, now_secs) {
+        Ok(n) => stats.jar_jtis_deleted = n,
+        Err(e) => {
+            stats.errors += 1;
+            tracing::warn!(
+                realm = %realm_id,
+                error = %e,
+                "cleanup: JAR JTI sweep failed"
+            );
+        }
+    }
+
     stats
+}
+
+/// Eviction counts from a single device-fingerprint sweep of one realm.
+#[derive(Debug, Default, Clone)]
+pub struct FingerprintSweepStats {
+    /// Expired fingerprint entries deleted.
+    pub evicted: u64,
+    /// Active (non-expired) fingerprint entries observed after the sweep.
+    pub active: u64,
+}
+
+/// Scans all `dfp:user:*` keys in `realm_id` and deletes entries whose
+/// 8-byte little-endian i64 expiry (Unix seconds) is <= `now_secs`.
+///
+/// Returns [`FingerprintSweepStats`] on success. The caller should log any
+/// returned error at WARN level and continue — partial sweeps are safe
+/// because lazy expiry on the read path still handles stragglers.
+pub(crate) fn sweep_fingerprints(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<FingerprintSweepStats, crate::storage::StorageError> {
+    let prefix = keys::device_fp_global_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut stats = FingerprintSweepStats::default();
+    for entry in &entries {
+        if entry.value.len() != 8 {
+            continue;
+        }
+        #[allow(clippy::unwrap_used)]
+        // INVARIANT: length is checked to be exactly 8 above.
+        let expires_at = i64::from_le_bytes(entry.value.as_slice().try_into().unwrap());
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            stats.evicted += 1;
+        } else {
+            stats.active += 1;
+        }
+    }
+    Ok(stats)
 }
 
 // --- per-entity sweep helpers ---
@@ -271,6 +352,69 @@ fn sweep_grant_families(
         }
     }
 
+    Ok(deleted)
+}
+
+fn sweep_par_requests(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now: Timestamp,
+    max_per_type: usize,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::par_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        if deleted >= max_per_type as u64 {
+            break;
+        }
+        let par: StoredPushedAuthorizationRequest =
+            serde_json::from_slice(&entry.value).map_err(|e| {
+                crate::storage::StorageError::DeserializationFailed {
+                    reason: format!("cleanup: failed to deserialize PAR request: {e}"),
+                }
+            })?;
+
+        if now >= par.expires_at {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+
+    Ok(deleted)
+}
+
+/// Scans all `oauth:jar-jti:*` keys in `realm_id` and deletes entries whose
+/// 8-byte little-endian i64 expiry (Unix seconds) is <= `now_secs`.
+///
+/// Returns the number of evicted entries. Errors are propagated to the caller,
+/// which should log at WARN level and continue — partial sweeps are safe because
+/// replay prevention still fires on the read path for any entry still present.
+pub(crate) fn sweep_jar_jtis(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::jar_jti_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        if entry.value.len() != 8 {
+            // Legacy entries stored as b"1" — leave for cascade realm deletion.
+            continue;
+        }
+        #[allow(clippy::unwrap_used)]
+        // INVARIANT: length is checked to be exactly 8 above.
+        let expires_at = i64::from_le_bytes(entry.value.as_slice().try_into().unwrap());
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
     Ok(deleted)
 }
 
@@ -453,6 +597,8 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             nonce: None,
+            response_mode: None,
+            authorization_signed_response_alg: None,
             created_at: Timestamp::from_micros(T0),
             expires_at: Timestamp::from_micros(T0 + TEN_MINUTES),
         };
@@ -488,6 +634,8 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             nonce: None,
+            response_mode: None,
+            authorization_signed_response_alg: None,
             created_at: Timestamp::from_micros(T0),
             expires_at: Timestamp::from_micros(T0 + ONE_HOUR),
         };
@@ -654,8 +802,207 @@ mod tests {
             device_codes_deleted: 2,
             pending_tickets_deleted: 3,
             grant_families_deleted: 4,
+            par_requests_deleted: 5,
             ..Default::default()
         };
-        assert_eq!(stats.total_deleted(), 10);
+        assert_eq!(stats.total_deleted(), 15);
+    }
+
+    // --- device fingerprint sweep ---
+
+    const NOW_SECS: i64 = 1_700_000_000; // fixed base time in Unix seconds
+
+    /// Seed a fingerprint entry with the given expiry directly into storage.
+    fn seed_fingerprint(
+        s: &EmbeddedStorageEngine,
+        realm: &RealmId,
+        user_id: &crate::core::UserId,
+        tag: u8,
+        expires_at: i64,
+    ) {
+        let hmac_hex = format!("{tag:0>64x}");
+        let key = keys::encode_device_fp(user_id, &hmac_hex);
+        s.put(realm, &key, &expires_at.to_le_bytes())
+            .expect("put fingerprint");
+    }
+
+    #[test]
+    fn sweep_fingerprints_deletes_expired_keeps_active() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let user_a = crate::core::UserId::generate();
+        let user_b = crate::core::UserId::generate();
+
+        // Seed 3 expired entries (for two different users)
+        seed_fingerprint(&s, &realm, &user_a, 1, NOW_SECS - 1);
+        seed_fingerprint(&s, &realm, &user_a, 2, NOW_SECS - 3600);
+        seed_fingerprint(&s, &realm, &user_b, 3, NOW_SECS - 86400);
+
+        // Seed 2 live entries
+        seed_fingerprint(&s, &realm, &user_a, 4, NOW_SECS + 86400);
+        seed_fingerprint(&s, &realm, &user_b, 5, NOW_SECS + 7 * 86400);
+
+        let stats = sweep_fingerprints(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(stats.evicted, 3, "should delete 3 expired entries");
+        assert_eq!(stats.active, 2, "should observe 2 live entries");
+
+        // Verify exactly 2 entries remain in storage.
+        let prefix = keys::device_fp_global_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let remaining = s.scan(&realm, &prefix, &end).expect("scan after sweep");
+        assert_eq!(remaining.len(), 2, "only active entries must survive");
+    }
+
+    #[test]
+    fn sweep_fingerprints_empty_realm_is_ok() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let stats = sweep_fingerprints(&realm, &s, NOW_SECS).expect("sweep empty realm");
+        assert_eq!(stats.evicted, 0);
+        assert_eq!(stats.active, 0);
+    }
+
+    #[test]
+    fn sweep_fingerprints_all_active_nothing_deleted() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let user = crate::core::UserId::generate();
+
+        for tag in 0u8..4 {
+            seed_fingerprint(&s, &realm, &user, tag, NOW_SECS + 86400);
+        }
+
+        let stats = sweep_fingerprints(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(stats.evicted, 0);
+        assert_eq!(stats.active, 4);
+    }
+
+    #[test]
+    fn sweep_fingerprints_boundary_at_exactly_now_is_expired() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let user = crate::core::UserId::generate();
+
+        // Entry whose expiry == now (not strictly in the future) must be evicted.
+        seed_fingerprint(&s, &realm, &user, 1, NOW_SECS);
+
+        let stats = sweep_fingerprints(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(
+            stats.evicted, 1,
+            "entry expiring exactly at now must be evicted"
+        );
+        assert_eq!(stats.active, 0);
+    }
+
+    #[test]
+    fn sweep_fingerprints_isolated_across_realms() {
+        let (s, _dir) = storage();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        let user = crate::core::UserId::generate();
+
+        // Seed expired in realm_a, live in realm_b.
+        seed_fingerprint(&s, &realm_a, &user, 1, NOW_SECS - 1);
+        seed_fingerprint(&s, &realm_b, &user, 2, NOW_SECS + 86400);
+
+        let stats_a = sweep_fingerprints(&realm_a, &s, NOW_SECS).expect("sweep realm_a");
+        assert_eq!(stats_a.evicted, 1);
+        assert_eq!(stats_a.active, 0);
+
+        let stats_b = sweep_fingerprints(&realm_b, &s, NOW_SECS).expect("sweep realm_b");
+        assert_eq!(stats_b.evicted, 0);
+        assert_eq!(stats_b.active, 1, "realm_b entry must be untouched");
+    }
+
+    // --- JAR JTI sweep ---
+
+    /// Seed a JAR JTI entry with the given expiry (Unix seconds) directly into storage.
+    fn seed_jar_jti(s: &EmbeddedStorageEngine, realm: &RealmId, jti: &str, expires_at: i64) {
+        let key = keys::encode_jar_jti(jti);
+        s.put(realm, &key, &expires_at.to_le_bytes())
+            .expect("put jar jti");
+    }
+
+    #[test]
+    fn sweep_jar_jtis_deletes_expired_keeps_active() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        seed_jar_jti(&s, &realm, "expired-1", NOW_SECS - 1);
+        seed_jar_jti(&s, &realm, "expired-2", NOW_SECS - 3600);
+        seed_jar_jti(&s, &realm, "active-1", NOW_SECS + 300);
+
+        let deleted = sweep_jar_jtis(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(deleted, 2, "both expired entries must be removed");
+
+        assert!(
+            s.get(&realm, &keys::encode_jar_jti("expired-1"))
+                .expect("get")
+                .is_none(),
+            "expired-1 must be gone"
+        );
+        assert!(
+            s.get(&realm, &keys::encode_jar_jti("active-1"))
+                .expect("get")
+                .is_some(),
+            "active-1 must survive"
+        );
+    }
+
+    #[test]
+    fn sweep_jar_jtis_boundary_at_exactly_now_is_expired() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        seed_jar_jti(&s, &realm, "boundary", NOW_SECS);
+
+        let deleted = sweep_jar_jtis(&realm, &s, NOW_SECS).expect("sweep boundary");
+        assert_eq!(deleted, 1, "entry expiring exactly at now must be evicted");
+    }
+
+    #[test]
+    fn sweep_jar_jtis_empty_realm_is_ok() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let deleted = sweep_jar_jtis(&realm, &s, NOW_SECS).expect("sweep empty");
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn sweep_jar_jtis_isolated_across_realms() {
+        let (s, _dir) = storage();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+
+        seed_jar_jti(&s, &realm_a, "jti-expired", NOW_SECS - 1);
+        seed_jar_jti(&s, &realm_b, "jti-active", NOW_SECS + 86400);
+
+        let deleted_a = sweep_jar_jtis(&realm_a, &s, NOW_SECS).expect("sweep realm_a");
+        assert_eq!(deleted_a, 1);
+
+        let deleted_b = sweep_jar_jtis(&realm_b, &s, NOW_SECS).expect("sweep realm_b");
+        assert_eq!(deleted_b, 0, "realm_b entry must be untouched");
+        assert!(s
+            .get(&realm_b, &keys::encode_jar_jti("jti-active"))
+            .expect("get")
+            .is_some());
+    }
+
+    #[test]
+    fn sweep_expired_includes_jar_jtis() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let clock = fake_clock(T0 + ONE_HOUR);
+
+        // Store an expired JAR JTI (expiry 30 min before "now").
+        let expires_at_secs = (T0 + ONE_HOUR) / 1_000_000 - 1800;
+        seed_jar_jti(&s, &realm, "jar-expired", expires_at_secs);
+
+        let config = CleanupConfig::default();
+        let stats = sweep_expired(&realm, &s, &clock, &config);
+        assert_eq!(
+            stats.jar_jtis_deleted, 1,
+            "sweep_expired must include JAR JTI sweep"
+        );
     }
 }

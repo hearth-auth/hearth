@@ -20,8 +20,8 @@ struct RealmListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms`.
@@ -43,8 +43,8 @@ pub async fn admin_realms_list(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "list_realms failed");
@@ -104,8 +104,8 @@ struct RealmDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms/{realm}`.
@@ -144,11 +144,11 @@ pub async fn admin_realm_detail(
                 narrow: false,
                 product_name,
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
-        Ok(None) => super::handlers_common::not_found_authed(&state, &session, "Realm not found."),
+        Ok(None) => super::handlers_common::not_found_authed(&state, &session, "Realm not found"),
         Err(e) => {
             tracing::warn!(error = %e, "get_realm failed");
             super::handlers_common::server_error()
@@ -189,7 +189,7 @@ pub async fn admin_realm_delete(
                     Redirect::to("/ui/admin/realms").into_response()
                 }
                 Err(IdentityError::RealmNotFound) => {
-                    super::handlers_common::not_found_authed(&state, &session, "Realm not found.")
+                    super::handlers_common::not_found("Realm not found")
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "delete_realm failed");
@@ -200,7 +200,7 @@ pub async fn admin_realm_delete(
         Ok(Some(_)) => super::handlers_common::bad_request(
             "Only archived realms can be permanently deleted. Remove the realm from hearth.yaml and restart to archive it first.",
         ),
-        Ok(None) => super::handlers_common::not_found_authed(&state, &session, "Realm not found."),
+        Ok(None) => super::handlers_common::not_found("Realm not found"),
         Err(e) => {
             tracing::warn!(error = %e, "get_realm failed");
             super::handlers_common::server_error()
@@ -395,12 +395,15 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::PasswordCompromisedRejected => "Password Compromised Rejected",
         A::BreachCheckUnavailable => "Breach Check Unavailable",
         A::StepUpMfaTriggered => "Step-Up MFA Triggered",
+        A::StepUpMfaCompleted => "Step-Up MFA Completed",
         A::SmsOtpEnrollmentStarted => "SMS OTP Enrollment Started",
         A::SmsOtpEnrollmentVerified => "SMS OTP Enrollment Verified",
         A::SmsOtpEnrollmentFailed => "SMS OTP Enrollment Failed",
         A::SmsMfaChallengeSucceeded => "SMS MFA Challenge Succeeded",
         A::SmsMfaChallengeFailed => "SMS MFA Challenge Failed",
         A::SmsMfaLocked => "SMS MFA Locked",
+        A::DeviceFingerprintsErased => "Device Fingerprints Erased",
+        A::SessionLimitEnforced => "Session Limit Enforced",
     }
 }
 
@@ -471,12 +474,14 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::PasswordCompromisedRejected
         | A::BreachCheckUnavailable
         | A::StepUpMfaTriggered
+        | A::StepUpMfaCompleted
         | A::SmsOtpEnrollmentStarted
         | A::SmsOtpEnrollmentVerified
         | A::SmsOtpEnrollmentFailed
         | A::SmsMfaChallengeSucceeded
         | A::SmsMfaChallengeFailed
-        | A::SmsMfaLocked => "Security",
+        | A::SmsMfaLocked
+        | A::DeviceFingerprintsErased => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
         // backup/restore, and internal cleanup jobs.
         A::RealmCreated
@@ -503,7 +508,8 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::ScimGroupDeleted
         | A::BackupCreated
         | A::BackupRestored
-        | A::Cleanup => "System",
+        | A::Cleanup
+        | A::SessionLimitEnforced => "System",
     }
 }
 
@@ -548,7 +554,7 @@ fn build_metadata_pills(
             break;
         }
         if let Some(v) = obj.get(key) {
-            pills.push((key.to_string(), truncate_pill_value(v)));
+            pills.push((humanize_pill_key(key), pill_display_value(key, v)));
             used.insert(key);
         }
     }
@@ -559,11 +565,61 @@ fn build_metadata_pills(
         if used.contains(k.as_str()) {
             continue;
         }
-        pills.push((k.clone(), truncate_pill_value(v)));
+        pills.push((humanize_pill_key(k), pill_display_value(k, v)));
     }
 
     let extra = obj.len().saturating_sub(pills.len());
     (pills, extra)
+}
+
+/// Converts a snake_case metadata key into a compact human-readable label.
+/// Common audit keys are mapped to well-known abbreviations; others fall
+/// back to title-case conversion (`user_agent` → `"User Agent"`).
+fn humanize_pill_key(key: &str) -> String {
+    match key {
+        "ip" => "IP".to_string(),
+        "user_agent" => "Agent".to_string(),
+        "client_id" => "Client".to_string(),
+        "scopes" => "Scopes".to_string(),
+        "method" => "Method".to_string(),
+        "provider" => "Provider".to_string(),
+        "external_id" => "Ext ID".to_string(),
+        "via" => "Via".to_string(),
+        "email" => "Email".to_string(),
+        "realm_id" => "Realm".to_string(),
+        "org_id" => "Org".to_string(),
+        "role" => "Role".to_string(),
+        other => other
+            .split('_')
+            .map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// Returns the display value for a metadata pill, applying key-specific
+/// humanization before truncation (e.g. `via: "admin_api"` → `"Admin API"`).
+fn pill_display_value(key: &str, v: &serde_json::Value) -> String {
+    if key == "via" {
+        if let serde_json::Value::String(s) = v {
+            return match s.as_str() {
+                "admin_api" | "admin" => "Admin API",
+                "ui" => "UI",
+                "scim" => "SCIM",
+                "self" => "Self-service",
+                "dynamic_registration" => "Dynamic Reg.",
+                other => return truncate_pill_value(&serde_json::Value::String(other.to_string())),
+            }
+            .to_string();
+        }
+    }
+    truncate_pill_value(v)
 }
 
 /// Truncates a metadata value for inline pill rendering — strings cap at
@@ -700,7 +756,7 @@ fn resolve_audit_resource(
                     (name, Some(url))
                 })
         }),
-        "organization" => uuid::Uuid::parse_str(resource_id).ok().and_then(|u| {
+        "org" | "organization" => uuid::Uuid::parse_str(resource_id).ok().and_then(|u| {
             state
                 .identity
                 .get_organization(realm_id, &crate::core::OrganizationId::new(u))
@@ -752,9 +808,16 @@ fn resolve_audit_resource(
         _ => None,
     };
     let entry = resolved.unwrap_or_else(|| {
-        // Fallback: show short id so the row stays compact and scannable.
         let short = resource_id.get(..8).unwrap_or(resource_id);
-        (format!("{short}…"), None)
+        let label = match resource_type {
+            "user" => format!("Deleted user ({short}…)"),
+            "org" | "organization" => format!("Deleted org ({short}…)"),
+            "client" | "application" => format!("Deleted app ({short}…)"),
+            "group" => format!("Deleted group ({short}…)"),
+            "realm" => format!("Deleted realm ({short}…)"),
+            _ => format!("{short}…"),
+        };
+        (label, None)
     });
     cache.insert(key, entry.clone());
     entry
@@ -839,8 +902,8 @@ struct AuditListTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Rows-only partial returned when the audit filter is triggered via HTMX.
@@ -977,8 +1040,8 @@ pub async fn admin_audit_list(
                     narrow: false,
                     product_name: state.product_name.clone(),
                     logo_url: state.logo_url.clone(),
-                    theme_css: state.theme_css.clone(),
-                    realm_theme_css: state.realm_theme_css(),
+                    realm_theme_url: state.realm_theme_url(),
+                    inline_theme_css: state.inline_theme_css(),
                 })
             }
         }
@@ -1019,8 +1082,8 @@ pub async fn admin_audit_verify_integrity(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Ok(false) => render(&AuditListTemplate {
             events: Vec::new(),
@@ -1047,8 +1110,8 @@ pub async fn admin_audit_verify_integrity(
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }),
         Err(e) => {
             tracing::warn!(error = %e, "audit verify_integrity failed");
@@ -1428,8 +1491,8 @@ struct SystemInfoTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/settings` — read-only system information page.
@@ -1448,8 +1511,8 @@ pub async fn admin_system_info(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1475,8 +1538,8 @@ struct ConfigEditorTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Template for the diff preview partial.
@@ -1489,8 +1552,8 @@ struct DiffPreviewTemplate {
     error: Option<String>,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Form data for config editor actions.
@@ -1542,8 +1605,8 @@ pub async fn admin_config_editor(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1575,8 +1638,8 @@ pub async fn admin_config_editor_preview(
         error: validation_error,
         product_name: String::new(),
         logo_url: String::new(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: None,
+        realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 
@@ -1711,8 +1774,8 @@ fn render_config_editor_with_flash(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1775,8 +1838,8 @@ pub async fn admin_config_editor_visual_preview(
                 error: Some(e),
                 product_name: String::new(),
                 logo_url: String::new(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: None,
+                realm_theme_url: None,
+                inline_theme_css: None,
             });
         }
     };
@@ -1800,8 +1863,8 @@ pub async fn admin_config_editor_visual_preview(
         error: validation_error,
         product_name: String::new(),
         logo_url: String::new(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: None,
+        realm_theme_url: None,
+        inline_theme_css: None,
     })
 }
 
@@ -2372,11 +2435,11 @@ mod metadata_pill_tests {
         });
         let (pills, extra) = build_metadata_pills(&AuditAction::SessionCreated, Some(&meta));
         let k = keys(&pills);
-        assert_eq!(k[0], "ip");
-        assert_eq!(k[1], "user_agent");
+        assert_eq!(k[0], "IP");
+        assert_eq!(k[1], "Agent");
         assert_eq!(pills.len(), 3);
         assert_eq!(extra, 1);
-        assert!(k[2] == "auth_method" || k[2] == "session_id");
+        assert!(k[2] == "Auth Method" || k[2] == "Session Id");
     }
 
     #[test]
@@ -2389,8 +2452,8 @@ mod metadata_pill_tests {
         });
         let (pills, extra) = build_metadata_pills(&AuditAction::ClientConsentGranted, Some(&meta));
         let k = keys(&pills);
-        assert_eq!(k[0], "client_id");
-        assert_eq!(k[1], "scopes");
+        assert_eq!(k[0], "Client");
+        assert_eq!(k[1], "Scopes");
         assert_eq!(pills.len(), 3);
         assert_eq!(extra, 1);
     }
@@ -2400,14 +2463,14 @@ mod metadata_pill_tests {
         let meta = json!({"client_id": "cli", "scopes": "openid", "by": "admin"});
         let (pills, _) = build_metadata_pills(&AuditAction::ClientConsentRevoked, Some(&meta));
         let k = keys(&pills);
-        assert_eq!(&k[..2], &["client_id", "scopes"]);
+        assert_eq!(&k[..2], &["Client", "Scopes"]);
     }
 
     #[test]
     fn credential_changed_lifts_method_first() {
         let meta = json!({"actor": "admin", "method": "password_reset"});
         let (pills, extra) = build_metadata_pills(&AuditAction::CredentialChanged, Some(&meta));
-        assert_eq!(keys(&pills)[0], "method");
+        assert_eq!(keys(&pills)[0], "Method");
         assert_eq!(extra, 0);
     }
 
@@ -2421,15 +2484,15 @@ mod metadata_pill_tests {
         });
         let (pills, _) = build_metadata_pills(&AuditAction::FederationLoginCompleted, Some(&meta));
         let k = keys(&pills);
-        assert_eq!(k[0], "provider");
-        assert_eq!(k[1], "external_id");
+        assert_eq!(k[0], "Provider");
+        assert_eq!(k[1], "Ext ID");
     }
 
     #[test]
     fn default_falls_back_to_alphabetic_first_three() {
         let meta = json!({"zebra": 1, "apple": 2, "mango": 3, "kiwi": 4});
         let (pills, extra) = build_metadata_pills(&AuditAction::UserCreated, Some(&meta));
-        assert_eq!(keys(&pills), vec!["apple", "kiwi", "mango"]);
+        assert_eq!(keys(&pills), vec!["Apple", "Kiwi", "Mango"]);
         assert_eq!(extra, 1);
     }
 
@@ -2442,7 +2505,7 @@ mod metadata_pill_tests {
         assert_eq!(pills.len(), 2);
         assert_eq!(extra, 0);
         let k = keys(&pills);
-        assert!(k.contains(&"trust") && k.contains(&"channel"));
+        assert!(k.contains(&"Trust") && k.contains(&"Channel"));
     }
 
     #[test]
@@ -2467,7 +2530,7 @@ mod metadata_pill_tests {
         let (pills, _) = build_metadata_pills(&AuditAction::SessionCreated, Some(&meta));
         let ua = pills
             .iter()
-            .find(|(k, _)| k == "user_agent")
+            .find(|(k, _)| k == "Agent")
             .map(|(_, v)| v.as_str())
             .expect("user_agent pill present");
         assert!(ua.ends_with('…'), "long values must be truncated: {ua}");

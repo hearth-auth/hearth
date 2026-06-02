@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn nonce_is_32_hex_chars() {
         let rng = SystemRandom::new();
-        let nonce = generate_otp_nonce(&rng).unwrap();
+        let nonce = generate_otp_nonce(&rng).expect("generate_otp_nonce should succeed");
         assert_eq!(nonce.len(), 32, "nonce should be 32 hex chars (128 bits)");
         assert!(
             nonce.chars().all(|c| c.is_ascii_hexdigit()),
@@ -254,8 +254,8 @@ mod tests {
     #[test]
     fn nonces_are_unique() {
         let rng = SystemRandom::new();
-        let a = generate_otp_nonce(&rng).unwrap();
-        let b = generate_otp_nonce(&rng).unwrap();
+        let a = generate_otp_nonce(&rng).expect("first nonce should generate");
+        let b = generate_otp_nonce(&rng).expect("second nonce should generate");
         assert_ne!(a, b, "two consecutive nonces must differ");
     }
 
@@ -265,7 +265,7 @@ mod tests {
     fn digits_are_six_chars() {
         let rng = SystemRandom::new();
         for _ in 0..20 {
-            let code = generate_otp_digits(&rng).unwrap();
+            let code = generate_otp_digits(&rng).expect("generate_otp_digits should succeed");
             assert_eq!(
                 code.len(),
                 6,
@@ -279,7 +279,7 @@ mod tests {
     fn digits_are_all_ascii_decimal() {
         let rng = SystemRandom::new();
         for _ in 0..20 {
-            let code = generate_otp_digits(&rng).unwrap();
+            let code = generate_otp_digits(&rng).expect("generate_otp_digits should succeed");
             assert!(
                 code.chars().all(|c| c.is_ascii_digit()),
                 "OTP must contain only digits: {}",
@@ -292,7 +292,7 @@ mod tests {
     fn digits_in_valid_range() {
         let rng = SystemRandom::new();
         for _ in 0..50 {
-            let code = generate_otp_digits(&rng).unwrap();
+            let code = generate_otp_digits(&rng).expect("generate_otp_digits should succeed");
             let n: u32 = code.parse().expect("OTP must be a valid number");
             assert!(n < 1_000_000, "OTP {n} must be less than 1_000_000");
         }
@@ -320,8 +320,10 @@ mod tests {
         // Every accepted value maps to [0, OTP_BOUND) with no bias.
         assert_eq!(0u32 % OTP_BOUND, 0);
         assert_eq!((OTP_ACCEPT_LIMIT - 1) % OTP_BOUND, OTP_BOUND - 1);
-        // Reject the boundary.
-        assert!(
+        // Reject the boundary. `const_assert` would express this at compile
+        // time, but we keep it as a runtime test so the documented arithmetic
+        // above is exercised by the regular test suite.
+        const _: () = assert!(
             OTP_ACCEPT_LIMIT < u32::MAX,
             "accept limit must leave a non-empty bias zone"
         );
@@ -359,7 +361,8 @@ mod tests {
     fn create_otp_returns_valid_digits_and_record() {
         let rng = SystemRandom::new();
         let expiry = 9_999_999_999u64;
-        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, expiry, OTP_MAX_ATTEMPTS).unwrap();
+        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, expiry, OTP_MAX_ATTEMPTS)
+            .expect("StoredOtp::create should succeed");
         assert_eq!(digits.len(), 6, "digits must be 6 chars");
         assert!(
             digits.chars().all(|c| c.is_ascii_digit()),
@@ -373,8 +376,8 @@ mod tests {
     #[test]
     fn verify_succeeds_with_correct_code() {
         let rng = SystemRandom::new();
-        let (digits, stored) =
-            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
+        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
+            .expect("StoredOtp::create should succeed");
         assert!(
             stored.verify(&digits, TEST_KEY).is_ok(),
             "verification must succeed with the correct code"
@@ -384,8 +387,8 @@ mod tests {
     #[test]
     fn verify_fails_with_wrong_code() {
         let rng = SystemRandom::new();
-        let (digits, stored) =
-            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
+        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
+            .expect("StoredOtp::create should succeed");
         let wrong: String = if digits.as_str() == "000000" {
             "000001".to_string()
         } else {
@@ -400,8 +403,8 @@ mod tests {
     #[test]
     fn verify_fails_with_wrong_key() {
         let rng = SystemRandom::new();
-        let (digits, stored) =
-            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
+        let (digits, stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
+            .expect("StoredOtp::create should succeed");
         let other_key = b"a-completely-different-key!!!!!!!!";
         assert!(
             stored.verify(&digits, other_key).is_err(),
@@ -413,9 +416,14 @@ mod tests {
     fn verify_fails_with_tampered_hmac_hex() {
         let rng = SystemRandom::new();
         let (digits, mut stored) =
-            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
+            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
+                .expect("StoredOtp::create should succeed");
         // Flip the first byte of the hex string.
-        let original_first = stored.hmac_hex.chars().next().unwrap();
+        let original_first = stored
+            .hmac_hex
+            .chars()
+            .next()
+            .expect("hmac_hex must have at least one char");
         let replacement = if original_first == 'a' { 'b' } else { 'a' };
         stored.hmac_hex = format!("{replacement}{}", &stored.hmac_hex[1..]);
         assert!(
@@ -427,7 +435,8 @@ mod tests {
     #[test]
     fn is_expired_returns_true_when_past_expiry() {
         let rng = SystemRandom::new();
-        let (_, stored) = StoredOtp::create(&rng, TEST_KEY, 1_000u64, OTP_MAX_ATTEMPTS).unwrap();
+        let (_, stored) = StoredOtp::create(&rng, TEST_KEY, 1_000u64, OTP_MAX_ATTEMPTS)
+            .expect("StoredOtp::create should succeed");
         assert!(
             stored.is_expired(1_001),
             "must be expired after expiry time"
@@ -439,8 +448,8 @@ mod tests {
     #[test]
     fn is_exhausted_after_max_attempts() {
         let rng = SystemRandom::new();
-        let (_, mut stored) =
-            StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS).unwrap();
+        let (_, mut stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, OTP_MAX_ATTEMPTS)
+            .expect("StoredOtp::create should succeed");
         assert!(!stored.is_exhausted(), "fresh OTP must not be exhausted");
         stored.attempt_count = OTP_MAX_ATTEMPTS - 1;
         assert!(
@@ -455,7 +464,8 @@ mod tests {
     fn per_realm_max_attempts_overrides_module_default() {
         let rng = SystemRandom::new();
         // Create an OTP with max_attempts = 2 (lower than the module default of 5).
-        let (_, mut stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, 2).unwrap();
+        let (_, mut stored) = StoredOtp::create(&rng, TEST_KEY, 9_999_999_999, 2)
+            .expect("StoredOtp::create should succeed");
         assert!(!stored.is_exhausted(), "fresh OTP must not be exhausted");
         stored.attempt_count = 1;
         assert!(!stored.is_exhausted(), "one attempt below limit");
@@ -517,7 +527,8 @@ mod tests {
     fn hex_encode_decode_roundtrip() {
         let original = b"hello world";
         let encoded = hex_encode(original);
-        let decoded = hex_decode(&encoded).unwrap();
+        let decoded =
+            hex_decode(&encoded).expect("hex_decode of round-tripped value should succeed");
         assert_eq!(decoded, original);
     }
 
@@ -536,9 +547,11 @@ mod tests {
     #[test]
     fn stored_otp_roundtrips_via_json() {
         let rng = SystemRandom::new();
-        let (_, original) = StoredOtp::create(&rng, TEST_KEY, 12345678, OTP_MAX_ATTEMPTS).unwrap();
-        let json = serde_json::to_vec(&original).unwrap();
-        let restored: StoredOtp = serde_json::from_slice(&json).unwrap();
+        let (_, original) = StoredOtp::create(&rng, TEST_KEY, 12_345_678, OTP_MAX_ATTEMPTS)
+            .expect("StoredOtp::create should succeed");
+        let json = serde_json::to_vec(&original).expect("StoredOtp should serialize to JSON");
+        let restored: StoredOtp =
+            serde_json::from_slice(&json).expect("StoredOtp should deserialize from JSON");
         assert_eq!(restored.hmac_hex, original.hmac_hex);
         assert_eq!(restored.expiry_unix_ts, original.expiry_unix_ts);
         assert_eq!(restored.attempt_count, original.attempt_count);
@@ -547,8 +560,10 @@ mod tests {
     #[test]
     fn stored_resend_count_roundtrips_via_json() {
         let original = StoredResendCount::new(99_999);
-        let json = serde_json::to_vec(&original).unwrap();
-        let restored: StoredResendCount = serde_json::from_slice(&json).unwrap();
+        let json =
+            serde_json::to_vec(&original).expect("StoredResendCount should serialize to JSON");
+        let restored: StoredResendCount =
+            serde_json::from_slice(&json).expect("StoredResendCount should deserialize from JSON");
         assert_eq!(restored.count, original.count);
         assert_eq!(restored.window_start_unix_ts, original.window_start_unix_ts);
     }

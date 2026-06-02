@@ -27,6 +27,8 @@ pub const TOKEN_TOO_LARGE: &str = "HEARTH_TOKEN_TOO_LARGE";
 pub const INVALID_CREDENTIAL: &str = "HEARTH_INVALID_CREDENTIAL";
 /// The OAuth client is not recognized or misconfigured.
 pub const INVALID_CLIENT: &str = "HEARTH_INVALID_CLIENT";
+/// The `private_key_jwt` client assertion is invalid (RFC 7523 §2.2).
+pub const INVALID_CLIENT_ASSERTION: &str = "HEARTH_INVALID_CLIENT_ASSERTION";
 /// The authorization grant (auth code or device code) is invalid, expired, or consumed.
 pub const INVALID_GRANT: &str = "HEARTH_INVALID_GRANT";
 /// The redirect URI does not match any registered URI.
@@ -48,6 +50,8 @@ pub const MFA_ALREADY_ENABLED: &str = "HEARTH_MFA_ALREADY_ENABLED";
 pub const STEP_UP_CHALLENGE_REQUIRED: &str = "HEARTH_STEP_UP_CHALLENGE_REQUIRED";
 /// Adaptive step-up: login from unrecognised device with no enrolled factor; enrollment required.
 pub const ENROLL_MFA_REQUIRED: &str = "HEARTH_ENROLL_MFA_REQUIRED";
+/// Token issuance blocked: user has one or more pending required actions.
+pub const REQUIRED_ACTIONS_PENDING: &str = "HEARTH_REQUIRED_ACTIONS_PENDING";
 
 // ── WebAuthn / Passkeys ───────────────────────────────────────────────────────
 
@@ -61,6 +65,8 @@ pub const WEBAUTHN_CREDENTIAL_NOT_FOUND: &str = "HEARTH_WEBAUTHN_CREDENTIAL_NOT_
 pub const INVALID_ATTESTATION: &str = "HEARTH_INVALID_ATTESTATION";
 /// Assertion provided during authentication is invalid.
 pub const INVALID_ASSERTION: &str = "HEARTH_INVALID_ASSERTION";
+/// JWT bearer assertion (RFC 7523) is invalid, expired, replayed, or has wrong claims.
+pub const JWT_BEARER_ASSERTION_INVALID: &str = "HEARTH_JWT_BEARER_ASSERTION_INVALID";
 
 // ── Device authorization flow ─────────────────────────────────────────────────
 
@@ -227,6 +233,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::InvalidCredential { .. } => Some(INVALID_CREDENTIAL),
         IdentityError::CredentialNotFound => Some(INVALID_CREDENTIAL),
         IdentityError::InvalidClient | IdentityError::InvalidClientSecret => Some(INVALID_CLIENT),
+        IdentityError::InvalidClientAssertion { .. } => Some(INVALID_CLIENT_ASSERTION),
         IdentityError::InvalidAuthorizationCode | IdentityError::InvalidGrant { .. } => {
             Some(INVALID_GRANT)
         }
@@ -244,12 +251,14 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::WebAuthnCredentialNotFound => Some(WEBAUTHN_CREDENTIAL_NOT_FOUND),
         IdentityError::InvalidAttestation { .. } => Some(INVALID_ATTESTATION),
         IdentityError::InvalidAssertion { .. } => Some(INVALID_ASSERTION),
+        IdentityError::JwtBearerAssertionInvalid { .. } => Some(JWT_BEARER_ASSERTION_INVALID),
 
         IdentityError::AuthorizationPending => Some(AUTHORIZATION_PENDING),
         IdentityError::SlowDown => Some(SLOW_DOWN),
         IdentityError::DeviceCodeDenied => Some(DEVICE_CODE_DENIED),
 
         IdentityError::RateLimited => Some(RATE_LIMITED),
+        IdentityError::SessionLimitExceeded { .. } => Some("session_limit_exceeded"),
 
         IdentityError::UserNotVerified => Some(EMAIL_UNVERIFIED),
         IdentityError::PasswordExpired => Some(PASSWORD_EXPIRED),
@@ -258,6 +267,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::AuthMethodNotAllowed { .. } => Some(AUTH_METHOD_NOT_ALLOWED),
         IdentityError::StepUpChallengeRequired => Some(STEP_UP_CHALLENGE_REQUIRED),
         IdentityError::EnrollMfaRequired => Some(ENROLL_MFA_REQUIRED),
+        IdentityError::RequiredActionsBlocking { .. } => Some(REQUIRED_ACTIONS_PENDING),
         IdentityError::InvalidSmsOtp => Some("invalid_sms_otp"),
         IdentityError::SmsResendLimitExceeded => Some("sms_resend_limit_exceeded"),
 
@@ -267,6 +277,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         | IdentityError::WebhookNotFound
         | IdentityError::ConsentNotFound => Some(NOT_FOUND),
         IdentityError::SessionNotFound => Some(SESSION_NOT_FOUND),
+        IdentityError::SessionVersionDisabled => Some("session_version_disabled"),
 
         IdentityError::RealmSuspended => Some(REALM_SUSPENDED),
 
@@ -331,6 +342,14 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
 
         IdentityError::Unauthorized => Some(FORBIDDEN),
         IdentityError::SystemRealmProtected { .. } => Some(SYSTEM_REALM_PROTECTED),
+
+        IdentityError::InvalidPushedAuthorizationRequest => Some("invalid_request"),
+        IdentityError::InvalidJar { .. } => Some("invalid_request_object"),
+        IdentityError::FapiViolation { .. } => Some("fapi_violation"),
+
+        IdentityError::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
+        IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => Some("use_dpop_nonce"),
+        IdentityError::DPopBindingMismatch => Some("invalid_token"),
 
         // 5xx — do not leak internal detail
         IdentityError::SigningError { .. }

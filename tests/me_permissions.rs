@@ -1,7 +1,6 @@
 //! Integration tests for `GET /v1/me/permissions`.
 //!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 — `me_permissions:returns_live_set`,
-//! `unauthenticated_401`.
+//! Scenarios: `returns_live_set`, `unauthenticated_401`.
 
 mod common;
 

@@ -99,4 +99,66 @@ class ClaimsTest {
         assertTrue(c.expiry().isAfter(Instant.now()))
         assertTrue(c.issuedAt().isBefore(Instant.now().plusSeconds(1)))
     }
+
+    // ── §4 gaps: inOrg, tokenType, organizationId, orgGroups ──────────────────
+
+    @Test
+    fun `inOrg returns true when oid matches`() {
+        val c = makeClaims { claim("oid", "org-abc") }
+        assertTrue(c.inOrg("org-abc"))
+    }
+
+    @Test
+    fun `inOrg returns false when oid does not match`() {
+        val c = makeClaims { claim("oid", "org-abc") }
+        assertFalse(c.inOrg("org-xyz"))
+    }
+
+    @Test
+    fun `inOrg returns false when oid claim absent`() {
+        val c = makeClaims { this }
+        assertFalse(c.inOrg("org-abc"))
+    }
+
+    @Test
+    fun `organizationId returns oid claim value`() {
+        val c = makeClaims { claim("oid", "org-abc") }
+        assertEquals("org-abc", c.organizationId())
+    }
+
+    @Test
+    fun `organizationId returns null when oid absent`() {
+        val c = makeClaims { this }
+        assertEquals(null, c.organizationId())
+    }
+
+    @Test
+    fun `tokenType returns token_type claim`() {
+        val c = makeClaims { claim("token_type", "access") }
+        assertEquals("access", c.tokenType())
+    }
+
+    @Test
+    fun `tokenType returns empty string when claim absent`() {
+        val c = makeClaims { this }
+        assertEquals("", c.tokenType())
+    }
+
+    @Test
+    fun `tokenType returns required_action when token is a required-action token`() {
+        val c = makeClaims { claim("token_type", "required_action") }
+        assertEquals("required_action", c.tokenType())
+    }
+
+    @Test
+    fun `orgGroups returns org_groups claim list`() {
+        val c = makeClaims { claim("org_groups", listOf("/org-slug/eng", "/org-slug/platform")) }
+        assertEquals(listOf("/org-slug/eng", "/org-slug/platform"), c.orgGroups())
+    }
+
+    @Test
+    fun `orgGroups returns empty list when claim absent`() {
+        val c = makeClaims { this }
+        assertEquals(emptyList<String>(), c.orgGroups())
+    }
 }

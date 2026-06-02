@@ -46,6 +46,10 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::InvalidCredential { .. }
         | IdentityError::InvalidClient
         | IdentityError::InvalidClientSecret => (Code::Unauthenticated, err.to_string()),
+        // Deliberately generic — internal reason MUST NOT reach the caller (enumeration resistance).
+        IdentityError::InvalidClientAssertion { .. } => {
+            (Code::Unauthenticated, "invalid_client".to_string())
+        }
         IdentityError::Unauthorized
         | IdentityError::SystemRealmProtected { .. }
         | IdentityError::RealmSuspended
@@ -105,6 +109,11 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::RateLimited
         | IdentityError::MemberLimitReached
         | IdentityError::TokenTooLarge { .. } => (Code::ResourceExhausted, err.to_string()),
+        // SEC-4: active count and configured limit must not appear in the
+        // gRPC error string — that leaks enforcement metadata to callers.
+        IdentityError::SessionLimitExceeded { .. } => {
+            (Code::ResourceExhausted, "session limit reached".to_string())
+        }
         IdentityError::PasswordCompromised => (
             Code::InvalidArgument,
             "password has appeared in a known data breach".to_string(),
@@ -117,6 +126,17 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             Code::PermissionDenied,
             "MFA enrollment required: login from unrecognised device".to_string(),
         ),
+        IdentityError::RequiredActionsBlocking { actions } => (
+            Code::FailedPrecondition,
+            format!(
+                "required actions pending: {}",
+                actions
+                    .iter()
+                    .map(|a| crate::protocol::convert::identity::required_action_to_wire(*a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
         IdentityError::InvalidSmsOtp => (
             Code::InvalidArgument,
             "invalid or expired SMS OTP".to_string(),
@@ -124,6 +144,29 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::SmsResendLimitExceeded => (
             Code::ResourceExhausted,
             "SMS OTP resend limit exceeded".to_string(),
+        ),
+        IdentityError::InvalidPushedAuthorizationRequest => (
+            Code::InvalidArgument,
+            "invalid, expired, or already used request_uri".to_string(),
+        ),
+        IdentityError::JwtBearerAssertionInvalid { .. } => {
+            (Code::InvalidArgument, "invalid_grant".to_string())
+        }
+        IdentityError::InvalidJar { .. } => {
+            (Code::InvalidArgument, "invalid_request_object".to_string())
+        }
+        IdentityError::FapiViolation { reason } => {
+            (Code::InvalidArgument, format!("fapi_violation: {reason}"))
+        }
+        IdentityError::InvalidDPopProof { .. } => {
+            (Code::Unauthenticated, "invalid DPoP proof".to_string())
+        }
+        IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => {
+            (Code::Unauthenticated, "DPoP nonce required".to_string())
+        }
+        IdentityError::DPopBindingMismatch => (
+            Code::Unauthenticated,
+            "DPoP key binding mismatch".to_string(),
         ),
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
@@ -136,6 +179,10 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             tracing::error!(error = %err, "internal gRPC error");
             (Code::Internal, "internal error".to_string())
         }
+        IdentityError::SessionVersionDisabled => (
+            Code::NotFound,
+            "session versioning disabled for realm".to_string(),
+        ),
     };
     Status::new(code, msg)
 }

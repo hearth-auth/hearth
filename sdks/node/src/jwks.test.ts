@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as jose from "jose";
 import { JwksVerifier } from "./jwks.js";
 import { DiscoveryClient } from "./discovery.js";
-import { TokenExpiredError, TokenVerificationError, JwksFetchError } from "./errors.js";
+import { TokenExpiredError, TokenVerificationError, JWKSFetchError } from "./errors.js";
 import type { ResolvedConfig } from "./config.js";
 import { JWKS_TTL_DEFAULT_MS, HTTP_TIMEOUT_DEFAULT_MS, CLOCK_SKEW_DEFAULT_S } from "./config.js";
 import type { JwkSetFactory } from "./jwks.js";
@@ -25,6 +25,8 @@ function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     introspection_endpoint: null,
     http_timeout: HTTP_TIMEOUT_DEFAULT_MS,
     clock_skew_seconds: CLOCK_SKEW_DEFAULT_S,
+    realm_id: null,
+    authorize_endpoint: null,
     ...overrides,
   };
 }
@@ -172,14 +174,14 @@ describe("JwksVerifier — JWKS key rotation integration (§9)", () => {
     expect(factoryCallCount).toBeGreaterThanOrEqual(2);
   });
 
-  it("throws JwksFetchError when OIDC discovery is unreachable", async () => {
+  it("throws JWKSFetchError when OIDC discovery is unreachable", async () => {
     const discovery = stubDiscovery();
     vi.spyOn(discovery, "discover").mockRejectedValue(new Error("ECONNREFUSED"));
 
     const verifier = new JwksVerifier(makeConfig(), discovery);
-    // JwksFetchError is thrown when discovery/JWKS cannot be reached; it's a HearthError subtype
+    // JWKSFetchError is thrown when discovery/JWKS cannot be reached; it's a HearthError subtype
     await expect(verifier.verifyToken("dummy.token.here")).rejects.toBeInstanceOf(
-      JwksFetchError,
+      JWKSFetchError,
     );
   });
 

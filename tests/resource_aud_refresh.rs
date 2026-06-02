@@ -101,6 +101,9 @@ fn authorize_and_exchange(
                 nonce: None,
                 resource: resource.map(str::to_string),
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -114,6 +117,9 @@ fn authorize_and_exchange(
                 code: auth_response.code().to_string(),
                 redirect_uri: "https://example.com/callback".to_string(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect("exchange code")
@@ -150,7 +156,7 @@ async fn resource_aud_preserved_through_refresh() {
     // 3. Refresh tokens
     let refreshed = harness
         .identity()
-        .refresh_tokens(&realm_id, tokens.refresh_token())
+        .refresh_tokens(&realm_id, tokens.refresh_token(), None)
         .expect("refresh tokens");
 
     // 4. Assert refreshed access token still has Multi audience

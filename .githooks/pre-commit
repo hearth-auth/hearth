@@ -4,19 +4,19 @@
 # Enabled by `make setup`, which sets:
 #   git config core.hooksPath .githooks
 #
-# Two regenerations happen here:
-#   1. SDK types from staged proto/*.proto changes (TS + Go).
+# Three regenerations happen here:
+#   1. Proto format + lint + SDK type regen from staged proto/*.proto changes (TS + Go).
 #   2. Tailwind app.css from staged template/CSS/config changes.
 #
 # Both produce checked-in artifacts that CI verifies via `make ci-fast`
-# (proto-lint + css-check). Regenerating here keeps the commit atomic.
+# (proto-lint + proto-format-check + css-check). Regenerating here keeps the commit atomic.
 
 set -euo pipefail
 
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
-# ── Proto: regenerate SDK types when proto files are staged ──────────────
+# ── Proto: format, lint, and regenerate SDK types when proto files staged ─
 staged_proto=$(git diff --cached --name-only --diff-filter=ACMR \
   | grep -E '^proto/.*\.proto$' || true)
 
@@ -34,11 +34,15 @@ EOF
     exit 1
   fi
 
-  echo "proto changes staged; regenerating SDK types via 'buf generate'..."
+  echo "proto changes staged; formatting and linting .proto files..."
+  (cd proto && buf format -w)
+  (cd proto && buf lint)
+
+  echo "proto lint passed; regenerating SDK types via 'buf generate'..."
   (cd proto && buf generate)
 
-  # Re-stage regenerated output. No-op when output is unchanged.
-  git add sdks/typescript/src/generated sdks/go/generated
+  # Re-stage formatted + regenerated output. No-op when output is unchanged.
+  git add proto sdks/typescript/src/generated sdks/go/generated
 fi
 
 # ── Rust: auto-format staged .rs files with cargo fmt ───────────────────
@@ -64,6 +68,43 @@ To bypass (discouraged — CI will fail via 'make fmt'):
   git commit --no-verify
 EOF
     exit 1
+  fi
+
+  # Resolve protoc for the build script. Use PROTOC if already set; otherwise
+  # search PATH and common install locations. Git hooks run without a login
+  # shell, so ~/.local/bin and Homebrew paths are often absent from PATH.
+  if [ -z "${PROTOC:-}" ]; then
+    _protoc_found=""
+    for _candidate in \
+        "$(command -v protoc 2>/dev/null || true)" \
+        "$HOME/.local/bin/protoc" \
+        "/usr/local/bin/protoc" \
+        "/usr/bin/protoc" \
+        "/opt/homebrew/bin/protoc" \
+        "/opt/homebrew/opt/protobuf/bin/protoc"; do
+      if [ -n "$_candidate" ] && [ -x "$_candidate" ]; then
+        _protoc_found="$_candidate"
+        break
+      fi
+    done
+
+    if [ -n "$_protoc_found" ]; then
+      export PROTOC="$_protoc_found"
+    else
+      cat >&2 <<'EOF'
+error: pre-commit hook needs 'protoc' to compile .proto files during
+  cargo fmt / cargo clippy.
+
+Install protoc:
+  macOS:   brew install protobuf
+  Debian:  apt-get install protobuf-compiler
+  Or set:  export PROTOC=/path/to/protoc
+
+To bypass (discouraged — CI will fail):
+  git commit --no-verify
+EOF
+      exit 1
+    fi
   fi
 
   # Partition staged .rs into "clean" (fully staged) vs "partial" (also has
@@ -97,6 +138,9 @@ EOF
     # shellcheck disable=SC2086
     git add -- $clean_rs
   fi
+
+  echo "rust changes staged; running 'cargo clippy'..."
+  cargo clippy --all-targets -- -D warnings
 fi
 
 # ── Changelog: warn when src/proto/sdks change but CHANGELOG.md does not ─

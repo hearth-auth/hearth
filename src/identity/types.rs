@@ -1,7 +1,9 @@
 //! Identity domain types: users, realms, requests, and status.
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 
 use crate::core::{
     ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
@@ -850,72 +852,187 @@ pub struct RealmConfig {
     /// `fingerprint_hmac_secret` to activate device-recognition step-up.
     #[serde(default)]
     pub adaptive_mfa: AdaptiveMfaConfig,
+    /// Session-version (`sv`) revocation tracking.
+    ///
+    /// When enabled, access tokens carry an `sv` claim that resource servers
+    /// check against a locally-cached minimum version polled from the delta
+    /// feed. Defaults to disabled for backward compatibility.
+    #[serde(default)]
+    pub session_version: SessionVersionConfig,
+    /// Maximum number of concurrent active (non-revoked, non-expired) sessions
+    /// per user in this realm. `None` means unlimited (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_sessions: Option<u32>,
+    /// What to do when a new session would exceed `max_concurrent_sessions`.
+    /// Defaults to `RejectNew`. Set to `EvictOldest` to opt in to eviction.
+    #[serde(default)]
+    pub session_over_limit_policy: SessionLimitPolicy,
+    /// FAPI 2.0 Security Profile enforcement level for this realm.
+    ///
+    /// When set, the authorization server enforces the corresponding FAPI profile
+    /// on all authorization requests in this realm:
+    ///
+    /// - `baseline` — requires PAR + PKCE (S256) on every request.
+    /// - `advanced` — additionally requires JAR, JARM, and `private_key_jwt`.
+    ///
+    /// `None` (default) means standard OAuth 2.0 / OIDC rules apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fapi_profile: Option<FapiProfile>,
 }
 
-/// Which breach-check backend a realm uses.
+/// FAPI 2.0 Security Profile enforcement level.
 ///
-/// `Online` queries the HIBP Range API (requires outbound HTTPS to
-/// `api.pwnedpasswords.com`). `Offline` binary-searches a locally-provided
-/// sorted SHA-1 corpus file — suitable for air-gapped deployments.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+/// Activates when set on a `RealmConfig`. Controls which FAPI 2.0 constraints
+/// the AS enforces for all authorization requests in the realm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
-pub enum BreachCheckMode {
-    /// Query the HIBP k-anonymity Range API (default).
-    #[default]
-    Online,
-    /// Binary-search a local sorted corpus of 20-byte raw SHA-1 hashes.
+pub enum FapiProfile {
+    /// FAPI 2.0 Baseline Security Profile.
     ///
-    /// The file must contain SHA-1 hashes in network byte order (big-endian),
-    /// sorted lexicographically, with no separators between entries.
-    /// Size must be an exact multiple of 20 bytes.
+    /// Requires: PAR (RFC 9126), PKCE with S256 (RFC 7636), `iss` in responses
+    /// (RFC 9207). All authorization requests must be submitted as PAR.
+    Baseline,
+    /// FAPI 2.0 Advanced Security Profile.
     ///
-    /// Build the corpus from the HIBP Pwned Passwords sorted-SHA1 download:
-    /// ```text
-    /// # strip the ":COUNT" suffix and convert hex → binary
-    /// awk -F: '{print $1}' pwned-passwords-sha1-sorted.txt \
-    ///   | xxd -r -p > breach_corpus.bin
-    /// ```
-    Offline {
-        /// Absolute path to the binary corpus file.
-        corpus_path: std::path::PathBuf,
-        /// Emit a startup warning if the corpus file is older than this many days.
-        /// `0` disables the age check. Defaults to 90.
-        #[serde(default = "BreachCheckMode::default_max_corpus_age_days")]
-        max_corpus_age_days: u32,
-    },
+    /// Requires all Baseline constraints plus: JAR (RFC 9101), JARM
+    /// (OAuth 2.0 JARM), and `private_key_jwt` client authentication.
+    Advanced,
 }
 
-impl BreachCheckMode {
-    fn default_max_corpus_age_days() -> u32 {
-        90
+/// Per-realm session-version (`sv`) tracking configuration.
+///
+/// Controls whether the `sv` claim is included in access tokens and whether
+/// the delta-feed and snapshot endpoints are active for this realm.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionVersionConfig {
+    /// Enable session-version claim emission and delta log.
+    ///
+    /// `false` (default) — no `sv` claim in tokens, no delta log written,
+    /// feed endpoints return 404.
+    #[serde(default)]
+    pub enabled: bool,
+    /// How long delta log entries are retained, in seconds.
+    ///
+    /// Resource servers that fall further behind must fetch the full snapshot
+    /// to recover. Defaults to 3 600 s (1 hour).
+    #[serde(default = "SessionVersionConfig::default_delta_retention_seconds")]
+    pub delta_retention_seconds: u64,
+}
+
+impl SessionVersionConfig {
+    fn default_delta_retention_seconds() -> u64 {
+        3600
     }
 }
 
-/// Configuration for the breached-password check.
+impl Default for SessionVersionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            delta_retention_seconds: Self::default_delta_retention_seconds(),
+        }
+    }
+}
+
+/// What to do when a new `create_session` would push a user's live session
+/// count past `RealmConfig::max_concurrent_sessions`.
 ///
-/// When `mode` is `online` (default), only the first 5 hex characters of the
-/// SHA-1 hash are sent to the HIBP Range API — no plaintext password or full
-/// hash leaves the process. When `mode` is `offline`, no network call is made.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// The default is [`RejectNew`][SessionLimitPolicy::RejectNew]. Operators must
+/// explicitly opt in to [`EvictOldest`][SessionLimitPolicy::EvictOldest] via
+/// `session_over_limit_policy = "evict_oldest"` in realm config.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLimitPolicy {
+    /// Reject the new session with [`crate::identity::IdentityError::SessionLimitExceeded`].
+    ///
+    /// This is the default. An attacker cannot silently evict a victim's
+    /// sessions by flooding new-session requests — the victim's existing
+    /// sessions remain intact and the attacker receives an error instead.
+    #[default]
+    RejectNew,
+    /// Revoke the oldest active session(s) to make room, then proceed.
+    ///
+    /// Opt-in only. Enables a DoS vector where an attacker can evict a
+    /// victim's sessions via repeated login. Only use when the application
+    /// requires single-session semantics and the threat model accepts it.
+    EvictOldest,
+}
+
+// ── SecretString serde helpers ────────────────────────────────────────────────
+//
+// Used by BreachCheckConfig and AdaptiveMfaConfig to safely round-trip secret
+// fields through storage without relying on SecretString's missing Serialize impl.
+mod secret_string_serde {
+    use secrecy::{ExposeSecret, SecretString};
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(secret.expose_secret())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SecretString, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::Deserialize;
+        let val = String::deserialize(deserializer)?;
+        Ok(SecretString::new(val))
+    }
+}
+
+fn is_empty_secret(s: &SecretString) -> bool {
+    s.expose_secret().is_empty()
+}
+
+fn default_secret_string() -> SecretString {
+    SecretString::new(String::new())
+}
+
+/// Configuration for the HIBP Pwned Passwords k-anonymity breach-check.
+///
+/// Only the first 5 hex characters of the SHA-1 hash are sent to the HIBP
+/// Range API — no plaintext password or full hash leaves the process.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BreachCheckConfig {
-    /// When `true`, every password-set or password-change call runs the breach check.
+    /// When `true`, every password-set or password-change call queries the HIBP
+    /// Range API before accepting the new credential.
     pub enabled: bool,
-    /// Which backend to use for breach detection.
+    /// Request timeout for the HIBP API in milliseconds.
     ///
-    /// Defaults to `online` (HIBP API). Set to `offline` with a `corpus_path`
-    /// for air-gapped deployments.
-    #[serde(default)]
-    pub mode: BreachCheckMode,
-    /// Request timeout for the online HIBP API in milliseconds.
-    ///
-    /// Ignored when `mode` is `offline`. Defaults to 3000 ms. On timeout the
-    /// call fails-open (password accepted, `BreachCheckUnavailable` audit event
-    /// emitted).
+    /// Defaults to 3000 ms. On timeout the call fails-open (password accepted,
+    /// `BreachCheckUnavailable` audit event emitted).
     pub timeout_ms: u64,
     /// Optional HIBP API key. When non-empty, sent as the `hibp-api-key` header.
-    /// Required for paid HIBP Enterprise plans. Ignored when `mode` is `offline`.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub hibp_api_key: String,
+    /// Required for paid HIBP Enterprise plans.
+    #[serde(
+        default = "default_secret_string",
+        skip_serializing_if = "is_empty_secret",
+        serialize_with = "secret_string_serde::serialize",
+        deserialize_with = "secret_string_serde::deserialize"
+    )]
+    pub hibp_api_key: SecretString,
+}
+
+impl fmt::Debug for BreachCheckConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BreachCheckConfig")
+            .field("enabled", &self.enabled)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("hibp_api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PartialEq for BreachCheckConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.timeout_ms == other.timeout_ms
+            && self.hibp_api_key.expose_secret() == other.hibp_api_key.expose_secret()
+    }
 }
 
 impl Default for BreachCheckConfig {
@@ -923,9 +1040,8 @@ impl Default for BreachCheckConfig {
         Self {
             // Safe migration default: disabled so existing realms are unaffected.
             enabled: false,
-            mode: BreachCheckMode::Online,
             timeout_ms: 3000,
-            hibp_api_key: String::new(),
+            hibp_api_key: SecretString::new(String::new()),
         }
     }
 }
@@ -936,7 +1052,7 @@ impl Default for BreachCheckConfig {
 /// every login from an unrecognised device triggers a step-up challenge or
 /// an MFA-enrollment required-action. Only the HMAC output is stored —
 /// never raw IP or User-Agent strings (AC-11 / GDPR).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AdaptiveMfaConfig {
     /// Whether adaptive MFA is active for this realm.
     ///
@@ -950,8 +1066,32 @@ pub struct AdaptiveMfaConfig {
     /// Should be at least 32 bytes of cryptographically-random data. When empty,
     /// the feature behaves as if `enabled = false` to prevent accidentally
     /// treating every device as unrecognised due to a trivially-guessable key.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub fingerprint_hmac_secret: String,
+    #[serde(
+        default = "default_secret_string",
+        skip_serializing_if = "is_empty_secret",
+        serialize_with = "secret_string_serde::serialize",
+        deserialize_with = "secret_string_serde::deserialize"
+    )]
+    pub fingerprint_hmac_secret: SecretString,
+}
+
+impl fmt::Debug for AdaptiveMfaConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdaptiveMfaConfig")
+            .field("enabled", &self.enabled)
+            .field("recognition_window_days", &self.recognition_window_days)
+            .field("fingerprint_hmac_secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PartialEq for AdaptiveMfaConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.enabled == other.enabled
+            && self.recognition_window_days == other.recognition_window_days
+            && self.fingerprint_hmac_secret.expose_secret()
+                == other.fingerprint_hmac_secret.expose_secret()
+    }
 }
 
 impl Default for AdaptiveMfaConfig {
@@ -960,7 +1100,7 @@ impl Default for AdaptiveMfaConfig {
             // Safe migration default: disabled so existing realms are unaffected.
             enabled: false,
             recognition_window_days: 30,
-            fingerprint_hmac_secret: String::new(),
+            fingerprint_hmac_secret: SecretString::new(String::new()),
         }
     }
 }
@@ -1694,6 +1834,17 @@ pub struct PendingAuthorizationRequest {
     pub code_challenge_method: Option<String>,
     /// OIDC nonce echoed into the ID token.
     pub nonce: Option<String>,
+    /// JARM response mode wire string (`query.jwt`, `fragment.jwt`, `jwt`).
+    ///
+    /// `None` means the client used the default `query` mode. Preserved here
+    /// so it can be threaded through the consent redirect path.
+    pub response_mode: Option<String>,
+    /// JARM signing algorithm from `OAuthClient.authorization_signed_response_alg`.
+    ///
+    /// Carried forward so that error redirects in consent_post can be
+    /// JWT-wrapped without an extra client lookup (JARM §4.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_signed_response_alg: Option<String>,
     /// When the ticket was created.
     pub created_at: Timestamp,
     /// When the ticket expires. Past this point `take_pending_authorization`
@@ -1781,6 +1932,19 @@ pub struct CreateWebhookRequest {
     /// Event type filter. Empty = all events.
     pub events: Vec<String>,
     /// Whether to activate the webhook immediately.
+    pub enabled: bool,
+}
+
+/// Request to update an existing webhook's configuration.
+#[derive(Clone, Debug)]
+pub struct UpdateWebhookRequest {
+    /// Endpoint URL.
+    pub url: String,
+    /// Optional HMAC-SHA256 signing secret. `None` clears the secret.
+    pub secret: Option<String>,
+    /// Event type filter. Empty = all events.
+    pub events: Vec<String>,
+    /// Whether the webhook is active.
     pub enabled: bool,
 }
 
@@ -2547,6 +2711,8 @@ mod tests {
             code_challenge: Some("abc".to_string()),
             code_challenge_method: Some("S256".to_string()),
             nonce: Some("n-0".to_string()),
+            response_mode: None,
+            authorization_signed_response_alg: Some("EdDSA".to_string()),
             created_at: Timestamp::from_micros(1_000_000),
             expires_at: Timestamp::from_micros(1_600_000_000),
         };

@@ -14,7 +14,7 @@ The current landscape forces teams into a miserable choice: pay a SaaS vendor $5
 
 The strategic insight is simple: **auth is a database problem masquerading as an application problem.** Keycloak, Ory, Auth0, and every other solution in this space are applications layered on top of generic databases. They inherit all the operational complexity of those databases (backups, replication, connection pooling, schema migrations) and add their own complexity on top. A purpose-built identity database collapses this entire stack into a single, optimized system — the same way TigerBeetle collapsed the "application + Postgres" ledger stack into a purpose-built ledger database, and the same way ClickHouse collapsed the "application + generic RDBMS" analytics stack.
 
-Hearth is AGPL-3.0 licensed (with commercial licensing available), written in a memory-safe systems language (Rust), and designed to be the last piece of auth infrastructure a team ever installs.
+Hearth is Apache 2.0 licensed, written in a memory-safe systems language (Rust), and designed to be the last piece of auth infrastructure a team ever installs.
 
 ---
 
@@ -132,7 +132,7 @@ Everything else — the OAuth flows, the SAML endpoints, the SCIM provisioning �
 | **Zitadel** | Auth server | Go | External (Postgres, CockroachDB) | Apache 2.0 / BSL | Yes | Go performance ceiling, external DB dependency, license concerns |
 | **Supabase Auth** | Auth module | Go/Elixir | Postgres (Supabase-managed) | Apache 2.0 | Partial | Tightly coupled to Supabase ecosystem |
 | **Authzed/SpiceDB** | Authorization only | Go | External (various) | Apache 2.0 | Yes | Authorization only, no authn |
-| **Hearth** | Identity database | Rust | **Embedded** | AGPL-3.0 / Commercial | **Yes** | New, unproven |
+| **Hearth** | Identity database | Rust | **Embedded** | Apache 2.0 | **Yes** | New, unproven |
 
 The critical differentiator is in the "Storage" column. Every competitor depends on an external database. Hearth *is* the database. This is not a minor architectural detail — it eliminates an entire class of operational problems (connection pooling, schema migrations, backup coordination, database version compatibility, HA configuration for the backing store) and enables performance characteristics that are physically impossible when you're round-tripping to Postgres.
 
@@ -493,19 +493,17 @@ Hearth's OIDC, OAuth 2.0, SAML, and SCIM endpoints conform strictly to their res
 
 ## 9. Business Model and Sustainability
 
-### 9.1 AGPL-3.0 + Commercial — Open Source with Teeth
+### 9.1 Apache 2.0 — Permissive Open Source
 
-Hearth is dual-licensed: **AGPL-3.0** for open-source use, with **commercial licenses** available for organizations that need different terms. Not "open core with the interesting features behind a paywall." Not "source-available with a time-delayed permissive license." The full product is open source, always.
+Hearth is licensed under the **Apache License 2.0**. Not "open core with the interesting features behind a paywall." Not "source-available with a time-delayed permissive license." The full product is open source, always, with no license compatibility friction.
 
-This is a deliberate strategic choice informed by hard lessons from the infrastructure ecosystem. The reasoning:
+This is a deliberate strategic choice:
 
-1. **Trust is the product.** Auth infrastructure sits at the heart of every application's security model. Teams need to trust that the infrastructure will be available, maintained, and unencumbered. The AGPL ensures the source is always open — no bait-and-switch to a proprietary license is possible because the existing codebase remains AGPL-3.0 forever.
+1. **Trust is the product.** Auth infrastructure sits at the heart of every application's security model. Teams need to trust that the infrastructure will be available, maintained, and unencumbered. Apache 2.0 is the industry standard for infrastructure: Kubernetes, Tokio, ClickHouse, TigerBeetle, and virtually every major cloud-native project use it. Choosing it signals that Hearth is built for adoption, not extraction.
 
-2. **The AGPL protects the commons.** The cautionary tales of Redis, Elasticsearch, and Terraform show what happens when cloud providers offer permissively-licensed infrastructure as a managed service without contributing back. The AGPL's network-use clause (Section 13) requires anyone offering Hearth as a service to release their modifications. This protects the project and its contributors without restricting self-hosting, modification, or redistribution.
+2. **Adoption over protection.** The dual-license model (AGPL + commercial) was designed to prevent hyperscalers from offering Hearth as a managed service without contributing back. In practice, copyleft licenses deter enterprise adoption more than they deter hyperscalers — large cloud providers have legal teams that navigate AGPL; mid-size engineering teams do not. Apache 2.0 removes that adoption barrier entirely.
 
-3. **Commercial licensing enables enterprise adoption.** Organizations that cannot or prefer not to operate under AGPL terms can obtain a commercial license. This is the same model used by Grafana Labs (AGPLv3 + commercial), MinIO (AGPLv3 + commercial), and MongoDB (SSPL + commercial). It funds development while keeping the project fully open source.
-
-4. **The precedent works.** Grafana, MinIO, and Neo4j demonstrate that AGPL + commercial dual-licensing sustains both vibrant open-source communities and durable businesses. The AGPL is not a barrier to adoption — it is a guarantee that the project stays open.
+3. **The business model does not require copyleft.** Hearth Cloud (§9.2) competes on operational convenience, compliance certifications, global edge, and enterprise support — not on license enforcement. Projects like ClickHouse Inc, Turso, and TigerBeetle demonstrate that a fully-permissive open-source project can sustain a durable hosted-service business.
 
 ### 9.2 Revenue Model: Hearth Cloud
 
@@ -538,7 +536,7 @@ The project will likely follow a staged funding approach:
 
 3. **Series A**: With Hearth Cloud in beta and paying customers, raise a Series A to fund the go-to-market and enterprise sales motions.
 
-This path is not the only option. The project could remain community-funded and community-governed indefinitely. The funding path is presented as an option, not a commitment — and the AGPL-3.0 license ensures that the project's openness is not contingent on any particular funding outcome.
+This path is not the only option. The project could remain community-funded and community-governed indefinitely. The funding path is presented as an option, not a commitment — and the Apache 2.0 license ensures that the project's openness is not contingent on any particular funding outcome.
 
 ---
 
@@ -655,7 +653,7 @@ The honest acknowledgment: if you already have a well-operated Postgres cluster 
 
 Infrastructure projects live or die by adoption. A technically superior product with no users is a hobby project. The identity database category doesn't exist yet — Hearth has to create it and convince people it's a category worth caring about.
 
-**Mitigation**: This is the risk that the TigerBeetle framing partially addresses. TigerBeetle proved that "purpose-built database for X" is a viable category creation strategy. The migration tooling, drop-in protocol compatibility, and five-minute on-ramp are designed to minimize adoption friction. The AGPL-3.0 license keeps the source fully open, and commercial licensing ensures adoption is not gated by license incompatibility for enterprises that need it.
+**Mitigation**: This is the risk that the TigerBeetle framing partially addresses. TigerBeetle proved that "purpose-built database for X" is a viable category creation strategy. The migration tooling, drop-in protocol compatibility, and five-minute on-ramp are designed to minimize adoption friction. The Apache 2.0 license keeps the source fully open with no license-compatibility friction for any adopter.
 
 ### 11.6 Single-Person / Small-Team Risk
 

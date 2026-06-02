@@ -1,3 +1,5 @@
+use crate::types::AccessTokenAuthorization;
+
 /// Hearth SDK error type — spec §5.
 ///
 /// The `HearthError` enum covers both HTTP-level API errors and all
@@ -62,4 +64,70 @@ pub enum HearthError {
     /// A token introspection request failed or returned inactive.
     #[error("introspection error: {message}")]
     IntrospectionError { message: String },
+
+    /// The token has `token_type == "required_action"` — the subject must complete
+    /// the pending actions before accessing general API resources.
+    ///
+    /// `required_actions` contains the action names from the `required_actions` JWT claim
+    /// (e.g. `["VERIFY_EMAIL", "UPDATE_PASSWORD"]`).  `redirect_uri` is the optional
+    /// Hearth interstitial URL when one is provided by the server.
+    #[error("required action pending: {required_actions:?}")]
+    RequiredActionError {
+        required_actions: Vec<String>,
+        redirect_uri: Option<String>,
+    },
+
+    /// The server echoed a different authorization mode than the SDK was configured to expect.
+    ///
+    /// This is a hard rejection — the SDK never silently falls back to a different mode.
+    #[error("mode mismatch: expected {expected:?}, got {actual:?}")]
+    ModeMismatch {
+        expected: AccessTokenAuthorization,
+        actual: AccessTokenAuthorization,
+    },
+
+    /// A `Decision`-mode `/oauth/authorize` call failed; fail-closed.
+    ///
+    /// Any network or parse error on the decision endpoint is surfaced as this variant
+    /// so callers can distinguish authorization-network failures from logic denials.
+    #[error("authorization check failed: {reason}")]
+    AuthorizationFailed { reason: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_action_error_fields() {
+        let err = HearthError::RequiredActionError {
+            required_actions: vec!["VERIFY_EMAIL".into(), "UPDATE_PASSWORD".into()],
+            redirect_uri: Some("https://auth.example.com/ui/required-actions/verify-email".into()),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("required action pending"));
+        assert!(msg.contains("VERIFY_EMAIL"));
+
+        match err {
+            HearthError::RequiredActionError { required_actions, redirect_uri } => {
+                assert_eq!(required_actions, vec!["VERIFY_EMAIL", "UPDATE_PASSWORD"]);
+                assert!(redirect_uri.is_some());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn required_action_error_no_redirect() {
+        let err = HearthError::RequiredActionError {
+            required_actions: vec!["VERIFY_EMAIL".into()],
+            redirect_uri: None,
+        };
+        match err {
+            HearthError::RequiredActionError { redirect_uri, .. } => {
+                assert!(redirect_uri.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
 }

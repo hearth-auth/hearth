@@ -1,21 +1,53 @@
 [advisories]
 
 [licenses]
+# cargo-deny 0.14+ uses a pure allowlist model: any license (or no license) not
+# in `allow` is implicitly rejected. This is stricter than a dual allow/deny
+# approach — no OR-expression loophole (e.g. "MIT OR GPL-3.0" fails because
+# GPL-3.0 is not in the allow list, even if MIT is).
+#
+# Policies this enforces:
+#  - Unlicensed packages: rejected (no license string → no allow-list match)
+#  - Copyleft families (GPL, AGPL, LGPL, SSPL, BUSL, OSL, EUPL, CDDL, CPL, EPL):
+#    rejected (not listed here)
+#  - All other non-permissive licenses: rejected by default
 allow = [
     "Apache-2.0",
+    # Apache-2.0 WITH LLVM-exception: used by 17 Bytecode Alliance / WASI packages
+    # (e.g. wasm-encoder, wast, wit-parser). The LLVM exception only adds permissions
+    # (allows linking with non-GPL-compatible runtime libraries); it is a strict superset
+    # of plain Apache-2.0 for our purposes.
+    "Apache-2.0 WITH LLVM-exception",
     "MIT",
+    # MIT-0: MIT with the attribution clause removed (more permissive than MIT).
+    "MIT-0",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "MPL-2.0",
     "ISC",
     "Unicode-DFS-2016",
     "Unicode-3.0",
-    "AGPL-3.0-only",
     "0BSD",
+    # Unlicense: public-domain dedication; used by ~8 packages in the tree.
+    "Unlicense",
+    # CC0-1.0: public-domain dedication with patent/copyright waiver; used by 1 package.
+    "CC0-1.0",
     "CDLA-Permissive-2.0",
     "Zlib",
 ]
 
+# r-efi ships as "Apache-2.0 OR LGPL-2.0-or-later". We elect Apache-2.0 here.
+# LGPL-2.0-or-later is not in the allow list above, so cargo-deny would normally
+# reject the disjunction; this per-crate exception pins r-efi to Apache-2.0 only.
+[[licenses.exceptions]]
+allow = ["Apache-2.0"]
+name = "r-efi"
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+skip = [
+    # wasip3 0.4.0 pins wit-bindgen 0.51.0; wasip2 1.0.x uses 0.57.1.
+    # No common version available upstream — skip to suppress the warning.
+    { name = "wit-bindgen", version = "=0.51.0" },
+]

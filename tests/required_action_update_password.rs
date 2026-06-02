@@ -604,6 +604,8 @@ async fn post_expired_ra_token_redirects_to_root() {
                 nonce: None,
                 state: Some("s".to_string()),
                 response_type: "code".to_string(),
+                response_mode: None,
+                via_par: false,
             },
             past,
         )

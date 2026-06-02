@@ -35,9 +35,48 @@ impl OAuthService for OAuthSvc {
         &self,
         req: Request<pb::AuthorizationRequest>,
     ) -> Result<Response<pb::AuthorizationResponse>, Status> {
+        use crate::core::UserId;
+        use crate::identity::{AuthorizationRequest, IdentityError};
+
         let realm_id = extract_realm_id(req.metadata())?;
         let body = req.into_inner();
-        let domain_req = proto_authorize_to_domain(body).map_err(Status::invalid_argument)?;
+
+        // PAR path: when `request_uri` is present, consume the stored entry to
+        // obtain pre-validated parameters with `via_par = true`.
+        let domain_req = if let Some(ref request_uri) = body.request_uri {
+            let user_id = uuid::Uuid::parse_str(&body.user_id)
+                .map(UserId::new)
+                .map_err(|_| Status::invalid_argument("invalid user_id"))?;
+            let stored = self
+                .state
+                .identity
+                .consume_par(&realm_id, request_uri)
+                .map_err(|e| match e {
+                    IdentityError::InvalidPushedAuthorizationRequest => {
+                        Status::invalid_argument("invalid or expired request_uri")
+                    }
+                    other => identity_to_status(other),
+                })?;
+            AuthorizationRequest {
+                client_id: stored.client_id,
+                redirect_uri: stored.redirect_uri,
+                scope: stored.scope,
+                state: stored.state,
+                resource: stored.resource,
+                response_type: stored.response_type,
+                user_id,
+                code_challenge: stored.code_challenge,
+                code_challenge_method: stored.code_challenge_method,
+                nonce: stored.nonce,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: true,
+            }
+        } else {
+            proto_authorize_to_domain(body).map_err(Status::invalid_argument)?
+        };
+
         let resp = self
             .state
             .identity
@@ -140,5 +179,35 @@ impl OAuthService for OAuthSvc {
             .register_client(&realm_id, &body)
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::OAuthClient::from(&client)))
+    }
+
+    async fn decide(
+        &self,
+        req: Request<pb::TokenDecisionRequest>,
+    ) -> Result<Response<pb::TokenDecisionResponse>, Status> {
+        let realm_id = extract_realm_id(req.metadata())?;
+        // Bearer token expected in `authorization` metadata.
+        let token = req
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .ok_or_else(|| Status::unauthenticated("bearer token required"))?
+            .to_string();
+        let body = req.into_inner();
+        let domain_req = domain::oidc::DecidePermissionRequest {
+            token,
+            permission: body.permission,
+            organization_id: body.organization_id,
+            resource: body.resource,
+        };
+        let resp = self
+            .state
+            .identity
+            .decide_token_permission(&realm_id, &domain_req)
+            .map_err(identity_to_status)?;
+        Ok(Response::new(pb::TokenDecisionResponse {
+            allowed: resp.allowed,
+        }))
     }
 }

@@ -311,6 +311,10 @@ pub struct ObservabilityConfig {
     /// Optional OTLP export. When absent, no spans are exported.
     #[serde(default)]
     pub otlp: Option<OtlpConfig>,
+    /// Whether dev-mode pretty formatting is active. Not serialized — threaded
+    /// in from [`crate::config::Config::dev_mode`] before `telemetry::init`.
+    #[serde(skip)]
+    pub dev_mode: bool,
 }
 
 impl ObservabilityConfig {
@@ -336,6 +340,7 @@ impl Default for ObservabilityConfig {
             log_level: Self::default_log_level(),
             log_format: Self::default_log_format(),
             otlp: None,
+            dev_mode: false,
         }
     }
 }
@@ -832,6 +837,15 @@ pub struct AuthConfig {
     /// Per-realm `auth.passkey_requires_mfa` overrides this.
     #[serde(default)]
     pub passkey_requires_mfa: Option<bool>,
+    /// Global default maximum concurrent sessions per user.
+    /// Per-realm overrides via `realms.<name>.session_max_concurrent`.
+    #[serde(default)]
+    pub session_max_concurrent: Option<u32>,
+    /// Global default over-limit policy: `"reject_new"` (default) or `"evict_oldest"`.
+    ///
+    /// An unrecognised value is a hard error at config parse time.
+    #[serde(default)]
+    pub session_over_limit_policy: Option<String>,
 }
 
 /// Per-realm auth policy configuration in YAML.
@@ -1141,6 +1155,13 @@ pub struct ApplicationYamlConfig {
     /// Whether a realm-level consent row covers all org contexts.
     #[serde(default)]
     pub consent_spans_orgs: Option<bool>,
+    /// FAPI 2.0 Security Profile for this client.
+    ///
+    /// Accepted values: `"fapi2"`. Absent means standard profile.
+    /// Setting this flag subjects the client to FAPI 2.0 constraints
+    /// (DPoP, PAR, PKCE S256) regardless of the realm-level `fapi_profile`.
+    #[serde(default)]
+    pub profile: Option<String>,
 }
 
 /// YAML permission definition.
@@ -1272,6 +1293,15 @@ pub struct RealmYamlConfig {
     /// Session TTL override (e.g. "12h").
     #[serde(default)]
     pub session_ttl: Option<String>,
+    /// Maximum concurrent sessions per user for this realm.
+    /// Overrides global `auth.session_max_concurrent`. `None` = unlimited.
+    #[serde(default)]
+    pub session_max_concurrent: Option<u32>,
+    /// Over-limit policy for this realm: `"reject_new"` (default) or `"evict_oldest"`.
+    /// Overrides global `auth.session_over_limit_policy`. An unrecognised value is
+    /// a hard error at config parse time.
+    #[serde(default)]
+    pub session_over_limit_policy: Option<String>,
     /// Argon2id memory cost override.
     #[serde(default)]
     pub password_memory_cost: Option<u32>,
@@ -1363,6 +1393,13 @@ pub struct RealmYamlConfig {
     /// instead of setting this flag.
     #[serde(default)]
     pub rotate_signing_key: Option<bool>,
+    /// FAPI 2.0 Security Profile enforcement for this realm.
+    ///
+    /// Accepted values: `"baseline"` (PAR + PKCE required for all clients),
+    /// `"advanced"` (Baseline + JAR + JARM required). Absent or `null` means
+    /// standard OAuth 2.0 / OIDC rules apply with no FAPI constraints.
+    #[serde(default)]
+    pub fapi_profile: Option<String>,
 }
 
 /// YAML for `realms.{name}.scim.*`.
@@ -1607,6 +1644,32 @@ impl RealmYamlConfig {
             .as_deref()
             .or(global.session_ttl.as_deref())
             .and_then(|s| parse_duration_to_micros(s).ok());
+
+        let max_concurrent_sessions = self
+            .session_max_concurrent
+            .or(global.session_max_concurrent);
+
+        // SEC-3: Hard error on unrecognised policy string — never silently default.
+        let raw_policy = self
+            .session_over_limit_policy
+            .as_deref()
+            .or(global.session_over_limit_policy.as_deref());
+        let session_over_limit_policy = match raw_policy {
+            None | Some("reject_new") => {
+                // None → default (RejectNew); explicit "reject_new" → same.
+                raw_policy.map_or_else(crate::identity::SessionLimitPolicy::default, |_| {
+                    crate::identity::SessionLimitPolicy::RejectNew
+                })
+            }
+            Some("evict_oldest") => crate::identity::SessionLimitPolicy::EvictOldest,
+            Some(unknown) => {
+                return Err(vec![RegistryError::InvalidRealmConfigField {
+                    field: "session_over_limit_policy".to_string(),
+                    value: unknown.to_string(),
+                    reason: "must be \"reject_new\" or \"evict_oldest\"".to_string(),
+                }]);
+            }
+        };
 
         let password_memory_cost = self.password_memory_cost.or(global.password_memory_cost);
         let password_time_cost = self.password_time_cost.or(global.password_time_cost);
@@ -1872,6 +1935,22 @@ impl RealmYamlConfig {
             })
             .collect();
 
+        // --- FAPI profile --------------------------------------------------
+
+        let fapi_profile = match self.fapi_profile.as_deref() {
+            None => None,
+            Some("baseline") => Some(crate::identity::FapiProfile::Baseline),
+            Some("advanced") => Some(crate::identity::FapiProfile::Advanced),
+            Some(other) => {
+                errors.push(RegistryError::InvalidRealmConfigField {
+                    field: "fapi_profile".to_string(),
+                    value: other.to_string(),
+                    reason: "expected \"baseline\" or \"advanced\"".to_string(),
+                });
+                None
+            }
+        };
+
         // --- Structural validation (cross-references, cycles, Tier 1) ------
         //
         // Bail early on grammar errors before running the structural checks
@@ -1996,6 +2075,10 @@ impl RealmYamlConfig {
             // SMS OTP expiry and max-attempt config; `None` uses OTP module defaults.
             sms_otp_expiry_seconds: None,
             sms_otp_max_attempts: None,
+            session_version: crate::identity::SessionVersionConfig::default(),
+            max_concurrent_sessions,
+            session_over_limit_policy,
+            fapi_profile,
         })
     }
 }
@@ -2238,6 +2321,8 @@ mod tests {
             password_time_cost: Some(3),
             mfa_required: None,
             passkey_requires_mfa: None,
+            session_max_concurrent: None,
+            session_over_limit_policy: None,
         };
         let realm_cfg = RealmYamlConfig {
             session_ttl: Some("12h".to_string()),
@@ -2251,5 +2336,54 @@ mod tests {
         // Inherited from global
         assert_eq!(merged.password_memory_cost, Some(65536));
         assert_eq!(merged.password_time_cost, Some(3));
+    }
+
+    #[test]
+    fn fapi_profile_baseline_parsed() {
+        let yaml = RealmYamlConfig {
+            fapi_profile: Some("baseline".to_string()),
+            ..RealmYamlConfig::default()
+        };
+        let cfg = yaml
+            .to_realm_config(&AuthConfig::default(), None)
+            .expect("baseline is valid");
+        assert_eq!(
+            cfg.fapi_profile,
+            Some(crate::identity::FapiProfile::Baseline)
+        );
+    }
+
+    #[test]
+    fn fapi_profile_advanced_parsed() {
+        let yaml = RealmYamlConfig {
+            fapi_profile: Some("advanced".to_string()),
+            ..RealmYamlConfig::default()
+        };
+        let cfg = yaml
+            .to_realm_config(&AuthConfig::default(), None)
+            .expect("advanced is valid");
+        assert_eq!(
+            cfg.fapi_profile,
+            Some(crate::identity::FapiProfile::Advanced)
+        );
+    }
+
+    #[test]
+    fn fapi_profile_absent_yields_none() {
+        let yaml = RealmYamlConfig::default();
+        let cfg = yaml
+            .to_realm_config(&AuthConfig::default(), None)
+            .expect("no fapi_profile is valid");
+        assert!(cfg.fapi_profile.is_none());
+    }
+
+    #[test]
+    fn fapi_profile_unknown_value_is_error() {
+        let yaml = RealmYamlConfig {
+            fapi_profile: Some("enterprise".to_string()),
+            ..RealmYamlConfig::default()
+        };
+        let result = yaml.to_realm_config(&AuthConfig::default(), None);
+        assert!(result.is_err(), "unknown fapi_profile must fail validation");
     }
 }

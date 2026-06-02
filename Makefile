@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install proto-gen proto-lint proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -91,9 +91,17 @@ proto-gen:
 proto-lint:
 	cd proto && $(BUF) lint
 
+## Format .proto files in-place (run before committing).
+proto-format:
+	cd proto && $(BUF) format -w
+
+## Check proto formatting without modifying files (CI gate).
+proto-format-check:
+	cd proto && $(BUF) format --diff --exit-code
+
 ## Check for backwards-incompatible proto changes vs main.
 proto-breaking:
-	cd proto && $(BUF) breaking --against '../.git#branch=main,subdir=proto'
+	cd proto && $(BUF) breaking --against '../.git#branch=origin/main,subdir=proto'
 
 ## Verify generated SDK code is up-to-date with .proto files.
 proto-check:
@@ -104,6 +112,31 @@ proto-check:
 	else \
 		echo "ERROR: Generated code is out of date. Run 'make proto-gen' and commit."; \
 		git diff --stat sdks/typescript/src/generated sdks/go/generated; \
+		exit 1; \
+	fi
+
+# ── OpenAPI ───────────────────────────────────────────
+
+## (Re)generate docs/api/openapi.json from proto-derived + supplement sources.
+## Requires: python3 + PyYAML.  On Nix machines it finds pyyaml from the store;
+## elsewhere it installs it via pip (quiet, user-level).
+openapi:
+	@python3 -c "import yaml" 2>/dev/null \
+	  || nix-shell -p python3Packages.pyyaml --run true 2>/dev/null \
+	  || pip3 install --user --quiet pyyaml
+	@if command -v nix-shell >/dev/null 2>&1 && ! python3 -c "import yaml" 2>/dev/null; then \
+		nix-shell -p python3Packages.pyyaml --run "python3 scripts/merge_openapi.py"; \
+	else \
+		python3 scripts/merge_openapi.py; \
+	fi
+
+## CI gate: regenerate and fail if docs/api/openapi.json is stale.
+openapi-check: openapi
+	@if git diff --quiet docs/api/openapi.json; then \
+		echo "✓ docs/api/openapi.json is up to date."; \
+	else \
+		echo "ERROR: docs/api/openapi.json is stale. Run 'make openapi' and commit the result."; \
+		git diff --stat docs/api/openapi.json; \
 		exit 1; \
 	fi
 
@@ -157,6 +190,40 @@ cluster-route-check:
 ## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate + cluster route check (merge).
 ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster-route-check
 
+## Host-side reproduction of PR-blocking CI checks (~5 min cold).
+## Mirrors the seven checks that gate every PR: test-quality, check (clippy+fmt+nextest),
+## css-check, proto-check, cargo deny, sdk-conformance, and sdk-smoke.
+## For full reproduction including workflow files and matrix legs: make ci-local-full
+ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
+	@echo "==> test-quality"              && $(MAKE) test-quality
+	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
+	@echo "==> css-check"                && $(MAKE) css-check
+	@echo "==> proto-check"              && $(MAKE) proto-check
+	@echo "==> cargo deny"               && cargo deny check
+	@echo "==> sdk-conformance"          && bash scripts/check-sdk-conformance.sh
+	@echo "==> sdk-smoke-local"          && $(MAKE) sdk-smoke-local
+	@echo ""
+	@echo "ci-local-fast OK. For full reproduction (workflow files, toolchain drift),"
+	@echo "run: make ci-local-full"
+
+## Full container reproduction of PR-blocking GHA workflows via nektos/act (~10-15 min cold).
+## Requires act: brew install act | mise install act | gh extension install nektos/gh-act
+## Catches bugs ci-local-fast cannot: workflow-file errors, toolchain drift, missing install steps.
+## See CONTRIBUTING.md § "Full container CI reproduction (ci-local-full)" for details.
+ci-local-full: ## Run PR-blocking workflows in containers via act (~10-15 min)
+	@command -v gh >/dev/null || { echo "gh CLI not found. Install: https://cli.github.com"; exit 1; }
+	@gh extension list 2>/dev/null | grep -q 'nektos/gh-act' || { echo "gh-act extension not found. Install: 'gh extension install nektos/gh-act'"; exit 1; }
+	gh act pull_request \
+	  --verbose \
+	  -W .github/workflows/ci.yml \
+	  -W .github/workflows/sdk-smoke.yml \
+	  --artifact-server-path /tmp/act-artifacts
+
+## Build hearth, boot --dev on a random free port, run TS + Go SDK example
+## smoke checks, then tear down. Called by ci-local-fast; safe to run standalone.
+sdk-smoke-local: ## Build hearth, boot --dev, run TS + Go SDK examples, tear down
+	@bash scripts/sdk-smoke-local.sh
+
 ## Run Hearth in local dev mode with persistent storage (./data/dev).
 ## Data survives restarts. Use `make dev-reset` to wipe it.
 ## Emails are captured in-process — mailcatcher inbox at http://127.0.0.1:8420/dev/mail
@@ -168,6 +235,42 @@ dev:
 dev-reset:
 	rm -rf ./data/dev
 	@echo "Dev data wiped. Run make dev for a fresh start."
+
+# ── Helm ──────────────────────────────────────────────
+
+HELM ?= helm
+HELM_CHART := deploy/helm/hearth
+
+## Lint the Hearth Helm chart. Exits non-zero on any warning or error.
+helm-lint:
+	@command -v $(HELM) >/dev/null 2>&1 || (echo "ERROR: helm not found — install Helm 3.10+ (https://helm.sh/docs/intro/install/)" && exit 1)
+	$(HELM) lint $(HELM_CHART)
+
+## Render Helm templates and diff against committed snapshots.
+## Fails if rendered output differs from deploy/helm/hearth/tests/*.yaml.
+## To update snapshots after intentional chart changes: make helm-template UPDATE=1
+helm-template:
+	@command -v $(HELM) >/dev/null 2>&1 || (echo "ERROR: helm not found — install Helm 3.10+ (https://helm.sh/docs/intro/install/)" && exit 1)
+	@if [ "$(UPDATE)" = "1" ]; then \
+		echo "Updating Helm snapshots..."; \
+		$(HELM) template hearth $(HELM_CHART) --namespace hearth \
+			> $(HELM_CHART)/tests/default.yaml; \
+		$(HELM) template hearth $(HELM_CHART) -f $(HELM_CHART)/values-prod.yaml --namespace hearth \
+			> $(HELM_CHART)/tests/prod.yaml; \
+		echo "✓ Snapshots updated: $(HELM_CHART)/tests/"; \
+	else \
+		tmp_dir=$$(mktemp -d); \
+		$(HELM) template hearth $(HELM_CHART) --namespace hearth \
+			> $$tmp_dir/default.yaml; \
+		$(HELM) template hearth $(HELM_CHART) -f $(HELM_CHART)/values-prod.yaml --namespace hearth \
+			> $$tmp_dir/prod.yaml; \
+		diff $(HELM_CHART)/tests/default.yaml $$tmp_dir/default.yaml \
+			|| (echo "ERROR: default.yaml snapshot drift. Run: make helm-template UPDATE=1" && rm -rf $$tmp_dir && exit 1); \
+		diff $(HELM_CHART)/tests/prod.yaml $$tmp_dir/prod.yaml \
+			|| (echo "ERROR: prod.yaml snapshot drift. Run: make helm-template UPDATE=1" && rm -rf $$tmp_dir && exit 1); \
+		rm -rf $$tmp_dir; \
+		echo "✓ Helm snapshots match."; \
+	fi
 
 # ── UI Tests ──────────────────────────────────────────
 #

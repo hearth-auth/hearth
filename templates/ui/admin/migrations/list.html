@@ -1,12 +1,5 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Migration History{% endblock %}
-{% block breadcrumb %}
-<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
-  <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
-  <span class="text-ht-content-muted">›</span>
-  <span class="font-medium text-ht-content-secondary">Migration History</span>
-</nav>
-{% endblock %}
 {% block body %}
 <div class="mb-6 flex items-center justify-between gap-4">
   <div>
@@ -39,14 +32,15 @@
 
           <div class="mt-3 flex flex-wrap gap-2">
             <button type="button"
-                    _="on click toggle .hidden on my closest <div.p-4>'s last <div>"
+                    data-component="disclosure"
+                    data-target="#orphan-form-{{ loop.index }}"
                     class="inline-flex items-center gap-1.5 rounded-md bg-error/20 px-3 py-1.5 text-xs font-medium text-error-fg transition hover:bg-error/30">
               <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/></svg>
               Generate YAML
             </button>
           </div>
 
-          <div class="hidden mt-4">
+          <div id="orphan-form-{{ loop.index }}" class="hidden mt-4">
             <form method="POST" action="/ui/admin/migrations/orphans/resolve"
                   hx-post="/ui/admin/migrations/orphans/resolve"
                   hx-target="#yaml-result-{{ loop.index }}"

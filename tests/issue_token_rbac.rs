@@ -1,6 +1,6 @@
 //! Integration tests for token issuance with RBAC claim population.
 //!
-//! Covers `MIGRATE_TO_RBAC.md` § 7 scenarios:
+//! Scenarios:
 //! - populates roles/groups/permissions claims at issue time
 //! - size cap refuses issuance (currently unenforced — see comment)
 
@@ -618,6 +618,9 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
                 nonce: None,
                 resource: None,
                 amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
             },
         )
         .expect("authorize");
@@ -632,6 +635,9 @@ async fn oauth_path_permissions_cap_refuses_issuance() {
                 code: auth_resp.code().to_string(),
                 redirect_uri: "http://localhost/callback".into(),
                 code_verifier: Some(TEST_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
             },
         )
         .expect_err("should fail");

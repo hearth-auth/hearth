@@ -31,6 +31,10 @@ struct RbacDebugTemplate {
     realm_uuid: String,
     /// Human-readable error message, if any.
     error: Option<String>,
+    /// True when a resolution was attempted (even if all lists are empty).
+    has_result: bool,
+    /// Resolved user context: (display_name, email), shown above the results grid.
+    resolved_user: Option<(String, String)>,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -40,8 +44,8 @@ struct RbacDebugTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Query parameters for the RBAC debugger.
@@ -94,47 +98,67 @@ pub async fn admin_rbac_debug(
     let mut groups: Vec<String> = Vec::new();
     let mut permissions: Vec<String> = Vec::new();
     let mut error: Option<String> = None;
+    let mut has_result = false;
+    let mut resolved_user: Option<(String, String)> = None;
 
     if !user_id_input.is_empty() {
-        let uuid = user_id_input
-            .strip_prefix("user_")
-            .unwrap_or(user_id_input.as_str())
-            .parse::<uuid::Uuid>();
-        match uuid {
-            Err(_) => error = Some("Invalid user UUID".to_string()),
-            Ok(u) => {
-                let user_id = crate::core::UserId::new(u);
-                let org_id = if org_id_input.is_empty() {
-                    None
-                } else {
-                    org_id_input
-                        .strip_prefix("org_")
-                        .unwrap_or(org_id_input.as_str())
-                        .parse::<uuid::Uuid>()
-                        .ok()
+        // UX-4: validate org_id early; a non-empty unparseable value is an error.
+        let org_id_result: Option<Result<crate::core::OrganizationId, ()>> =
+            if org_id_input.is_empty() {
+                None
+            } else {
+                let raw = org_id_input
+                    .strip_prefix("org_")
+                    .unwrap_or(org_id_input.as_str());
+                Some(
+                    raw.parse::<uuid::Uuid>()
                         .map(crate::core::OrganizationId::new)
-                };
-                let scope = if scope_input.is_empty() {
-                    None
-                } else {
-                    Some(scope_input.clone())
-                };
-                match state.rbac.resolve_permissions(
-                    &user_id,
-                    target.id(),
-                    org_id.as_ref(),
-                    scope.as_deref(),
-                ) {
-                    Ok(resolved) => {
-                        roles = resolved.roles;
-                        groups = resolved.groups;
-                        permissions = resolved
-                            .permissions
-                            .into_iter()
-                            .map(|p| p.into_string())
-                            .collect();
+                        .map_err(|_| ()),
+                )
+            };
+
+        if let Some(Err(())) = org_id_result {
+            error = Some("Invalid org UUID — enter a valid org_<uuid> or leave blank".to_string());
+        } else {
+            let uuid = user_id_input
+                .strip_prefix("user_")
+                .unwrap_or(user_id_input.as_str())
+                .parse::<uuid::Uuid>();
+            match uuid {
+                Err(_) => error = Some("Invalid user UUID".to_string()),
+                Ok(u) => {
+                    let user_id = crate::core::UserId::new(u);
+                    let org_id = org_id_result.and_then(|r| r.ok());
+                    let scope = if scope_input.is_empty() {
+                        None
+                    } else {
+                        Some(scope_input.clone())
+                    };
+                    match state.rbac.resolve_permissions(
+                        &user_id,
+                        target.id(),
+                        org_id.as_ref(),
+                        scope.as_deref(),
+                    ) {
+                        Ok(resolved) => {
+                            has_result = true;
+                            roles = resolved.roles;
+                            groups = resolved.groups;
+                            permissions = resolved
+                                .permissions
+                                .into_iter()
+                                .map(|p| p.into_string())
+                                .collect();
+                            // UX-3: load resolved user context for the summary banner.
+                            if let Ok(Some(user)) = state.identity.get_user(target.id(), &user_id) {
+                                resolved_user = Some((
+                                    user.display_name().to_string(),
+                                    user.email().to_string(),
+                                ));
+                            }
+                        }
+                        Err(e) => error = Some(format!("Resolution failed: {e}")),
                     }
-                    Err(e) => error = Some(format!("Resolution failed: {e}")),
                 }
             }
         }
@@ -150,6 +174,8 @@ pub async fn admin_rbac_debug(
         permissions,
         realm_uuid: target.id().as_uuid().to_string(),
         error,
+        has_result,
+        resolved_user,
         chrome: true,
         active: "rbac_debug",
         user_email: Some(session.user_email.clone()),
@@ -159,16 +185,16 @@ pub async fn admin_rbac_debug(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
 // =========================================================================
-// RBAC token preview (POST /ui/admin/rbac/token-preview)
+// RBAC token preview (GET /ui/admin/rbac/token-preview)
 // =========================================================================
 
-/// Form body for the token preview endpoint.
+/// Query parameters for the token preview endpoint.
 #[derive(Debug, Deserialize)]
 pub struct TokenPreviewForm {
     /// UUID (bare or with `user_` prefix) of the user to preview.
@@ -176,15 +202,15 @@ pub struct TokenPreviewForm {
     pub user_id: String,
 }
 
-/// `POST /ui/admin/rbac/token-preview` — returns a JSON snippet previewing
-/// the access-token claims that would be embedded for the given user in the
-/// current realm.
+/// `GET /ui/admin/rbac/token-preview?user_id=<uuid>` — returns a JSON snippet
+/// previewing the access-token claims that would be embedded for the given
+/// user in the current realm.
 pub async fn admin_rbac_token_preview(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    axum::Form(form): axum::Form<TokenPreviewForm>,
+    axum::extract::Query(form): axum::extract::Query<TokenPreviewForm>,
 ) -> Response {
     use axum::response::IntoResponse;
     use serde_json::{json, to_string_pretty};
@@ -270,8 +296,8 @@ struct RbacScopesTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/rbac/scopes` — read-only list of registered scope bundles.
@@ -330,8 +356,8 @@ pub async fn admin_rbac_scopes(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -729,8 +755,8 @@ struct RbacPermissionsTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// Row data for a permission in the permissions list template.
@@ -861,8 +887,8 @@ pub async fn admin_rbac_permissions(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -892,8 +918,8 @@ struct RoleNewTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl RoleNewTemplate {
@@ -914,8 +940,8 @@ impl RoleNewTemplate {
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }
     }
 }
@@ -1056,8 +1082,8 @@ struct RoleDetailTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/realms/{realm}/rbac/roles/{id}`
@@ -1091,8 +1117,8 @@ pub async fn admin_role_detail(
                 narrow: false,
                 product_name: state.product_name.clone(),
                 logo_url: state.logo_url.clone(),
-                theme_css: state.theme_css.clone(),
-                realm_theme_css: state.realm_theme_css(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
             })
         }
         Ok(None) => super::handlers_common::not_found("Role not found"),
@@ -1126,8 +1152,8 @@ struct RoleEditTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 impl RoleEditTemplate {
@@ -1167,8 +1193,8 @@ impl RoleEditTemplate {
             narrow: false,
             product_name: state.product_name.clone(),
             logo_url: state.logo_url.clone(),
-            theme_css: state.theme_css.clone(),
-            realm_theme_css: state.realm_theme_css(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
         }
     }
 }
@@ -1363,8 +1389,8 @@ struct RbacRolesTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 /// `GET /ui/admin/rbac/roles` — list of defined roles with links to detail.
@@ -1416,8 +1442,8 @@ pub async fn admin_rbac_roles(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }
 
@@ -1453,8 +1479,8 @@ struct RealmClaimsTemplate {
     narrow: bool,
     product_name: String,
     logo_url: String,
-    theme_css: String,
-    realm_theme_css: Option<String>,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
 }
 
 // =========================================================================
@@ -1527,7 +1553,7 @@ pub async fn admin_realm_claims(
         narrow: false,
         product_name: state.product_name.clone(),
         logo_url: state.logo_url.clone(),
-        theme_css: state.theme_css.clone(),
-        realm_theme_css: state.realm_theme_css(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
     })
 }

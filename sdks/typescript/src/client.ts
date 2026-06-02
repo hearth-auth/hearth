@@ -1,3 +1,5 @@
+import { decodeJwt } from "jose";
+import { RequiredActionError } from "./errors.js";
 import type {
   AuthorizeParams,
   AuthorizeResponse,
@@ -10,6 +12,18 @@ import type {
   TokenResponse,
   UserInfoResponse,
 } from "./types.js";
+
+/** Parameters for the PKCE authorization-code callback handler (spec §7). */
+export interface HandleCallbackParams {
+  /** Full callback URL including query parameters (`code`, `state`, etc.). */
+  callbackUrl: string;
+  /** OAuth 2.0 client ID. */
+  clientId: string;
+  /** Redirect URI registered for this client. */
+  redirectUri: string;
+  /** PKCE code verifier generated during `login()` (RFC 7636). */
+  codeVerifier?: string;
+}
 
 /** Error thrown when the Hearth API returns an error. */
 export class HearthError extends Error {
@@ -85,6 +99,63 @@ export class HearthApiClient {
       redirect_uri: params.redirectUri,
       code_verifier: params.codeVerifier,
     });
+  }
+
+  /**
+   * Handle a PKCE authorization-code callback (spec §7).
+   *
+   * Extracts the `code` from `callbackUrl`, exchanges it for tokens, then
+   * inspects the JWT's `token_type` claim before returning:
+   *
+   * - If `token_type === "required_action"`: throws {@link RequiredActionError}
+   *   with `requiredActions` populated from the JWT's `required_actions` claim.
+   * - If the callback URL contains `required_action_redirect_uri`: throws
+   *   {@link RequiredActionError} with `redirectUri` set to that value.
+   * - Otherwise: returns the token response normally.
+   */
+  async handleCallback(params: HandleCallbackParams): Promise<TokenResponse> {
+    const url = new URL(params.callbackUrl);
+    const code = url.searchParams.get("code");
+    const requiredActionRedirectUri = url.searchParams.get(
+      "required_action_redirect_uri",
+    );
+
+    if (!code) {
+      throw new Error("handleCallback: no authorization code found in callback URL");
+    }
+
+    const tokens = await this.exchangeCode({
+      clientId: params.clientId,
+      code,
+      redirectUri: params.redirectUri,
+      codeVerifier: params.codeVerifier,
+    });
+
+    // Decode the access token to read Hearth-specific claims.
+    let jwtPayload: Record<string, unknown> = {};
+    try {
+      jwtPayload = decodeJwt(tokens.access_token) as Record<string, unknown>;
+    } catch {
+      // Non-JWT access tokens (opaque) skip required-action detection.
+    }
+
+    const tokenType = jwtPayload["token_type"];
+    const requiredActions = Array.isArray(jwtPayload["required_actions"])
+      ? (jwtPayload["required_actions"] as string[])
+      : [];
+
+    if (tokenType === "required_action") {
+      throw new RequiredActionError(
+        requiredActions,
+        requiredActionRedirectUri ?? undefined,
+      );
+    }
+
+    if (requiredActionRedirectUri !== null) {
+      throw new RequiredActionError([], requiredActionRedirectUri);
+    }
+
+    return tokens;
   }
 
   /** POST /token — refresh tokens using a refresh token. */

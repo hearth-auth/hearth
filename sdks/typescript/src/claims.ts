@@ -27,6 +27,10 @@ interface RawPayload {
   scopes?: string[];
   roles?: string[];
   permissions?: string[];
+  groups?: string[];
+  oid?: string;
+  org_groups?: string[];
+  token_type?: string;
   [key: string]: unknown;
 }
 
@@ -135,6 +139,38 @@ export class Claims {
   /** Returns true iff the token's `permissions` claim contains the given permission. */
   hasPermission(permission: string): boolean {
     return (this.payload.permissions ?? []).includes(permission);
+  }
+
+  /** The raw `scope` claim (space-delimited string), or empty string if absent. */
+  scope(): string {
+    return this.payload.scope ?? "";
+  }
+
+  /** Returns true iff the token's `groups` claim contains the given group. */
+  inGroup(groupId: string): boolean {
+    const groups = this.payload.groups;
+    return Array.isArray(groups) && groups.includes(groupId);
+  }
+
+  /** Returns true iff the token's `oid` claim exactly matches the given org ID. */
+  inOrg(orgId: string): boolean {
+    return typeof this.payload.oid === "string" && this.payload.oid === orgId;
+  }
+
+  /** The `token_type` claim (`"access"`, `"refresh"`, `"required_action"`), or empty string. */
+  tokenType(): string {
+    return this.payload.token_type ?? "";
+  }
+
+  /** The `oid` (organization ID) claim, or `undefined` if absent. */
+  organizationId(): string | undefined {
+    return this.payload.oid;
+  }
+
+  /** The `org_groups` claim (Keycloak-style org-scoped group paths), or empty array. */
+  orgGroups(): string[] {
+    const og = this.payload.org_groups;
+    return Array.isArray(og) ? og : [];
   }
 
   /** Access an arbitrary claim by key. */

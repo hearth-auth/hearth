@@ -1,13 +1,12 @@
 {# Server-rendered bootstrap data — `type="application/json"` is parsed
-   as data, not executed as script, so CSP `script-src 'self'` allows
-   it. admin.js reads this in `Alpine.data('rolesTabData')` via the
-   `data-bootstrap-id` attribute on the host element. #}
+   as data, not executed as script, so CSP `script-src 'self'` allows it.
+   admin.js reads this in `initRolesTab()` via `#roles-tab-bootstrap`. #}
 <script id="roles-tab-bootstrap" type="application/json">
 { "selectedRoleId": {% if let Some(first) = available_roles.first() %}"{{ first.id }}"{% else %}""{% endif %},
   "rolePerms": {{ role_perms_json|safe }} }
 </script>
 
-<div x-data="rolesTabData" data-bootstrap-id="roles-tab-bootstrap">
+<div data-roles-tab>
 
   {# Current assignments #}
   {% if role_assignments.is_empty() %}
@@ -15,7 +14,7 @@
   {% else %}
     <ul class="divide-y divide-divider-faint">
       {% for row in role_assignments %}
-      <li class="py-2.5" x-data="{ open: false }">
+      <li class="py-2.5">
         <div class="flex items-center justify-between gap-3">
           <div class="flex min-w-0 flex-1 items-center gap-2.5">
             <span class="inline-flex items-center rounded-full bg-teal-bg px-2.5 py-0.5 text-xs font-medium text-teal-fg">{{ row.role_name }}</span>
@@ -24,10 +23,15 @@
             <span class="text-xs italic text-ht-content-muted">no permissions</span>
             {% else %}
             <button type="button"
-                    @click="open = !open"
-                    class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-ht-content-muted transition-colors hover:bg-ht-surface-base hover:text-ht-content-secondary"
-                    :title="open ? 'Hide permissions' : 'Show permissions'">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="currentColor" class="h-3 w-3 transition-transform" :class="{ 'rotate-90': open }">
+                    title="Show permissions"
+                    data-component="reveal"
+                    data-target="#role-asgn-perms-{{ row.assignment_id }}"
+                    data-chevron="#role-asgn-chevron-{{ row.assignment_id }}"
+                    data-chevron-class="rotate-90"
+                    data-title-open="Hide permissions"
+                    data-title-close="Show permissions"
+                    class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-ht-content-muted transition-colors hover:bg-ht-surface-base hover:text-ht-content-secondary">
+              <svg id="role-asgn-chevron-{{ row.assignment_id }}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="currentColor" class="h-3 w-3 transition-transform">
                 <path d="M4.5 2.5 8 6l-3.5 3.5"  stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
               </svg>
               <span>{{ row.permissions.len() }} permission{% if row.permissions.len() != 1 %}s{% endif %}</span>
@@ -48,7 +52,7 @@
           </form>
         </div>
         {% if !row.permissions.is_empty() %}
-        <div x-show="open" x-cloak class="mt-2 flex flex-wrap gap-1.5 pl-1">
+        <div id="role-asgn-perms-{{ row.assignment_id }}" class="mt-2 hidden flex flex-wrap gap-1.5 pl-1">
           {% for perm in row.permissions %}
           <span class="inline-flex items-center rounded-full bg-violet-bg px-2 py-0.5 font-mono text-xs text-violet-fg">{{ perm }}</span>
           {% endfor %}
@@ -61,15 +65,20 @@
 
   {# Assign Role form #}
   <div class="mt-5 border-t border-divider-faint pt-4">
-    <button @click="assignOpen = !assignOpen" type="button"
+    <button type="button"
+            data-component="disclosure"
+            data-target="#assign-role-form"
+            data-label-open="Cancel"
+            data-label-close="Assign Role"
+            data-label-target="#assign-role-label"
             class="inline-flex items-center gap-1.5 text-sm font-medium text-teal-fg transition-colors hover:text-teal-fg/80">
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="h-4 w-4">
         <path d="M8.75 3.75a.75.75 0 0 0-1.5 0v3.5h-3.5a.75.75 0 0 0 0 1.5h3.5v3.5a.75.75 0 0 0 1.5 0v-3.5h3.5a.75.75 0 0 0 0-1.5h-3.5v-3.5Z" />
       </svg>
-      <span x-text="assignOpen ? 'Cancel' : 'Assign Role'"></span>
+      <span id="assign-role-label">Assign Role</span>
     </button>
 
-    <div x-show="assignOpen" x-cloak class="mt-4 rounded-lg border border-white/[0.10] bg-ht-surface-base p-4">
+    <div id="assign-role-form" class="mt-4 hidden rounded-lg border border-white/[0.10] bg-ht-surface-base p-4">
       {% if available_roles.is_empty() %}
         <p class="text-sm text-ht-content-muted">No roles are defined in this realm. Define roles in <code class="font-mono text-xs">hearth.yaml</code>.</p>
       {% else %}
@@ -77,52 +86,51 @@
               action="/ui/admin/realms/{{ realm_name }}/users/{{ user_id }}/roles/assign"
               hx-post="/ui/admin/realms/{{ realm_name }}/users/{{ user_id }}/roles/assign"
               hx-target="#roles-tab-content"
-              hx-swap="innerHTML"
-              @submit="assignOpen = false">
+              hx-swap="innerHTML">
           {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-
-          {# Hidden scope field — kept in sync by Alpine #}
-          <input type="hidden" name="scope" :value="scopeType === 'org' && selectedOrg ? 'org:' + selectedOrg : 'realm'">
 
           <div class="grid gap-4 sm:grid-cols-2">
             <div>
               <label class="mb-1.5 block font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Role</label>
-              <select name="role_id"
-                      x-model="selectedRoleId"
+              <select id="role-select"
+                      name="role_id"
                       class="w-full rounded-sm border border-white/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
                 {% for role in available_roles %}
                 <option value="{{ role.id }}">{{ role.name }}{% if !role.description.is_empty() %} — {{ role.description }}{% endif %} ({{ role.scope_kind }})</option>
                 {% endfor %}
               </select>
 
-              {# Permissions preview for the selected role #}
-              <div x-show="inheritedPerms.length > 0" x-cloak class="mt-2">
+              {# Permissions preview — populated by initRolesTab() in admin.js on select change #}
+              <div id="role-perms-preview" class="mt-2 hidden">
                 <p class="mb-1 text-xs text-ht-content-muted">Permissions included:</p>
-                <div class="flex flex-wrap gap-1">
-                  <template x-for="perm in inheritedPerms" :key="perm">
-                    <span class="inline-flex items-center rounded-full bg-violet-bg px-2 py-0.5 font-mono text-xs text-violet-fg" x-text="perm"></span>
-                  </template>
-                </div>
+                <div id="role-perms-chips" class="flex flex-wrap gap-1"></div>
               </div>
-              <div x-show="inheritedPerms.length === 0" x-cloak class="mt-2">
+              <div id="role-perms-empty" class="mt-2 hidden">
                 <p class="text-xs italic text-ht-content-muted">This role grants no permissions.</p>
               </div>
             </div>
 
-            <div>
+            <div data-component="scope-selector">
               <label class="mb-1.5 block font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Scope</label>
+              {# Hidden scope field — kept in sync by ScopeSelector component #}
+              <input type="hidden" id="role-scope-value" name="scope" value="realm" data-scope-value>
               <div class="flex flex-col gap-2">
                 <label class="flex cursor-pointer items-center gap-2 text-sm text-ht-content-secondary">
-                  <input type="radio" value="realm" x-model="scopeType" class="accent-teal-fg">
+                  <input type="radio" name="scope_type" value="realm" checked
+                         data-scope-radio
+                         class="accent-teal-fg">
                   Realm-wide
                 </label>
                 {% if !available_orgs.is_empty() %}
                 <label class="flex cursor-pointer items-center gap-2 text-sm text-ht-content-secondary">
-                  <input type="radio" value="org" x-model="scopeType" class="accent-teal-fg">
+                  <input type="radio" name="scope_type" value="org"
+                         data-scope-radio
+                         class="accent-teal-fg">
                   Organization
                 </label>
-                <div x-show="scopeType === 'org'" x-cloak class="ml-6">
-                  <select x-model="selectedOrg"
+                <div id="role-org-div" data-scope-org-panel class="ml-6 hidden">
+                  <select id="role-org-select"
+                          data-scope-org-select
                           class="w-full rounded-sm border border-white/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
                     <option value="">— pick an org —</option>
                     {% for org in available_orgs %}

@@ -1,6 +1,14 @@
-import { ConfigurationError, DiscoveryError } from "./errors.js";
+import {
+  AuthorizationModeMismatchError,
+  ConfigurationError,
+  DiscoveryError,
+} from "./errors.js";
 import { JwksClient } from "./jwks-client.js";
-import { IntrospectionClient } from "./introspection-client.js";
+import {
+  IntrospectionClient,
+  type IntrospectionResult,
+} from "./introspection-client.js";
+import type { AccessTokenAuthorizationMode, AuthorizePermissionOptions } from "./types.js";
 
 /** Configuration for {@link HearthClient}. */
 export interface HearthClientConfig {
@@ -36,6 +44,20 @@ export interface HearthClientConfig {
    * Default: 10 000 (10 seconds).
    */
   httpTimeout?: number;
+  /**
+   * Realm ID sent as `X-Realm-ID` on realm-scoped requests.
+   * Required for `authorize()` and the `requirePermission()` middleware in
+   * `decision` mode.
+   */
+  realmId?: string;
+  /**
+   * Expected access-token authorization mode for this resource server.
+   *
+   * When set, `introspect()` validates the `mode` field echoed in the
+   * introspection response and throws {@link AuthorizationModeMismatchError}
+   * if they differ.
+   */
+  expectedMode?: AccessTokenAuthorizationMode;
 }
 
 interface OidcConfiguration {
@@ -64,6 +86,10 @@ export class HearthClient {
   readonly introspectionEndpointOverride: string | undefined;
   /** HTTP timeout in milliseconds applied to all outbound fetch calls. */
   readonly httpTimeout: number;
+  /** Realm ID for realm-scoped endpoints (e.g. `/oauth/authorize`). */
+  readonly realmId: string | undefined;
+  /** Expected authorization mode; validated on `introspect()` when present. */
+  readonly expectedMode: AccessTokenAuthorizationMode | undefined;
 
   private _discovery: OidcConfiguration | null = null;
   private _jwksClient: JwksClient | null = null;
@@ -87,6 +113,8 @@ export class HearthClient {
     this.jwksTtl = config.jwksTtl;
     this.introspectionEndpointOverride = config.introspectionEndpoint;
     this.httpTimeout = config.httpTimeout ?? 10_000;
+    this.realmId = config.realmId;
+    this.expectedMode = config.expectedMode;
   }
 
   /**
@@ -188,5 +216,73 @@ export class HearthClient {
       httpTimeout: this.httpTimeout,
     });
     return this._introspectionClient;
+  }
+
+  /**
+   * Calls `POST {issuerUrl}/oauth/authorize` to get a per-request permission
+   * decision for the given bearer token (Decision mode, HEA-922).
+   *
+   * Requires `realmId` in config. Fail-closed: returns `false` on any network
+   * or server error so authorization cannot be accidentally granted.
+   *
+   * @throws {@link ConfigurationError} when `realmId` is not configured.
+   */
+  async authorize(
+    token: string,
+    permission: string,
+    opts?: AuthorizePermissionOptions,
+  ): Promise<boolean> {
+    if (!this.realmId) {
+      throw new ConfigurationError("realmId is required for authorize()");
+    }
+    const body: Record<string, string> = { permission };
+    if (opts?.organizationId) body["organization_id"] = opts.organizationId;
+    if (opts?.resource) body["resource"] = opts.resource;
+
+    try {
+      const resp = await fetch(`${this.issuerUrl}/oauth/authorize`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Realm-ID": this.realmId,
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.httpTimeout),
+      });
+      if (!resp.ok) return false;
+      const data = (await resp.json()) as { allowed?: boolean };
+      return data.allowed === true;
+    } catch {
+      return false; // fail-closed on network/timeout errors
+    }
+  }
+
+  /**
+   * Introspects a token via RFC 7662 and optionally validates the echoed
+   * `mode` field against `expectedMode` from config.
+   *
+   * Throws {@link AuthorizationModeMismatchError} when `expectedMode` is set
+   * and the server echoes a different mode. This catches misconfigured
+   * deployments where the resource server and the issuing client disagree on
+   * the permission delivery strategy.
+   *
+   * @throws {@link ConfigurationError} when `clientId`/`clientSecret` are absent.
+   * @throws {@link AuthorizationModeMismatchError} on mode echo mismatch.
+   */
+  async introspect(token: string): Promise<IntrospectionResult> {
+    const ic = await this.introspectionClient();
+    const result = await ic.introspect(token);
+    if (
+      this.expectedMode !== undefined &&
+      result.mode !== undefined &&
+      result.mode !== this.expectedMode
+    ) {
+      throw new AuthorizationModeMismatchError(
+        this.expectedMode,
+        String(result.mode),
+      );
+    }
+    return result;
   }
 }

@@ -1,5 +1,11 @@
 /** §4 — VerifiedToken: typed claims accessors and helpers. */
 
+/**
+ * Controls how authorization data is delivered to resource servers.
+ * Mirrors the server-side `AccessTokenAuthorization` enum (HEA-922).
+ */
+export type AccessTokenAuthorizationMode = "embedded" | "introspection" | "decision";
+
 import { timingSafeEqual } from "node:crypto";
 import type { JWTPayload } from "jose";
 
@@ -14,6 +20,11 @@ interface RawPayload extends JWTPayload {
   scopes?: string[];
   roles?: string[];
   permissions?: string[];
+  groups?: string[];
+  oid?: string;
+  org_groups?: string[];
+  token_type?: string;
+  required_actions?: string[];
   [key: string]: unknown;
 }
 
@@ -37,7 +48,7 @@ export class VerifiedToken {
   }
 
   /** The `aud` claim normalized to an array. */
-  audience(): string[] {
+  audiences(): string[] {
     const aud = this._payload.aud;
     if (!aud) return [];
     return Array.isArray(aud) ? aud : [aud];
@@ -49,13 +60,18 @@ export class VerifiedToken {
   }
 
   /** The `exp` claim as a Date, or null if absent. */
-  expiresAt(): Date | null {
+  expiry(): Date | null {
     return this._payload.exp !== undefined ? new Date(this._payload.exp * 1000) : null;
   }
 
   /** The `nbf` claim as a Date, or null if absent. */
   notBefore(): Date | null {
     return this._payload.nbf !== undefined ? new Date(this._payload.nbf * 1000) : null;
+  }
+
+  /** The `jti` (JWT ID) claim. Returns empty string if absent. */
+  jwtID(): string {
+    return this._payload.jti ?? "";
   }
 
   /** The raw `scope` string claim (space-separated). Returns empty string if absent. */
@@ -94,5 +110,42 @@ export class VerifiedToken {
   /** Timing-safe check: returns true if the token's `permissions` claim contains the given permission. */
   hasPermission(p: string): boolean {
     return (this._payload.permissions ?? []).some((perm) => timingSafeStringEqual(perm, p));
+  }
+
+  /** Returns true if the token's `groups` claim contains the given group id. */
+  inGroup(groupId: string): boolean {
+    return (this._payload.groups ?? []).some((g) => timingSafeStringEqual(g, groupId));
+  }
+
+  /** Returns true if the token's `oid` claim exactly matches the given org id. */
+  inOrg(orgId: string): boolean {
+    const oid = this._payload.oid;
+    if (!oid) return false;
+    return timingSafeStringEqual(oid, orgId);
+  }
+
+  /** The `token_type` claim (`"access"`, `"refresh"`, `"required_action"`). Returns empty string if absent. */
+  tokenType(): string {
+    return this._payload.token_type ?? "";
+  }
+
+  /** The `oid` (organization ID) claim, or undefined if absent. */
+  organizationId(): string | undefined {
+    return this._payload.oid;
+  }
+
+  /** The `org_groups` claim (Keycloak-style group paths). Returns empty array if absent. */
+  orgGroups(): string[] {
+    return this._payload.org_groups ? [...this._payload.org_groups] : [];
+  }
+
+  /** The `required_actions` claim. Returns empty array if absent. */
+  requiredActions(): string[] {
+    return this._payload.required_actions ? [...this._payload.required_actions] : [];
+  }
+
+  /** @internal Expose header for downstream use (e.g. kid extraction). */
+  get _rawHeader(): Record<string, unknown> {
+    return this._header;
   }
 }

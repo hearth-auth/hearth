@@ -1,17 +1,8 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · {{ org.name() }}{% endblock %}
-{% block breadcrumb %}
-<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
-  <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Realms</a>
-  <span class="text-ht-content-muted">›</span>
-  <a href="/ui/admin/realms/{{ realm_name }}" class="text-ht-content-secondary hover:text-ht-content-primary">{{ realm_name }}</a>
-  <span class="text-ht-content-muted">›</span>
-  <a href="/ui/admin/realms/{{ realm_name }}/organizations" class="text-ht-content-secondary hover:text-ht-content-primary">Organizations</a>
-  <span class="text-ht-content-muted">›</span>
-  <span class="font-medium text-ht-content-secondary" aria-current="page">{{ org.name() }}</span>
-</nav>
-{% endblock %}
 {% block body %}
+{% include "ui/admin/realms/_workspace_tabs.html" %}
+
 <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
   <div>
     <div class="flex flex-wrap items-center gap-3">
@@ -166,7 +157,7 @@
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">User</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Roles</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Permissions</th>
-        <th class="px-3 py-2"></th>
+        <th class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     {% for m in members %}
@@ -204,7 +195,7 @@
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Email</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Role</th>
         <th class="px-3 py-2 text-left font-mono text-xs font-semibold uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
-        <th class="px-3 py-2"></th>
+        <th class="px-3 py-2" aria-label="Actions"></th>
       </tr>
     </thead>
     <tbody>
@@ -247,16 +238,11 @@
                   action="/ui/admin/realms/{{ realm_name }}/organizations/{{ org.id().as_uuid() }}/invitations/{{ inv.id().as_uuid() }}/revoke"
                   class="inline">
               {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-              <button type="button"
+              <button type="submit"
                       class="rounded px-2 py-1 text-xs font-medium transition-colors text-ht-content-muted hover:text-danger-fg"
-                      _="on click
-                           if @data-confirming is 'yes'
-                             call (closest <form/>).submit()
-                           else
-                             set @data-confirming to 'yes'
-                             set @class to 'btn-danger text-graphite-950 rounded px-2 py-1 text-xs font-medium transition-colors'
-                             set my textContent to 'Confirm'
-                           end">Revoke</button>
+                      data-component="two-step-confirm"
+                      data-confirm-label="Confirm"
+                      data-confirm-class="btn-danger text-graphite-950 rounded px-2 py-1 text-xs font-medium transition-colors">Revoke</button>
             </form>
           </div>
           {% endif %}
@@ -277,8 +263,7 @@
     <p class="mt-1 text-xs text-ht-content-muted">Sends a link that creates an account on first sign-in if the email isn't registered yet.</p>
     <form method="post"
           action="/ui/admin/realms/{{ realm_name }}/organizations/{{ org.id().as_uuid() }}/invite"
-          class="mt-3 flex flex-wrap items-end gap-3"
-          x-data="{ role: 'Member' }">
+          class="mt-3 flex flex-wrap items-end gap-3">
       {% match csrf %}
         {% when Some with (token) %}
           <input type="hidden" name="_csrf" value="{{ token }}">
@@ -293,7 +278,7 @@
       <div>
         <label for="invite_role" class="block text-xs font-medium text-ht-content-secondary">Role</label>
         <select name="role" id="invite_role"
-                x-model="role"
+                data-component="value-reveal" data-show-when="Owner" data-target="#invite-owner-warning"
                 class="mt-1 rounded-sm border border-divider bg-ht-surface-elevated px-3 py-1.5 text-sm text-ht-content-primary focus:border-ht-content-brand focus:outline-none focus:shadow-focus">
           <option value="Member">Member</option>
           <option value="Admin">Admin</option>
@@ -301,7 +286,7 @@
         </select>
       </div>
       <button type="submit" class="btn-ember rounded px-3 py-1.5 text-sm font-semibold">Send invite</button>
-      <p x-show="role === 'Owner'" x-cloak class="basis-full text-xs text-warning-fg">
+      <p id="invite-owner-warning" class="basis-full text-xs text-warning-fg hidden">
         Owners can delete this organization and remove other owners. Pick this only for trusted leaders.
       </p>
     </form>
@@ -323,14 +308,13 @@
     becomes available for re-registration immediately.
   </p>
   <button type="button"
-          _="on click call #org-delete-dialog.showModal() then tell #org-slug-input to focus()"
+          data-component="show-dialog" data-target="#org-delete-dialog" data-focus="#org-slug-input"
           class="mt-4 btn-danger rounded px-4 py-2 text-sm font-semibold">
     Delete organization
   </button>
 
   <dialog id="org-delete-dialog"
-          class="w-full max-w-md rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50"
-          _="on click(event) if event.target is me call me.close() end">
+          class="w-full max-w-md rounded-md bg-ht-surface-elevated p-6 shadow-md backdrop:bg-black/50">
     <h3 class="text-lg font-semibold text-ht-content-primary">Delete organization?</h3>
     <p class="mt-2 text-sm text-ht-content-secondary">
       This will permanently delete <strong class="text-ht-content-primary">{{ org.name() }}</strong>,
@@ -352,26 +336,21 @@
              id="org-slug-input"
              autocomplete="off"
              aria-label="Confirm by typing the slug"
-             _="on input
-                  if my value is '{{ org.slug() }}'
-                    remove @disabled from #org-delete-btn
-                    set #org-delete-btn's @class to 'btn-danger opacity-100 rounded px-4 py-2 text-sm font-semibold transition-opacity'
-                  else
-                    set @disabled on #org-delete-btn
-                    set #org-delete-btn's @class to 'btn-danger opacity-40 cursor-not-allowed rounded px-4 py-2 text-sm font-semibold transition-opacity'
-                  end
-                on keydown[key=='Enter'] if my value is not '{{ org.slug() }}' halt the event end"
+             data-component="type-to-confirm"
+             data-match="{{ org.slug() }}"
+             data-target="#org-delete-btn"
              class="mt-2 block w-full rounded-sm border border-divider bg-ht-surface-elevated px-3 py-2 font-mono text-sm text-ht-content-primary focus:border-danger focus:outline-none focus:shadow-focus">
       <div class="mt-6 flex justify-end gap-3">
         <button type="button"
-                _="on click call #org-delete-dialog.close()"
+                data-component="show-dialog"
+                data-action="close"
                 class="rounded border border-strong px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
           Cancel
         </button>
         <button type="submit"
                 id="org-delete-btn"
                 disabled
-                class="btn-danger opacity-40 cursor-not-allowed rounded px-4 py-2 text-sm font-semibold transition-opacity">
+                class="btn-danger rounded px-4 py-2 text-sm font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed">
           Delete
         </button>
       </div>

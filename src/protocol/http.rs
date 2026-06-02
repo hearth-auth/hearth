@@ -30,7 +30,8 @@ use crate::cluster::ClusterEngine;
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
 use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
 use crate::identity::{
-    IdentityEngine, PasswordGrantRequest, StepUpMfaGrantRequest, UpdateRealmRequest,
+    IdentityEngine, JwtBearerRequest, PasswordGrantRequest, StepUpMfaGrantRequest,
+    UpdateRealmRequest,
 };
 use crate::protocol::admin_auth::{
     AdminRateLimiter, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
@@ -117,6 +118,10 @@ pub struct AppState {
     /// When `None`, all `/admin/cluster/*` endpoints return `503 Service
     /// Unavailable` rather than panicking.
     pub cluster: Option<Arc<ClusterEngine>>,
+    /// In-memory JTI replay cache for DPoP proofs (RFC 9449 §11.1).
+    pub dpop_jti_cache: Arc<crate::identity::dpop::DPopJtiCache>,
+    /// 32-byte HMAC secret for stateless DPoP nonce generation.
+    pub dpop_nonce_secret: [u8; 32],
 }
 
 impl AppState {
@@ -138,6 +143,8 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
+            dpop_jti_cache: Arc::new(crate::identity::dpop::DPopJtiCache::new()),
+            dpop_nonce_secret: [0u8; 32], // overridden in production via config
         }
     }
 
@@ -161,6 +168,8 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
+            dpop_jti_cache: Arc::new(crate::identity::dpop::DPopJtiCache::new()),
+            dpop_nonce_secret: [0u8; 32],
         }
     }
 
@@ -186,6 +195,8 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
+            dpop_jti_cache: Arc::new(crate::identity::dpop::DPopJtiCache::new()),
+            dpop_nonce_secret: [0u8; 32],
         }
     }
 
@@ -429,6 +440,10 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(admin_delete_user),
         )
         .route(
+            "/users/{id}/device-fingerprints",
+            axum::routing::delete(admin_delete_user_device_fingerprints),
+        )
+        .route(
             "/realms",
             axum::routing::get(admin_list_realms).post(admin_create_realm),
         )
@@ -543,6 +558,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::patch(admin_patch_realm_config),
         )
         .route(
+            "/sessions/{session_id}/sv-bump",
+            axum::routing::post(admin_sv_bump_session),
+        )
+        .route(
+            "/realms/{realm_id}/sv-bump-all",
+            axum::routing::post(admin_sv_bump_all),
+        )
+        .route(
             "/cluster/bootstrap",
             axum::routing::post(crate::protocol::cluster_admin::admin_cluster_bootstrap),
         )
@@ -576,6 +599,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/authorize", axum::routing::post(authorize))
         .route(
+            "/as/par",
+            axum::routing::post(pushed_authorization_request)
+                .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
+        )
+        .route(
             "/token",
             axum::routing::post(token_exchange).options(token_preflight),
         )
@@ -606,10 +634,23 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::post(magic_link_request)
                 .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
         )
+        .route(
+            "/oauth/authorize",
+            axum::routing::post(oauth_decide_permission)
+                .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
+        )
         .route("/oauth/consents", axum::routing::get(self_list_consents))
         .route(
             "/oauth/consents/{client_id}",
             axum::routing::delete(self_revoke_consent),
+        )
+        .route(
+            "/oauth/session-versions",
+            axum::routing::get(oauth_sv_delta_feed),
+        )
+        .route(
+            "/oauth/session-versions/snapshot",
+            axum::routing::get(oauth_sv_snapshot),
         )
         .route(
             "/webauthn/register/begin",
@@ -638,6 +679,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/admin", admin_routes)
         .route("/admin/bootstrap", axum::routing::post(admin_bootstrap))
         .nest("/scim/v2", crate::protocol::scim::router())
+        .merge(crate::protocol::web::openapi::openapi_router())
         .nest(
             "/realms/{realm_name}",
             Router::new()
@@ -647,6 +689,11 @@ pub fn router(state: Arc<AppState>) -> Router {
                 )
                 .route("/.well-known/jwks.json", axum::routing::get(realm_jwks))
                 .route("/authorize", axum::routing::post(realm_authorize))
+                .route(
+                    "/as/par",
+                    axum::routing::post(realm_pushed_authorization_request)
+                        .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
+                )
                 .route(
                     "/token",
                     axum::routing::post(realm_token_exchange).options(realm_token_preflight),
@@ -1095,6 +1142,14 @@ struct HttpTokenRequest {
     // Step-up MFA completion (HEA-836)
     #[serde(default)]
     mfa_code: Option<String>,
+    // JWT Bearer assertion (RFC 7523)
+    #[serde(default)]
+    assertion: Option<String>,
+    // private_key_jwt client authentication (RFC 7523 §2.2)
+    #[serde(default)]
+    client_assertion_type: Option<String>,
+    #[serde(default)]
+    client_assertion: Option<String>,
 }
 
 /// HTTP request body for token revocation (RFC 7009).
@@ -1384,6 +1439,24 @@ fn identity_error_to_response(
 ) -> (StatusCode, Json<serde_json::Value>) {
     use crate::identity::IdentityError;
 
+    // RequiredActionsBlocking carries a structured payload — handle before the
+    // flat (status, message) match so we can embed the actions array.
+    if let IdentityError::RequiredActionsBlocking { actions } = err {
+        let action_strs: Vec<&str> = actions
+            .iter()
+            .map(|a| crate::protocol::convert::identity::required_action_to_wire(*a))
+            .collect();
+        let error_code = crate::protocol::error_codes::for_identity_error(err);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "required_actions_pending",
+                "error_code": error_code,
+                "actions": action_strs,
+            })),
+        );
+    }
+
     let (status, message) = match err {
         IdentityError::RealmNotFound | IdentityError::UserNotFound => {
             (StatusCode::NOT_FOUND, "not found")
@@ -1395,15 +1468,22 @@ fn identity_error_to_response(
         IdentityError::CredentialNotFound => (StatusCode::NOT_FOUND, "credential not found"),
         IdentityError::InvalidCredential { .. } => (StatusCode::UNAUTHORIZED, "invalid credential"),
         IdentityError::SessionNotFound => (StatusCode::NOT_FOUND, "session not found"),
+        IdentityError::SessionVersionDisabled => (
+            StatusCode::NOT_FOUND,
+            "session versioning disabled for realm",
+        ),
         IdentityError::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid token"),
         IdentityError::TokenExpired => (StatusCode::UNAUTHORIZED, "token expired"),
-        IdentityError::InvalidClient => (StatusCode::BAD_REQUEST, "invalid client"),
+        // RFC 6749 §5.2: all client authentication failures MUST return 401 with
+        // "invalid_client" — distinguishable status codes are an enumeration oracle
+        // (OAuth 2.0 Security BCP §2.2).
+        IdentityError::InvalidClient => (StatusCode::UNAUTHORIZED, "invalid_client"),
         IdentityError::InvalidRedirectUri => (StatusCode::BAD_REQUEST, "invalid redirect URI"),
         IdentityError::InvalidAuthorizationCode => {
             (StatusCode::BAD_REQUEST, "invalid authorization code")
         }
         IdentityError::InvalidGrant { .. } => (StatusCode::BAD_REQUEST, "invalid grant"),
-        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid client"),
+        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid_client"),
         IdentityError::AuthorizationPending => (StatusCode::BAD_REQUEST, "authorization_pending"),
         IdentityError::SlowDown => (StatusCode::BAD_REQUEST, "slow_down"),
         IdentityError::DeviceCodeExpired => (StatusCode::BAD_REQUEST, "expired_token"),
@@ -1427,6 +1507,9 @@ fn identity_error_to_response(
             (StatusCode::BAD_REQUEST, "invalid attestation")
         }
         IdentityError::InvalidAssertion { .. } => (StatusCode::UNAUTHORIZED, "invalid assertion"),
+        IdentityError::InvalidClientAssertion { .. } => {
+            (StatusCode::UNAUTHORIZED, "invalid_client")
+        }
         IdentityError::Unauthorized => (StatusCode::FORBIDDEN, "forbidden"),
         IdentityError::ClientNotFound => (StatusCode::NOT_FOUND, "not found"),
         IdentityError::MagicLinkTokenInvalid => {
@@ -1547,9 +1630,29 @@ fn identity_error_to_response(
         IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
         IdentityError::StepUpChallengeRequired => (StatusCode::UNAUTHORIZED, "mfa_required"),
         IdentityError::EnrollMfaRequired => (StatusCode::FORBIDDEN, "mfa_enrollment_required"),
+        // Handled by the early return above; this arm satisfies exhaustiveness.
+        IdentityError::RequiredActionsBlocking { .. } => {
+            (StatusCode::BAD_REQUEST, "required_actions_pending")
+        }
         IdentityError::InvalidSmsOtp => (StatusCode::UNAUTHORIZED, "invalid_sms_otp"),
         IdentityError::SmsResendLimitExceeded => {
             (StatusCode::TOO_MANY_REQUESTS, "sms_resend_limit_exceeded")
+        }
+        IdentityError::InvalidPushedAuthorizationRequest => {
+            (StatusCode::BAD_REQUEST, "invalid_request")
+        }
+        IdentityError::InvalidDPopProof { .. } => (StatusCode::UNAUTHORIZED, "invalid_dpop_proof"),
+        IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => {
+            (StatusCode::UNAUTHORIZED, "use_dpop_nonce")
+        }
+        IdentityError::DPopBindingMismatch => (StatusCode::UNAUTHORIZED, "invalid_token"),
+        IdentityError::JwtBearerAssertionInvalid { .. } => {
+            (StatusCode::UNAUTHORIZED, "invalid_grant")
+        }
+        IdentityError::InvalidJar { .. } => (StatusCode::BAD_REQUEST, "invalid_request_object"),
+        IdentityError::FapiViolation { .. } => (StatusCode::BAD_REQUEST, "invalid_request"),
+        IdentityError::SessionLimitExceeded { .. } => {
+            (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
         }
     };
 
@@ -1734,19 +1837,98 @@ async fn authorize(
     headers: HeaderMap,
     Json(body): Json<pb::AuthorizationRequest>,
 ) -> impl IntoResponse {
+    use crate::identity::{AuthorizationRequest, IdentityError};
+
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
 
-    let request = match proto_authorize_to_domain(body) {
-        Ok(r) => r,
-        Err(msg) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": msg})),
-            )
-                .into_response();
+    // PAR path: when `request_uri` is present, consume the stored entry to
+    // obtain the pre-validated parameters and set `via_par = true`.
+    let request = if let Some(ref request_uri) = body.request_uri {
+        let user_id = match uuid::Uuid::parse_str(&body.user_id) {
+            Ok(u) => UserId::new(u),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "invalid user_id"})),
+                )
+                    .into_response();
+            }
+        };
+        let stored = match state.identity.consume_par(&realm_id, request_uri) {
+            Ok(s) => s,
+            Err(IdentityError::InvalidPushedAuthorizationRequest) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "invalid or expired request_uri"
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "consume_par failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+        // RFC 9126 §4: if client_id is present in the request body, it MUST
+        // match the client_id stored in the PAR entry.
+        if !body.client_id.is_empty() {
+            let body_client_id = match uuid::Uuid::parse_str(&body.client_id) {
+                Ok(u) => ClientId::new(u),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_request",
+                            "error_description": "invalid client_id"
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            if body_client_id != stored.client_id {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "client_id mismatch with pushed authorization request"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+
+        AuthorizationRequest {
+            client_id: stored.client_id,
+            redirect_uri: stored.redirect_uri,
+            scope: stored.scope,
+            state: stored.state,
+            resource: stored.resource,
+            response_type: stored.response_type,
+            user_id,
+            code_challenge: stored.code_challenge,
+            code_challenge_method: stored.code_challenge_method,
+            nonce: stored.nonce,
+            amr_values: Vec::new(),
+            response_mode: None,
+            request: None,
+            via_par: true,
+        }
+    } else {
+        match proto_authorize_to_domain(body) {
+            Ok(r) => r,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": msg})),
+                )
+                    .into_response();
+            }
         }
     };
 
@@ -1756,6 +1938,116 @@ async fn authorize(
             Json(proto_to_rest_json(&pb::AuthorizationResponse::from(
                 &response,
             ))),
+        )
+            .into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+/// HTTP request body for a Pushed Authorization Request (RFC 9126).
+#[derive(Debug, serde::Deserialize)]
+struct HttpParRequest {
+    client_id: String,
+    redirect_uri: String,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    state: String,
+    resource: Option<String>,
+    #[serde(default = "default_response_type")]
+    response_type: String,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    nonce: Option<String>,
+    /// Signed JAR JWT (RFC 9101) — required for FAPI Advanced.
+    request: Option<String>,
+    response_mode: Option<String>,
+}
+
+fn default_response_type() -> String {
+    "code".to_string()
+}
+
+/// Push authorization parameters (RFC 9126) — header-realm variant.
+async fn pushed_authorization_request(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<HttpParRequest>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
+    par_handler(&state, &realm_id, body).await.into_response()
+}
+
+/// Push authorization parameters (RFC 9126) — realm-scoped via path.
+async fn realm_pushed_authorization_request(
+    State(state): State<Arc<AppState>>,
+    Path(realm_name): Path<String>,
+    Json(body): Json<HttpParRequest>,
+) -> impl IntoResponse {
+    let realm_id = match resolve_realm_by_name(&state, &realm_name) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    par_handler(&state, &realm_id, body).await.into_response()
+}
+
+async fn par_handler(
+    state: &AppState,
+    realm_id: &crate::core::RealmId,
+    body: HttpParRequest,
+) -> impl IntoResponse {
+    use crate::identity::{CodeChallengeMethod, PushedAuthorizationRequest};
+
+    let client_id = match body.client_id.parse::<uuid::Uuid>() {
+        Ok(u) => crate::core::ClientId::new(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_client", "error_description": "invalid client_id"})),
+            )
+                .into_response();
+        }
+    };
+
+    let code_challenge_method = match body.code_challenge_method.as_deref() {
+        Some("S256") => Some(CodeChallengeMethod::S256),
+        Some(m) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid_request", "error_description": format!("unsupported code_challenge_method: {m}")})),
+            )
+                .into_response();
+        }
+        None => None,
+    };
+
+    let request = PushedAuthorizationRequest {
+        client_id,
+        redirect_uri: body.redirect_uri,
+        scope: body.scope,
+        state: body.state,
+        resource: body.resource,
+        response_type: body.response_type,
+        code_challenge: body.code_challenge,
+        code_challenge_method,
+        nonce: body.nonce,
+        request: body.request,
+        response_mode: body.response_mode,
+    };
+
+    match state
+        .identity
+        .push_authorization_request(realm_id, &request)
+    {
+        Ok(resp) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "request_uri": resp.request_uri,
+                "expires_in": resp.expires_in,
+            })),
         )
             .into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
@@ -1786,6 +2078,17 @@ async fn token_exchange(
     if let (Some(ref realm_id), Some(ref client_id)) = (&maybe_realm_id, &maybe_client_id) {
         apply_cors_to_response(&mut resp, &state, realm_id, client_id, &headers);
     }
+
+    // RFC 9449 §9: always return DPoP-Nonce so clients can use it in the next proof.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let nonce = crate::identity::dpop::current_dpop_nonce(&state.dpop_nonce_secret, now_secs);
+    if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
+        resp.headers_mut().insert("DPoP-Nonce", val);
+    }
+
     resp
 }
 
@@ -1831,6 +2134,49 @@ async fn token_exchange_impl(
         return make_ip_rate_limit_response(retry_after as u32);
     }
 
+    // Extract and validate DPoP proof if present (RFC 9449).
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let dpop_jkt: Option<String> =
+        if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
+            let expected_htu = state.identity.oidc_discovery().token_endpoint.clone();
+            match crate::identity::dpop::validate_dpop_proof(
+                proof,
+                "POST",
+                &expected_htu,
+                now_secs,
+                None,
+            ) {
+                Ok(validated) => {
+                    if let Some(ref nonce) = validated.nonce {
+                        if !crate::identity::dpop::is_valid_dpop_nonce(
+                            &state.dpop_nonce_secret,
+                            nonce,
+                            now_secs,
+                        ) {
+                            return identity_error_to_response(
+                                &crate::identity::error::IdentityError::DPopNonceInvalid,
+                            )
+                            .into_response();
+                        }
+                    }
+                    if let Err(e) = state.dpop_jti_cache.check_and_insert(
+                        &validated.jti,
+                        now_secs,
+                        crate::identity::dpop::DPOP_MAX_AGE_SECS,
+                    ) {
+                        return identity_error_to_response(&e).into_response();
+                    }
+                    Some(validated.jkt)
+                }
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            }
+        } else {
+            None
+        };
+
     match grant_type {
         "authorization_code" => {
             let (Some(code), Some(redirect_uri)) = (body.code, body.redirect_uri) else {
@@ -1848,7 +2194,7 @@ async fn token_exchange_impl(
                 code_verifier: body.code_verifier,
             };
 
-            let request = match proto_token_exchange_to_domain(&proto_req) {
+            let mut request = match proto_token_exchange_to_domain(&proto_req) {
                 Ok(r) => r,
                 Err(msg) => {
                     return (
@@ -1858,6 +2204,9 @@ async fn token_exchange_impl(
                         .into_response();
                 }
             };
+            request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
 
             match state
                 .identity
@@ -1872,11 +2221,11 @@ async fn token_exchange_impl(
                         ])
                         .inc();
                     crate::metrics::metrics().active_sessions.inc();
-                    (
-                        StatusCode::OK,
-                        Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),
-                    )
-                        .into_response()
+                    let mut token_resp = pb::OidcTokenResponse::from(&response);
+                    if dpop_jkt.is_some() {
+                        token_resp.token_type = "DPoP".to_string();
+                    }
+                    (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
                 }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
@@ -1890,7 +2239,10 @@ async fn token_exchange_impl(
                     .into_response();
             };
 
-            match state.identity.refresh_tokens(&realm_id, &refresh_token) {
+            match state
+                .identity
+                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
+            {
                 Ok(tokens) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -1902,7 +2254,7 @@ async fn token_exchange_impl(
                     let resp = pb::OidcTokenResponse {
                         access_token: tokens.access_token().to_string(),
                         id_token: String::new(),
-                        token_type: "Bearer".to_string(),
+                        token_type: if dpop_jkt.is_some() { "DPoP" } else { "Bearer" }.to_string(),
                         expires_in: 900,
                         refresh_token: tokens.refresh_token().to_string(),
                     };
@@ -1918,7 +2270,7 @@ async fn token_exchange_impl(
                 scope: body.scope,
             };
 
-            let request = match proto_client_creds_to_domain(&proto_req) {
+            let mut request = match proto_client_creds_to_domain(&proto_req) {
                 Ok(r) => r,
                 Err(msg) => {
                     return (
@@ -1928,6 +2280,9 @@ async fn token_exchange_impl(
                         .into_response();
                 }
             };
+            request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
 
             let realm_str = realm_id.as_uuid().to_string();
             match state.identity.client_credentials_token(&realm_id, &request) {
@@ -1940,13 +2295,11 @@ async fn token_exchange_impl(
                         .tokens_issued_total
                         .with_label_values(&[realm_str.as_str(), "client_credentials"])
                         .inc();
-                    (
-                        StatusCode::OK,
-                        Json(proto_to_rest_json(&pb::ClientCredentialsResponse::from(
-                            &response,
-                        ))),
-                    )
-                        .into_response()
+                    let mut cc_resp = pb::ClientCredentialsResponse::from(&response);
+                    if dpop_jkt.is_some() {
+                        cc_resp.token_type = "DPoP".to_string();
+                    }
+                    (StatusCode::OK, Json(proto_to_rest_json(&cc_resp))).into_response()
                 }
                 Err(e) => {
                     crate::metrics::metrics()
@@ -2103,6 +2456,52 @@ async fn token_exchange_impl(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
+        "urn:ietf:params:oauth:grant-type:jwt-bearer" => {
+            let Some(assertion) = body.assertion else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "assertion required for jwt-bearer grant"})),
+                )
+                    .into_response();
+            };
+            let oauth_client_id = match body.client_id.parse::<uuid::Uuid>() {
+                Ok(u) => ClientId::new(u),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "invalid client_id UUID"})),
+                    )
+                        .into_response();
+                }
+            };
+            let request = JwtBearerRequest {
+                client_id: oauth_client_id,
+                assertion,
+                scope: body.scope,
+                dpop_jkt: dpop_jkt.clone(),
+            };
+            match state.identity.jwt_bearer_token(&realm_id, &request) {
+                Ok(response) => {
+                    crate::metrics::metrics()
+                        .tokens_issued_total
+                        .with_label_values(&[realm_id.as_uuid().to_string().as_str(), "jwt_bearer"])
+                        .inc();
+                    let token_resp = pb::OidcTokenResponse {
+                        access_token: response.access_token().to_string(),
+                        id_token: String::new(),
+                        token_type: if dpop_jkt.is_some() {
+                            "DPoP".to_string()
+                        } else {
+                            "Bearer".to_string()
+                        },
+                        expires_in: response.expires_in(),
+                        refresh_token: String::new(),
+                    };
+                    (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
         _ => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -2199,6 +2598,7 @@ async fn token_introspection(
     let request = crate::identity::TokenIntrospectionRequest {
         token: body.token,
         token_type_hint: body.token_type_hint,
+        introspecting_client_id: Some(client_id.clone()),
     };
 
     let mut resp = match state.identity.introspect_token(&realm_id, &request) {
@@ -2211,6 +2611,67 @@ async fn token_introspection(
     };
     apply_cors_to_response(&mut resp, &state, &realm_id, &client_id, &headers);
     resp
+}
+
+// === Decision Endpoint (HEA-922) ===
+
+/// POST `/oauth/authorize` — per-request permission decision for Decision-mode clients.
+///
+/// Validates the bearer token and resolves live RBAC to decide whether the
+/// token holder has the requested permission.  Fail-closed: invalid tokens,
+/// missing permissions, or resolution errors all return `allowed: false`.
+async fn oauth_decide_permission(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let realm_id = match extract_realm_id(&headers) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
+
+    let token = match headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        Some(t) => t.to_string(),
+        None => {
+            return (StatusCode::OK, Json(serde_json::json!({"allowed": false}))).into_response()
+        }
+    };
+
+    let permission = match body.get("permission").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "permission field required"})),
+            )
+                .into_response()
+        }
+    };
+
+    let organization_id = body
+        .get("organization_id")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let resource = body
+        .get("resource")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let request = crate::identity::oidc::DecidePermissionRequest {
+        token,
+        permission,
+        organization_id,
+        resource,
+    };
+
+    match state.identity.decide_token_permission(&realm_id, &request) {
+        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
 }
 
 // === Device Authorization (RFC 8628) ===
@@ -2944,6 +3405,57 @@ async fn admin_delete_user(
     }
 }
 
+/// Admin: erase all device fingerprints for a user (GDPR Art. 17 / AC-11).
+///
+/// `DELETE /admin/users/{id}/device-fingerprints`
+///
+/// Satisfies DSAR erasure requests for biometric/device-signal data without
+/// requiring deletion of the entire user account.  Returns `{ "erased": N }`.
+async fn admin_delete_user_device_fingerprints(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+
+    let user_uuid: uuid::Uuid = match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid user ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    let user_id = UserId::new(user_uuid);
+
+    match state
+        .identity
+        .delete_user_device_fingerprints(&auth.realm_id, &user_id)
+    {
+        Ok(erased) => {
+            let _ = state.audit.append(&CreateAuditEvent {
+                realm_id: auth.realm_id.clone(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::DeviceFingerprintsErased,
+                resource_type: "user".to_string(),
+                resource_id: user_uuid.to_string(),
+                metadata: Some(serde_json::json!({
+                    "via": "admin_api",
+                    "count": erased,
+                })),
+            });
+            (StatusCode::OK, Json(serde_json::json!({"erased": erased}))).into_response()
+        }
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
 /// HTTP request body for bulk user operations.
 #[derive(Debug, Deserialize)]
 struct HttpBulkUsersRequest {
@@ -3439,6 +3951,34 @@ async fn admin_patch_realm_config(
         #[allow(clippy::cast_possible_truncation)]
         {
             config.sms_otp_max_attempts = Some(v as u32);
+        }
+    }
+    if let Some(v) = body.get("fapi_profile") {
+        use crate::identity::FapiProfile;
+        if v.is_null() {
+            config.fapi_profile = None;
+        } else if let Some(s) = v.as_str() {
+            match s {
+                "baseline" => config.fapi_profile = Some(FapiProfile::Baseline),
+                "advanced" => config.fapi_profile = Some(FapiProfile::Advanced),
+                other => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": format!("unknown fapi_profile value {other:?}; expected \"baseline\", \"advanced\", or null")
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "fapi_profile must be a string or null"
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -3984,6 +4524,8 @@ struct AdminUpdateClientBody {
     /// Whether user consent is required for this client. `true` for
     /// third-party apps; `false` for trusted first-party clients.
     require_consent: Option<bool>,
+    /// Access-token authorization mode. `null`/omitted leaves unchanged.
+    access_token_authorization: Option<String>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -4023,6 +4565,12 @@ async fn admin_update_client(
         }
     };
 
+    use crate::identity::oidc::AccessTokenAuthorization;
+    let access_token_authorization = body.access_token_authorization.as_deref().map(|s| match s {
+        "introspection" => AccessTokenAuthorization::Introspection,
+        "decision" => AccessTokenAuthorization::Decision,
+        _ => AccessTokenAuthorization::Embedded,
+    });
     let request = crate::identity::UpdateClientRequest {
         client_name: body.client_name,
         redirect_uris: if body.redirect_uris.is_empty() {
@@ -4039,6 +4587,7 @@ async fn admin_update_client(
         frontchannel_logout_uri: body.frontchannel_logout_uri,
         post_logout_redirect_uris: body.post_logout_redirect_uris,
         require_consent: body.require_consent,
+        access_token_authorization,
         ..Default::default()
     };
 
@@ -4582,13 +5131,45 @@ async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoRespons
             let admin = match state.identity.get_user_by_email(&rid, "admin@dev.local") {
                 Ok(Some(u)) => u,
                 Ok(None) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(
-                            serde_json::json!({"error": "admin@dev.local not found in dev-realm"}),
-                        ),
-                    )
-                        .into_response();
+                    // User was deleted while dev-realm survived — re-create idempotently
+                    // so callers never need to wipe data just to re-bootstrap.
+                    let _ = state.rbac.seed_realm(&rid);
+                    let new_user = match state.identity.create_user(
+                        &rid,
+                        &crate::identity::CreateUserRequest {
+                            email: "admin@dev.local".to_string(),
+                            display_name: "Dev Admin".to_string(),
+                            ..Default::default()
+                        },
+                    ) {
+                        Ok(u) => u,
+                        Err(e) => return identity_error_to_response(&e).into_response(),
+                    };
+                    let new_uid = new_user.id().clone();
+                    let _ = state.identity.update_user(
+                        &rid,
+                        &new_uid,
+                        &crate::identity::UpdateUserRequest {
+                            status: Some(crate::identity::UserStatus::Active),
+                            ..Default::default()
+                        },
+                    );
+                    let dev_pwd = crate::identity::CleartextPassword::from_string(
+                        "HearthDev123!".to_string(),
+                    );
+                    let _ = state.identity.set_password(&rid, &new_uid, &dev_pwd);
+                    if let Ok(Some(admin_role)) = state.rbac.get_role_by_name(&rid, "realm.admin") {
+                        let _ = state.rbac.assign_role(
+                            &rid,
+                            &AssignRoleRequest {
+                                subject: Subject::User(new_uid.clone()),
+                                role_id: admin_role.id.clone(),
+                                scope: Scope::Realm,
+                                assigned_by: None,
+                            },
+                        );
+                    }
+                    new_user
                 }
                 Err(e) => return identity_error_to_response(&e).into_response(),
             };
@@ -5843,7 +6424,7 @@ async fn realm_token_exchange(
     Path(realm_name): Path<String>,
     headers: HeaderMap,
     Json(body): Json<HttpTokenRequest>,
-) -> impl IntoResponse {
+) -> Response {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
@@ -5871,7 +6452,52 @@ async fn realm_token_exchange(
             .ip_login_retry_after_secs(&realm_id, &client_ip);
         return make_ip_rate_limit_response(retry_after as u32);
     }
-    match grant_type {
+
+    // Extract and validate DPoP proof if present (RFC 9449).
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let dpop_jkt: Option<String> =
+        if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
+            let base_issuer = state.identity.oidc_discovery().issuer;
+            let expected_htu = format!("{base_issuer}/realms/{realm_name}/token");
+            match crate::identity::dpop::validate_dpop_proof(
+                proof,
+                "POST",
+                &expected_htu,
+                now_secs,
+                None,
+            ) {
+                Ok(validated) => {
+                    if let Some(ref nonce) = validated.nonce {
+                        if !crate::identity::dpop::is_valid_dpop_nonce(
+                            &state.dpop_nonce_secret,
+                            nonce,
+                            now_secs,
+                        ) {
+                            return identity_error_to_response(
+                                &crate::identity::error::IdentityError::DPopNonceInvalid,
+                            )
+                            .into_response();
+                        }
+                    }
+                    if let Err(e) = state.dpop_jti_cache.check_and_insert(
+                        &validated.jti,
+                        now_secs,
+                        crate::identity::dpop::DPOP_MAX_AGE_SECS,
+                    ) {
+                        return identity_error_to_response(&e).into_response();
+                    }
+                    Some(validated.jkt)
+                }
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            }
+        } else {
+            None
+        };
+
+    let mut resp = match grant_type {
         "authorization_code" => {
             let (Some(code), Some(redirect_uri)) = (body.code, body.redirect_uri) else {
                 return (
@@ -5886,7 +6512,7 @@ async fn realm_token_exchange(
                 redirect_uri,
                 code_verifier: body.code_verifier,
             };
-            let request = match proto_token_exchange_to_domain(&proto_req) {
+            let mut request = match proto_token_exchange_to_domain(&proto_req) {
                 Ok(r) => r,
                 Err(msg) => {
                     return (
@@ -5896,15 +6522,20 @@ async fn realm_token_exchange(
                         .into_response()
                 }
             };
+            request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
             match state
                 .identity
                 .exchange_authorization_code(&realm_id, &request)
             {
-                Ok(response) => (
-                    StatusCode::OK,
-                    Json(proto_to_rest_json(&pb::OidcTokenResponse::from(&response))),
-                )
-                    .into_response(),
+                Ok(response) => {
+                    let mut token_resp = pb::OidcTokenResponse::from(&response);
+                    if dpop_jkt.is_some() {
+                        token_resp.token_type = "DPoP".to_string();
+                    }
+                    (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
+                }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
@@ -5916,12 +6547,15 @@ async fn realm_token_exchange(
                 )
                     .into_response();
             };
-            match state.identity.refresh_tokens(&realm_id, &refresh_token) {
+            match state
+                .identity
+                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
+            {
                 Ok(tokens) => {
                     let resp = pb::OidcTokenResponse {
                         access_token: tokens.access_token().to_string(),
                         id_token: String::new(),
-                        token_type: "Bearer".to_string(),
+                        token_type: if dpop_jkt.is_some() { "DPoP" } else { "Bearer" }.to_string(),
                         expires_in: 900,
                         refresh_token: tokens.refresh_token().to_string(),
                     };
@@ -5936,7 +6570,7 @@ async fn realm_token_exchange(
                 client_secret: body.client_secret.unwrap_or_default(),
                 scope: body.scope,
             };
-            let request = match proto_client_creds_to_domain(&proto_req) {
+            let mut request = match proto_client_creds_to_domain(&proto_req) {
                 Ok(r) => r,
                 Err(msg) => {
                     return (
@@ -5946,12 +6580,19 @@ async fn realm_token_exchange(
                         .into_response()
                 }
             };
+            request.dpop_jkt = dpop_jkt.clone();
+            request.client_assertion_type = body.client_assertion_type;
+            request.client_assertion = body.client_assertion;
             match state.identity.client_credentials_token(&realm_id, &request) {
                 Ok(response) => {
                     let resp = pb::OidcTokenResponse {
                         access_token: response.access_token().to_string(),
                         id_token: String::new(),
-                        token_type: "Bearer".to_string(),
+                        token_type: if dpop_jkt.is_some() {
+                            "DPoP".to_string()
+                        } else {
+                            "Bearer".to_string()
+                        },
                         expires_in: response.expires_in(),
                         refresh_token: String::new(),
                     };
@@ -6075,12 +6716,66 @@ async fn realm_token_exchange(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
+        "urn:ietf:params:oauth:grant-type:jwt-bearer" => {
+            let Some(assertion) = body.assertion else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "assertion required for jwt-bearer grant"})),
+                )
+                    .into_response();
+            };
+            let oauth_client_id = match body.client_id.parse::<uuid::Uuid>() {
+                Ok(u) => ClientId::new(u),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "invalid client_id UUID"})),
+                    )
+                        .into_response();
+                }
+            };
+            let request = JwtBearerRequest {
+                client_id: oauth_client_id,
+                assertion,
+                scope: body.scope,
+                dpop_jkt: dpop_jkt.clone(),
+            };
+            match state.identity.jwt_bearer_token(&realm_id, &request) {
+                Ok(response) => {
+                    crate::metrics::metrics()
+                        .tokens_issued_total
+                        .with_label_values(&[realm_id.as_uuid().to_string().as_str(), "jwt_bearer"])
+                        .inc();
+                    let token_resp = pb::OidcTokenResponse {
+                        access_token: response.access_token().to_string(),
+                        id_token: String::new(),
+                        token_type: if dpop_jkt.is_some() {
+                            "DPoP".to_string()
+                        } else {
+                            "Bearer".to_string()
+                        },
+                        expires_in: response.expires_in(),
+                        refresh_token: String::new(),
+                    };
+                    (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
         other => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("unsupported grant_type: {other}")})),
         )
             .into_response(),
+    };
+
+    // RFC 9449 §9: always return DPoP-Nonce so clients can use it in the next proof.
+    let nonce = crate::identity::dpop::current_dpop_nonce(&state.dpop_nonce_secret, now_secs);
+    if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
+        resp.headers_mut().insert("DPoP-Nonce", val);
     }
+
+    resp
 }
 
 async fn realm_token_revocation(
@@ -6134,6 +6829,7 @@ async fn realm_token_introspection(
     let request = crate::identity::TokenIntrospectionRequest {
         token,
         token_type_hint: None,
+        introspecting_client_id: None,
     };
     match state.identity.introspect_token(&realm_id, &request) {
         Ok(info) => (
@@ -6291,6 +6987,11 @@ async fn realm_register_client_dynamic(
             "email".to_string(),
         ],
         consent_spans_orgs: false,
+        access_token_authorization: crate::identity::AccessTokenAuthorization::Embedded,
+        jwks: None,
+        jwks_uri: None,
+        authorization_signed_response_alg: None,
+        profile: crate::identity::ClientProfile::Standard,
     };
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {
@@ -7227,6 +7928,346 @@ fn end_session_redirect(uri: Option<String>, state: Option<String>) -> Response 
     }
 }
 
+// ── Session-version feed endpoints ───────────────────────────────────────────
+
+/// Query parameters for the delta feed.
+#[derive(Deserialize)]
+struct SvDeltaQuery {
+    since: u64,
+    limit: Option<usize>,
+}
+
+/// `GET /oauth/session-versions?since=<seq>` — session-version delta feed.
+///
+/// Returns all bump events with `seq > since`, up to `limit` (default: 1000).
+/// Returns 204 when there are no new deltas.
+/// Returns 400 when `since` is older than the retention window.
+/// Returns 404 when session versioning is disabled for the realm.
+/// Requires a bearer token with `hearth.sv_feed` permission.
+async fn oauth_sv_delta_feed(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<SvDeltaQuery>,
+) -> Response {
+    // Validate token — extract realm and check hearth.sv_feed permission.
+    let Ok(realm_id) = extract_realm_id(&headers) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing X-Realm-ID header"})),
+        )
+            .into_response();
+    };
+
+    let token = match extract_bearer_token(&headers) {
+        Ok(t) => t,
+        Err(r) => return r.into_response(),
+    };
+
+    let claims = match state.identity.validate_token(&realm_id, &token) {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
+    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
+    if !has_feed_perm && !is_admin {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
+        )
+            .into_response();
+    }
+
+    let limit = params.limit.unwrap_or(1000).min(5000);
+
+    let result = tokio::task::spawn_blocking({
+        let identity = Arc::clone(&state.identity);
+        let realm_id = realm_id.clone();
+        let since = params.since;
+        move || identity.sv_list_deltas(&realm_id, since, limit)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(Some(resp))) => {
+            if resp.deltas.is_empty() {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                Json(resp).into_response()
+            }
+        }
+        Ok(Ok(None)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "since is older than retention window; fetch snapshot first"
+            })),
+        )
+            .into_response(),
+        Ok(Err(crate::identity::IdentityError::SessionVersionDisabled)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session versioning disabled for realm"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /oauth/session-versions/snapshot` — full session-version snapshot.
+///
+/// Returns gzip-compressed JSON with `{realm, current_seq, versions}`.
+/// Returns 404 when session versioning is disabled for the realm.
+/// Requires a bearer token with `hearth.sv_feed` permission.
+async fn oauth_sv_snapshot(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let Ok(realm_id) = extract_realm_id(&headers) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "missing X-Realm-ID header"})),
+        )
+            .into_response();
+    };
+
+    let token = match extract_bearer_token(&headers) {
+        Ok(t) => t,
+        Err(r) => return r.into_response(),
+    };
+
+    let claims = match state.identity.validate_token(&realm_id, &token) {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let has_feed_perm = claims.permissions.iter().any(|p| p == "hearth.sv_feed");
+    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
+    if !has_feed_perm && !is_admin {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "requires hearth.sv_feed permission"})),
+        )
+            .into_response();
+    }
+
+    let result = tokio::task::spawn_blocking({
+        let identity = Arc::clone(&state.identity);
+        let realm_id = realm_id.clone();
+        move || identity.sv_snapshot(&realm_id)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(snapshot)) => {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+
+            let json_bytes = match serde_json::to_vec(&snapshot) {
+                Ok(b) => b,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": e.to_string()})),
+                    )
+                        .into_response()
+                }
+            };
+
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            if encoder.write_all(&json_bytes).is_err() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "compression error"})),
+                )
+                    .into_response();
+            }
+            let compressed = match encoder.finish() {
+                Ok(b) => b,
+                Err(_) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": "compression error"})),
+                    )
+                        .into_response()
+                }
+            };
+
+            axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/json")
+                .header("Content-Encoding", "gzip")
+                .body(axum::body::Body::from(compressed))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Ok(Err(crate::identity::IdentityError::SessionVersionDisabled)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session versioning disabled for realm"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /admin/sessions/{session_id}/sv-bump` — manually bump a single session's sv.
+///
+/// Returns `{"new_min_sv": <n>}`. Requires `hearth.admin`.
+async fn admin_sv_bump_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(session_id_str): Path<String>,
+) -> Response {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+
+    let uuid = match uuid::Uuid::parse_str(&session_id_str) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid session_id"})),
+            )
+                .into_response()
+        }
+    };
+    let session_id = crate::core::SessionId::new(uuid);
+
+    let result = tokio::task::spawn_blocking({
+        let identity = Arc::clone(&state.identity);
+        let realm_id = auth.realm_id.clone();
+        move || identity.sv_bump_session(&realm_id, &session_id)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(new_min_sv)) => Json(serde_json::json!({"new_min_sv": new_min_sv})).into_response(),
+        Ok(Err(crate::identity::IdentityError::SessionVersionDisabled)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session versioning disabled for realm"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /admin/realms/{realm_id}/sv-bump-all` — bump every active session in the realm.
+///
+/// Returns `{"bumped": <n>}`. Heavy operation — generates O(active_sessions) delta entries.
+/// Requires `hearth.admin`.
+async fn admin_sv_bump_all(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(realm_id_str): Path<String>,
+) -> Response {
+    if let Err(e) = extract_admin_auth(&headers, &state) {
+        return e.into_response();
+    }
+
+    let uuid = match uuid::Uuid::parse_str(&realm_id_str) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid realm_id"})),
+            )
+                .into_response()
+        }
+    };
+    let realm_id = RealmId::new(uuid);
+
+    let result = tokio::task::spawn_blocking({
+        let identity = Arc::clone(&state.identity);
+        move || identity.sv_bump_all(&realm_id)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(bumped)) => Json(serde_json::json!({"bumped": bumped})).into_response(),
+        Ok(Err(crate::identity::IdentityError::SessionVersionDisabled)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "session versioning disabled for realm"})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Extracts a `Bearer <token>` from the `Authorization` header.
+fn extract_bearer_token(
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let auth_header = headers
+        .get("authorization")
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "missing authorization header"})),
+            )
+        })?
+        .to_str()
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid authorization header"})),
+            )
+        })?;
+    auth_header
+        .strip_prefix("Bearer ")
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid authorization scheme"})),
+            )
+        })
+}
+
 /// HTML-escapes the five special characters to prevent XSS in inline HTML.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -7383,5 +8424,240 @@ mod tests {
         // Verify access_token is non-empty
         let token = json["access_token"].as_str().expect("access_token string");
         assert!(!token.is_empty(), "access_token should not be empty");
+    }
+
+    /// PAR with a signed JAR JWT in the request body is accepted under FAPI Advanced.
+    ///
+    /// Regression for HEA-1019: `HttpParRequest` was missing the `request` field,
+    /// so the JAR was silently dropped and Advanced realms always rejected with
+    /// `FapiViolation`.  This test exercises the full HTTP deserialisation path and
+    /// MUST return 201 with the fix applied.
+    #[tokio::test]
+    async fn par_jar_accepted_under_fapi_advanced() {
+        use crate::identity::{
+            CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
+        };
+        use base64::Engine as _;
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(temp_dir.path());
+
+        // Create an Advanced FAPI realm.
+        let realm_rec = state
+            .identity
+            .create_realm(&CreateRealmRequest {
+                name: format!("fapi-adv-jar-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm");
+        let mut config = realm_rec.config().clone();
+        config.fapi_profile = Some(FapiProfile::Advanced);
+        state
+            .identity
+            .update_realm(
+                realm_rec.id(),
+                &UpdateRealmRequest {
+                    config: Some(config),
+                    ..Default::default()
+                },
+            )
+            .expect("set FAPI Advanced");
+
+        // Generate Ed25519 key pair and register a JARM-capable JWKS client.
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("from_pkcs8");
+        let pub_bytes = ring::signature::KeyPair::public_key(&pair)
+            .as_ref()
+            .to_vec();
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let x = b64.encode(&pub_bytes);
+        let jwks = format!(
+            r#"{{"keys":[{{"kty":"OKP","crv":"Ed25519","alg":"EdDSA","kid":"hea1019","x":"{x}"}}]}}"#
+        );
+
+        let client = state
+            .identity
+            .register_client(
+                realm_rec.id(),
+                &RegisterClientRequest {
+                    client_name: "FAPI-A JAR HTTP Client".to_string(),
+                    redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                    client_secret: None,
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: false,
+                    jwks: Some(jwks),
+                    authorization_signed_response_alg: Some("EdDSA".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+
+        // Sign a minimal JAR JWT.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs() as i64;
+        let issuer = format!("https://hearth.local/realms/{}", realm_rec.name());
+        // HTTP body expects the raw UUID; JAR claims compare against the prefixed form.
+        let cid_http = client.client_id().as_uuid().to_string();
+        let cid_jar = client.client_id().to_string();
+        const REDIRECT: &str = "https://app.example.com/callback";
+        const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
+        let header_b64 = b64.encode(
+            serde_json::to_vec(&serde_json::json!({"alg": "EdDSA", "kid": "hea1019"}))
+                .expect("header json"),
+        );
+        let claims_b64 = b64.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "iss": cid_jar, "aud": issuer,
+                "exp": now + 300, "iat": now,
+                "jti": uuid::Uuid::new_v4().to_string(),
+                "client_id": cid_jar,
+                "response_type": "code",
+                "redirect_uri": REDIRECT,
+                "scope": "openid",
+                "state": "jar-state",
+                "code_challenge": CHALLENGE,
+                "code_challenge_method": "S256",
+                "nonce": "hea1019-nonce"
+            }))
+            .expect("claims json"),
+        );
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let sig = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+            .expect("pair")
+            .sign(signing_input.as_bytes());
+        let jar_jwt = format!("{signing_input}.{}", b64.encode(sig.as_ref()));
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "client_id": cid_http,
+            "redirect_uri": REDIRECT,
+            "scope": "openid",
+            "state": "par-state",
+            "response_type": "code",
+            "code_challenge": CHALLENGE,
+            "code_challenge_method": "S256",
+            "nonce": "hea1019-nonce",
+            "request": jar_jwt
+        }))
+        .expect("body json");
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/realms/{}/as/par", realm_rec.name()))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "JAR in HTTP PAR body must be accepted under FAPI Advanced (HEA-1019 regression)"
+        );
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).expect("json");
+        assert!(
+            json.get("request_uri").is_some(),
+            "response must include request_uri"
+        );
+    }
+
+    /// PAR without a JAR JWT is rejected under FAPI Advanced.
+    ///
+    /// Counterpart to `par_jar_accepted_under_fapi_advanced`: confirms the
+    /// negative case still returns 400 / `invalid_request` when the `request`
+    /// field is absent.
+    #[tokio::test]
+    async fn par_without_jar_rejected_under_fapi_advanced() {
+        use crate::identity::{
+            CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,
+        };
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let state = test_state(temp_dir.path());
+
+        let realm_rec = state
+            .identity
+            .create_realm(&CreateRealmRequest {
+                name: format!("fapi-adv-nojar-{}", uuid::Uuid::new_v4()),
+                config: None,
+            })
+            .expect("create realm");
+        let mut config = realm_rec.config().clone();
+        config.fapi_profile = Some(FapiProfile::Advanced);
+        state
+            .identity
+            .update_realm(
+                realm_rec.id(),
+                &UpdateRealmRequest {
+                    config: Some(config),
+                    ..Default::default()
+                },
+            )
+            .expect("set FAPI Advanced");
+
+        let client = state
+            .identity
+            .register_client(
+                realm_rec.id(),
+                &RegisterClientRequest {
+                    client_name: "FAPI-A No-JAR Client".to_string(),
+                    redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                    client_secret: Some("secret".to_string()),
+                    grant_types: vec!["authorization_code".to_string()],
+                    require_consent: false,
+                    ..Default::default()
+                },
+            )
+            .expect("register client");
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "client_id": client.client_id().as_uuid().to_string(),
+            "redirect_uri": "https://app.example.com/callback",
+            "scope": "openid",
+            "state": "par-state",
+            "response_type": "code",
+            "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+            "code_challenge_method": "S256",
+            "nonce": "test-nonce"
+        }))
+        .expect("body json");
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/realms/{}/as/par", realm_rec.name()))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "PAR without JAR must be rejected (FapiViolation) under FAPI Advanced"
+        );
+        let resp_body = axum::body::to_bytes(resp.into_body(), 4_096)
+            .await
+            .expect("body bytes");
+        let json: serde_json::Value = serde_json::from_slice(&resp_body).expect("json");
+        assert_eq!(
+            json["error"], "invalid_request",
+            "error must be invalid_request for FAPI violation"
+        );
     }
 }
