@@ -60,3 +60,10 @@ ui/tailwindcss
 tests/ui/.auth/
 tests/ui/reports/
 tests/ui/node_modules/
+
+**/php/vendor
+**/.phpunit.cache
+
+**/.next/*
+
+go-gin
