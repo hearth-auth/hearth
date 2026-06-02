@@ -126,23 +126,21 @@ pub fn init(config: &ObservabilityConfig) -> TracingGuard {
                 .with(tracing_subscriber::fmt::layer())
                 .init();
         }
+    } else if json {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else if use_pretty {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().event_format(DevFormatter { ansi }))
+            .init();
     } else {
-        if json {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer().json())
-                .init();
-        } else if use_pretty {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer().event_format(DevFormatter { ansi }))
-                .init();
-        } else {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer())
-                .init();
-        }
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
     }
 
     // Subscriber is now installed; safe to use tracing macros.
