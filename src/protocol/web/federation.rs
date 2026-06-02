@@ -170,7 +170,10 @@ async fn callback_impl(
         _ => crate::identity::federation::LinkMode::Confirm,
     };
     let now = Timestamp::from_micros(now_micros());
-    let (bag, outcome) = match service.callback(&realm_id, &q.state, &code, link_mode, now) {
+    let (bag, outcome) = match service
+        .callback(&realm_id, &q.state, &code, link_mode, now)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "federation callback failed");
