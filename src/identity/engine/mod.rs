@@ -858,11 +858,15 @@ impl EmbeddedIdentityEngine {
             device_fp,
             sv_store,
         };
-        // Best-effort: if seeding fails here, tests that expect a system
-        // realm will notice and surface it. `new()` panics on failure; this
-        // constructor swallows so existing test harnesses don't break.
-        let _ = engine.seed_system_realm_if_absent();
-        let _ = engine.populate_realm_status_cache();
+        // Best-effort: log but do not propagate initialization errors so
+        // existing test harnesses that pre-seed storage don't break on a
+        // duplicate-realm error. `new()` propagates; this constructor does not.
+        if let Err(e) = engine.seed_system_realm_if_absent() {
+            tracing::warn!(error = %e, "with_signing_key: seed_system_realm_if_absent failed");
+        }
+        if let Err(e) = engine.populate_realm_status_cache() {
+            tracing::warn!(error = %e, "with_signing_key: populate_realm_status_cache failed");
+        }
         engine
     }
 
