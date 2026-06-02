@@ -96,12 +96,12 @@ fn make_dpop_proof(key: &DPopKey, htm: &str, htu: &str, nonce: Option<&str>) -> 
 
 /// Builds the router with a deterministic DPoP nonce secret so nonces are predictable.
 async fn build_app_with_key(harness: &common::TestHarness, nonce_secret: [u8; 32]) -> axum::Router {
-    let mut state = AppState::new(
+    let state = AppState::new(
         harness.identity_arc(),
         harness.rbac_arc(),
         harness.audit_arc(),
-    );
-    state.dpop_nonce_secret = nonce_secret;
+    )
+    .with_dpop_nonce_secret(nonce_secret);
     router(Arc::new(state))
 }
 
@@ -245,11 +245,7 @@ async fn dpop_replay_rejected() {
     let h = common::TestHarness::embedded().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
     // Share the same AppState (and JTI cache) across both requests
-    let state = Arc::new({
-        let mut s = AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc());
-        s.dpop_nonce_secret = [0u8; 32];
-        s
-    });
+    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
     let app1 = router(Arc::clone(&state));
     let app2 = router(Arc::clone(&state));
 
@@ -377,14 +373,19 @@ async fn no_dpop_yields_bearer_token_with_nonce_header() {
 
 // ===== Scenario DP-Config: dpop_nonce_secret wiring =====
 
-/// `AppState::with_dpop_nonce_secret` must store exactly the bytes it receives.
+/// `AppState::with_dpop_nonce_secret` must wire the correct secret into the DPoP processor.
+///
+/// Verified by checking that `current_nonce` returns the same value as computing the
+/// nonce directly with the secret.
 #[tokio::test]
 async fn app_state_with_dpop_nonce_secret_stores_value() {
     let h = common::TestHarness::embedded().await.unwrap();
     let secret = [0xDE_u8; 32];
     let state =
         AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()).with_dpop_nonce_secret(secret);
-    assert_eq!(state.dpop_nonce_secret, secret);
+    let now_secs = 0_i64;
+    let expected = hearth::identity::dpop::current_dpop_nonce(&secret, now_secs);
+    assert_eq!(state.dpop.current_nonce(now_secs), expected);
 }
 
 /// The auto-generated DPoP nonce secret must not be the zero key.

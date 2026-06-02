@@ -7,6 +7,35 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Changed
+
+- **`PATCH` replaces `PUT` for partial-update admin endpoints** — `PUT /admin/realms/{id}`,
+  `PUT /admin/roles/{id}`, `PUT /admin/groups/{id}`, and `PUT /admin/applications/{id}` are now
+  `PATCH` to correctly signal partial-update semantics (RFC 5789). All four endpoints and their
+  gRPC HTTP annotations (`identity.proto`, `rbac.proto`, `oauth.proto`) have been updated. The Go
+  and TypeScript SDKs have been updated accordingly. HTTP clients that hard-code `PUT` will receive
+  `405 Method Not Allowed`. (HEA-1184)
+
+- **DPoP state moved to identity layer** — `DPopJtiCache` and the HMAC nonce secret are now
+  managed by a new `DPopProcessor` type in `src/identity/dpop` rather than being fields on
+  `AppState`. The HTTP protocol layer holds only an `Arc<DPopProcessor>`. Operator-visible
+  behaviour is unchanged. (HEA-1184)
+
+- **`HEARTH_` prefix now covers all error codes** — four error codes previously returned as bare
+  strings (`session_limit_exceeded`, `invalid_sms_otp`, `sms_resend_limit_exceeded`,
+  `session_version_disabled`) are now named constants with the `HEARTH_` prefix. (HEA-1184)
+
+### Fixed
+
+- **`proto_to_rest_json` serialization failures now logged** — previously, a `serde_json`
+  serialization error in the proto-to-REST JSON helper was silently swallowed via
+  `unwrap_or_default()`. Failures are now logged at `error` level so operators can detect them.
+  (HEA-1184)
+
+- **Audit failure error message no longer leaks subsystem name** — the `AuditFailure` error
+  previously returned `"internal error: audit record failed"` as the HTTP error body, disclosing
+  the internal audit subsystem. It now returns `"internal error"`. (HEA-1184)
+
 ### Added
 
 - **Offline breach corpus for air-gapped realms (HEA-96)** — `BreachCheckConfig` gains a new
@@ -30,6 +59,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   create and detects drift on subsequent restarts. (HEA-1040)
 
 ### Security
+
+- **User deletion now purges RBAC state** — `delete_user` previously omitted the RBAC cascade,
+  leaving stale role assignments and group memberships in storage after a user was deleted. An
+  attacker who later claimed the same user UUID could inherit the deleted user's privileges. The
+  identity engine now calls `RbacEngine::purge_user_from_realm` as step 12 of the deletion
+  sequence, removing all direct role assignments and group memberships within the realm before
+  the audit event is written. Realm isolation is preserved: RBAC state in other realms is not
+  affected. (HEA-1185)
 
 - **JTI corruption no longer bypasses replay protection** — a malformed (wrong-length) WAL entry for
   a JWT Bearer assertion JTI previously silently decoded as epoch-0 expiry, causing the replay check

@@ -37,7 +37,7 @@ func (a *AdminClient) GetUser(ctx context.Context, userID string) (*User, error)
 // UpdateUser updates a user via the admin API.
 func (a *AdminClient) UpdateUser(ctx context.Context, userID string, req UpdateUserRequest) (*User, error) {
 	var result User
-	if err := a.request(ctx, "PUT", fmt.Sprintf("/admin/users/%s", userID), req, &result); err != nil {
+	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/users/%s", userID), req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -89,7 +89,7 @@ func (a *AdminClient) GetRealm(ctx context.Context, realmID string) (*Realm, err
 // UpdateRealm updates a realm via the admin API.
 func (a *AdminClient) UpdateRealm(ctx context.Context, realmID string, req UpdateRealmRequest) (*Realm, error) {
 	var result Realm
-	if err := a.request(ctx, "PUT", fmt.Sprintf("/admin/realms/%s", realmID), req, &result); err != nil {
+	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/realms/%s", realmID), req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -123,7 +123,7 @@ func (a *AdminClient) GetClient(ctx context.Context, clientID string) (*OAuthCli
 // UpdateClient updates an OAuth client via the admin API.
 func (a *AdminClient) UpdateClient(ctx context.Context, clientID string, req UpdateClientRequest) (*OAuthClient, error) {
 	var result OAuthClient
-	if err := a.request(ctx, "PUT", fmt.Sprintf("/admin/clients/%s", clientID), req, &result); err != nil {
+	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/clients/%s", clientID), req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -167,7 +167,7 @@ func (a *AdminClient) GetRole(ctx context.Context, roleID string) (*Role, error)
 // UpdateRole updates a role via the admin API.
 func (a *AdminClient) UpdateRole(ctx context.Context, roleID string, req UpdateRoleRequest) (*Role, error) {
 	var result Role
-	if err := a.request(ctx, "PUT", fmt.Sprintf("/admin/roles/%s", roleID), req, &result); err != nil {
+	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/roles/%s", roleID), req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -211,7 +211,7 @@ func (a *AdminClient) GetGroup(ctx context.Context, groupID string) (*Group, err
 // UpdateGroup updates a group via the admin API.
 func (a *AdminClient) UpdateGroup(ctx context.Context, groupID string, req UpdateGroupRequest) (*Group, error) {
 	var result Group
-	if err := a.request(ctx, "PUT", fmt.Sprintf("/admin/groups/%s", groupID), req, &result); err != nil {
+	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/groups/%s", groupID), req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -255,7 +255,7 @@ func (a *AdminClient) GetOrgMember(ctx context.Context, orgID, userID string) (*
 // UpdateOrgMember updates an organization membership via the admin API.
 func (a *AdminClient) UpdateOrgMember(ctx context.Context, orgID, userID string, req UpdateOrgMemberRequest) (*OrgMember, error) {
 	var result OrgMember
-	if err := a.request(ctx, "PUT", fmt.Sprintf("/admin/orgs/%s/members/%s", orgID, userID), req, &result); err != nil {
+	if err := a.request(ctx, "PATCH", fmt.Sprintf("/admin/orgs/%s/members/%s", orgID, userID), req, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil

@@ -296,7 +296,7 @@ service IdentityAdminService {
   }
   rpc UpdateRealm(UpdateRealmCall) returns (Realm) {
     option (google.api.http) = {
-      put: "/admin/realms/{id}"
+      patch: "/admin/realms/{id}"
       body: "body"
     };
   }

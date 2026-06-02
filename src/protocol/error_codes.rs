@@ -83,6 +83,8 @@ pub const DEVICE_CODE_DENIED: &str = "HEARTH_DEVICE_CODE_DENIED";
 
 /// Request rate limit exceeded or account temporarily locked after failed attempts.
 pub const RATE_LIMITED: &str = "HEARTH_RATE_LIMITED";
+/// User has exceeded the maximum number of concurrent active sessions.
+pub const SESSION_LIMIT_EXCEEDED: &str = "HEARTH_SESSION_LIMIT_EXCEEDED";
 
 // ── Account state ─────────────────────────────────────────────────────────────
 
@@ -103,6 +105,15 @@ pub const AUTH_METHOD_NOT_ALLOWED: &str = "HEARTH_AUTH_METHOD_NOT_ALLOWED";
 pub const NOT_FOUND: &str = "HEARTH_NOT_FOUND";
 /// Session not found, expired, or revoked.
 pub const SESSION_NOT_FOUND: &str = "HEARTH_SESSION_NOT_FOUND";
+/// The requested session version is disabled by realm policy.
+pub const SESSION_VERSION_DISABLED: &str = "HEARTH_SESSION_VERSION_DISABLED";
+
+// ── SMS / OTP ─────────────────────────────────────────────────────────────────
+
+/// SMS OTP code is invalid or expired.
+pub const INVALID_SMS_OTP: &str = "HEARTH_INVALID_SMS_OTP";
+/// SMS OTP resend rate limit exceeded; must wait before requesting another.
+pub const SMS_RESEND_LIMIT_EXCEEDED: &str = "HEARTH_SMS_RESEND_LIMIT_EXCEEDED";
 
 // ── Realm ──────────────────────────────────────────────────────────────────────
 
@@ -259,7 +270,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::DeviceCodeDenied => Some(DEVICE_CODE_DENIED),
 
         IdentityError::RateLimited => Some(RATE_LIMITED),
-        IdentityError::SessionLimitExceeded { .. } => Some("session_limit_exceeded"),
+        IdentityError::SessionLimitExceeded { .. } => Some(SESSION_LIMIT_EXCEEDED),
 
         IdentityError::UserNotVerified => Some(EMAIL_UNVERIFIED),
         IdentityError::PasswordExpired => Some(PASSWORD_EXPIRED),
@@ -269,8 +280,8 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         IdentityError::StepUpChallengeRequired => Some(STEP_UP_CHALLENGE_REQUIRED),
         IdentityError::EnrollMfaRequired => Some(ENROLL_MFA_REQUIRED),
         IdentityError::RequiredActionsBlocking { .. } => Some(REQUIRED_ACTIONS_PENDING),
-        IdentityError::InvalidSmsOtp => Some("invalid_sms_otp"),
-        IdentityError::SmsResendLimitExceeded => Some("sms_resend_limit_exceeded"),
+        IdentityError::InvalidSmsOtp => Some(INVALID_SMS_OTP),
+        IdentityError::SmsResendLimitExceeded => Some(SMS_RESEND_LIMIT_EXCEEDED),
 
         IdentityError::RealmNotFound
         | IdentityError::UserNotFound
@@ -278,7 +289,7 @@ pub(crate) fn for_identity_error(err: &crate::identity::IdentityError) -> Option
         | IdentityError::WebhookNotFound
         | IdentityError::ConsentNotFound => Some(NOT_FOUND),
         IdentityError::SessionNotFound => Some(SESSION_NOT_FOUND),
-        IdentityError::SessionVersionDisabled => Some("session_version_disabled"),
+        IdentityError::SessionVersionDisabled => Some(SESSION_VERSION_DISABLED),
 
         IdentityError::RealmSuspended => Some(REALM_SUSPENDED),
 
@@ -576,6 +587,10 @@ mod tests {
             AUTH_METHOD_NOT_ALLOWED,
             NOT_FOUND,
             SESSION_NOT_FOUND,
+            SESSION_VERSION_DISABLED,
+            SESSION_LIMIT_EXCEEDED,
+            INVALID_SMS_OTP,
+            SMS_RESEND_LIMIT_EXCEEDED,
             REALM_SUSPENDED,
             INVALID_INPUT,
             DUPLICATE_EMAIL,
