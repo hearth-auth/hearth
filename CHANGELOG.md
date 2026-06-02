@@ -9,6 +9,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`make license-check` CI gate** — `cargo deny check licenses advisories bans` now runs as a
+  required PR-blocking step in CI and is available locally via `make license-check`. Any PR that
+  introduces a crate with a copyleft, unknown, or non-permissive license is rejected. (HEA-915)
+
 - **`fapi_profile` realm config key** — operators can now set `fapi_profile: "baseline"` or
   `fapi_profile: "advanced"` under `realms.<name>` in `hearth.yaml` to enforce FAPI 2.0 Security
   Profile constraints on all clients in that realm at startup. Unknown values are a hard error.

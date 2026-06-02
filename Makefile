@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt check license-check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -74,6 +74,12 @@ fmt:
 
 ## Run all Rust checks (build + clippy + fmt + tests + test-quality guardrail).
 check: clippy fmt test-quality test
+
+## Dependency policy gate: check licenses, advisories, and bans via cargo-deny.
+## Blocks any crate with a copyleft or non-permissive license, known vulnerabilities,
+## or explicitly banned packages. Run standalone or via ci-local-fast.
+license-check:
+	cargo deny check licenses advisories bans
 
 ## Grep-based guardrail against false-confidence test patterns
 ## (weak is_ok/is_err asserts, unconditional sleeps, untracked #[ignore]).
@@ -192,14 +198,14 @@ ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster
 
 ## Host-side reproduction of PR-blocking CI checks (~5 min cold).
 ## Mirrors the seven checks that gate every PR: test-quality, check (clippy+fmt+nextest),
-## css-check, proto-check, cargo deny, sdk-conformance, and sdk-smoke.
+## css-check, proto-check, license-check (cargo deny), sdk-conformance, and sdk-smoke.
 ## For full reproduction including workflow files and matrix legs: make ci-local-full
 ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> test-quality"              && $(MAKE) test-quality
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check
-	@echo "==> cargo deny"               && cargo deny check
+	@echo "==> license-check"             && $(MAKE) license-check
 	@echo "==> sdk-conformance"          && bash scripts/check-sdk-conformance.sh
 	@echo "==> sdk-smoke-local"          && $(MAKE) sdk-smoke-local
 	@echo ""

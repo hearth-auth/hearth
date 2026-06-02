@@ -28,6 +28,7 @@ make tailwind-install  # downloads Tailwind standalone CLI to ui/tailwindcss
 | Command | What it does |
 |---------|-------------|
 | `make check` | clippy + fmt + nextest — run before every PR |
+| `make license-check` | `cargo deny check licenses advisories bans` — blocks copyleft/unknown licenses, advisories, banned crates |
 | `make test` | `cargo nextest run --workspace` (PROTOC env var required) |
 | `make clippy` | `cargo clippy --all-targets -- -D warnings` |
 | `make fmt` | `cargo fmt --check` |
