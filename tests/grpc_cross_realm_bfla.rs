@@ -181,12 +181,10 @@ async fn cross_realm_delete_realm_denied() {
         ))
         .await;
 
-    assert!(
-        result.is_err(),
-        "cross-realm delete_realm must be denied, got Ok"
-    );
     assert_eq!(
-        result.expect_err("must error").code(),
+        result
+            .expect_err("cross-realm delete_realm must be denied, got Ok")
+            .code(),
         Code::PermissionDenied,
         "must return PermissionDenied"
     );
@@ -211,8 +209,10 @@ async fn cross_realm_get_realm_denied() {
         ))
         .await;
 
-    assert!(result.is_err(), "cross-realm get_realm must be denied");
-    assert_eq!(result.expect_err("must error").code(), Code::PermissionDenied);
+    assert_eq!(
+        result.expect_err("cross-realm get_realm must be denied").code(),
+        Code::PermissionDenied,
+    );
 }
 
 /// Realm-A admin calling update_realm on realm-B must get PermissionDenied.
@@ -238,8 +238,10 @@ async fn cross_realm_update_realm_denied() {
         ))
         .await;
 
-    assert!(result.is_err(), "cross-realm update_realm must be denied");
-    assert_eq!(result.expect_err("must error").code(), Code::PermissionDenied);
+    assert_eq!(
+        result.expect_err("cross-realm update_realm must be denied").code(),
+        Code::PermissionDenied,
+    );
 }
 
 /// Non-system realm admin calling create_realm must get PermissionDenied.
@@ -262,11 +264,12 @@ async fn cross_realm_create_realm_denied() {
         ))
         .await;
 
-    assert!(
-        result.is_err(),
-        "non-system realm admin must not be able to create realms"
+    assert_eq!(
+        result
+            .expect_err("non-system realm admin must not be able to create realms")
+            .code(),
+        Code::PermissionDenied,
     );
-    assert_eq!(result.expect_err("must error").code(), Code::PermissionDenied);
 }
 
 /// Realm-A admin calling list_realms must see only their own realm, not realm-B.
