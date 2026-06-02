@@ -188,6 +188,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **DPoP nonce secret wired from config (HEA-1125)** — `AppState` was initialised with
+  `dpop_nonce_secret = [0u8; 32]` in all three constructors, making the HMAC-SHA256 nonce
+  generation trivially predictable and defeating DPoP replay protection. The secret is now
+  derived at startup from `security.dpop_nonce_secret` in `hearth.yaml`: a 64-character
+  lowercase hex value pins the key across restarts; `"auto"` (the default) generates a
+  fresh 32-byte key via `ring`'s CSPRNG on every startup. A startup assertion rejects the
+  zero key in all deployment modes.
+
 - **JAR `response_mode` override now enforced (HEA-1008)** — `JarClaims` lacked a
   `response_mode` field, so a JAR JWT could not override the outer query-string
   `response_mode`.  A network attacker who stripped the outer parameter could downgrade
