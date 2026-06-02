@@ -257,6 +257,7 @@ impl Config {
     ///
     /// Unlike [`validate`], this does **not** short-circuit — all validation
     /// rules are checked and every problem is returned.
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     pub fn validate_all(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
@@ -398,6 +399,7 @@ impl Config {
     ///
     /// Called automatically by [`from_yaml_str`] and [`from_file`].
     /// Dev-mode configs skip certain checks (e.g., empty `data_dir`).
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     fn validate(&self) -> Result<(), ConfigError> {
         // Port: valid TCP port range
         if self.server.port == 0 {
@@ -1284,7 +1286,7 @@ fn validate_email_all(email: &EmailConfig, issues: &mut Vec<ValidationIssue>) {
                 });
             }
         }
-        EmailTransport::Log | EmailTransport::Mailcatcher => unreachable!(),
+        EmailTransport::Log | EmailTransport::Mailcatcher => {}
     }
 }
 
@@ -1352,6 +1354,7 @@ fn validate_realm_web_configs_all(
 }
 
 /// Collects per-realm auth config validation issues.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 fn validate_realm_auth_configs_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
     issues: &mut Vec<ValidationIssue>,
@@ -2295,5 +2298,22 @@ storage:
         let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
         let err = validate_sms(&config.sms).expect_err("empty region should error");
         assert!(err.to_string().contains("region"), "error: {err}");
+    }
+
+    // === HEA-1134: validate_email_all must not panic for dev transports ===
+
+    #[test]
+    fn validate_all_mailcatcher_transport_does_not_panic() {
+        let yaml =
+            "oidc:\n  issuer: \"https://auth.example.com\"\nemail:\n  transport: mailcatcher\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        // Must not panic — previously hit unreachable!() for Mailcatcher.
+        let issues = config.validate_all();
+        // Mailcatcher needs no credentials; the only expected issue (if any) is a
+        // missing `from` address, not a panic.
+        assert!(
+            issues.iter().all(|i| i.field != "email.transport"),
+            "unexpected transport-level issue: {issues:?}"
+        );
     }
 }

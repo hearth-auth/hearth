@@ -35,10 +35,11 @@ impl AuthorizeUrl {
 ///
 /// Both methods are synchronous: the federation callback path is
 /// entirely off the hot path, and all I/O happens through the
-/// injectable [`super::FederationHttpTransport`] which already uses
-/// `block_in_place` for multi-thread Tokio runtimes. Making the trait
-/// synchronous keeps it object-safe and avoids `async-trait` heap
-/// allocations that CLAUDE.md forbids on the hot path.
+/// injectable [`super::FederationHttpTransport`]. Keeping the trait
+/// synchronous preserves object safety and avoids `async-trait` heap
+/// allocations. The async boundary lives one layer up in
+/// `FederationService::callback`, which dispatches `exchange` via
+/// `tokio::task::spawn_blocking`.
 pub trait IdpConnector: Send + Sync {
     /// The connector's protocol variant (used for audit events and
     /// for the `IdpHandle` dispatch enum).

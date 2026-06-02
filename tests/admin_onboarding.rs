@@ -49,6 +49,7 @@ struct Rig {
     admin_session_id: SessionId,
 }
 
+#[allow(clippy::too_many_lines)] // TODO: split this function
 fn build_rig(pre_create_realm: bool) -> Rig {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();

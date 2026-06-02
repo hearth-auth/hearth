@@ -18,6 +18,7 @@ use std::collections::BTreeSet;
 // ===== Integration Scenario: tokens in org context carry org-scoped group paths =====
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn org_context_token_emits_org_groups_paths() {
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = h.create_realm();

@@ -29,6 +29,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `realms.<name>.applications.<key>.profile: "fapi2"` in `hearth.yaml`. The reconciler applies it on
   create and detects drift on subsequent restarts. (HEA-1040)
 
+### Security
+
+- **JTI corruption no longer bypasses replay protection** — a malformed (wrong-length) WAL entry for
+  a JWT Bearer assertion JTI previously silently decoded as epoch-0 expiry, causing the replay check
+  to pass and enabling token replay. The engine now returns an `Internal` error on unexpected byte
+  length, preventing silent overwrites of valid entries (HEA-1136).
+
 ### Fixed
 
 - **Admin UI defect batch** — 15 confirmed bugs from the 2026-05-31 QA audit (HEA-1089):
@@ -187,6 +194,21 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   leaving the invariant unverifiable. Test added; integrity check now passes across restart.
 
 ### Security
+
+- **Backup restore body capped at 4 GiB (HEA-1130)** — `POST /admin/backup/restore` previously
+  used `DefaultBodyLimit::disable()`, allowing any admin-token holder to stream an arbitrarily
+  large body and exhaust heap memory. The limit is now `4 GiB` — sufficient for the largest
+  expected backup archives while preventing OOM-kill from malicious uploads. The handler
+  already streams the body to a temporary file rather than buffering in memory, so this limit
+  gates TCP ingress rather than in-process RAM.
+
+- **DPoP nonce secret wired from config (HEA-1125)** — `AppState` was initialised with
+  `dpop_nonce_secret = [0u8; 32]` in all three constructors, making the HMAC-SHA256 nonce
+  generation trivially predictable and defeating DPoP replay protection. The secret is now
+  derived at startup from `security.dpop_nonce_secret` in `hearth.yaml`: a 64-character
+  lowercase hex value pins the key across restarts; `"auto"` (the default) generates a
+  fresh 32-byte key via `ring`'s CSPRNG on every startup. A startup assertion rejects the
+  zero key in all deployment modes.
 
 - **JAR `response_mode` override now enforced (HEA-1008)** — `JarClaims` lacked a
   `response_mode` field, so a JAR JWT could not override the outer query-string

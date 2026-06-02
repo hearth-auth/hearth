@@ -113,7 +113,11 @@ impl FederationService {
     /// - Re-reading the state bag out of storage (validated here).
     /// - Looking up a local user by email if the returned outcome is
     ///   `JitProvision` or `ConfirmLinkRequired`.
-    pub fn callback(
+    ///
+    /// The upstream token exchange (`connector.exchange`) runs on the
+    /// blocking thread pool via `spawn_blocking` so the ureq HTTP call
+    /// does not occupy the async executor thread.
+    pub async fn callback(
         &self,
         realm_id: &RealmId,
         state_token: &str,
@@ -126,7 +130,20 @@ impl FederationService {
             .engine
             .get_idp(realm_id, &bag.idp_id)?
             .ok_or(IdentityError::FederationUnknownConnector)?;
-        let identity = self.connector_for(&cfg)?.exchange(code, &bag)?;
+        let connector = self.connector_for(&cfg)?;
+
+        // ureq is a blocking client; run it on the blocking thread pool
+        // so we do not occupy the async executor thread during the HTTP
+        // round-trip. `spawn_blocking` works on any Tokio runtime flavor.
+        let code_owned = code.to_string();
+        let bag_for_exchange = bag.clone();
+        let identity =
+            tokio::task::spawn_blocking(move || connector.exchange(&code_owned, &bag_for_exchange))
+                .await
+                .map_err(|_| IdentityError::FederationUpstreamError {
+                    provider: "transport".to_string(),
+                    reason: "connector task panicked".to_string(),
+                })??;
 
         // 1. Existing link?
         if let Some(user_id) = self.engine.find_user_by_external_identity(

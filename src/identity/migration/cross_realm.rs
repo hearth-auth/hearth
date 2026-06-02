@@ -183,7 +183,14 @@ pub fn execute_cross_realm_migration(
 
     if user_ids.is_empty() {
         // Source realm has no users — write completed marker and return.
-        let _ = storage.put(&sys, &completed_key, b"done");
+        if let Err(e) = storage.put(&sys, &completed_key, b"done") {
+            warn!(
+                error = %e,
+                src_slug,
+                "migration: failed to write completion marker for empty source; \
+                 re-run may re-scan source realm unnecessarily"
+            );
+        }
         return Ok(report);
     }
 
@@ -266,7 +273,14 @@ pub fn execute_cross_realm_migration(
 
         if batch.is_empty() {
             // Source data already gone (partial prior run). Mark done.
-            let _ = storage.put(&sys, &progress_key, b"done");
+            if let Err(e) = storage.put(&sys, &progress_key, b"done") {
+                warn!(
+                    error = %e,
+                    user_uuid = %user_id.as_uuid(),
+                    "migration: failed to write per-user progress marker; \
+                     user may be re-processed on re-run"
+                );
+            }
             report.migrated += 1;
             continue;
         }
@@ -293,7 +307,14 @@ pub fn execute_cross_realm_migration(
         }
 
         // Write per-user "done" marker. From this point, restarts skip this user.
-        let _ = storage.put(&sys, &progress_key, b"done");
+        if let Err(e) = storage.put(&sys, &progress_key, b"done") {
+            warn!(
+                error = %e,
+                user_uuid = %user_id.as_uuid(),
+                "migration: failed to write per-user progress marker; \
+                 user may be re-migrated on re-run"
+            );
+        }
         report.migrated += 1;
 
         info!(
@@ -305,7 +326,14 @@ pub fn execute_cross_realm_migration(
     }
 
     // 5. Write the "completed" marker so subsequent restarts skip this migration.
-    let _ = storage.put(&sys, &completed_key, b"done");
+    if let Err(e) = storage.put(&sys, &completed_key, b"done") {
+        warn!(
+            error = %e,
+            src_slug,
+            "migration: failed to write completion marker; \
+             re-run will re-migrate all users — check storage health"
+        );
+    }
 
     info!(
         src_slug,
@@ -572,11 +600,18 @@ fn delete_source_user(
                         .and_then(serde_json::Value::as_str)
                     {
                         let disc_key = keys::encode_webauthn_discoverable(cred_id_b64);
-                        let _ = storage.delete(src_realm_id, &disc_key);
+                        if let Err(e) = storage.delete(src_realm_id, &disc_key) {
+                            warn!(
+                                error = %e,
+                                "failed to delete WebAuthn discoverable index entry during move"
+                            );
+                        }
                     }
                 }
             }
-            let _ = storage.delete(src_realm_id, &entry.key);
+            if let Err(e) = storage.delete(src_realm_id, &entry.key) {
+                warn!(error = %e, "failed to delete WebAuthn credential during move");
+            }
         }
     }
 }

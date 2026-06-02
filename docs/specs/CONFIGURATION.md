@@ -368,6 +368,66 @@ onboarding:
 
 ---
 
+### `security`
+
+Global security hardening options.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `dpop_nonce_secret` | string | `"auto"` | 32-byte HMAC secret for stateless DPoP nonce generation (RFC 9449). Absent or `"auto"`: a fresh random key is generated at each startup — safe for single-node deployments but invalidates all outstanding DPoP proofs on restart. A 64-character lowercase hex string is decoded to 32 bytes and used verbatim; use a stable hex key to keep nonces valid across rolling restarts or in multi-node deployments where all nodes must share the same secret. **Never use the all-zero key (`0000…`) in production** — the server rejects it at startup. Set via `HEARTH_DPOP_NONCE_SECRET` env var to avoid storing secrets in the YAML file. |
+
+```yaml
+security:
+  dpop_nonce_secret: "${HEARTH_DPOP_NONCE_SECRET}"  # 64-char hex, or omit for auto
+```
+
+#### `security.rate_limiting`
+
+Global per-IP and per-account rate-limit thresholds. These are the server-wide defaults; per-realm overrides live under `realms.<name>.auth.rate_limit`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `login_per_ip.max_attempts` | integer | `10` | Maximum failed login attempts from a single IP within the window before the IP is blocked. |
+| `login_per_ip.window_seconds` | integer | `60` | Sliding window length in seconds for per-IP failed-login counting. |
+| `login_per_account.max_failures` | integer | `5` | Maximum consecutive failures for a single account before it is locked out. |
+| `login_per_account.lockout_seconds` | integer | `300` | Duration (seconds) of the account lockout after `max_failures` is reached. |
+
+```yaml
+security:
+  rate_limiting:
+    login_per_ip:
+      max_attempts: 10
+      window_seconds: 60
+    login_per_account:
+      max_failures: 5
+      lockout_seconds: 300
+```
+
+##### Rate-Limit Durability After Restart
+
+Not all rate limiters survive a server restart:
+
+| Limiter | Scope | Restart-safe? |
+|---------|-------|---------------|
+| `login_per_account` (password brute-force) | per user | **Yes** — WAL-persisted and restored at startup |
+| `login_per_ip` (IP flood) | per source IP | **No** — in-memory only, cleared on restart |
+| Magic-link request rate | per email | **No** — in-memory only, cleared on restart |
+| Password-reset request rate | per email | **No** — in-memory only, cleared on restart |
+| Self-registration rate | per email / per IP | **No** — in-memory only, cleared on restart |
+
+**Security implication:** an attacker who triggers or waits for a server restart can temporarily bypass the in-memory rate limits for magic-link, password-reset, and IP-based login flows. The window is narrow — the attacker must act immediately after restart — but operators should be aware of this behaviour in rolling-restart or high-availability deployments.
+
+**Recommended mitigations:**
+
+- Deploy a reverse-proxy (nginx, Caddy, Cloudflare) with its own IP-based rate limiting in front of Hearth. Proxy-level limits are not affected by application restarts.
+- Keep restart windows short and infrequent in production.
+- Enable CAPTCHA or MFA for magic-link and password-reset flows when operating in high-threat environments.
+
+> **Future work:** WAL-persisted magic-link, password-reset, and IP rate trackers are tracked in
+> [HEA-1139](/HEA/issues/HEA-1139). Contributions welcome.
+
+---
+
 ## `realms` Section
 
 The `realms` key is a map of **slug → configuration**. When present, Hearth manages realms declaratively via YAML reconciliation at startup.
@@ -769,4 +829,9 @@ Every field's default value at a glance.
 | `auth` | `passkey_requires_mfa` | `false` |
 | `realms.<name>.auth.adaptive_mfa` | `enabled` | `false` |
 | `realms.<name>.auth.adaptive_mfa` | `recognition_window_days` | `30` |
+| `security` | `dpop_nonce_secret` | `"auto"` (random per startup) |
+| `security.rate_limiting.login_per_ip` | `max_attempts` | `10` |
+| `security.rate_limiting.login_per_ip` | `window_seconds` | `60` |
+| `security.rate_limiting.login_per_account` | `max_failures` | `5` |
+| `security.rate_limiting.login_per_account` | `lockout_seconds` | `300` |
 | `onboarding` | `enabled` | `true` |

@@ -750,12 +750,14 @@ async fn jwt_bearer_exp_too_far_future_rejected() {
         .expect("set assertion key");
 
     let audience = realm_issuer(&harness, &realm);
-    // exp = now + 601 seconds — just over the 10-minute ceiling.
+    // exp = now + 1200 seconds — 2× the 600-second ceiling, giving ample buffer
+    // against CI timing jitter (the original 601 was within 1s of the limit and
+    // failed on slow runners when even 2s of overhead was enough to slip under).
     let assertion = make_assertion(
         &assertion_key,
         &client.client_id().to_string(),
         &audience,
-        601,
+        1200,
         Some(uuid::Uuid::new_v4().to_string()),
     );
 
@@ -778,6 +780,98 @@ async fn jwt_bearer_exp_too_far_future_rejected() {
             hearth::identity::IdentityError::JwtBearerAssertionInvalid { .. }
         ),
         "expected JwtBearerAssertionInvalid for excessive lifetime, got: {err:?}"
+    );
+}
+
+// ===== Test: MEDIUM-6 — corrupted JTI bytes return Internal error (HEA-1136) =====
+
+#[tokio::test]
+async fn jwt_bearer_corrupted_jti_bytes_returns_internal_error() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let assertion_key = SigningKey::generate().expect("generate key");
+    let pk_b64 = URL_SAFE_NO_PAD.encode(assertion_key.public_key_bytes());
+
+    let client = harness
+        .identity()
+        .register_client(
+            &realm,
+            &RegisterClientRequest {
+                client_name: "Corruption Client".to_string(),
+                redirect_uris: vec![],
+                client_secret: None,
+                grant_types: vec![JWT_BEARER_GRANT.to_string()],
+                require_consent: false,
+                ..Default::default()
+            },
+        )
+        .expect("register client");
+
+    harness
+        .identity()
+        .update_client(
+            &realm,
+            client.client_id(),
+            &UpdateClientRequest {
+                assertion_public_key: Some(Some(pk_b64)),
+                ..Default::default()
+            },
+        )
+        .expect("set assertion key");
+
+    let issuer = realm_issuer(&harness, &realm);
+    let jti = uuid::Uuid::new_v4().to_string();
+    let assertion = make_assertion(
+        &assertion_key,
+        &client.client_id().to_string(),
+        &issuer,
+        60,
+        Some(jti.clone()),
+    );
+
+    // First use must succeed — this writes 8 valid bytes for the JTI.
+    harness
+        .identity()
+        .jwt_bearer_token(
+            &realm,
+            &JwtBearerRequest {
+                client_id: client.client_id().clone(),
+                assertion: assertion.clone(),
+                scope: Some("read".to_string()),
+                dpop_jkt: None,
+            },
+        )
+        .expect("first use must succeed");
+
+    // Corrupt the JTI storage entry: overwrite with 3 bytes instead of 8.
+    // Key format mirrors keys::encode_jwt_bearer_jti ("oauth:jb-jti:{jti}").
+    let jti_key = format!("oauth:jb-jti:{jti}").into_bytes();
+    harness
+        .storage()
+        .put(&realm, &jti_key, &[0u8, 1, 2])
+        .expect("corrupt storage write");
+
+    // Second use with same assertion: the engine must detect corrupted bytes
+    // and return Internal — not silently treat them as "expired" (epoch 0)
+    // and issue a new token, which would constitute a replay bypass.
+    let err = harness
+        .identity()
+        .jwt_bearer_token(
+            &realm,
+            &JwtBearerRequest {
+                client_id: client.client_id().clone(),
+                assertion,
+                scope: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect_err("corrupted JTI bytes must produce an error");
+
+    assert!(
+        matches!(err, hearth::identity::IdentityError::Internal { .. }),
+        "expected Internal error for corrupted JTI bytes, got: {err:?}"
     );
 }
 

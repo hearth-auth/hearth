@@ -66,6 +66,11 @@ pub struct CleanupStats {
     pub par_requests_deleted: u64,
     /// JAR (RFC 9101) JTI replay-store entries swept.
     pub jar_jtis_deleted: u64,
+    /// In-memory rate-tracker entries pruned across all five maps.
+    ///
+    /// Rate tracker `HashMap`s are not backed by storage; they are pruned
+    /// in the engine's `sweep_expired` after the storage sweep completes.
+    pub rate_trackers_pruned: u64,
     /// Number of entity-type sweeps that encountered an error.
     pub errors: u64,
 }
@@ -79,6 +84,7 @@ impl CleanupStats {
             + self.grant_families_deleted
             + self.par_requests_deleted
             + self.jar_jtis_deleted
+            + self.rate_trackers_pruned
     }
 }
 
@@ -198,12 +204,11 @@ pub(crate) fn sweep_fingerprints(
 
     let mut stats = FingerprintSweepStats::default();
     for entry in &entries {
-        if entry.value.len() != 8 {
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
+            tracing::warn!(key = ?entry.key, "cleanup: malformed fingerprint expiry entry, skipping");
             continue;
-        }
-        #[allow(clippy::unwrap_used)]
-        // INVARIANT: length is checked to be exactly 8 above.
-        let expires_at = i64::from_le_bytes(entry.value.as_slice().try_into().unwrap());
+        };
+        let expires_at = i64::from_le_bytes(bytes);
         if expires_at <= now_secs {
             storage.delete(realm_id, &entry.key)?;
             stats.evicted += 1;
@@ -403,13 +408,12 @@ pub(crate) fn sweep_jar_jtis(
 
     let mut deleted: u64 = 0;
     for entry in &entries {
-        if entry.value.len() != 8 {
-            // Legacy entries stored as b"1" — leave for cascade realm deletion.
+        // Legacy b"1" entries and genuinely malformed entries both fail this conversion;
+        // legacy entries are left for cascade realm deletion and do not warrant a warning.
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
             continue;
-        }
-        #[allow(clippy::unwrap_used)]
-        // INVARIANT: length is checked to be exactly 8 above.
-        let expires_at = i64::from_le_bytes(entry.value.as_slice().try_into().unwrap());
+        };
+        let expires_at = i64::from_le_bytes(bytes);
         if expires_at <= now_secs {
             storage.delete(realm_id, &entry.key)?;
             deleted += 1;
@@ -1003,6 +1007,54 @@ mod tests {
         assert_eq!(
             stats.jar_jtis_deleted, 1,
             "sweep_expired must include JAR JTI sweep"
+        );
+    }
+
+    #[test]
+    fn sweep_fingerprints_malformed_entry_is_skipped() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let user = crate::core::UserId::generate();
+
+        // Seed a valid expired entry alongside a malformed one (wrong byte length).
+        seed_fingerprint(&s, &realm, &user, 1, NOW_SECS - 1);
+        let bad_key = keys::encode_device_fp(&user, &format!("{:0>64x}", 99u8));
+        s.put(&realm, &bad_key, b"bad").expect("put malformed");
+
+        // Must not panic; valid expired entry is deleted, malformed entry is left in place.
+        let stats = sweep_fingerprints(&realm, &s, NOW_SECS).expect("sweep with malformed entry");
+        assert_eq!(
+            stats.evicted, 1,
+            "only the valid expired entry should be evicted"
+        );
+        assert!(
+            s.get(&realm, &bad_key).expect("get").is_some(),
+            "malformed entry must be skipped, not deleted"
+        );
+    }
+
+    #[test]
+    fn sweep_jar_jtis_malformed_and_legacy_entries_are_skipped() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        // Seed a valid expired entry, a legacy b"1" entry, and a malformed entry.
+        seed_jar_jti(&s, &realm, "expired-ok", NOW_SECS - 1);
+        let legacy_key = keys::encode_jar_jti("legacy-jti");
+        s.put(&realm, &legacy_key, b"1").expect("put legacy");
+        let bad_key = keys::encode_jar_jti("malformed-jti");
+        s.put(&realm, &bad_key, b"bad").expect("put malformed");
+
+        // Must not panic; only the valid expired entry is deleted.
+        let deleted = sweep_jar_jtis(&realm, &s, NOW_SECS).expect("sweep with legacy/malformed");
+        assert_eq!(deleted, 1, "only the valid expired entry should be deleted");
+        assert!(
+            s.get(&realm, &legacy_key).expect("get").is_some(),
+            "legacy b\"1\" entry must survive"
+        );
+        assert!(
+            s.get(&realm, &bad_key).expect("get").is_some(),
+            "malformed entry must survive"
         );
     }
 }

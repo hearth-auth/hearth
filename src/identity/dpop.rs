@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use base64::Engine as _;
 use ring::{digest, hmac, signature};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 use crate::identity::error::IdentityError;
 
@@ -376,8 +377,13 @@ pub fn current_dpop_nonce(secret: &[u8; 32], now_secs: i64) -> String {
 /// grace for clock drift and window transitions).
 pub fn is_valid_dpop_nonce(secret: &[u8; 32], nonce: &str, now_secs: i64) -> bool {
     let current_window = now_secs / DPOP_NONCE_WINDOW_SECS;
-    nonce == compute_dpop_nonce(secret, current_window)
-        || nonce == compute_dpop_nonce(secret, current_window - 1)
+    let cur = compute_dpop_nonce(secret, current_window);
+    let prev = compute_dpop_nonce(secret, current_window - 1);
+    // Bitwise | (not ||) so both ct_eq calls always execute — no short-circuit timing oracle.
+    // Residual: subtle's ct_eq returns early on length mismatch, but compute_dpop_nonce always
+    // produces a fixed 43-byte base64url string (public via DPoP-Nonce header), so no secret
+    // is disclosed by the length fast-path.
+    (nonce.as_bytes().ct_eq(cur.as_bytes()) | nonce.as_bytes().ct_eq(prev.as_bytes())).into()
 }
 
 /// Computes the `ath` claim value: `BASE64URL(SHA-256(ASCII(access_token)))`.
@@ -500,6 +506,18 @@ mod tests {
         let now = 2000 * DPOP_NONCE_WINDOW_SECS;
         let old = compute_dpop_nonce(&secret, now / DPOP_NONCE_WINDOW_SECS - 2);
         assert!(!is_valid_dpop_nonce(&secret, &old, now));
+    }
+
+    #[test]
+    fn nonce_tampered_rejected() {
+        // Ensure a single-character mutation of a valid nonce is rejected.
+        // This exercises the constant-time rejection path.
+        let secret = [99u8; 32];
+        let now = 500 * DPOP_NONCE_WINDOW_SECS + 42;
+        let mut tampered = current_dpop_nonce(&secret, now).into_bytes();
+        tampered[0] ^= 0x01;
+        let tampered_str = String::from_utf8(tampered).expect("utf8");
+        assert!(!is_valid_dpop_nonce(&secret, &tampered_str, now));
     }
 
     #[test]

@@ -662,6 +662,7 @@ pub struct VerifyEmailConfirmQuery {
 /// verified in storage (auto-clear scenario for migration artifacts). If so,
 /// clears the VERIFY_EMAIL action and advances the OIDC flow without sending
 /// another email (AC-8 / OQ-3 resolution).
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
     let Some(token) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
@@ -821,6 +822,7 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
 /// VERIFY_EMAIL from the RA pending list and calls
 /// [`resume_oidc_flow`] or [`next_required_action`]. On failure, renders an
 /// error page with a link to resend the verification email.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn verify_email_confirm(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -991,6 +993,7 @@ pub async fn update_password_page(
 /// RA cookie is left intact (the token remains valid for the remaining TTL).
 /// On success the password credential is replaced, the action is removed from
 /// the user record, and the OIDC flow resumes.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn update_password_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -1290,6 +1293,7 @@ pub async fn enroll_phone_otp_send(
 
 /// Verifies the submitted OTP code, stores the phone as verified, clears
 /// `ENROLL_PHONE_OTP` from the user's required actions, and advances the flow.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn enroll_phone_otp_verify_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,

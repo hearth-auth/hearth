@@ -375,6 +375,55 @@ async fn no_dpop_yields_bearer_token_with_nonce_header() {
     );
 }
 
+// ===== Scenario DP-Config: dpop_nonce_secret wiring =====
+
+/// `AppState::with_dpop_nonce_secret` must store exactly the bytes it receives.
+#[tokio::test]
+async fn app_state_with_dpop_nonce_secret_stores_value() {
+    let h = common::TestHarness::embedded().await.unwrap();
+    let secret = [0xDE_u8; 32];
+    let state =
+        AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()).with_dpop_nonce_secret(secret);
+    assert_eq!(state.dpop_nonce_secret, secret);
+}
+
+/// The auto-generated DPoP nonce secret must not be the zero key.
+///
+/// This mirrors the main.rs startup path: when `security.dpop_nonce_secret`
+/// is absent the server generates a random key. If `ring`'s CSPRNG ever
+/// returned all-zeros we'd catch it here.
+#[test]
+fn auto_generated_dpop_nonce_secret_is_nonzero() {
+    use ring::rand::SecureRandom as _;
+    let rng = ring::rand::SystemRandom::new();
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes).expect("ring CSPRNG must succeed");
+    assert_ne!(
+        bytes, [0u8; 32],
+        "auto-generated nonce secret must not be the zero key"
+    );
+}
+
+/// A 64-char hex config value decodes to the expected bytes.
+///
+/// Mirrors the hex-decode branch in main.rs.
+#[test]
+fn dpop_nonce_secret_hex_decodes_correctly() {
+    let hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    assert_eq!(hex.len(), 64);
+    let mut bytes = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let h = std::str::from_utf8(chunk).unwrap();
+        bytes[i] = u8::from_str_radix(h, 16).unwrap();
+    }
+    let expected: [u8; 32] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+        0x1f, 0x20,
+    ];
+    assert_eq!(bytes, expected);
+}
+
 // ===== Scenario DP-6: htm mismatch rejected =====
 
 #[tokio::test]

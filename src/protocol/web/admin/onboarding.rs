@@ -274,6 +274,7 @@ pub struct AppCreateWizardForm {
 }
 
 /// `POST /ui/admin/onboarding/app` — creates the OAuth application.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn admin_onboarding_app_post(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -461,6 +462,7 @@ pub struct InviteWizardForm {
 }
 
 /// `POST /ui/admin/onboarding/invite` — creates a user and sends a setup link.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn admin_onboarding_invite_post(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,

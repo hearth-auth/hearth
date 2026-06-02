@@ -48,67 +48,61 @@ pub trait FederationHttpTransport: Send + Sync {
 
 /// Production transport built on `ureq`.
 ///
-/// Uses `block_in_place` when called from a multi-thread Tokio runtime
-/// (same idiom as `src/identity/email/http.rs::UreqTransport`).
+/// A plain synchronous implementation. Callers that run inside a Tokio
+/// async context (e.g. `FederationService::callback`) MUST wrap calls to
+/// `send` in `tokio::task::spawn_blocking` so the blocking ureq I/O runs
+/// on the dedicated blocking thread pool instead of occupying an async
+/// executor thread.
 pub struct UreqFederationTransport;
 
 impl FederationHttpTransport for UreqFederationTransport {
     fn send(&self, request: &FedHttpRequest) -> Result<FedHttpResponse, IdentityError> {
-        let do_request = || -> Result<FedHttpResponse, IdentityError> {
-            // ureq 3.x distinguishes WithBody vs WithoutBody at the type
-            // level, so we branch at the top and build each call path
-            // independently.
-            let response = match request.method {
-                "GET" => {
-                    let mut req = ureq::get(&request.url);
-                    for (name, value) in &request.headers {
-                        req = req.header(name.as_str(), value.as_str());
-                    }
-                    req.call()
-                        .map_err(|e| IdentityError::FederationUpstreamError {
-                            provider: "transport".to_string(),
-                            reason: format!("HTTP request failed: {e}"),
-                        })?
+        // ureq 3.x distinguishes WithBody vs WithoutBody at the type
+        // level, so we branch at the top and build each call path
+        // independently.
+        let response = match request.method {
+            "GET" => {
+                let mut req = ureq::get(&request.url);
+                for (name, value) in &request.headers {
+                    req = req.header(name.as_str(), value.as_str());
                 }
-                "POST" => {
-                    let mut req = ureq::post(&request.url);
-                    for (name, value) in &request.headers {
-                        req = req.header(name.as_str(), value.as_str());
-                    }
-                    if let Some(ct) = &request.content_type {
-                        req = req.header("Content-Type", ct.as_str());
-                    }
-                    req.send(&request.body)
-                        .map_err(|e| IdentityError::FederationUpstreamError {
-                            provider: "transport".to_string(),
-                            reason: format!("HTTP request failed: {e}"),
-                        })?
-                }
-                other => {
-                    return Err(IdentityError::FederationUpstreamError {
+                req.call()
+                    .map_err(|e| IdentityError::FederationUpstreamError {
                         provider: "transport".to_string(),
-                        reason: format!("unsupported HTTP method: {other}"),
-                    });
+                        reason: format!("HTTP request failed: {e}"),
+                    })?
+            }
+            "POST" => {
+                let mut req = ureq::post(&request.url);
+                for (name, value) in &request.headers {
+                    req = req.header(name.as_str(), value.as_str());
                 }
-            };
-
-            let status: u16 = response.status().into();
-            let body = response.into_body().read_to_string().map_err(|e| {
-                IdentityError::FederationUpstreamError {
+                if let Some(ct) = &request.content_type {
+                    req = req.header("Content-Type", ct.as_str());
+                }
+                req.send(&request.body)
+                    .map_err(|e| IdentityError::FederationUpstreamError {
+                        provider: "transport".to_string(),
+                        reason: format!("HTTP request failed: {e}"),
+                    })?
+            }
+            other => {
+                return Err(IdentityError::FederationUpstreamError {
                     provider: "transport".to_string(),
-                    reason: format!("failed to read response body: {e}"),
-                }
-            })?;
-
-            Ok(FedHttpResponse { status, body })
+                    reason: format!("unsupported HTTP method: {other}"),
+                });
+            }
         };
 
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                tokio::task::block_in_place(do_request)
+        let status: u16 = response.status().into();
+        let body = response.into_body().read_to_string().map_err(|e| {
+            IdentityError::FederationUpstreamError {
+                provider: "transport".to_string(),
+                reason: format!("failed to read response body: {e}"),
             }
-            _ => do_request(),
-        }
+        })?;
+
+        Ok(FedHttpResponse { status, body })
     }
 }
 
@@ -267,5 +261,28 @@ mod tests {
         fn assert_object_safe(_: &dyn FederationHttpTransport) {}
         let stub = StubFederationTransport::new();
         assert_object_safe(&stub);
+    }
+
+    /// Verifies `UreqFederationTransport::send` is a plain sync function
+    /// with no runtime-flavor branching. The service layer wraps it in
+    /// `spawn_blocking`, so this test exercises that call path directly.
+    ///
+    /// We point at port 1 (always refused) to keep the test offline;
+    /// the important property is "no panic from block_in_place".
+    #[tokio::test]
+    async fn ureq_transport_send_is_sync_callable_from_spawn_blocking() {
+        let result = tokio::task::spawn_blocking(|| {
+            UreqFederationTransport.send(&FedHttpRequest {
+                method: "GET",
+                url: "http://127.0.0.1:1".to_string(),
+                headers: vec![],
+                body: vec![],
+                content_type: None,
+            })
+        })
+        .await
+        .expect("spawn_blocking completed — transport is sync and panic-free");
+        // Connection refused is the expected outcome; what matters is no panic.
+        assert!(result.is_err(), "port 1 should refuse the connection");
     }
 }

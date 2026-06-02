@@ -356,6 +356,7 @@ impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateUserForm {
 }
 
 /// `POST /ui/admin/users/new`.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn admin_user_create_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -2723,6 +2724,7 @@ struct ImportSummary {
 }
 
 /// `POST /ui/admin/realms/{realm}/users/import` — process uploaded CSV.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn admin_users_import_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -2841,6 +2843,7 @@ pub async fn admin_users_import_submit(
 }
 
 /// Parses the CSV text and creates/updates users, returning a summary.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 fn process_csv_import(
     state: &Arc<WebState>,
     realm_id: &crate::core::RealmId,
@@ -3132,6 +3135,7 @@ pub struct PatchRequiredActionsBody {
 /// strings receive 400.
 ///
 /// Returns 200 with the updated [`User`] JSON.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub async fn admin_api_user_required_actions_patch(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,

@@ -404,6 +404,7 @@ fn rewrite_keys_file(
 /// If decryption fails with `host_key` and `prev_host_key` is provided,
 /// falls back to the previous key. Realms decrypted via the fallback are
 /// recorded in `needs_reencrypt`; realms that fail both keys go to `failed`.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 fn load_keks_from_file(
     path: &Path,
     host_key: &HostKey,

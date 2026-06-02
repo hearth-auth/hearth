@@ -76,6 +76,17 @@ const BODY_LIMIT_DEFAULT: usize = 1024 * 1024;
 /// of resource-exhaustion attempts.
 const BODY_LIMIT_SMALL: usize = 64 * 1024;
 
+/// Maximum body size (4 GiB) for the `POST /admin/backup/restore` endpoint.
+///
+/// The restore endpoint accepts a multipart upload containing a full backup
+/// archive, which may legitimately be several gigabytes for large realms.
+/// This cap prevents an admin-token holder from streaming an arbitrarily
+/// large body that would exhaust heap memory and trigger OOM-kill.
+///
+/// Backups are streamed to a temporary file before parsing, so this limit
+/// gates network ingress rather than in-process RAM usage.
+pub const BACKUP_RESTORE_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
+
 /// Shared application state passed to all route handlers.
 pub struct AppState {
     /// The identity engine for all domain operations.
@@ -227,6 +238,15 @@ impl AppState {
     /// Attaches a cluster engine, enabling the `/admin/cluster/*` endpoints.
     pub fn with_cluster(mut self, engine: Arc<ClusterEngine>) -> Self {
         self.cluster = Some(engine);
+        self
+    }
+
+    /// Sets the 32-byte HMAC secret used for stateless DPoP nonce generation.
+    ///
+    /// **Must be called before serving any requests.** The zero key `[0u8; 32]`
+    /// is rejected at startup by an assertion in `main.rs`.
+    pub fn with_dpop_nonce_secret(mut self, secret: [u8; 32]) -> Self {
+        self.dpop_nonce_secret = secret;
         self
     }
 }
@@ -424,6 +444,7 @@ fn make_ip_rate_limit_response(retry_after_secs: u32) -> Response {
 /// Builds the HTTP router with all configured routes.
 ///
 /// The returned router is ready to be served with [`serve`].
+#[allow(clippy::too_many_lines)] // TODO: split this function
 pub fn router(state: Arc<AppState>) -> Router {
     let admin_routes = Router::new()
         .route(
@@ -547,7 +568,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/backup", axum::routing::post(admin_backup_create))
         .route(
             "/backup/restore",
-            axum::routing::post(admin_backup_restore).route_layer(DefaultBodyLimit::disable()),
+            axum::routing::post(admin_backup_restore)
+                .route_layer(DefaultBodyLimit::max(BACKUP_RESTORE_BODY_LIMIT)),
         )
         .route(
             "/realms/{realm_id}/users/{user_id}/required-actions",
@@ -677,7 +699,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::delete(webauthn_delete_credential),
         )
         .nest("/admin", admin_routes)
-        .route("/admin/bootstrap", axum::routing::post(admin_bootstrap))
+        // Registered only in dev mode so the route is absent from the table in
+        // production, preventing fingerprinting via port scanners (HEA-1138).
+        .merge({
+            let mut r: axum::Router<Arc<AppState>> = axum::Router::new();
+            if state.dev_mode {
+                r = r.route("/admin/bootstrap", axum::routing::post(admin_bootstrap));
+            }
+            r
+        })
         .nest("/scim/v2", crate::protocol::scim::router())
         .merge(crate::protocol::web::openapi::openapi_router())
         .nest(
@@ -1097,7 +1127,15 @@ async fn create_user(
 
     let request = crate::identity::CreateUserRequest::from(body);
 
-    match state.identity.create_user(&realm_id, &request) {
+    let identity = Arc::clone(&state.identity);
+    let result = tokio::task::spawn_blocking(move || identity.create_user(&realm_id, &request))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "create_user spawn_blocking panicked");
+            Err(crate::identity::IdentityError::Storage(Box::new(e)))
+        });
+
+    match result {
         Ok(user) => (
             StatusCode::CREATED,
             Json(proto_to_rest_json(&pb::User::from(&user))),
@@ -1434,6 +1472,7 @@ fn extract_realm_id(headers: &HeaderMap) -> Result<RealmId, (StatusCode, Json<se
 ///
 /// Error messages are intentionally vague to prevent information leakage
 /// per the cross-cutting security requirements.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 fn identity_error_to_response(
     err: &crate::identity::IdentityError,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -2909,6 +2948,7 @@ impl PaginationParams {
 
 /// Admin: list users (paginated), search when `?search=<q>` is present, or
 /// field-filter when `?email=`, `?username=`, or `?status=` are present.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn admin_list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3247,7 +3287,16 @@ async fn admin_create_user(
 
     let request = crate::identity::CreateUserRequest::from(body);
 
-    match state.identity.create_user(&auth.realm_id, &request) {
+    let identity = Arc::clone(&state.identity);
+    let realm_id = auth.realm_id.clone();
+    let result = tokio::task::spawn_blocking(move || identity.create_user(&realm_id, &request))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "admin_create_user spawn_blocking panicked");
+            Err(crate::identity::IdentityError::Storage(Box::new(e)))
+        });
+
+    match result {
         Ok(user) => {
             let _ = state.audit.append(&CreateAuditEvent {
                 realm_id: auth.realm_id.clone(),
@@ -3716,6 +3765,7 @@ async fn admin_delete_realm(
 /// Validates action strings against the v1 allowlist, adds/removes from the
 /// user's list atomically, emits one audit event per modified action, and
 /// returns the updated user JSON.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn admin_patch_user_required_actions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3868,6 +3918,7 @@ async fn admin_patch_user_required_actions(
 ///
 /// Replaces the realm's default required-actions list. Only affects users
 /// created after this call. Unknown action strings return 400.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn admin_patch_realm_config(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -5079,6 +5130,7 @@ fn dev_seed_system_admin(state: &AppState) {
 ///
 /// Only available when `AppState.dev_mode` is `true` (i.e., `--dev` flag).
 /// Returns 404 in production mode.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if !state.dev_mode {
         return (
@@ -7386,6 +7438,7 @@ struct BackupRestoreParams {
 /// Response: `application/octet-stream` with `Content-Disposition: attachment`.
 /// No passphrase encryption — TLS provides transport security; encryption is
 /// CLI-only (`--encrypt` flag on `hearth backup create`).
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn admin_backup_create(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -7544,6 +7597,7 @@ async fn admin_backup_create(
 /// - `dry_run=true` — validate without writing
 ///
 /// Response: JSON `ImportReport` with per-realm counts and any conflicts.
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn admin_backup_restore(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -8433,6 +8487,7 @@ mod tests {
     /// `FapiViolation`.  This test exercises the full HTTP deserialisation path and
     /// MUST return 201 with the fix applied.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // TODO: split this function
     async fn par_jar_accepted_under_fapi_advanced() {
         use crate::identity::{
             CreateRealmRequest, FapiProfile, RegisterClientRequest, UpdateRealmRequest,

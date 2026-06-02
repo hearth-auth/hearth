@@ -13,6 +13,8 @@
 
 use std::io::IsTerminal as _;
 
+use thiserror::Error;
+
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig, WithTonicConfig};
 use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
@@ -27,6 +29,15 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::{ObservabilityConfig, OtlpConfig, OtlpProtocol};
+
+/// Error returned when the OTLP telemetry pipeline cannot be configured.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum TelemetryError {
+    /// The OTLP span exporter builder failed (bad endpoint, invalid header, etc.).
+    #[error("failed to build OTLP span exporter: {0}")]
+    OtlpBuild(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+}
 
 /// Holds the live OTel tracer provider. Dropping this guard flushes all
 /// pending spans and shuts down the export pipeline.
@@ -45,8 +56,14 @@ impl Drop for TracingGuard {
 /// Initialize the global `tracing` subscriber.
 ///
 /// When `config.otlp` is `Some`, a `BatchSpanProcessor` is wired in and
-/// spans flow to the configured OTLP collector via gRPC or HTTP. When it is
-/// `None`, only the fmt layer is installed (identical to the previous setup).
+/// spans flow to the configured OTLP collector via gRPC or HTTP. If the OTLP
+/// exporter cannot be built (bad endpoint URL, invalid header value, etc.),
+/// the function falls back to logging-only mode and emits a `warn`-level
+/// tracing event describing the failure — the server continues to start
+/// normally.
+///
+/// When `config.otlp` is `None`, or when OTLP setup fails, only the fmt
+/// layer is installed (identical to the previous setup).
 ///
 /// When `config.dev_mode` is true or stdout is a TTY, a compact pretty
 /// formatter is used: `HH:MM:SS` timestamps, ANSI-colored levels (TTY only),
@@ -72,14 +89,22 @@ pub fn init(config: &ObservabilityConfig) -> TracingGuard {
     let use_pretty = !json && (config.dev_mode || is_tty);
     let ansi = is_tty;
 
-    // Build the OTel layer and provider only when configured.
-    if let Some(otlp_cfg) = &config.otlp {
-        let provider = build_provider(otlp_cfg);
+    // Try to build the OTLP provider. On failure, capture the error and fall
+    // back to logging-only mode; we emit a warn! after the subscriber is up.
+    let (provider, otlp_error) = match config.otlp.as_ref() {
+        Some(cfg) => match build_provider(cfg) {
+            Ok(p) => (Some(p), None),
+            Err(e) => (None, Some(e)),
+        },
+        None => (None, None),
+    };
+
+    if let Some(ref p) = provider {
         let tracer = {
             use opentelemetry::trace::TracerProvider as _;
-            provider.tracer("hearth")
+            p.tracer("hearth")
         };
-        opentelemetry::global::set_tracer_provider(provider.clone());
+        opentelemetry::global::set_tracer_provider(p.clone());
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
         if json {
@@ -101,30 +126,29 @@ pub fn init(config: &ObservabilityConfig) -> TracingGuard {
                 .with(tracing_subscriber::fmt::layer())
                 .init();
         }
-
-        TracingGuard {
-            provider: Some(provider),
-        }
+    } else if json {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else if use_pretty {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().event_format(DevFormatter { ansi }))
+            .init();
     } else {
-        if json {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer().json())
-                .init();
-        } else if use_pretty {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer().event_format(DevFormatter { ansi }))
-                .init();
-        } else {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer())
-                .init();
-        }
-
-        TracingGuard { provider: None }
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
     }
+
+    // Subscriber is now installed; safe to use tracing macros.
+    if let Some(ref e) = otlp_error {
+        tracing::warn!(error = %e, "OTLP exporter unavailable; traces disabled");
+    }
+
+    TracingGuard { provider }
 }
 
 // ── private helpers ──────────────────────────────────────────────────────────
@@ -198,19 +222,19 @@ fn short_target(target: &str) -> String {
     }
 }
 
-fn build_provider(cfg: &OtlpConfig) -> SdkTracerProvider {
+fn build_provider(cfg: &OtlpConfig) -> Result<SdkTracerProvider, TelemetryError> {
     let resource = Resource::builder()
         .with_attribute(KeyValue::new(SERVICE_NAME, cfg.service_name.clone()))
         .build();
-    let exporter = build_exporter(cfg);
+    let exporter = build_exporter(cfg)?;
     let processor = BatchSpanProcessor::builder(exporter).build();
-    SdkTracerProvider::builder()
+    Ok(SdkTracerProvider::builder()
         .with_span_processor(processor)
         .with_resource(resource)
-        .build()
+        .build())
 }
 
-fn build_exporter(cfg: &OtlpConfig) -> opentelemetry_otlp::SpanExporter {
+fn build_exporter(cfg: &OtlpConfig) -> Result<opentelemetry_otlp::SpanExporter, TelemetryError> {
     let endpoint = cfg.effective_endpoint();
 
     match cfg.protocol {
@@ -226,7 +250,7 @@ fn build_exporter(cfg: &OtlpConfig) -> opentelemetry_otlp::SpanExporter {
 
             builder
                 .build()
-                .unwrap_or_else(|e| panic!("failed to build OTLP gRPC span exporter: {e}"))
+                .map_err(|e| TelemetryError::OtlpBuild(Box::new(e)))
         }
         OtlpProtocol::Http => {
             let mut builder = opentelemetry_otlp::SpanExporter::builder()
@@ -239,7 +263,7 @@ fn build_exporter(cfg: &OtlpConfig) -> opentelemetry_otlp::SpanExporter {
 
             builder
                 .build()
-                .unwrap_or_else(|e| panic!("failed to build OTLP HTTP span exporter: {e}"))
+                .map_err(|e| TelemetryError::OtlpBuild(Box::new(e)))
         }
     }
 }
@@ -261,7 +285,35 @@ fn tonic_metadata_from_headers(
 
 #[cfg(test)]
 mod tests {
-    use super::short_target;
+    use super::{build_exporter, short_target};
+    use crate::config::{OtlpConfig, OtlpProtocol};
+
+    fn bad_endpoint_cfg(protocol: OtlpProtocol) -> OtlpConfig {
+        OtlpConfig {
+            endpoint: Some("not a valid uri at all".to_string()),
+            protocol,
+            headers: std::collections::HashMap::new(),
+            service_name: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn build_exporter_grpc_returns_err_on_invalid_endpoint() {
+        let result = build_exporter(&bad_endpoint_cfg(OtlpProtocol::Grpc));
+        assert!(
+            result.is_err(),
+            "expected Err for invalid gRPC endpoint, got Ok"
+        );
+    }
+
+    #[test]
+    fn build_exporter_http_returns_err_on_invalid_endpoint() {
+        let result = build_exporter(&bad_endpoint_cfg(OtlpProtocol::Http));
+        assert!(
+            result.is_err(),
+            "expected Err for invalid HTTP endpoint, got Ok"
+        );
+    }
 
     #[test]
     fn short_target_three_segments() {

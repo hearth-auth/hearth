@@ -143,6 +143,7 @@ pub async fn callback(
     callback_impl(state, headers, realm_id, q).await
 }
 
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn callback_impl(
     state: Arc<WebState>,
     headers: HeaderMap,
@@ -170,7 +171,10 @@ async fn callback_impl(
         _ => crate::identity::federation::LinkMode::Confirm,
     };
     let now = Timestamp::from_micros(now_micros());
-    let (bag, outcome) = match service.callback(&realm_id, &q.state, &code, link_mode, now) {
+    let (bag, outcome) = match service
+        .callback(&realm_id, &q.state, &code, link_mode, now)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "federation callback failed");

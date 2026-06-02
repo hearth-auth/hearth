@@ -218,6 +218,7 @@ async fn oidc_core_required_claims_and_signing() {
 // ==========================================================================
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // TODO: split this function
 async fn oidc_discovery_all_required_fields() {
     let harness = common::TestHarness::embedded()
         .await
