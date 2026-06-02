@@ -1580,7 +1580,7 @@ pub async fn admin_config_editor(
     RequireAdmin(session): RequireAdmin,
     Query(params): Query<ConfigEditorParams>,
 ) -> Response {
-    let (yaml_content, read_only) = read_config_yaml(&state);
+    let (yaml_content, read_only) = read_config_yaml(&state).await;
     let config_json = yaml_to_editor_json(&yaml_content).unwrap_or_else(|_| "{}".to_string());
 
     let flash = params.flash.map(|msg| {
@@ -1626,7 +1626,7 @@ pub async fn admin_config_editor_preview(
     let diff = if validation_error.is_some() {
         String::new()
     } else {
-        let (old_yaml, _) = read_config_yaml(&state);
+        let (old_yaml, _) = read_config_yaml(&state).await;
         compute_unified_diff(&old_yaml, &new_yaml)
     };
 
@@ -1675,7 +1675,7 @@ pub async fn admin_config_editor_apply(
         );
     };
 
-    if let Err(e) = std::fs::write(config_path, &new_yaml) {
+    if let Err(e) = tokio::fs::write(config_path, &new_yaml).await {
         tracing::error!(error = %e, "failed to write config file");
         return render_config_editor_with_flash(
             &state,
@@ -1703,7 +1703,7 @@ pub async fn admin_config_editor_export(
     State(state): State<Arc<WebState>>,
     RequireAdmin(_session): RequireAdmin,
 ) -> Response {
-    let (yaml_content, _) = read_config_yaml(&state);
+    let (yaml_content, _) = read_config_yaml(&state).await;
 
     (
         [
@@ -1736,9 +1736,9 @@ pub async fn admin_config_editor_visual_export(
 
 /// Reads the raw YAML from the config file on disk.
 /// Returns `(yaml_content, read_only)`. `read_only` is true when no file path is available.
-fn read_config_yaml(state: &Arc<WebState>) -> (String, bool) {
+async fn read_config_yaml(state: &Arc<WebState>) -> (String, bool) {
     match &state.config_path {
-        Some(path) => match std::fs::read_to_string(path) {
+        Some(path) => match tokio::fs::read_to_string(path).await {
             Ok(content) => (content, false),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to read config file for editor");
@@ -1851,7 +1851,7 @@ pub async fn admin_config_editor_visual_preview(
     let diff = if validation_error.is_some() {
         String::new()
     } else {
-        let (old_yaml, _) = read_config_yaml(&state);
+        let (old_yaml, _) = read_config_yaml(&state).await;
         compute_unified_diff(&old_yaml, &new_yaml)
     };
 
@@ -1970,7 +1970,7 @@ pub async fn admin_config_editor_visual_apply(
         .into_response();
     };
 
-    if let Err(e) = std::fs::write(config_path, &new_yaml) {
+    if let Err(e) = tokio::fs::write(config_path, &new_yaml).await {
         tracing::error!(error = %e, "failed to write config file (visual editor)");
         return axum::response::Json(serde_json::json!({
             "ok": false,
