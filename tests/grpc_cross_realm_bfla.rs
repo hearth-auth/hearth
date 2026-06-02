@@ -186,7 +186,7 @@ async fn cross_realm_delete_realm_denied() {
         "cross-realm delete_realm must be denied, got Ok"
     );
     assert_eq!(
-        result.unwrap_err().code(),
+        result.expect_err("must error").code(),
         Code::PermissionDenied,
         "must return PermissionDenied"
     );
@@ -212,7 +212,7 @@ async fn cross_realm_get_realm_denied() {
         .await;
 
     assert!(result.is_err(), "cross-realm get_realm must be denied");
-    assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
+    assert_eq!(result.expect_err("must error").code(), Code::PermissionDenied);
 }
 
 /// Realm-A admin calling update_realm on realm-B must get PermissionDenied.
@@ -239,7 +239,7 @@ async fn cross_realm_update_realm_denied() {
         .await;
 
     assert!(result.is_err(), "cross-realm update_realm must be denied");
-    assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
+    assert_eq!(result.expect_err("must error").code(), Code::PermissionDenied);
 }
 
 /// Non-system realm admin calling create_realm must get PermissionDenied.
@@ -266,7 +266,7 @@ async fn cross_realm_create_realm_denied() {
         result.is_err(),
         "non-system realm admin must not be able to create realms"
     );
-    assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
+    assert_eq!(result.expect_err("must error").code(), Code::PermissionDenied);
 }
 
 /// Realm-A admin calling list_realms must see only their own realm, not realm-B.
@@ -338,7 +338,7 @@ async fn system_admin_can_get_any_realm() {
         "system realm admin must be able to get any realm, got: {result:?}"
     );
     assert_eq!(
-        result.unwrap().into_inner().id,
+        result.expect("must succeed").into_inner().id,
         realm_a.as_uuid().to_string()
     );
 }
@@ -366,7 +366,7 @@ async fn realm_admin_can_get_own_realm() {
         "realm admin must be able to get own realm, got: {result:?}"
     );
     assert_eq!(
-        result.unwrap().into_inner().id,
+        result.expect("must succeed").into_inner().id,
         realm_a.as_uuid().to_string()
     );
 }

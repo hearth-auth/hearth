@@ -140,7 +140,7 @@ async fn role_crud_happy_path() {
     // Update.
     let (status, _body) = send(
         &ctx,
-        "PUT",
+        "PATCH",
         &format!("/admin/roles/{id}"),
         Some(json!({
             "name": "docs.editor.v2",
@@ -236,7 +236,7 @@ async fn reserved_permission_rejected_on_update() {
 
     let (status, body) = send(
         &ctx,
-        "PUT",
+        "PATCH",
         &format!("/admin/roles/{id}"),
         Some(json!({
             "name": null,

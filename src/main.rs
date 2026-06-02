@@ -638,56 +638,57 @@ async fn run_serve(
     // `storage` is what the rest of the app uses: in cluster mode it is
     // wrapped in ClusterStorageAdapter so writes route through Raft quorum
     // commit; in single-node mode it is a zero-overhead passthrough.
-    let (inner_storage, app_storage_config): (Arc<EmbeddedStorageEngine>, StorageConfig) =
-        if config.dev_mode {
-            let data_path = if let Ok(dir) = std::env::var("HEARTH_DEV_DATA_DIR") {
-                PathBuf::from(dir)
-            } else {
-                let temp_dir = tempfile::tempdir()?;
-                temp_dir.keep()
-            };
-            info!(path = %data_path.display(), "using data directory (dev mode)");
-            let mut storage_config = StorageConfig::dev(data_path);
-            storage_config.compaction = CompactionConfig {
-                enabled: config.storage.compaction.enabled,
-                interval_secs: config.storage.compaction.interval_secs,
-                min_sst_count: config.storage.compaction.min_sst_count,
-            };
-            let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
-            (engine, storage_config)
+    let (inner_storage, app_storage_config): (Arc<EmbeddedStorageEngine>, StorageConfig) = if config
+        .dev_mode
+    {
+        let data_path = if let Ok(dir) = std::env::var("HEARTH_DEV_DATA_DIR") {
+            PathBuf::from(dir)
         } else {
-            let hot_tier_capacity = config.storage.hot_tier_capacity.unwrap_or_else(|| {
-                let cap = hearth::storage::auto_size::auto_size_hot_tier_capacity(
-                    config.storage.hot_tier_max_memory,
-                );
-                info!(
-                    capacity = cap,
-                    memory_budget = ?config.storage.hot_tier_max_memory,
-                    "hot tier auto-sized",
-                );
-                cap
-            });
+            let temp_dir = tempfile::tempdir()?;
+            temp_dir.keep()
+        };
+        info!(path = %data_path.display(), "using data directory (dev mode)");
+        let mut storage_config = StorageConfig::dev(data_path);
+        storage_config.compaction = CompactionConfig {
+            enabled: config.storage.compaction.enabled,
+            interval_secs: config.storage.compaction.interval_secs,
+            min_sst_count: config.storage.compaction.min_sst_count,
+        };
+        let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
+        (engine, storage_config)
+    } else {
+        let hot_tier_capacity = config.storage.hot_tier_capacity.unwrap_or_else(|| {
+            let cap = hearth::storage::auto_size::auto_size_hot_tier_capacity(
+                config.storage.hot_tier_max_memory,
+            );
+            info!(
+                capacity = cap,
+                memory_budget = ?config.storage.hot_tier_max_memory,
+                "hot tier auto-sized",
+            );
+            cap
+        });
 
-            if !config.storage.fsync {
-                tracing::warn!(
+        if !config.storage.fsync {
+            tracing::warn!(
                     "storage.fsync=false is ignored in production mode — WAL durability is non-negotiable; \
                      use dev mode or a custom WalConfig if you need fsync disabled"
                 );
-            }
-            let mut storage_config = StorageConfig::production(
-                PathBuf::from(&config.storage.data_dir),
-                config.storage.wal_max_size_bytes,
-                config.storage.memtable_flush_bytes,
-                hot_tier_capacity,
-            );
-            storage_config.compaction = CompactionConfig {
-                enabled: config.storage.compaction.enabled,
-                interval_secs: config.storage.compaction.interval_secs,
-                min_sst_count: config.storage.compaction.min_sst_count,
-            };
-            let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
-            (engine, storage_config)
+        }
+        let mut storage_config = StorageConfig::production(
+            PathBuf::from(&config.storage.data_dir),
+            config.storage.wal_max_size_bytes,
+            config.storage.memtable_flush_bytes,
+            hot_tier_capacity,
+        );
+        storage_config.compaction = CompactionConfig {
+            enabled: config.storage.compaction.enabled,
+            interval_secs: config.storage.compaction.interval_secs,
+            min_sst_count: config.storage.compaction.min_sst_count,
         };
+        let engine = Arc::new(EmbeddedStorageEngine::open(storage_config.clone())?);
+        (engine, storage_config)
+    };
 
     // Build cluster-aware storage: wraps inner_storage in ClusterEngine so
     // all writes (put / delete / put_batch) go through Raft quorum commit

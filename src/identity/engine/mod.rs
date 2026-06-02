@@ -2298,7 +2298,8 @@ impl EmbeddedIdentityEngine {
     ///
     /// Called on suspend/archive transitions. Skips per-session audit events;
     /// the caller's `RealmUpdated` event covers the lifecycle change.
-    fn bulk_revoke_sessions(storage: &dyn StorageEngine, realm_id: &RealmId) {
+    fn bulk_revoke_sessions(&self, realm_id: &RealmId) {
+        let storage = self.storage.as_ref();
         let prefix = keys::session_id_scan_prefix();
         let end = keys::prefix_end(&prefix);
         let Ok(entries) = storage.scan(realm_id, &prefix, &end) else {
@@ -2307,10 +2308,14 @@ impl EmbeddedIdentityEngine {
         for entry in &entries {
             if let Ok(mut session) = serde_json::from_slice::<Session>(&entry.value) {
                 if !session.is_revoked() {
+                    let session_id = session.id().clone();
                     session.revoke();
                     if let Ok(bytes) = serde_json::to_vec(&session) {
                         let _ = storage.put(realm_id, &entry.key, &bytes);
                     }
+                    // Drop the cached (still-valid) copy so subsequent
+                    // get_session calls observe the revocation.
+                    self.session_cache_evict(realm_id, &session_id);
                 }
             }
         }
@@ -2789,7 +2794,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             request.status,
             Some(RealmStatus::Suspended | RealmStatus::Archived)
         ) {
-            Self::bulk_revoke_sessions(self.storage.as_ref(), realm_id);
+            self.bulk_revoke_sessions(realm_id);
         }
 
         Ok(realm)
