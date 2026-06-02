@@ -11401,6 +11401,145 @@ mod tests {
         );
     }
 
+    // ===== Rate-limit durability: in-memory trackers cleared on restart (HEA-1139) =====
+
+    #[test]
+    fn restart_clears_in_memory_rate_trackers() {
+        // Per CONFIGURATION.md §security.rate_limiting: magic-link, password-reset,
+        // IP-login, and registration rate trackers are in-memory only and do NOT
+        // survive a server restart. Only `attempt_trackers` (password brute-force)
+        // are WAL-persisted. This test pins that contract so any future WAL-persist
+        // change is forced to also update the documentation.
+        let lockout_micros = 60_000_000; // 60 s — well beyond test duration
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+
+        let realm;
+        {
+            let engine = open_engine_at(&dir, 3, lockout_micros, Arc::clone(&clock));
+            realm = create_test_realm(&engine);
+            let user = create_test_user(&engine, &realm);
+            let user_id = user.id().clone();
+            engine
+                .set_password(
+                    &realm,
+                    &user_id,
+                    &CleartextPassword::from_string("correct-pw".to_string()),
+                )
+                .expect("set password");
+            // One failed attempt → written to WAL by record_failed_attempt
+            let _ = engine.verify_password(
+                &realm,
+                &user_id,
+                &CleartextPassword::from_string("wrong-pw".to_string()),
+            );
+            // Inject one live entry into each in-memory-only tracker
+            let now = clock.now().as_micros();
+            engine
+                .magic_link_rate_trackers
+                .lock()
+                .expect("lock")
+                .insert(
+                    "magic:test:addr@example.com".to_string(),
+                    AttemptTracker {
+                        failed_count: 2,
+                        last_failure_micros: now,
+                    },
+                );
+            engine
+                .password_reset_rate_trackers
+                .lock()
+                .expect("lock")
+                .insert(
+                    "reset:test:addr@example.com".to_string(),
+                    AttemptTracker {
+                        failed_count: 1,
+                        last_failure_micros: now,
+                    },
+                );
+            engine.ip_login_rate_trackers.lock().expect("lock").insert(
+                "test:127.0.0.1".to_string(),
+                AttemptTracker {
+                    failed_count: 3,
+                    last_failure_micros: now,
+                },
+            );
+            engine
+                .registration_email_rate_trackers
+                .lock()
+                .expect("lock")
+                .insert(
+                    "reg-email:test:new@example.com".to_string(),
+                    AttemptTracker {
+                        failed_count: 1,
+                        last_failure_micros: now,
+                    },
+                );
+            engine
+                .registration_ip_rate_trackers
+                .lock()
+                .expect("lock")
+                .insert(
+                    "reg-ip:test:10.0.0.1".to_string(),
+                    AttemptTracker {
+                        failed_count: 1,
+                        last_failure_micros: now,
+                    },
+                );
+        } // engine dropped — simulates a server restart
+
+        // Reopen from the same storage directory
+        let engine2 = open_engine_at(&dir, 3, lockout_micros, Arc::clone(&clock));
+
+        // attempt_trackers are WAL-persisted and must survive restart
+        assert_eq!(
+            engine2.attempt_trackers.lock().expect("lock").len(),
+            1,
+            "password attempt_trackers must survive restart (WAL-persisted)"
+        );
+        // All in-memory-only trackers must be empty after restart
+        assert!(
+            engine2
+                .magic_link_rate_trackers
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "magic_link_rate_trackers are in-memory only — must be cleared on restart"
+        );
+        assert!(
+            engine2
+                .password_reset_rate_trackers
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "password_reset_rate_trackers are in-memory only — must be cleared on restart"
+        );
+        assert!(
+            engine2
+                .ip_login_rate_trackers
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "ip_login_rate_trackers are in-memory only — must be cleared on restart"
+        );
+        assert!(
+            engine2
+                .registration_email_rate_trackers
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "registration_email_rate_trackers are in-memory only — must be cleared on restart"
+        );
+        assert!(
+            engine2
+                .registration_ip_rate_trackers
+                .lock()
+                .expect("lock")
+                .is_empty(),
+            "registration_ip_rate_trackers are in-memory only — must be cleared on restart"
+        );
+    }
+
     // ===== Adversarial: Nonce reuse detection =====
 
     fn setup_engine_with_nonce_enforcement(
