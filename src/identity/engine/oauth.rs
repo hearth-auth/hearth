@@ -1823,7 +1823,11 @@ impl EmbeddedIdentityEngine {
                         reason: "ES256 signature verification failed".to_string(),
                     })?;
             }
-            _ => unreachable!("alg already restricted to EdDSA/RS256/ES256/PS256 above"),
+            _ => {
+                return Err(IdentityError::InvalidJar {
+                    reason: format!("unsupported JAR signing algorithm '{alg}'"),
+                })
+            }
         }
 
         // 6. Decode claims.

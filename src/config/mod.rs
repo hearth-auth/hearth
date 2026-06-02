@@ -1284,7 +1284,7 @@ fn validate_email_all(email: &EmailConfig, issues: &mut Vec<ValidationIssue>) {
                 });
             }
         }
-        EmailTransport::Log | EmailTransport::Mailcatcher => unreachable!(),
+        EmailTransport::Log | EmailTransport::Mailcatcher => {}
     }
 }
 
@@ -2295,5 +2295,22 @@ storage:
         let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
         let err = validate_sms(&config.sms).expect_err("empty region should error");
         assert!(err.to_string().contains("region"), "error: {err}");
+    }
+
+    // === HEA-1134: validate_email_all must not panic for dev transports ===
+
+    #[test]
+    fn validate_all_mailcatcher_transport_does_not_panic() {
+        let yaml =
+            "oidc:\n  issuer: \"https://auth.example.com\"\nemail:\n  transport: mailcatcher\n";
+        let config = Config::from_yaml_str_unchecked(yaml).expect("parse");
+        // Must not panic — previously hit unreachable!() for Mailcatcher.
+        let issues = config.validate_all();
+        // Mailcatcher needs no credentials; the only expected issue (if any) is a
+        // missing `from` address, not a panic.
+        assert!(
+            issues.iter().all(|i| i.field != "email.transport"),
+            "unexpected transport-level issue: {issues:?}"
+        );
     }
 }
