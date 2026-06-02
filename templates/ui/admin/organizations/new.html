@@ -1,13 +1,17 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Create Organization{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Realms</a>
+  <span class="text-ht-content-muted">›</span>
+  <a href="/ui/admin/realms/{{ realm_name }}" class="text-ht-content-secondary hover:text-ht-content-primary">{{ realm_name }}</a>
+  <span class="text-ht-content-muted">›</span>
+  <a href="/ui/admin/realms/{{ realm_name }}/organizations" class="text-ht-content-secondary hover:text-ht-content-primary">Organizations</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary" aria-current="page">New</span>
+</nav>
+{% endblock %}
 {% block body %}
-{% include "ui/admin/realms/_workspace_tabs.html" %}
-<div class="mb-6 flex flex-wrap items-center gap-2 text-sm text-ht-content-muted">
-  <a href="/ui/admin/realms/{{ realm_name }}/organizations"
-     class="hover:text-ht-content-primary">Organizations</a>
-  <span>›</span>
-  <span class="text-ht-content-secondary">New</span>
-</div>
 <div class="mb-6">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Create organization</h1>
   <p class="mt-1 text-sm text-ht-content-muted">Organizations group members, RBAC roles, and audit history together inside this realm.</p>
