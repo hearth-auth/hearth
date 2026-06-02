@@ -379,7 +379,10 @@ pub fn is_valid_dpop_nonce(secret: &[u8; 32], nonce: &str, now_secs: i64) -> boo
     let current_window = now_secs / DPOP_NONCE_WINDOW_SECS;
     let cur = compute_dpop_nonce(secret, current_window);
     let prev = compute_dpop_nonce(secret, current_window - 1);
-    // Use bitwise OR (not ||) so both comparisons always execute — prevents timing oracle.
+    // Bitwise | (not ||) so both ct_eq calls always execute — no short-circuit timing oracle.
+    // Residual: subtle's ct_eq returns early on length mismatch, but compute_dpop_nonce always
+    // produces a fixed 43-byte base64url string (public via DPoP-Nonce header), so no secret
+    // is disclosed by the length fast-path.
     (nonce.as_bytes().ct_eq(cur.as_bytes()) | nonce.as_bytes().ct_eq(prev.as_bytes())).into()
 }
 
