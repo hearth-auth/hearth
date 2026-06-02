@@ -1,5 +1,12 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Multi-factor authentication{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <a href="/ui/account" class="text-ht-content-muted hover:text-ht-content-primary">My Account</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary">Multi-factor authentication</span>
+</nav>
+{% endblock %}
 {% block body %}
 <div class="mb-8">
   <h1 class="font-display text-2xl font-medium text-ht-content-primary">Multi-factor authentication</h1>

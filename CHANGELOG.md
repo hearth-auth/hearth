@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Offline breach corpus for air-gapped realms (HEA-96)** — `BreachCheckConfig` gains a new
+  `mode` field (`online` | `offline`). When set to `offline`, a locally-provided binary corpus
+  of sorted 20-byte SHA-1 hashes is binary-searched instead of calling the HIBP API, enabling
+  NIST SP 800-63B breach checking in networks without outbound internet access. Configure via
+  `breach_check.mode = offline` and `breach_check.mode.corpus_path = /path/to/corpus.bin`.
+  Existing configs that omit `mode` continue to behave as `online` with no changes required.
+
 - **`fapi_profile` realm config key** — operators can now set `fapi_profile: "baseline"` or
   `fapi_profile: "advanced"` under `realms.<name>` in `hearth.yaml` to enforce FAPI 2.0 Security
   Profile constraints on all clients in that realm at startup. Unknown values are a hard error.
@@ -945,6 +952,23 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   admin permission (HEA-737).
 
 ### Fixed
+
+- **Realm-not-found 404 now renders inside admin chrome (HEA-1116)** — navigating to any
+  `/ui/admin/realms/{nonexistent-realm}/*` URL now shows the 404 error inside the normal admin
+  sidebar and header instead of a bare unstyled page. The `TargetRealm` extractor re-reads the
+  session cookie on the not-found path and renders with chrome when the user is authenticated.
+
+- **Sidebar REALMS section no longer shows "Loading…" indefinitely** — the sidebar realm tree
+  now uses synchronous `init()` with explicit proxy capture instead of `async init()`, ensuring
+  the fetch's `.finally()` handler always fires and clears the loading state regardless of Alpine
+  version behaviour (HEA-1106).
+- **Dual ember gradient on empty-state pages** — the secondary CTA in the empty-state panels
+  for Webhooks and Organizations no longer uses `btn-ember`; it now uses the muted outline
+  button style, so `btn-ember` appears at most once per visible region as required by THEME.md
+  (HEA-1106).
+- **Missing breadcrumbs on RBAC sub-pages** — the Permissions, Scope Bundles, and Permission
+  Check pages now render `Realms › {realm} › {page}` breadcrumb nav in the header, consistent
+  with the Roles page (HEA-1106).
 
 - **Browser login bypassed required-action gates** — `login_submit_impl` now intercepts
   pending required actions between credential verification and session issuance.  Users with

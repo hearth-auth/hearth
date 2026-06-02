@@ -1,7 +1,15 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · Organizations{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Realms</a>
+  <span class="text-ht-content-muted">›</span>
+  <a href="/ui/admin/realms/{{ realm_name }}" class="text-ht-content-secondary hover:text-ht-content-primary">{{ realm_name }}</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary" aria-current="page">Organizations</span>
+</nav>
+{% endblock %}
 {% block body %}
-{% include "ui/admin/realms/_workspace_tabs.html" %}
 <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
   <div>
     <h1 class="font-display text-2xl font-medium text-ht-content-primary">Organizations</h1>
@@ -39,7 +47,7 @@
       Organizations group customers, projects, or teams within this realm. Members share RBAC roles, invitations, and audit history.
     </p>
     <a href="/ui/admin/realms/{{ realm_name }}/organizations/new"
-       class="btn-ember mt-6 inline-flex items-center gap-1.5 rounded px-4 py-2 text-sm font-semibold">
+       class="mt-6 inline-flex items-center gap-1.5 rounded border border-strong bg-ht-surface-elevated px-4 py-2 text-sm font-medium text-ht-content-secondary hover-bg-divider">
       <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       Create your first organization
     </a>

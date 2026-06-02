@@ -62,7 +62,9 @@ tests/ui/reports/
 tests/ui/node_modules/
 
 *.tsbuildinfo
+**/.phpunit.cache
 
+**/.next/*
 .next
 
 go-gin

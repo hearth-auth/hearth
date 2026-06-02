@@ -592,3 +592,82 @@ async fn dashboard_trailing_slash_redirects() {
         .expect("ascii");
     assert_eq!(location, "/ui", "redirect target must be /ui");
 }
+
+#[tokio::test]
+async fn fallback_404_unauthenticated_shows_no_chrome() {
+    let rig = build_rig();
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/this-page-does-not-exist")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unmatched admin path must return 404"
+    );
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+    assert!(
+        body.contains("Not Found") || body.contains("No page exists"),
+        "body should contain error message, got: {body}"
+    );
+    // Unauthenticated — the admin sidebar must NOT render.
+    assert!(
+        !body.contains("/ui/admin/realms"),
+        "unauthenticated 404 must not render admin nav sidebar"
+    );
+}
+
+#[tokio::test]
+async fn fallback_404_authenticated_shows_admin_chrome() {
+    let rig = build_rig();
+    let cookie = auth_cookie(&rig, "csrf-404");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/this-page-does-not-exist")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "authenticated missing admin path must still return 404"
+    );
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+    assert!(
+        body.contains("Not Found") || body.contains("No page exists"),
+        "body should contain error message, got: {body}"
+    );
+    // Authenticated — the admin sidebar MUST render so the user can navigate back.
+    assert!(
+        body.contains("/ui/admin/realms"),
+        "authenticated 404 must render admin nav sidebar"
+    );
+    assert!(
+        body.contains("alice@acme.test"),
+        "authenticated 404 must show signed-in user email in sidebar"
+    );
+}
