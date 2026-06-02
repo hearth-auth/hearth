@@ -1,9 +1,11 @@
 {% extends "ui/_layout.html" %}
 {% block title %}{{ product_name }} · System Info{% endblock %}
 {% block breadcrumb %}
-  <span class="text-ht-content-muted">Admin</span>
-  <span class="mx-1 text-ht-content-muted">/</span>
-  <span class="text-ht-content-secondary">System Info</span>
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Admin</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary">System Info</span>
+</nav>
 {% endblock %}
 {% block body %}
 <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
