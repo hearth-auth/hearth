@@ -750,12 +750,14 @@ async fn jwt_bearer_exp_too_far_future_rejected() {
         .expect("set assertion key");
 
     let audience = realm_issuer(&harness, &realm);
-    // exp = now + 601 seconds — just over the 10-minute ceiling.
+    // exp = now + 1200 seconds — 2× the 600-second ceiling, giving ample buffer
+    // against CI timing jitter (the original 601 was within 1s of the limit and
+    // failed on slow runners when even 2s of overhead was enough to slip under).
     let assertion = make_assertion(
         &assertion_key,
         &client.client_id().to_string(),
         &audience,
-        601,
+        1200,
         Some(uuid::Uuid::new_v4().to_string()),
     );
 
