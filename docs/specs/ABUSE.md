@@ -770,3 +770,127 @@ permissive verdict (all flags `false`) on any transport or internal error.
 The provider is consulted only at registration, invitation acceptance, and
 similar account-creation flows — never during `validate_token()` or
 `lookup_session()`.
+
+---
+
+## A-19 — Email-Change Re-Verification Flow
+
+Closes §3.20. Implemented in `src/identity/engine/mod.rs`.
+
+### Contract
+
+When a user requests an email address change, the new address must be verified
+via a separate token before the swap is committed:
+
+1. `initiate_email_change(realm_id, user_id, new_email)` — validates and
+   normalises `new_email`, checks uniqueness (including the A-20 reservation
+   gate), generates a 32-byte cryptographically-random token, stores
+   `SHA-256(token)` under `email:change:{hash}`, and emits
+   `EmailChangeInitiated` audit.  Returns the plaintext token; the caller is
+   responsible for delivering it to `new_email`.
+
+2. `confirm_email_change(realm_id, token)` — looks up the stored record by
+   `SHA-256(token)`, enforces a 24-hour expiry and single-use semantics, swaps
+   the email indexes atomically, sets `email_verified = true`, revokes all
+   sessions, and emits `EmailChangeConfirmed` audit.  Returns the updated
+   `User`.  The caller MUST send a `security.email_changed` notification to the
+   old address with a revoke link.
+
+### Failure modes
+
+| Error | Condition |
+|-------|-----------|
+| `EmailChangeTokenInvalid` (`HEARTH_EMAIL_CHANGE_TOKEN_INVALID`) | Token not found, expired, or already consumed. |
+| `DuplicateEmail` | New address already registered. |
+| `EmailReserved` | New address is under A-20 cooldown. |
+
+### Fail policy
+
+`EmailChangeConfirmed` is a security-critical audit; `FailOperation` is used if
+the append fails.  All other operations are `LogOnly`.
+
+---
+
+## A-20 — Deleted-Account Email Reservation (90-Day Cooldown)
+
+Closes §3.21. Implemented in `src/identity/engine/mod.rs`.
+
+### Contract
+
+When `delete_user` completes, it writes a JSON tombstone under
+`email:reserved:{normalized_email}` within the same realm's storage namespace:
+
+```json
+{ "reserved_at_micros": 1748907483000000 }
+```
+
+The tombstone enforces a **90-day cooldown**: `create_user_with_status` and
+`initiate_email_change` both check for a live tombstone before accepting the
+address.
+
+| Scenario | Result |
+|----------|--------|
+| Tombstone present and within 90 days | `EmailReserved` (wire: `HEARTH_DUPLICATE_EMAIL`) |
+| Tombstone present but expired | Tombstone cleaned up; operation proceeds normally |
+| No tombstone | Operation proceeds normally |
+
+### Enumeration resistance
+
+`EmailReserved` shares the same wire error code as `DuplicateEmail`
+(`HEARTH_DUPLICATE_EMAIL`).  Callers cannot distinguish "address in use" from
+"address under reservation".
+
+### Identity independence
+
+Re-registration after the cooldown creates a **wholly new identity** (new
+`UserId`).  No memberships, invitations, sessions, or credentials are
+inherited from the deleted account.
+
+---
+
+## A-37 — `prompt=none` Silent-Auth Probe Rate Limit
+
+Closes §3.38. Implemented in `src/protocol/web/oauth_consent.rs` (web layer)
+and `src/identity/engine/mod.rs` (counter persistence + audit).
+
+### Attack model
+
+`prompt=none` is a standard OIDC mechanism for silent token refresh, but it
+doubles as a low-noise session-existence oracle: an attacker can send repeated
+`prompt=none` requests to infer whether a specific subject has an active
+session (`consent_required` → logged in; `login_required` → not logged in).
+
+### Contract
+
+Every `prompt=none` authorize request for an authenticated subject increments a
+sliding-window counter stored under `rl:prompt_none:{user_uuid}` within the
+realm.
+
+| Parameter | Value |
+|-----------|-------|
+| Window duration | 1 hour |
+| Cap per window | 50 probes |
+| Counter storage | WAL-persisted JSON (`StoredPromptNoneTracker`) |
+
+- Probes 1–50: the request proceeds normally.
+- Probe 51+: the handler returns `error=login_required` (the least-informative
+  RFC-defined silent-auth error per OIDC Core §3.1.2.6).
+- An `OidcSilentAuthProbed` audit event is emitted on **every** probe,
+  regardless of outcome, with `user_id`, `client_id`, `outcome`, and
+  `probe_count` metadata.
+
+### Fail policy
+
+Audit emit is `LogOnly` — a failed append does not block the authorization
+flow.  The rate-limit counter write is best-effort (`let _ =`); a storage
+error does not block the flow either (fail-open per §6.1).
+
+### Window reset
+
+The window clock starts at the first probe.  Once the window expires the
+counter resets to zero, and the next probe starts a new window.
+
+### Scope
+
+This counter is per (realm, subject) — each user has an independent counter
+in each realm.  There is no cross-realm sharing.

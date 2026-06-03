@@ -56,6 +56,30 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `protocol/web/handlers.rs`). Default-redacted fields: `reset_url`,
   `magic_link_url`, `password`, `token`, `cookie`, raw email (HEA-1196).
 
+- **A-19 Email-change re-verification** — changing a user's email address now
+  requires the new address to be verified via a separate 32-byte random token
+  (SHA-256 stored, 24-hour TTL, single-use) before the swap is committed.
+  Two new identity-engine methods are exposed: `initiate_email_change` (issues
+  token, caller delivers to new address) and `confirm_email_change` (validates
+  token, swaps indexes, revokes all sessions, caller notifies old address).
+  New `EmailChangeInitiated` and `EmailChangeConfirmed` audit actions; new
+  `EmailChangeTokenInvalid` error code `HEARTH_EMAIL_CHANGE_TOKEN_INVALID`
+  (HEA-1194).
+
+- **A-20 Deleted-account email reservation** — `delete_user` now writes a
+  90-day tombstone under `email:reserved:{normalized_email}`. While the
+  tombstone is live, `create_user` and `initiate_email_change` for that address
+  return `EmailReserved` (same wire code as `DuplicateEmail` —
+  `HEARTH_DUPLICATE_EMAIL` — for enumeration resistance). The tombstone is
+  automatically cleaned up when it expires. (HEA-1194).
+
+- **A-37 `prompt=none` silent-auth probe rate limit** — the OIDC
+  `GET /ui/oauth/authorize` handler now tracks every `prompt=none` request per
+  (realm, subject) in a 1-hour sliding window (cap: 50 probes/hour). Probes
+  over the limit receive `error=login_required`. An `OidcSilentAuthProbed`
+  audit event is emitted on every probe with `outcome` and `probe_count`
+  metadata; new error code `HEARTH_SILENT_AUTH_RATE_LIMITED` (HEA-1194).
+
 - **A-45 Tenant-content sanitization** — all operator- and tenant-supplied
   SVG and CSS is sanitized before unescaped render (HEA-1199):
   - **SVG** (`logo_svg_inline` in email templates) — `<script>`,

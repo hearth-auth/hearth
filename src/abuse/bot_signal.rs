@@ -513,7 +513,7 @@ mod tests {
     /// A very short UA (< 10 chars) is suspicious.
     #[test]
     fn very_short_ua_is_suspect() {
-        let v = provider().check(&ctx_ua("bot"));
+        let v = provider().check(&ctx_ua("ab"));
         assert!(matches!(v, BotSignalVerdict::Suspect { .. }));
     }
 
