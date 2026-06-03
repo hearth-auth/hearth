@@ -137,6 +137,13 @@ error, forcing a reset flow).
 - **Delta / incremental sync.** This bundler is one-shot. Re-running it
   overwrites `tenant.json`.
 
+## Next step — consume the bundle
+
+Once you have `tenant.json`, head to
+[`examples/auth0-migration/`](../auth0-migration/) for the runnable
+**end-to-end importer**: it migrates the bundle, boots Hearth, and verifies
+the result with a single `./run.sh` command.
+
 ## Reference
 
 - Hearth importer source: [`src/identity/migration/auth0.rs`](../../src/identity/migration/auth0.rs)

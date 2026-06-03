@@ -1,0 +1,93 @@
+{
+  "tenant": {
+    "name": "acme-corp",
+    "id": "7b5d9f26-3c8a-4b1e-a6f2-2d08e7c81045"
+  },
+  "users": [
+    {
+      "user_id": "auth0|alice-001",
+      "email": "alice@acme-corp.test",
+      "email_verified": true,
+      "given_name": "Alice",
+      "family_name": "Chen",
+      "name": "Alice Chen",
+      "created_at": "2023-06-15T09:00:00.000Z",
+      "custom_password_hash": {
+        "algorithm": "bcrypt",
+        "hash": {
+          "value": "$2b$04$abcdefghijklmnopqrstuuS8GxNXZYjLFxV1Xbqc2I44TmWcAb90a"
+        }
+      }
+    },
+    {
+      "user_id": "auth0|bob-002",
+      "email": "bob@acme-corp.test",
+      "email_verified": false,
+      "given_name": "Bob",
+      "family_name": "Rivera",
+      "name": "Bob Rivera",
+      "created_at": "2023-08-20T14:30:00.000Z"
+    },
+    {
+      "user_id": "auth0|charlie-003",
+      "email": "charlie@acme-corp.test",
+      "email_verified": true,
+      "given_name": "Charlie",
+      "family_name": "Moss",
+      "name": "Charlie Moss",
+      "blocked": true,
+      "created_at": "2022-01-10T08:00:00.000Z"
+    }
+  ],
+  "clients": [
+    {
+      "client_id": "acme-spa-clientid-auth0",
+      "name": "Acme Corp Web App",
+      "app_type": "spa",
+      "callbacks": [
+        "https://app.acme-corp.test/callback",
+        "http://localhost:3000/callback"
+      ],
+      "grant_types": ["authorization_code", "refresh_token"]
+    },
+    {
+      "client_id": "acme-backend-clientid-auth0",
+      "name": "Acme Corp Backend API",
+      "app_type": "non_interactive",
+      "client_secret": "acme-backend-super-secret-placeholder",
+      "callbacks": [],
+      "grant_types": ["client_credentials"]
+    }
+  ],
+  "organizations": [
+    {
+      "id": "org_acme-engineering",
+      "name": "engineering",
+      "display_name": "Engineering",
+      "members": [
+        {
+          "user_id": "auth0|alice-001",
+          "roles": ["owner"]
+        },
+        {
+          "user_id": "auth0|bob-002",
+          "roles": ["member"]
+        }
+      ]
+    }
+  ],
+  "roles": [
+    {
+      "id": "rol_admin001",
+      "name": "admin",
+      "description": "Full administrative access",
+      "assignments": ["auth0|alice-001"]
+    },
+    {
+      "id": "rol_viewer002",
+      "name": "viewer",
+      "description": "Read-only access",
+      "assignments": ["auth0|bob-002"]
+    }
+  ]
+}
