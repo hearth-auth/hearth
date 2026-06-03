@@ -1884,6 +1884,45 @@ async fn run_serve(
         web_state = web_state.with_config_path(cfg_path.clone());
     }
 
+    // Wire up the CAPTCHA provider (P-1 — HEA-1202).
+    if let Some(captcha_cfg) = config.security.captcha.as_ref() {
+        use hearth::abuse::captcha::{TurnstileCaptchaProvider, TurnstileConfig};
+        use hearth::config::CaptchaProviderKind;
+        match captcha_cfg.provider {
+            CaptchaProviderKind::Turnstile => {
+                if let Some(ts) = captcha_cfg.turnstile.as_ref() {
+                    let secret_key = std::env::var("HEARTH_TURNSTILE_SECRET_KEY")
+                        .ok()
+                        .or_else(|| ts.secret_key.clone())
+                        .unwrap_or_default();
+                    if secret_key.is_empty() {
+                        warn!(
+                            "security.captcha.turnstile: no secret_key configured and \
+                             HEARTH_TURNSTILE_SECRET_KEY is unset — Turnstile will reject all tokens"
+                        );
+                    }
+                    let cfg = if let Some(ref url) = ts.verify_url {
+                        TurnstileConfig {
+                            site_key: ts.site_key.clone(),
+                            secret_key,
+                            verify_url: url.clone(),
+                        }
+                    } else {
+                        TurnstileConfig::new(ts.site_key.clone(), secret_key)
+                    };
+                    info!(site_key = %ts.site_key, "CAPTCHA: Cloudflare Turnstile enabled");
+                    web_state = web_state
+                        .with_captcha_provider(Arc::new(TurnstileCaptchaProvider::new(cfg)));
+                } else {
+                    warn!(
+                        "security.captcha.provider = turnstile but no \
+                         security.captcha.turnstile section found — captcha disabled"
+                    );
+                }
+            }
+        }
+    }
+
     let mut app_router = http::router(Arc::clone(&app_state)).merge(web::router(web_state));
     if let Some(mc_state) = &mailcatcher_state {
         app_router = app_router.merge(web::mailcatcher_router(Arc::clone(mc_state)));

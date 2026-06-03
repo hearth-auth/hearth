@@ -195,6 +195,10 @@ pub struct WebState {
     /// Derived from `HEARTH_SMS_OTP_HMAC_KEY`. `None` in dev mode when the
     /// Log transport is active (a deterministic dev key is substituted).
     pub sms_otp_hmac_key: Option<Vec<u8>>,
+    /// CAPTCHA provider for challenge-gated forms (P-1 — HEA-1202).
+    ///
+    /// Defaults to [`crate::abuse::challenge::NoopCaptchaProvider`] (fail-open).
+    pub captcha_provider: Arc<dyn crate::abuse::challenge::CaptchaProvider>,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -252,6 +256,7 @@ impl WebState {
             trust_forwarded_proto: false,
             sms: None,
             sms_otp_hmac_key: None,
+            captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
         }
     }
 
@@ -448,6 +453,18 @@ impl WebState {
     ) -> Self {
         self.sms = Some(sender);
         self.sms_otp_hmac_key = hmac_key;
+        self
+    }
+
+    /// Sets the CAPTCHA provider for challenge-gated forms (P-1 — HEA-1202).
+    ///
+    /// When not called, defaults to [`crate::abuse::challenge::NoopCaptchaProvider`] (fail-open).
+    #[must_use]
+    pub fn with_captcha_provider(
+        mut self,
+        provider: Arc<dyn crate::abuse::challenge::CaptchaProvider>,
+    ) -> Self {
+        self.captcha_provider = provider;
         self
     }
 

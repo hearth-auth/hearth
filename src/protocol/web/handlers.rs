@@ -2243,6 +2243,8 @@ struct ForgotPasswordTemplate {
     logo_url: String,
     realm_theme_url: Option<String>,
     inline_theme_css: Option<String>,
+    /// Pre-built CAPTCHA widget HTML (empty string when no provider is configured).
+    captcha_widget_html: String,
 }
 
 impl ForgotPasswordTemplate {
@@ -2251,6 +2253,7 @@ impl ForgotPasswordTemplate {
         action_prefix: &str,
         product_name: String,
         logo_url: String,
+        captcha_widget_html: String,
     ) -> Self {
         Self {
             error,
@@ -2267,6 +2270,7 @@ impl ForgotPasswordTemplate {
             logo_url,
             realm_theme_url: None,
             inline_theme_css: None,
+            captcha_widget_html,
         }
     }
 }
@@ -2424,6 +2428,7 @@ fn forgot_password_form_impl(state: Arc<WebState>, source: RealmSource) -> Respo
         &action_prefix,
         state.product_name.clone(),
         state.logo_url.clone(),
+        state.captcha_provider.widget_html().to_string(),
     );
     tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
     tmpl.inline_theme_css = state.inline_theme_css();
@@ -2435,6 +2440,11 @@ fn forgot_password_form_impl(state: Arc<WebState>, source: RealmSource) -> Respo
 pub struct ForgotPasswordForm {
     /// The email address for the password reset.
     pub email: String,
+    /// CAPTCHA response token populated by the Turnstile widget (P-1).
+    ///
+    /// Empty string when no CAPTCHA provider is configured (`NoopCaptchaProvider`).
+    #[serde(default)]
+    pub captcha_token: String,
 }
 
 /// Handles forgot-password form submission at the bare URL.
@@ -2443,7 +2453,8 @@ pub async fn forgot_password_submit(
     headers: HeaderMap,
     Form(form): Form<ForgotPasswordForm>,
 ) -> Response {
-    forgot_password_submit_impl(state, headers, form, RealmSource::Path(None))
+    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    forgot_password_submit_impl(state, headers, form, RealmSource::Path(None), captcha_ok)
 }
 
 /// Handles forgot-password form submission at `/ui/realms/<name>/forgot-password`.
@@ -2453,7 +2464,14 @@ pub async fn forgot_password_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<ForgotPasswordForm>,
 ) -> Response {
-    forgot_password_submit_impl(state, headers, form, RealmSource::Path(Some(realm_name)))
+    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    forgot_password_submit_impl(
+        state,
+        headers,
+        form,
+        RealmSource::Path(Some(realm_name)),
+        captcha_ok,
+    )
 }
 
 /// Handles admin forgot-password form submission at `/ui/admin/forgot-password`.
@@ -2462,7 +2480,8 @@ pub async fn admin_forgot_password_submit(
     headers: HeaderMap,
     Form(form): Form<ForgotPasswordForm>,
 ) -> Response {
-    forgot_password_submit_impl(state, headers, form, RealmSource::Admin)
+    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    forgot_password_submit_impl(state, headers, form, RealmSource::Admin, captcha_ok)
 }
 
 /// Shared implementation. Looks up the user in the resolved realm.
@@ -2474,6 +2493,7 @@ fn forgot_password_submit_impl(
     headers: HeaderMap,
     form: ForgotPasswordForm,
     source: RealmSource,
+    captcha_ok: bool,
 ) -> Response {
     let email = form.email.trim();
     let (realm, action_prefix) = match resolve_for_source(&state, source, true) {
@@ -2483,6 +2503,20 @@ fn forgot_password_submit_impl(
         } => (realm, action_prefix),
         PreAuthRealm::Handled(resp) => return resp,
     };
+
+    if !captcha_ok {
+        let mut tmpl = ForgotPasswordTemplate::new(
+            Some("CAPTCHA verification failed. Please try again.".to_string()),
+            &action_prefix,
+            state.product_name.clone(),
+            state.logo_url.clone(),
+            state.captcha_provider.widget_html().to_string(),
+        );
+        tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
+        tmpl.inline_theme_css = state.inline_theme_css();
+        return render(&tmpl);
+    }
+
     let sent_url = format!("{action_prefix}/forgot-password/sent");
 
     match state.identity.request_password_reset(realm.id(), email) {
@@ -2766,6 +2800,7 @@ impl RegisterTemplate {
         login_url: String,
         product_name: String,
         logo_url: String,
+        captcha_widget_html: String,
     ) -> Self {
         Self {
             disabled,
@@ -2785,7 +2820,7 @@ impl RegisterTemplate {
             logo_url,
             realm_theme_url: None,
             inline_theme_css: None,
-            captcha_widget_html: String::new(),
+            captcha_widget_html,
         }
     }
 }
@@ -2848,6 +2883,11 @@ pub struct RegisterForm {
     /// Optional invitation token (required when policy is invite-only).
     #[serde(default)]
     pub invitation_token: Option<String>,
+    /// CAPTCHA response token populated by the Turnstile widget (P-1).
+    ///
+    /// Empty string when no CAPTCHA provider is configured (`NoopCaptchaProvider`).
+    #[serde(default)]
+    pub captcha_token: String,
 }
 
 /// Returns `(disabled, invite_only)` flags derived from the realm's
@@ -2903,6 +2943,7 @@ fn register_form_impl(state: Arc<WebState>, path_realm: Option<String>) -> Respo
         login_url,
         state.product_name.clone(),
         state.logo_url.clone(),
+        state.captcha_provider.widget_html().to_string(),
     );
     tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
     tmpl.inline_theme_css = state.inline_theme_css();
@@ -2945,13 +2986,60 @@ fn register_client_ip(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CAPTCHA helpers (P-1 — HEA-1202)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Extracts the best-effort client IP from request headers for CAPTCHA
+/// verification.  Falls back to `127.0.0.1` when headers are absent or
+/// unparseable.
+fn captcha_client_ip(headers: &HeaderMap) -> std::net::IpAddr {
+    let ip_str = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .map(str::trim)
+        });
+
+    ip_str
+        .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+}
+
+/// Verifies the CAPTCHA response token from a form submission.
+///
+/// Short-circuits to `true` when the configured provider is the
+/// `NoopCaptchaProvider` (empty `widget_html`) — no network call is made.
+///
+/// Otherwise calls [`crate::abuse::challenge::CaptchaProvider::verify`] on
+/// the blocking thread pool via [`tokio::task::spawn_blocking`].
+///
+/// Fails-open (returns `true`) if `spawn_blocking` itself fails, consistent
+/// with §6.1 of the abuse-prevention plan.
+async fn captcha_check(state: &Arc<super::WebState>, headers: &HeaderMap, token: &str) -> bool {
+    if state.captcha_provider.widget_html().is_empty() {
+        return true;
+    }
+    let ip = captcha_client_ip(headers);
+    let provider = Arc::clone(&state.captcha_provider);
+    let token = token.to_string();
+    tokio::task::spawn_blocking(move || provider.verify(&token, ip))
+        .await
+        .unwrap_or(true)
+}
+
 /// Handles registration form submission (bare `/ui/register`).
 pub async fn register_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
     Form(form): Form<RegisterForm>,
 ) -> Response {
-    register_submit_impl(state, headers, form, None)
+    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    register_submit_impl(state, headers, form, None, captcha_ok)
 }
 
 /// Handles registration form submission for `/ui/realms/<name>/register`.
@@ -2961,7 +3049,8 @@ pub async fn register_submit_scoped(
     headers: HeaderMap,
     Form(form): Form<RegisterForm>,
 ) -> Response {
-    register_submit_impl(state, headers, form, Some(realm_name))
+    let captcha_ok = captcha_check(&state, &headers, &form.captcha_token).await;
+    register_submit_impl(state, headers, form, Some(realm_name), captcha_ok)
 }
 
 /// Shared implementation for bare and realm-scoped register submits.
@@ -2971,12 +3060,13 @@ pub async fn register_submit_scoped(
 /// Duplicate emails are handled at the engine layer with a fake-success
 /// response so we never see an error on that path — preserving
 /// enumeration resistance.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn register_submit_impl(
     state: Arc<WebState>,
     headers: HeaderMap,
     form: RegisterForm,
     path_realm: Option<String>,
+    captcha_ok: bool,
 ) -> Response {
     let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, true) {
         PreAuthRealm::Ok {
@@ -2994,6 +3084,7 @@ fn register_submit_impl(
     let form_action = format!("{action_prefix}/register");
     let login_url = format!("{action_prefix}/login");
     let sent_url = format!("{action_prefix}/register/sent");
+    let captcha_widget_html = state.captcha_provider.widget_html().to_string();
 
     let render_err = |msg: String, email: String| {
         let mut tmpl = RegisterTemplate::new(
@@ -3005,11 +3096,19 @@ fn register_submit_impl(
             login_url.clone(),
             product_name.clone(),
             logo_url.clone(),
+            captcha_widget_html.clone(),
         );
         tmpl.realm_theme_url.clone_from(&realm_theme);
         tmpl.inline_theme_css.clone_from(&inline_css);
         render_status(&tmpl, StatusCode::BAD_REQUEST)
     };
+
+    if !captcha_ok {
+        return render_err(
+            "CAPTCHA verification failed. Please try again.".to_string(),
+            form.email.clone(),
+        );
+    }
 
     if disabled {
         return render_err(

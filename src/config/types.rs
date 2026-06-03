@@ -826,6 +826,9 @@ pub struct SecurityYaml {
     /// IP reputation provider configuration (P-2).
     #[serde(default)]
     pub ip_reputation: IpReputationYaml,
+    /// CAPTCHA provider configuration (P-1 — HEA-1202).
+    #[serde(default)]
+    pub captcha: Option<CaptchaYaml>,
     /// gRPC-specific security settings (A-43).
     #[serde(default)]
     pub grpc: GrpcSecurityYaml,
@@ -835,6 +838,50 @@ pub struct SecurityYaml {
     /// Backup and export hardening (A-30).
     #[serde(default)]
     pub backup: BackupSecurityYaml,
+}
+
+/// `security.captcha` — CAPTCHA provider configuration (P-1 — HEA-1202).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   captcha:
+///     provider: turnstile
+///     turnstile:
+///       site_key: "0x4AAAAAAA..."
+///       secret_key: "0x4AAAAAAA..."
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct CaptchaYaml {
+    /// Which CAPTCHA provider to activate.
+    pub provider: CaptchaProviderKind,
+    /// Cloudflare Turnstile settings (required when `provider = "turnstile"`).
+    #[serde(default)]
+    pub turnstile: Option<TurnstileYaml>,
+}
+
+/// Supported CAPTCHA provider identifiers.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptchaProviderKind {
+    /// Cloudflare Turnstile (reference adapter — HEA-1202).
+    Turnstile,
+}
+
+/// `security.captcha.turnstile` — Cloudflare Turnstile settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TurnstileYaml {
+    /// Turnstile **site key** (public — safe to embed in HTML).
+    pub site_key: String,
+    /// Turnstile **secret key** (private — use env-var injection in production).
+    ///
+    /// Prefer `HEARTH_TURNSTILE_SECRET_KEY` over embedding in the config file.
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// Override for the Cloudflare siteverify URL (omit in production).
+    #[serde(default)]
+    pub verify_url: Option<String>,
 }
 
 /// `security.backup` — backup and export hardening (A-30).

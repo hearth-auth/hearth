@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **P-1 Cloudflare Turnstile CAPTCHA adapter** — new `TurnstileCaptchaProvider` in
+  `src/abuse/captcha/` implements the `CaptchaProvider` trait with Cloudflare's
+  siteverify API.  Widget HTML is injected at the `<!-- captcha-widget-slot -->`
+  marker in the register and forgot-password UI forms.  Server-side verification
+  runs via `spawn_blocking`.  Fail-open on transport errors per §6.1.  Configure
+  via `security.captcha.provider: turnstile` in `hearth.yaml`; defaults to
+  `NoopCaptchaProvider` (no CAPTCHA shown) when absent (HEA-1202).
 - **A-30 Backup/export hardening** — export operations now require a separate
   `hearth.export` permission in addition to `hearth.admin` (granted to the
   `realm.admin` role by default). A per-user rate limit of 10 exports per hour

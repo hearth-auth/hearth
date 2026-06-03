@@ -23,6 +23,7 @@
 //! | A-47 | `deny_unknown_fields` on request shapes  | (annotations)            |
 //! | A-50 | Cross-realm SMS/email aggregation cap    | [`detector`]             |
 //! | A-52 | Unified `return_to` allowlist            | [`redirect`]             |
+//! | P-1  | CaptchaProvider trait + Cloudflare Turnstile adapter | [`captcha`]    |
 //! | P-2  | IP-reputation trait + Spamhaus DROP + MaxMind ASN | [`ip_reputation`] |
 //! | P-3  | Bot-signal trait + UA/JA3/JA4 heuristics | [`bot_signal`]           |
 //! | P-4  | RiskScorer trait + rule-based engine (A-11) | [`risk_scorer`]       |

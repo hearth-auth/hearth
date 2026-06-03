@@ -6,6 +6,59 @@ phase-by-phase threat model.
 
 ---
 
+## P-1 — `CaptchaProvider`: Cloudflare Turnstile Reference Adapter
+
+**Status:** Shipped (HEA-1202)  
+**Module:** `src/abuse/captcha/` → `TurnstileCaptchaProvider`; trait lives in `src/abuse/challenge.rs`
+
+### What it provides
+
+Pluggable CAPTCHA verification for public auth forms. When configured, the
+Turnstile widget is injected at the `<!-- captcha-widget-slot -->` marker in
+each form template and the server verifies the response token against
+Cloudflare's siteverify API before processing the form.
+
+### Trait contract
+
+```rust
+pub trait CaptchaProvider: Send + Sync {
+    fn widget_html(&self) -> &str;  // HTML snippet to inject; empty = noop
+    fn verify(&self, token: &str, ip: IpAddr) -> bool;
+}
+```
+
+`verify()` is synchronous (blocking `ureq` POST). Call inside `spawn_blocking`.
+
+### Failure mode (§6.1)
+
+| Condition | Outcome |
+|-----------|---------|
+| Empty token | fail-**closed** (`false`) — bot bypassed widget |
+| Transport / Cloudflare error | fail-**open** (`true`) — log at `warn` |
+| Provider not configured | `NoopCaptchaProvider` → always `true` |
+
+### Forms wired
+
+| Form | Template | Handler |
+|------|----------|---------|
+| Registration | `templates/ui/register.html` | `register_submit` |
+| Forgot password | `templates/ui/forgot_password.html` | `forgot_password_submit` |
+
+### Configuration (`security.captcha` in `hearth.yaml`)
+
+```yaml
+security:
+  captcha:
+    provider: turnstile
+    turnstile:
+      site_key: "0x4AAAAAAA..."         # public
+      secret_key: "0x4AAAAAAA..."        # private — prefer HEARTH_TURNSTILE_SECRET_KEY
+```
+
+When absent, `NoopCaptchaProvider` is active (fail-open per §6.1).
+
+---
+
 ## P-2 — IP Reputation: Spamhaus DROP + MaxMind ASN
 
 **Status:** Shipped (HEA-1203)  

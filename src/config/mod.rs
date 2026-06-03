@@ -14,17 +14,17 @@ pub use error::ConfigError;
 pub use types::parse_duration_to_micros;
 pub use types::ClusterConfig;
 pub use types::{
-    AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, ClaimsYamlConfig,
-    CompactionSection, EmailConfig, EmailTransport, FederationProviderYaml, FederationYamlConfig,
-    GlobalRateLimitYaml, GroupYamlConfig, IpRateLimitYaml, LinkModeYaml, MailgunConfig,
-    MailgunRegion, MailtrapConfig, MetricsConfig, MigrateConflictPolicy, ObservabilityConfig,
-    OidcYamlConfig, OnboardingConfig, OperationalConfig, OrgConfigYaml, OrganizationYamlConfig,
-    OtlpConfig, OtlpProtocol, PasswordPolicyYaml, PermissionYamlConfig, PostmarkConfig,
-    ProtectedResourceYamlConfig, RateLimitYaml, RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml,
-    RealmScimYaml, RealmTokenYaml, RealmWebYaml, RealmYamlConfig, RoleYamlConfig,
-    SamlServiceProviderYaml, ScopeBundleYamlConfig, SecurityYaml, SendgridConfig, ServerConfig,
-    SmsConfig, SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection,
-    TokenYamlConfig, TwilioConfig,
+    AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, CaptchaProviderKind,
+    CaptchaYaml, ClaimsYamlConfig, CompactionSection, EmailConfig, EmailTransport,
+    FederationProviderYaml, FederationYamlConfig, GlobalRateLimitYaml, GroupYamlConfig,
+    IpRateLimitYaml, LinkModeYaml, MailgunConfig, MailgunRegion, MailtrapConfig, MetricsConfig,
+    MigrateConflictPolicy, ObservabilityConfig, OidcYamlConfig, OnboardingConfig,
+    OperationalConfig, OrgConfigYaml, OrganizationYamlConfig, OtlpConfig, OtlpProtocol,
+    PasswordPolicyYaml, PermissionYamlConfig, PostmarkConfig, ProtectedResourceYamlConfig,
+    RateLimitYaml, RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml, RealmScimYaml, RealmTokenYaml,
+    RealmWebYaml, RealmYamlConfig, RoleYamlConfig, SamlServiceProviderYaml, ScopeBundleYamlConfig,
+    SecurityYaml, SendgridConfig, ServerConfig, SmsConfig, SmsTransport, SmtpConfig,
+    SmtpEncryption, SnsSmsConfig, StorageSection, TokenYamlConfig, TurnstileYaml, TwilioConfig,
 };
 
 /// Helper: construct a validation error without repeating the struct
