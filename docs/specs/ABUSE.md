@@ -1569,3 +1569,145 @@ after a prune operation. This is the same design as the existing `prune_before`.
 
 `retention_days = 0` disables time-based pruning. `max_rows = null` disables the
 row backstop. Both can be active simultaneously for defence-in-depth.
+
+---
+
+## A-30 — Backup / Export Hardening
+
+**Status:** Implemented (HEA-1206)
+
+### Problem
+
+`/admin/backup`, `/admin/backup/restore`, `/admin/users/export`, and
+`/admin/realms/{r}/audit/export` were gated only by `hearth.admin`. A single
+compromised admin token could exfiltrate an entire realm in one call with no
+rate limit, no secondary capability gate, no audit watermark, and no restore
+signature verification.
+
+### Controls implemented
+
+#### A-30.1 Separate `hearth.export` capability
+
+All data-export endpoints (`POST /admin/backup`, `GET /admin/users/export`,
+`GET /admin/realms/{r}/audit/export`) now require the caller's token to carry
+**both** `hearth.admin` AND `hearth.export` in the `permissions` claim.
+
+- `hearth.export` is seeded in all realms and included in the `realm.admin` role
+  by default.
+- Operators can grant it to dedicated service accounts (DR pipelines) without
+  granting full `hearth.admin`.
+- Fail-closed: missing permission → `403 Forbidden`.
+
+#### A-30.2 Per-export rate limit
+
+A dedicated `ExportRateLimiter` (`src/protocol/admin_auth.rs`) enforces a fixed
+window of **10 exports per user per hour** (configurable via
+`security.backup.export_rate_limit`).
+
+- Exceed the limit → `429 Too Many Requests`.
+- Per-user, not per-IP, so rotating IPs does not bypass it.
+- Check fires AFTER the capability check, so tokens without `hearth.export` never
+  consume quota.
+
+#### A-30.3 Restore archive signature verification
+
+`BackupManifest` gains `detached_signature_b64: Option<String>` — a base64url
+Ed25519 signature over `canonical_bytes()` (the manifest JSON with the signature
+field set to `null`).
+
+Config:
+
+```yaml
+security:
+  backup:
+    verify_key: "<base64url-encoded 32-byte Ed25519 public key>"
+```
+
+Behaviour:
+- **Key configured, signature present and valid** → restore proceeds.
+- **Key configured, signature absent or invalid** → `400 Bad Request` (fail-closed).
+- **Key not configured** → signature field is ignored (backwards-compatible).
+
+The signing tool signs `manifest.canonical_bytes()` with the operator's private
+key and writes the result to `detached_signature_b64` before creating the archive.
+
+#### A-30.4 Per-export audit watermark
+
+Every export call (regardless of outcome) emits a `RealmExportWatermarked` audit
+event:
+
+| Field | Value |
+|-------|-------|
+| `action` | `realm_export_watermarked` |
+| `resource_type` | `export` |
+| `resource_id` | unique export UUID |
+| `metadata.export_id` | same UUID (stable lookup key) |
+| `metadata.export_type` | `backup` \| `users` \| `audit` |
+| `metadata.realm_slug` | present when a realm filter was applied |
+
+The event is emitted **before** the export data is produced so the watermark
+exists even when a subsequent step (rate limit, capability, I/O error) fails.
+
+### Fail-open vs fail-closed
+
+| Control | Fail mode | Rationale |
+|---------|-----------|-----------|
+| `hearth.export` capability check | Fail-closed (403) | Missing permission = no data leaves |
+| Per-export rate limit | Fail-closed (429) | Poison-pill on limiter panic drops request |
+| Restore signature verification | Fail-closed (400) | Unsigned archive = rejected when key is configured |
+| Audit watermark emit failure | Fail-open (log only) | Losing a watermark is better than blocking a valid DR restore |
+
+---
+
+## P-8 — Pluggable SecretsBackend (HSM/KMS)
+
+**Status:** Trait + StorageSecretsBackend + FileSecretsBackend implemented;
+KmsSecretsBackend and HsmSecretsBackend are stubs (HEA-1206).
+
+### Problem
+
+Signing keys, encryption-at-rest keys, and Argon2 pepper were stored directly in
+the embedded WAL with no abstraction layer. This made HSM/KMS integration
+impossible without touching every call site.
+
+### Design
+
+`src/abuse/secrets_backend/mod.rs` defines:
+
+```rust
+pub trait SecretsBackend: Send + Sync {
+    fn signing_key_der(&self, realm_id: &RealmId) -> Result<Vec<u8>, SecretsError>;
+    fn store_signing_key_der(&self, realm_id: &RealmId, der: &[u8]) -> Result<(), SecretsError>;
+    fn encryption_key(&self, realm_id: &RealmId) -> Result<[u8; 32], SecretsError>;
+    fn pepper(&self) -> Result<[u8; 32], SecretsError>;
+}
+```
+
+### Adapters
+
+| Adapter | Description |
+|---------|-------------|
+| `StorageSecretsBackend` | Default. Keys stored in the embedded WAL under the system realm namespace (`realm:key:{uuid}`, `realm:ear:{uuid}`, `sys:secrets:pepper`). Zero-migration upgrade path. |
+| `FileSecretsBackend` | Reads/writes raw files from `{root}/signing/{uuid}.der`, `{root}/ear/{uuid}.bin`, `{root}/pepper.bin`. Atomic write via `.tmp` rename. |
+| `KmsSecretsBackend` | Stub — all methods return `SecretsError::NotConfigured`. Replace with AWS/GCP KMS SDK adapter. |
+| `HsmSecretsBackend` | Stub — all methods return `SecretsError::NotConfigured`. Replace with PKCS#11 adapter. |
+
+### Storage key layout (StorageSecretsBackend)
+
+Stored under the **system realm** (nil UUID) namespace:
+
+```
+realm:key:{realm_uuid}   → raw PKCS#8 DER (Ed25519 signing key)
+realm:ear:{realm_uuid}   → 32 raw bytes (encryption-at-rest key)
+sys:secrets:pepper       → 32 raw bytes (Argon2id pepper)
+```
+
+This matches the layout already used by the identity engine, so no WAL migration
+is required when adopting `StorageSecretsBackend`.
+
+### Fail-open vs fail-closed
+
+`SecretsBackend` operations are not on the hot path. Any error (missing key,
+I/O failure, KMS unavailable) propagates as `SecretsError` and is mapped to an
+`IdentityError::Internal` by the call site. The server does not start if the
+system realm signing key cannot be loaded at startup.

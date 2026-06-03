@@ -609,6 +609,9 @@ pub enum RealmStatus {
     /// Behaves like `Suspended` (auth denied) but additionally signals
     /// that the realm can be permanently deleted from the admin UI.
     Archived,
+    /// Background cascade deletion is running. Auth is denied; the realm
+    /// will be fully removed once the cascade completes.
+    DeletingInProgress,
 }
 
 /// Controls who may self-register in a realm.

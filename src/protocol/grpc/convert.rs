@@ -97,6 +97,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::SamlDestinationMismatch
         | IdentityError::SamlUnsupportedAlgorithm
         | IdentityError::SamlInvalidAuthnRequest { .. } => (Code::InvalidArgument, err.to_string()),
+        IdentityError::QuotaExceeded { .. } => (Code::ResourceExhausted, err.to_string()),
         IdentityError::EmailReserved | IdentityError::EmailChangeTokenInvalid => {
             (Code::InvalidArgument, err.to_string())
         }

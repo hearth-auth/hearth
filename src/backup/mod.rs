@@ -310,6 +310,7 @@ mod tests {
             checksums: HashMap::new(),
             signing_key_dek_b64: None,
             dek_wrapping_params: None,
+            detached_signature_b64: None,
         }
     }
 

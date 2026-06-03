@@ -781,6 +781,73 @@ impl StorageEngine for EmbeddedStorageEngine {
         Ok(())
     }
 
+    fn write_batch(
+        &self,
+        realm_id: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        // Trivial case: nothing to do.
+        if puts.is_empty() && deletes.is_empty() {
+            return Ok(());
+        }
+
+        let _timer = crate::metrics::metrics()
+            .storage_operation_duration_seconds
+            .with_label_values(&["write_batch"])
+            .start_timer();
+
+        // 1. Build a single WAL batch record containing both puts and deletes.
+        //    The existing `[len][payload][crc32]` framing + "stop on bad CRC"
+        //    recovery policy gives all-or-nothing durability for the whole set.
+        let mut sub_entries: Vec<BatchEntry> = Vec::with_capacity(puts.len() + deletes.len());
+        for (k, v) in puts {
+            sub_entries.push(BatchEntry {
+                operation: WalOperation::Put,
+                key: k.clone(),
+                value: v.clone(),
+            });
+        }
+        for k in deletes {
+            sub_entries.push(BatchEntry {
+                operation: WalOperation::Delete,
+                key: k.clone(),
+                value: Vec::new(),
+            });
+        }
+
+        let payload = crate::storage::wal::encode_batch_payload(&sub_entries)?;
+        let wal_entry = WalEntry {
+            timestamp: crate::core::Timestamp::now(),
+            realm_id: realm_id.clone(),
+            operation: WalOperation::Batch,
+            key: Vec::new(),
+            value: payload,
+        };
+        self.wal
+            .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
+
+        // 2. Apply puts to in-memory state. If this fails after the WAL write,
+        //    recovery on next open will replay the full batch.
+        for (key, value) in puts {
+            self.active_memtable.put(realm_id, key, value)?;
+            self.hot_tier.invalidate(realm_id, key);
+        }
+
+        // 3. Apply deletes (tombstones) to in-memory state.
+        for key in deletes {
+            self.active_memtable.delete(realm_id, key)?;
+            self.hot_tier.invalidate(realm_id, key);
+        }
+
+        // 4. Single flush check at the tail.
+        if self.active_memtable.should_flush() {
+            self.trigger_flush()?;
+        }
+
+        Ok(())
+    }
+
     fn scan(
         &self,
         realm_id: &RealmId,

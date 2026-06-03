@@ -99,6 +99,79 @@ pub enum TokenRateLimitOutcome {
     },
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ExportRateLimiter — per-export / per-user (A-30)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maximum export operations per hour per admin user (A-30).
+///
+/// A single admin token limited to 10 backup/export calls per 60-minute window
+/// prevents a compromised credential from mass-exfiltrating realm data in a
+/// tight loop. Operators can relax this for automated DR jobs via a service
+/// account with a dedicated token.
+pub const EXPORT_RATE_LIMIT: u32 = 10;
+
+/// Export rate-limit window in microseconds (1 hour).
+pub const EXPORT_RATE_WINDOW_MICROS: i64 = 3_600 * 1_000_000;
+
+/// Per-user fixed-window rate limiter for export endpoints (A-30).
+///
+/// Keyed by `user_uuid`. Contention is negligible because exports are
+/// infrequent and the lock is held only for a counter increment.
+#[derive(Debug, Default)]
+pub struct ExportRateLimiter {
+    trackers: Mutex<HashMap<String, RateTracker>>,
+}
+
+/// Outcome of an export rate-limit check.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ExportRateLimitOutcome {
+    /// The export operation may proceed.
+    Allowed,
+    /// The user has exceeded [`EXPORT_RATE_LIMIT`] in the current window.
+    Exceeded,
+}
+
+impl ExportRateLimiter {
+    /// Creates an empty limiter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records an export attempt from `user_id` and reports whether it is permitted.
+    ///
+    /// `now_micros` is the current Unix timestamp in microseconds; tests should
+    /// pass a fixed value to drive time deterministically.
+    pub fn check(&self, user_id: &UserId, now_micros: i64) -> ExportRateLimitOutcome {
+        let key = user_id.as_uuid().to_string();
+        let mut trackers = self
+            .trackers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let tracker = trackers.entry(key).or_insert(RateTracker {
+            count: 0,
+            window_start_micros: now_micros,
+        });
+
+        if now_micros - tracker.window_start_micros > EXPORT_RATE_WINDOW_MICROS {
+            tracker.count = 0;
+            tracker.window_start_micros = now_micros;
+        }
+
+        tracker.count += 1;
+        if tracker.count > EXPORT_RATE_LIMIT {
+            ExportRateLimitOutcome::Exceeded
+        } else {
+            ExportRateLimitOutcome::Allowed
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TokenRateLimiter
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Per-`(realm, client)` sliding-window rate limiter for OAuth token endpoints.
 ///
 /// Keyed by `"{realm_uuid}:{client_uuid}"`.  Lock contention is low because
@@ -304,5 +377,58 @@ mod tests {
             TokenRateLimitOutcome::Exceeded { .. }
         ));
         assert_eq!(limiter.check(&r2, &c, 0), TokenRateLimitOutcome::Allowed);
+    }
+
+    // --- ExportRateLimiter ---
+
+    #[test]
+    fn export_allows_under_limit() {
+        let limiter = ExportRateLimiter::new();
+        let u = user();
+        for _ in 0..EXPORT_RATE_LIMIT {
+            assert_eq!(limiter.check(&u, 0), ExportRateLimitOutcome::Allowed);
+        }
+    }
+
+    #[test]
+    fn export_rejects_over_limit() {
+        let limiter = ExportRateLimiter::new();
+        let u = user();
+        for _ in 0..EXPORT_RATE_LIMIT {
+            let _ = limiter.check(&u, 0);
+        }
+        assert_eq!(limiter.check(&u, 0), ExportRateLimitOutcome::Exceeded);
+    }
+
+    #[test]
+    fn export_resets_after_hour_window() {
+        let limiter = ExportRateLimiter::new();
+        let u = user();
+        for _ in 0..EXPORT_RATE_LIMIT {
+            let _ = limiter.check(&u, 0);
+        }
+        assert_eq!(limiter.check(&u, 0), ExportRateLimitOutcome::Exceeded);
+        let later = EXPORT_RATE_WINDOW_MICROS + 1;
+        assert_eq!(
+            limiter.check(&u, later),
+            ExportRateLimitOutcome::Allowed,
+            "window must reset after 1 hour"
+        );
+    }
+
+    #[test]
+    fn export_separate_users_are_independent() {
+        let limiter = ExportRateLimiter::new();
+        let a = user();
+        let b = user();
+        for _ in 0..EXPORT_RATE_LIMIT {
+            let _ = limiter.check(&a, 0);
+        }
+        assert_eq!(limiter.check(&a, 0), ExportRateLimitOutcome::Exceeded);
+        assert_eq!(
+            limiter.check(&b, 0),
+            ExportRateLimitOutcome::Allowed,
+            "different users must have independent quotas"
+        );
     }
 }

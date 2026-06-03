@@ -9,6 +9,31 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **A-30 Backup/export hardening** — export operations now require a separate
+  `hearth.export` permission in addition to `hearth.admin` (granted to the
+  `realm.admin` role by default). A per-user rate limit of 10 exports per hour
+  caps blast radius from a compromised credential. Every backup, user-export, and
+  audit-export call emits a `RealmExportWatermarked` audit event with a unique
+  `export_id` UUID, `export_type`, and actor (HEA-1206).
+
+- **A-30 Restore archive signature verification** — `BackupManifest` gains a
+  `detached_signature_b64` field (base64url Ed25519). When
+  `security.backup.verify_key` is configured (raw Ed25519 public key, base64url),
+  the restore handler verifies the detached signature over `canonical_bytes()`
+  before importing any data. Fail-closed: archives without a valid signature are
+  rejected with `400 missing_manifest_signature` (HEA-1206).
+
+- **P-8 Pluggable `SecretsBackend` trait** — `src/abuse/secrets_backend/` provides
+  a `dyn SecretsBackend` abstraction for signing keys (PKCS#8 DER), encryption-at-rest
+  keys (32 bytes), and Argon2 pepper (32 bytes). Adapters: `StorageSecretsBackend`
+  (default, today's WAL storage layout), `FileSecretsBackend` (reads from a
+  directory), and stubs `KmsSecretsBackend` / `HsmSecretsBackend` for future
+  HSM/KMS integration (HEA-1206).
+
+- **`hearth.export` permission** — seeded in all realms and included in the
+  `realm.admin` role. Service accounts can be granted `hearth.export` without
+  full `hearth.admin` for dedicated DR pipelines (HEA-1206).
+
 - **A-24 Per-realm resource quotas** — `RealmConfig.quotas` (`RealmQuotaConfig`)
   adds optional per-realm caps for users, orgs, OAuth clients, total sessions,
   and audit rows. Create operations are rejected with HTTP 429 /

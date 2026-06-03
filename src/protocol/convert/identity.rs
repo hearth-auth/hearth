@@ -124,10 +124,10 @@ impl From<&domain::Realm> for pb::Realm {
 pub(crate) fn domain_realm_status_to_proto(s: domain::RealmStatus) -> pb::RealmStatus {
     match s {
         domain::RealmStatus::Active => pb::RealmStatus::Active,
-        // Archived behaves like Suspended on the wire (no proto value yet).
-        domain::RealmStatus::Suspended | domain::RealmStatus::Archived => {
-            pb::RealmStatus::Suspended
-        }
+        // Archived and DeletingInProgress behave like Suspended on the wire (no proto value yet).
+        domain::RealmStatus::Suspended
+        | domain::RealmStatus::Archived
+        | domain::RealmStatus::DeletingInProgress => pb::RealmStatus::Suspended,
     }
 }
 

@@ -27,6 +27,7 @@
 //! | P-3  | Bot-signal trait + UA/JA3/JA4 heuristics | [`bot_signal`]           |
 //! | P-4  | RiskScorer trait + rule-based engine (A-11) | [`risk_scorer`]       |
 //! | P-5  | Email-reputation trait + disposable list | [`email_reputation`]     |
+//! | P-8  | Pluggable SecretsBackend (HSM/KMS/file)  | [`secrets_backend`]      |
 
 pub mod backoff;
 pub mod bot_signal;
@@ -39,6 +40,7 @@ pub mod ip_reputation;
 pub mod redirect;
 pub mod risk_scorer;
 pub mod sanitize;
+pub mod secrets_backend;
 pub mod shaper;
 pub mod tarpit;
 

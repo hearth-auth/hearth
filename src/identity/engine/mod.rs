@@ -318,6 +318,12 @@ pub struct IdentityConfig {
     pub rate_limit: RateLimitConfig,
     /// Periodic cleanup sweeper configuration.
     pub cleanup: crate::identity::cleanup::CleanupConfig,
+    /// Number of keys to delete per chunk in delete_realm cascade.
+    /// Defaults to 200. Applies both in sync and background mode.
+    pub cascade_chunk_size: usize,
+    /// Realm item count above which delete_realm spawns a background task.
+    /// Below this threshold the cascade runs synchronously. Default: 1_000.
+    pub cascade_background_threshold: usize,
 }
 
 impl Default for IdentityConfig {
@@ -330,6 +336,8 @@ impl Default for IdentityConfig {
             oidc: OidcConfig::default(),
             rate_limit: RateLimitConfig::default(),
             cleanup: crate::identity::cleanup::CleanupConfig::default(),
+            cascade_chunk_size: 200,
+            cascade_background_threshold: 1_000,
         }
     }
 }
@@ -391,13 +399,15 @@ pub struct EmbeddedIdentityEngine {
     ///
     /// Hot-path readers call `load()` — one atomic fence, no locking.
     /// Writers use `rcu()` to clone-and-CAS the map; realm key ops are rare.
-    realm_signing_keys: ArcSwap<HashMap<RealmId, Arc<SigningKey>>>,
+    /// Wrapped in `Arc` so background delete tasks can hold a reference.
+    realm_signing_keys: Arc<ArcSwap<HashMap<RealmId, Arc<SigningKey>>>>,
     /// Wait-free realm status cache for the `validate_token` hot path.
     ///
     /// Populated at startup and updated on every realm CRUD operation.
     /// `validate_token` reads with `load()` — no lock, no storage call.
     /// Writers (`create_realm`, `update_realm`, `delete_realm`) use `rcu()`.
-    realm_status_cache: ArcSwap<HashMap<RealmId, RealmStatus>>,
+    /// Wrapped in `Arc` so background delete tasks can hold a reference.
+    realm_status_cache: Arc<ArcSwap<HashMap<RealmId, RealmStatus>>>,
     /// Per-realm RSA signing keys used for SAML metadata + response signing.
     ///
     /// Lazily loaded. Regeneration happens only on first SAML operation in
@@ -483,6 +493,12 @@ pub struct EmbeddedIdentityEngine {
     /// callers; a finer-grained per-realm lock could come later if
     /// contention ever becomes measurable.
     realm_ops_lock: Mutex<()>,
+    /// Serializes org slug reservation and invitation acceptance.
+    ///
+    /// Guards the check-then-write sequence in create_organization and
+    /// accept_invitation so two concurrent callers cannot both win the
+    /// same slug or both accept the same invitation token.
+    org_write_lock: Mutex<()>,
     /// HIBP k-anonymity breach-check client.
     ///
     /// Shared across all password-set/-change operations. Uses an injectable
@@ -734,8 +750,8 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             signing_key,
-            realm_signing_keys: ArcSwap::from_pointee(HashMap::new()),
-            realm_status_cache: ArcSwap::from_pointee(HashMap::new()),
+            realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             realm_saml_keys: Mutex::new(HashMap::new()),
             oidc_rsa_key: std::sync::OnceLock::new(),
             oidc_ecdsa_key: std::sync::OnceLock::new(),
@@ -751,6 +767,7 @@ impl EmbeddedIdentityEngine {
             session_limit_locks: Mutex::new(HashMap::new()),
             jti_locks: Mutex::new(HashMap::new()),
             realm_ops_lock: Mutex::new(()),
+            org_write_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
             sv_store,
@@ -907,8 +924,8 @@ impl EmbeddedIdentityEngine {
             audit,
             dummy_hash,
             signing_key,
-            realm_signing_keys: ArcSwap::from_pointee(HashMap::new()),
-            realm_status_cache: ArcSwap::from_pointee(HashMap::new()),
+            realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             realm_saml_keys: Mutex::new(HashMap::new()),
             oidc_rsa_key: std::sync::OnceLock::new(),
             oidc_ecdsa_key: std::sync::OnceLock::new(),
@@ -924,6 +941,7 @@ impl EmbeddedIdentityEngine {
             session_limit_locks: Mutex::new(HashMap::new()),
             jti_locks: Mutex::new(HashMap::new()),
             realm_ops_lock: Mutex::new(()),
+            org_write_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
             sv_store,
@@ -2550,8 +2568,10 @@ impl EmbeddedIdentityEngine {
         let realm = self
             .get_realm(realm_id)?
             .ok_or(IdentityError::RealmNotFound)?;
-        if realm.status() != RealmStatus::Active {
-            return Err(IdentityError::RealmSuspended);
+        match realm.status() {
+            RealmStatus::Active => {}
+            RealmStatus::DeletingInProgress => return Err(IdentityError::RealmSuspended),
+            _ => return Err(IdentityError::RealmSuspended),
         }
         Ok(())
     }
@@ -2771,6 +2791,451 @@ impl EmbeddedIdentityEngine {
             .put(realm_id, &jti_key, &assertion_exp.to_be_bytes())
             .map_err(Self::storage_err)?;
         Ok(())
+    }
+}
+
+// Private cascade helpers — not part of the IdentityEngine trait.
+impl EmbeddedIdentityEngine {
+    /// Counts the total number of data keys across all cascade prefixes for a realm.
+    /// Used to decide whether to background the delete_realm cascade.
+    fn estimate_cascade_count(&self, realm_id: &RealmId) -> usize {
+        let prefixes: &[&[u8]] = &[
+            b"usr:id:",
+            b"usr:email:",
+            b"cred:user:",
+            b"ses:id:",
+            b"ses:user:",
+            b"mfa:totp:",
+            b"webauthn:cred:",
+            b"webauthn:disc:",
+            b"magic:link:",
+            b"email:verify:",
+            b"rst:token:",
+            b"org:id:",
+            b"org:slug:",
+            b"orgm:org:",
+            b"orgm:user:",
+            b"orgi:id:",
+            b"orgi:token:",
+            b"orgi:org:",
+            b"orgi:list:",
+            b"oauth:client:",
+            b"rel:",
+            b"oauth:code:",
+            b"oauth:revjti:",
+            b"oauth:ucode:",
+            b"rba:",
+        ];
+        prefixes.iter().fold(0usize, |acc, prefix| {
+            let end = keys::prefix_end(prefix);
+            acc + self
+                .storage
+                .scan(realm_id, prefix, &end)
+                .map(|e| e.len())
+                .unwrap_or(0)
+        })
+    }
+
+    /// Runs the full cascade deletion for a realm in chunks of `chunk_size` keys.
+    ///
+    /// Deletes all realm data across every key prefix. The realm record itself
+    /// must have already been removed (or marked `DeletingInProgress`) before
+    /// this is called. This method is idempotent: re-running after a crash
+    /// converges to a clean state.
+    ///
+    /// Returns `(cascade_work_done, audit_needed)` where `cascade_work_done`
+    /// indicates whether any keys were actually deleted.
+    #[allow(clippy::too_many_lines)]
+    fn do_cascade_chunked(
+        &self,
+        realm_id: &RealmId,
+        chunk_size: usize,
+    ) -> Result<bool, IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let mut cascade_work_done = false;
+
+        // 1. Delete all users in this realm (cascades to sessions, credentials)
+        let user_prefix = keys::user_id_scan_prefix();
+        let user_end = keys::prefix_end(&user_prefix);
+        let users = self
+            .storage
+            .scan(realm_id, &user_prefix, &user_end)
+            .map_err(Self::storage_err)?;
+
+        if !users.is_empty() {
+            cascade_work_done = true;
+        }
+
+        for entry in &users {
+            let user: User = Self::deserialize_user(&entry.value)?;
+            // delete_user handles cascade of sessions, credentials, email index
+            let _ = self.delete_user(realm_id, user.id());
+        }
+
+        // 1a. Unconditional sweep of per-user secondary prefixes. These
+        //     indexes are normally cleaned up inside `delete_user`, but a
+        //     crash (or an orphaned primary) can leave stragglers. Scanning
+        //     by prefix guarantees we reach them on any retry.
+        for prefix in [
+            &b"usr:email:"[..],
+            &b"cred:user:"[..],
+            &b"ses:id:"[..],
+            &b"ses:user:"[..],
+            &b"mfa:totp:"[..],
+            &b"webauthn:cred:"[..],
+            &b"webauthn:disc:"[..],
+            &b"magic:link:"[..],
+            &b"email:verify:"[..],
+            &b"rst:token:"[..],
+        ] {
+            let end = keys::prefix_end(prefix);
+            let entries = self
+                .storage
+                .scan(realm_id, prefix, &end)
+                .map_err(Self::storage_err)?;
+            if !entries.is_empty() {
+                cascade_work_done = true;
+            }
+            for chunk in entries.chunks(chunk_size) {
+                for entry in chunk {
+                    self.storage
+                        .delete(realm_id, &entry.key)
+                        .map_err(Self::storage_err)?;
+                }
+            }
+        }
+
+        // 1b. Unconditional sweep of organization-related prefixes.
+        for prefix in [
+            &b"org:id:"[..],
+            &b"org:slug:"[..],
+            &b"orgm:org:"[..],
+            &b"orgm:user:"[..],
+            &b"orgi:id:"[..],
+            &b"orgi:token:"[..],
+            &b"orgi:org:"[..],
+            &b"orgi:list:"[..],
+        ] {
+            let end = keys::prefix_end(prefix);
+            let entries = self
+                .storage
+                .scan(realm_id, prefix, &end)
+                .map_err(Self::storage_err)?;
+            if !entries.is_empty() {
+                cascade_work_done = true;
+            }
+            for chunk in entries.chunks(chunk_size) {
+                for entry in chunk {
+                    self.storage
+                        .delete(realm_id, &entry.key)
+                        .map_err(Self::storage_err)?;
+                }
+            }
+        }
+
+        // 2. Delete all OAuth clients
+        let client_prefix = b"oauth:client:";
+        let client_end = keys::prefix_end(client_prefix);
+        let clients = self
+            .storage
+            .scan(realm_id, client_prefix, &client_end)
+            .map_err(Self::storage_err)?;
+        if !clients.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in clients.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 3. Delete all authorization tuples (prefix "rel:")
+        let rel_prefix = b"rel:";
+        let rel_end = keys::prefix_end(rel_prefix);
+        let rels = self
+            .storage
+            .scan(realm_id, rel_prefix, &rel_end)
+            .map_err(Self::storage_err)?;
+        if !rels.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in rels.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 4. Delete all OAuth authorization codes
+        let code_prefix = b"oauth:code:";
+        let code_end = keys::prefix_end(code_prefix);
+        let codes = self
+            .storage
+            .scan(realm_id, code_prefix, &code_end)
+            .map_err(Self::storage_err)?;
+        if !codes.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in codes.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 5. Delete all grant families
+        let family_prefix = keys::grant_family_scan_prefix();
+        let family_end = keys::prefix_end(&family_prefix);
+        let families = self
+            .storage
+            .scan(realm_id, &family_prefix, &family_end)
+            .map_err(Self::storage_err)?;
+        if !families.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in families.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 6. Delete all device codes
+        let device_prefix = keys::device_code_scan_prefix();
+        let device_end = keys::prefix_end(&device_prefix);
+        let devices = self
+            .storage
+            .scan(realm_id, &device_prefix, &device_end)
+            .map_err(Self::storage_err)?;
+        if !devices.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in devices.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 7. Delete all revoked JTIs
+        let jti_prefix = b"oauth:revjti:";
+        let jti_end = keys::prefix_end(jti_prefix);
+        let jtis = self
+            .storage
+            .scan(realm_id, jti_prefix, &jti_end)
+            .map_err(Self::storage_err)?;
+        if !jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in jtis.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 8. Delete all user-code index entries
+        let ucode_prefix = b"oauth:ucode:";
+        let ucode_end = keys::prefix_end(ucode_prefix);
+        let ucodes = self
+            .storage
+            .scan(realm_id, ucode_prefix, &ucode_end)
+            .map_err(Self::storage_err)?;
+        if !ucodes.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in ucodes.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 8a. Delete all OAuth consent records in this realm.
+        let consent_prefix = keys::oauth_consent_scan_prefix();
+        let consent_end = keys::prefix_end(&consent_prefix);
+        let consents = self
+            .storage
+            .scan(realm_id, &consent_prefix, &consent_end)
+            .map_err(Self::storage_err)?;
+        if !consents.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in consents.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 8b. Delete all in-flight pending-authorization tickets.
+        let pending_prefix = keys::oauth_pending_auth_scan_prefix();
+        let pending_end = keys::prefix_end(&pending_prefix);
+        let pendings = self
+            .storage
+            .scan(realm_id, &pending_prefix, &pending_end)
+            .map_err(Self::storage_err)?;
+        if !pendings.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in pendings.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 8c. Federation connectors, state tokens, confirm-link tickets,
+        //     the external-identity indexes (both directions), and the
+        //     SCIM externalId indexes (both directions, users + groups).
+        for prefix in [
+            &b"fed:idp:"[..],
+            &b"fed:state:"[..],
+            &b"fed:confirm:"[..],
+            &b"fed:ext:"[..],
+            &b"fed:ext_fwd:"[..],
+            &b"scim:ext_user:"[..],
+            &b"scim:ext_user_fwd:"[..],
+            &b"scim:ext_group:"[..],
+            &b"scim:ext_group_fwd:"[..],
+        ] {
+            let end = keys::prefix_end(prefix);
+            let entries = self
+                .storage
+                .scan(realm_id, prefix, &end)
+                .map_err(Self::storage_err)?;
+            if !entries.is_empty() {
+                cascade_work_done = true;
+            }
+            for chunk in entries.chunks(chunk_size) {
+                for entry in chunk {
+                    self.storage
+                        .delete(realm_id, &entry.key)
+                        .map_err(Self::storage_err)?;
+                }
+            }
+        }
+
+        // 8d. SAML registrations, state, replay sentinels, SP-session
+        //     registrations, and logout state.
+        for prefix in [
+            &b"saml:sp:"[..],
+            &b"saml:state:"[..],
+            &b"saml:asn:"[..],
+            &b"saml:sp_session:"[..],
+            &b"saml:logout:"[..],
+        ] {
+            let end = keys::prefix_end(prefix);
+            let entries = self
+                .storage
+                .scan(realm_id, prefix, &end)
+                .map_err(Self::storage_err)?;
+            if !entries.is_empty() {
+                cascade_work_done = true;
+            }
+            for chunk in entries.chunks(chunk_size) {
+                for entry in chunk {
+                    self.storage
+                        .delete(realm_id, &entry.key)
+                        .map_err(Self::storage_err)?;
+                }
+            }
+        }
+
+        // 8e. SAML per-realm RSA signing key (under system realm scope).
+        let saml_key_storage_key = keys::encode_realm_saml_key(realm_id);
+        if self
+            .storage
+            .get(&sys_realm, &saml_key_storage_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            cascade_work_done = true;
+            self.storage
+                .delete(&sys_realm, &saml_key_storage_key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 8f. Delete all JWT bearer assertion JTIs (replay store).
+        let jb_jti_prefix = keys::jwt_bearer_jti_scan_prefix();
+        let jb_jti_end = keys::prefix_end(&jb_jti_prefix);
+        let jb_jtis = self
+            .storage
+            .scan(realm_id, &jb_jti_prefix, &jb_jti_end)
+            .map_err(Self::storage_err)?;
+        if !jb_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in jb_jtis.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 8g. Delete all private_key_jwt client assertion JTIs (replay store).
+        let ca_jti_prefix = keys::client_assertion_jti_scan_prefix();
+        let ca_jti_end = keys::prefix_end(&ca_jti_prefix);
+        let ca_jtis = self
+            .storage
+            .scan(realm_id, &ca_jti_prefix, &ca_jti_end)
+            .map_err(Self::storage_err)?;
+        if !ca_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in ca_jtis.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 8h. Delete all JAR (RFC 9101) signed request object JTIs (replay store).
+        let jar_jti_prefix = keys::jar_jti_scan_prefix();
+        let jar_jti_end = keys::prefix_end(&jar_jti_prefix);
+        let jar_jtis = self
+            .storage
+            .scan(realm_id, &jar_jti_prefix, &jar_jti_end)
+            .map_err(Self::storage_err)?;
+        if !jar_jtis.is_empty() {
+            cascade_work_done = true;
+        }
+        for chunk in jar_jtis.chunks(chunk_size) {
+            for entry in chunk {
+                self.storage
+                    .delete(realm_id, &entry.key)
+                    .map_err(Self::storage_err)?;
+            }
+        }
+
+        // 9. Delete realm signing key (check existence first so we can attribute
+        //    cascade work even when only the signing key survives a prior crash).
+        let key_storage_key = keys::encode_realm_signing_key(realm_id);
+        if self
+            .storage
+            .get(&sys_realm, &key_storage_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            cascade_work_done = true;
+            self.storage
+                .delete(&sys_realm, &key_storage_key)
+                .map_err(Self::storage_err)?;
+        }
+
+        Ok(cascade_work_done)
     }
 }
 
@@ -3028,7 +3493,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // top of the realm-status check added to validate_token).
         if matches!(
             request.status,
-            Some(RealmStatus::Suspended | RealmStatus::Archived)
+            Some(RealmStatus::Suspended | RealmStatus::Archived | RealmStatus::DeletingInProgress)
         ) {
             self.bulk_revoke_sessions(realm_id);
         }
@@ -3043,11 +3508,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 operation: "delete_realm",
             });
         }
+
         // Serialize against create/update so a concurrent update can't
         // re-put a realm record after we've already removed its signing
         // key. Without this lock, `record=Some key=None` would leak out
         // and `realm_jwks()` would fail for a still-live-looking realm.
-        let _ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
+        let ops_guard = self.realm_ops_lock.lock().expect("realm ops lock");
+
         // Check whether the realm record exists. We do NOT early-return on
         // missing record — a previous cascade may have crashed after deleting
         // the record but before cleaning all key-spaces. Recovery requires us
@@ -3055,7 +3522,6 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // AND the record is absent, we return RealmNotFound at the end.
         let existing_realm = self.get_realm(realm_id)?;
         let realm_exists = existing_realm.is_some();
-        let mut cascade_work_done = false;
 
         // 0. Delete the realm record FIRST. Ordering matters: if a fault
         //    lands mid-cascade, the observable partial state is "realm
@@ -3065,6 +3531,200 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         //    as live. The idempotent cascade below converges on retry.
         let sys_realm = keys::system_realm_id();
         let realm_key = keys::encode_realm_id(realm_id);
+
+        if realm_exists {
+            // Mark the realm as DeletingInProgress so concurrent requests
+            // are rejected by require_active_realm before we start the
+            // potentially-long cascade. (A-33)
+            if let Some(ref t) = existing_realm {
+                let mut in_progress = t.clone();
+                in_progress.set_status(RealmStatus::DeletingInProgress);
+                let in_progress_bytes =
+                    serde_json::to_vec(&in_progress).map_err(|e| IdentityError::Serialization {
+                        reason: e.to_string(),
+                    })?;
+                self.storage
+                    .put(&sys_realm, &realm_key, &in_progress_bytes)
+                    .map_err(Self::storage_err)?;
+                // Reflect the status change in the in-memory cache immediately.
+                let id = realm_id.clone();
+                self.realm_status_cache.rcu(|current| {
+                    let mut new_map = (**current).clone();
+                    new_map.insert(id.clone(), RealmStatus::DeletingInProgress);
+                    new_map
+                });
+            }
+        }
+
+        // Release the ops lock before the (potentially long) cascade so we
+        // do not block create/update of other realms. The DeletingInProgress
+        // status written above prevents new mutations from landing on this
+        // realm, so it is safe to proceed without holding the lock.
+        drop(ops_guard);
+
+        // Estimate the size of the cascade to decide whether to background it.
+        let cascade_count = self.estimate_cascade_count(realm_id);
+        let chunk_size = self.config.cascade_chunk_size;
+        let background_threshold = self.config.cascade_background_threshold;
+
+        if cascade_count > background_threshold {
+            // Large realm: spawn a background task and return immediately.
+            // The background task performs the full cascade and then cleans
+            // up the in-memory caches. (A-33)
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let storage = Arc::clone(&self.storage);
+                let audit = Arc::clone(&self.audit);
+                let realm_id_bg = realm_id.clone();
+                let signing_keys = self.realm_signing_keys.clone();
+                let status_cache = self.realm_status_cache.clone();
+                let existing_realm_bg = existing_realm.clone();
+
+                handle.spawn(async move {
+                    tracing::info!(
+                        realm_id = %realm_id_bg.as_uuid(),
+                        cascade_count,
+                        "delete_realm: backgrounding large cascade"
+                    );
+
+                    // Build a minimal engine wrapper to reuse do_cascade_chunked.
+                    // We need an engine with the same storage — the cheapest
+                    // approach is to run the cascade inline on the storage.
+                    let sys = keys::system_realm_id();
+                    let realm_key_bg = keys::encode_realm_id(&realm_id_bg);
+
+                    // Delete the realm record from the system realm.
+                    if realm_exists {
+                        if let Err(e) = storage.delete(&sys, &realm_key_bg) {
+                            tracing::info!(
+                                realm_id = %realm_id_bg.as_uuid(),
+                                error = %e,
+                                "delete_realm background: failed to delete realm record"
+                            );
+                        }
+                        // Clean up the name index (best-effort).
+                        if let Some(ref t) = existing_realm_bg {
+                            let name_key = keys::encode_realm_name(t.name());
+                            let _ = storage.delete(&sys, &name_key);
+                        }
+                    }
+
+                    // Scan and delete each prefix in chunks. Includes usr:id:
+                    // directly since we cannot call delete_user from a
+                    // background task; the unconditional sweep covers all
+                    // user-related key spaces idempotently.
+                    let all_prefixes: &[&[u8]] = &[
+                        &b"usr:id:"[..],
+                        &b"usr:email:"[..],
+                        &b"cred:user:"[..],
+                        &b"ses:id:"[..],
+                        &b"ses:user:"[..],
+                        &b"mfa:totp:"[..],
+                        &b"webauthn:cred:"[..],
+                        &b"webauthn:disc:"[..],
+                        &b"magic:link:"[..],
+                        &b"email:verify:"[..],
+                        &b"rst:token:"[..],
+                        &b"org:id:"[..],
+                        &b"org:slug:"[..],
+                        &b"orgm:org:"[..],
+                        &b"orgm:user:"[..],
+                        &b"orgi:id:"[..],
+                        &b"orgi:token:"[..],
+                        &b"orgi:org:"[..],
+                        &b"orgi:list:"[..],
+                        &b"oauth:client:"[..],
+                        &b"rel:"[..],
+                        &b"oauth:code:"[..],
+                        &b"oauth:revjti:"[..],
+                        &b"oauth:ucode:"[..],
+                        &b"fed:idp:"[..],
+                        &b"fed:state:"[..],
+                        &b"fed:confirm:"[..],
+                        &b"fed:ext:"[..],
+                        &b"fed:ext_fwd:"[..],
+                        &b"scim:ext_user:"[..],
+                        &b"scim:ext_user_fwd:"[..],
+                        &b"scim:ext_group:"[..],
+                        &b"scim:ext_group_fwd:"[..],
+                        &b"saml:sp:"[..],
+                        &b"saml:state:"[..],
+                        &b"saml:asn:"[..],
+                        &b"saml:sp_session:"[..],
+                        &b"saml:logout:"[..],
+                        &b"rba:"[..],
+                    ];
+                    let mut deleted_total = 0usize;
+                    for prefix in all_prefixes {
+                        let end = keys::prefix_end(prefix);
+                        match storage.scan(&realm_id_bg, prefix, &end) {
+                            Ok(entries) => {
+                                for chunk in entries.chunks(chunk_size) {
+                                    for entry in chunk {
+                                        if let Err(e) = storage.delete(&realm_id_bg, &entry.key) {
+                                            tracing::info!(
+                                                realm_id = %realm_id_bg.as_uuid(),
+                                                error = %e,
+                                                "delete_realm background: failed to delete key"
+                                            );
+                                        } else {
+                                            deleted_total += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::info!(
+                                    realm_id = %realm_id_bg.as_uuid(),
+                                    error = %e,
+                                    "delete_realm background: scan error"
+                                );
+                            }
+                        }
+                    }
+
+                    // System-realm keys: SAML key + signing key.
+                    let saml_key = keys::encode_realm_saml_key(&realm_id_bg);
+                    let _ = storage.delete(&sys, &saml_key);
+                    let signing_key_key = keys::encode_realm_signing_key(&realm_id_bg);
+                    let _ = storage.delete(&sys, &signing_key_key);
+
+                    // Emit audit event (best-effort; no ? propagation in async task).
+                    let audit_event = crate::audit::CreateAuditEvent {
+                        realm_id: realm_id_bg.clone(),
+                        actor: "system".to_string(),
+                        action: crate::audit::AuditAction::RealmDeleted,
+                        resource_type: "realm".to_string(),
+                        resource_id: realm_id_bg.as_uuid().to_string(),
+                        metadata: None,
+                    };
+                    let _ = audit.append(&audit_event);
+
+                    // Remove from in-memory caches.
+                    signing_keys.rcu(|current| {
+                        let mut new_map = (**current).clone();
+                        new_map.remove(&realm_id_bg);
+                        new_map
+                    });
+                    status_cache.rcu(|current| {
+                        let mut new_map = (**current).clone();
+                        new_map.remove(&realm_id_bg);
+                        new_map
+                    });
+
+                    tracing::info!(
+                        realm_id = %realm_id_bg.as_uuid(),
+                        deleted_total,
+                        "delete_realm: background cascade complete"
+                    );
+                });
+
+                // Return Ok immediately; the background task will finish the work.
+                return Ok(());
+            }
+            // No Tokio runtime available — fall through to synchronous cascade.
+        }
+
+        // Synchronous cascade path (small realm, or no runtime for background).
         if realm_exists {
             self.storage
                 .delete(&sys_realm, &realm_key)
@@ -3076,357 +3736,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        // 1. Delete all users in this realm (cascades to sessions, credentials)
-        let user_prefix = keys::user_id_scan_prefix();
-        let user_end = keys::prefix_end(&user_prefix);
-        let users = self
-            .storage
-            .scan(realm_id, &user_prefix, &user_end)
-            .map_err(Self::storage_err)?;
+        let cascade_work_done = self.do_cascade_chunked(realm_id, chunk_size)?;
 
-        if !users.is_empty() {
-            cascade_work_done = true;
-        }
-
-        for entry in &users {
-            let user: User = Self::deserialize_user(&entry.value)?;
-            // delete_user handles cascade of sessions, credentials, email index
-            let _ = self.delete_user(realm_id, user.id());
-        }
-
-        // 1a. Unconditional sweep of per-user secondary prefixes. These
-        //     indexes are normally cleaned up inside `delete_user`, but a
-        //     crash (or an orphaned primary) can leave stragglers. Scanning
-        //     by prefix guarantees we reach them on any retry.
-        for prefix in [
-            &b"usr:email:"[..],
-            &b"cred:user:"[..],
-            &b"ses:id:"[..],
-            &b"ses:user:"[..],
-            &b"mfa:totp:"[..],
-            &b"webauthn:cred:"[..],
-            &b"webauthn:disc:"[..],
-            &b"magic:link:"[..],
-            &b"email:verify:"[..],
-            &b"rst:token:"[..],
-        ] {
-            let end = keys::prefix_end(prefix);
-            let entries = self
-                .storage
-                .scan(realm_id, prefix, &end)
-                .map_err(Self::storage_err)?;
-            if !entries.is_empty() {
-                cascade_work_done = true;
-            }
-            for entry in &entries {
-                self.storage
-                    .delete(realm_id, &entry.key)
-                    .map_err(Self::storage_err)?;
-            }
-        }
-
-        // 1b. Unconditional sweep of organization-related prefixes.
-        for prefix in [
-            &b"org:id:"[..],
-            &b"org:slug:"[..],
-            &b"orgm:org:"[..],
-            &b"orgm:user:"[..],
-            &b"orgi:id:"[..],
-            &b"orgi:token:"[..],
-            &b"orgi:org:"[..],
-            &b"orgi:list:"[..],
-        ] {
-            let end = keys::prefix_end(prefix);
-            let entries = self
-                .storage
-                .scan(realm_id, prefix, &end)
-                .map_err(Self::storage_err)?;
-            if !entries.is_empty() {
-                cascade_work_done = true;
-            }
-            for entry in &entries {
-                self.storage
-                    .delete(realm_id, &entry.key)
-                    .map_err(Self::storage_err)?;
-            }
-        }
-
-        // 2. Delete all OAuth clients
-        let client_prefix = b"oauth:client:";
-        let client_end = keys::prefix_end(client_prefix);
-        let clients = self
-            .storage
-            .scan(realm_id, client_prefix, &client_end)
-            .map_err(Self::storage_err)?;
-        if !clients.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &clients {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 3. Delete all authorization tuples (prefix "rel:")
-        let rel_prefix = b"rel:";
-        let rel_end = keys::prefix_end(rel_prefix);
-        let rels = self
-            .storage
-            .scan(realm_id, rel_prefix, &rel_end)
-            .map_err(Self::storage_err)?;
-        if !rels.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &rels {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 4. Delete all OAuth authorization codes
-        let code_prefix = b"oauth:code:";
-        let code_end = keys::prefix_end(code_prefix);
-        let codes = self
-            .storage
-            .scan(realm_id, code_prefix, &code_end)
-            .map_err(Self::storage_err)?;
-        if !codes.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &codes {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 5. Delete all grant families
-        let family_prefix = keys::grant_family_scan_prefix();
-        let family_end = keys::prefix_end(&family_prefix);
-        let families = self
-            .storage
-            .scan(realm_id, &family_prefix, &family_end)
-            .map_err(Self::storage_err)?;
-        if !families.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &families {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 6. Delete all device codes
-        let device_prefix = keys::device_code_scan_prefix();
-        let device_end = keys::prefix_end(&device_prefix);
-        let devices = self
-            .storage
-            .scan(realm_id, &device_prefix, &device_end)
-            .map_err(Self::storage_err)?;
-        if !devices.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &devices {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 7. Delete all revoked JTIs
-        let jti_prefix = b"oauth:revjti:";
-        let jti_end = keys::prefix_end(jti_prefix);
-        let jtis = self
-            .storage
-            .scan(realm_id, jti_prefix, &jti_end)
-            .map_err(Self::storage_err)?;
-        if !jtis.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &jtis {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 8. Delete all user-code index entries
-        let ucode_prefix = b"oauth:ucode:";
-        let ucode_end = keys::prefix_end(ucode_prefix);
-        let ucodes = self
-            .storage
-            .scan(realm_id, ucode_prefix, &ucode_end)
-            .map_err(Self::storage_err)?;
-        if !ucodes.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &ucodes {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 8a. Delete all OAuth consent records in this realm.
-        let consent_prefix = keys::oauth_consent_scan_prefix();
-        let consent_end = keys::prefix_end(&consent_prefix);
-        let consents = self
-            .storage
-            .scan(realm_id, &consent_prefix, &consent_end)
-            .map_err(Self::storage_err)?;
-        if !consents.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &consents {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 8b. Delete all in-flight pending-authorization tickets.
-        let pending_prefix = keys::oauth_pending_auth_scan_prefix();
-        let pending_end = keys::prefix_end(&pending_prefix);
-        let pendings = self
-            .storage
-            .scan(realm_id, &pending_prefix, &pending_end)
-            .map_err(Self::storage_err)?;
-        if !pendings.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &pendings {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 8c. Federation connectors, state tokens, confirm-link tickets,
-        //     the external-identity indexes (both directions), and the
-        //     SCIM externalId indexes (both directions, users + groups).
-        for prefix in [
-            &b"fed:idp:"[..],
-            &b"fed:state:"[..],
-            &b"fed:confirm:"[..],
-            &b"fed:ext:"[..],
-            &b"fed:ext_fwd:"[..],
-            &b"scim:ext_user:"[..],
-            &b"scim:ext_user_fwd:"[..],
-            &b"scim:ext_group:"[..],
-            &b"scim:ext_group_fwd:"[..],
-        ] {
-            let end = keys::prefix_end(prefix);
-            let entries = self
-                .storage
-                .scan(realm_id, prefix, &end)
-                .map_err(Self::storage_err)?;
-            if !entries.is_empty() {
-                cascade_work_done = true;
-            }
-            for entry in &entries {
-                self.storage
-                    .delete(realm_id, &entry.key)
-                    .map_err(Self::storage_err)?;
-            }
-        }
-
-        // 8d. SAML registrations, state, replay sentinels, SP-session
-        //     registrations, and logout state.
-        for prefix in [
-            &b"saml:sp:"[..],
-            &b"saml:state:"[..],
-            &b"saml:asn:"[..],
-            &b"saml:sp_session:"[..],
-            &b"saml:logout:"[..],
-        ] {
-            let end = keys::prefix_end(prefix);
-            let entries = self
-                .storage
-                .scan(realm_id, prefix, &end)
-                .map_err(Self::storage_err)?;
-            if !entries.is_empty() {
-                cascade_work_done = true;
-            }
-            for entry in &entries {
-                self.storage
-                    .delete(realm_id, &entry.key)
-                    .map_err(Self::storage_err)?;
-            }
-        }
-
-        // 8e. SAML per-realm RSA signing key (under system realm scope).
-        let saml_key_storage_key = keys::encode_realm_saml_key(realm_id);
-        if self
-            .storage
-            .get(&sys_realm, &saml_key_storage_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            cascade_work_done = true;
-            self.storage
-                .delete(&sys_realm, &saml_key_storage_key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 8f. Delete all JWT bearer assertion JTIs (replay store).
-        let jb_jti_prefix = keys::jwt_bearer_jti_scan_prefix();
-        let jb_jti_end = keys::prefix_end(&jb_jti_prefix);
-        let jb_jtis = self
-            .storage
-            .scan(realm_id, &jb_jti_prefix, &jb_jti_end)
-            .map_err(Self::storage_err)?;
-        if !jb_jtis.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &jb_jtis {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 8g. Delete all private_key_jwt client assertion JTIs (replay store).
-        let ca_jti_prefix = keys::client_assertion_jti_scan_prefix();
-        let ca_jti_end = keys::prefix_end(&ca_jti_prefix);
-        let ca_jtis = self
-            .storage
-            .scan(realm_id, &ca_jti_prefix, &ca_jti_end)
-            .map_err(Self::storage_err)?;
-        if !ca_jtis.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &ca_jtis {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 8h. Delete all JAR (RFC 9101) signed request object JTIs (replay store).
-        let jar_jti_prefix = keys::jar_jti_scan_prefix();
-        let jar_jti_end = keys::prefix_end(&jar_jti_prefix);
-        let jar_jtis = self
-            .storage
-            .scan(realm_id, &jar_jti_prefix, &jar_jti_end)
-            .map_err(Self::storage_err)?;
-        if !jar_jtis.is_empty() {
-            cascade_work_done = true;
-        }
-        for entry in &jar_jtis {
-            self.storage
-                .delete(realm_id, &entry.key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 9. Delete realm signing key (check existence first so we can attribute
-        //    cascade work even when only the signing key survives a prior crash).
-        let key_storage_key = keys::encode_realm_signing_key(realm_id);
-        if self
-            .storage
-            .get(&sys_realm, &key_storage_key)
-            .map_err(Self::storage_err)?
-            .is_some()
-        {
-            cascade_work_done = true;
-            self.storage
-                .delete(&sys_realm, &key_storage_key)
-                .map_err(Self::storage_err)?;
-        }
-
-        // 10. Remove from in-memory caches. Durable deletion already
-        //     happened above; this drops the cached Arc and status entry.
+        // Remove from in-memory caches. Durable deletion already
+        // happened above; this drops the cached Arc and status entry.
         {
             let id = realm_id.clone();
             self.realm_signing_keys.rcu(|current| {
@@ -7725,6 +8038,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let slug = validation::validate_slug(&request.slug)?;
         let name = validation::validate_display_name(&request.name)?;
 
+        // Acquire write lock before slug check to prevent TOCTOU (A-28)
+        let _slug_guard = self.org_write_lock.lock().expect("org write lock");
         // Check slug uniqueness
         let slug_key = keys::encode_org_slug(&slug);
         if self
@@ -7763,18 +8078,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         );
         org.set_attributes(request.attributes.clone());
 
-        // Write primary record
         let id_key = keys::encode_org_id(&org_id);
         let org_bytes = serde_json::to_vec(&org).map_err(|e| IdentityError::Serialization {
             reason: e.to_string(),
         })?;
+        // Atomic: primary + slug index in one WAL record (A-28)
         self.storage
-            .put(realm_id, &id_key, &org_bytes)
-            .map_err(Self::storage_err)?;
-
-        // Write slug index
-        self.storage
-            .put(realm_id, &slug_key, org_id.as_uuid().as_bytes())
+            .put_batch(
+                realm_id,
+                &[
+                    (id_key, org_bytes),
+                    (slug_key, org_id.as_uuid().as_bytes().to_vec()),
+                ],
+            )
             .map_err(Self::storage_err)?;
 
         self.record_audit(
@@ -8505,6 +8821,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<OrganizationMembership, IdentityError> {
         self.require_active_realm(realm_id)?;
 
+        // Acquire write lock BEFORE loading the invitation to prevent
+        // double-spend: two concurrent accepts for the same token would
+        // both see Pending and both proceed without this lock. (A-28)
+        let _inv_guard = self.org_write_lock.lock().expect("org write lock");
+
         // Hash the token
         let token_hash = {
             use ring::digest;
@@ -8539,7 +8860,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 reason: e.to_string(),
             })?;
 
-        // Validate status
+        // Re-check status under lock (prevents double-spend). (A-28)
         if invitation.status() != InvitationStatus::Pending {
             return Err(IdentityError::InvitationInvalid);
         }
@@ -8575,14 +8896,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             serde_json::to_vec(&invitation).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
             })?;
-        self.storage
-            .put(realm_id, &inv_key, &updated_bytes)
-            .map_err(Self::storage_err)?;
 
         // Remove dedup index so a new invitation can be sent if needed
         let dedup_key = keys::encode_invitation_org_email(invitation.org_id(), invitation.email());
+        // Atomic: status update + dedup removal in one WAL record (A-28)
         self.storage
-            .delete(realm_id, &dedup_key)
+            .write_batch(realm_id, &[(inv_key, updated_bytes)], &[dedup_key])
             .map_err(Self::storage_err)?;
 
         Ok(membership)

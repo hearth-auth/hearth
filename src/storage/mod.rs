@@ -85,4 +85,28 @@ pub trait StorageEngine: Send + Sync {
         }
         Ok(())
     }
+
+    /// Atomically writes a batch of puts and deletes for a single realm.
+    ///
+    /// All mutations (inserts/updates and removals) land durably together
+    /// or none do. Use this when both puts and deletes must be crash-safe
+    /// as a unit (e.g., invitation acceptance updates the record and removes
+    /// the dedup sentinel).
+    ///
+    /// The default implementation falls back to sequential `put`/`delete`
+    /// calls without atomicity — implementers that care must override.
+    fn write_batch(
+        &self,
+        realm_id: &RealmId,
+        puts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        for (key, value) in puts {
+            self.put(realm_id, key, value)?;
+        }
+        for key in deletes {
+            self.delete(realm_id, key)?;
+        }
+        Ok(())
+    }
 }

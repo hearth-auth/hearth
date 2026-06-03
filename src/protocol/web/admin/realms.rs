@@ -410,6 +410,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::DeviceFingerprintsErased => "Device Fingerprints Erased",
         A::SessionLimitEnforced => "Session Limit Enforced",
         A::SessionsRevoked => "All Sessions Revoked",
+        A::RealmExportWatermarked => "Realm Export (Watermarked)",
     }
 }
 
@@ -520,6 +521,7 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::ScimGroupDeleted
         | A::BackupCreated
         | A::BackupRestored
+        | A::RealmExportWatermarked
         | A::Cleanup
         | A::SessionLimitEnforced => "System",
     }
@@ -1199,13 +1201,28 @@ pub async fn admin_api_audit_events(
 /// Accepts the same filter parameters as the UI view. The downloaded file is
 /// named `audit-{realm}-{date}.json` and contains all matched events (up to
 /// 10 000) as a JSON array, suitable for offline analysis or archiving.
+#[allow(clippy::too_many_lines)]
 pub async fn admin_audit_export(
     State(state): State<Arc<WebState>>,
-    RequireAdmin(_session): RequireAdmin,
+    RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
     Query(params): Query<AuditFilterParams>,
 ) -> Response {
+    // A-30: emit a watermark audit event at the start of every audit export.
+    let export_id = uuid::Uuid::new_v4().to_string();
+    let _ = state.audit.append(&crate::audit::CreateAuditEvent {
+        realm_id: target.id().clone(),
+        actor: session.user_id.as_uuid().to_string(),
+        action: crate::audit::AuditAction::RealmExportWatermarked,
+        resource_type: "export".to_string(),
+        resource_id: export_id.clone(),
+        metadata: Some(serde_json::json!({
+            "export_id": export_id,
+            "export_type": "audit",
+        })),
+    });
+
     let action = params
         .action
         .as_deref()
@@ -1322,6 +1339,8 @@ pub async fn admin_api_audit_config_get(
 #[derive(serde::Deserialize)]
 pub struct UpdateAuditRetentionBody {
     pub retention_days: u32,
+    #[serde(default)]
+    pub max_rows: Option<u64>,
 }
 
 /// `PUT /admin/api/realms/{realm}/audit/config` — update retention configuration.
@@ -1337,6 +1356,7 @@ pub async fn admin_api_audit_config_put(
 ) -> Response {
     let config = crate::audit::AuditRetentionConfig {
         retention_days: body.retention_days,
+        max_rows: body.max_rows,
     };
     match state.audit.set_retention_config(target.id(), &config) {
         Ok(()) => axum::response::Json(config).into_response(),

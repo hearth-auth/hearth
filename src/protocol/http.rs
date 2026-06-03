@@ -33,7 +33,8 @@ use crate::identity::{
     UpdateRealmRequest,
 };
 use crate::protocol::admin_auth::{
-    AdminRateLimiter, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
+    AdminRateLimiter, ExportRateLimitOutcome, ExportRateLimiter, RateLimitOutcome,
+    TokenRateLimitOutcome, TokenRateLimiter,
 };
 use crate::protocol::client_info::extract_client_ip;
 use crate::protocol::convert::identity::{
@@ -133,6 +134,18 @@ pub struct AppState {
     /// device-authorization endpoints. Returns 429 with `Retry-After` when
     /// exceeded.
     pub token_rate_limiter: Arc<TokenRateLimiter>,
+    /// Per-user rate limiter for backup/export endpoints (A-30).
+    ///
+    /// Limits each admin user to [`crate::protocol::admin_auth::EXPORT_RATE_LIMIT`]
+    /// export operations per hour to limit blast radius of a compromised token.
+    pub export_rate_limiter: Arc<ExportRateLimiter>,
+    /// Ed25519 public key (32 raw bytes) used to verify detached signatures
+    /// on restore archives (A-30). `None` when signature verification is disabled.
+    ///
+    /// When `Some`, the restore handler enforces that every uploaded archive
+    /// carries a valid `detached_signature_b64` in its manifest. Fail-closed:
+    /// archives without a valid signature are rejected.
+    pub backup_verify_key_bytes: Option<[u8; 32]>,
     /// Grace period (seconds) during which a retiring signing key remains in
     /// JWKS after rotation. Sourced from `token.signing_key_rotation_grace_period`.
     pub signing_key_rotation_grace_period_secs: u64,
@@ -169,6 +182,8 @@ impl AppState {
             metrics_bearer_token: None,
             admin_rate_limiter: Arc::new(AdminRateLimiter::new()),
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
+            export_rate_limiter: Arc::new(ExportRateLimiter::new()),
+            backup_verify_key_bytes: None,
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
@@ -195,6 +210,8 @@ impl AppState {
             metrics_bearer_token: None,
             admin_rate_limiter: Arc::new(AdminRateLimiter::new()),
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
+            export_rate_limiter: Arc::new(ExportRateLimiter::new()),
+            backup_verify_key_bytes: None,
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
@@ -222,6 +239,8 @@ impl AppState {
             metrics_bearer_token: None,
             admin_rate_limiter,
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
+            export_rate_limiter: Arc::new(ExportRateLimiter::new()),
+            backup_verify_key_bytes: None,
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
@@ -238,6 +257,17 @@ impl AppState {
     /// Attaches a webhook engine, enabling the webhook management endpoints.
     pub fn with_webhook(mut self, webhook: Arc<dyn WebhookEngine>) -> Self {
         self.webhook = Some(webhook);
+        self
+    }
+
+    /// Sets the Ed25519 public key used to verify detached manifest signatures
+    /// on restore archives (A-30).
+    ///
+    /// `key_bytes` must be 32 raw bytes (the uncompressed Ed25519 public key).
+    /// When set, the restore handler enforces that every uploaded archive carries
+    /// a valid signature. Pass `None` to disable signature verification.
+    pub fn with_backup_verify_key(mut self, key_bytes: Option<[u8; 32]>) -> Self {
+        self.backup_verify_key_bytes = key_bytes;
         self
     }
 
@@ -281,11 +311,15 @@ impl AppState {
 /// Authenticated admin context extracted from request headers.
 ///
 /// Contains the realm and user that passed both token validation
-/// and the `hearth.admin` permission check.
+/// and the `hearth.admin` permission check. `permissions` carries the full
+/// permission set from the token claims so callers can check capability-level
+/// gates (e.g. `hearth.export`) without re-validating the token.
 #[derive(Debug, Clone)]
 pub(crate) struct AdminAuth {
     pub(crate) realm_id: RealmId,
     pub(crate) user_id: UserId,
+    /// Full permission set from the validated token claims.
+    pub(crate) permissions: Vec<String>,
 }
 
 /// Extracts and validates admin authentication from request headers.
@@ -361,7 +395,11 @@ pub(crate) fn extract_admin_auth(
     // Rate limiting
     check_admin_rate_limit(state, &user_id)?;
 
-    Ok(AdminAuth { realm_id, user_id })
+    Ok(AdminAuth {
+        realm_id,
+        user_id,
+        permissions: claims.permissions,
+    })
 }
 
 /// Extracts and validates admin authentication for cluster-level operations.
@@ -413,6 +451,139 @@ fn check_admin_rate_limit(
             Json(serde_json::json!({"error": "rate limit exceeded"})),
         )),
     }
+}
+
+/// Checks that the authenticated admin token carries the `hearth.export`
+/// permission required for backup/export endpoints (A-30).
+///
+/// Returns `403 Forbidden` when the permission is absent. The check is separate
+/// from the normal `hearth.admin` gate so operators can grant export access to
+/// dedicated service accounts without granting full admin privileges.
+fn check_export_capability(auth: &AdminAuth) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let has_export = auth.permissions.iter().any(|p| p == "hearth.export");
+    if !has_export {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "error_description": "hearth.export permission required for export operations"
+            })),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the per-user export rate limit (A-30).
+///
+/// Returns `429 Too Many Requests` when the user has exceeded the export quota
+/// in the current hour. The limit is intentionally low (10/hour by default)
+/// to limit the blast radius of a compromised admin token.
+fn check_export_rate_limit(
+    state: &AppState,
+    user_id: &UserId,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    #[allow(clippy::cast_possible_truncation)]
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as i64;
+
+    match state.export_rate_limiter.check(user_id, now) {
+        ExportRateLimitOutcome::Allowed => Ok(()),
+        ExportRateLimitOutcome::Exceeded => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "export_rate_limit_exceeded",
+                "error_description": "export rate limit exceeded; maximum exports per hour reached"
+            })),
+        )),
+    }
+}
+
+/// Emits a `RealmExportWatermarked` audit event for every export operation (A-30).
+///
+/// Called at the START of export operations regardless of the outcome so the
+/// watermark exists even when the export is later rate-limited or rejected.
+fn emit_export_watermark(
+    state: &AppState,
+    realm_id: &RealmId,
+    user_id: &UserId,
+    export_type: &str,
+    realm_slug: Option<&str>,
+    export_id: &str,
+) {
+    let mut metadata = serde_json::json!({
+        "export_id": export_id,
+        "export_type": export_type,
+    });
+    if let Some(slug) = realm_slug {
+        metadata["realm_slug"] = serde_json::Value::String(slug.to_string());
+    }
+    let _ = state.audit.append(&crate::audit::CreateAuditEvent {
+        realm_id: realm_id.clone(),
+        actor: user_id.as_uuid().to_string(),
+        action: crate::audit::AuditAction::RealmExportWatermarked,
+        resource_type: "export".to_string(),
+        resource_id: export_id.to_string(),
+        metadata: Some(metadata),
+    });
+}
+
+/// Verifies a detached Ed25519 signature on a backup manifest (A-30).
+///
+/// `public_key_bytes` must be the 32-byte raw Ed25519 public key.
+/// `manifest` must carry a `detached_signature_b64` field; the signature
+/// is verified against `manifest.canonical_bytes()`.
+///
+/// Returns `Err` with a 400 body when:
+/// - the signature field is absent
+/// - the signature is not valid base64url
+/// - the Ed25519 verification fails
+fn verify_manifest_signature(
+    manifest: &crate::backup::BackupManifest,
+    public_key_bytes: &[u8; 32],
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    use ring::signature::{UnparsedPublicKey, ED25519};
+
+    let sig_b64 = manifest.detached_signature_b64.as_deref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "missing_manifest_signature",
+                "error_description": "restore archive must carry a detached_signature_b64 when backup_verify_key is configured"
+            })),
+        )
+    })?;
+
+    let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(sig_b64)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_manifest_signature",
+                    "error_description": "detached_signature_b64 is not valid base64url"
+                })),
+            )
+        })?;
+
+    let canonical = manifest.canonical_bytes().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "failed to serialize manifest for signature verification"})),
+        )
+    })?;
+
+    let pk = UnparsedPublicKey::new(&ED25519, public_key_bytes.as_slice());
+    pk.verify(&canonical, &sig_bytes).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_manifest_signature",
+                "error_description": "manifest signature verification failed; archive may be tampered or signed with the wrong key"
+            })),
+        )
+    })
 }
 
 /// Checks the per-`(realm, client)` token endpoint rate limit.
@@ -1766,6 +1937,7 @@ fn identity_error_to_response(
             (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
         }
         // A-19: email-change flow errors.
+        IdentityError::QuotaExceeded { .. } => (StatusCode::TOO_MANY_REQUESTS, "quota_exceeded"),
         IdentityError::EmailReserved => (StatusCode::CONFLICT, "email_reserved"),
         IdentityError::EmailChangeTokenInvalid => (
             StatusCode::UNAUTHORIZED,
@@ -3325,6 +3497,25 @@ async fn admin_export_users(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+
+    // A-30: require hearth.export capability.
+    if let Err(e) = check_export_capability(&auth) {
+        return e.into_response();
+    }
+    // A-30: per-export rate limit.
+    if let Err(e) = check_export_rate_limit(&state, &auth.user_id) {
+        return e.into_response();
+    }
+    // A-30: watermark this export.
+    let export_id = uuid::Uuid::new_v4().to_string();
+    emit_export_watermark(
+        &state,
+        &auth.realm_id,
+        &auth.user_id,
+        "users",
+        None,
+        &export_id,
+    );
 
     // Collect all users by draining pages.
     let mut all_users: Vec<crate::identity::User> = Vec::new();
@@ -7571,6 +7762,27 @@ async fn admin_backup_create(
         Err(e) => return e.into_response(),
     };
 
+    // A-30: require hearth.export capability (separate from hearth.admin).
+    if let Err(e) = check_export_capability(&auth) {
+        return e.into_response();
+    }
+
+    // A-30: per-export rate limit (10/hour per user).
+    if let Err(e) = check_export_rate_limit(&state, &auth.user_id) {
+        return e.into_response();
+    }
+
+    // A-30: emit audit watermark at the start of every export.
+    let export_id = uuid::Uuid::new_v4().to_string();
+    emit_export_watermark(
+        &state,
+        &auth.realm_id,
+        &auth.user_id,
+        "backup",
+        params.realm.as_deref(),
+        &export_id,
+    );
+
     let identity = Arc::clone(&state.identity);
     let audit_engine = Arc::clone(&state.audit);
     let rbac = Arc::clone(&state.rbac);
@@ -7734,6 +7946,8 @@ async fn admin_backup_restore(
     let mode_str = params.mode.as_deref().unwrap_or("skip").to_string();
     let realm_filter = params.realm.clone();
     let dry_run = params.dry_run;
+    // Clone out of Arc before entering spawn_blocking.
+    let verify_key_bytes = state.backup_verify_key_bytes;
 
     // Stream the `file` multipart field to a tempfile to avoid holding the
     // entire archive in memory while parsing.
@@ -7835,6 +8049,12 @@ async fn admin_backup_restore(
         };
 
         let reader = BackupArchive::open(&tmp_path).map_err(|e| format!("open archive: {e}"))?;
+
+        // A-30: verify detached manifest signature when an operator verify key is configured.
+        if let Some(key_bytes) = verify_key_bytes.as_ref() {
+            verify_manifest_signature(&reader.manifest, key_bytes)
+                .map_err(|(_, body)| format!("{}", body.0))?;
+        }
 
         let importer = BackupImporter::new(identity, rbac);
         let opts = ImportOptions {

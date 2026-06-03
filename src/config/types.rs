@@ -832,6 +832,37 @@ pub struct SecurityYaml {
     /// TLS-specific security settings (A-44).
     #[serde(default)]
     pub tls: TlsSecurityYaml,
+    /// Backup and export hardening (A-30).
+    #[serde(default)]
+    pub backup: BackupSecurityYaml,
+}
+
+/// `security.backup` — backup and export hardening (A-30).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   backup:
+///     verify_key: "base64url-encoded-ed25519-public-key"
+///     export_rate_limit: 10
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BackupSecurityYaml {
+    /// Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-pad).
+    ///
+    /// When set, the restore handler verifies that every uploaded archive's
+    /// `manifest.json` carries a `detached_signature_b64` field whose Ed25519
+    /// signature (made with the corresponding private key) covers the canonical
+    /// manifest bytes. Archives without a valid signature are rejected
+    /// (fail-closed). When absent, signature verification is skipped.
+    #[serde(default)]
+    pub verify_key: Option<String>,
+    /// Maximum backup/export calls per admin user per hour (A-30).
+    ///
+    /// Defaults to 10 when absent.  Set to `0` to disable per-export rate limiting.
+    #[serde(default)]
+    pub export_rate_limit: Option<u32>,
 }
 
 /// `security.ip_reputation` — IP reputation policy and provider config (P-2).

@@ -208,6 +208,14 @@ pub enum AuditAction {
     /// Metadata carries `dry_run` (`"true"` / `"false"`) and the list of
     /// restored realm slugs.
     BackupRestored,
+    /// A realm export was requested and watermarked (A-30).
+    ///
+    /// Emitted on every invocation of `/admin/backup`, `/admin/users/export`,
+    /// and `/admin/realms/{r}/audit/export` regardless of the outcome.
+    /// Metadata carries `export_id` (UUIDv4), `export_type` (one of
+    /// `"backup"`, `"users"`, `"audit"`), `realm_slug` (when filtered), and
+    /// `actor_ip` (the request's remote address when available).
+    RealmExportWatermarked,
     /// A required action was assigned to a user by an admin.
     ///
     /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `admin_id`.
@@ -416,6 +424,7 @@ impl AuditAction {
             Self::EmailChangeInitiated,
             Self::EmailChangeConfirmed,
             Self::OidcSilentAuthProbed,
+            Self::RealmExportWatermarked,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -513,6 +522,7 @@ impl AuditAction {
             Self::EmailChangeInitiated => "email_change_initiated",
             Self::EmailChangeConfirmed => "email_change_confirmed",
             Self::OidcSilentAuthProbed => "oidc_silent_auth_probed",
+            Self::RealmExportWatermarked => "realm_export_watermarked",
         }
     }
 }
@@ -611,6 +621,7 @@ impl std::str::FromStr for AuditAction {
             "email_change_initiated" => Ok(Self::EmailChangeInitiated),
             "email_change_confirmed" => Ok(Self::EmailChangeConfirmed),
             "oidc_silent_auth_probed" => Ok(Self::OidcSilentAuthProbed),
+            "realm_export_watermarked" => Ok(Self::RealmExportWatermarked),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -710,7 +721,8 @@ impl AuditAction {
             | Self::SessionEvicted
             | Self::AbuseDetected
             | Self::EmailChangeInitiated
-            | Self::OidcSilentAuthProbed => LogOnly,
+            | Self::OidcSilentAuthProbed
+            | Self::RealmExportWatermarked => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
