@@ -203,6 +203,7 @@ ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster
 ## For full reproduction including workflow files and matrix legs: make ci-local-full
 ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> test-quality"              && $(MAKE) test-quality
+	@echo "==> abuse-check (§3.41)"       && $(MAKE) abuse-check
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check
