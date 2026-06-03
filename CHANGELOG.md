@@ -48,6 +48,20 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   within the limit.  Two new `AuditEngine` trait methods: `count_events` and
   `prune_oldest` (HEA-1195).
 
+### Changed
+
+- **Atomic org-slug reservation and invitation acceptance** — concurrent requests can no
+  longer both win the same organization slug or double-spend an invitation token; a
+  per-engine mutex serializes the check-then-write sequence and `put_batch` makes the
+  primary record + index land atomically (A-28, HEA-1207).
+- **RBAC assignment deduplication** — concurrent role assignments for the same
+  (subject, role, scope) tuple are now idempotent; the second caller receives the
+  existing assignment record (A-28, HEA-1207).
+- **Bounded realm deletion cascade** — `delete_realm` marks the realm
+  `DeletingInProgress` before cascading, preventing new auth ops; the cascade is
+  chunked (default 200 keys/chunk) and backgrounded for realms exceeding 1 000 items,
+  preventing write storms that would degrade all tenants (A-33, HEA-1207).
+
 ### Security
 
 - **A-43 gRPC reflection production-disable** — `security.grpc.reflection_enabled`

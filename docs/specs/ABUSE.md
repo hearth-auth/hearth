@@ -421,6 +421,29 @@ Per §6.1 of the abuse-prevention plan:
 
 ---
 
+## A-33 — Bounded delete_realm Cascade
+
+**What it prevents:** A large realm deletion causing a write storm that degrades the storage layer for all tenants.
+
+**How it works:**
+
+- `delete_realm` first marks the realm as `DeletingInProgress` in storage and the hot-path status cache, blocking new auth operations immediately.
+- The cascade is chunked (`cascade_chunk_size`, default 200 keys/chunk).
+- If total item count exceeds `cascade_background_threshold` (default 1,000), deletion is backgrounded via a tokio task; the HTTP response returns immediately.
+- Status is surfaced in the admin dashboard (realm shows "Deleting" state).
+
+**Config (per global engine config, not per-realm YAML):**
+
+```yaml
+# These are engine-level defaults, not per-realm YAML keys.
+cascade_chunk_size: 200
+cascade_background_threshold: 1000
+```
+
+**Failure mode:** Fail-open for background progress (realm stays `DeletingInProgress` on crash; re-running `delete_realm` on restart converges via idempotent cascade).
+
+---
+
 ## A-35 — SCIM / SAML Payload Caps
 
 ### A-35a: SCIM PATCH `Operations` count cap
@@ -730,6 +753,21 @@ HEA-1196 platform follow-up).
 **Per-deployment override**: `HEARTH_LOG_INCLUDE_PII=1` env toggle and
 per-realm config are not yet implemented (Phase 0 ships the newtype only).
 Future work tracked at HEA-1196.
+
+---
+
+## A-28 — Slug & Invitation Atomic CAS
+
+**What it prevents:** Two concurrent requests winning the same organization slug or double-spending an invitation token.
+
+**How it works:**
+
+- A per-engine `org_write_lock` mutex serializes the check-then-write sequence for slug reservation and invitation acceptance.
+- The primary record and slug index are written together via `put_batch` (single WAL record) for crash-safe atomicity.
+- Invitation acceptance re-validates the pending status under the mutex, eliminating the double-spend window.
+- RBAC assignment deduplication: `assign_write_lock` guards concurrent role assignment; idempotent if the same (subject, role, scope) already exists.
+
+**Failure mode:** Fail-closed (mutex contention stalls the loser, then returns Conflict/NotFound).
 
 ---
 

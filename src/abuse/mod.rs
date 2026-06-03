@@ -31,6 +31,7 @@
 
 pub mod backoff;
 pub mod bot_signal;
+pub mod captcha;
 pub mod challenge;
 pub mod cidr;
 pub mod detector;

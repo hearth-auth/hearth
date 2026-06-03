@@ -2750,6 +2750,9 @@ struct RegisterTemplate {
     logo_url: String,
     realm_theme_url: Option<String>,
     inline_theme_css: Option<String>,
+    /// Pre-built CAPTCHA widget HTML injected into the form (P-1 / HEA-1202).
+    /// Empty string when no provider is configured (no-op / fail-open).
+    captcha_widget_html: String,
 }
 
 impl RegisterTemplate {
@@ -2782,6 +2785,7 @@ impl RegisterTemplate {
             logo_url,
             realm_theme_url: None,
             inline_theme_css: None,
+            captcha_widget_html: String::new(),
         }
     }
 }
