@@ -421,8 +421,10 @@ pub(crate) fn verify_hash(
     password: &CleartextPassword,
     hash_str: &str,
 ) -> Result<bool, IdentityError> {
-    // Try bcrypt first — bcrypt hashes start with "$2b$" or "$2a$"
-    if hash_str.starts_with("$2b$") || hash_str.starts_with("$2a$") {
+    // Try bcrypt first — bcrypt hashes start with "$2b$", "$2a$", or "$2y$".
+    // "$2y$" is a PHP-introduced cosmetic variant, functionally identical to "$2b$".
+    if hash_str.starts_with("$2b$") || hash_str.starts_with("$2a$") || hash_str.starts_with("$2y$")
+    {
         return Ok(bcrypt::verify(password.as_bytes(), hash_str).unwrap_or(false));
     }
 
@@ -716,6 +718,24 @@ mod tests {
             !result,
             "wrong password should not verify against bcrypt hash"
         );
+    }
+
+    #[test]
+    fn verify_bcrypt_2y_hash() {
+        // $2y$ is the PHP-introduced variant of bcrypt, functionally identical to $2b$.
+        // Auth0 exports from PHP-backed tenants may use this prefix.
+        // Generate a real $2b$ hash, then swap the prefix to $2y$ to simulate the import.
+        let canonical = bcrypt::hash(b"TestMigration1!", 4).expect("bcrypt hash");
+        let php_variant = canonical.replacen("$2b$", "$2y$", 1);
+        assert!(php_variant.starts_with("$2y$"), "prefix swap sanity check");
+
+        let pw = CleartextPassword::from_string("TestMigration1!".to_string());
+        let result = verify_hash(&pw, &php_variant).expect("verify_hash must not error on $2y$");
+        assert!(result, "$2y$ hash must verify against the correct password");
+
+        let wrong = CleartextPassword::from_string("wrong".to_string());
+        let result = verify_hash(&wrong, &php_variant).expect("verify_hash must not error on $2y$");
+        assert!(!result, "$2y$ hash must reject a wrong password");
     }
 
     #[test]

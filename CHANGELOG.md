@@ -51,6 +51,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Fixed
 
+- **`$2y$` bcrypt prefix now verifies correctly** — `verify_hash` previously only dispatched
+  `$2a$`/`$2b$` prefixes to `bcrypt::verify`; `$2y$` hashes (produced by PHP-backed tenants and
+  accepted by the Auth0 migration importer) fell through to `PasswordHash::new`, which cannot
+  parse the non-PHC bcrypt format and returned an `unsupported algorithm` error on every login
+  attempt. Users migrated from Auth0 with `$2y$` hashes can now authenticate (HEA-1225).
+
 - **A-33 `update_realm` vs delete cascade race** — `delete_realm` releases the realm
   ops lock after stamping `DeletingInProgress` so the (potentially long) cascade does
   not block other realms.  Without a status check on `update_realm`, a concurrent

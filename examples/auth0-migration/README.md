@@ -188,9 +188,9 @@ The bcrypt hash in `sample-bundle.json` may not match the password string
 
 ```bash
 # PHP:
-php -r "echo crypt('TestMigration1!', '\$2b\$04\$abcdefghijklmnopqrstuuu');"
+php -r "echo crypt('TestMigration1!', '\$2b\$04\$abcdefghijklmnopqrstuuu');"  # cost 4 is for test speed only — use 12+ in production
 # Python (requires bcrypt package):
-python3 -c "import bcrypt; print(bcrypt.hashpw(b'TestMigration1!', b'\$2b\$04\$abcdefghijklmnopqrstuuu').decode())"
+python3 -c "import bcrypt; print(bcrypt.hashpw(b'TestMigration1!', b'\$2b\$04\$abcdefghijklmnopqrstuuu').decode())"  # cost 4 is for test speed only — use 12+ in production
 ```
 
 The hash must start with `$2a$`, `$2b$`, or `$2y$`.
