@@ -46,7 +46,8 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 - **A-10 Per-IP JWKS / OIDC discovery rate cap** — JWKS and OpenID discovery endpoints
   are now capped at 60 requests per second per source IP (`JwksRateLimiter`).  Exceeding
-  the limit returns `429 Too Many Requests` (HEA-1212).
+  the limit returns `429 Too Many Requests` (HEA-1212).  Dev mode (`--dev`) disables the
+  cap so local SDK smoke tests and CLI integration tests do not race the limiter.
 
 - **A-13 WebAuthn attestation policy** — per-realm configuration (`realms.<name>.auth.webauthn_attestation`)
   controls: `allow_none` (whether the `"none"` attestation format is accepted),

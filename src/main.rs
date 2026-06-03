@@ -1691,9 +1691,15 @@ async fn run_serve(
     );
 
     // A-10: build the JWKS rate limiter from the operator-configured RPS limit.
-    let jwks_rate_limiter = Arc::new(JwksRateLimiter::with_rps_limit(
-        config.security.jwks_rps_limit,
-    ));
+    // Dev mode disables the cap (u32::MAX) to keep local iteration and CLI
+    // integration tests deterministic; production retains the configured cap.
+    let jwks_rate_limiter = if config.dev_mode {
+        Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX))
+    } else {
+        Arc::new(JwksRateLimiter::with_rps_limit(
+            config.security.jwks_rps_limit,
+        ))
+    };
 
     let app_state = if config.dev_mode {
         Arc::new(

@@ -237,7 +237,12 @@ impl AppState {
             trusted_proxies: Vec::new(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
-            jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
+            // A-10 dev relaxation: production default (60 rps) would otherwise
+            // cause flakes when test harnesses share 127.0.0.1 against a hot
+            // limiter. Operators still get the production cap via `serve`'s
+            // explicit `with_jwks_rate_limiter` call wired from
+            // `config.security.jwks_rps_limit`.
+            jwks_rate_limiter: Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX)),
         }
     }
 
