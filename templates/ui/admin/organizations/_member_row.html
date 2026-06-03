@@ -95,7 +95,7 @@
       {# Permission chips + add-permission button #}
       <div class="flex flex-wrap items-center gap-1.5">
         {% for p in m.extra_perms %}
-        <span class="inline-flex items-center gap-1 rounded-full border border-white/[0.10] bg-ht-surface-base px-2 py-0.5 font-mono text-xs text-ht-content-secondary">
+        <span class="inline-flex items-center gap-1 rounded-full border border-ht-divider/[0.10] bg-ht-surface-base px-2 py-0.5 font-mono text-xs text-ht-content-secondary">
           {{ p.permission }}
           <form method="post"
                 action="/ui/admin/realms/{{ realm_name }}/organizations/{{ org_id }}/members/{{ m.view.membership.user_id().as_uuid() }}/permissions/revoke"

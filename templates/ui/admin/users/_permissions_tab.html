@@ -13,7 +13,7 @@
       </p>
       <div class="flex flex-wrap gap-2">
         {% for perm in group.permissions %}
-        <span class="inline-flex items-center rounded-full border border-white/[0.06] bg-ht-surface-base px-2.5 py-1 font-mono text-xs text-ht-content-muted">{{ perm }}</span>
+        <span class="inline-flex items-center rounded-full border border-ht-divider/[0.06] bg-ht-surface-base px-2.5 py-1 font-mono text-xs text-ht-content-muted">{{ perm }}</span>
         {% endfor %}
       </div>
     </div>
@@ -29,7 +29,7 @@
     <p class="mb-2 font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Directly Granted</p>
     <div class="flex flex-wrap gap-2">
       {% for row in extra_permissions %}
-      <span class="inline-flex items-center gap-1.5 rounded-full border border-white/[0.10] bg-ht-surface-base px-2.5 py-1 font-mono text-xs text-ht-content-secondary">
+      <span class="inline-flex items-center gap-1.5 rounded-full border border-ht-divider/[0.10] bg-ht-surface-base px-2.5 py-1 font-mono text-xs text-ht-content-secondary">
         {{ row.permission }}
         <span class="text-ht-content-muted">·</span>
         <span class="text-ht-content-muted">{{ row.scope_label }}</span>
@@ -70,7 +70,7 @@
       <span id="grant-perm-label">Grant Permission</span>
     </button>
 
-    <div id="grant-perm-form" class="mt-4 hidden rounded-lg border border-white/[0.10] bg-ht-surface-base p-4">
+    <div id="grant-perm-form" class="mt-4 hidden rounded-lg border border-ht-divider/[0.10] bg-ht-surface-base p-4">
       <form method="post"
             action="/ui/admin/realms/{{ realm_name }}/users/{{ user_id }}/permissions/grant"
             hx-post="/ui/admin/realms/{{ realm_name }}/users/{{ user_id }}/permissions/grant"
@@ -86,7 +86,7 @@
                    list="perm-datalist"
                    required
                    placeholder="e.g. documents.read"
-                   class="w-full rounded-sm border border-white/[0.10] bg-ht-surface-input px-3 py-2 font-mono text-sm text-ht-content-primary placeholder-ht-content-muted focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
+                   class="w-full rounded-sm border border-ht-divider/[0.10] bg-ht-surface-input px-3 py-2 font-mono text-sm text-ht-content-primary placeholder-ht-content-muted focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
             <datalist id="perm-datalist">
               {% for perm in available_permissions %}
               <option value="{{ perm }}"></option>
@@ -116,7 +116,7 @@
               <div id="perm-org-div" data-scope-org-panel class="ml-6 hidden">
                 <select id="perm-org-select"
                         data-scope-org-select
-                        class="w-full rounded-sm border border-white/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
+                        class="w-full rounded-sm border border-ht-divider/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
                   <option value="">— pick an org —</option>
                   {% for org in available_orgs %}
                   <option value="{{ org.id }}">{{ org.name }}</option>
