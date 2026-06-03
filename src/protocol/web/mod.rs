@@ -1444,6 +1444,11 @@ pub fn router(state: WebState) -> Router {
             "/admin/realms/{realm}/users/import/template.csv",
             axum::routing::get(admin::admin_users_import_template_csv),
         )
+        // --- Realm-scoped: abuse dashboard (A-8) ---
+        .route(
+            "/admin/realms/{realm}/abuse",
+            axum::routing::get(admin::admin_abuse_dashboard),
+        )
         // --- Realm-scoped: webhooks ---
         .route(
             "/admin/realms/{realm}/webhooks",

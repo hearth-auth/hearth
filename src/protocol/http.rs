@@ -1765,6 +1765,16 @@ fn identity_error_to_response(
         IdentityError::SessionLimitExceeded { .. } => {
             (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
         }
+        // A-19: email-change flow errors.
+        IdentityError::EmailReserved => (StatusCode::CONFLICT, "email_reserved"),
+        IdentityError::EmailChangeTokenInvalid => (
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired email-change link",
+        ),
+        // A-37: silent-auth rate-limit exceeded (prompt=none).
+        IdentityError::SilentAuthRateLimited => {
+            (StatusCode::TOO_MANY_REQUESTS, "silent_auth_rate_limited")
+        }
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);

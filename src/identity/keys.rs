@@ -119,6 +119,22 @@ const MAGIC_LINK_PREFIX: &str = "magic:link:";
 /// Prefix for email verification token storage (stored by SHA-256 hash).
 const EMAIL_VERIFY_PREFIX: &str = "email:verify:";
 
+/// Prefix for deleted-account email reservations (A-20).
+///
+/// Format: `email:reserved:{normalized_email}`
+///
+/// Written on `delete_user`; read in `create_user_with_status` to enforce the
+/// 90-day re-registration cooldown. The value is a JSON `StoredEmailReservation`.
+const EMAIL_RESERVED_PREFIX: &str = "email:reserved:";
+
+/// Prefix for pending email-change tokens (A-19).
+///
+/// Format: `email:change:{sha256_hex_of_token}`
+///
+/// Written by `initiate_email_change`; consumed (and deleted) by
+/// `confirm_email_change`. The plaintext token is never stored.
+const EMAIL_CHANGE_TOKEN_PREFIX: &str = "email:change:";
+
 /// Prefix for password reset token storage (stored by SHA-256 hash).
 const PASSWORD_RESET_PREFIX: &str = "rst:token:";
 
@@ -173,6 +189,15 @@ const FED_CONFIRM_PREFIX: &str = "fed:confirm:";
 /// Storage is already realm-scoped via the `StorageEngine` realm handle,
 /// so no realm UUID is embedded in the key.
 const ATTEMPT_TRACKER_PREFIX: &str = "rl:user:";
+
+/// Prefix for `prompt=none` silent-auth probe counters (A-37).
+///
+/// Format: `rl:prompt_none:{user_uuid}`
+///
+/// Realm-scoped (via the `StorageEngine` handle). Counts `prompt=none`
+/// authorize attempts per subject within a sliding window; enforced in
+/// `authorize_get_impl` before code issuance.
+const PROMPT_NONE_TRACKER_PREFIX: &str = "rl:prompt_none:";
 
 /// Prefix for the reverse external-identity → user index.
 ///
@@ -626,6 +651,26 @@ pub(crate) fn encode_magic_link_token(token_hash: &str) -> Vec<u8> {
 /// The plaintext is never stored.
 pub(crate) fn encode_email_verify_token(token_hash: &str) -> Vec<u8> {
     format!("{EMAIL_VERIFY_PREFIX}{token_hash}").into_bytes()
+}
+
+/// Encodes the storage key for a deleted-account email reservation (A-20).
+///
+/// Format: `email:reserved:{normalized_email}`
+///
+/// Written by `delete_user` to enforce a 90-day re-registration cooldown.
+/// Read by `create_user_with_status` before accepting a new registration.
+pub(crate) fn encode_email_reserved(email: &str) -> Vec<u8> {
+    format!("{EMAIL_RESERVED_PREFIX}{email}").into_bytes()
+}
+
+/// Encodes the storage key for a pending email-change token (A-19).
+///
+/// Format: `email:change:{sha256_hex_of_token}`
+///
+/// Written by `initiate_email_change`; consumed by `confirm_email_change`.
+/// The plaintext token is never stored — only its SHA-256 digest.
+pub(crate) fn encode_email_change_token(token_hash: &str) -> Vec<u8> {
+    format!("{EMAIL_CHANGE_TOKEN_PREFIX}{token_hash}").into_bytes()
 }
 
 /// Encodes the storage key for a password reset token.
@@ -1382,6 +1427,16 @@ pub(crate) fn encode_attempt_tracker(user_id: &UserId) -> Vec<u8> {
 /// Format: `rl:user:`
 pub(crate) fn attempt_tracker_scan_prefix() -> Vec<u8> {
     ATTEMPT_TRACKER_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the storage key for a `prompt=none` probe counter (A-37).
+///
+/// Format: `rl:prompt_none:{user_uuid}`
+///
+/// Realm-scoped — no realm UUID in the key itself (same convention as
+/// `rl:user:`). Value is a JSON `StoredPromptNoneTracker`.
+pub(crate) fn encode_prompt_none_tracker(user_id: &UserId) -> Vec<u8> {
+    format!("{PROMPT_NONE_TRACKER_PREFIX}{}", user_id.as_uuid()).into_bytes()
 }
 
 /// Encodes a device-fingerprint storage key.

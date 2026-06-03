@@ -331,6 +331,9 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::SessionRevoked => "Session Revoked",
         A::SessionEvicted => "Session Evicted (Policy)",
         A::AbuseDetected => "Abuse Detected",
+        A::OidcSilentAuthProbed => "OidcSilentAuth Probed",
+        A::EmailChangeConfirmed => "EmailChange Confirmed",
+        A::EmailChangeInitiated => "EmailChange Initiated",
         A::TokenIssued => "Token Issued",
         A::TokenRefreshed => "Token Refreshed",
         A::RealmCreated => "Realm Created",
@@ -441,6 +444,9 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::SessionsRevoked
         | A::SessionEvicted
         | A::AbuseDetected
+        | A::EmailChangeInitiated
+        | A::EmailChangeConfirmed
+        | A::OidcSilentAuthProbed
         | A::TokenIssued
         | A::TokenRefreshed
         | A::LoginFailed

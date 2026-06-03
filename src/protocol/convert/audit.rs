@@ -102,7 +102,10 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         | domain::AuditAction::SessionLimitEnforced
         | domain::AuditAction::SessionsRevoked
         | domain::AuditAction::SessionEvicted
-        | domain::AuditAction::AbuseDetected => pb::AuditAction::Unspecified,
+        | domain::AuditAction::EmailChangeConfirmed
+        | domain::AuditAction::OidcSilentAuthProbed
+        | domain::AuditAction::AbuseDetected
+        | domain::AuditAction::EmailChangeInitiated => pb::AuditAction::Unspecified,
     }
 }
 

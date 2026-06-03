@@ -463,6 +463,25 @@ pub enum IdentityError {
         /// Human-readable description of the violated constraint.
         reason: String,
     },
+    /// The requested email is under a 90-day post-deletion reservation (A-20).
+    ///
+    /// Returned by `create_user_with_status` when the target address was freed
+    /// by a `delete_user` within the last 90 days. Re-registration is blocked
+    /// to prevent account-squatting and privilege re-inheritance.
+    ///
+    /// Intentionally matches the `DuplicateEmail` error surface — callers
+    /// cannot distinguish "email in use" from "email reserved".
+    EmailReserved,
+    /// The email-change verification token is invalid, expired, or already used
+    /// (A-19).
+    ///
+    /// Intentionally conflates all failure modes for enumeration resistance.
+    EmailChangeTokenInvalid,
+    /// The `prompt=none` silent-auth probe rate limit was exceeded (A-37).
+    ///
+    /// Returned when a subject has made more than the per-realm cap of
+    /// `prompt=none` authorize requests within the sliding window.
+    SilentAuthRateLimited,
 }
 
 impl fmt::Display for IdentityError {
@@ -672,6 +691,16 @@ impl fmt::Display for IdentityError {
             Self::FapiViolation { reason } => {
                 write!(f, "FAPI 2.0 violation: {reason}")
             }
+            Self::EmailReserved => write!(
+                f,
+                "a user with this email already exists or was recently deleted"
+            ),
+            Self::EmailChangeTokenInvalid => {
+                write!(f, "email change token is invalid or has expired")
+            }
+            Self::SilentAuthRateLimited => {
+                write!(f, "too many silent-auth requests; slow down")
+            }
             Self::SessionLimitExceeded { limit, active } => write!(
                 f,
                 "session limit exceeded: {active} active sessions, limit is {limit}"
@@ -753,7 +782,7 @@ impl IdentityError {
                 Some("HEARTH_INVALID_INPUT")
             }
 
-            Self::DuplicateEmail => Some("HEARTH_DUPLICATE_EMAIL"),
+            Self::DuplicateEmail | Self::EmailReserved => Some("HEARTH_DUPLICATE_EMAIL"),
             Self::DuplicateRealmName => Some("HEARTH_DUPLICATE_REALM_NAME"),
 
             Self::OrganizationNotFound => Some("HEARTH_ORG_NOT_FOUND"),
@@ -776,6 +805,8 @@ impl IdentityError {
             Self::MagicLinkTokenInvalid => Some("HEARTH_MAGIC_LINK_INVALID"),
             Self::VerificationTokenInvalid => Some("HEARTH_VERIFICATION_TOKEN_INVALID"),
             Self::PasswordResetTokenInvalid => Some("HEARTH_PASSWORD_RESET_TOKEN_INVALID"),
+            Self::EmailChangeTokenInvalid => Some("HEARTH_EMAIL_CHANGE_TOKEN_INVALID"),
+            Self::SilentAuthRateLimited => Some("HEARTH_SILENT_AUTH_RATE_LIMITED"),
 
             Self::ConsentRequired => Some("HEARTH_CONSENT_REQUIRED"),
             Self::ConsentTicketNotFound | Self::ConsentTicketExpired => {
@@ -943,7 +974,10 @@ impl std::error::Error for IdentityError {
             | Self::InvalidJar { .. }
             | Self::SessionVersionDisabled
             | Self::SessionLimitExceeded { .. }
-            | Self::FapiViolation { .. } => None,
+            | Self::FapiViolation { .. }
+            | Self::EmailReserved
+            | Self::EmailChangeTokenInvalid
+            | Self::SilentAuthRateLimited => None,
         }
     }
 }

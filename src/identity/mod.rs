@@ -1031,6 +1031,51 @@ pub trait IdentityEngine: Send + Sync {
     /// resistance.
     fn verify_email_token(&self, realm_id: &RealmId, token: &str) -> Result<UserId, IdentityError>;
 
+    // ===== A-19: Email-change re-verification flow =====
+
+    /// Begins an email-address change for `user_id` (A-19).
+    ///
+    /// Validates `new_email`, checks uniqueness (and the A-20 reservation),
+    /// generates a 32-byte random verification token, stores SHA-256(token)
+    /// in `email:change:{hash}`, emits `EmailChangeInitiated` audit.
+    ///
+    /// Returns the plaintext token. The caller is responsible for delivering
+    /// it to `new_email` (e.g. via `WebState::email`). The old address is
+    /// unchanged until `confirm_email_change` is called.
+    fn initiate_email_change(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        new_email: &str,
+    ) -> Result<String, IdentityError>;
+
+    /// Completes an email-address change (A-19).
+    ///
+    /// Validates the token (expiry, single-use), swaps the email indexes,
+    /// updates the user record, revokes all sessions, emits
+    /// `EmailChangeConfirmed` audit.
+    ///
+    /// Returns `Err(EmailChangeTokenInvalid)` for any token failure.
+    /// The caller MUST send a `security.email_changed` notification to the
+    /// returned old address (available from the updated `User` record before
+    /// this call or from the engine's old-email field in the stored token).
+    fn confirm_email_change(&self, realm_id: &RealmId, token: &str) -> Result<User, IdentityError>;
+
+    /// Checks and records a `prompt=none` probe for the given (realm, sub)
+    /// pair (A-37).
+    ///
+    /// Increments a sliding-window counter stored under
+    /// `rl:prompt_none:{user_uuid}`. Returns `Ok(())` while under the cap,
+    /// `Err(SilentAuthRateLimited)` when the hourly limit is exceeded.
+    /// Emits `OidcSilentAuthProbed` audit on every call (fail-open).
+    fn check_silent_auth_probe(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: &str,
+        outcome: &str,
+    ) -> Result<(), IdentityError>;
+
     // ===== UserInfo (OIDC Core §5.3) =====
 
     /// Returns user claims for the `UserInfo` endpoint.

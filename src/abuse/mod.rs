@@ -1,22 +1,26 @@
-//! Abuse-prevention primitives (Phase 0 builtins).
+//! Abuse-prevention primitives — built-in guards and pluggable provider traits.
 //!
-//! | ID   | Feature                                  | Location in module |
-//! |------|------------------------------------------|--------------------|
-//! | A-2  | Global request shaper (per-IP + realm)   | [`shaper`]         |
-//! | A-15 | gRPC rate-limit interceptor              | [`shaper`]         |
-//! | A-16 | CAPTCHA-of-last-resort challenge          | [`challenge`]      |
-//! | A-21 | JSON parse-bomb guard (depth + length)   | [`guards`]         |
-//! | A-22 | Decompression-bomb cap                   | [`guards`]         |
-//! | A-23 | Trait-level pagination hard cap          | (constant here)    |
-//! | A-38 | ACT actor-chain depth cap                | (constant here)    |
-//! | A-39 | HTTP/2 rapid-reset defense               | `src/protocol/http`|
-//! | A-40 | Host allowlist + COOP/COEP + cookies     | `src/protocol/web` |
-//! | A-44 | SAML XML parse-event cap                 | (constant here)    |
-//! | A-45 | Tenant HTML/CSS/SVG sanitization         | [`sanitize`]       |
-//! | A-47 | `deny_unknown_fields` on request shapes  | (annotations)      |
-//! | A-52 | Unified `return_to` allowlist            | [`redirect`]       |
+//! | ID   | Feature                                  | Location in module       |
+//! |------|------------------------------------------|--------------------------|
+//! | A-2  | Global request shaper (per-IP + realm)   | [`shaper`]               |
+//! | A-15 | gRPC rate-limit interceptor              | [`shaper`]               |
+//! | A-16 | CAPTCHA-of-last-resort challenge          | [`challenge`]            |
+//! | A-21 | JSON parse-bomb guard (depth + length)   | [`guards`]               |
+//! | A-22 | Decompression-bomb cap                   | [`guards`]               |
+//! | A-23 | Trait-level pagination hard cap          | (constant here)          |
+//! | A-38 | ACT actor-chain depth cap                | (constant here)          |
+//! | A-39 | HTTP/2 rapid-reset defense               | `src/protocol/http`      |
+//! | A-40 | Host allowlist + COOP/COEP + cookies     | `src/protocol/web`       |
+//! | A-44 | SAML XML parse-event cap                 | (constant here)          |
+//! | A-45 | Tenant HTML/CSS/SVG sanitization         | [`sanitize`]             |
+//! | A-47 | `deny_unknown_fields` on request shapes  | (annotations)            |
+//! | A-52 | Unified `return_to` allowlist            | [`redirect`]             |
+//! | P-3  | Bot-signal trait + UA/JA3/JA4 heuristics | [`bot_signal`]           |
+//! | P-5  | Email-reputation trait + disposable list | [`email_reputation`]     |
 
+pub mod bot_signal;
 pub mod challenge;
+pub mod email_reputation;
 pub mod guards;
 pub mod redirect;
 pub mod sanitize;

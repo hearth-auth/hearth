@@ -1,8 +1,76 @@
 # Abuse Prevention — Sanitization Contract
 
-This document records the security contract for tenant-supplied content that
-Hearth renders without HTML escaping. See `docs/plans/HEA-1114-abuse-prevention.md`
-for the full Phase-0 threat model.
+This document records the security contract for implemented abuse-prevention
+features. See `docs/plans/HEA-1114-abuse-prevention.md` for the full
+phase-by-phase threat model.
+
+---
+
+## A-7 — Security Webhook Channel
+
+**Status:** Shipped (HEA-1190)
+
+Operators subscribe webhooks to the `security.*` event family to fan security
+events out to a SIEM, Slack channel, or WAF—without polling the audit log.
+
+### Event types
+
+| Wire name | `AuditAction` variant | Description |
+|-----------|----------------------|-------------|
+| `security.login_failed` | `LoginFailed` | Credential verification failed |
+| `security.account_locked` | `LoginLocked` | Account temporarily locked |
+| `security.abuse_detected` | `AbuseDetected` | Abuse pattern detected (A-3 detector) |
+| `security.password_compromised` | `PasswordCompromisedRejected` | Password rejected as known-compromised (HIBP) |
+| `security.rate_limit_exceeded` | `IpLoginLimitExceeded` | Per-IP login rate limit hit |
+
+The five event types appear in the webhook create/edit form in the admin UI
+under a **Security events** group. The delivery mechanism is unchanged: each
+matching `AuditEvent` is signed with HMAC-SHA256 and POSTed to the endpoint
+with exponential-backoff retry (see `src/webhook/dispatcher.rs`).
+
+### `X-Hearth-Event` header
+
+The header value is the `AuditAction::as_str()` wire key (e.g.
+`login_failed`), not the dot-notation display string. Consumers should match
+on the wire key.
+
+---
+
+## A-8 — Admin Abuse Dashboard
+
+**Status:** Shipped (HEA-1190)
+
+`GET /ui/admin/realms/{realm}/abuse` — server-rendered security monitor.
+
+### Counters (rolling 24-hour window)
+
+| Counter | Source `AuditAction` |
+|---------|---------------------|
+| Login failures | `LoginFailed` |
+| Accounts locked | `LoginLocked` |
+| Rate-limit hits | `IpLoginLimitExceeded` |
+| Compromised-password rejections | `PasswordCompromisedRejected` |
+| Abuse detections | `AbuseDetected` |
+
+### Top-IP aggregation
+
+Events whose metadata carries an `"ip"` key are aggregated into a top-10
+failing-IPs table. IP metadata is populated by the credential-verification
+and rate-limit code paths. The `AbuseDetected` action also carries `ip`.
+
+### Fail-open policy
+
+Per §6/§6.1 of the abuse-prevention plan, a query failure degrades to empty
+counters (status 200, zeros). An audit-engine outage never blocks operator
+access to the admin UI.
+
+### Not yet implemented on this page
+
+- **Block / unblock IPs** — requires A-9 (CIDR allow/deny lists).
+- **ASN view** — requires P-2 (`IpReputationProvider` integration).
+- **Geo heat-map** — requires P-2 (MaxMind GeoIP2 or equivalent).
+
+---
 
 ## A-45 — Tenant-Controlled HTML/CSS/SVG Sanitization
 
@@ -562,3 +630,143 @@ Async adapters wrap calls in `tokio::task::spawn_blocking`.
 
 **Fail-open contract**: callers in the hot path treat storage errors as "session
 not found" to avoid locking out users during transient outages.
+
+---
+
+## P-3: `BotSignalProvider` — UA + JA3/JA4 Heuristics Adapter
+
+**Status**: Shipped (HEA-1204)  
+**Source**: `src/abuse/bot_signal.rs`
+
+### Overview
+
+`BotSignalProvider` is the P-3 extension point for bot-signal detection.  The
+built-in `HeuristicBotSignalProvider` reference adapter ships with Hearth.
+External adapters (Cloudflare Bot Management, Datadome, Kasada, Akamai) implement
+the trait and are wired at startup via `security.providers.bot_signal`.
+
+### Signal layers (applied in order)
+
+| Priority | Layer | Signal | Verdict |
+|----------|-------|--------|---------|
+| 1 | JA3 hash | Matches built-in or operator blocklist | `Block` |
+| 2 | JA4 hash | Matches built-in or operator blocklist | `Block` |
+| 3 | UA — woothee category | `"crawler"` | `Block` |
+| 3 | UA — substring | Known scripting client (`curl/`, `python-requests/`, etc.) | `Block` |
+| 4 | UA — substring | Headless browser / automation framework (`HeadlessChrome`, `Selenium`, etc.) | `Suspect` |
+| 5 | UA — length | Shorter than 10 characters after trimming | `Suspect` |
+| 5 | UA — absent | `User-Agent` header missing | `Suspect` |
+| — | (none matched) | — | `Allow` |
+
+### JA3/JA4 notes
+
+JA3 and JA4 hashes must be injected by the proxy tier (`X-JA3-Hash` /
+`X-JA4-Hash` headers set by Nginx, HAProxy, Cloudflare, etc.).  Hearth does not
+perform TLS fingerprinting of its own listener — these headers are treated as
+advisory.  When absent, the layers are skipped entirely.
+
+The built-in JA3 blocklist contains 7 publicly documented automated-scanner
+fingerprints (zgrab2/masscan, Nmap NSE, Metasploit, Shodan, Censys.io, etc.).
+Add site-specific hashes via `security.providers.bot_signal.extra_ja3_blocklist`.
+
+**False-positive warning**: JA3 hashes can collide between legitimate clients
+and bots sharing the same TLS implementation.  Always pair JA3 blocking with
+additional signals.
+
+### Config (`security.providers.bot_signal` in `hearth.yaml`)
+
+```yaml
+security:
+  providers:
+    bot_signal:
+      extra_ja3_blocklist:
+        - "deadbeef00000000deadbeef00000000"
+      extra_ja4_blocklist: []
+```
+
+### Fail-open policy (§6.1)
+
+`BotSignal` is **fail-open**.  The default shipping configuration uses
+`NoopBotSignalProvider` — no request is ever blocked until an adapter is
+explicitly configured.  External adapter implementations MUST return
+`BotSignalVerdict::Allow` on any transport or internal error.
+
+### Off hot-path guarantee
+
+The provider is consulted only at registration, forgot-password, and magic-link
+flows — never during `validate_token()` or `lookup_session()`.
+
+---
+
+## P-5: `EmailReputation` — Disposable-Domain List + Role-Address Detection
+
+**Status**: Shipped (HEA-1204)  
+**Source**: `src/abuse/email_reputation.rs`
+
+### Overview
+
+`EmailReputation` is the P-5 extension point for email-address reputation checks.
+The built-in `BuiltinEmailReputation` reference adapter ships with Hearth.
+External adapters (Kickbox, ZeroBounce, NeverBounce) implement the trait and
+are wired at startup via `security.providers.email_reputation`.
+
+### Verdict flags
+
+| Flag | Meaning |
+|------|---------|
+| `is_disposable` | Domain matched the bundled (~400-entry) disposable-domain list |
+| `domain_has_no_mx` | Domain could not be confirmed to have an MX record (see DNS note) |
+| `is_role_address` | Local part is a well-known role address (`noreply`, `admin`, etc.) |
+
+All flags are **advisory** — callers decide policy.  `is_clean()` is true only
+when all three flags are false.
+
+### DNS MX validation (stub)
+
+True MX validation requires an async DNS resolver (`hickory-resolver` or
+equivalent).  The built-in adapter sets `domain_has_no_mx = false` unconditionally
+(assume domain is valid).  To enable real MX checking:
+
+1. Add `hickory-resolver = "0.25"` to `Cargo.toml`.
+2. Implement `lookup_mx(domain)` in `BuiltinEmailReputation::check()` using the
+   `hickory_resolver::TokioAsyncResolver`.
+3. Change the trait signature to `async fn check` (requires `async-trait` or
+   native AFIT with a `Box<dyn Future>` return for dyn dispatch).
+
+### Disposable-domain list
+
+~400 entries from well-known community lists (disposable-email-domains project,
+ivolo/disposable-email-domains, wesbos/burner-email-providers).  Domain matching
+is exact and case-insensitive (domain is lowercased before lookup).  Subdomains
+are NOT checked by default — add them via `extra_disposable_domains` if needed.
+
+### Role-address prefixes (RFC 2142 + common additions)
+
+`noreply`, `no-reply`, `no_reply`, `donotreply`, `postmaster`, `hostmaster`,
+`webmaster`, `mailer-daemon`, `abuse`, `security`, `admin`, `administrator`,
+`root`, `support`, `helpdesk`, `help`, `info`, `contact`, `sales`, `marketing`,
+`billing`, `finance`, `hr`, `jobs`, `careers`, `newsletter`, `notifications`,
+`alerts`, `bounce`, `bounces`, `unsubscribe`, `feedback`, `system`, `daemon`.
+
+### Config (`security.providers.email_reputation` in `hearth.yaml`)
+
+```yaml
+security:
+  providers:
+    email_reputation:
+      extra_disposable_domains:
+        - "my-internal-throwaway.example"
+```
+
+### Fail-open policy (§6.1)
+
+`EmailReputation` is **fail-open**.  The default shipping configuration uses
+`NoopEmailReputation` — no registration is ever blocked until an adapter is
+explicitly configured.  External adapter implementations MUST return a
+permissive verdict (all flags `false`) on any transport or internal error.
+
+### Off hot-path guarantee
+
+The provider is consulted only at registration, invitation acceptance, and
+similar account-creation flows — never during `validate_token()` or
+`lookup_session()`.

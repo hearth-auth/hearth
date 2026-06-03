@@ -116,6 +116,18 @@ pub(crate) fn validate_claim_payload(
 /// Email-verification token expiry: 24 hours in microseconds.
 const EMAIL_VERIFY_EXPIRY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 
+/// Deleted-email reservation window (A-20): 90 days in microseconds.
+const EMAIL_RESERVED_MICROS: i64 = 90 * 24 * 60 * 60 * 1_000_000;
+
+/// Email-change token expiry: 24 hours in microseconds (A-19).
+const EMAIL_CHANGE_TOKEN_EXPIRY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+
+/// `prompt=none` probe rate-limit window: 1 hour in microseconds (A-37).
+const PROMPT_NONE_WINDOW_MICROS: i64 = 60 * 60 * 1_000_000;
+
+/// Maximum `prompt=none` probes per (realm, subject) per hour (A-37).
+const PROMPT_NONE_MAX_PROBES: u32 = 50;
+
 /// Maximum tolerated clock skew between issuer and validator, in seconds.
 ///
 /// Tokens with `iat > now + CLOCK_SKEW_SECS` are rejected as future-dated.
@@ -145,6 +157,43 @@ struct StoredEmailVerification {
     /// entry outright on success.
     used: bool,
 }
+
+/// Tombstone written on `delete_user` to enforce the 90-day re-registration
+/// cooldown (A-20). Stored under `email:reserved:{email}`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredEmailReservation {
+    /// Unix microseconds when the account was deleted.
+    reserved_at_micros: i64,
+}
+
+/// Pending email-address change record (A-19).
+///
+/// Written by `initiate_email_change`; consumed by `confirm_email_change`.
+/// Stored under `email:change:{sha256_hex_of_token}`. Single-use.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredEmailChangeToken {
+    /// Stringified UUID of the user requesting the change.
+    user_id: String,
+    /// New address (normalized) awaiting verification.
+    new_email: String,
+    /// Old address — needed by `confirm_email_change` to notify the
+    /// previous owner.
+    old_email: String,
+    /// Creation time in Unix microseconds.
+    created_at_micros: i64,
+}
+
+/// Per-subject sliding-window counter for `prompt=none` probes (A-37).
+///
+/// Stored under `rl:prompt_none:{user_uuid}` within the realm.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredPromptNoneTracker {
+    /// Number of probes recorded in the current window.
+    count: u32,
+    /// Unix microseconds of the first probe in the current window.
+    window_start_micros: i64,
+}
+
 use crate::identity::oidc::{
     AuthorizationRequest, AuthorizationResponse, CodeChallengeMethod, OAuthClient, OidcConfig,
     OidcDiscoveryDocument, OidcTokenResponse, RefreshBindContext, RegisterClientRequest,
@@ -1552,6 +1601,24 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
         if existing.is_some() {
             return Err(IdentityError::DuplicateEmail);
+        }
+
+        // A-20: reject if email was released by a delete_user within the last
+        // 90 days — prevents account-squatting and privilege re-inheritance.
+        let reserved_key = keys::encode_email_reserved(&email);
+        if let Some(bytes) = self
+            .storage
+            .get(realm_id, &reserved_key)
+            .map_err(Self::storage_err)?
+        {
+            if let Ok(reservation) = serde_json::from_slice::<StoredEmailReservation>(&bytes) {
+                let now = self.clock.now().as_micros();
+                if now - reservation.reserved_at_micros < EMAIL_RESERVED_MICROS {
+                    return Err(IdentityError::EmailReserved);
+                }
+                // Expired reservation — clean it up.
+                let _ = self.storage.delete(realm_id, &reserved_key);
+            }
         }
 
         let user_id = UserId::generate();
@@ -3861,6 +3928,17 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage
             .delete(realm_id, &email_key)
             .map_err(Self::storage_err)?;
+
+        // A-20: write a 90-day reservation tombstone so the deleted email
+        // cannot be immediately re-registered by another actor.
+        let now_micros = self.clock.now().as_micros();
+        let reservation = StoredEmailReservation {
+            reserved_at_micros: now_micros,
+        };
+        if let Ok(bytes) = serde_json::to_vec(&reservation) {
+            let reserved_key = keys::encode_email_reserved(user.email());
+            let _ = self.storage.put(realm_id, &reserved_key, &bytes);
+        }
 
         // 4. Delete credential (if any — best effort, ignore not-found)
         let cred_key = keys::encode_credential_key(user_id);
@@ -6637,6 +6715,259 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
 
         Ok(user_id)
+    }
+
+    // ===== A-19: Email-change re-verification =====
+
+    fn initiate_email_change(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        new_email: &str,
+    ) -> Result<String, IdentityError> {
+        // Validate and normalize the new address.
+        let normalized = crate::identity::validation::validate_email(new_email)?;
+
+        // Load the user; capture the current email for the stored record.
+        let user = self
+            .get_user(realm_id, user_id)?
+            .ok_or(IdentityError::UserNotFound)?;
+        let old_email = user.email().to_string();
+
+        // No-op if already at this address.
+        if normalized == old_email {
+            return Err(IdentityError::InvalidInput {
+                reason: "new email is the same as the current email".to_string(),
+            });
+        }
+
+        // Check that the target address is not already in use.
+        let new_email_key = keys::encode_user_email(&normalized);
+        if self
+            .storage
+            .get(realm_id, &new_email_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DuplicateEmail);
+        }
+
+        // A-20: reject if the target address is under a 90-day reservation.
+        let reserved_key = keys::encode_email_reserved(&normalized);
+        if let Some(bytes) = self
+            .storage
+            .get(realm_id, &reserved_key)
+            .map_err(Self::storage_err)?
+        {
+            if let Ok(r) = serde_json::from_slice::<StoredEmailReservation>(&bytes) {
+                let now = self.clock.now().as_micros();
+                if now - r.reserved_at_micros < EMAIL_RESERVED_MICROS {
+                    return Err(IdentityError::EmailReserved);
+                }
+                let _ = self.storage.delete(realm_id, &reserved_key);
+            }
+        }
+
+        // Generate 32-byte random token; store SHA-256(token).
+        let rng = ring::rand::SystemRandom::new();
+        let mut buf = [0u8; 32];
+        rng.fill(&mut buf)
+            .map_err(|_| IdentityError::SigningError {
+                reason: "failed to generate email change token".to_string(),
+            })?;
+        let token = URL_SAFE_NO_PAD.encode(buf);
+        let token_hash = Self::sha256_hex(token.as_bytes());
+
+        let stored = StoredEmailChangeToken {
+            user_id: user_id.as_uuid().to_string(),
+            new_email: normalized.clone(),
+            old_email,
+            created_at_micros: self.clock.now().as_micros(),
+        };
+        let stored_bytes =
+            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let key = keys::encode_email_change_token(&token_hash);
+        self.storage
+            .put(realm_id, &key, &stored_bytes)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::EmailChangeInitiated,
+            "user",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        Ok(token)
+    }
+
+    fn confirm_email_change(&self, realm_id: &RealmId, token: &str) -> Result<User, IdentityError> {
+        let token_hash = Self::sha256_hex(token.as_bytes());
+        let key = keys::encode_email_change_token(&token_hash);
+
+        let bytes = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::EmailChangeTokenInvalid)?;
+
+        let stored: StoredEmailChangeToken =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        let now = self.clock.now().as_micros();
+        if now - stored.created_at_micros > EMAIL_CHANGE_TOKEN_EXPIRY_MICROS {
+            let _ = self.storage.delete(realm_id, &key);
+            return Err(IdentityError::EmailChangeTokenInvalid);
+        }
+
+        let uuid =
+            uuid::Uuid::parse_str(&stored.user_id).map_err(|e| IdentityError::Serialization {
+                reason: format!("invalid stored user_id: {e}"),
+            })?;
+        let user_id = UserId::new(uuid);
+
+        // Re-check new address uniqueness (race-safe).
+        let new_email_key = keys::encode_user_email(&stored.new_email);
+        if self
+            .storage
+            .get(realm_id, &new_email_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DuplicateEmail);
+        }
+
+        // Load user; confirm email hasn't already changed externally.
+        let mut user = self
+            .get_user(realm_id, &user_id)?
+            .ok_or(IdentityError::EmailChangeTokenInvalid)?;
+        if user.email() != stored.old_email {
+            // The address was already changed by another path; invalidate.
+            let _ = self.storage.delete(realm_id, &key);
+            return Err(IdentityError::EmailChangeTokenInvalid);
+        }
+
+        // Swap email indexes: remove old, add new.
+        let old_email_key = keys::encode_user_email(&stored.old_email);
+        self.storage
+            .delete(realm_id, &old_email_key)
+            .map_err(Self::storage_err)?;
+        let user_id_bytes = user_id.as_uuid().to_string().into_bytes();
+        self.storage
+            .put(realm_id, &new_email_key, &user_id_bytes)
+            .map_err(Self::storage_err)?;
+
+        // Update user record: new email, mark verified, bump timestamp.
+        user.set_email(stored.new_email.clone());
+        user.set_email_verified(true);
+        user.set_updated_at(self.clock.now());
+        let user_bytes = Self::serialize_user(&user)?;
+        let id_key = keys::encode_user_id(&user_id);
+        self.storage
+            .put(realm_id, &id_key, &user_bytes)
+            .map_err(Self::storage_err)?;
+
+        // Consume token (single-use).
+        let _ = self.storage.delete(realm_id, &key);
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::EmailChangeConfirmed,
+            "user",
+            &user_id.as_uuid().to_string(),
+        )?;
+
+        // Revoke all sessions — email change is a security event.
+        if let Err(e) = self.revoke_all_user_sessions(realm_id, &user_id, None) {
+            tracing::warn!(
+                user_id = %user_id.as_uuid(),
+                error = %e,
+                "confirm_email_change: revoke_all_user_sessions failed"
+            );
+        }
+
+        Ok(user)
+    }
+
+    // ===== A-37: prompt=none silent-auth probe rate-limiting =====
+
+    /// Checks and records a `prompt=none` probe for the given subject.
+    ///
+    /// Returns `Ok(())` when under the rate limit and `Err(SilentAuthRateLimited)`
+    /// when the per-hour cap has been exceeded. The counter is incremented on
+    /// every call regardless of outcome. An `OidcSilentAuthProbed` audit event
+    /// is emitted on each probe.
+    fn check_silent_auth_probe(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: &str,
+        outcome: &str,
+    ) -> Result<(), IdentityError> {
+        let now = self.clock.now().as_micros();
+        let key = keys::encode_prompt_none_tracker(user_id);
+
+        // Load or initialise the tracker.
+        let mut tracker = if let Some(bytes) = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+        {
+            serde_json::from_slice::<StoredPromptNoneTracker>(&bytes).unwrap_or(
+                StoredPromptNoneTracker {
+                    count: 0,
+                    window_start_micros: now,
+                },
+            )
+        } else {
+            StoredPromptNoneTracker {
+                count: 0,
+                window_start_micros: now,
+            }
+        };
+
+        // Reset window if expired.
+        if now - tracker.window_start_micros >= PROMPT_NONE_WINDOW_MICROS {
+            tracker.count = 0;
+            tracker.window_start_micros = now;
+        }
+
+        // Increment before the limit check so the count is always persisted.
+        tracker.count = tracker.count.saturating_add(1);
+
+        if let Ok(bytes) = serde_json::to_vec(&tracker) {
+            let _ = self.storage.put(realm_id, &key, &bytes);
+        }
+
+        // Emit audit — fail-open (LogOnly) if the append fails.
+        let audit_ctx = AuditContext {
+            actor: Actor::User(user_id.clone()),
+            metadata: Some(serde_json::json!({
+                "user_id": user_id.as_uuid().to_string(),
+                "client_id": client_id,
+                "outcome": outcome,
+                "probe_count": tracker.count,
+            })),
+        };
+        let _ = self.record_audit(
+            realm_id,
+            Some(&audit_ctx),
+            AuditAction::OidcSilentAuthProbed,
+            "user",
+            &user_id.as_uuid().to_string(),
+        );
+
+        if tracker.count > PROMPT_NONE_MAX_PROBES {
+            return Err(IdentityError::SilentAuthRateLimited);
+        }
+
+        Ok(())
     }
 
     // ===== UserInfo (OIDC Core §5.3) =====

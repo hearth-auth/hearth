@@ -1,0 +1,182 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · Abuse Monitor{% endblock %}
+{% block body %}
+{% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}
+
+<div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+  <div>
+    <h1 class="font-display text-2xl font-medium text-ht-content-primary">Abuse Monitor</h1>
+    <p class="mt-1 text-sm text-ht-content-muted">
+      Security events from the last {{ window_hours }} hours in realm
+      <span class="font-mono font-medium text-ht-content-secondary">{{ realm_name }}</span>.
+    </p>
+  </div>
+</div>
+
+{# ── Counter cards ────────────────────────────────────────────────────────── #}
+<div class="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+
+  <div class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
+    <p class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Login failures</p>
+    <p class="mt-2 font-display text-3xl font-semibold text-ht-content-primary">{{ counters.login_failures }}</p>
+  </div>
+
+  <div class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
+    <p class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Accounts locked</p>
+    <p class="mt-2 font-display text-3xl font-semibold
+      {% if counters.accounts_locked > 0 %}text-danger-fg{% else %}text-ht-content-primary{% endif %}">
+      {{ counters.accounts_locked }}
+    </p>
+  </div>
+
+  <div class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
+    <p class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Rate limit hits</p>
+    <p class="mt-2 font-display text-3xl font-semibold
+      {% if counters.rate_limit_hits > 0 %}text-warning-fg{% else %}text-ht-content-primary{% endif %}">
+      {{ counters.rate_limit_hits }}
+    </p>
+  </div>
+
+  <div class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
+    <p class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Compromised pwds</p>
+    <p class="mt-2 font-display text-3xl font-semibold
+      {% if counters.compromised_rejections > 0 %}text-warning-fg{% else %}text-ht-content-primary{% endif %}">
+      {{ counters.compromised_rejections }}
+    </p>
+  </div>
+
+  <div class="rounded-md bg-ht-surface-elevated p-4 ring-1 ring-divider-subtle">
+    <p class="font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Abuse detections</p>
+    <p class="mt-2 font-display text-3xl font-semibold
+      {% if counters.abuse_detections > 0 %}text-danger-fg{% else %}text-ht-content-primary{% endif %}">
+      {{ counters.abuse_detections }}
+    </p>
+  </div>
+
+</div>
+
+<div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
+
+  {# ── Top failing IPs ──────────────────────────────────────────────────── #}
+  <div class="lg:col-span-1">
+    <h2 class="mb-3 font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Top failing IPs (24 h)</h2>
+    {% if top_ips.is_empty() %}
+      <div class="rounded-md bg-ht-surface-elevated p-6 text-center ring-1 ring-divider-subtle">
+        <p class="text-sm text-ht-content-muted italic">No events with IP metadata in this window.</p>
+      </div>
+    {% else %}
+      <div class="overflow-hidden rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
+        <table class="w-full">
+          <thead>
+            <tr class="border-b border-divider bg-ht-surface-elevated">
+              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">IP address</th>
+              <th class="px-4 py-2.5 text-right font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Events</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in top_ips %}
+            <tr class="border-b border-divider-subtle hover-bg-divider">
+              <td class="px-4 py-2.5">
+                <span class="font-mono text-sm text-ht-content-primary">{{ row.ip }}</span>
+              </td>
+              <td class="px-4 py-2.5 text-right">
+                <span class="font-mono text-sm font-medium
+                  {% if row.count >= 10 %}text-danger-fg{% else if row.count >= 5 %}text-warning-fg{% else %}text-ht-content-secondary{% endif %}">
+                  {{ row.count }}
+                </span>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    {# ASN / geo heat-map placeholder — requires P-2 MaxMind integration #}
+    <div class="mt-4 rounded-md border border-dashed border-divider bg-ht-surface-base p-4">
+      <p class="text-xs font-medium text-ht-content-muted">
+        ASN view &amp; geo heat-map require the
+        <span class="font-mono">P-2 IpReputationProvider</span> integration (MaxMind / Spamhaus).
+        Configure <code class="rounded bg-ht-surface-elevated px-1 font-mono text-xs">security.providers.ip_reputation</code>
+        to enable.
+      </p>
+    </div>
+  </div>
+
+  {# ── Recent security events ───────────────────────────────────────────── #}
+  <div class="lg:col-span-2">
+    <h2 class="mb-3 font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Recent security events</h2>
+    {% if recent_events.is_empty() %}
+      <div class="rounded-lg border border-divider-subtle bg-ht-surface-elevated px-6 py-12 text-center">
+        <svg class="mx-auto h-10 w-10 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+        </svg>
+        <h3 class="mt-4 font-display text-lg font-medium text-ht-content-primary">No security events</h3>
+        <p class="mx-auto mt-2 max-w-md text-sm text-ht-content-secondary">
+          No login failures, lockouts, or rate-limit hits recorded in the last {{ window_hours }} hours.
+        </p>
+      </div>
+    {% else %}
+      <div class="overflow-hidden rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
+        <table class="w-full">
+          <thead>
+            <tr class="border-b border-divider bg-ht-surface-elevated">
+              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Time (UTC)</th>
+              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Event</th>
+              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Actor</th>
+              <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in recent_events %}
+            <tr class="border-b border-divider-subtle hover-bg-divider">
+              <td class="px-4 py-2.5">
+                <span class="font-mono text-xs text-ht-content-muted">{{ row.timestamp_display }}</span>
+              </td>
+              <td class="px-4 py-2.5">
+                <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium
+                  {% match row.severity %}
+                    {% when "critical" %}bg-danger/[0.12] text-danger-fg
+                    {% when "high" %}bg-warning/[0.12] text-warning-fg
+                    {% when _ %}bg-ht-surface-base text-ht-content-secondary ring-1 ring-divider-subtle
+                  {% endmatch %}">
+                  {{ row.action_label }}
+                </span>
+              </td>
+              <td class="px-4 py-2.5">
+                <span class="font-mono text-xs text-ht-content-secondary">{{ row.actor }}</span>
+              </td>
+              <td class="px-4 py-2.5">
+                {% match row.ip %}
+                  {% when Some with (ip) %}
+                    <span class="font-mono text-xs text-ht-content-secondary">{{ ip }}</span>
+                  {% when None %}
+                    <span class="text-xs text-ht-content-muted italic">—</span>
+                {% endmatch %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="mt-2 text-xs text-ht-content-muted">
+        Showing the 50 most recent events. Full history is available in the
+        <a href="/ui/admin/realms/{{ realm_name }}/audit" class="underline hover:text-ht-content-secondary">audit log</a>.
+      </p>
+    {% endif %}
+  </div>
+
+</div>
+
+{# Block/unblock note — functional CIDR management lands in A-9 #}
+<div class="mt-6 rounded-md border border-dashed border-divider bg-ht-surface-base p-4">
+  <p class="text-xs font-medium text-ht-content-muted">
+    <strong class="text-ht-content-secondary">Block / unblock IPs:</strong>
+    Tenant-managed CIDR allow/deny lists (A-9) are not yet enabled.
+    Once available, one-click block actions will appear here.
+    Track progress in
+    <a href="/HEA/issues/HEA-1114" class="underline hover:text-ht-content-secondary" target="_blank">HEA-1114</a>.
+  </p>
+</div>
+
+{% endblock %}

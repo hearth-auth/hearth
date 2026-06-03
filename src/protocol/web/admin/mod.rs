@@ -7,6 +7,7 @@
 //! * [`orgs`] — organization management, member management
 //! * [`groups`] — group CRUD, membership, role assignments
 //! * [`rbac`] — role definitions, permissions browser, RBAC debug tooling
+//! * [`abuse`] — abuse monitor dashboard (A-8): security event counters, top IPs
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -43,6 +44,7 @@ pub use super::auth;
 pub(crate) use super::handlers_common;
 pub(crate) use super::templates;
 
+pub mod abuse;
 pub mod clients;
 pub mod groups;
 pub mod identity_providers;
@@ -55,6 +57,7 @@ pub mod users;
 pub mod webhooks;
 
 // Re-export all public handlers so `web/mod.rs` keeps `admin::fn_name` paths.
+pub use abuse::*;
 pub use clients::*;
 pub use groups::*;
 pub use identity_providers::*;

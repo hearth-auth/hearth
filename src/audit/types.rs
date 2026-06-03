@@ -294,6 +294,29 @@ pub enum AuditAction {
     /// `ip`, `username` (if targeted), `detector` (`"credential_stuffing"` /
     /// `"password_spray"` / `"distributed_brute_force"`), and `realm_id`.
     AbuseDetected,
+    /// A user initiated an email-address change (A-19).
+    ///
+    /// A verification token has been issued for the new address; the old
+    /// address remains in use until `confirm_email_change` is called.
+    /// Metadata carries `user_id` and `new_email` (partially redacted:
+    /// domain retained, local-part starred).
+    EmailChangeInitiated,
+    /// A user confirmed an email-address change via the verification token (A-19).
+    ///
+    /// The old address received a `security.email_changed` notification
+    /// with a revoke link; all sessions were revoked.
+    /// Metadata carries `user_id`, `old_email` (partially redacted), and
+    /// `new_email` (partially redacted).
+    EmailChangeConfirmed,
+    /// A `prompt=none` OIDC authorization request was observed for an
+    /// authenticated subject (A-37).
+    ///
+    /// Emitted on every `prompt=none` request while a valid session exists,
+    /// regardless of outcome (bypass / `consent_required`). Rate-limited
+    /// callers also receive `SilentAuthRateLimited`.
+    /// Metadata carries `user_id`, `client_id`, and `outcome`
+    /// (`"code_issued"` / `"consent_required"` / `"rate_limited"`).
+    OidcSilentAuthProbed,
 }
 
 impl AuditAction {
@@ -390,6 +413,9 @@ impl AuditAction {
             Self::SessionLimitEnforced,
             Self::SessionsRevoked,
             Self::AbuseDetected,
+            Self::EmailChangeInitiated,
+            Self::EmailChangeConfirmed,
+            Self::OidcSilentAuthProbed,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -484,6 +510,9 @@ impl AuditAction {
             Self::SessionLimitEnforced => "session_limit_enforced",
             Self::SessionsRevoked => "sessions_revoked",
             Self::AbuseDetected => "abuse_detected",
+            Self::EmailChangeInitiated => "email_change_initiated",
+            Self::EmailChangeConfirmed => "email_change_confirmed",
+            Self::OidcSilentAuthProbed => "oidc_silent_auth_probed",
         }
     }
 }
@@ -579,6 +608,9 @@ impl std::str::FromStr for AuditAction {
             "session_limit_enforced" => Ok(Self::SessionLimitEnforced),
             "sessions_revoked" => Ok(Self::SessionsRevoked),
             "abuse_detected" => Ok(Self::AbuseDetected),
+            "email_change_initiated" => Ok(Self::EmailChangeInitiated),
+            "email_change_confirmed" => Ok(Self::EmailChangeConfirmed),
+            "oidc_silent_auth_probed" => Ok(Self::OidcSilentAuthProbed),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -676,7 +708,9 @@ impl AuditAction {
             | Self::SmsMfaChallengeSucceeded
             | Self::SessionLimitEnforced
             | Self::SessionEvicted
-            | Self::AbuseDetected => LogOnly,
+            | Self::AbuseDetected
+            | Self::EmailChangeInitiated
+            | Self::OidcSilentAuthProbed => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
@@ -702,7 +736,9 @@ impl AuditAction {
             | Self::SmsMfaChallengeFailed
             | Self::SmsMfaLocked
             | Self::DeviceFingerprintsErased
-            | Self::SessionsRevoked => FailOperation,
+            | Self::SessionsRevoked
+            // Email-change confirmation revokes all sessions — security-sensitive.
+            | Self::EmailChangeConfirmed => FailOperation,
         }
     }
 }

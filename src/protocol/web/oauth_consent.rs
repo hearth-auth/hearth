@@ -473,6 +473,45 @@ async fn authorize_get_impl(
     let force_prompt = q.prompt == "consent";
     let silent_only = q.prompt == "none";
 
+    // A-37: track every `prompt=none` request per (realm, sub) and enforce
+    // a rate limit.  The outcome label is determined after the bypass check,
+    // so we pass "pending" here and emit the real label via the probe helper.
+    // We call the helper now (before the bypass branch) so the counter is
+    // always incremented, and we use the actual outcome to fill `outcome`.
+    let silent_auth_probe_result = if silent_only {
+        let outcome = if !client.require_consent() || covered {
+            "code_issued"
+        } else {
+            "consent_required"
+        };
+        Some(state.identity.check_silent_auth_probe(
+            realm,
+            &session.user_id,
+            &client_id.to_string(),
+            outcome,
+        ))
+    } else {
+        None
+    };
+
+    // If the probe check returned a rate-limit error, redirect with
+    // `error=login_required` (the least informative RFC-defined error for
+    // silent-auth failures per OIDC Core §3.1.2.6).
+    if let Some(Err(crate::identity::IdentityError::SilentAuthRateLimited)) =
+        &silent_auth_probe_result
+    {
+        return jarm_aware_error_redirect(
+            state,
+            realm,
+            &client_id.to_string(),
+            &q.redirect_uri,
+            "login_required",
+            "silent auth rate limit exceeded",
+            &q.state,
+            client.authorization_signed_response_alg(),
+        );
+    }
+
     let bypass = !client.require_consent() || (covered && !force_prompt);
 
     let parsed_response_mode = if let Some(mode_str) = q.response_mode.as_deref() {
