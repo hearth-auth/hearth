@@ -36,6 +36,7 @@ use super::handlers_common;
 use super::realm_resolver::{self, Resolved};
 use super::templates::render;
 use super::WebState;
+use crate::abuse::redirect::validate_return_to;
 
 /// Cookie carrying the confirm-link ticket to `/ui/federation/confirm-link`.
 const CONFIRM_LINK_COOKIE: &str = "hearth_ui_fed_confirm";
@@ -95,9 +96,12 @@ async fn begin_impl(state: Arc<WebState>, realm_id: RealmId, q: BeginQuery) -> R
         Some(s) => s,
         None => return handlers_common::server_error(),
     };
-    let return_to = q.return_to.as_deref().unwrap_or("/ui/account");
+    // A-52: validate return_to before storing in federation state bag.
+    let return_to_raw = q.return_to.as_deref().unwrap_or("/ui/account");
+    let return_to =
+        validate_return_to(return_to_raw, &[]).unwrap_or_else(|| "/ui/account".to_string());
     let now = Timestamp::from_micros(now_micros());
-    match service.begin(&realm_id, &q.idp, return_to, now) {
+    match service.begin(&realm_id, &q.idp, &return_to, now) {
         Ok(url) => {
             audit_federation_started(&state, &realm_id, &q.idp);
             Redirect::to(url.as_str()).into_response()

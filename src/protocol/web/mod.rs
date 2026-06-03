@@ -1529,6 +1529,7 @@ pub fn router(state: WebState) -> Router {
         .layer(security::SecurityHeadersLayer::new(
             security::SecurityConfig {
                 hsts_enabled: tls_enabled,
+                coop_coep_enabled: true,
             },
         ))
 }

@@ -86,6 +86,30 @@ use crate::core::{
     ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
 };
 
+/// Maximum page size for all paginated list operations (A-23).
+///
+/// Callers supplying `limit > MAX_PAGE_SIZE` receive
+/// [`IdentityError::InvalidInput`].  This constant is also re-exported from
+/// `crate::abuse::MAX_PAGE_SIZE` for use in handlers and tests.
+pub const MAX_PAGE_SIZE: usize = crate::abuse::MAX_PAGE_SIZE;
+
+/// Clamps `limit` to [`MAX_PAGE_SIZE`], returning an `IdentityError` if the
+/// caller requested more rows than the cap allows.
+///
+/// Handlers should call this before passing `limit` to any trait method.
+///
+/// # Errors
+///
+/// Returns `IdentityError::InvalidInput` when `limit > MAX_PAGE_SIZE`.
+pub fn cap_page_size(limit: usize) -> Result<usize, IdentityError> {
+    if limit > MAX_PAGE_SIZE {
+        return Err(IdentityError::InvalidInput {
+            reason: format!("page size {limit} exceeds maximum {MAX_PAGE_SIZE}"),
+        });
+    }
+    Ok(limit)
+}
+
 /// Trait defining the identity engine interface.
 ///
 /// Synchronous for Phase 0 — callers should use `spawn_blocking` for async

@@ -7,6 +7,42 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **Phase-0 abuse-prevention builtins** — HTTP-layer and strictness-default
+  primitives that the rest of the abuse plane depends on (HEA-1188):
+  - **A-2 Global request shaper** — per-IP (100 rps) + per-realm (1 000 rps)
+    sliding-window rate limiter applied to all public routes.  Configurable
+    via `security.request_shaper` in `hearth.yaml`.
+  - **A-15 gRPC rate-limit interceptor** — mirrors the HTTP shaper on all
+    gRPC methods; the per-IP interceptor is wired via `Server::layer()`.
+  - **A-21 JSON parse-bomb guard** — inbound JSON bodies are rejected with
+    413 if nesting depth > 128 levels or any single array has ≥ 65 536
+    elements.
+  - **A-22 Decompression-bomb cap** — `Content-Encoding: gzip` payloads are
+    capped at 4 MiB decompressed; oversized streams are aborted.
+  - **A-23 Pagination hard cap** — `cap_page_size(limit)` helper enforces a
+    1 000-row maximum at the trait boundary; handlers' hardcoded 10 000 limit
+    is superseded.
+  - **A-39 HTTP/2 rapid-reset defense** — TLS connections set
+    `max_concurrent_streams = 100` and `max_pending_reset_streams = 10`
+    (CVE-2023-44487 mitigations).
+  - **A-40 COOP / COEP / Permissions-Policy headers** — the UI security-
+    headers middleware now emits `Cross-Origin-Opener-Policy: same-origin`,
+    `Cross-Origin-Embedder-Policy: require-corp`, and
+    `Permissions-Policy: camera=(), microphone=(), geolocation=(), …` on
+    every UI response.  Configurable via `SecurityConfig.coop_coep_enabled`.
+  - **A-47 `deny_unknown_fields` on admin request bodies** — key admin
+    request shapes (`ImportUsersBody`, `HttpBulkUsersRequest`,
+    `PatchRealmBrandingRequest`, RBAC role/group bodies) now reject extra
+    fields.  OAuth/OIDC protocol bodies are explicitly exempted (RFC 6749
+    extension-parameter allowance documented).
+  - **A-52 Unified `return_to` allowlist** — `crate::abuse::redirect::validate_return_to`
+    consolidates all open-redirect prevention.  Federation start and SAML ACS
+    handlers now validate `return_to` before persisting it in the state bag.
+    Operator-whitelisted absolute origins are supported via
+    `security.allowed_return_to_origins`.
+
 ### Changed
 
 - **`validate_token` hot-path allocation reduced** — two in-process `ArcSwap` caches were added

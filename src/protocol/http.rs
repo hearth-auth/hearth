@@ -60,6 +60,19 @@ use crate::webhook::{
 const FALLBACK_PEER: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
 
+/// HTTP/2 maximum concurrent streams per connection (A-39, CVE-2023-44487).
+///
+/// Caps the number of active streams to limit the amplification factor of
+/// rapid-reset attacks. This is the `SETTINGS_MAX_CONCURRENT_STREAMS` value
+/// sent to HTTP/2 clients.
+const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 100;
+
+/// HTTP/2 maximum pending RST_STREAM frames per connection (A-39).
+///
+/// Limits the per-connection RST budget so a rapid-reset attacker cannot
+/// exhaust server resources by opening and immediately cancelling streams.
+const HTTP2_MAX_PENDING_RESET_STREAMS: usize = 10;
+
 /// Default maximum request body size (1 MiB).
 ///
 /// Covers normal JSON payloads (user/realm CRUD, OAuth token exchange).
@@ -865,12 +878,20 @@ pub async fn serve_tls_router(
                         app.into_service(),
                     );
 
-                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                    // A-39: HTTP/2 rapid-reset defense (CVE-2023-44487).
+                    // Cap concurrent streams and RST_STREAM budget to limit
+                    // the amplification factor of rapid-reset attacks.
+                    let mut builder = hyper_util::server::conn::auto::Builder::new(
                         hyper_util::rt::TokioExecutor::new(),
-                    )
-                    .serve_connection(io, service)
-                    .await
-                    {
+                    );
+                    builder
+                        .http2()
+                        .max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS)
+                        .max_pending_accept_reset_streams(Some(
+                            HTTP2_MAX_PENDING_RESET_STREAMS,
+                        ));
+
+                    if let Err(e) = builder.serve_connection(io, service).await {
                         debug!(peer = %peer_addr, error = %e, "connection error");
                     }
                 });
@@ -3096,13 +3117,19 @@ async fn admin_list_users(
 }
 
 /// Import request body — one entry per user to import.
+// A-47: admin request bodies use deny_unknown_fields to prevent silent
+// extension-field bypass.  OAuth/OIDC protocol bodies (HttpTokenRequest,
+// HttpRevocationBody, HttpParRequest) are exempt — RFC 6749 §3.2 allows
+// extension parameters.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportUsersBody {
     users: Vec<ImportUserEntry>,
 }
 
 /// Single user entry in a bulk import request.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportUserEntry {
     email: String,
     display_name: String,
@@ -3509,6 +3536,7 @@ async fn admin_delete_user_device_fingerprints(
 
 /// HTTP request body for bulk user operations.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HttpBulkUsersRequest {
     operation: String,
     #[serde(default)]
@@ -4110,6 +4138,7 @@ async fn admin_rotate_realm_signing_key(
 
 /// Request body for `PATCH /realms/{id}/branding`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatchRealmBrandingRequest {
     #[serde(default)]
     logo_url: Option<String>,
@@ -5387,6 +5416,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
 // =======================================================================
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateRoleBody {
     name: String,
     #[serde(default)]
@@ -5398,6 +5428,7 @@ struct CreateRoleBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateRoleBody {
     #[serde(default)]
     name: Option<String>,
@@ -5410,6 +5441,7 @@ struct UpdateRoleBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateGroupBody {
     name: String,
     slug: String,
@@ -5418,6 +5450,7 @@ struct CreateGroupBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateGroupBody {
     #[serde(default)]
     name: Option<String>,
@@ -5428,6 +5461,7 @@ struct UpdateGroupBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddGroupMemberBody {
     /// `"user"` or `"group"`.
     #[serde(rename = "type")]

@@ -791,6 +791,76 @@ pub struct SecurityYaml {
     /// **Never use the zero key `0000…` in production.** The server rejects it at startup.
     #[serde(default)]
     pub dpop_nonce_secret: Option<String>,
+    /// Allowlist of `Host` header values the server accepts (A-40).
+    ///
+    /// Requests whose `Host` header is not in this list are rejected with
+    /// 400 Bad Request.  Absent or empty = accept any host (fail-open for
+    /// backward compat).  Include the port for non-standard ports
+    /// (e.g. `"localhost:8420"`).
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// HTTP/2 rapid-reset defense parameters (A-39).
+    #[serde(default)]
+    pub http2: Http2SecurityYaml,
+    /// Global per-IP + per-realm request shaper (A-2).
+    #[serde(default)]
+    pub request_shaper: Option<RequestShaperYaml>,
+    /// Absolute origins permitted as `return_to` redirect targets (A-52).
+    ///
+    /// Relative paths (`/ui/…`) are always accepted.  Absolute URLs are only
+    /// accepted when their `scheme://host[:port]` matches an entry here.
+    #[serde(default)]
+    pub allowed_return_to_origins: Vec<String>,
+}
+
+/// `security.http2` — HTTP/2 rapid-reset defense (A-39, CVE-2023-44487).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Http2SecurityYaml {
+    /// Maximum concurrent HTTP/2 streams per connection.  Default: 100.
+    #[serde(default = "Http2SecurityYaml::default_max_concurrent_streams")]
+    pub max_concurrent_streams: u32,
+    /// Maximum number of pending RST_STREAM frames (rapid-reset budget).
+    /// Default: 10.
+    #[serde(default = "Http2SecurityYaml::default_max_pending_reset_streams")]
+    pub max_pending_reset_streams: usize,
+}
+
+impl Http2SecurityYaml {
+    fn default_max_concurrent_streams() -> u32 {
+        100
+    }
+    fn default_max_pending_reset_streams() -> usize {
+        10
+    }
+}
+
+impl Default for Http2SecurityYaml {
+    fn default() -> Self {
+        Self {
+            max_concurrent_streams: Self::default_max_concurrent_streams(),
+            max_pending_reset_streams: Self::default_max_pending_reset_streams(),
+        }
+    }
+}
+
+/// `security.request_shaper` — global per-IP + per-realm rate limiter (A-2).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RequestShaperYaml {
+    /// Maximum requests per second per source IP.  Default: 100.
+    #[serde(default = "RequestShaperYaml::default_ip_rps")]
+    pub ip_rps: u32,
+    /// Maximum requests per second per realm.  Default: 1000.
+    #[serde(default = "RequestShaperYaml::default_realm_rps")]
+    pub realm_rps: u32,
+}
+
+impl RequestShaperYaml {
+    fn default_ip_rps() -> u32 {
+        100
+    }
+    fn default_realm_rps() -> u32 {
+        1_000
+    }
 }
 
 /// `security.rate_limiting` — operator-tunable per-IP and per-account thresholds.

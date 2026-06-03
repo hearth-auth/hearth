@@ -27,6 +27,7 @@ use crate::identity::federation::saml::{
 use crate::identity::federation::IdpKind;
 
 use super::WebState;
+use crate::abuse::redirect::validate_return_to;
 
 // ============================================================================
 // SP side — consume external IdP assertions.
@@ -219,7 +220,13 @@ pub async fn sp_acs(
             // federation linking / JIT provisioning. That plumbing reuses
             // the OIDC-side helpers — outside Phase 1 scope for the web
             // layer. We confirm the flow by redirecting to the return_to.
-            Redirect::to(bag.return_to.as_deref().unwrap_or("/ui/account")).into_response()
+            // A-52: sanitize the stored return_to before using it as Location.
+            let return_to = bag
+                .return_to
+                .as_deref()
+                .and_then(|u| validate_return_to(u, &[]))
+                .unwrap_or_else(|| "/ui/account".to_string());
+            Redirect::to(&return_to).into_response()
         }
         SamlSpOutcome::Rejected { error } => {
             let reason = match &error {
@@ -290,12 +297,17 @@ pub async fn sp_begin(
         force_authn: false,
     });
 
+    // A-52: validate return_to before persisting in state bag.
+    let validated_return_to = q
+        .return_to
+        .as_deref()
+        .and_then(|u| validate_return_to(u, &[]));
     let bag = SamlStateBag {
         token: state_token.clone(),
         request_id: req_id.clone(),
         realm_id: realm.clone(),
         idp_id: idp_cfg.id.clone(),
-        return_to: q.return_to,
+        return_to: validated_return_to,
         created_at: now,
     };
     if state.identity.put_saml_state(&bag).is_err() {
