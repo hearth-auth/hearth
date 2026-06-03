@@ -396,6 +396,147 @@ to disable without recompiling.
 
 ---
 
+## A-48 — OAuth `state` ↔ Session Binding (Federation Start)
+
+**Status:** Shipped (HEA-1200)  
+**Module:** `src/protocol/web/federation.rs`, `src/identity/federation/state.rs`  
+**Closes:** §3.51 of the abuse-prevention plan
+
+### Threat (§3.51)
+
+At `begin`, Hearth stores the federation state bag (nonce, PKCE verifier,
+`return_to`) under the opaque `state` token.  Without binding, any browser that
+already knows the `state` value (e.g. by observing the redirect URL from a
+shared tab, referrer header leak, or an attacker-initiated parallel flow) can
+call the `callback` endpoint with a valid code and take over the resulting
+session.
+
+### Implementation
+
+`begin_impl` (`federation.rs:104`):
+
+1. Calls `FederationService::begin` to produce the upstream authorization URL
+   and a random 256-bit `state_token`.
+2. Computes `bind_mac = HMAC-SHA256(cookie_secret, "fed-state-bind|" || state_token)`.
+3. Sets a short-lived `hearth_fed_bind=<bind_mac>; HttpOnly; Path=/; SameSite=Lax; Max-Age=600`
+   cookie on the response.  `SameSite=Lax` is required because the IdP redirect
+   is a top-level cross-origin navigation.
+
+`callback_impl` (`federation.rs:184`):
+
+1. Extracts `hearth_fed_bind` from the `Cookie` header.
+2. Calls `verify_federation_state_mac(cookie_secret, q.state, mac)` — a
+   constant-time HMAC comparison.
+3. If missing or mismatched → 303 to `/ui/login?error=federation_failed`.
+
+The MAC primitive lives in `src/identity/federation/state.rs::compute_federation_state_mac` /
+`verify_federation_state_mac`.  It is domain-separated from the confirm-link
+cookie with the prefix `"fed-state-bind|"`.
+
+### Fail mode
+
+Fail-**closed**.  A callback without the correct cookie is unconditionally
+rejected.  No fallback, no degraded path.
+
+### Key invariants
+
+- `state_token` is 32 random bytes (256-bit entropy), base64url-encoded.
+- The HMAC key is the server-wide `cookie_secret` (32 bytes, loaded at boot,
+  zeroized on drop).
+- `Max-Age=600` (10 min) — the upstream IdP redirect must complete within this
+  window.  Expired cookies are automatically removed by the browser.
+- No plaintext `state` value is stored in the cookie — only the MAC tag.
+
+### Tests
+
+| Test file | Coverage |
+|-----------|---------|
+| `tests/abuse_risk.rs::a48_*` | MAC primitives — determinism, roundtrip, wrong MAC, wrong secret, domain-separation |
+| `tests/abuse_a48_a49.rs::a48_*` | HTTP adversarial — missing cookie, cross-state cookie, forged MAC, wrong-secret cookie |
+| `tests/web_ui_federation.rs` | Integration — begin plants cookie; callback with unknown state redirects; full flow |
+
+---
+
+## A-49 — Refresh-Token UA/ASN Context Binding
+
+**Status:** Shipped (HEA-1200)  
+**Module:** `src/identity/engine/mod.rs`, `src/identity/oidc.rs`, `src/protocol/http.rs`  
+**Closes:** §3.52 of the abuse-prevention plan
+
+### Threat (§3.52)
+
+Refresh tokens are bearer tokens.  Rotation catches replay *after* a first
+theft-detect (mismatch family hash), but not "stolen token replayed from a
+wholly different network / device before the legitimate holder next refreshes."
+A-49 closes this window by flagging a context switch into the A-11 risk scorer.
+
+### Implementation
+
+**Grant family binding** (`src/identity/oidc.rs::StoredGrantFamily`):
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `ua_hash` | `Option<String>` | SHA-256 hex of the first `User-Agent` seen on a refresh exchange |
+| `bound_asn` | `Option<u32>` | ASN from the first refresh (stub — absent until P-2 ships) |
+
+Both fields default to `None` at grant-family creation; they are recorded on
+the **first refresh exchange** (lazy binding) so that clients that never
+refresh do not carry stale context.
+
+**Context detection** (`engine/mod.rs:2024-2071`):
+
+1. `callback_impl` in `http.rs` extracts the `User-Agent` header and wraps it
+   in a `RefreshBindContext { user_agent, asn }`.
+2. On each refresh exchange, `ua_changed` and `asn_changed` are computed by
+   comparing hashes against the stored family values.  If neither stored hash
+   is present (fresh grant or pre-upgrade), both flags are `false` (fail-open).
+3. When `ua_changed || asn_changed`:
+   - Reads `realm.config.risk_scorer_config` (or default).
+   - Builds a `RiskContext { signals: [RefreshContextDelta { ua_changed, asn_changed }] }`.
+   - If `scorer.score(&ctx).step_up_required` → `Err(IdentityError::StepUpChallengeRequired)`.
+4. On the first refresh, the family's `ua_hash` / `bound_asn` are written with
+   the current values for future comparisons.
+
+**Signal weight** (default `refresh_context_delta_weight = 0.35`):
+
+| Changed dimensions | Score contribution |
+|-------------------|--------------------|
+| None | 0.0 |
+| UA only | 0.35 |
+| ASN only | 0.35 |
+| Both | 0.70 → exceeds default `step_up_threshold = 0.5` |
+
+### Fail mode
+
+Fail-**open**.
+
+- Scorer disabled (`security.risk_scorer.enabled: false`, the default) → never blocks.
+- No stored `ua_hash` / no inbound `User-Agent` → skip check entirely.
+- Risk scorer is a heuristic signal, not a hard gate; operators must explicitly
+  enable it and set an appropriate threshold.
+
+### Configuration (`security.risk_scorer` in `hearth.yaml`)
+
+See the P-4 section for the full config reference.  The relevant field:
+
+```yaml
+security:
+  risk_scorer:
+    enabled: true                      # false by default — opt-in
+    step_up_threshold: 0.5             # 0.70 (both dims) > 0.5 → step-up
+    refresh_context_delta_weight: 0.35 # per changed dimension
+```
+
+### Tests
+
+| Test file | Coverage |
+|-----------|---------|
+| `tests/abuse_risk.rs::a49_*` | Unit — disabled scorer, UA-only change, both dims, no change |
+| `tests/abuse_a48_a49.rs::a49_*` | Adversarial — stolen token UA change triggers step-up; fail-open guarantee; both-dims threshold; field API |
+| `tests/abuse_risk_scorer.rs::p4_refresh_*` | Scorer weight arithmetic — one/both/zero dims |
+
+---
+
 ## A-45 — Tenant-Controlled HTML/CSS/SVG Sanitization
 
 **Scope:** All operator- or tenant-supplied content that flows into an

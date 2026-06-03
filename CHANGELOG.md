@@ -492,20 +492,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
-
 - **User deletion now purges RBAC state** — `delete_user` previously omitted the RBAC cascade,
   leaving stale role assignments and group memberships in storage after a user was deleted. An
   attacker who later claimed the same user UUID could inherit the deleted user's privileges. The
@@ -678,20 +664,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
-
 - **Backup restore body capped at 4 GiB (HEA-1130)** — `POST /admin/backup/restore` previously
   used `DefaultBodyLimit::disable()`, allowing any admin-token holder to stream an arbitrarily
   large body and exhaust heap memory. The limit is now `4 GiB` — sufficient for the largest
@@ -846,20 +818,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `token_endpoint_auth_methods_supported` (RFC 7523 §2.2 / OIDC Core §9).
 
 ### Security
-
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
 
 - **JWT Bearer grant (`urn:ietf:params:oauth:grant-type:jwt-bearer`) hardening (HEA-999)** —
   several security gaps in the RFC 7523 JWT Bearer token endpoint are resolved:
@@ -1031,20 +989,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
-
 - **ReDoS fix in Node SDK error sanitizer** — replaced the backtracking regex in
   `sdks/node/src/errors.ts` `sanitize()` with a linear O(n) charcode scan; a crafted
   input like `eyJeyJeyJ…` (no dots) caused O(n²) regex backtracking in V8 on any
@@ -1189,20 +1133,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
-
 - **Required-actions bypass via ROPC closed (HEA-905)** — `password_grant_token` now checks
   `user.required_actions()` after credential verification and returns `RequiredActionsBlocking`
   when any actions are pending. HTTP surface maps this to `400 {"error":"required_actions_pending",
@@ -1261,20 +1191,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `<polygon>` based on the requested SVG tag.
 
 ### Security
-
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
 
 - **CSP `script-src 'self'`: 10 inline `<script>` blocks extracted (HEA-886)** —
   Per-page inline scripts in admin templates (`groups/new`, `webhooks/new`,
@@ -1347,20 +1263,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   re-enroll on next login. Exposed as `POST /ui/admin/realms/{realm}/users/{id}/remove-phone`.
 
 ### Security
-
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
 
 - **Sensitive config fields wrapped in `SecretString` (HEA-869)** — `AdaptiveMfaConfig.fingerprint_hmac_secret`
   and `BreachCheckConfig.hibp_api_key` were typed as `String` with `#[derive(Debug)]`, which exposed
@@ -1568,20 +1470,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
-
 - **gRPC cross-realm BFLA: realm management now requires system-realm admin token** — all five
   realm-management gRPC handlers (`list_realms`, `get_realm`, `create_realm`, `update_realm`,
   `delete_realm`) previously authenticated the caller but discarded the returned realm context
@@ -1702,20 +1590,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   Uses ambient `GITHUB_TOKEN` via `gh` — no secret handling (HEA-716).
 
 ### Security
-
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
 
 - **`rsa` crate removed from the dependency graph (RUSTSEC-2023-0071 /
   CVE-2023-49092, Marvin Attack)** — SAML's RSA-2048 keypair + self-signed
@@ -2061,20 +1935,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
-
 - **Rate-limiting gaps closed** — per-IP sliding-window enforcement added to `POST /token`
   (password grant) and the new `POST /v1/{realm}/auth/magic-link` endpoint; per-account lockout
   state is now persisted to WAL and restored on startup so active lockouts survive server restarts;
@@ -2116,20 +1976,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   repair any realms whose original seed was lost (HEA-545).
 
 ### Security
-
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
 
 - **`validate_token` now rejects tokens from Suspended or Archived realms** — suspending or
   archiving a realm immediately blocks all token validation for that realm. Previously, tokens
@@ -2239,20 +2085,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
-
 - **PKCE mandatory** — all public clients must supply a `code_challenge`; server rejects authorization requests without one (Security Phase A).
 - **Redirect URI exact-match** — registered redirect URIs compared byte-for-byte; no prefix or wildcard matching (Security Phase A).
 - **RFC 9207 `iss` parameter** — returned in every authorization response to prevent mix-up attacks (Security Phase A).
@@ -2272,20 +2104,6 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 - **Zanzibar authorization engine** — `src/authz/`, tuple storage, `AuthzCache` in TypeScript and Go SDKs, `POST /v1/authz/check`, `GET /v1/me/capabilities`, and `CapabilityPage` bundles. All authorization now goes through `src/rbac/`.
 - **`lazy_static`** — replaced with `std::sync::OnceLock` / `LazyLock` throughout.
 ### Security
-
-- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
-  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
-  state_token)`. At `callback`, the server rejects requests that lack the
-  cookie or whose MAC does not match — preventing cross-browser callback
-  injection (IdP callback hijacking). Fail-closed (HEA-1200).
-
-- **A-49 Refresh-token UA/ASN context binding** — grant families now record
-  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
-  exchange, the engine computes a `RefreshContextDelta` risk signal when the
-  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
-  `security.risk_scorer.enabled = true` and the combined score exceeds
-  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
-  caller must force re-authentication. Fail-open by default (HEA-1200).
 
 - **WAL rotation must flush memtable before truncating (HEA-1180 / F1)** —
   `Wal::rotate_locked` truncated the WAL file before the in-memory memtable had
