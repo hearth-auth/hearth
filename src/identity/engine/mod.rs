@@ -3481,6 +3481,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get_realm(realm_id)?
             .ok_or(IdentityError::RealmNotFound)?;
 
+        // Refuse updates against a realm whose cascade has already started.
+        // `delete_realm` releases the ops_lock after stamping
+        // `DeletingInProgress` so its (potentially long) cascade does not
+        // block create/update of *other* realms. Without this guard the
+        // update could re-put the realm record between the cascade's
+        // record-delete and signing-key-delete, leaving record=Some /
+        // key=None — the exact invariant the
+        // `simulation_concurrent_realm_ops_under_io_delay` test asserts.
+        if realm.status() == RealmStatus::DeletingInProgress {
+            return Err(IdentityError::RealmSuspended);
+        }
+
         let now = self.clock.now();
         let old_name = realm.name().to_string();
 
