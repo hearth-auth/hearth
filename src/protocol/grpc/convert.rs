@@ -38,6 +38,8 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::DuplicateRealmName
         | IdentityError::DuplicateOrgSlug
         | IdentityError::DuplicateInvitation
+        | IdentityError::ReservedSlug { .. }
+        | IdentityError::SlugInCooldown { .. }
         | IdentityError::MfaAlreadyEnabled
         | IdentityError::AlreadyMember
         | IdentityError::FederationAlreadyLinked

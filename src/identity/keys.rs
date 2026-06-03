@@ -1567,6 +1567,36 @@ pub(crate) fn ssv_delta_scan_prefix() -> Vec<u8> {
     SSV_DELTA_PREFIX.as_bytes().to_vec()
 }
 
+// ===== Slug reservation key encoding (A-5) =====
+
+/// Key stored under the **system realm** for a reserved realm slug (A-5 cooldown).
+///
+/// Format: `slug:realm:{slug}`
+///
+/// Value: JSON-serialized `StoredSlugReservation` (private to the engine).
+/// Written by `delete_realm`; read by `create_realm` to enforce the
+/// post-delete cooldown window configured in `security.slug_cooldown_days`.
+pub(crate) fn encode_realm_slug_reservation(slug: &str) -> Vec<u8> {
+    let mut k = b"slug:realm:".to_vec();
+    k.extend_from_slice(slug.as_bytes());
+    k
+}
+
+/// Key stored under a **realm** for a reserved org slug (A-5 cooldown).
+///
+/// Format: `slug:org:{realm_uuid_bytes (16)}:{slug}`
+///
+/// Value: JSON-serialized `StoredSlugReservation` (private to the engine).
+/// Written by `delete_organization`; read by `create_organization` to enforce
+/// the post-delete cooldown window configured in `security.slug_cooldown_days`.
+pub(crate) fn encode_org_slug_reservation(realm_id: &RealmId, slug: &str) -> Vec<u8> {
+    let mut k = b"slug:org:".to_vec();
+    k.extend_from_slice(realm_id.as_uuid().as_bytes());
+    k.push(b':');
+    k.extend_from_slice(slug.as_bytes());
+    k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

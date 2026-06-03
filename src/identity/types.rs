@@ -950,6 +950,45 @@ pub struct RealmConfig {
     /// when the current count equals or exceeds the configured limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quotas: Option<RealmQuotaConfig>,
+    /// Per-realm magic link token TTL in microseconds (A-14).
+    ///
+    /// `None` falls back to the compiled default (15 minutes). Hard-capped at
+    /// 30 minutes unless `allow_unsafe_ttl` is also set in the realm's YAML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub magic_link_ttl_micros: Option<i64>,
+    /// WebAuthn attestation policy for this realm (A-13).
+    ///
+    /// `None` means no policy — attestation format and AAGUID are unrestricted
+    /// (fail-open per §6.1 of the abuse plan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webauthn_attestation: Option<WebAuthnAttestationPolicy>,
+}
+
+/// Per-realm WebAuthn attestation policy (A-13).
+///
+/// Controls which authenticators are permitted to register credentials in this
+/// realm. All fields fail-open by default (absent policy = any authenticator).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WebAuthnAttestationPolicy {
+    /// Whether attestation format `"none"` is accepted (default: `true`).
+    pub allow_none: bool,
+    /// AAGUID allowlist (lowercase UUID format). Empty = any AAGUID accepted.
+    pub aaguid_allowlist: Vec<String>,
+    /// Require PRF extension on registered credentials (default: `false`).
+    pub require_prf: bool,
+    /// Require `largeBlob` extension on registered credentials (default: `false`).
+    pub require_large_blob: bool,
+}
+
+impl Default for WebAuthnAttestationPolicy {
+    fn default() -> Self {
+        Self {
+            allow_none: true,
+            aaguid_allowlist: Vec::new(),
+            require_prf: false,
+            require_large_blob: false,
+        }
+    }
 }
 
 /// FAPI 2.0 Security Profile enforcement level.

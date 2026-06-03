@@ -1818,6 +1818,8 @@ fn identity_error_to_response(
         }
         IdentityError::InvitationInvalid => (StatusCode::BAD_REQUEST, "invalid invitation"),
         IdentityError::DuplicateInvitation => (StatusCode::CONFLICT, "duplicate invitation"),
+        IdentityError::ReservedSlug { .. } => (StatusCode::CONFLICT, "slug_reserved"),
+        IdentityError::SlugInCooldown { .. } => (StatusCode::CONFLICT, "slug_cooldown"),
         IdentityError::SystemRealmProtected { .. } => {
             (StatusCode::FORBIDDEN, "system realm is read-only")
         }

@@ -79,7 +79,7 @@ pub use types::{
     RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
     RequiredAction, RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy,
     SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
-    UpdateWebhookRequest, User, UserStatus, Webhook,
+    UpdateWebhookRequest, User, UserStatus, WebAuthnAttestationPolicy, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{

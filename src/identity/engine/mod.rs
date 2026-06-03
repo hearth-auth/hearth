@@ -166,6 +166,16 @@ struct StoredEmailReservation {
     reserved_at_micros: i64,
 }
 
+/// Tombstone written on `delete_organization` to enforce the post-delete slug
+/// cooldown window (A-5). Stored under `slug:org:{realm_uuid_bytes}:{slug}`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredSlugReservation {
+    /// The slug being held in cooldown.
+    slug: String,
+    /// Unix microseconds when the cooldown expires.
+    expires_at_micros: i64,
+}
+
 /// Pending email-address change record (A-19).
 ///
 /// Written by `initiate_email_change`; consumed by `confirm_email_change`.
@@ -324,6 +334,18 @@ pub struct IdentityConfig {
     /// Realm item count above which delete_realm spawns a background task.
     /// Below this threshold the cascade runs synchronously. Default: 1_000.
     pub cascade_background_threshold: usize,
+    /// A-5: Operator-configured list of slug names that are permanently reserved
+    /// and may never be used for org or realm slugs (e.g. `"admin"`, `"api"`).
+    ///
+    /// Defaults to an empty list; populated from `security.reserved_slugs` in
+    /// `hearth.yaml` at startup.  The list is normalised to lowercase at
+    /// startup so comparisons are case-insensitive.
+    pub reserved_slugs: Vec<String>,
+    /// A-5: Duration (in seconds) for which a slug is reserved after the
+    /// org or realm that held it is deleted.
+    ///
+    /// Default: `30 * 86_400` (30 days).
+    pub slug_cooldown_secs: u64,
 }
 
 impl Default for IdentityConfig {
@@ -338,6 +360,8 @@ impl Default for IdentityConfig {
             cleanup: crate::identity::cleanup::CleanupConfig::default(),
             cascade_chunk_size: 200,
             cascade_background_threshold: 1_000,
+            reserved_slugs: Vec::new(),
+            slug_cooldown_secs: 30 * 86_400,
         }
     }
 }
@@ -3270,6 +3294,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Realm names ride in URL paths, so they must be URL-safe AND
         // must not collide with any admin sub-resource keyword.
         super::validation::validate_realm_name(&request.name)?;
+
+        // A-5: reject operator-configured permanently reserved realm names.
+        let name_lower = request.name.to_ascii_lowercase();
+        if self.config.reserved_slugs.iter().any(|r| r == &name_lower) {
+            return Err(IdentityError::ReservedSlug {
+                slug: request.name.clone(),
+            });
+        }
+
         // Serialize against other realm-record mutations so the atomic
         // record+key `put_batch` below is never interleaved with another
         // thread's update/delete. See `realm_ops_lock` docs.
@@ -3282,6 +3315,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::DuplicateRealmName);
         }
 
+        // A-5: check post-delete realm name cooldown (system realm namespace).
+        let sys_realm = keys::system_realm_id();
+        let cooldown_key = keys::encode_realm_slug_reservation(&request.name);
+        if let Some(bytes) = self
+            .storage
+            .get(&sys_realm, &cooldown_key)
+            .map_err(Self::storage_err)?
+        {
+            if let Ok(reservation) = serde_json::from_slice::<StoredSlugReservation>(&bytes) {
+                let now_micros = self.clock.now().as_micros();
+                if now_micros < reservation.expires_at_micros {
+                    return Err(IdentityError::SlugInCooldown {
+                        slug: request.name.clone(),
+                    });
+                }
+                // Cooldown expired — clean up the stale reservation.
+                let _ = self.storage.delete(&sys_realm, &cooldown_key);
+            }
+        }
+
         let now = self.clock.now();
         let realm_id = RealmId::generate();
         let config = request.config.clone().unwrap_or_default();
@@ -3290,7 +3343,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let realm_signing_key = SigningKey::generate()?;
 
         // Persist the realm record under the system realm namespace
-        let sys_realm = keys::system_realm_id();
+        // (sys_realm already declared above for cooldown check)
         let realm = Realm::new(
             realm_id.clone(),
             request.name.clone(),
@@ -3760,6 +3813,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // that case so the existing API stays stable.
         if !realm_exists && !cascade_work_done {
             return Err(IdentityError::RealmNotFound);
+        }
+
+        // A-5: write a post-delete realm name cooldown tombstone so the freed
+        // name cannot be immediately re-claimed. Best-effort: a write failure
+        // here is not fatal for the delete. Only written when the realm existed.
+        if let Some(ref t) = existing_realm {
+            let cooldown_micros = self.config.slug_cooldown_secs as i64 * 1_000_000;
+            let now_micros = self.clock.now().as_micros();
+            let reservation = StoredSlugReservation {
+                slug: t.name().to_string(),
+                expires_at_micros: now_micros + cooldown_micros,
+            };
+            if let Ok(bytes) = serde_json::to_vec(&reservation) {
+                let res_key = keys::encode_realm_slug_reservation(t.name());
+                let _ = self.storage.put(&sys_realm, &res_key, &bytes);
+            }
         }
 
         self.record_audit(
@@ -6267,12 +6336,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
+        // A-13: retrieve the realm's WebAuthn attestation policy (if any).
+        let attestation_policy = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.config().webauthn_attestation.clone());
+
         let (mut info, mut stored) = webauthn::complete_registration(
             &pending,
             client_data_json,
             attestation_object,
             origin,
             now,
+            attestation_policy.as_ref(),
         )?;
 
         // Set discoverable from caller's request
@@ -8038,6 +8115,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let slug = validation::validate_slug(&request.slug)?;
         let name = validation::validate_display_name(&request.name)?;
 
+        // A-5: reject permanently reserved slugs (operator-configured list).
+        let slug_lower = slug.to_ascii_lowercase();
+        if self.config.reserved_slugs.iter().any(|r| r == &slug_lower) {
+            return Err(IdentityError::ReservedSlug { slug: slug.clone() });
+        }
+
         // Acquire write lock before slug check to prevent TOCTOU (A-28)
         let _slug_guard = self.org_write_lock.lock().expect("org write lock");
         // Check slug uniqueness
@@ -8049,6 +8132,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .is_some()
         {
             return Err(IdentityError::DuplicateOrgSlug);
+        }
+
+        // A-5: check post-delete slug cooldown reservation.
+        let reservation_key = keys::encode_org_slug_reservation(realm_id, &slug);
+        if let Some(bytes) = self
+            .storage
+            .get(realm_id, &reservation_key)
+            .map_err(Self::storage_err)?
+        {
+            if let Ok(reservation) = serde_json::from_slice::<StoredSlugReservation>(&bytes) {
+                let now_micros = self.clock.now().as_micros();
+                if now_micros < reservation.expires_at_micros {
+                    return Err(IdentityError::SlugInCooldown { slug: slug.clone() });
+                }
+                // Cooldown expired — clean up the stale reservation.
+                let _ = self.storage.delete(realm_id, &reservation_key);
+            }
         }
 
         let realm = self
@@ -8212,6 +8312,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(org)
     }
 
+    #[allow(clippy::too_many_lines)] // A-5 cooldown + cascade delete legitimately long
     fn delete_organization(
         &self,
         realm_id: &RealmId,
@@ -8300,6 +8401,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.storage
             .delete(realm_id, &slug_key)
             .map_err(Self::storage_err)?;
+
+        // A-5: write a post-delete slug cooldown reservation so the freed slug
+        // cannot be immediately re-claimed by a new tenant.
+        {
+            let now_micros = self.clock.now().as_micros();
+            let cooldown_micros = self.config.slug_cooldown_secs as i64 * 1_000_000;
+            let reservation = StoredSlugReservation {
+                slug: org.slug().to_string(),
+                expires_at_micros: now_micros + cooldown_micros,
+            };
+            if let Ok(bytes) = serde_json::to_vec(&reservation) {
+                let reservation_key = keys::encode_org_slug_reservation(realm_id, org.slug());
+                // Best-effort: a failed write here does not fail the delete.
+                let _ = self.storage.put(realm_id, &reservation_key, &bytes);
+            }
+        }
 
         // 4. Cascade SCIM externalId mapping (forward + reverse).
         let scim_fwd_key = keys::encode_scim_ext_group_fwd_key(org_id);

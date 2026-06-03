@@ -838,6 +838,63 @@ pub struct SecurityYaml {
     /// Backup and export hardening (A-30).
     #[serde(default)]
     pub backup: BackupSecurityYaml,
+    /// A-5: Slug names that are permanently reserved and may never be used
+    /// as an organization or realm slug (case-insensitive).
+    ///
+    /// Operators may override this list entirely via `security.reserved_slugs`
+    /// in `hearth.yaml`. Default list includes: `admin`, `api`, `support`,
+    /// `www`, `mail`, `help`, `status`, `blog`, `app`, `auth`, `login`,
+    /// `logout`, `signup`, `register`, `account`, `profile`, `settings`,
+    /// `dashboard`, `billing`, `security`, `webhook`, `callback`, `oauth`,
+    /// `oidc`, `saml`, `scim`.
+    #[serde(default = "SecurityYaml::default_reserved_slugs")]
+    pub reserved_slugs: Vec<String>,
+    /// A-5: Days a slug is reserved after deletion before it can be reused.
+    /// Default: `30`.
+    #[serde(default = "SecurityYaml::default_slug_cooldown_days")]
+    pub slug_cooldown_days: u32,
+}
+
+impl SecurityYaml {
+    /// Default set of permanently reserved slug names (A-5).
+    fn default_reserved_slugs() -> Vec<String> {
+        [
+            "admin",
+            "api",
+            "support",
+            "www",
+            "mail",
+            "help",
+            "status",
+            "blog",
+            "app",
+            "auth",
+            "login",
+            "logout",
+            "signup",
+            "register",
+            "account",
+            "profile",
+            "settings",
+            "dashboard",
+            "billing",
+            "security",
+            "webhook",
+            "callback",
+            "oauth",
+            "oidc",
+            "saml",
+            "scim",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+    }
+
+    /// Default slug cooldown in days (A-5).
+    const fn default_slug_cooldown_days() -> u32 {
+        30
+    }
 }
 
 /// `security.captcha` — CAPTCHA provider configuration (P-1 — HEA-1202).
@@ -1196,6 +1253,44 @@ pub struct RealmAuthYaml {
     /// Controls dynamic client registration (RFC 7591). Defaults to `disabled` when absent.
     #[serde(default)]
     pub dcr: Option<DcrPolicyYaml>,
+    /// WebAuthn attestation policy for this realm (A-13).
+    ///
+    /// Absent = no restrictions (fail-open per §6.1 of the abuse plan).
+    #[serde(default)]
+    pub webauthn_attestation: Option<WebAuthnAttestationYaml>,
+}
+
+/// WebAuthn attestation policy in YAML (`realms.<name>.auth.webauthn_attestation`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WebAuthnAttestationYaml {
+    /// Whether attestation format `"none"` is allowed (default: `true`).
+    #[serde(default = "WebAuthnAttestationYaml::default_allow_none")]
+    pub allow_none: bool,
+    /// AAGUID allowlist (lowercase UUID format). Empty = any AAGUID accepted.
+    #[serde(default)]
+    pub aaguid_allowlist: Vec<String>,
+    /// Require PRF extension (default: `false`).
+    #[serde(default)]
+    pub require_prf: bool,
+    /// Require `largeBlob` extension (default: `false`).
+    #[serde(default)]
+    pub require_large_blob: bool,
+}
+
+impl WebAuthnAttestationYaml {
+    fn default_allow_none() -> bool {
+        true
+    }
+
+    /// Projects the YAML declaration into the engine-level policy struct.
+    pub(crate) fn to_domain(&self) -> crate::identity::WebAuthnAttestationPolicy {
+        crate::identity::WebAuthnAttestationPolicy {
+            allow_none: self.allow_none,
+            aaguid_allowlist: self.aaguid_allowlist.clone(),
+            require_prf: self.require_prf,
+            require_large_blob: self.require_large_blob,
+        }
+    }
 }
 
 /// Self-service registration policy in YAML.
@@ -1320,9 +1415,20 @@ pub struct RealmTokenYaml {
     #[serde(default)]
     pub refresh_token_ttl: Option<String>,
     /// Password reset token TTL as a duration string (e.g. `"30m"`).
-    /// Defaults to 30 minutes when absent.
+    /// Defaults to 30 minutes when absent. Hard-capped at 1 hour (A-14).
     #[serde(default)]
     pub password_reset_token_ttl: Option<String>,
+    /// Magic link token TTL as a duration string (e.g. `"15m"`).
+    /// Defaults to 15 minutes when absent. Hard-capped at 30 minutes (A-14).
+    #[serde(default)]
+    pub magic_link_ttl: Option<String>,
+    /// Lift A-14 TTL hard caps for this realm.
+    ///
+    /// When `true`, `password_reset_token_ttl` may exceed 1 hour and
+    /// `magic_link_ttl` may exceed 30 minutes. Operators accept the
+    /// additional token-theft window by enabling this flag.
+    #[serde(default)]
+    pub allow_unsafe_ttl: bool,
 }
 
 /// Per-realm rate limit overrides in YAML.
@@ -2038,6 +2144,20 @@ impl RealmYamlConfig {
             .and_then(|t| t.password_reset_token_ttl.as_deref())
             .and_then(|s| parse_duration_to_micros(s).ok());
 
+        let magic_link_ttl_micros_parsed = auth
+            .and_then(|a| a.token.as_ref())
+            .and_then(|t| t.magic_link_ttl.as_deref())
+            .and_then(|s| parse_duration_to_micros(s).ok());
+
+        let allow_unsafe_ttl = auth
+            .and_then(|a| a.token.as_ref())
+            .map(|t| t.allow_unsafe_ttl)
+            .unwrap_or(false);
+
+        let webauthn_attestation_policy = auth
+            .and_then(|a| a.webauthn_attestation.as_ref())
+            .map(WebAuthnAttestationYaml::to_domain);
+
         let max_failed_logins = auth
             .and_then(|a| a.rate_limit.as_ref())
             .and_then(|r| r.max_failed_logins);
@@ -2058,6 +2178,31 @@ impl RealmYamlConfig {
         // Accumulate all validation errors upfront so callers see the full
         // set of problems in one pass rather than stopping at the first error.
         let mut errors: Vec<RegistryError> = Vec::new();
+
+        // --- A-14: TTL hard caps (fail-closed unless allow_unsafe_ttl) -----
+        const PASSWORD_RESET_TTL_CAP_MICROS: i64 = 3_600 * 1_000_000; // 1 hour
+        const MAGIC_LINK_TTL_CAP_MICROS: i64 = 1_800 * 1_000_000; // 30 minutes
+
+        if let Some(pr_ttl) = password_reset_token_ttl_micros {
+            if pr_ttl > PASSWORD_RESET_TTL_CAP_MICROS && !allow_unsafe_ttl {
+                errors.push(RegistryError::InvalidRealmConfigField {
+                    field: "auth.token.password_reset_token_ttl".to_string(),
+                    value: format!("{pr_ttl}µs"),
+                    reason: "exceeds 1h hard cap (A-14); set auth.token.allow_unsafe_ttl: true to override"
+                        .to_string(),
+                });
+            }
+        }
+        if let Some(ml_ttl) = magic_link_ttl_micros_parsed {
+            if ml_ttl > MAGIC_LINK_TTL_CAP_MICROS && !allow_unsafe_ttl {
+                errors.push(RegistryError::InvalidRealmConfigField {
+                    field: "auth.token.magic_link_ttl".to_string(),
+                    value: format!("{ml_ttl}µs"),
+                    reason: "exceeds 30m hard cap (A-14); set auth.token.allow_unsafe_ttl: true to override"
+                        .to_string(),
+                });
+            }
+        }
 
         // --- Permissions: grammar-validate each name -----------------------
 
@@ -2306,12 +2451,14 @@ impl RealmYamlConfig {
             access_token_ttl_micros,
             refresh_token_ttl_micros,
             password_reset_token_ttl_micros,
+            magic_link_ttl_micros: magic_link_ttl_micros_parsed,
             max_failed_logins,
             lockout_duration_micros,
             passkey_requires_mfa,
             webauthn_required: None,
             webauthn_resident_key: None,
             webauthn_user_verification: None,
+            webauthn_attestation: webauthn_attestation_policy,
             registration_policy,
             dcr_policy,
             // Realm-level federation link mode. `None` → `Confirm`

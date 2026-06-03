@@ -311,8 +311,8 @@ struct AuthenticatorData {
 /// Attested credential data from the authenticator.
 #[derive(Debug)]
 struct AttestedCredentialData {
-    /// AAGUID of the authenticator (16 bytes).
-    _aaguid: [u8; 16],
+    /// AAGUID of the authenticator (16 bytes). All-zeros for "none" attestation.
+    aaguid: [u8; 16],
     /// The credential ID bytes.
     credential_id: Vec<u8>,
     /// The COSE-encoded public key bytes.
@@ -369,7 +369,7 @@ fn parse_authenticator_data(data: &[u8]) -> Result<AuthenticatorData, IdentityEr
         let cose_public_key = data[cred_id_end..].to_vec();
 
         Some(AttestedCredentialData {
-            _aaguid: aaguid,
+            aaguid,
             credential_id,
             cose_public_key,
         })
@@ -684,12 +684,19 @@ pub fn fuzz_parse_webauthn(data: &[u8]) {
 ///
 /// Validates the attestation response against the stored challenge, extracts
 /// the credential public key, and returns the credential info + stored record.
+/// Validates the attestation response against the stored challenge, extracts
+/// the credential public key, and returns the credential info + stored record.
+///
+/// `policy` is the realm-level attestation policy (A-13). `None` = no
+/// restrictions (fail-open per §6.1 of the abuse plan).
+#[allow(clippy::too_many_lines)] // A-13 policy checks legitimately extend this function
 pub(crate) fn complete_registration(
     pending: &PendingWebAuthnChallenge,
     client_data_json: &[u8],
     attestation_object_bytes: &[u8],
     origin: &str,
     now_micros: i64,
+    policy: Option<&crate::identity::WebAuthnAttestationPolicy>,
 ) -> Result<(WebAuthnCredentialInfo, StoredWebAuthnCredential), IdentityError> {
     // 1. Parse and validate clientDataJSON
     let client_data = parse_client_data_json(client_data_json)?;
@@ -753,10 +760,18 @@ pub(crate) fn complete_registration(
     // 5. Validate the COSE public key is parseable and supported
     let (alg, _raw_key) = extract_public_key_bytes(&cred_data.cose_public_key)?;
 
-    // 6. Validate attestation statement
+    // 6. Validate attestation statement (and enforce A-13 policy).
     match &att_obj.att_stmt {
         AttestationStatement::None => {
-            // No attestation — always accepted
+            // A-13: reject "none" format if the realm policy forbids it.
+            if let Some(p) = policy {
+                if !p.allow_none {
+                    return Err(IdentityError::WebAuthnRegistrationFailed {
+                        reason: "attestation format 'none' is not permitted by realm policy"
+                            .to_string(),
+                    });
+                }
+            }
         }
         AttestationStatement::PackedSelf { alg: stmt_alg, sig } => {
             // Self-attestation: verify signature over authData || clientDataHash
@@ -783,6 +798,25 @@ pub(crate) fn complete_registration(
             return Err(IdentityError::InvalidAttestation {
                 reason: format!("unsupported attestation format: {fmt}"),
             });
+        }
+    }
+
+    // A-13: check AAGUID allowlist.
+    if let Some(p) = policy {
+        if !p.aaguid_allowlist.is_empty() {
+            let aaguid_uuid = uuid::Uuid::from_bytes(cred_data.aaguid);
+            let aaguid_str = aaguid_uuid.hyphenated().to_string();
+            if !p
+                .aaguid_allowlist
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(&aaguid_str))
+            {
+                return Err(IdentityError::WebAuthnRegistrationFailed {
+                    reason: format!(
+                        "authenticator AAGUID '{aaguid_str}' is not in the realm allowlist"
+                    ),
+                });
+            }
         }
     }
 
@@ -1326,6 +1360,7 @@ mod tests {
             &attestation_object,
             origin,
             1_000_000,
+            None,
         )
         .expect("registration should succeed");
 
@@ -1359,6 +1394,7 @@ mod tests {
             &attestation_object,
             origin,
             1_000_000,
+            None,
         )
         .expect("packed self-attestation registration should succeed");
 
@@ -1388,7 +1424,7 @@ mod tests {
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&challenge, origin);
         let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000)
+            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
                 .expect("registration");
 
         // Now authenticate
@@ -1430,7 +1466,7 @@ mod tests {
         };
         let (cdj, att) = helper.build_registration_response(&challenge, origin);
         let (_info, mut stored) =
-            complete_registration(&reg_pending, &cdj, &att, origin, 1_000_000).expect("reg");
+            complete_registration(&reg_pending, &cdj, &att, origin, 1_000_000, None).expect("reg");
 
         // Auth with counter=1
         let c1 = generate_challenge().expect("gen");
@@ -1484,7 +1520,7 @@ mod tests {
         };
         let (cdj1, att1) = helper1.build_registration_response(&c1, origin);
         let (info1, stored1) =
-            complete_registration(&p1, &cdj1, &att1, origin, 1_000_000).expect("reg1");
+            complete_registration(&p1, &cdj1, &att1, origin, 1_000_000, None).expect("reg1");
 
         // Register credential 2
         let c2 = generate_challenge().expect("gen");
@@ -1497,7 +1533,7 @@ mod tests {
         };
         let (cdj2, att2) = helper2.build_registration_response(&c2, origin);
         let (info2, stored2) =
-            complete_registration(&p2, &cdj2, &att2, origin, 1_000_000).expect("reg2");
+            complete_registration(&p2, &cdj2, &att2, origin, 1_000_000, None).expect("reg2");
 
         // Each credential has a unique ID
         assert_ne!(info1.credential_id(), info2.credential_id());
@@ -1560,7 +1596,7 @@ mod tests {
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
         let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000)
+            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
                 .expect("registration");
 
         // Authenticate WITHOUT user_id in pending (username-less)
@@ -1614,7 +1650,7 @@ mod tests {
         };
         let (cdj, att) = helper.build_registration_response(&reg_c, origin);
         let (_info, stored) =
-            complete_registration(&reg_p, &cdj, &att, origin, 1_000_000).expect("reg");
+            complete_registration(&reg_p, &cdj, &att, origin, 1_000_000, None).expect("reg");
 
         // Try discoverable auth without providing userHandle
         let auth_c = generate_challenge().expect("gen");
@@ -1673,8 +1709,15 @@ mod tests {
         let mut att_bytes = Vec::new();
         ciborium::into_writer(&att_obj, &mut att_bytes).expect("encode");
 
-        let err = complete_registration(&pending, &client_data_json, &att_bytes, origin, 1_000_000)
-            .expect_err("tpm should be rejected");
+        let err = complete_registration(
+            &pending,
+            &client_data_json,
+            &att_bytes,
+            origin,
+            1_000_000,
+            None,
+        )
+        .expect_err("tpm should be rejected");
         assert!(err.to_string().contains("unsupported attestation format"));
     }
 
@@ -1728,8 +1771,15 @@ mod tests {
         let mut att_bytes = Vec::new();
         ciborium::into_writer(&att_obj, &mut att_bytes).expect("encode");
 
-        let err = complete_registration(&pending, &client_data_json, &att_bytes, origin, 1_000_000)
-            .expect_err("packed with x5c should be rejected");
+        let err = complete_registration(
+            &pending,
+            &client_data_json,
+            &att_bytes,
+            origin,
+            1_000_000,
+            None,
+        )
+        .expect_err("packed with x5c should be rejected");
         assert!(err
             .to_string()
             .contains("x5c certificate chain is not supported"));
@@ -1756,7 +1806,7 @@ mod tests {
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
         let (_info, mut stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000)
+            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
                 .expect("registration");
 
         // First auth with counter=1 — should succeed
@@ -1815,7 +1865,7 @@ mod tests {
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
         let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000)
+            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
                 .expect("registration");
         assert_eq!(stored.sign_count, 0);
 
@@ -1855,7 +1905,7 @@ mod tests {
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
         let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000)
+            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
                 .expect("registration");
 
         // Build authenticator data with wrong RP ID hash
@@ -1913,7 +1963,7 @@ mod tests {
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
         let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000)
+            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
                 .expect("registration");
 
         // Build a legitimate authentication response
@@ -1968,7 +2018,7 @@ mod tests {
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_challenge, origin);
         let (_info, stored) =
-            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000)
+            complete_registration(&reg_pending, &reg_cdj, &reg_att, origin, 1_000_000, None)
                 .expect("registration");
 
         // Build clientDataJSON with wrong origin
@@ -2039,7 +2089,7 @@ mod tests {
         assert_eq!(client_data["origin"], origin);
 
         // Registration should succeed with all fields valid
-        let (info, stored) = complete_registration(&pending, &cdj, &att, origin, 1_000_000)
+        let (info, stored) = complete_registration(&pending, &cdj, &att, origin, 1_000_000, None)
             .expect("conformant registration");
 
         // Verify credential info
@@ -2054,7 +2104,7 @@ mod tests {
             "origin": origin,
         }))
         .expect("json");
-        let err = complete_registration(&pending, &wrong_type_cdj, &att, origin, 1_000_000);
+        let err = complete_registration(&pending, &wrong_type_cdj, &att, origin, 1_000_000, None);
         assert!(err.is_err());
     }
 
@@ -2081,7 +2131,8 @@ mod tests {
         };
         let (reg_cdj, reg_att) = helper.build_registration_response(&reg_c, origin);
         let (_info, stored) =
-            complete_registration(&reg_p, &reg_cdj, &reg_att, origin, 1_000_000).expect("reg");
+            complete_registration(&reg_p, &reg_cdj, &reg_att, origin, 1_000_000, None)
+                .expect("reg");
 
         // Authenticate
         let auth_c = generate_challenge().expect("gen");

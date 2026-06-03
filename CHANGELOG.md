@@ -30,6 +30,34 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   before importing any data. Fail-closed: archives without a valid signature are
   rejected with `400 missing_manifest_signature` (HEA-1206).
 
+- **A-5 Reserved realm/org slug names** — `security.reserved_slugs` in `hearth.yaml`
+  lets operators declare a list of names that cannot be used as realm names or
+  organization slugs (e.g. `["support", "www", "mail"]`).  Built-in URL-routing
+  keywords remain reserved as before (HEA-1212).
+
+- **A-5 Post-delete slug cooldown** — when a realm or organization is deleted its name
+  enters a 30-day cooldown window.  Attempts to create a new realm or org with the
+  same name during the window are rejected with `HEARTH_SLUG_IN_COOLDOWN` (HEA-1212).
+
+- **A-6 Bootstrap endpoint production guard** — `POST /admin/bootstrap` is now absent
+  from the route table in production by default (the route is not registered, preventing
+  fingerprinting).  Pass `--allow-bootstrap-in-prod` to enable it for initial
+  provisioning of a fresh deployment; a startup warning is emitted (HEA-1212).
+
+- **A-10 Per-IP JWKS / OIDC discovery rate cap** — JWKS and OpenID discovery endpoints
+  are now capped at 60 requests per second per source IP (`JwksRateLimiter`).  Exceeding
+  the limit returns `429 Too Many Requests` (HEA-1212).
+
+- **A-13 WebAuthn attestation policy** — per-realm configuration (`realms.<name>.auth.webauthn_attestation`)
+  controls: `allow_none` (whether the `"none"` attestation format is accepted),
+  `aaguid_allowlist` (allowlist of authenticator AAGUIDs in UUID format), and
+  `require_prf` / `require_large_blob` flags.  Absent = fail-open (HEA-1212).
+
+- **A-14 Per-realm TTL hard caps** — `to_realm_config` rejects realm configs where
+  `auth.token.password_reset_token_ttl` exceeds 1 hour or `auth.token.magic_link_ttl`
+  exceeds 30 minutes unless `auth.token.allow_unsafe_ttl: true` is also set.  Operators
+  accept the wider token-theft window by explicitly setting the flag (HEA-1212).
+
 - **P-8 Pluggable `SecretsBackend` trait** — `src/abuse/secrets_backend/` provides
   a `dyn SecretsBackend` abstraction for signing keys (PKCS#8 DER), encryption-at-rest
   keys (32 bytes), and Argon2 pepper (32 bytes). Adapters: `StorageSecretsBackend`

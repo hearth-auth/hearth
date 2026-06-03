@@ -226,6 +226,50 @@ impl TokenRateLimiter {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// JwksRateLimiter — per-IP cap on JWKS and discovery endpoints (A-10)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Default JWKS / discovery endpoint rate limit: 60 requests per second per IP.
+///
+/// JWKS is a public, unauthenticated endpoint. At 60 rps it serves legitimate
+/// relying parties while blocking enumeration bots.
+pub const JWKS_RATE_LIMIT_PER_SEC: u32 = 60;
+
+/// Window for JWKS rate limiting: 1 second in microseconds.
+pub const JWKS_RATE_WINDOW_MICROS: i64 = 1_000_000;
+
+/// Per-IP rate limiter for JWKS and OIDC discovery endpoints (A-10).
+#[derive(Debug, Default)]
+pub struct JwksRateLimiter {
+    trackers: Mutex<HashMap<String, RateTracker>>,
+}
+
+impl JwksRateLimiter {
+    /// Creates an empty limiter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records a request from `ip` and returns `true` when the request is allowed.
+    pub fn check(&self, ip: &str, now_micros: i64) -> bool {
+        let mut trackers = self
+            .trackers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tracker = trackers.entry(ip.to_string()).or_insert(RateTracker {
+            count: 0,
+            window_start_micros: now_micros,
+        });
+        if now_micros - tracker.window_start_micros > JWKS_RATE_WINDOW_MICROS {
+            tracker.count = 0;
+            tracker.window_start_micros = now_micros;
+        }
+        tracker.count += 1;
+        tracker.count <= JWKS_RATE_LIMIT_PER_SEC
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -172,6 +172,19 @@ pub enum IdentityError {
     InvitationInvalid,
     /// An invitation for this email already exists for this organization.
     DuplicateInvitation,
+    /// The realm name or org slug is in the operator-configured reserved list (A-5).
+    ReservedSlug {
+        /// The name that was rejected.
+        slug: String,
+    },
+    /// The realm name or org slug is in a post-delete cooldown period (A-5).
+    ///
+    /// The slug was recently deleted and cannot be reused until the
+    /// cooldown window expires.
+    SlugInCooldown {
+        /// The name that was rejected.
+        slug: String,
+    },
     /// An operation targeted the reserved system realm, which only
     /// accepts writes from Hearth itself. The admin realm is not a
     /// place for application users, OAuth clients, organizations, or
@@ -575,6 +588,13 @@ impl fmt::Display for IdentityError {
             Self::DuplicateInvitation => {
                 write!(f, "an invitation for this email already exists")
             }
+            Self::ReservedSlug { slug } => {
+                write!(f, "name or slug '{slug}' is reserved and cannot be used")
+            }
+            Self::SlugInCooldown { slug } => write!(
+                f,
+                "name or slug '{slug}' is in a post-delete cooldown and cannot be reused yet"
+            ),
             Self::SystemRealmProtected { operation } => write!(
                 f,
                 "operation not permitted on the system realm: {operation}"
@@ -819,6 +839,9 @@ impl IdentityError {
             Self::InvitationInvalid => Some("HEARTH_INVITATION_INVALID"),
             Self::DuplicateInvitation => Some("HEARTH_INVITATION_DUPLICATE"),
 
+            Self::ReservedSlug { .. } => Some("HEARTH_RESERVED_SLUG"),
+            Self::SlugInCooldown { .. } => Some("HEARTH_SLUG_IN_COOLDOWN"),
+
             Self::RegistrationDisabled => Some("HEARTH_REGISTRATION_DISABLED"),
             Self::RegistrationDomainNotAllowed { .. } => {
                 Some("HEARTH_REGISTRATION_DOMAIN_NOT_ALLOWED")
@@ -941,6 +964,8 @@ impl std::error::Error for IdentityError {
             | Self::MemberLimitReached
             | Self::InvitationInvalid
             | Self::DuplicateInvitation
+            | Self::ReservedSlug { .. }
+            | Self::SlugInCooldown { .. }
             | Self::RegistrationDisabled
             | Self::RegistrationDomainNotAllowed { .. }
             | Self::RegistrationRequiresInvitation

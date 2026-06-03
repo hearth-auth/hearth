@@ -916,12 +916,23 @@ async fn run_serve(
         }
     };
 
+    // A-5: normalise reserved slugs to lowercase once at startup.
+    let reserved_slugs: Vec<String> = config
+        .security
+        .reserved_slugs
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    let slug_cooldown_secs = u64::from(config.security.slug_cooldown_days) * 86_400;
+
     let identity_config = if config.dev_mode {
         IdentityConfig {
             credential: CredentialConfig::fast_for_testing(),
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
+            reserved_slugs: reserved_slugs.clone(),
+            slug_cooldown_secs,
             ..IdentityConfig::default()
         }
     } else {
@@ -929,6 +940,8 @@ async fn run_serve(
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
+            reserved_slugs: reserved_slugs.clone(),
+            slug_cooldown_secs,
             ..IdentityConfig::default()
         }
     };
