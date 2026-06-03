@@ -78,7 +78,7 @@
       <span id="assign-role-label">Assign Role</span>
     </button>
 
-    <div id="assign-role-form" class="mt-4 hidden rounded-lg border border-white/[0.10] bg-ht-surface-base p-4">
+    <div id="assign-role-form" class="mt-4 hidden rounded-lg border border-ht-divider/[0.10] bg-ht-surface-base p-4">
       {% if available_roles.is_empty() %}
         <p class="text-sm text-ht-content-muted">No roles are defined in this realm. Define roles in <code class="font-mono text-xs">hearth.yaml</code>.</p>
       {% else %}
@@ -94,7 +94,7 @@
               <label class="mb-1.5 block font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Role</label>
               <select id="role-select"
                       name="role_id"
-                      class="w-full rounded-sm border border-white/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
+                      class="w-full rounded-sm border border-ht-divider/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
                 {% for role in available_roles %}
                 <option value="{{ role.id }}">{{ role.name }}{% if !role.description.is_empty() %} — {{ role.description }}{% endif %} ({{ role.scope_kind }})</option>
                 {% endfor %}
@@ -131,7 +131,7 @@
                 <div id="role-org-div" data-scope-org-panel class="ml-6 hidden">
                   <select id="role-org-select"
                           data-scope-org-select
-                          class="w-full rounded-sm border border-white/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
+                          class="w-full rounded-sm border border-ht-divider/[0.10] bg-ht-surface-input px-3 py-2 text-sm text-ht-content-primary focus:border-teal-fg/50 focus:outline-none focus:ring-1 focus:ring-teal-fg/30">
                     <option value="">— pick an org —</option>
                     {% for org in available_orgs %}
                     <option value="{{ org.id }}">{{ org.name }}</option>

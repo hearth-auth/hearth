@@ -56,10 +56,10 @@
                 </label>
                 <input type="text" id="dest-{{ loop.index }}" name="destination"
                        placeholder="e.g. production"
-                       class="w-full max-w-xs rounded-md border border-white/10 bg-ht-surface-elevated px-3 py-1.5 text-sm text-ht-content-primary placeholder:text-ht-content-muted focus:outline-none focus:ring-1 focus:ring-white/20">
+                       class="w-full max-w-xs rounded-md border border-ht-divider/[0.10] bg-ht-surface-elevated px-3 py-1.5 text-sm text-ht-content-primary placeholder:text-ht-content-muted focus:outline-none focus:ring-1 focus:ring-ht-divider/[0.20]">
               </div>
               <button type="submit"
-                      class="inline-flex items-center gap-1.5 rounded-md bg-ht-surface-elevated px-3 py-1.5 text-xs font-medium text-ht-content-primary ring-1 ring-white/10 transition hover:ring-white/20">
+                      class="inline-flex items-center gap-1.5 rounded-md bg-ht-surface-elevated px-3 py-1.5 text-xs font-medium text-ht-content-primary ring-1 ring-ht-divider/[0.10] transition hover:ring-ht-divider/[0.20]">
                 Generate snippet
               </button>
             </form>
@@ -74,8 +74,8 @@
 {% endif %}
 
 {# ── Migration history table ── #}
-<div class="rounded-lg border border-white/6 bg-ht-surface-elevated">
-  <div class="border-b border-white/6 px-4 py-3">
+<div class="rounded-lg border border-ht-divider/[0.06] bg-ht-surface-elevated">
+  <div class="border-b border-ht-divider/[0.06] px-4 py-3">
     <h2 class="text-sm font-semibold text-ht-content-primary">Completed Migrations</h2>
   </div>
   {% if migrations.is_empty() %}
@@ -88,7 +88,7 @@
   <div class="overflow-x-auto">
     <table class="w-full text-sm">
       <thead>
-        <tr class="border-b border-white/6">
+        <tr class="border-b border-ht-divider/[0.06]">
           <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Source</th>
           <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Destination</th>
           <th class="px-4 py-2.5 text-left font-mono text-xs font-medium uppercase tracking-[0.10em] text-ht-content-muted">Kind</th>
@@ -108,7 +108,7 @@
             <code class="font-mono text-xs text-ht-content-primary">{{ m.destination_slug }}</code>
           </td>
           <td class="px-4 py-3">
-            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {% if m.kind == "move" %}text-steel-fg bg-steel-bg{% else %}text-ht-content-muted bg-ht-surface-base{% endif %} ring-1 ring-inset ring-white/6">
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {% if m.kind == "move" %}text-steel-fg bg-steel-bg{% else %}text-ht-content-muted bg-ht-surface-base{% endif %} ring-1 ring-inset ring-ht-divider/[0.06]">
               {{ m.kind }}
             </span>
           </td>
@@ -119,7 +119,7 @@
             {{ m.users_skipped }}
           </td>
           <td class="px-4 py-3">
-            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{ m.badge_class }} ring-1 ring-inset ring-white/6">
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{ m.badge_class }} ring-1 ring-inset ring-ht-divider/[0.06]">
               {{ m.status_label }}
             </span>
           </td>
