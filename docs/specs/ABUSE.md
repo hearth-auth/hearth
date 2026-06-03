@@ -491,3 +491,74 @@ verification path.
 **Constants**: `crate::abuse::MAX_SAML_XML_EVENTS = 10_000` (shared).
 
 **Fail mode**: Fail-closed.
+
+---
+
+## A-18: Session Lifecycle Policy (idle + absolute timeout)
+
+**File**: `src/identity/sessions.rs`, `src/identity/engine/mod.rs`, `src/identity/types.rs`
+
+### YAML configuration
+
+Under `auth:` (global) and per-realm:
+
+```yaml
+auth:
+  session_idle_timeout_secs: 3600    # 1 hour idle timeout; null = disabled (default)
+  session_absolute_timeout_secs: 86400  # 24-hour hard cap; null = disabled (default)
+
+realms:
+  my-realm:
+    session_idle_timeout_secs: 1800   # override global
+    session_absolute_timeout_secs: 43200
+```
+
+### Enforcement contract
+
+| Mechanism | Trigger | Audit event |
+|-----------|---------|-------------|
+| Lazy eviction | `get_session()` or `refresh_session()` on a policy-expired session | `session_evicted` |
+| Proactive reaper | Background task runs alongside OAuth cleanup sweep | `session_evicted` |
+
+**Idle timeout**: Session evicted if `now ≥ last_refreshed_at + idle_timeout_secs`.
+Reset on each `refresh_session()` call.
+
+**Absolute timeout**: Session evicted if `now ≥ created_at + absolute_timeout_secs`.
+Never reset — unaffected by refreshes.
+
+Both deadlines are embedded in the `Session` record at creation time so the
+hot-path `get_session()` avoids a realm config lookup on every call (zero-alloc
+arithmetic only).
+
+**Fail-open** (§6.1): when neither timeout is configured (the default), the
+existing TTL governs. Removing a timeout config does not retroactively evict
+existing sessions — sessions created with embedded deadlines continue to enforce
+those deadlines until they naturally expire via TTL or explicit revocation.
+
+### `session.evicted` audit event
+
+- `reason`: `"idle_timeout"` | `"absolute_timeout"`
+- `session_id`: the evicted session UUID
+- `user_id`: the session owner
+- `failure_policy`: `LogOnly` (fail-open)
+
+---
+
+## P-7: `SessionStore` Pluggable Trait
+
+**File**: `src/identity/sessions.rs`
+
+Defines `SessionStore` — the persistence interface for session list/lookup so
+A-18's concurrent-session policy is enforceable cluster-wide in multi-node
+deployments.
+
+| Adapter | Location |
+|---------|----------|
+| `EmbeddedSessionStore` | `src/identity/sessions.rs` — WAL-backed reference adapter |
+| Future Redis / Postgres adapters | Implement `SessionStore` and wire at construction |
+
+The trait is `Send + Sync + 'static` and all methods are synchronous (blocking).
+Async adapters wrap calls in `tokio::task::spawn_blocking`.
+
+**Fail-open contract**: callers in the hot path treat storage errors as "session
+not found" to avoid locking out users during transient outages.
