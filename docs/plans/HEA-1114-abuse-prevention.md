@@ -692,3 +692,23 @@ strictness-by-default; federation response-path defenses.
 strictness coverage were not confirmable from grep alone — recommend
 manual code review during HEA-1114-A foundation work to validate scope-set
 intersection logic at token issue.
+
+## CI Enforcement (§3.41 adversarial test-quality gate)
+
+The `scripts/check-abuse-coverage.sh` script (wired into the `abuse-coverage` CI
+job and `make abuse-check`) scans this file for `A-N` identifiers, then verifies
+each appears at least once in `tests/abuse_*.rs`. Any uncovered row fails the
+build with a clear message.
+
+**Rollback:** set `SKIP_ABUSE_COVERAGE_CHECK=1` as a GitHub Actions secret or
+repo-level environment variable. Document the reason and the tracking issue when
+activating the escape hatch. The flag is logged visibly in CI output so accidental
+bypass is observable.
+
+### Adding New Rows
+
+1. Add the row to the A-N table above with a unique identifier (increment the
+   largest existing N).
+2. Land at least one adversarial test in `tests/abuse_*.rs` that references the
+   identifier before (or in the same PR as) the plan doc change.
+3. CI will fail the PR if step 2 is missing — that is the gate working correctly.

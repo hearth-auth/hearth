@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -81,6 +81,13 @@ check: clippy fmt test-quality test
 test-quality:
 	@bash scripts/check-test-quality.sh
 
+## §3.41 adversarial test-quality gate: every A-N row in the abuse-prevention
+## plan (docs/plans/HEA-1114-abuse-prevention.md) must have at least one
+## adversarial test in tests/abuse_*.rs that references the row identifier.
+## Rollback: set SKIP_ABUSE_COVERAGE_CHECK=1 (see scripts/check-abuse-coverage.sh).
+abuse-check:
+	@bash scripts/check-abuse-coverage.sh
+
 # ── Proto ─────────────────────────────────────────────
 
 ## Generate SDK types from .proto files (TypeScript + Go).
@@ -149,8 +156,8 @@ sdk-test:
 
 # ── CI Tiers ──────────────────────────────────────────
 
-## CI fast tier: lint + fmt + proto lint + css freshness + test-quality (every commit).
-ci-fast: fmt clippy proto-lint css-check test-quality
+## CI fast tier: lint + fmt + proto lint + css freshness + test-quality + §3.41 abuse gate (every commit).
+ci-fast: fmt clippy proto-lint css-check test-quality abuse-check
 
 ## CI benchmark gate: compile and run hot-path perf threshold gates.
 ##
@@ -196,6 +203,7 @@ ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster
 ## For full reproduction including workflow files and matrix legs: make ci-local-full
 ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> test-quality"              && $(MAKE) test-quality
+	@echo "==> abuse-check (§3.41)"       && $(MAKE) abuse-check
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check
