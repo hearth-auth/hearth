@@ -220,8 +220,9 @@ async fn delete_frees_email_for_reuse() {
         .delete_user(&realm, first.id())
         .expect("delete");
 
-    // Should be able to re-create with same email
-    let second = harness
+    // A-20: email is reserved for 90 days after deletion.
+    // Verify the reservation is active.
+    let err = harness
         .identity()
         .create_user(
             &realm,
@@ -233,7 +234,25 @@ async fn delete_frees_email_for_reuse() {
                 attributes: Default::default(),
             },
         )
-        .expect("re-create should succeed");
+        .expect_err("email must be reserved after delete");
+    assert!(
+        matches!(err, hearth::identity::IdentityError::EmailReserved),
+        "expected EmailReserved, got {err:?}"
+    );
+    // A different email can be used immediately.
+    let second = harness
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "alice2@example.com".to_string(),
+                display_name: "Alice 2".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("re-create with different email should succeed");
 
     assert_ne!(first.id(), second.id());
 }

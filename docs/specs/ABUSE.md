@@ -190,6 +190,85 @@ access to the admin UI.
 
 ---
 
+## A-50 — Cross-Realm SMS / Email Aggregation Cap
+
+**Status:** Shipped (HEA-1201)  
+**Module:** `src/abuse/detector` → `CrossRealmAggregationCap`  
+**Closes:** §3.53 of the abuse-prevention plan
+
+Complements A-4's per-realm volume shield by tracking how many **distinct
+realms** have sent to the same recipient across the entire cluster.  An
+attacker who splits sends across N realms to evade A-4's per-realm budget is
+caught here.
+
+### Threat closed (§3.53)
+
+A-4 caps *per-realm* distinct recipients per hour.  Without A-50, an attacker
+controlling 50 realms can target the same `+1 555-0100` from each, staying
+below A-4's per-realm threshold while flooding the victim.  A-50 detects the
+cross-realm pattern and escalates.
+
+### Outcome and caller contract
+
+| Outcome | `realm_count` | Required caller action |
+|---------|--------------|------------------------|
+| `Allow` | — | Proceed with send |
+| `MultiRealmAlert { realm_count }` | ≥ `alert_threshold` | Emit `AbuseDetected` audit + A-7 webhook; MAY still send |
+| `SoftCap { realm_count }` | ≥ `email/sms_realm_soft_cap` | MUST apply CAPTCHA or queue; SHOULD emit audit + webhook |
+| `HardCap { realm_count }` | ≥ `email/sms_realm_hard_cap` | MUST reject send (HTTP 429); MUST emit audit + webhook |
+
+Callers MUST NOT surface the `realm_count` value to the sending realm or to
+any external client.
+
+### Privacy
+
+Recipient addresses and realm IDs are stored only as `SipHash-1-3` hashes
+(`u64`).  No plaintext is retained in memory.
+
+### Fail-open policy
+
+Per §6/§6.1: lock poisoning returns `CrossRealmOutcome::Allow`.  A-4
+per-realm caps and A-2 request shaper remain backstops.
+
+### Integration point
+
+Call **in addition to** `OutboundVolumeShield::check_email` / `check_sms`.
+Both checks must pass before a send proceeds:
+
+```rust
+// Per-realm cap (A-4) — checked first
+match volume_shield.check_email(realm_id, recipient) {
+    VolumeShieldOutcome::HardCap => return Err(EmailError::VolumeLimitExceeded),
+    VolumeShieldOutcome::SoftCap => { /* emit audit + webhook */ }
+    VolumeShieldOutcome::Allow => {}
+}
+// Global cross-realm cap (A-50) — checked second
+match cross_realm_cap.check_email(realm_id, recipient) {
+    CrossRealmOutcome::HardCap { .. } => return Err(EmailError::CrossRealmCapExceeded),
+    CrossRealmOutcome::SoftCap { .. } => { /* challenge + emit */ }
+    CrossRealmOutcome::MultiRealmAlert { .. } => { /* emit audit + webhook */ }
+    CrossRealmOutcome::Allow => {}
+}
+```
+
+### Configuration (`hearth.yaml`)
+
+```yaml
+security:
+  cross_realm_aggregation_cap:
+    window: 3600s               # rolling window (default: 1 hour)
+    alert_threshold: 3          # distinct realms before operator alert
+    email_realm_soft_cap: 5     # distinct realms before email SoftCap
+    email_realm_hard_cap: 10    # distinct realms before email HardCap
+    sms_realm_soft_cap: 3       # distinct realms before SMS SoftCap
+    sms_realm_hard_cap: 6       # distinct realms before SMS HardCap
+```
+
+Set all thresholds to `usize::MAX` (or use `CrossRealmAggregationCap::disabled()`)
+to disable without recompiling.
+
+---
+
 ## A-45 — Tenant-Controlled HTML/CSS/SVG Sanitization
 
 **Scope:** All operator- or tenant-supplied content that flows into an
@@ -406,7 +485,7 @@ and a regression test MUST be added to `tests/abuse_dpop_act.rs`.
 
 ## A-11 — Step-up MFA Risk Scorer
 
-**Source**: `src/identity/risk.rs`
+**Source**: `src/identity/risk.rs` (re-exports from `src/abuse/risk_scorer.rs` — HEA-1205)
 
 Aggregates risk signals at login time into a normalised score `[0.0, 1.0]`.
 When `score >= step_up_threshold` (default `0.5`), the login handler returns
@@ -418,30 +497,31 @@ device-fingerprint step-up.
 | Signal | Default weight | Source |
 |--------|---------------|--------|
 | `NewDevice` | 0.3 | Device-fingerprint miss (`src/identity/device_fp`) |
-| `NewCountry` | 0.4 | GeoIP lookup — **stub until HEA-1205** |
+| `NewCountry` | 0.4 | GeoIP lookup (stub — absent until P-2 ships) |
 | `PasswordAge { days }` | 0.2 (if `days >= threshold`) | `user.created_at()` (approximation) |
-| `BreachCorpusHit` | 1.0 (forces step-up) | HIBP / offline corpus — **stub at login until HEA-1205** |
+| `BreachCorpusHit` | 1.0 (forces step-up) | HIBP / offline corpus |
+| `RefreshContextDelta` | 0.35 per dim | UA-hash or ASN change on refresh (A-49) |
 
 ### Config (`security.risk_scorer` in `hearth.yaml`)
 
 ```yaml
 security:
   risk_scorer:
-    enabled: true          # default: false (fail-open)
-    step_up_threshold: 0.5 # score >= this → step-up
+    enabled: true                    # default: false (fail-open)
+    step_up_threshold: 0.5           # score >= this → step-up
     new_device_weight: 0.3
     new_country_weight: 0.4
     password_age_weight: 0.2
     password_age_days_threshold: 365
     breach_corpus_weight: 1.0
+    refresh_context_delta_weight: 0.35
 ```
 
 **Fail mode**: Fail-open. When disabled (`enabled: false`, the default) score
-is always `0.0` so existing deployments are unaffected. Scoring errors are
-suppressed and treated as `score = 0.0`.
+is always `0.0` so existing deployments are unaffected.
 
-**Extension point (P-4)**: The `RiskScorer` trait in `src/identity/risk.rs` is
-the hook for HEA-1205 pluggable adapters (vendor ML models, remote risk APIs).
+**Extension point (P-4)**: See [§ P-4: `RiskScorer`](#p-4-riskscorer--rule-based-step-up-mfa-risk-engine)
+for the pluggable trait contract and swap-in instructions.
 
 ---
 
@@ -813,6 +893,70 @@ explicitly configured.  External adapter implementations MUST return
 
 The provider is consulted only at registration, forgot-password, and magic-link
 flows — never during `validate_token()` or `lookup_session()`.
+
+---
+
+## P-4: `RiskScorer` — Rule-Based Step-Up MFA Risk Engine
+
+**Status**: Shipped (HEA-1205)  
+**Source**: `src/abuse/risk_scorer.rs`
+
+### Overview
+
+`RiskScorer` is the P-4 extension point for adaptive, risk-based step-up MFA.
+The built-in [`RuleBasedRiskScorer`] reference adapter implements the A-11 rule
+engine: it aggregates configurable risk signals observed at login time, computes
+a normalised score in `[0.0, 1.0]`, and sets `step_up_required = true` when the
+score meets or exceeds the operator's configured threshold.
+
+Operators who need vendor risk models or custom ML pipelines implement the
+`RiskScorer` trait and supply their adapter at startup.
+
+### Risk signals
+
+| Signal | Default weight | Source |
+|--------|---------------|--------|
+| `NewDevice` | 0.3 | Device-fingerprint miss (`(user_id, ip/24, UA)` not seen before) |
+| `NewCountry` | 0.4 | GeoIP country change (stub — absent until P-2 ships) |
+| `PasswordAge { days }` | 0.2 | Credential `created_at` ≥ `password_age_days_threshold` |
+| `BreachCorpusHit` | 1.0 | HIBP k-anonymity / offline corpus match |
+| `RefreshContextDelta` | 0.35 per dim | UA-hash or ASN change on refresh exchange (A-49) |
+
+Weights sum additively; the total is clamped to `1.0` before the threshold
+comparison.
+
+### Fail-open policy
+
+Per §6.1 of the abuse-prevention plan: `RiskScorer` is **fail-open**.
+
+- The default config ships with `enabled: false` — `RuleBasedRiskScorer::disabled()`
+  always returns score `0.0` and `step_up_required = false`.
+- `NoopRiskScorer` always returns score `0.0` regardless of signals.
+- External adapter implementations **MUST** return `step_up_required = false` on
+  any transient error so that a scorer outage never blocks legitimate logins.
+
+### Configuration (`hearth.yaml`)
+
+```yaml
+security:
+  risk_scorer:
+    enabled: true                    # false = fail-open (default)
+    step_up_threshold: 0.5           # [0.0, 1.0] — score ≥ this triggers MFA
+    new_device_weight: 0.3
+    new_country_weight: 0.4
+    password_age_weight: 0.2
+    password_age_days_threshold: 365 # days before PasswordAge signal fires
+    breach_corpus_weight: 1.0
+    refresh_context_delta_weight: 0.35
+```
+
+All weights are per-signal contributions in `[0.0, 1.0]`.  Setting a weight to
+`0.0` disables that signal without a code change.
+
+### Off hot-path guarantee
+
+The scorer is consulted only at login time (form-submit / password-grant flows).
+It is **not** on the `validate_token()` or `lookup_session()` hot path.
 
 ---
 

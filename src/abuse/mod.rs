@@ -19,8 +19,11 @@
 //! | A-44 | SAML XML parse-event cap                 | (constant here)          |
 //! | A-45 | Tenant HTML/CSS/SVG sanitization         | [`sanitize`]             |
 //! | A-47 | `deny_unknown_fields` on request shapes  | (annotations)            |
+//! | A-50 | Cross-realm SMS/email aggregation cap    | [`detector`]             |
 //! | A-52 | Unified `return_to` allowlist            | [`redirect`]             |
+//! | P-2  | IP-reputation trait + Spamhaus DROP + MaxMind ASN | [`ip_reputation`] |
 //! | P-3  | Bot-signal trait + UA/JA3/JA4 heuristics | [`bot_signal`]           |
+//! | P-4  | RiskScorer trait + rule-based engine (A-11) | [`risk_scorer`]       |
 //! | P-5  | Email-reputation trait + disposable list | [`email_reputation`]     |
 
 pub mod backoff;
@@ -30,7 +33,9 @@ pub mod cidr;
 pub mod detector;
 pub mod email_reputation;
 pub mod guards;
+pub mod ip_reputation;
 pub mod redirect;
+pub mod risk_scorer;
 pub mod sanitize;
 pub mod shaper;
 pub mod tarpit;

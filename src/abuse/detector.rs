@@ -123,6 +123,19 @@ impl DistinctWindow {
         }
     }
 
+    /// Returns the approximate distinct count across both buckets.
+    ///
+    /// O(|prev|), bounded by `2 × threshold`.  Not called on the hot path;
+    /// used only for reporting in [`CrossRealmOutcome`] variants.
+    fn count(&self) -> usize {
+        self.current.len()
+            + self
+                .prev
+                .iter()
+                .filter(|h| !self.current.contains(h))
+                .count()
+    }
+
     /// Returns `true` when the distinct count across both buckets exceeds
     /// `threshold`.  Uses early exit so the check is O(threshold) not O(n).
     fn exceeds_threshold(&self, threshold: usize) -> bool {
@@ -535,6 +548,248 @@ impl OutboundVolumeShield {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// A-50 — CrossRealmAggregationCap
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Configuration for the cross-realm aggregation cap (A-50).
+///
+/// Serialised under `security.cross_realm_aggregation_cap` in `hearth.yaml`.
+#[derive(Debug, Clone)]
+pub struct CrossRealmAggCapConfig {
+    /// Rolling window length.  Default: 1 hour.
+    pub window: Duration,
+
+    /// Number of distinct realms targeting the same recipient before an
+    /// operator alert fires (A-7 webhook emitted; send still allowed).
+    /// Default: 3.
+    pub alert_threshold: usize,
+
+    /// Distinct realms targeting the same email address before
+    /// [`CrossRealmOutcome::SoftCap`].  CAPTCHA / send queue required.
+    /// Default: 5.
+    pub email_realm_soft_cap: usize,
+
+    /// Distinct realms targeting the same email address before
+    /// [`CrossRealmOutcome::HardCap`].  Send MUST be rejected.
+    /// Default: 10.
+    pub email_realm_hard_cap: usize,
+
+    /// Distinct realms targeting the same E.164 phone number before soft cap.
+    /// Default: 3.
+    pub sms_realm_soft_cap: usize,
+
+    /// Distinct realms targeting the same E.164 phone number before hard cap.
+    /// Default: 6.
+    pub sms_realm_hard_cap: usize,
+}
+
+impl Default for CrossRealmAggCapConfig {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_secs(3_600),
+            alert_threshold: 3,
+            email_realm_soft_cap: 5,
+            email_realm_hard_cap: 10,
+            sms_realm_soft_cap: 3,
+            sms_realm_hard_cap: 6,
+        }
+    }
+}
+
+/// Outcome of a [`CrossRealmAggregationCap`] check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrossRealmOutcome {
+    /// Target is within expected bounds across all realms.  Send may proceed.
+    Allow,
+
+    /// This target has been reached by ≥ `alert_threshold` distinct realms in
+    /// the current window — a cross-tenant targeting pattern is emerging.
+    ///
+    /// Callers SHOULD emit `AuditAction::AbuseDetected` and an A-7 security
+    /// webhook, but MAY still allow the send.
+    MultiRealmAlert {
+        /// Approximate number of distinct realms that have sent to this
+        /// recipient in the current window.
+        realm_count: usize,
+    },
+
+    /// ≥ `email_realm_soft_cap` / `sms_realm_soft_cap` distinct realms have
+    /// targeted this recipient.  CAPTCHA or send queue is required.
+    ///
+    /// Callers SHOULD emit `AbuseDetected` + A-7 webhook and MUST apply a
+    /// challenge before any outbound send is attempted.
+    SoftCap {
+        /// Approximate distinct realm count.
+        realm_count: usize,
+    },
+
+    /// ≥ `email_realm_hard_cap` / `sms_realm_hard_cap` distinct realms have
+    /// targeted this recipient.  Send must be blocked.
+    ///
+    /// Callers MUST reject the send (HTTP 429 or equivalent) and MUST emit
+    /// `AbuseDetected` + A-7 security webhook.
+    HardCap {
+        /// Approximate distinct realm count.
+        realm_count: usize,
+    },
+}
+
+/// Global cross-realm aggregation cap (A-50).
+///
+/// Maintains a single cluster-wide counter **per recipient** that counts how
+/// many distinct realms have sent to that address in a rolling window.  When a
+/// single recipient is targeted by too many different realms the cap fires —
+/// closing the §3.53 bypass where an attacker splits sends across N realms to
+/// evade A-4's per-realm budget.
+///
+/// **Privacy:** recipient addresses and realm IDs are stored only as
+/// `SipHash-1-3` hashes (`u64`); no plaintext is retained in memory.
+///
+/// Thread-safe; share via `Arc<CrossRealmAggregationCap>`.
+///
+/// # Integration point
+///
+/// Call this **in addition to** `OutboundVolumeShield::check_email` /
+/// `check_sms`.  Both checks must pass before an outbound send proceeds.
+///
+/// ```text
+/// // Per-realm budget check (A-4):
+/// match volume_shield.check_email(realm_id, recipient) {
+///     VolumeShieldOutcome::HardCap => return Err(EmailError::VolumeLimitExceeded),
+///     VolumeShieldOutcome::SoftCap => { /* emit audit + webhook */ }
+///     VolumeShieldOutcome::Allow => {}
+/// }
+/// // Global cross-realm cap (A-50):
+/// match cross_realm_cap.check_email(realm_id, recipient) {
+///     CrossRealmOutcome::HardCap { .. } => return Err(EmailError::CrossRealmCapExceeded),
+///     CrossRealmOutcome::SoftCap { .. } => { /* challenge + emit */ }
+///     CrossRealmOutcome::MultiRealmAlert { .. } => { /* emit audit + webhook */ }
+///     CrossRealmOutcome::Allow => {}
+/// }
+/// ```
+pub struct CrossRealmAggregationCap {
+    config: CrossRealmAggCapConfig,
+    /// email-address hash → distinct realm-ID hashes in the rolling window.
+    email_realm_windows: Mutex<HashMap<u64, DistinctWindow>>,
+    /// E.164-phone hash → distinct realm-ID hashes in the rolling window.
+    phone_realm_windows: Mutex<HashMap<u64, DistinctWindow>>,
+}
+
+impl CrossRealmAggregationCap {
+    /// Creates a cap with the given configuration.
+    #[must_use]
+    pub fn new(config: CrossRealmAggCapConfig) -> Self {
+        Self {
+            config,
+            email_realm_windows: Mutex::new(HashMap::new()),
+            phone_realm_windows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Creates a no-op cap that always returns [`CrossRealmOutcome::Allow`].
+    ///
+    /// Use when `security.cross_realm_aggregation_cap.enabled = false`.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self::new(CrossRealmAggCapConfig {
+            alert_threshold: usize::MAX,
+            email_realm_soft_cap: usize::MAX,
+            email_realm_hard_cap: usize::MAX,
+            sms_realm_soft_cap: usize::MAX,
+            sms_realm_hard_cap: usize::MAX,
+            ..CrossRealmAggCapConfig::default()
+        })
+    }
+
+    /// Checks and records an outbound email send from `realm_id` to `recipient`.
+    ///
+    /// Uses `Instant::now()`.  See [`Self::check_email_with_time`] for the
+    /// testable variant.
+    pub fn check_email(&self, realm_id: &str, recipient: &str) -> CrossRealmOutcome {
+        self.check_email_with_time(realm_id, recipient, Instant::now())
+    }
+
+    /// Like [`Self::check_email`] but accepts an explicit `now` timestamp.
+    ///
+    /// Intended for tests; production callers use [`Self::check_email`].
+    pub fn check_email_with_time(
+        &self,
+        realm_id: &str,
+        recipient: &str,
+        now: Instant,
+    ) -> CrossRealmOutcome {
+        let recipient_hash = hash_one(&recipient);
+        let realm_hash = hash_one(&realm_id);
+        let soft = self.config.email_realm_soft_cap;
+        let hard = self.config.email_realm_hard_cap;
+        let alert = self.config.alert_threshold;
+
+        let mut map = self
+            .email_realm_windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = map
+            .entry(recipient_hash)
+            .or_insert_with(|| DistinctWindow::new(self.config.window, hard));
+        window.record(realm_hash, now);
+
+        let realm_count = window.count();
+        if window.exceeds_threshold(hard) {
+            CrossRealmOutcome::HardCap { realm_count }
+        } else if window.exceeds_threshold(soft) {
+            CrossRealmOutcome::SoftCap { realm_count }
+        } else if window.exceeds_threshold(alert) {
+            CrossRealmOutcome::MultiRealmAlert { realm_count }
+        } else {
+            CrossRealmOutcome::Allow
+        }
+    }
+
+    /// Checks and records an outbound SMS send from `realm_id` to `recipient`
+    /// (E.164 phone number).
+    ///
+    /// Uses `Instant::now()`.  See [`Self::check_sms_with_time`] for the
+    /// testable variant.
+    pub fn check_sms(&self, realm_id: &str, recipient: &str) -> CrossRealmOutcome {
+        self.check_sms_with_time(realm_id, recipient, Instant::now())
+    }
+
+    /// Like [`Self::check_sms`] but accepts an explicit `now` timestamp.
+    pub fn check_sms_with_time(
+        &self,
+        realm_id: &str,
+        recipient: &str,
+        now: Instant,
+    ) -> CrossRealmOutcome {
+        let recipient_hash = hash_one(&recipient);
+        let realm_hash = hash_one(&realm_id);
+        let soft = self.config.sms_realm_soft_cap;
+        let hard = self.config.sms_realm_hard_cap;
+        let alert = self.config.alert_threshold;
+
+        let mut map = self
+            .phone_realm_windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let window = map
+            .entry(recipient_hash)
+            .or_insert_with(|| DistinctWindow::new(self.config.window, hard));
+        window.record(realm_hash, now);
+
+        let realm_count = window.count();
+        if window.exceeds_threshold(hard) {
+            CrossRealmOutcome::HardCap { realm_count }
+        } else if window.exceeds_threshold(soft) {
+            CrossRealmOutcome::SoftCap { realm_count }
+        } else if window.exceeds_threshold(alert) {
+            CrossRealmOutcome::MultiRealmAlert { realm_count }
+        } else {
+            CrossRealmOutcome::Allow
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Unit tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -722,5 +977,199 @@ mod tests {
             let out = shield.check_email_with_time("r", &format!("{i}@x.com"), now);
             assert_eq!(out, VolumeShieldOutcome::Allow);
         }
+    }
+
+    // ── CrossRealmAggregationCap ──────────────────────────────────────────
+
+    fn realm(n: u32) -> String {
+        format!("realm-{n}")
+    }
+
+    #[test]
+    fn cross_realm_under_all_thresholds_allows() {
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            alert_threshold: 3,
+            email_realm_soft_cap: 5,
+            email_realm_hard_cap: 10,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let now = Instant::now();
+        // 3 realms — at the boundary, exactly at alert_threshold (not over)
+        for i in 0..3u32 {
+            let out = cap.check_email_with_time(&realm(i), "x@example.com", now);
+            assert_eq!(out, CrossRealmOutcome::Allow);
+        }
+    }
+
+    #[test]
+    fn cross_realm_alert_threshold_fires() {
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            alert_threshold: 3,
+            email_realm_soft_cap: 10,
+            email_realm_hard_cap: 20,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let now = Instant::now();
+        for i in 0..3u32 {
+            let _ = cap.check_email_with_time(&realm(i), "x@example.com", now);
+        }
+        let out = cap.check_email_with_time(&realm(3), "x@example.com", now);
+        assert!(
+            matches!(out, CrossRealmOutcome::MultiRealmAlert { .. }),
+            "expected MultiRealmAlert, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn cross_realm_soft_cap_fires() {
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            alert_threshold: 2,
+            email_realm_soft_cap: 4,
+            email_realm_hard_cap: 10,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let now = Instant::now();
+        for i in 0..4u32 {
+            let _ = cap.check_email_with_time(&realm(i), "x@example.com", now);
+        }
+        let out = cap.check_email_with_time(&realm(4), "x@example.com", now);
+        assert!(
+            matches!(out, CrossRealmOutcome::SoftCap { .. }),
+            "expected SoftCap, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn cross_realm_hard_cap_fires() {
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            alert_threshold: 2,
+            email_realm_soft_cap: 3,
+            email_realm_hard_cap: 5,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let now = Instant::now();
+        for i in 0..5u32 {
+            let _ = cap.check_email_with_time(&realm(i), "x@example.com", now);
+        }
+        let out = cap.check_email_with_time(&realm(5), "x@example.com", now);
+        assert!(
+            matches!(out, CrossRealmOutcome::HardCap { .. }),
+            "expected HardCap, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn cross_realm_recipient_isolation() {
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            alert_threshold: 2,
+            email_realm_soft_cap: 3,
+            email_realm_hard_cap: 5,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let now = Instant::now();
+        for i in 0..5u32 {
+            let _ = cap.check_email_with_time(&realm(i), "target@example.com", now);
+        }
+        let out = cap.check_email_with_time("realm-99", "innocent@example.com", now);
+        assert_eq!(
+            out,
+            CrossRealmOutcome::Allow,
+            "different recipient must be isolated"
+        );
+    }
+
+    #[test]
+    fn cross_realm_same_realm_not_double_counted() {
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            alert_threshold: 3,
+            email_realm_soft_cap: 5,
+            email_realm_hard_cap: 10,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let now = Instant::now();
+        // One realm sending to same address 1 000 times — must never escalate.
+        for _ in 0..1_000 {
+            let out = cap.check_email_with_time("single-realm", "x@example.com", now);
+            assert_eq!(
+                out,
+                CrossRealmOutcome::Allow,
+                "single realm high-volume must not trigger cross-realm cap"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_realm_sms_hard_cap_fires() {
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            sms_realm_soft_cap: 2,
+            sms_realm_hard_cap: 4,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let now = Instant::now();
+        for i in 0..4u32 {
+            let _ = cap.check_sms_with_time(&realm(i), "+12025550100", now);
+        }
+        let out = cap.check_sms_with_time(&realm(4), "+12025550100", now);
+        assert!(
+            matches!(out, CrossRealmOutcome::HardCap { .. }),
+            "expected SMS HardCap, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn cross_realm_disabled_always_allows() {
+        let cap = CrossRealmAggregationCap::disabled();
+        let now = Instant::now();
+        for i in 0..1_000u32 {
+            let out = cap.check_email_with_time(&realm(i), "x@example.com", now);
+            assert_eq!(out, CrossRealmOutcome::Allow);
+        }
+    }
+
+    #[test]
+    fn cross_realm_realm_count_reported() {
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            alert_threshold: 2,
+            email_realm_soft_cap: 10,
+            email_realm_hard_cap: 20,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let now = Instant::now();
+        for i in 0..2u32 {
+            let _ = cap.check_email_with_time(&realm(i), "x@example.com", now);
+        }
+        let out = cap.check_email_with_time(&realm(2), "x@example.com", now);
+        if let CrossRealmOutcome::MultiRealmAlert { realm_count } = out {
+            assert!(
+                realm_count >= 3,
+                "realm_count must be >= 3, got {realm_count}"
+            );
+        } else {
+            panic!("expected MultiRealmAlert, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn cross_realm_email_and_sms_counters_independent() {
+        let cap = CrossRealmAggregationCap::new(CrossRealmAggCapConfig {
+            alert_threshold: 2,
+            email_realm_soft_cap: 3,
+            email_realm_hard_cap: 5,
+            sms_realm_soft_cap: 3,
+            sms_realm_hard_cap: 5,
+            ..CrossRealmAggCapConfig::default()
+        });
+        let now = Instant::now();
+        // Fill email cap to hard cap for "user@example.com"
+        for i in 0..5u32 {
+            let _ = cap.check_email_with_time(&realm(i), "user@example.com", now);
+        }
+        // SMS counter for an unrelated phone must be unaffected
+        let out = cap.check_sms_with_time(&realm(0), "+12025550100", now);
+        assert_eq!(
+            out,
+            CrossRealmOutcome::Allow,
+            "email cap must not bleed into SMS counter"
+        );
     }
 }

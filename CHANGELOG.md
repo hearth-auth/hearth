@@ -9,6 +9,30 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **A-50 Cross-realm SMS / email aggregation cap** — Closes §3.53: a global
+  (cluster-wide) counter keyed by recipient hash (email or E.164 phone number)
+  now tracks how many distinct realms have sent to each address in a rolling
+  window.  Three escalating outcomes fire as the distinct-realm count rises:
+  `MultiRealmAlert` (emit A-7 operator webhook; send still allowed),
+  `SoftCap` (CAPTCHA / queue required), and `HardCap` (send rejected with
+  HTTP 429).  This closes the bypass where an attacker splits sends across N
+  realms to slip past A-4's per-realm cap.  Fail-open on lock poisoning.  New
+  config section `security.cross_realm_aggregation_cap` in `hearth.yaml`.
+  New types: `CrossRealmAggCapConfig`, `CrossRealmOutcome`,
+  `CrossRealmAggregationCap` in `src/abuse/detector`.  (HEA-1201)
+
+- **P-4 `RiskScorer` pluggable trait + rule-based reference engine** — The A-11
+  step-up MFA risk scorer is now exposed as a public pluggable trait
+  (`src/abuse/risk_scorer`).  Operators can replace the built-in
+  `RuleBasedRiskScorer` with any vendor risk engine or custom HTTP adapter by
+  implementing `RiskScorer: Send + Sync`.  The built-in engine aggregates five
+  configurable signals (`NewDevice`, `NewCountry`, `PasswordAge`,
+  `BreachCorpusHit`, `RefreshContextDelta`) with per-weight YAML config under
+  `security.risk_scorer`.  Fail-open: `enabled: false` (the default) and
+  `NoopRiskScorer` both always return score `0.0`.  New type: `NoopRiskScorer`.
+  Renamed public type: `RuleBasedRiskScorer` (was `DefaultRiskScorer` — alias
+  preserved for existing call sites).  (HEA-1205)
+
 - **A-46 Argon2 pepper rotation policy** — `CredentialConfig` gains an optional
   `PepperConfig` that applies `HMAC-SHA256(key=pepper, msg=password)` before
   Argon2id hashing. The pepper version is stored in `StoredCredential::pepper_version`

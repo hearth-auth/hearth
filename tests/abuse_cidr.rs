@@ -220,5 +220,5 @@ fn a9_adversarial_first_ip_next_network_is_outside() {
 #[test]
 fn a9_from_strs_propagates_parse_error() {
     let result = CidrFilter::from_strs([] as [&str; 0], ["not-a-cidr"]);
-    assert!(result.is_err(), "malformed CIDR must produce an error");
+    result.expect_err("malformed CIDR must produce an error");
 }

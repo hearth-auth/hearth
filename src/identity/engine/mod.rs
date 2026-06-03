@@ -4335,7 +4335,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         };
 
         let cred = Self::deserialize_credential(&cred_bytes)?;
-        let matches = credentials::verify_password(password, &cred)?;
+        // Pepper-aware verification. Returns (matches, needs_pepper_rehash).
+        // needs_pepper_rehash is true when the credential was verified with an
+        // older or absent pepper and should be re-hashed with the active pepper.
+        let credential_cfg = self.credential_config_for_realm(realm_id)?;
+        let (matches, needs_pepper_rehash) =
+            credentials::verify_password_with_pepper(password, &cred, &credential_cfg)?;
 
         if matches {
             // Clear failed attempts on success
@@ -4354,31 +4359,23 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 }
             }
 
-            // Auto-upgrade legacy algorithms on successful verification
-            if cred.algorithm != credentials::PasswordAlgorithm::Argon2id {
+            // Determine whether this credential needs any rehash:
+            //   1. Legacy algorithm upgrade (bcrypt/scrypt/pbkdf2 → Argon2id)
+            //   2. Argon2 params changed (memory/time cost)
+            //   3. Pepper rotation (active version changed, or pepper newly added)
+            let needs_algo_upgrade = cred.algorithm != credentials::PasswordAlgorithm::Argon2id;
+            let needs_param_rehash = !needs_algo_upgrade
+                && credentials::argon2_params_need_rehash(&cred.hash, &credential_cfg);
+
+            if needs_algo_upgrade || needs_param_rehash || needs_pepper_rehash {
                 let now = self.clock.now().as_micros();
-                let credential_cfg = self.credential_config_for_realm(realm_id)?;
                 let mut upgraded = credentials::hash_password(password, &credential_cfg, now)?;
-                // Rehash must preserve original credential age so expiry
-                // semantics stay stable across algorithm migrations.
+                // Preserve original credential age for expiry-policy continuity.
                 upgraded.created_at = cred.created_at;
                 let upgraded_bytes = Self::serialize_credential(&upgraded)?;
                 self.storage
                     .put(realm_id, &cred_key, &upgraded_bytes)
                     .map_err(Self::storage_err)?;
-            } else {
-                // Lazy Argon2 rehash: transparently upgrade when config params change.
-                let credential_cfg = self.credential_config_for_realm(realm_id)?;
-                if credentials::argon2_params_need_rehash(&cred.hash, &credential_cfg) {
-                    let now = self.clock.now().as_micros();
-                    let mut upgraded = credentials::hash_password(password, &credential_cfg, now)?;
-                    // Preserve original age for expiry policy continuity.
-                    upgraded.created_at = cred.created_at;
-                    let upgraded_bytes = Self::serialize_credential(&upgraded)?;
-                    self.storage
-                        .put(realm_id, &cred_key, &upgraded_bytes)
-                        .map_err(Self::storage_err)?;
-                }
             }
         } else {
             let count = self.record_failed_attempt(realm_id, user_id);
@@ -10467,7 +10464,7 @@ mod tests {
 
     #[test]
     fn delete_user_frees_email() {
-        let (_dir, engine, _clock) = setup_engine();
+        let (_dir, engine, clock) = setup_engine();
         let realm = create_test_realm(&engine);
 
         let created = engine
@@ -10483,7 +10480,10 @@ mod tests {
 
         engine.delete_user(&realm, created.id()).expect("delete");
 
-        // Should be able to create a new user with the same email
+        // A-20: email is reserved for 90 days after deletion.
+        // Advance clock past the reservation window before re-creating.
+        clock.advance(91 * 24 * 60 * 60 * 1_000_000);
+
         let new_user = engine
             .create_user(
                 &realm,
@@ -10493,7 +10493,7 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .expect("create should succeed after delete");
+            .expect("create should succeed after reservation expires");
 
         assert_ne!(new_user.id(), created.id());
     }
@@ -14067,7 +14067,7 @@ mod tests {
 
     #[test]
     fn scim_external_id_cascades_on_delete_user() {
-        let (_dir, engine, _clock) = setup_engine();
+        let (_dir, engine, clock) = setup_engine();
         let realm = engine
             .create_realm(&CreateRealmRequest {
                 name: "scim-r5".to_string(),
@@ -14085,6 +14085,8 @@ mod tests {
             .is_none());
         // Re-creating a user and assigning the same externalId should
         // succeed because the cascade freed it.
+        // A-20: advance clock past 90-day email reservation window.
+        clock.advance(91 * 24 * 60 * 60 * 1_000_000);
         let reborn = create_scim_user(&engine, realm.id(), "a@x.com");
         engine
             .set_scim_external_id(realm.id(), &reborn, "okta-abc")
