@@ -210,7 +210,9 @@ async fn cross_realm_get_realm_denied() {
         .await;
 
     assert_eq!(
-        result.expect_err("cross-realm get_realm must be denied").code(),
+        result
+            .expect_err("cross-realm get_realm must be denied")
+            .code(),
         Code::PermissionDenied,
     );
 }
@@ -239,7 +241,9 @@ async fn cross_realm_update_realm_denied() {
         .await;
 
     assert_eq!(
-        result.expect_err("cross-realm update_realm must be denied").code(),
+        result
+            .expect_err("cross-realm update_realm must be denied")
+            .code(),
         Code::PermissionDenied,
     );
 }
