@@ -7,6 +7,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **§3.41 adversarial test-quality gate** — a new CI job (`abuse-coverage`) and
+  `make abuse-check` target enforce that every A-N row in
+  `docs/plans/HEA-1114-abuse-prevention.md` has at least one adversarial
+  negative-scenario test in `tests/abuse_*.rs`. The gate is grep-only (no Rust
+  build required) and completes in under two seconds. PRs that add a new plan row
+  without a corresponding test now fail CI with a clear message listing the
+  uncovered identifiers. Rollback: set `SKIP_ABUSE_COVERAGE_CHECK=1`; see the
+  rollback procedure in `docs/plans/HEA-1114-abuse-prevention.md`. (HEA-1214)
+
 ### Changed
 
 - **`validate_token` hot-path allocation reduced** — two in-process `ArcSwap` caches were added
