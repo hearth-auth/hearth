@@ -53,6 +53,19 @@ Contributions welcome — see [Adding a new example](#adding-a-new-example) belo
    and pointers back to the relevant source code and specs should all be
    in the example's README.
 
+## Adding a new migration provider example
+
+Every new importer must ship a runnable example directory containing:
+
+- [ ] `README.md` — full runbook (export → import → verify → troubleshoot)
+- [ ] Sample fixture (`sample-export.json` or `sample-bundle.json`) — committed, minimal, no secrets
+- [ ] Annotated `hearth.yaml` — source provider settings → Hearth keys
+- [ ] `run.sh` — one command; MUST use `hearth serve --dev` and an ephemeral temp data dir (`mktemp -d`)
+- [ ] `verify.mjs` — Node ESM, zero-dep; non-zero exit on any assertion failure
+- [ ] CHANGELOG entry under `### Added`
+
+Before merging, loop in SecurityAuditor to review credential import messaging.
+
 ## Adding a new example
 
 1. Create a new subdirectory at the repo root: `examples/<feature>/`.

@@ -9,6 +9,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Migration runnable examples** — `examples/keycloak-migration/` and `examples/auth0-migration/` provide
+  self-contained end-to-end examples (sample fixture → `hearth migrate` → `hearth serve --dev` → verify).
+  A **Migration provider checklist** in `examples/README.md` codifies the requirement for every future
+  importer (HEA-1179).
+
 - **P-1 Cloudflare Turnstile CAPTCHA adapter** — new `TurnstileCaptchaProvider` in
   `src/abuse/captcha/` implements the `CaptchaProvider` trait with Cloudflare's
   siteverify API.  Widget HTML is injected at the `<!-- captcha-widget-slot -->`

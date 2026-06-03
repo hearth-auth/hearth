@@ -22,6 +22,8 @@
 //! Credential conversion (source-specific hash formats → PHC) is an
 //! internal detail of each importer; direct callers use the importer's
 //! `import_*` entry point.
+//!
+//! Definition of done for a new importer: see `examples/README.md` migration checklist.
 
 mod auth0;
 mod auth0_credentials;
