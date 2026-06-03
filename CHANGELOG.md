@@ -9,6 +9,20 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **A-26 `/metrics` authentication + `Server:` header suppression** — the
+  Prometheus scrape endpoint now enforces `Authorization: Bearer <token>`
+  (constant-time comparison) when `metrics.bearer_token` is set in
+  `hearth.yaml`; unauthenticated requests receive HTTP 401 with
+  `WWW-Authenticate: Bearer`. All responses no longer include a `Server:`
+  header, preventing runtime/version fingerprinting (HEA-1196).
+
+- **A-27 Tracing PII / token redaction** — a `Redact<T>` newtype in
+  `src/protocol/redact.rs` wraps sensitive values so both `Display` and
+  `Debug` emit `[REDACTED]`; the first usage guards the password-reset URL
+  logged when no email transport is configured (`reset_url` span field in
+  `protocol/web/handlers.rs`). Default-redacted fields: `reset_url`,
+  `magic_link_url`, `password`, `token`, `cookie`, raw email (HEA-1196).
+
 - **A-45 Tenant-content sanitization** — all operator- and tenant-supplied
   SVG and CSS is sanitized before unescaped render (HEA-1199):
   - **SVG** (`logo_svg_inline` in email templates) — `<script>`,
@@ -22,6 +36,16 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   - See `docs/specs/ABUSE.md` §A-45 for the full contract.
 
 ### Added
+
+- **A-18 Session lifecycle policy + P-7 `SessionStore` trait** — per-realm
+  `idle_timeout_secs` and `absolute_timeout_secs` on `RealmConfig` (also in
+  `hearth.yaml` under `auth:` and per-realm). Sessions are evicted lazily on
+  `get_session` / `refresh_session` and proactively by a background reaper task
+  that runs alongside the existing OAuth cleanup sweep. A new `SessionEvicted`
+  audit event (distinct from `SessionRevoked`) is emitted on every policy
+  eviction. `SessionStore` pluggable trait (`src/identity/sessions.rs`) defines
+  the persistence interface for multi-node deployments; `EmbeddedSessionStore`
+  is the reference adapter backed by the WAL storage engine (HEA-1193).
 
 - **A-11 Step-up MFA risk scorer** — new `src/identity/risk.rs` aggregates
   signals (new device, new country, password age, breach corpus hit) into a

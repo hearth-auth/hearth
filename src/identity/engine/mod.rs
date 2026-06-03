@@ -147,8 +147,8 @@ struct StoredEmailVerification {
 }
 use crate::identity::oidc::{
     AuthorizationRequest, AuthorizationResponse, CodeChallengeMethod, OAuthClient, OidcConfig,
-    OidcDiscoveryDocument, OidcTokenResponse, RegisterClientRequest, RpLogoutRequest,
-    RpLogoutResult, StoredGrantFamily, TokenExchangeRequest,
+    OidcDiscoveryDocument, OidcTokenResponse, RefreshBindContext, RegisterClientRequest,
+    RpLogoutRequest, RpLogoutResult, StoredGrantFamily, TokenExchangeRequest,
 };
 use crate::identity::tokens::{
     self, Audience, IssueTokenRequest, JwksDocument, SigningKey, TokenClaims, TokenConfig,
@@ -1816,6 +1816,7 @@ impl EmbeddedIdentityEngine {
         now_secs: i64,
         claims: &TokenClaims,
         dpop_jkt: Option<&str>,
+        bind_ctx: Option<&RefreshBindContext>,
     ) -> Result<TokenPair, IdentityError> {
         let family_key = keys::encode_grant_family(fid);
         let family_bytes = self
@@ -1908,6 +1909,55 @@ impl EmbeddedIdentityEngine {
                         }
                     }
                 }
+            }
+        }
+
+        // A-49: detect refresh-context drift (UA hash / ASN change) and score.
+        // Fail-open: no bind_ctx or no stored hash → skip check.
+        if let Some(ctx) = bind_ctx {
+            let current_ua_hash = ctx
+                .user_agent
+                .as_deref()
+                .map(|ua| Self::sha256_hex(ua.as_bytes()));
+
+            let ua_changed = match (&current_ua_hash, &family.ua_hash) {
+                (Some(cur), Some(stored)) => cur != stored,
+                _ => false,
+            };
+            let asn_changed = match (ctx.asn, family.bound_asn) {
+                (Some(cur), Some(stored)) => cur != stored,
+                _ => false,
+            };
+
+            if ua_changed || asn_changed {
+                use crate::identity::risk::{
+                    DefaultRiskScorer, RiskContext, RiskScorer, RiskSignal,
+                };
+                let realm_risk_cfg = self
+                    .get_realm(realm_id)?
+                    .ok_or(IdentityError::RealmNotFound)?
+                    .config()
+                    .risk_scorer_config
+                    .clone()
+                    .unwrap_or_default();
+                let scorer = DefaultRiskScorer::new(realm_risk_cfg);
+                let risk_ctx = RiskContext {
+                    signals: vec![RiskSignal::RefreshContextDelta {
+                        ua_changed,
+                        asn_changed,
+                    }],
+                };
+                if scorer.score(&risk_ctx).step_up_required {
+                    return Err(IdentityError::StepUpChallengeRequired);
+                }
+            }
+
+            // Record UA hash on first refresh so subsequent exchanges can compare.
+            if family.ua_hash.is_none() {
+                family.ua_hash = current_ua_hash;
+            }
+            if family.bound_asn.is_none() {
+                family.bound_asn = ctx.asn;
             }
         }
 
@@ -2081,6 +2131,79 @@ impl EmbeddedIdentityEngine {
             m.remove(&key);
             m
         });
+    }
+
+    // ===== Session lifecycle policy helpers (A-18) =====
+
+    /// Evicts a policy-expired session (A-18). Marks revoked, evicts from
+    /// cache, bumps SV, and emits `SessionEvicted` audit.
+    fn evict_session_by_policy(
+        &self,
+        realm_id: &RealmId,
+        session: &Session,
+        now: crate::core::Timestamp,
+    ) -> Result<(), IdentityError> {
+        let reason = session.policy_expiry_reason(now).unwrap_or("unknown");
+        let mut evicted = session.clone();
+        evicted.revoke();
+        self.persist_session(realm_id, &evicted)?;
+        self.session_cache_evict(realm_id, evicted.id());
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if realm.config().session_version.enabled {
+                let retention = realm.config().session_version.delta_retention_seconds;
+                let _ = self.sv_store.bump(realm_id, evicted.id(), retention);
+            }
+        }
+        let ctx = crate::audit::context::AuditContext {
+            actor: crate::audit::context::Actor::System,
+            metadata: Some(serde_json::json!({
+                "user_id": evicted.user_id().as_uuid().to_string(),
+                "session_id": evicted.id().as_uuid().to_string(),
+                "reason": reason,
+            })),
+        };
+        let _ = self.record_audit(
+            realm_id,
+            Some(&ctx),
+            crate::audit::AuditAction::SessionEvicted,
+            "session",
+            &evicted.id().as_uuid().to_string(),
+        );
+        Ok(())
+    }
+
+    /// Proactively sweeps sessions past their idle or absolute timeout (A-18).
+    /// Short-circuits if the realm has no lifecycle policy (fail-open, §6.1).
+    pub fn sweep_expired_sessions(&self, realm_id: &RealmId) -> Result<u64, IdentityError> {
+        let (has_idle, has_abs) = if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            (
+                realm.config().idle_timeout_secs.is_some(),
+                realm.config().absolute_timeout_secs.is_some(),
+            )
+        } else {
+            return Ok(0);
+        };
+        if !has_idle && !has_abs {
+            return Ok(0);
+        }
+        let now = self.clock.now();
+        let mut evicted: u64 = 0;
+        let mut cursor = None::<String>;
+        loop {
+            let page = self.list_sessions_by_realm(realm_id, cursor.as_deref(), 200)?;
+            for session in &page.items {
+                if session.is_valid(now) && session.is_policy_expired(now) {
+                    if self.evict_session_by_policy(realm_id, session, now).is_ok() {
+                        evicted += 1;
+                    }
+                }
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(evicted)
     }
 
     // ===== Token claims cache helpers (S12-F2) =====
@@ -4335,6 +4458,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
+        // Capture per-realm lifecycle timeouts once and embed them in the
+        // session record so hot-path get_session avoids a realm lookup (A-18).
+        let (idle_timeout_secs, absolute_timeout_secs) =
+            if let Ok(Some(realm)) = self.get_realm(realm_id) {
+                (
+                    realm.config().idle_timeout_secs,
+                    realm.config().absolute_timeout_secs,
+                )
+            } else {
+                (None, None)
+            };
+
         // Generate session
         let session_id = SessionId::generate();
         let now = self.clock.now();
@@ -4345,6 +4480,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             now,
             expires_at,
             context,
+            idle_timeout_secs,
+            absolute_timeout_secs,
         );
 
         // Persist session record
@@ -4390,13 +4527,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         {
             let cache = self.session_cache.load();
             if let Some(s) = cache.get(&cache_key) {
-                return if s.is_valid(now) {
-                    Ok(Some((**s).clone()))
-                } else {
-                    // Lazy eviction: drop the read guard before mutating the map.
-                    drop(cache);
+                // Clone before dropping the guard so no borrow crosses the drop.
+                let cloned = (**s).clone();
+                drop(cache);
+                return if !cloned.is_valid(now) {
                     self.session_cache_evict(realm_id, session_id);
                     Ok(None)
+                } else if cloned.is_policy_expired(now) {
+                    // A-18: idle or absolute timeout. Lazy eviction.
+                    self.session_cache_evict(realm_id, session_id);
+                    let _ = self.evict_session_by_policy(realm_id, &cloned, now);
+                    Ok(None)
+                } else {
+                    Ok(Some(cloned))
                 };
             }
         }
@@ -4404,9 +4547,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Cache miss: load from storage and warm the cache on a valid result.
         let session = self.load_session_raw(realm_id, session_id)?;
         match session {
-            Some(s) if s.is_valid(now) => {
+            Some(s) if s.is_valid(now) && !s.is_policy_expired(now) => {
                 self.session_cache_insert(realm_id, &s);
                 Ok(Some(s))
+            }
+            Some(s) if s.is_valid(now) => {
+                // Policy-expired (A-18) — evict lazily.
+                let _ = self.evict_session_by_policy(realm_id, &s, now);
+                Ok(None)
             }
             _ => Ok(None),
         }
@@ -4486,12 +4634,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .load_session_raw(realm_id, session_id)?
             .ok_or(IdentityError::SessionNotFound)?;
 
-        // Cannot refresh a revoked or expired session
-        if !session.is_valid(self.clock.now()) {
+        let now = self.clock.now();
+        // Cannot refresh a revoked, TTL-expired, or A-18 policy-expired session.
+        if !session.is_valid(now) || session.is_policy_expired(now) {
+            if session.is_valid(now) && session.is_policy_expired(now) {
+                let _ = self.evict_session_by_policy(realm_id, &session, now);
+            }
             return Err(IdentityError::SessionNotFound);
         }
 
-        session.refresh(self.clock.now(), self.config.session.ttl_micros);
+        session.refresh(now, self.config.session.ttl_micros);
         self.persist_session(realm_id, &session)?;
 
         self.record_audit(
@@ -5013,6 +5165,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         refresh_token: &str,
         dpop_jkt: Option<&str>,
+        bind_ctx: Option<&RefreshBindContext>,
     ) -> Result<TokenPair, IdentityError> {
         // Verify Ed25519 signature against realm key (with global-key fallback
         // for Phase 0 realms). Rejects forged/tampered tokens at the crypto
@@ -5097,6 +5250,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 now_secs,
                 &claims,
                 dpop_jkt,
+                bind_ctx,
             )
         } else {
             // Legacy path: Phase-0 session tokens (fid == None).
@@ -13077,7 +13231,7 @@ mod tests {
             .issue_token(&forged_claims)
             .expect("issue forged token");
 
-        let result = engine.refresh_tokens(&realm_id, &forged_token, None);
+        let result = engine.refresh_tokens(&realm_id, &forged_token, None, None);
         assert!(
             matches!(result, Err(IdentityError::InvalidToken)),
             "subject/session mismatch must be rejected, got: {result:?}"
@@ -13763,7 +13917,7 @@ mod tests {
 
         // Real refresh works
         engine
-            .refresh_tokens(&realm_id, response.refresh_token(), None)
+            .refresh_tokens(&realm_id, response.refresh_token(), None, None)
             .expect("legitimate refresh should succeed");
 
         // Craft a forged refresh token with a different signing key
@@ -13779,7 +13933,7 @@ mod tests {
             .issue_token(&forged_claims)
             .expect("issue forged refresh");
 
-        let result = engine.refresh_tokens(&realm_id, &forged_token, None);
+        let result = engine.refresh_tokens(&realm_id, &forged_token, None, None);
         assert!(result.is_err(), "forged refresh token must be rejected");
     }
 

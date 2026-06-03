@@ -204,9 +204,15 @@ pub fn find_element_range(
     // corresponding End closes at this depth.
     let mut target_depth: Option<i32> = None;
     let mut target_start: usize = 0;
+    // A-35: cap total element events to prevent resource exhaustion.
+    let mut event_count: usize = 0;
 
     loop {
         let pos_before = reader.buffer_position() as usize;
+        event_count += 1;
+        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
+            return Err(parse_err("XML document exceeds maximum element limit"));
+        }
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 depth += 1;

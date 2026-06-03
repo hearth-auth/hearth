@@ -236,6 +236,11 @@ pub enum IdentityError {
     /// audience, signature, nonce, or lifetime). Intentionally vague
     /// to avoid leaking which check failed to a tampering client.
     FederationTokenVerificationFailed,
+    /// The RFC 9207 `iss` authorization-response parameter was present but
+    /// did not match the expected issuer for this IdP connector.  A mismatch
+    /// signals a potential IdP-mixup attack where an attacker substituted a
+    /// callback from a different authorization server.  Fail-closed.
+    FederationIdpMixup,
     /// The upstream IdP returned `email_verified: false` for an
     /// operation that requires verified email (e.g., auto-linking to an
     /// existing user under `link_existing_accounts: auto`). The flow
@@ -564,6 +569,9 @@ impl fmt::Display for IdentityError {
             Self::FederationTokenVerificationFailed => {
                 write!(f, "federation token verification failed")
             }
+            Self::FederationIdpMixup => {
+                write!(f, "federation IdP-mixup: iss parameter mismatch")
+            }
             Self::FederationEmailNotVerified => {
                 write!(f, "upstream email is not verified")
             }
@@ -781,6 +789,7 @@ impl IdentityError {
             Self::FederationTokenVerificationFailed => {
                 Some("HEARTH_FEDERATION_TOKEN_VERIFICATION_FAILED")
             }
+            Self::FederationIdpMixup => Some("HEARTH_FEDERATION_IDP_MIXUP"),
             Self::FederationEmailNotVerified => Some("HEARTH_FEDERATION_EMAIL_NOT_VERIFIED"),
             Self::FederationLinkConfirmationRequired { .. } => {
                 Some("HEARTH_FEDERATION_LINK_CONFIRMATION_REQUIRED")
@@ -890,6 +899,7 @@ impl std::error::Error for IdentityError {
             | Self::FederationInvalidState
             | Self::FederationUpstreamError { .. }
             | Self::FederationTokenVerificationFailed
+            | Self::FederationIdpMixup
             | Self::FederationEmailNotVerified
             | Self::FederationLinkConfirmationRequired { .. }
             | Self::FederationNotLinked

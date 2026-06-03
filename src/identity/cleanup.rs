@@ -678,6 +678,8 @@ mod tests {
             client_id: None,
             resources: Vec::new(),
             amr_values: Vec::new(),
+            bound_asn: None,
+            ua_hash: None,
         };
 
         let key = keys::encode_grant_family("fid1");
@@ -711,6 +713,8 @@ mod tests {
             client_id: None,
             resources: Vec::new(),
             amr_values: Vec::new(),
+            bound_asn: None,
+            ua_hash: None,
         };
 
         let key = keys::encode_grant_family("fid2");
@@ -744,6 +748,8 @@ mod tests {
             client_id: None,
             resources: Vec::new(),
             amr_values: Vec::new(),
+            bound_asn: None,
+            ua_hash: None,
         };
 
         let key = keys::encode_grant_family("fid3");

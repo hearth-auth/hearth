@@ -34,6 +34,12 @@ pub enum AuditAction {
     /// Metadata carries `user_id`, `count` (sessions revoked), and `trigger`
     /// (e.g. `"set_password"` / `"disable_mfa"` / `"email_change"`).
     SessionsRevoked,
+    /// A session was evicted by a realm-level lifecycle policy (idle or
+    /// absolute timeout). Distinct from [`SessionRevoked`] (user/admin action).
+    ///
+    /// Metadata carries `user_id`, `session_id`, and `reason`
+    /// (`"idle_timeout"` | `"absolute_timeout"`). Fail-open (LogOnly).
+    SessionEvicted,
     /// Tokens were issued for a session.
     TokenIssued,
     /// Tokens were refreshed.
@@ -297,6 +303,7 @@ impl AuditAction {
             Self::CredentialVerified,
             Self::SessionCreated,
             Self::SessionRevoked,
+            Self::SessionEvicted,
             Self::TokenIssued,
             Self::TokenRefreshed,
             Self::RealmCreated,
@@ -389,6 +396,7 @@ impl AuditAction {
             Self::CredentialVerified => "credential_verified",
             Self::SessionCreated => "session_created",
             Self::SessionRevoked => "session_revoked",
+            Self::SessionEvicted => "session_evicted",
             Self::TokenIssued => "token_issued",
             Self::TokenRefreshed => "token_refreshed",
             Self::RealmCreated => "realm_created",
@@ -482,6 +490,7 @@ impl std::str::FromStr for AuditAction {
             "credential_verified" => Ok(Self::CredentialVerified),
             "session_created" => Ok(Self::SessionCreated),
             "session_revoked" => Ok(Self::SessionRevoked),
+            "session_evicted" => Ok(Self::SessionEvicted),
             "token_issued" => Ok(Self::TokenIssued),
             "token_refreshed" => Ok(Self::TokenRefreshed),
             "realm_created" => Ok(Self::RealmCreated),
@@ -653,7 +662,8 @@ impl AuditAction {
             | Self::SmsOtpEnrollmentStarted
             | Self::SmsOtpEnrollmentVerified
             | Self::SmsMfaChallengeSucceeded
-            | Self::SessionLimitEnforced => LogOnly,
+            | Self::SessionLimitEnforced
+            | Self::SessionEvicted => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged

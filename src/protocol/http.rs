@@ -119,6 +119,12 @@ pub struct AppState {
     ///
     /// Controlled by `metrics.enabled` in `hearth.yaml` (default: `true`).
     pub metrics_enabled: bool,
+    /// Optional Bearer token required to access `/metrics` (A-26).
+    ///
+    /// When `Some`, the handler enforces `Authorization: Bearer <token>`
+    /// using constant-time comparison. When `None` the endpoint is
+    /// unauthenticated (operators should firewall or bind to loopback).
+    pub metrics_bearer_token: Option<String>,
     /// Shared admin API rate limiter. Shared between the HTTP and gRPC
     /// admin surfaces so a caller cannot evade the limit by switching
     /// protocols.
@@ -160,6 +166,7 @@ impl AppState {
             webhook: None,
             dev_mode: false,
             metrics_enabled: true,
+            metrics_bearer_token: None,
             admin_rate_limiter: Arc::new(AdminRateLimiter::new()),
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             signing_key_rotation_grace_period_secs: 86_400,
@@ -185,6 +192,7 @@ impl AppState {
             webhook: None,
             dev_mode: true,
             metrics_enabled: true,
+            metrics_bearer_token: None,
             admin_rate_limiter: Arc::new(AdminRateLimiter::new()),
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             signing_key_rotation_grace_period_secs: 86_400,
@@ -211,6 +219,7 @@ impl AppState {
             webhook: None,
             dev_mode: false,
             metrics_enabled: true,
+            metrics_bearer_token: None,
             admin_rate_limiter,
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
             signing_key_rotation_grace_period_secs: 86_400,
@@ -235,6 +244,15 @@ impl AppState {
     /// Sets whether the `/metrics` Prometheus scrape endpoint is exposed.
     pub fn with_metrics_enabled(mut self, enabled: bool) -> Self {
         self.metrics_enabled = enabled;
+        self
+    }
+
+    /// Sets the Bearer token required to access `/metrics` (A-26).
+    ///
+    /// When `Some`, every `/metrics` request must supply a matching
+    /// `Authorization: Bearer <token>` header. Comparison is constant-time.
+    pub fn with_metrics_bearer_token(mut self, token: Option<String>) -> Self {
+        self.metrics_bearer_token = token;
         self
     }
 
@@ -771,6 +789,8 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
         )
         .layer(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
+        // A-26: strip Server: header so the runtime identity is not disclosed.
+        .layer(axum::middleware::from_fn(strip_server_header))
         .with_state(state)
 }
 
@@ -1028,6 +1048,14 @@ pub(crate) async fn track_metrics(request: Request, next: Next) -> Response {
     response
 }
 
+/// A-26: removes the `Server:` response header from every response so the
+/// runtime identity (hyper version, OS) is not disclosed to callers.
+async fn strip_server_header(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().remove(axum::http::header::SERVER);
+    resp
+}
+
 // === Route handlers ===
 
 /// Liveness probe endpoint.
@@ -1070,10 +1098,14 @@ async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// format (version 0.0.4). Operators should point their Prometheus scrape
 /// config at this path.
 ///
-/// No authentication is required by default — operators SHOULD firewall this
-/// endpoint from the public internet if the metric cardinality reveals
-/// sensitive business data (e.g. realm names in label sets).
-async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// When `metrics.bearer_token` is set in `hearth.yaml`, requests must supply
+/// a matching `Authorization: Bearer <token>` header or receive HTTP 401
+/// (A-26). When no token is configured the endpoint is unauthenticated —
+/// operators SHOULD firewall it at the network layer or bind to loopback.
+async fn metrics_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     if !state.metrics_enabled {
         return (
             StatusCode::NOT_FOUND,
@@ -1082,6 +1114,26 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
         )
             .into_response();
     }
+
+    // A-26: enforce Bearer auth when a token is configured (constant-time).
+    if let Some(expected) = &state.metrics_bearer_token {
+        use subtle::ConstantTimeEq as _;
+        let supplied = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let ok: bool = supplied.as_bytes().ct_eq(expected.as_bytes()).into();
+        if !ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                String::new(),
+            )
+                .into_response();
+        }
+    }
+
     let body = crate::metrics::metrics().render();
     (
         StatusCode::OK,
@@ -1629,6 +1681,7 @@ fn identity_error_to_response(
         IdentityError::FederationEmailNotVerified => {
             (StatusCode::FORBIDDEN, "upstream email not verified")
         }
+        IdentityError::FederationIdpMixup => (StatusCode::BAD_REQUEST, "federation IdP mismatch"),
         IdentityError::FederationLinkConfirmationRequired { .. } => {
             // Browser flows redirect to /ui/federation/confirm-link; JSON
             // callers (rare for federation) get a terse 409 so they know
@@ -2289,10 +2342,20 @@ async fn token_exchange_impl(
                     .into_response();
             };
 
-            match state
-                .identity
-                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
-            {
+            let refresh_bind = crate::identity::RefreshBindContext {
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+                asn: None,
+            };
+
+            match state.identity.refresh_tokens(
+                &realm_id,
+                &refresh_token,
+                dpop_jkt.as_deref(),
+                Some(&refresh_bind),
+            ) {
                 Ok(tokens) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -6627,10 +6690,19 @@ async fn realm_token_exchange(
                 )
                     .into_response();
             };
-            match state
-                .identity
-                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
-            {
+            let refresh_bind = crate::identity::RefreshBindContext {
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+                asn: None,
+            };
+            match state.identity.refresh_tokens(
+                &realm_id,
+                &refresh_token,
+                dpop_jkt.as_deref(),
+                Some(&refresh_bind),
+            ) {
                 Ok(tokens) => {
                     let resp = pb::OidcTokenResponse {
                         access_token: tokens.access_token().to_string(),

@@ -24,6 +24,7 @@ pub mod ra_token;
 pub mod reconcile;
 pub mod risk;
 pub mod session_version;
+pub mod sessions;
 pub mod sms;
 pub mod tokens;
 pub(crate) mod totp;
@@ -49,9 +50,9 @@ pub use oidc::{
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
     OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
-    PushedAuthorizationRequest, PushedAuthorizationResponse, RegisterClientRequest, ResponseMode,
-    StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
-    UpdateClientRequest, UserInfoResponse,
+    PushedAuthorizationRequest, PushedAuthorizationResponse, RefreshBindContext,
+    RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest, TokenExchangeRequest,
+    TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest, UserInfoResponse,
 };
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
@@ -520,6 +521,7 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         refresh_token: &str,
         dpop_jkt: Option<&str>,
+        bind_ctx: Option<&RefreshBindContext>,
     ) -> Result<TokenPair, IdentityError>;
 
     /// Returns the JWKS document containing public keys for external verification.

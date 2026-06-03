@@ -13,6 +13,7 @@ use crate::identity::credentials::CleartextPassword;
 use crate::identity::email::stored_templates::LocalizedEmailTemplate;
 use crate::identity::email::EmailBranding;
 use crate::identity::federation::LinkMode;
+use crate::identity::risk::RiskScorerConfig;
 use crate::rbac::{Group, PermissionDefinition, ProtectedResource, Role, ScopeBundle};
 
 /// A cursor-based page of results.
@@ -365,6 +366,15 @@ pub struct Session {
     user_agent_raw: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device_label: Option<String>,
+    /// Deadline after which the session is idle-expired (A-18).
+    /// Stored in the session record so `get_session` avoids a realm lookup on
+    /// every access. Reset on each `refresh()`. `None` = no idle timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) idle_deadline: Option<Timestamp>,
+    /// Hard absolute expiry deadline set at creation time (A-18).
+    /// Never updated on refresh. `None` = no absolute timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) absolute_deadline: Option<Timestamp>,
 }
 
 impl Session {
@@ -375,7 +385,12 @@ impl Session {
         created_at: Timestamp,
         expires_at: Timestamp,
         context: &SessionContext,
+        idle_timeout_secs: Option<u32>,
+        absolute_timeout_secs: Option<u32>,
     ) -> Self {
+        let idle_deadline = idle_timeout_secs.map(|s| created_at.add_micros(s as i64 * 1_000_000));
+        let absolute_deadline =
+            absolute_timeout_secs.map(|s| created_at.add_micros(s as i64 * 1_000_000));
         Self {
             id,
             user_id,
@@ -386,6 +401,8 @@ impl Session {
             ip_address: context.ip_address.clone(),
             user_agent_raw: context.user_agent_raw.clone(),
             device_label: context.device_label.clone(),
+            idle_deadline,
+            absolute_deadline,
         }
     }
 
@@ -429,10 +446,37 @@ impl Session {
         self.revoked = true;
     }
 
-    /// Refreshes the session by extending the TTL.
+    /// Refreshes the session by extending the TTL and resetting the idle deadline.
     pub(crate) fn refresh(&mut self, now: Timestamp, ttl_micros: i64) {
+        // Recover idle window BEFORE overwriting last_refreshed_at.
+        let new_idle = self.idle_deadline.map(|deadline| {
+            let window = deadline.as_micros() - self.last_refreshed_at.as_micros();
+            now.add_micros(window)
+        });
         self.expires_at = now.add_micros(ttl_micros);
         self.last_refreshed_at = now;
+        if let Some(d) = new_idle {
+            self.idle_deadline = Some(d);
+        }
+        // absolute_deadline is intentionally NOT updated — it is a hard cap.
+    }
+
+    /// Returns `true` if the session has exceeded its idle or absolute timeout
+    /// policy (A-18). Does NOT check the standard TTL (`is_valid`).
+    pub(crate) fn is_policy_expired(&self, now: Timestamp) -> bool {
+        self.idle_deadline.map_or(false, |d| now >= d)
+            || self.absolute_deadline.map_or(false, |d| now >= d)
+    }
+
+    /// Returns the eviction reason string for audit metadata.
+    pub(crate) fn policy_expiry_reason(&self, now: Timestamp) -> Option<&'static str> {
+        if self.idle_deadline.map_or(false, |d| now >= d) {
+            return Some("idle_timeout");
+        }
+        if self.absolute_deadline.map_or(false, |d| now >= d) {
+            return Some("absolute_timeout");
+        }
+        None
     }
 
     /// Returns the client IP address captured at session creation, if available.
@@ -878,6 +922,24 @@ pub struct RealmConfig {
     /// `None` (default) means standard OAuth 2.0 / OIDC rules apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fapi_profile: Option<FapiProfile>,
+    /// Idle session timeout in seconds (A-18).
+    ///
+    /// A session whose `last_refreshed_at` is older than this window is evicted
+    /// on next access and by the background session reaper. `None` = no idle
+    /// timeout (fail-open; standard TTL governs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u32>,
+    /// Absolute session lifetime cap in seconds (A-18).
+    ///
+    /// A session older than this is evicted regardless of recent activity.
+    /// `None` = no hard cap (fail-open; standard TTL governs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_timeout_secs: Option<u32>,
+    /// Per-realm risk scorer configuration (A-11 / A-49).
+    ///
+    /// `None` → scorer disabled (fail-open per §6.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_scorer_config: Option<RiskScorerConfig>,
 }
 
 /// FAPI 2.0 Security Profile enforcement level.

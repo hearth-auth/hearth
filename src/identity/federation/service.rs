@@ -16,7 +16,7 @@ use crate::core::{IdpId, RealmId, Timestamp, UserId};
 use crate::identity::federation::connector::{AuthorizeUrl, IdpConnector};
 use crate::identity::federation::github::GithubConnector;
 use crate::identity::federation::http::FederationHttpTransport;
-use crate::identity::federation::oidc::GenericOidcConnector;
+use crate::identity::federation::oidc::{verify_iss_param, GenericOidcConnector};
 use crate::identity::federation::state::{
     generate_nonce, generate_pkce_verifier, generate_state_token,
 };
@@ -82,13 +82,16 @@ impl FederationService {
 
     /// Builds and persists a state bag, returning the authorize URL
     /// to redirect the browser to.
+    /// Builds and persists a state bag, returning the authorize URL and the raw
+    /// `state_token`.  The caller plants `HMAC(cookie_secret, state_token)` as
+    /// the `hearth_fed_bind` cookie (A-48) and verifies it at callback.
     pub fn begin(
         &self,
         realm_id: &RealmId,
         idp_name: &str,
         return_to: &str,
         now: Timestamp,
-    ) -> Result<AuthorizeUrl, IdentityError> {
+    ) -> Result<(AuthorizeUrl, String), IdentityError> {
         let cfg = self
             .engine
             .get_idp_by_name(realm_id, idp_name)?
@@ -103,8 +106,10 @@ impl FederationService {
             return_to: return_to.to_string(),
             expires_at: Timestamp::from_micros(now.as_micros() + FED_STATE_TTL_MICROS),
         };
+        let state_token = bag.state_token.clone();
         self.engine.put_federation_state(&bag)?;
-        self.connector_for(&cfg)?.begin(&bag)
+        let url = self.connector_for(&cfg)?.begin(&bag)?;
+        Ok((url, state_token))
     }
 
     /// Completes a callback round-trip.
@@ -117,11 +122,16 @@ impl FederationService {
     /// The upstream token exchange (`connector.exchange`) runs on the
     /// blocking thread pool via `spawn_blocking` so the ureq HTTP call
     /// does not occupy the async executor thread.
+    /// `iss_hint` is the RFC 9207 `iss` query parameter from the authorization
+    /// server's redirect.  If `Some`, it MUST match the configured issuer for
+    /// the IdP referenced by `state_token`.  If `None`, the check is skipped
+    /// (fail-open — not all authorization servers send it).
     pub async fn callback(
         &self,
         realm_id: &RealmId,
         state_token: &str,
         code: &str,
+        iss_hint: Option<&str>,
         link_mode: LinkMode,
         now: Timestamp,
     ) -> Result<(StateBag, FederationOutcome), IdentityError> {
@@ -130,6 +140,10 @@ impl FederationService {
             .engine
             .get_idp(realm_id, &bag.idp_id)?
             .ok_or(IdentityError::FederationUnknownConnector)?;
+
+        // A-29: RFC 9207 IdP-mixup defense.
+        verify_iss_param(iss_hint, &cfg.issuer)?;
+
         let connector = self.connector_for(&cfg)?;
 
         // ureq is a blocking client; run it on the blocking thread pool

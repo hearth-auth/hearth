@@ -81,6 +81,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::FederationUnknownConnector
         | IdentityError::FederationInvalidState
         | IdentityError::FederationTokenVerificationFailed
+        | IdentityError::FederationIdpMixup
         | IdentityError::FederationEmailNotVerified
         | IdentityError::FederationLinkConfirmationRequired { .. }
         | IdentityError::WebAuthnRegistrationFailed { .. }

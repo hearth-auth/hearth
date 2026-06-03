@@ -667,7 +667,7 @@ async fn fapi2_token03_refresh_no_dpop_rejected() {
     // Attempt refresh WITHOUT DPoP — must be rejected for FAPI2 clients.
     let err = h
         .identity()
-        .refresh_tokens(&realm, initial_tokens.refresh_token(), None)
+        .refresh_tokens(&realm, initial_tokens.refresh_token(), None, None)
         .expect_err("FAPI2 refresh without DPoP must fail");
 
     assert!(
@@ -734,6 +734,7 @@ async fn fapi2_token04_refresh_with_dpop_accepted() {
             &realm,
             initial_tokens.refresh_token(),
             Some(REFRESH_THUMBPRINT),
+            None,
         )
         .expect("FAPI2 refresh with DPoP must succeed");
 
@@ -807,7 +808,7 @@ async fn fapi2_std02_standard_refresh_without_dpop_succeeds() {
     // Refresh without DPoP — allowed for standard clients.
     let refreshed = h
         .identity()
-        .refresh_tokens(&realm, initial_tokens.refresh_token(), None)
+        .refresh_tokens(&realm, initial_tokens.refresh_token(), None, None)
         .expect("standard client refresh without DPoP must succeed");
 
     assert!(

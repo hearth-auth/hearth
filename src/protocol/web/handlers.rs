@@ -2512,7 +2512,10 @@ fn forgot_password_submit_impl(
                     tracing::warn!(error = %e, "forgot_password: failed to send email");
                 }
             } else {
-                tracing::warn!(reset_url = %reset_url, "password reset URL (no email transport configured)");
+                tracing::warn!(
+                    reset_url = %crate::protocol::redact::Redact(&reset_url),
+                    "password reset URL (no email transport configured)"
+                );
             }
         }
         Ok(None) | Err(IdentityError::RateLimited) => {

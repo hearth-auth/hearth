@@ -134,8 +134,16 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
     let mut attr_values: Vec<String> = Vec::new();
     let mut capturing_text: Option<TextTarget> = None;
 
+    // A-35: cap XML event count to prevent resource exhaustion from
+    // crafted responses with thousands of elements (no DTD required).
+    let mut event_count: usize = 0;
+
     loop {
         let ev = reader.read_event_into(&mut buf);
+        event_count += 1;
+        if event_count > crate::abuse::MAX_SAML_XML_EVENTS {
+            return Err(parse_err("SAML response exceeds maximum XML event limit"));
+        }
         match ev {
             Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
                 if is_element(e, ns::SAMLP, "Response") {

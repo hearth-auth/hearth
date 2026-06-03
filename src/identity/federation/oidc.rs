@@ -505,6 +505,28 @@ fn claims_to_identity(claims: &IdTokenClaims, cfg: &IdpConfig) -> ExternalIdenti
     }
 }
 
+/// Validates the optional RFC 9207 `iss` authorization-response parameter.
+///
+/// When an authorization server includes `iss` in the redirect back to the
+/// relying party, the RP MUST validate it matches the configured issuer for
+/// this IdP connector.  A mismatch indicates a potential IdP-mixup attack
+/// where an attacker has substituted a callback (or authorization code) from
+/// a different authorization server.
+///
+/// Fail-closed on mismatch; fail-open on absence — not all authorization
+/// servers send the parameter (RFC 9207 is optional for the AS side).
+pub fn verify_iss_param(
+    iss_hint: Option<&str>,
+    expected_issuer: &str,
+) -> Result<(), IdentityError> {
+    if let Some(iss) = iss_hint {
+        if iss != expected_issuer {
+            return Err(IdentityError::FederationIdpMixup);
+        }
+    }
+    Ok(())
+}
+
 /// Fuzz entry point: attempts to parse arbitrary bytes as an ID token
 /// claims payload. Must never panic, only return `Ok` or `Err`.
 ///

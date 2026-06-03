@@ -1552,6 +1552,7 @@ async fn run_serve(
             )
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
+            .with_metrics_bearer_token(config.metrics.bearer_token.clone())
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret),
@@ -1565,6 +1566,7 @@ async fn run_serve(
             )
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
+            .with_metrics_bearer_token(config.metrics.bearer_token.clone())
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret),

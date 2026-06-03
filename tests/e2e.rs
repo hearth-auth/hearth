@@ -208,7 +208,7 @@ async fn user_lifecycle_register_authenticate_session_token() {
     // 7. Token refresh works
     let refreshed = harness
         .identity()
-        .refresh_tokens(&realm, tokens.refresh_token(), None)
+        .refresh_tokens(&realm, tokens.refresh_token(), None, None)
         .expect("refresh");
     let refreshed_claims = harness
         .identity()

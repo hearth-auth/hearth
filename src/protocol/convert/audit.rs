@@ -100,7 +100,8 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         | domain::AuditAction::SmsMfaLocked
         | domain::AuditAction::DeviceFingerprintsErased
         | domain::AuditAction::SessionLimitEnforced
-        | domain::AuditAction::SessionsRevoked => pb::AuditAction::Unspecified,
+        | domain::AuditAction::SessionsRevoked
+        | domain::AuditAction::SessionEvicted => pb::AuditAction::Unspecified,
     }
 }
 

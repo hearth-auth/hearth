@@ -230,6 +230,17 @@ pub struct MetricsConfig {
     /// collected via a sidecar instead of a direct scrape).
     #[serde(default = "MetricsConfig::default_enabled")]
     pub enabled: bool,
+
+    /// Optional Bearer token required to access the `/metrics` scrape endpoint (A-26).
+    ///
+    /// When set, requests without a matching `Authorization: Bearer <token>`
+    /// header receive HTTP 401. When absent (the default), the endpoint is
+    /// unauthenticated — operators SHOULD firewall it at the network layer or
+    /// bind the server to a loopback / internal address.
+    ///
+    /// Comparison is constant-time to prevent timing-based enumeration.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
 }
 
 impl MetricsConfig {
@@ -242,6 +253,7 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             enabled: Self::default_enabled(),
+            bearer_token: None,
         }
     }
 }
@@ -2162,7 +2174,10 @@ impl RealmYamlConfig {
             session_version: crate::identity::SessionVersionConfig::default(),
             max_concurrent_sessions,
             session_over_limit_policy,
+            idle_timeout_secs: None,
+            absolute_timeout_secs: None,
             fapi_profile,
+            risk_scorer_config: None,
         })
     }
 }
