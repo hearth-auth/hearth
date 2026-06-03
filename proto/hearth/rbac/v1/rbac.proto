@@ -24,7 +24,7 @@ service RbacAdminService {
   }
   rpc UpdateRole(UpdateRoleRequest) returns (Role) {
     option (google.api.http) = {
-      put: "/admin/roles/{role_id}"
+      patch: "/admin/roles/{role_id}"
       body: "*"
     };
   }
@@ -46,7 +46,7 @@ service RbacAdminService {
   }
   rpc UpdateGroup(UpdateGroupRequest) returns (Group) {
     option (google.api.http) = {
-      put: "/admin/groups/{group_id}"
+      patch: "/admin/groups/{group_id}"
       body: "*"
     };
   }

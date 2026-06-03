@@ -1237,6 +1237,36 @@ impl RbacEngine for EmbeddedRbacEngine {
         self.scan_assignments_by_prefix(realm_id, &prefix)
     }
 
+    fn purge_user_from_realm(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), RbacError> {
+        // Remove all direct role assignments where this user is the subject.
+        // Each user-index entry's value is the AssignmentId; mirrors delete_group cascade.
+        let asgn_prefix = keys::assign_user_scan_prefix(user_id);
+        let asgn_end = keys::prefix_end(&asgn_prefix);
+        for e in self.storage.scan(realm_id, &asgn_prefix, &asgn_end)? {
+            let aid: AssignmentId = Self::de(&e.value)?;
+            if let Some(a) = self.load_assignment(realm_id, &aid)? {
+                self.storage
+                    .delete(realm_id, &keys::encode_assignment(&aid))?;
+                self.storage
+                    .delete(realm_id, &keys::encode_assign_role(&a.role_id, &aid))?;
+            }
+            self.storage.delete(realm_id, &e.key)?;
+        }
+
+        // Remove the user from all groups they belong to.
+        let member = GroupMember::User(user_id.clone());
+        let gm_prefix = keys::gm_reverse_scan_prefix(&member);
+        let gm_end = keys::prefix_end(&gm_prefix);
+        for e in self.storage.scan(realm_id, &gm_prefix, &gm_end)? {
+            let group_id: GroupId = Self::de(&e.value)?;
+            self.storage
+                .delete(realm_id, &keys::encode_gm_forward(&group_id, &member))?;
+            self.storage.delete(realm_id, &e.key)?;
+        }
+
+        Ok(())
+    }
+
     fn list_role_members(
         &self,
         realm_id: &RealmId,

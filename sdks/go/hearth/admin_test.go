@@ -144,7 +144,7 @@ func TestAdminGetClient(t *testing.T) {
 
 func TestAdminUpdateClient(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/clients/cl1" || r.Method != "PUT" {
+		if r.URL.Path != "/admin/clients/cl1" || r.Method != "PATCH" {
 			http.NotFound(w, r)
 			return
 		}
@@ -254,7 +254,7 @@ func TestAdminGetRole(t *testing.T) {
 
 func TestAdminUpdateRole(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/roles/role1" || r.Method != "PUT" {
+		if r.URL.Path != "/admin/roles/role1" || r.Method != "PATCH" {
 			http.NotFound(w, r)
 			return
 		}
@@ -364,7 +364,7 @@ func TestAdminGetGroup(t *testing.T) {
 
 func TestAdminUpdateGroup(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/groups/grp1" || r.Method != "PUT" {
+		if r.URL.Path != "/admin/groups/grp1" || r.Method != "PATCH" {
 			http.NotFound(w, r)
 			return
 		}
@@ -474,7 +474,7 @@ func TestAdminGetOrgMember(t *testing.T) {
 
 func TestAdminUpdateOrgMember(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/admin/orgs/org1/members/u1" || r.Method != "PUT" {
+		if r.URL.Path != "/admin/orgs/org1/members/u1" || r.Method != "PATCH" {
 			http.NotFound(w, r)
 			return
 		}

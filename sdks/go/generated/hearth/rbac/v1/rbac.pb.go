@@ -4115,14 +4115,14 @@ const file_hearth_rbac_v1_rbac_proto_rawDesc = "" +
 	"CreateRole\x12!.hearth.rbac.v1.CreateRoleRequest\x1a\x14.hearth.rbac.v1.Role\"\x17\x82\xd3\xe4\x93\x02\x11:\x01*\"\f/admin/roles\x12_\n" +
 	"\aGetRole\x12\x1e.hearth.rbac.v1.GetRoleRequest\x1a\x14.hearth.rbac.v1.Role\"\x1e\x82\xd3\xe4\x93\x02\x18\x12\x16/admin/roles/{role_id}\x12h\n" +
 	"\n" +
-	"UpdateRole\x12!.hearth.rbac.v1.UpdateRoleRequest\x1a\x14.hearth.rbac.v1.Role\"!\x82\xd3\xe4\x93\x02\x1b:\x01*\x1a\x16/admin/roles/{role_id}\x12s\n" +
+	"UpdateRole\x12!.hearth.rbac.v1.UpdateRoleRequest\x1a\x14.hearth.rbac.v1.Role\"!\x82\xd3\xe4\x93\x02\x1b:\x01*2\x16/admin/roles/{role_id}\x12s\n" +
 	"\n" +
 	"DeleteRole\x12!.hearth.rbac.v1.DeleteRoleRequest\x1a\".hearth.rbac.v1.DeleteRoleResponse\"\x1e\x82\xd3\xe4\x93\x02\x18*\x16/admin/roles/{role_id}\x12j\n" +
 	"\n" +
 	"ListGroups\x12!.hearth.rbac.v1.ListGroupsRequest\x1a\".hearth.rbac.v1.ListGroupsResponse\"\x15\x82\xd3\xe4\x93\x02\x0f\x12\r/admin/groups\x12b\n" +
 	"\vCreateGroup\x12\".hearth.rbac.v1.CreateGroupRequest\x1a\x15.hearth.rbac.v1.Group\"\x18\x82\xd3\xe4\x93\x02\x12:\x01*\"\r/admin/groups\x12d\n" +
 	"\bGetGroup\x12\x1f.hearth.rbac.v1.GetGroupRequest\x1a\x15.hearth.rbac.v1.Group\" \x82\xd3\xe4\x93\x02\x1a\x12\x18/admin/groups/{group_id}\x12m\n" +
-	"\vUpdateGroup\x12\".hearth.rbac.v1.UpdateGroupRequest\x1a\x15.hearth.rbac.v1.Group\"#\x82\xd3\xe4\x93\x02\x1d:\x01*\x1a\x18/admin/groups/{group_id}\x12x\n" +
+	"\vUpdateGroup\x12\".hearth.rbac.v1.UpdateGroupRequest\x1a\x15.hearth.rbac.v1.Group\"#\x82\xd3\xe4\x93\x02\x1d:\x01*2\x18/admin/groups/{group_id}\x12x\n" +
 	"\vDeleteGroup\x12\".hearth.rbac.v1.DeleteGroupRequest\x1a#.hearth.rbac.v1.DeleteGroupResponse\" \x82\xd3\xe4\x93\x02\x1a*\x18/admin/groups/{group_id}\x12\x8f\x01\n" +
 	"\x10ListGroupMembers\x12'.hearth.rbac.v1.ListGroupMembersRequest\x1a(.hearth.rbac.v1.ListGroupMembersResponse\"(\x82\xd3\xe4\x93\x02\"\x12 /admin/groups/{group_id}/members\x12\x85\x01\n" +
 	"\x0eAddGroupMember\x12%.hearth.rbac.v1.AddGroupMemberRequest\x1a\x1f.hearth.rbac.v1.GroupMembership\"+\x82\xd3\xe4\x93\x02%:\x01*\" /admin/groups/{group_id}/members\x12\x9e\x01\n" +

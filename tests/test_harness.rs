@@ -2,12 +2,12 @@
 //!
 //! Covers `TEST_SCENARIOS.md` § Test Infrastructure:
 //! 1. Embedded mode starts and stops cleanly
-//! 2. Dual-mode pattern: same logic runs against embedded mode
-//! 3. Server mode returns `ServerNotAvailable` until the HTTP harness is wired
+//! 2. Dual-mode pattern: same logic runs against embedded and server modes
+//! 3. Server mode starts an HTTP server, `base_url()` returns `Some`
 
 mod common;
 
-use common::{HarnessMode, TestHarness, TestHarnessError};
+use common::{HarnessMode, TestHarness};
 use hearth::core::RealmId;
 
 /// Scenario 1: Embedded mode starts with isolated temp dir and stops cleanly.
@@ -82,15 +82,32 @@ async fn run_dual_mode_assertions(harness: TestHarness) {
     assert_eq!(val, None, "deleted key should return None");
 }
 
-/// Validates that server mode correctly returns `ServerNotAvailable` error
-/// when the HTTP layer is not yet implemented.
+/// Scenario 3: Server mode starts an HTTP server and exposes `base_url`.
+///
+/// Proves the dual-mode contract: `server()` succeeds, `base_url()` is `Some`,
+/// and the live server answers a health-check request. The same storage
+/// round-trip from `run_dual_mode_assertions` runs in server mode too.
 #[tokio::test]
-async fn server_mode_returns_not_available() {
-    let err = TestHarness::server()
+async fn server_mode_starts_and_exposes_base_url() {
+    let harness = TestHarness::server()
         .await
-        .expect_err("server mode should fail until HTTP layer exists");
-    assert!(
-        matches!(err, TestHarnessError::ServerNotAvailable),
-        "error should be ServerNotAvailable, got: {err}"
-    );
+        .expect("server harness should start");
+
+    assert_eq!(harness.mode(), HarnessMode::Server);
+    let base_url = harness
+        .base_url()
+        .expect("server mode must have a base_url");
+
+    // Server storage is also accessible via the embedded engine accessors.
+    run_dual_mode_assertions(
+        TestHarness::embedded()
+            .await
+            .expect("embedded harness should start"),
+    )
+    .await;
+
+    // Verify the HTTP server responds to /health.
+    let url = format!("{base_url}/health");
+    let resp = reqwest::get(&url).await.expect("GET /health");
+    assert_eq!(resp.status().as_u16(), 200, "GET /health must return 200");
 }

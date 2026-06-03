@@ -285,6 +285,13 @@ pub trait RbacEngine: Send + Sync {
         limit: usize,
     ) -> Result<Page<RoleSubject>, RbacError>;
 
+    /// Removes all role assignments where this user is the subject, and removes
+    /// the user from all groups within the realm.
+    ///
+    /// Called by the identity layer during `delete_user` to keep RBAC state
+    /// consistent. Idempotent: calling on a user with no assignments is a no-op.
+    fn purge_user_from_realm(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), RbacError>;
+
     // ------- Bootstrap -------
 
     /// Installs the default role, permission, and scope seed for a new realm.

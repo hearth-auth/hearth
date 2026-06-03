@@ -623,32 +623,32 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 
 #### Unit
 
-- [ ] Group nesting: user in `G1 ∈ G2 ∈ G3` resolves to membership in all three `P0` `fast`
-- [ ] Role composition: role with multiple parents unions all ancestor permissions; deduplicates `P0` `fast`
-- [ ] Org-scoped assignment: `scope=Org(oid)` applies only when token carries matching `oid` `P0` `fast`
-- [ ] Scope → permission mapping: realm config defines `scope=docs` → `docs.*`; token request narrows claim set accordingly `P0` `fast`
-- [ ] Declarative YAML reconciliation: realm config with roles/groups/scopes creates or updates storage idempotently on startup `P0` `fast`
+- [x] Group nesting: user in `G1 ∈ G2 ∈ G3` resolves to membership in all three `P0` `fast`
+- [x] Role composition: role with multiple parents unions all ancestor permissions; deduplicates `P0` `fast`
+- [x] Org-scoped assignment: `scope=Org(oid)` applies only when token carries matching `oid` `P0` `fast`
+- [x] Scope → permission mapping: realm config defines `scope=docs` → `docs.*`; token request narrows claim set accordingly `P0` `fast`
+- [x] Declarative YAML reconciliation: realm config with roles/groups/scopes creates or updates storage idempotently on startup `P0` `fast`
 
 #### Integration
 
-- [ ] First-user bootstrap: first user created in a fresh realm receives `realm.admin`; subsequent users get no default assignment `P0` `fast`
-- [ ] `GET /v1/me/permissions` returns live-resolved permission set matching the most recent JWT for the same user `P0` `fast`
-- [ ] User deletion cascades RBAC state: all role assignments and group memberships for the deleted user are purged `P0` `fast`
+- [x] First-user bootstrap: first user created in a fresh realm receives `realm.admin`; subsequent users get no default assignment `P0` `fast`
+- [x] `GET /v1/me/permissions` returns live-resolved permission set matching the most recent JWT for the same user `P0` `fast`
+- [x] User deletion cascades RBAC state: all role assignments and group memberships for the deleted user are purged `P0` `fast`
 
 #### Property
 
-- [ ] Random role-DAG + group-graph combinations produce correct resolved permission sets (`proptest`) `P0` `extended`
-- [ ] Random assign / unassign / add-member / remove-member sequences preserve realm isolation and invariants (`proptest`) `P0` `extended`
+- [x] Random role-DAG + group-graph combinations produce correct resolved permission sets (`proptest`) `P0` `extended`
+- [x] Random assign / unassign / add-member / remove-member sequences preserve realm isolation and invariants (`proptest`) `P0` `extended`
 
 #### Adversarial
 
-- [ ] Reserved-namespace enforcement: operator-created role with `hearth.*` permission rejected at API `P0` `fast`
-- [ ] Size-cap attack: assign enough roles/groups to exceed token size; issuance fails with named limit, no oversize token escapes `P0` `fast`
+- [x] Reserved-namespace enforcement: operator-created role with `hearth.*` permission rejected at API `P0` `fast`
+- [x] Size-cap attack: assign enough roles/groups to exceed token size; issuance fails with named limit, no oversize token escapes `P0` `fast`
 
 #### Benchmark
 
-- [ ] `resolve_permissions` (off hot path, at token issue): p50 < 100 μs, p99 < 1 ms for a typical user (5 roles, 10 groups, 30 permissions) `P0` `standard`
-- [ ] JWT claim lookup (`hasPermission` on a decoded token, hot path-adjacent): p99 < 1 μs `P0` `standard`
+- [x] `resolve_permissions` (off hot path, at token issue): p50 < 100 μs, p99 < 1 ms for a typical user (5 roles, 10 groups, 30 permissions) `P0` `standard`
+- [x] JWT claim lookup (`hasPermission` on a decoded token, hot path-adjacent): p99 < 1 μs `P0` `standard`
 
 ---
 

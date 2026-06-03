@@ -385,10 +385,19 @@ async fn integrity_check_detects_corruption() {
     let (realm, _, _) = seeded_realm(&h);
     let tmp = export_realm_to_file(&h, &realm, &ExportOptions::default());
 
-    // Read raw bytes, flip a byte in the middle of the payload.
+    // Read raw bytes and flip a 256-byte span across the middle of the
+    // payload. A single-byte flip is flaky: it can land in zstd frame
+    // padding or tar trailer bytes that are not part of any tracked
+    // checksum, so verify_checksums would return Ok and the test would
+    // spuriously fail (~5% of runs locally). A wide span virtually
+    // guarantees we corrupt content the decompressor will reproduce
+    // differently or a manifest hash string.
     let mut raw = std::fs::read(tmp.path()).expect("read archive");
     let midpoint = raw.len() / 2;
-    raw[midpoint] ^= 0xFF;
+    let end = (midpoint + 256).min(raw.len());
+    for byte in &mut raw[midpoint..end] {
+        *byte ^= 0xFF;
+    }
 
     let corrupted_tmp = NamedTempFile::new().expect("tempfile");
     std::fs::write(corrupted_tmp.path(), &raw).expect("write corrupted");

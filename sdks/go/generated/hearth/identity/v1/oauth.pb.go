@@ -2204,7 +2204,7 @@ const file_hearth_identity_v1_oauth_proto_rawDesc = "" +
 	"\x10ListApplications\x12+.hearth.identity.v1.ListApplicationsRequest\x1a#.hearth.identity.v1.OAuthClientPage\"\x1b\x82\xd3\xe4\x93\x02\x15\x12\x13/admin/applications\x12\x85\x01\n" +
 	"\x0eGetApplication\x12).hearth.identity.v1.GetApplicationRequest\x1a\x1f.hearth.identity.v1.OAuthClient\"'\x82\xd3\xe4\x93\x02!\x12\x1f/admin/applications/{client_id}\x12\x7f\n" +
 	"\x11CreateApplication\x12).hearth.identity.v1.RegisterClientRequest\x1a\x1f.hearth.identity.v1.OAuthClient\"\x1e\x82\xd3\xe4\x93\x02\x18:\x01*\"\x13/admin/applications\x12\x8e\x01\n" +
-	"\x11UpdateApplication\x12).hearth.identity.v1.UpdateApplicationCall\x1a\x1f.hearth.identity.v1.OAuthClient\"-\x82\xd3\xe4\x93\x02':\x04body\x1a\x1f/admin/applications/{client_id}\x12\x8a\x01\n" +
+	"\x11UpdateApplication\x12).hearth.identity.v1.UpdateApplicationCall\x1a\x1f.hearth.identity.v1.OAuthClient\"-\x82\xd3\xe4\x93\x02':\x04body2\x1f/admin/applications/{client_id}\x12\x8a\x01\n" +
 	"\x11DeleteApplication\x12,.hearth.identity.v1.DeleteApplicationRequest\x1a\x1e.hearth.identity.v1.OAuthEmpty\"'\x82\xd3\xe4\x93\x02!*\x1f/admin/applications/{client_id}2\xef\a\n" +
 	"\fOAuthService\x12w\n" +
 	"\tAuthorize\x12(.hearth.identity.v1.AuthorizationRequest\x1a).hearth.identity.v1.AuthorizationResponse\"\x15\x82\xd3\xe4\x93\x02\x0f:\x01*\"\n" +

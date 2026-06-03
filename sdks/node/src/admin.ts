@@ -87,7 +87,7 @@ export class AdminClient {
 
   /** Update a user by ID. */
   async updateUser(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PUT", this.buildUrl(`/admin/users/${id}`), params);
+    return this.request("PATCH", this.buildUrl(`/admin/users/${id}`), params);
   }
 
   /** Delete a user by ID. */
@@ -115,7 +115,7 @@ export class AdminClient {
 
   /** Update a realm by ID. */
   async updateRealm(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PUT", this.buildUrl(`/admin/realms/${id}`), params);
+    return this.request("PATCH", this.buildUrl(`/admin/realms/${id}`), params);
   }
 
   /** Delete a realm by ID. */
@@ -143,7 +143,7 @@ export class AdminClient {
 
   /** Update an OAuth client by ID. */
   async updateClient(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PUT", this.buildUrl(`/admin/clients/${id}`), params);
+    return this.request("PATCH", this.buildUrl(`/admin/clients/${id}`), params);
   }
 
   /** Delete an OAuth client by ID. */
@@ -171,7 +171,7 @@ export class AdminClient {
 
   /** Update a role by ID. */
   async updateRole(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PUT", this.buildUrl(`/admin/roles/${id}`), params);
+    return this.request("PATCH", this.buildUrl(`/admin/roles/${id}`), params);
   }
 
   /** Delete a role by ID. */
@@ -199,7 +199,7 @@ export class AdminClient {
 
   /** Update a group by ID. */
   async updateGroup(id: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return this.request("PUT", this.buildUrl(`/admin/groups/${id}`), params);
+    return this.request("PATCH", this.buildUrl(`/admin/groups/${id}`), params);
   }
 
   /** Delete a group by ID. */

@@ -59,7 +59,6 @@ fn make_engine() -> (tempfile::TempDir, EmbeddedStorageEngine, RealmId) {
     let config = StorageConfig::production(
         dir.path().to_path_buf(),
         64 * 1024 * 1024, // 64 MiB WAL
-        false,            // no fsync in bench
         64 * 1024 * 1024, // 64 MiB memtable flush threshold
         HOT_TIER_CAPACITY,
     );

@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::core::{Clock, FakeClock, RealmId, Timestamp};
+use hearth::core::{Clock, FakeClock, Timestamp};
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
     IdentityConfig, IdentityEngine, SessionContext,

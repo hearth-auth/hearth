@@ -441,6 +441,47 @@ impl Default for DPopJtiCache {
     }
 }
 
+// ===== DPoP processor =====
+
+/// Encapsulates DPoP state (replay cache + nonce secret) that belongs in the
+/// identity layer rather than the HTTP protocol layer.
+///
+/// The protocol layer holds an `Arc<DPopProcessor>` and delegates all DPoP
+/// enforcement through this type — keeping the HTTP adapter thin and stateless.
+pub struct DPopProcessor {
+    jti_cache: DPopJtiCache,
+    nonce_secret: [u8; 32],
+}
+
+impl DPopProcessor {
+    /// Creates a new processor with the given HMAC nonce secret.
+    #[must_use]
+    pub fn new(nonce_secret: [u8; 32]) -> Self {
+        Self {
+            jti_cache: DPopJtiCache::new(),
+            nonce_secret,
+        }
+    }
+
+    /// Returns the current DPoP nonce for inclusion in the `DPoP-Nonce` response header.
+    #[must_use]
+    pub fn current_nonce(&self, now_secs: i64) -> String {
+        current_dpop_nonce(&self.nonce_secret, now_secs)
+    }
+
+    /// Returns `true` if the client-supplied nonce matches the current or previous window.
+    #[must_use]
+    pub fn is_valid_nonce(&self, nonce: &str, now_secs: i64) -> bool {
+        is_valid_dpop_nonce(&self.nonce_secret, nonce, now_secs)
+    }
+
+    /// Records `jti` in the replay cache. Returns `Err(DPopProofReplay)` on replay.
+    pub fn check_and_insert_jti(&self, jti: &str, now_secs: i64) -> Result<(), IdentityError> {
+        self.jti_cache
+            .check_and_insert(jti, now_secs, DPOP_MAX_AGE_SECS)
+    }
+}
+
 // ===== Unit tests =====
 
 #[cfg(test)]

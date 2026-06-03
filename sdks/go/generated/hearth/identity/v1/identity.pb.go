@@ -2181,7 +2181,7 @@ const file_hearth_identity_v1_identity_proto_rawDesc = "" +
 	"ListRealms\x12%.hearth.identity.v1.ListRealmsRequest\x1a\x1d.hearth.identity.v1.RealmPage\"\x15\x82\xd3\xe4\x93\x02\x0f\x12\r/admin/realms\x12f\n" +
 	"\bGetRealm\x12#.hearth.identity.v1.GetRealmRequest\x1a\x19.hearth.identity.v1.Realm\"\x1a\x82\xd3\xe4\x93\x02\x14\x12\x12/admin/realms/{id}\x12j\n" +
 	"\vCreateRealm\x12&.hearth.identity.v1.CreateRealmRequest\x1a\x19.hearth.identity.v1.Realm\"\x18\x82\xd3\xe4\x93\x02\x12:\x01*\"\r/admin/realms\x12o\n" +
-	"\vUpdateRealm\x12#.hearth.identity.v1.UpdateRealmCall\x1a\x19.hearth.identity.v1.Realm\" \x82\xd3\xe4\x93\x02\x1a:\x04body\x1a\x12/admin/realms/{id}\x12l\n" +
+	"\vUpdateRealm\x12#.hearth.identity.v1.UpdateRealmCall\x1a\x19.hearth.identity.v1.Realm\" \x82\xd3\xe4\x93\x02\x1a:\x04body2\x12/admin/realms/{id}\x12l\n" +
 	"\vDeleteRealm\x12&.hearth.identity.v1.DeleteRealmRequest\x1a\x19.hearth.identity.v1.Empty\"\x1a\x82\xd3\xe4\x93\x02\x14*\x12/admin/realms/{id}\x12g\n" +
 	"\x11ListOrganizations\x12,.hearth.identity.v1.ListOrganizationsRequest\x1a$.hearth.identity.v1.OrganizationPage\x12_\n" +
 	"\x0fGetOrganization\x12*.hearth.identity.v1.GetOrganizationRequest\x1a .hearth.identity.v1.Organization\x12e\n" +

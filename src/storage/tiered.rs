@@ -9,9 +9,11 @@
 //! - On read hit: set `reference_bit` = true (atomic store, no lock).
 //! - Clock hand sweeps entries: `ref_bit`=0 → evict; `ref_bit`=1 → clear, advance.
 
-use std::collections::HashMap;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+use hashbrown::HashMap;
 
 use arc_swap::ArcSwap;
 
@@ -20,15 +22,15 @@ use crate::storage::memtable::CompositeKey;
 
 /// A single entry in the hot tier.
 pub(crate) struct HotEntry {
-    /// The cached value bytes.
-    value: Vec<u8>,
+    /// The cached value bytes — shared cheaply via Arc on cache hits.
+    value: Arc<[u8]>,
     /// Clock reference bit: set on access, cleared during sweep.
     reference_bit: AtomicBool,
 }
 
 impl HotEntry {
     /// Creates a new hot entry with the reference bit set (just accessed).
-    fn new(value: Vec<u8>) -> Self {
+    fn new(value: Arc<[u8]>) -> Self {
         Self {
             value,
             reference_bit: AtomicBool::new(true),
@@ -40,7 +42,7 @@ impl HotEntry {
 impl Clone for HotEntry {
     fn clone(&self) -> Self {
         Self {
-            value: self.value.clone(),
+            value: Arc::clone(&self.value),
             reference_bit: AtomicBool::new(self.reference_bit.load(Ordering::Relaxed)),
         }
     }
@@ -94,14 +96,29 @@ impl HotTier {
     /// Lock-free read from the hot tier. Returns `None` if not cached.
     ///
     /// On hit, sets the reference bit to protect the entry from eviction.
-    pub(crate) fn get(&self, realm_id: &RealmId, key: &[u8]) -> Option<Vec<u8>> {
-        let composite = CompositeKey::new(realm_id.clone(), key.to_vec());
+    /// Returns `Arc<[u8]>` so callers avoid a heap allocation on every cache
+    /// hit — Arc clone is an atomic refcount increment with no malloc.
+    pub(crate) fn get(&self, realm_id: &RealmId, key: &[u8]) -> Option<Arc<[u8]>> {
         let snapshot = self.data.load();
-        snapshot.get(&composite).map(|entry| {
-            // Mark as recently accessed — protects from next sweep
-            entry.reference_bit.store(true, Ordering::Relaxed);
-            entry.value.clone()
-        })
+
+        // Build the hash that matches CompositeKey's derived Hash impl
+        // (fields hashed in declaration order: realm_id then key).
+        // This avoids allocating a CompositeKey just for the lookup.
+        let hash = {
+            let mut hasher = snapshot.hasher().build_hasher();
+            realm_id.hash(&mut hasher);
+            key.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        snapshot
+            .raw_entry()
+            .from_hash(hash, |k| k.realm_id() == realm_id && k.key() == key)
+            .map(|(_, entry)| {
+                // Mark as recently accessed — protects from next sweep
+                entry.reference_bit.store(true, Ordering::Relaxed);
+                Arc::clone(&entry.value)
+            })
     }
 
     /// Promotes a key-value pair into the hot tier.
@@ -120,7 +137,7 @@ impl HotTier {
         // If already present, just update the value and set ref bit
         if current.contains_key(&composite) {
             let mut new_map = (*current).clone();
-            new_map.insert(composite, HotEntry::new(value.to_vec()));
+            new_map.insert(composite, HotEntry::new(Arc::from(value)));
             self.data.store(Arc::new(new_map));
             return;
         }
@@ -131,7 +148,7 @@ impl HotTier {
             self.evict_locked(&mut new_map);
         }
 
-        new_map.insert(composite, HotEntry::new(value.to_vec()));
+        new_map.insert(composite, HotEntry::new(Arc::from(value)));
         self.data.store(Arc::new(new_map));
     }
 
@@ -297,7 +314,7 @@ mod tests {
 
         // Read it (sets reference bit)
         let val = tier.get(&realm, b"key1");
-        assert_eq!(val, Some(b"value1".to_vec()));
+        assert_eq!(val.as_deref(), Some(b"value1" as &[u8]));
 
         // Sweep — should NOT evict because reference bit is set
         let evicted = tier.clock_sweep_step();
@@ -305,8 +322,8 @@ mod tests {
         // Second read should still find the entry
         let val = tier.get(&realm, b"key1");
         assert_eq!(
-            val,
-            Some(b"value1".to_vec()),
+            val.as_deref(),
+            Some(b"value1" as &[u8]),
             "entry should survive sweep after read"
         );
 
@@ -424,10 +441,10 @@ mod tests {
         let realm = RealmId::generate();
 
         tier.promote(&realm, b"key1", b"old");
-        assert_eq!(tier.get(&realm, b"key1"), Some(b"old".to_vec()));
+        assert_eq!(tier.get(&realm, b"key1").as_deref(), Some(b"old" as &[u8]));
 
         tier.promote(&realm, b"key1", b"new");
-        assert_eq!(tier.get(&realm, b"key1"), Some(b"new".to_vec()));
+        assert_eq!(tier.get(&realm, b"key1").as_deref(), Some(b"new" as &[u8]));
         assert_eq!(tier.len(), 1, "update should not add a second entry");
     }
 
@@ -468,8 +485,14 @@ mod tests {
         tier.promote(&realm_a, b"shared_key", b"value-a");
         tier.promote(&realm_b, b"shared_key", b"value-b");
 
-        assert_eq!(tier.get(&realm_a, b"shared_key"), Some(b"value-a".to_vec()));
-        assert_eq!(tier.get(&realm_b, b"shared_key"), Some(b"value-b".to_vec()));
+        assert_eq!(
+            tier.get(&realm_a, b"shared_key").as_deref(),
+            Some(b"value-a" as &[u8])
+        );
+        assert_eq!(
+            tier.get(&realm_b, b"shared_key").as_deref(),
+            Some(b"value-b" as &[u8])
+        );
         assert_eq!(tier.len(), 2);
     }
 
@@ -536,7 +559,7 @@ mod tests {
                         if let Some(val) = &tier_val {
                             // If hot tier returns a value, it must match oracle
                             if let Some(oracle_val) = oracle.get(k) {
-                                prop_assert_eq!(val, oracle_val,
+                                prop_assert_eq!(val.as_ref(), oracle_val.as_slice(),
                                     "hot tier returned wrong value for key {:?}", k);
                             }
                         }

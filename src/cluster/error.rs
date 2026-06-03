@@ -3,6 +3,7 @@
 use std::fmt;
 
 /// Error produced by the Hearth peer transport.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum TransportError {
     /// gRPC channel could not be established (e.g. connection refused, DNS failure).

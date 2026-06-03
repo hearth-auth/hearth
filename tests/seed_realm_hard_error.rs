@@ -334,6 +334,10 @@ impl RbacEngine for FailSeedRbac {
     fn export_all_assignments(&self, realm_id: &RealmId) -> Result<Vec<RoleAssignment>, RbacError> {
         self.inner.export_all_assignments(realm_id)
     }
+
+    fn purge_user_from_realm(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), RbacError> {
+        self.inner.purge_user_from_realm(realm_id, user_id)
+    }
 }
 
 /// `create_realm` must return `Status::INTERNAL` when `seed_realm` fails,

@@ -18,7 +18,6 @@ use axum::middleware::Next;
 use axum::response::Redirect;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use reqwest::Client as HttpClient;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -129,10 +128,9 @@ pub struct AppState {
     /// When `None`, all `/admin/cluster/*` endpoints return `503 Service
     /// Unavailable` rather than panicking.
     pub cluster: Option<Arc<ClusterEngine>>,
-    /// In-memory JTI replay cache for DPoP proofs (RFC 9449 §11.1).
-    pub dpop_jti_cache: Arc<crate::identity::dpop::DPopJtiCache>,
-    /// 32-byte HMAC secret for stateless DPoP nonce generation.
-    pub dpop_nonce_secret: [u8; 32],
+    /// DPoP state (replay-cache + nonce secret). Lives in the identity layer
+    /// and is shared across all request handlers via `Arc`.
+    pub dpop: Arc<crate::identity::dpop::DPopProcessor>,
 }
 
 impl AppState {
@@ -154,8 +152,8 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
-            dpop_jti_cache: Arc::new(crate::identity::dpop::DPopJtiCache::new()),
-            dpop_nonce_secret: [0u8; 32], // overridden in production via config
+            // zero key is overridden in production via with_dpop_nonce_secret
+            dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
         }
     }
 
@@ -179,8 +177,7 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
-            dpop_jti_cache: Arc::new(crate::identity::dpop::DPopJtiCache::new()),
-            dpop_nonce_secret: [0u8; 32],
+            dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
         }
     }
 
@@ -206,8 +203,7 @@ impl AppState {
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
-            dpop_jti_cache: Arc::new(crate::identity::dpop::DPopJtiCache::new()),
-            dpop_nonce_secret: [0u8; 32],
+            dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
         }
     }
 
@@ -246,7 +242,7 @@ impl AppState {
     /// **Must be called before serving any requests.** The zero key `[0u8; 32]`
     /// is rejected at startup by an assertion in `main.rs`.
     pub fn with_dpop_nonce_secret(mut self, secret: [u8; 32]) -> Self {
-        self.dpop_nonce_secret = secret;
+        self.dpop = Arc::new(crate::identity::dpop::DPopProcessor::new(secret));
         self
     }
 }
@@ -471,7 +467,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/realms/{id}",
             axum::routing::get(admin_get_realm)
-                .put(admin_update_realm)
+                .patch(admin_update_realm)
                 .delete(admin_delete_realm),
         )
         .route(
@@ -499,7 +495,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/applications/{id}",
             axum::routing::get(admin_get_client)
-                .put(admin_update_client)
+                .patch(admin_update_client)
                 .delete(admin_delete_client),
         )
         .route(
@@ -522,7 +518,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/roles/{id}",
             axum::routing::get(admin_get_role)
-                .put(admin_update_role)
+                .patch(admin_update_role)
                 .delete(admin_delete_role),
         )
         .route(
@@ -532,7 +528,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/groups/{id}",
             axum::routing::get(admin_get_group)
-                .put(admin_update_group)
+                .patch(admin_update_group)
                 .delete(admin_delete_group),
         )
         .route(
@@ -951,8 +947,13 @@ pub async fn serve_redirect(
 /// use numeric JSON values, so this helper post-processes the serialized
 /// JSON to convert string-encoded integers back to numbers.
 fn proto_to_rest_json<T: Serialize>(value: &T) -> serde_json::Value {
-    let v = serde_json::to_value(value).unwrap_or_default();
-    coerce_string_ints(v)
+    match serde_json::to_value(value) {
+        Ok(v) => coerce_string_ints(v),
+        Err(e) => {
+            tracing::error!(error = %e, "proto serialization failed");
+            serde_json::Value::Null
+        }
+    }
 }
 
 /// Recursively converts string values that represent integers to JSON numbers.
@@ -1662,10 +1663,7 @@ fn identity_error_to_response(
         IdentityError::PasswordCompromised => {
             (StatusCode::UNPROCESSABLE_ENTITY, "password_compromised")
         }
-        IdentityError::AuditFailure { .. } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal error: audit record failed",
-        ),
+        IdentityError::AuditFailure { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
         IdentityError::StepUpChallengeRequired => (StatusCode::UNAUTHORIZED, "mfa_required"),
         IdentityError::EnrollMfaRequired => (StatusCode::FORBIDDEN, "mfa_enrollment_required"),
@@ -2123,7 +2121,7 @@ async fn token_exchange(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let nonce = crate::identity::dpop::current_dpop_nonce(&state.dpop_nonce_secret, now_secs);
+    let nonce = state.dpop.current_nonce(now_secs);
     if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
         resp.headers_mut().insert("DPoP-Nonce", val);
     }
@@ -2190,22 +2188,14 @@ async fn token_exchange_impl(
             ) {
                 Ok(validated) => {
                     if let Some(ref nonce) = validated.nonce {
-                        if !crate::identity::dpop::is_valid_dpop_nonce(
-                            &state.dpop_nonce_secret,
-                            nonce,
-                            now_secs,
-                        ) {
+                        if !state.dpop.is_valid_nonce(nonce, now_secs) {
                             return identity_error_to_response(
                                 &crate::identity::error::IdentityError::DPopNonceInvalid,
                             )
                             .into_response();
                         }
                     }
-                    if let Err(e) = state.dpop_jti_cache.check_and_insert(
-                        &validated.jti,
-                        now_secs,
-                        crate::identity::dpop::DPOP_MAX_AGE_SECS,
-                    ) {
+                    if let Err(e) = state.dpop.check_and_insert_jti(&validated.jti, now_secs) {
                         return identity_error_to_response(&e).into_response();
                     }
                     Some(validated.jkt)
@@ -2412,7 +2402,19 @@ async fn token_exchange_impl(
                     .map(str::to_string),
             };
             let realm_str = realm_id.as_uuid().to_string();
-            match state.identity.password_grant_token(&realm_id, &request) {
+            let identity = Arc::clone(&state.identity);
+            let realm_id_2 = realm_id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                identity.password_grant_token(&realm_id_2, &request)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "password_grant spawn_blocking panicked");
+                Err(crate::identity::IdentityError::Internal {
+                    reason: e.to_string(),
+                })
+            });
+            match result {
                 Ok(response) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -6523,22 +6525,14 @@ async fn realm_token_exchange(
             ) {
                 Ok(validated) => {
                     if let Some(ref nonce) = validated.nonce {
-                        if !crate::identity::dpop::is_valid_dpop_nonce(
-                            &state.dpop_nonce_secret,
-                            nonce,
-                            now_secs,
-                        ) {
+                        if !state.dpop.is_valid_nonce(nonce, now_secs) {
                             return identity_error_to_response(
                                 &crate::identity::error::IdentityError::DPopNonceInvalid,
                             )
                             .into_response();
                         }
                     }
-                    if let Err(e) = state.dpop_jti_cache.check_and_insert(
-                        &validated.jti,
-                        now_secs,
-                        crate::identity::dpop::DPOP_MAX_AGE_SECS,
-                    ) {
+                    if let Err(e) = state.dpop.check_and_insert_jti(&validated.jti, now_secs) {
                         return identity_error_to_response(&e).into_response();
                     }
                     Some(validated.jkt)
@@ -6701,7 +6695,19 @@ async fn realm_token_exchange(
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string),
             };
-            match state.identity.password_grant_token(&realm_id, &request) {
+            let identity = Arc::clone(&state.identity);
+            let realm_id_2 = realm_id.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                identity.password_grant_token(&realm_id_2, &request)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "password_grant spawn_blocking panicked");
+                Err(crate::identity::IdentityError::Internal {
+                    reason: e.to_string(),
+                })
+            });
+            match result {
                 Ok(response) => (
                     StatusCode::OK,
                     Json(serde_json::json!({
@@ -6822,7 +6828,7 @@ async fn realm_token_exchange(
     };
 
     // RFC 9449 §9: always return DPoP-Nonce so clients can use it in the next proof.
-    let nonce = crate::identity::dpop::current_dpop_nonce(&state.dpop_nonce_secret, now_secs);
+    let nonce = state.dpop.current_nonce(now_secs);
     if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
         resp.headers_mut().insert("DPoP-Nonce", val);
     }
@@ -7841,6 +7847,7 @@ struct EndSessionParams {
 ///
 /// All parameters are optional; when neither `id_token_hint` nor a session
 /// can be inferred, the endpoint returns 400.
+#[allow(clippy::too_many_lines)]
 async fn end_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -7882,19 +7889,27 @@ async fn end_session(
     };
 
     // Fan out back-channel logout notifications asynchronously (fire-and-forget).
+    // ureq is a blocking client; run each POST on the blocking thread pool.
     for target in result.backchannel_targets {
         tokio::spawn(async move {
-            let client = HttpClient::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_default();
-            let outcome = client
-                .post(&target.uri)
-                .form(&[("logout_token", &target.logout_token)])
-                .send()
-                .await;
-            if let Err(e) = outcome {
-                tracing::warn!(uri = %target.uri, error = %e, "backchannel logout delivery failed");
+            let uri = target.uri.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                let body = form_urlencoded::Serializer::new(String::new())
+                    .append_pair("logout_token", &target.logout_token)
+                    .finish();
+                ureq::post(&target.uri)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .send(body.as_bytes())
+            })
+            .await;
+            match outcome {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(uri = %uri, error = %e, "backchannel logout delivery failed");
+                }
+                Err(e) => {
+                    tracing::warn!(uri = %uri, error = %e, "backchannel logout spawn_blocking panicked");
+                }
             }
         });
     }

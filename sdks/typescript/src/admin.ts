@@ -50,7 +50,7 @@ export class AdminClient {
 
   /** PUT /admin/users/:id — update a user. */
   async updateUser(userId: string, params: UpdateUserParams): Promise<User> {
-    return this.request("PUT", `/admin/users/${userId}`, {
+    return this.request("PATCH", `/admin/users/${userId}`, {
       email: params.email,
       display_name: params.displayName,
       status: params.status,
@@ -99,7 +99,7 @@ export class AdminClient {
     realmId: string,
     params: UpdateRealmParams,
   ): Promise<Realm> {
-    return this.request("PUT", `/admin/realms/${realmId}`, {
+    return this.request("PATCH", `/admin/realms/${realmId}`, {
       name: params.name,
       status: params.status,
       config: params.config,

@@ -264,7 +264,7 @@ service ApplicationAdminService {
   }
   rpc UpdateApplication(UpdateApplicationCall) returns (OAuthClient) {
     option (google.api.http) = {
-      put: "/admin/applications/{client_id}"
+      patch: "/admin/applications/{client_id}"
       body: "body"
     };
   }

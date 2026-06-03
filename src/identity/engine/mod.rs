@@ -123,6 +123,12 @@ const EMAIL_VERIFY_EXPIRY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 /// opening a meaningful replay window.
 const CLOCK_SKEW_SECS: i64 = 60;
 
+/// Maximum entries in the in-process session cache (S12-F1).
+const SESSION_CACHE_MAX: usize = 4096;
+
+/// Maximum entries in the in-process token claims cache (S12-F2).
+const TOKEN_CLAIMS_CACHE_MAX: usize = 2048;
+
 /// Persisted state for a pending email-verification token.
 ///
 /// Stored under `email:verify:{sha256_hex_of_token}`. The plaintext
@@ -444,6 +450,19 @@ pub struct EmbeddedIdentityEngine {
     /// namespace. Shared with the `SvBumper` trait implementation so the RBAC
     /// engine can trigger bumps without importing from the identity layer.
     sv_store: Arc<SessionVersionStore>,
+    /// In-process session cache for the `validate_token` hot path (S12-F1).
+    ///
+    /// Key: `(RealmId, SessionId)`. Value: `Arc<Session>`.
+    /// Hot-path readers call `load()` — one atomic fence, no lock, no I/O.
+    /// Writers use `rcu()` on `persist_session`. Bounded to [`SESSION_CACHE_MAX`].
+    session_cache: ArcSwap<HashMap<(RealmId, SessionId), Arc<Session>>>,
+    /// In-process token claims cache for the `validate_token` hot path (S12-F2).
+    ///
+    /// Key: SHA-256(`token_bytes`) as `[u8; 32]`. Value: `Arc<TokenClaims>`.
+    /// Eliminates `serde_json` allocation for repeated validations of the same
+    /// access token. Hot-path readers call `load()`. Bounded to
+    /// [`TOKEN_CLAIMS_CACHE_MAX`].
+    token_claims_cache: ArcSwap<HashMap<[u8; 32], Arc<TokenClaims>>>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -686,6 +705,8 @@ impl EmbeddedIdentityEngine {
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
             sv_store,
+            session_cache: ArcSwap::from_pointee(HashMap::new()),
+            token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
@@ -857,6 +878,8 @@ impl EmbeddedIdentityEngine {
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             device_fp,
             sv_store,
+            session_cache: ArcSwap::from_pointee(HashMap::new()),
+            token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
         };
         // Best-effort: log but do not propagate initialization errors so
         // existing test harnesses that pre-seed storage don't break on a
@@ -2011,14 +2034,78 @@ impl EmbeddedIdentityEngine {
         URL_SAFE_NO_PAD.encode(digest.as_ref())
     }
 
-    /// Persists a session to storage (both primary and user index).
+    /// Persists a session to storage and keeps the in-process cache consistent.
     fn persist_session(&self, realm_id: &RealmId, session: &Session) -> Result<(), IdentityError> {
         let session_bytes = Self::serialize_session(session)?;
         let id_key = keys::encode_session_id(session.id());
         self.storage
             .put(realm_id, &id_key, &session_bytes)
             .map_err(Self::storage_err)?;
+        // Update cache after the storage write succeeds.
+        if session.is_valid(self.clock.now()) {
+            self.session_cache_insert(realm_id, session);
+        } else {
+            self.session_cache_evict(realm_id, session.id());
+        }
         Ok(())
+    }
+
+    // ===== Session cache helpers (S12-F1) =====
+
+    /// Inserts or updates a session in the in-process cache.
+    ///
+    /// Silently skips at capacity so the storage fallback stays available.
+    fn session_cache_insert(&self, realm_id: &RealmId, session: &Session) {
+        if self.session_cache.load().len() >= SESSION_CACHE_MAX {
+            return;
+        }
+        let key = (realm_id.clone(), session.id().clone());
+        let val = Arc::new(session.clone());
+        self.session_cache.rcu(|map| {
+            let mut m = HashMap::clone(map);
+            m.insert(key.clone(), Arc::clone(&val));
+            m
+        });
+    }
+
+    /// Removes a session from the in-process cache after revocation or expiry.
+    ///
+    /// No-ops when the key is absent to avoid a pointless `rcu()` clone.
+    fn session_cache_evict(&self, realm_id: &RealmId, session_id: &SessionId) {
+        let key = (realm_id.clone(), session_id.clone());
+        if !self.session_cache.load().contains_key(&key) {
+            return;
+        }
+        self.session_cache.rcu(|map| {
+            let mut m = HashMap::clone(map);
+            m.remove(&key);
+            m
+        });
+    }
+
+    // ===== Token claims cache helpers (S12-F2) =====
+
+    /// SHA-256 cache key for a raw JWT string.
+    ///
+    /// Returns `None` only if `ring`'s SHA-256 digest is not 32 bytes
+    /// (defensive; impossible in practice).
+    pub(crate) fn token_cache_hash(token: &str) -> Option<[u8; 32]> {
+        let digest = ring::digest::digest(&ring::digest::SHA256, token.as_bytes());
+        digest.as_ref().try_into().ok()
+    }
+
+    /// Inserts parsed claims into the token claims cache.
+    ///
+    /// Silently skips at capacity.
+    fn token_claims_cache_insert(&self, key: [u8; 32], claims: Arc<TokenClaims>) {
+        if self.token_claims_cache.load().len() >= TOKEN_CLAIMS_CACHE_MAX {
+            return;
+        }
+        self.token_claims_cache.rcu(|map| {
+            let mut m = HashMap::clone(map);
+            m.insert(key, Arc::clone(&claims));
+            m
+        });
     }
 
     // ===== Realm helpers =====
@@ -2211,7 +2298,8 @@ impl EmbeddedIdentityEngine {
     ///
     /// Called on suspend/archive transitions. Skips per-session audit events;
     /// the caller's `RealmUpdated` event covers the lifecycle change.
-    fn bulk_revoke_sessions(storage: &dyn StorageEngine, realm_id: &RealmId) {
+    fn bulk_revoke_sessions(&self, realm_id: &RealmId) {
+        let storage = self.storage.as_ref();
         let prefix = keys::session_id_scan_prefix();
         let end = keys::prefix_end(&prefix);
         let Ok(entries) = storage.scan(realm_id, &prefix, &end) else {
@@ -2220,10 +2308,14 @@ impl EmbeddedIdentityEngine {
         for entry in &entries {
             if let Ok(mut session) = serde_json::from_slice::<Session>(&entry.value) {
                 if !session.is_revoked() {
+                    let session_id = session.id().clone();
                     session.revoke();
                     if let Ok(bytes) = serde_json::to_vec(&session) {
                         let _ = storage.put(realm_id, &entry.key, &bytes);
                     }
+                    // Drop the cached (still-valid) copy so subsequent
+                    // get_session calls observe the revocation.
+                    self.session_cache_evict(realm_id, &session_id);
                 }
             }
         }
@@ -2702,7 +2794,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             request.status,
             Some(RealmStatus::Suspended | RealmStatus::Archived)
         ) {
-            Self::bulk_revoke_sessions(self.storage.as_ref(), realm_id);
+            self.bulk_revoke_sessions(realm_id);
         }
 
         Ok(realm)
@@ -3670,6 +3762,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     self.storage
                         .delete(realm_id, &session_key)
                         .map_err(Self::storage_err)?;
+                    // Evict from in-process cache so subsequent get_session
+                    // calls see the deletion rather than a stale cache hit.
+                    self.session_cache_evict(realm_id, &session_id);
                 }
             }
 
@@ -3774,6 +3869,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         //     advisory risk signals, not authoritative data.  The UserDeleted
         //     audit event already records that erasure happened.
         let _ = self.device_fp.delete_all_for_user(realm_id, user_id);
+
+        // 12. Cascade: purge RBAC role assignments and group memberships.
+        self.rbac
+            .purge_user_from_realm(realm_id, user_id)
+            .map_err(|e| IdentityError::Internal {
+                reason: format!("rbac cascade failed during delete_user: {e}"),
+            })?;
 
         self.record_audit(
             realm_id,
@@ -4236,9 +4338,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .entered()
         });
 
+        let now = self.clock.now();
+
+        // Hot path: check the in-process session cache (zero I/O, one atomic load).
+        let cache_key = (realm_id.clone(), session_id.clone());
+        {
+            let cache = self.session_cache.load();
+            if let Some(s) = cache.get(&cache_key) {
+                return if s.is_valid(now) {
+                    Ok(Some((**s).clone()))
+                } else {
+                    // Lazy eviction: drop the read guard before mutating the map.
+                    drop(cache);
+                    self.session_cache_evict(realm_id, session_id);
+                    Ok(None)
+                };
+            }
+        }
+
+        // Cache miss: load from storage and warm the cache on a valid result.
         let session = self.load_session_raw(realm_id, session_id)?;
         match session {
-            Some(s) if s.is_valid(self.clock.now()) => Ok(Some(s)),
+            Some(s) if s.is_valid(now) => {
+                self.session_cache_insert(realm_id, &s);
+                Ok(Some(s))
+            }
             _ => Ok(None),
         }
     }
@@ -4671,10 +4795,29 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .entered()
         });
 
-        // Verify Ed25519 signature against realm key (with global-key fallback
-        // for Phase 0 realms). Rejects forged, tampered, and alg=none tokens
-        // at the cryptographic layer before any claim inspection.
-        let claims = self.verify_token_signature_for_realm(realm_id, token)?;
+        // Resolve claims: check the in-process token claims cache first (S12-F2).
+        //
+        // A SHA-256 match on the raw JWT bytes guarantees content identity
+        // (the signature is part of the input), so a cache hit means the
+        // signature was already verified by a prior call on this engine
+        // instance. All semantic checks (expiry, realm binding, session
+        // validity) still run below — only the Ed25519 verify + serde parse
+        // are skipped on a cache hit.
+        let claims = {
+            let maybe_key = Self::token_cache_hash(token);
+            let cached = maybe_key.and_then(|k| self.token_claims_cache.load().get(&k).cloned());
+            match cached {
+                Some(arc) => (*arc).clone(),
+                None => {
+                    // Cache miss: full Ed25519 verify + serde_json parse.
+                    let c = self.verify_token_signature_for_realm(realm_id, token)?;
+                    if let Some(k) = maybe_key {
+                        self.token_claims_cache_insert(k, Arc::new(c.clone()));
+                    }
+                    c
+                }
+            }
+        };
 
         // Only accept access tokens — refresh tokens must not be accepted here.
         if claims.token_type != "access" {
@@ -12357,6 +12500,193 @@ mod tests {
                 "suspended realm must be Suspended in cache after restart"
             );
         }
+    }
+
+    // ===== S12-F1: Session cache tests =====
+
+    /// S12-F1/AC-1: valid session is inserted into the cache by `create_session`
+    /// so the next `validate_token` call resolves from memory, not storage.
+    #[test]
+    fn session_cache_populated_on_create() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+
+        let key = (realm_id.clone(), session.id().clone());
+        assert!(
+            engine.session_cache.load().contains_key(&key),
+            "session must be in cache immediately after create_session"
+        );
+
+        // validate_token must succeed (exercises hot-path cache hit).
+        clock.advance(1_000_000); // iat < now
+        let pair = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+        engine
+            .validate_token(&realm_id, pair.access_token())
+            .expect("validate_token must succeed from session cache");
+    }
+
+    /// S12-F1/AC-2: `revoke_session` evicts the session from the cache so
+    /// `validate_token` returns `InvalidToken` without finding a stale entry.
+    #[test]
+    fn session_cache_evicted_on_revoke() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        clock.advance(1_000_000);
+
+        let pair = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+
+        let key = (realm_id.clone(), session.id().clone());
+        assert!(
+            engine.session_cache.load().contains_key(&key),
+            "session must be in cache before revoke"
+        );
+
+        engine
+            .revoke_session(&realm_id, session.id())
+            .expect("revoke session");
+
+        assert!(
+            !engine.session_cache.load().contains_key(&key),
+            "session must be evicted from cache after revoke_session"
+        );
+
+        let err = engine
+            .validate_token(&realm_id, pair.access_token())
+            .expect_err("revoked session must reject token");
+        assert!(
+            matches!(err, IdentityError::InvalidToken),
+            "expected InvalidToken for revoked session, got {err:?}"
+        );
+    }
+
+    /// S12-F1/AC-3: an expired session is lazily evicted from the cache on
+    /// the first `get_session` call after its TTL passes.
+    #[test]
+    fn session_cache_lazy_evict_on_expiry() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        clock.advance(1_000_000); // iat < now for token issue
+
+        // Advance past session TTL (default 7 days).
+        clock.advance(8 * 24 * 60 * 60 * 1_000_000);
+
+        let key = (realm_id.clone(), session.id().clone());
+        assert!(
+            engine.session_cache.load().contains_key(&key),
+            "session should still be in cache before first post-expiry access"
+        );
+
+        // get_session triggers lazy eviction.
+        let result = engine
+            .get_session(&realm_id, session.id())
+            .expect("get_session must not error");
+        assert!(result.is_none(), "expired session must return None");
+
+        assert!(
+            !engine.session_cache.load().contains_key(&key),
+            "expired session must be lazily evicted after get_session"
+        );
+    }
+
+    // ===== S12-F2: Token claims cache tests =====
+
+    /// S12-F2/AC-1: after `validate_token` succeeds, parsed claims are present
+    /// in the token claims cache keyed by SHA-256 of the raw JWT.
+    #[test]
+    fn token_claims_cache_populated_on_validate_token() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        clock.advance(1_000_000);
+        let pair = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+
+        assert!(
+            engine.token_claims_cache.load().is_empty(),
+            "token claims cache must be empty before first validate_token"
+        );
+
+        engine
+            .validate_token(&realm_id, pair.access_token())
+            .expect("validate_token");
+
+        let key = EmbeddedIdentityEngine::token_cache_hash(pair.access_token())
+            .expect("token_cache_hash must succeed for a valid JWT");
+        let cache = engine.token_claims_cache.load();
+        assert!(
+            cache.contains_key(&key),
+            "token claims must be in cache after validate_token"
+        );
+        assert_eq!(
+            cache.get(&key).expect("key must be present").token_type,
+            "access",
+            "cached claims must be access token type"
+        );
+    }
+
+    /// S12-F2/AC-2: a cache hit on token claims does NOT bypass the session
+    /// validity check — `validate_token` must still return `InvalidToken` for
+    /// a revoked session even when claims are already cached.
+    #[test]
+    fn token_claims_cache_hit_still_enforces_session_check() {
+        let (_dir, engine, clock) = setup_engine();
+        let realm_id = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm_id);
+        let session = engine
+            .create_session(&realm_id, user.id(), &SessionContext::default())
+            .expect("create session");
+        clock.advance(1_000_000);
+        let pair = engine
+            .issue_tokens(&realm_id, user.id(), session.id())
+            .expect("issue tokens");
+
+        // Prime the token claims cache.
+        engine
+            .validate_token(&realm_id, pair.access_token())
+            .expect("first validate_token must succeed");
+
+        let key = EmbeddedIdentityEngine::token_cache_hash(pair.access_token())
+            .expect("SHA-256 must produce a 32-byte key");
+        assert!(
+            engine.token_claims_cache.load().contains_key(&key),
+            "token claims must be cached"
+        );
+
+        // Revoke the session — the session check must still fire.
+        engine
+            .revoke_session(&realm_id, session.id())
+            .expect("revoke session");
+
+        let err = engine
+            .validate_token(&realm_id, pair.access_token())
+            .expect_err("revoked session must reject token even with cached claims");
+        assert!(
+            matches!(err, IdentityError::InvalidToken),
+            "expected InvalidToken, got {err:?}"
+        );
     }
 
     /// SEC-1 (HEA-742): a corrupted realm record in storage causes engine

@@ -7,6 +7,43 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Changed
+
+- **`validate_token` hot-path allocation reduced** — two in-process `ArcSwap` caches were added
+  to `EmbeddedIdentityEngine`: a session cache (keyed by `(RealmId, SessionId)`) eliminates the
+  `StorageEngine::get` call on every token validation for active sessions, and a token claims cache
+  (keyed by SHA-256 of the raw JWT) eliminates the `serde_json::from_slice::<TokenClaims>`
+  allocation for repeated validations of the same access token. The `validate_token` allocation
+  gate (`benches/validate_token.rs`) is tightened from 64 to 20 allocations per warm call.
+  (HEA-1183)
+
+- **`PATCH` replaces `PUT` for partial-update admin endpoints** — `PUT /admin/realms/{id}`,
+  `PUT /admin/roles/{id}`, `PUT /admin/groups/{id}`, and `PUT /admin/applications/{id}` are now
+  `PATCH` to correctly signal partial-update semantics (RFC 5789). All four endpoints and their
+  gRPC HTTP annotations (`identity.proto`, `rbac.proto`, `oauth.proto`) have been updated. The Go
+  and TypeScript SDKs have been updated accordingly. HTTP clients that hard-code `PUT` will receive
+  `405 Method Not Allowed`. (HEA-1184)
+
+- **DPoP state moved to identity layer** — `DPopJtiCache` and the HMAC nonce secret are now
+  managed by a new `DPopProcessor` type in `src/identity/dpop` rather than being fields on
+  `AppState`. The HTTP protocol layer holds only an `Arc<DPopProcessor>`. Operator-visible
+  behaviour is unchanged. (HEA-1184)
+
+- **`HEARTH_` prefix now covers all error codes** — four error codes previously returned as bare
+  strings (`session_limit_exceeded`, `invalid_sms_otp`, `sms_resend_limit_exceeded`,
+  `session_version_disabled`) are now named constants with the `HEARTH_` prefix. (HEA-1184)
+
+### Fixed
+
+- **`proto_to_rest_json` serialization failures now logged** — previously, a `serde_json`
+  serialization error in the proto-to-REST JSON helper was silently swallowed via
+  `unwrap_or_default()`. Failures are now logged at `error` level so operators can detect them.
+  (HEA-1184)
+
+- **Audit failure error message no longer leaks subsystem name** — the `AuditFailure` error
+  previously returned `"internal error: audit record failed"` as the HTTP error body, disclosing
+  the internal audit subsystem. It now returns `"internal error"`. (HEA-1184)
+
 ### Added
 
 - **Offline breach corpus for air-gapped realms (HEA-96)** — `BreachCheckConfig` gains a new
@@ -30,6 +67,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   create and detects drift on subsequent restarts. (HEA-1040)
 
 ### Security
+
+- **User deletion now purges RBAC state** — `delete_user` previously omitted the RBAC cascade,
+  leaving stale role assignments and group memberships in storage after a user was deleted. An
+  attacker who later claimed the same user UUID could inherit the deleted user's privileges. The
+  identity engine now calls `RbacEngine::purge_user_from_realm` as step 12 of the deletion
+  sequence, removing all direct role assignments and group memberships within the realm before
+  the audit event is written. Realm isolation is preserved: RBAC state in other realms is not
+  affected. (HEA-1185)
 
 - **JTI corruption no longer bypasses replay protection** — a malformed (wrong-length) WAL entry for
   a JWT Bearer assertion JTI previously silently decoded as epoch-0 expiry, causing the replay check
@@ -1634,3 +1679,42 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 - **Zanzibar authorization engine** — `src/authz/`, tuple storage, `AuthzCache` in TypeScript and Go SDKs, `POST /v1/authz/check`, `GET /v1/me/capabilities`, and `CapabilityPage` bundles. All authorization now goes through `src/rbac/`.
 - **`lazy_static`** — replaced with `std::sync::OnceLock` / `LazyLock` throughout.
+### Security
+
+- **WAL rotation must flush memtable before truncating (HEA-1180 / F1)** —
+  `Wal::rotate_locked` truncated the WAL file before the in-memory memtable had
+  been written to an SST. A `kill -9` between truncation and the next regular
+  memtable flush would lose every write since the last SST flush. Fixed: the WAL
+  now accepts a pre-rotation callback; `EmbeddedStorageEngine` injects a
+  memtable→SST flush so all data is durable before the segment is reused. Regression
+  test `wal_rotation_flushes_memtable_to_sst_before_truncating` added.
+
+- **`StorageConfig::production()` always enforces fsync (HEA-1180 / F3)** —
+  the constructor accepted a `fsync: bool` parameter that, when `false`, silently
+  produced `SyncMode::None` and disabled WAL durability in production. Removed the
+  parameter; `production()` now unconditionally uses `SyncMode::EveryWrite`.
+  Operators who need fsync off must use `StorageConfig::dev()` or construct
+  `WalConfig` directly. A `tracing::warn!` is emitted when a legacy config file
+  has `fsync: false` and the production constructor is in use. Regression test
+  `production_config_always_fsyncs` added.
+
+### Performance
+
+- **Hot-tier cache hits are now zero-alloc (HEA-1180 / F2)** —
+  `HotTier::get` previously made two heap allocations on every cache hit: one to
+  build a lookup `CompositeKey` (owned `Vec<u8>`) and one to clone the cached
+  `Vec<u8>` value. Both are eliminated: the lookup now uses
+  `hashbrown::HashMap::raw_entry` with a computed hash and a borrow-comparison
+  closure (no key allocation), and cached values are stored as `Arc<[u8]>` so hits
+  return a refcount increment instead of a `memcpy`. Regression test
+  `hot_tier_get_returns_shared_arc_no_extra_copy` added.
+
+### Security (continued)
+
+- **gRPC cross-realm BFLA (HEA-799)** — all five realm-management gRPC handlers
+  (`list_realms`, `get_realm`, `create_realm`, `update_realm`, `delete_realm`) previously
+  discarded the authenticated realm (`_auth`) and operated on any caller-supplied realm ID.
+  An admin of realm A could read, modify, or destroy realm B with a valid realm-A token.
+  Fixed: each handler now enforces that regular realm admins may only operate on their own
+  realm; only system-realm admins may act cross-realm or create new realms. Regression tests
+  added in `tests/grpc_cross_realm_bfla.rs` (HEA-799).

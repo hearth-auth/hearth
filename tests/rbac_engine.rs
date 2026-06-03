@@ -4,6 +4,8 @@
 //! - role composition transitive / cycle / depth cap
 //! - group nesting transitive / cycle / caps
 //! - scope filtering (realm vs org) and scope intersection (OAuth narrowing)
+//! - delete_user cascades role assignments and group memberships (F10-3)
+//! - server mode smoke (F10-1 dual-mode proof)
 
 mod common;
 
@@ -546,4 +548,187 @@ async fn archived_role_blocks_and_restore_allows_assignment() {
             },
         )
         .expect("assign to restored role must succeed");
+}
+
+/// F10-3 — User deletion cascades RBAC state (P0 security gap).
+///
+/// Creates a user in realm_a with roles and group memberships, assigns the
+/// same user-UUID a role in realm_b, then deletes the user from realm_a via
+/// the identity engine. Verifies that:
+/// - all role assignments in realm_a are removed
+/// - the user is removed from all groups in realm_a
+/// - realm_b RBAC state is unaffected (realm isolation)
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn delete_user_cascades_rbac_state() {
+    use hearth::identity::CreateUserRequest;
+
+    let h = common::TestHarness::embedded().await.expect("harness");
+
+    let realm_a = h.create_realm();
+    let realm_b = h.create_realm();
+
+    h.rbac().seed_realm(&realm_a).expect("seed realm_a");
+    h.rbac().seed_realm(&realm_b).expect("seed realm_b");
+
+    // Create user in realm_a through the identity engine (full record).
+    let user = h
+        .identity()
+        .create_user(
+            &realm_a,
+            &CreateUserRequest {
+                email: "cascade@example.com".into(),
+                display_name: "Cascade User".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    let user_id = user.id().clone();
+
+    // Create roles in each realm.
+    let role_a = h
+        .rbac()
+        .create_role(
+            &realm_a,
+            &CreateRoleRequest {
+                name: "editor-a".into(),
+                description: None,
+                permissions: perms(&["docs.write"]),
+                parent_roles: vec![],
+                scope_kind: Default::default(),
+            },
+        )
+        .expect("role_a");
+    let role_b = h
+        .rbac()
+        .create_role(
+            &realm_b,
+            &CreateRoleRequest {
+                name: "editor-b".into(),
+                description: None,
+                permissions: perms(&["docs.read"]),
+                parent_roles: vec![],
+                scope_kind: Default::default(),
+            },
+        )
+        .expect("role_b");
+
+    // Create a group in realm_a and add the user.
+    let group = h
+        .rbac()
+        .create_group(
+            &realm_a,
+            &CreateGroupRequest {
+                name: "editors".into(),
+                slug: "editors".into(),
+                description: None,
+            },
+        )
+        .expect("group");
+    h.rbac()
+        .add_group_member(&realm_a, &group.id, &GroupMember::User(user_id.clone()))
+        .expect("add member");
+
+    // Assign roles in both realms.
+    h.rbac()
+        .assign_role(
+            &realm_a,
+            &AssignRoleRequest {
+                subject: Subject::User(user_id.clone()),
+                role_id: role_a.id.clone(),
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign realm_a role");
+    h.rbac()
+        .assign_role(
+            &realm_b,
+            &AssignRoleRequest {
+                subject: Subject::User(user_id.clone()),
+                role_id: role_b.id.clone(),
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign realm_b role");
+
+    // Sanity: verify pre-deletion state.
+    assert_eq!(
+        h.rbac()
+            .list_user_assignments(&realm_a, &user_id)
+            .expect("list_a pre")
+            .len(),
+        1,
+        "should have 1 assignment in realm_a before deletion"
+    );
+    assert_eq!(
+        h.rbac()
+            .list_user_assignments(&realm_b, &user_id)
+            .expect("list_b pre")
+            .len(),
+        1,
+        "should have 1 assignment in realm_b before deletion"
+    );
+    assert_eq!(
+        h.rbac()
+            .list_group_members(&realm_a, &group.id, None, 100)
+            .expect("members pre")
+            .items
+            .len(),
+        1,
+        "group should have 1 member before deletion"
+    );
+
+    // Delete user from realm_a — this must cascade RBAC state in realm_a only.
+    h.identity()
+        .delete_user(&realm_a, &user_id)
+        .expect("delete_user");
+
+    // realm_a: all RBAC state removed.
+    let assignments_a = h
+        .rbac()
+        .list_user_assignments(&realm_a, &user_id)
+        .expect("list_a post");
+    assert!(
+        assignments_a.is_empty(),
+        "realm_a role assignments must be purged after delete_user, got: {assignments_a:?}"
+    );
+
+    let members_after = h
+        .rbac()
+        .list_group_members(&realm_a, &group.id, None, 100)
+        .expect("members post");
+    assert!(
+        members_after.items.is_empty(),
+        "user must be removed from realm_a groups after delete_user"
+    );
+
+    // realm_b: untouched (realm isolation).
+    let assignments_b = h
+        .rbac()
+        .list_user_assignments(&realm_b, &user_id)
+        .expect("list_b post");
+    assert_eq!(
+        assignments_b.len(),
+        1,
+        "realm_b RBAC state must be unaffected by deletion in realm_a"
+    );
+}
+
+/// F10-1 proof — `TestHarness::server()` starts a real HTTP server and
+/// `base_url()` returns `Some`. A health-check GET proves the server is
+/// reachable and serving valid JSON.
+#[tokio::test]
+async fn server_mode_smoke_test() {
+    let h = common::TestHarness::server().await.expect("server harness");
+
+    assert_eq!(h.mode(), common::HarnessMode::Server);
+    let base_url = h.base_url().expect("server mode must have base_url");
+
+    let url = format!("{base_url}/health");
+    let resp = reqwest::get(&url).await.expect("GET /health");
+    assert_eq!(resp.status().as_u16(), 200, "GET /health must return 200");
 }

@@ -71,12 +71,12 @@ describe("AdminClient — Users CRUD", () => {
     expect(result).toMatchObject({ id: "usr_1" });
   });
 
-  it("updateUser sends PUT /admin/users/{id}", async () => {
+  it("updateUser sends PATCH /admin/users/{id}", async () => {
     fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => ({ id: "usr_1", email: "newemail@example.com" }) });
     await client.updateUser("usr_1", { email: "newemail@example.com" });
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://auth.example.com/admin/users/usr_1");
-    expect(init.method).toBe("PUT");
+    expect(init.method).toBe("PATCH");
   });
 
   it("deleteUser sends DELETE /admin/users/{id}", async () => {
@@ -135,12 +135,12 @@ describe("AdminClient — Realms CRUD", () => {
     expect(url).toBe("https://auth.example.com/admin/realms/realm_1");
   });
 
-  it("updateRealm sends PUT /admin/realms/{id}", async () => {
+  it("updateRealm sends PATCH /admin/realms/{id}", async () => {
     fetchSpy.mockResolvedValue({ ok: true, status: 200, json: async () => ({ id: "realm_1" }) });
     await client.updateRealm("realm_1", { name: "Updated" });
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://auth.example.com/admin/realms/realm_1");
-    expect(init.method).toBe("PUT");
+    expect(init.method).toBe("PATCH");
   });
 
   it("deleteRealm sends DELETE /admin/realms/{id}", async () => {
