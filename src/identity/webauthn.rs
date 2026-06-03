@@ -385,6 +385,76 @@ fn parse_authenticator_data(data: &[u8]) -> Result<AuthenticatorData, IdentityEr
     })
 }
 
+/// Checks whether the authenticator data extensions contain a `prf` entry.
+///
+/// Per WebAuthn §6.1, extensions are present when bit 7 (ED flag, 0x80) of the flags
+/// byte is set. Extensions are CBOR-encoded after the `attestedCredentialData`. This
+/// function performs a best-effort CBOR parse of any trailing extension bytes; on any
+/// parse error it conservatively returns `false` (fail-open for non-PRF authenticators).
+fn parse_extensions_has_prf(auth_data: &[u8]) -> bool {
+    parse_extension_key_present(auth_data, "prf")
+}
+
+/// Checks whether the authenticator data extensions contain a `largeBlob` entry.
+///
+/// Same conservative semantics as [`parse_extensions_has_prf`].
+fn parse_extensions_has_large_blob(auth_data: &[u8]) -> bool {
+    parse_extension_key_present(auth_data, "largeBlob")
+}
+
+/// Parses the extension CBOR map from authenticator data and returns `true` if
+/// `key` is present (regardless of value). Returns `false` on any parse error.
+fn parse_extension_key_present(auth_data: &[u8], key: &str) -> bool {
+    // Minimum authenticator data without extensions: 37 bytes.
+    // ED flag (bit 7) must be set for extensions to be present.
+    if auth_data.len() < 37 {
+        return false;
+    }
+    let flags = auth_data[32];
+    // ED flag (bit 7 = 0x80): extensions data present.
+    if flags & 0x80 == 0 {
+        return false;
+    }
+
+    // Skip to the start of the extensions CBOR map.
+    // Layout: 37 fixed bytes + optional attestedCredentialData.
+    // AT flag (bit 6 = 0x40) indicates attestedCredentialData is present.
+    let ext_offset = if flags & 0x40 != 0 {
+        // attestedCredentialData: aaguid(16) + credIdLen(2) + credId + coseKey
+        if auth_data.len() < 55 {
+            return false;
+        }
+        let cred_id_len = u16::from_be_bytes([auth_data[53], auth_data[54]]) as usize;
+        let cose_key_start = 55 + cred_id_len;
+        if auth_data.len() <= cose_key_start {
+            return false;
+        }
+        // The COSE key length is determined by parsing its CBOR. Use a
+        // conservative approach: parse a CBOR value at cose_key_start and
+        // compute how many bytes it consumed.
+        let cose_bytes = &auth_data[cose_key_start..];
+        let mut cursor = std::io::Cursor::new(cose_bytes);
+        match ciborium::from_reader::<ciborium::Value, _>(&mut cursor) {
+            Ok(_) => cose_key_start + cursor.position() as usize,
+            Err(_) => return false,
+        }
+    } else {
+        37
+    };
+
+    if auth_data.len() <= ext_offset {
+        return false;
+    }
+
+    let ext_bytes = &auth_data[ext_offset..];
+    match ciborium::from_reader::<ciborium::Value, _>(ext_bytes) {
+        Ok(ciborium::Value::Map(entries)) => entries
+            .iter()
+            .any(|(k, _)| k.as_text().is_some_and(|t| t == key)),
+        _ => false,
+    }
+}
+
 /// Parsed attestation object from a registration response.
 #[derive(Debug)]
 struct AttestationObject {
@@ -766,7 +836,7 @@ pub(crate) fn complete_registration(
             // A-13: reject "none" format if the realm policy forbids it.
             if let Some(p) = policy {
                 if !p.allow_none {
-                    return Err(IdentityError::WebAuthnRegistrationFailed {
+                    return Err(IdentityError::AttestationPolicyViolation {
                         reason: "attestation format 'none' is not permitted by realm policy"
                             .to_string(),
                     });
@@ -811,10 +881,36 @@ pub(crate) fn complete_registration(
                 .iter()
                 .any(|allowed| allowed.eq_ignore_ascii_case(&aaguid_str))
             {
-                return Err(IdentityError::WebAuthnRegistrationFailed {
+                return Err(IdentityError::AttestationPolicyViolation {
                     reason: format!(
                         "authenticator AAGUID '{aaguid_str}' is not in the realm allowlist"
                     ),
+                });
+            }
+        }
+
+        // A-13: enforce PRF / largeBlob extension requirements.
+        // The ED (extensions data present) flag is bit 7 (0x80) of the flags byte.
+        // We only check the clientExtensionResults here; since browsers return extension
+        // outputs in the attestation response, we parse them from the authenticator data
+        // extensions if ED flag is set. A missing extensions map is treated as "no
+        // extensions present" — which fails open on unknown extensions but fails closed
+        // when the realm requires one.
+        if p.require_prf || p.require_large_blob {
+            let has_prf = parse_extensions_has_prf(&att_obj.auth_data);
+            let has_large_blob = parse_extensions_has_large_blob(&att_obj.auth_data);
+
+            if p.require_prf && p.require_large_blob && !has_prf && !has_large_blob {
+                return Err(IdentityError::AttestationPolicyViolation {
+                    reason: "realm policy requires PRF or largeBlob extension support; authenticator reported neither".to_string(),
+                });
+            } else if p.require_prf && !p.require_large_blob && !has_prf && !has_large_blob {
+                return Err(IdentityError::AttestationPolicyViolation {
+                    reason: "realm policy requires PRF extension support; authenticator did not report it".to_string(),
+                });
+            } else if p.require_large_blob && !p.require_prf && !has_prf && !has_large_blob {
+                return Err(IdentityError::AttestationPolicyViolation {
+                    reason: "realm policy requires largeBlob extension support; authenticator did not report it".to_string(),
                 });
             }
         }
@@ -2168,5 +2264,220 @@ mod tests {
         let err =
             complete_authentication(&auth_p, &stored, &wrong_type_cdj, &ad, &sig, None, origin);
         assert!(err.is_err());
+    }
+
+    // ====================================================================
+    // A-13 attestation policy: extension parsing helpers
+    // ====================================================================
+
+    /// Build raw authenticator data with the ED flag set and a CBOR extension
+    /// map appended. Used to test `parse_extension_key_present`.
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_auth_data_with_extensions(extensions: &[(&str, bool)]) -> Vec<u8> {
+        // Minimal authData without AT flag — just the 37-byte fixed header.
+        // Flags: UP (0x01) | ED (0x80).
+        let mut data = vec![0u8; 37];
+        // Set UP + ED flags at byte 32.
+        data[32] = 0x01 | 0x80;
+
+        // Encode extensions as CBOR map { key: bool, ... }
+        let entries: Vec<(ciborium::Value, ciborium::Value)> = extensions
+            .iter()
+            .map(|(k, v)| {
+                (
+                    ciborium::Value::Text((*k).to_string()),
+                    ciborium::Value::Bool(*v),
+                )
+            })
+            .collect();
+        let ext_map = ciborium::Value::Map(entries);
+        ciborium::into_writer(&ext_map, &mut data).expect("encode extensions");
+        data
+    }
+
+    #[test]
+    fn extension_key_present_no_ed_flag() {
+        // Without ED flag, extensions are not present — must return false.
+        let mut data = vec![0u8; 37];
+        data[32] = 0x01; // UP only, no ED
+        assert!(!parse_extension_key_present(&data, "prf"));
+        assert!(!parse_extension_key_present(&data, "largeBlob"));
+    }
+
+    #[test]
+    fn extension_key_present_prf_in_map() {
+        let data = build_auth_data_with_extensions(&[("prf", true)]);
+        assert!(parse_extension_key_present(&data, "prf"));
+        assert!(!parse_extension_key_present(&data, "largeBlob"));
+    }
+
+    #[test]
+    fn extension_key_present_large_blob_in_map() {
+        let data = build_auth_data_with_extensions(&[("largeBlob", true)]);
+        assert!(!parse_extension_key_present(&data, "prf"));
+        assert!(parse_extension_key_present(&data, "largeBlob"));
+    }
+
+    #[test]
+    fn extension_key_present_both_in_map() {
+        let data = build_auth_data_with_extensions(&[("prf", true), ("largeBlob", true)]);
+        assert!(parse_extension_key_present(&data, "prf"));
+        assert!(parse_extension_key_present(&data, "largeBlob"));
+    }
+
+    #[test]
+    fn extension_key_present_too_short() {
+        // Data shorter than 37 bytes must return false.
+        assert!(!parse_extension_key_present(&[0u8; 10], "prf"));
+    }
+
+    // ====================================================================
+    // A-13 attestation policy: complete_registration enforcement
+    // ====================================================================
+
+    #[test]
+    fn registration_rejects_none_attestation_when_policy_forbids_it() {
+        let helper = WebAuthnTestHelper::new("example.com");
+        let challenge = generate_challenge().expect("generate");
+        let origin = "https://example.com";
+
+        let pending = PendingWebAuthnChallenge {
+            challenge: challenge.clone(),
+            rp_id: "example.com".to_string(),
+            user_id: Some(UserId::generate()),
+            ceremony_type: CeremonyType::Registration,
+            created_at: 1_000_000,
+        };
+
+        let (client_data_json, attestation_object) =
+            helper.build_registration_response(&challenge, origin);
+
+        let policy = crate::identity::WebAuthnAttestationPolicy {
+            allow_none: false,
+            aaguid_allowlist: vec![],
+            require_prf: false,
+            require_large_blob: false,
+        };
+
+        let err = complete_registration(
+            &pending,
+            &client_data_json,
+            &attestation_object,
+            origin,
+            1_000_000,
+            Some(&policy),
+        )
+        .expect_err("should reject none attestation");
+
+        assert!(
+            matches!(err, IdentityError::AttestationPolicyViolation { .. }),
+            "expected AttestationPolicyViolation, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn registration_rejects_aaguid_not_in_allowlist() {
+        let helper = WebAuthnTestHelper::new("example.com");
+        let challenge = generate_challenge().expect("generate");
+        let origin = "https://example.com";
+
+        let pending = PendingWebAuthnChallenge {
+            challenge: challenge.clone(),
+            rp_id: "example.com".to_string(),
+            user_id: Some(UserId::generate()),
+            ceremony_type: CeremonyType::Registration,
+            created_at: 1_000_000,
+        };
+
+        let (client_data_json, attestation_object) =
+            helper.build_registration_response(&challenge, origin);
+
+        // The test helper uses all-zero AAGUID. This allowlist requires a specific UUID.
+        let policy = crate::identity::WebAuthnAttestationPolicy {
+            allow_none: true,
+            aaguid_allowlist: vec!["d8522d9f-575b-4866-88a9-ba99fa02f35b".to_string()],
+            require_prf: false,
+            require_large_blob: false,
+        };
+
+        let err = complete_registration(
+            &pending,
+            &client_data_json,
+            &attestation_object,
+            origin,
+            1_000_000,
+            Some(&policy),
+        )
+        .expect_err("should reject AAGUID not in allowlist");
+
+        assert!(
+            matches!(err, IdentityError::AttestationPolicyViolation { .. }),
+            "expected AttestationPolicyViolation, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn registration_passes_aaguid_in_allowlist() {
+        let helper = WebAuthnTestHelper::new("example.com");
+        let challenge = generate_challenge().expect("generate");
+        let origin = "https://example.com";
+
+        let pending = PendingWebAuthnChallenge {
+            challenge: challenge.clone(),
+            rp_id: "example.com".to_string(),
+            user_id: Some(UserId::generate()),
+            ceremony_type: CeremonyType::Registration,
+            created_at: 1_000_000,
+        };
+
+        let (client_data_json, attestation_object) =
+            helper.build_registration_response(&challenge, origin);
+
+        // The test helper uses all-zero AAGUID → 00000000-0000-0000-0000-000000000000.
+        let policy = crate::identity::WebAuthnAttestationPolicy {
+            allow_none: true,
+            aaguid_allowlist: vec!["00000000-0000-0000-0000-000000000000".to_string()],
+            require_prf: false,
+            require_large_blob: false,
+        };
+
+        complete_registration(
+            &pending,
+            &client_data_json,
+            &attestation_object,
+            origin,
+            1_000_000,
+            Some(&policy),
+        )
+        .expect("registration should pass for AAGUID in allowlist");
+    }
+
+    #[test]
+    fn registration_passes_with_no_policy() {
+        let helper = WebAuthnTestHelper::new("example.com");
+        let challenge = generate_challenge().expect("generate");
+        let origin = "https://example.com";
+
+        let pending = PendingWebAuthnChallenge {
+            challenge: challenge.clone(),
+            rp_id: "example.com".to_string(),
+            user_id: Some(UserId::generate()),
+            ceremony_type: CeremonyType::Registration,
+            created_at: 1_000_000,
+        };
+
+        let (client_data_json, attestation_object) =
+            helper.build_registration_response(&challenge, origin);
+
+        // None policy = fail-open: any authenticator accepted.
+        complete_registration(
+            &pending,
+            &client_data_json,
+            &attestation_object,
+            origin,
+            1_000_000,
+            None,
+        )
+        .expect("registration should succeed with no policy");
     }
 }

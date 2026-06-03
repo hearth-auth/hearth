@@ -33,7 +33,7 @@ use crate::identity::{
     UpdateRealmRequest,
 };
 use crate::protocol::admin_auth::{
-    AdminRateLimiter, ExportRateLimitOutcome, ExportRateLimiter, RateLimitOutcome,
+    AdminRateLimiter, ExportRateLimitOutcome, ExportRateLimiter, JwksRateLimiter, RateLimitOutcome,
     TokenRateLimitOutcome, TokenRateLimiter,
 };
 use crate::protocol::client_info::extract_client_ip;
@@ -100,6 +100,19 @@ const BODY_LIMIT_SMALL: usize = 64 * 1024;
 /// gates network ingress rather than in-process RAM usage.
 pub const BACKUP_RESTORE_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
 
+/// Returns the current Unix timestamp in microseconds.
+///
+/// Used for rate-limiter calls throughout the HTTP layer. Extracted into a
+/// helper so the `#[allow(cast_possible_truncation)]` suppression is in one
+/// place.
+#[allow(clippy::cast_possible_truncation)]
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as i64
+}
+
 /// Shared application state passed to all route handlers.
 pub struct AppState {
     /// The identity engine for all domain operations.
@@ -163,6 +176,13 @@ pub struct AppState {
     /// DPoP state (replay-cache + nonce secret). Lives in the identity layer
     /// and is shared across all request handlers via `Arc`.
     pub dpop: Arc<crate::identity::dpop::DPopProcessor>,
+    /// Per-IP rate limiter for JWKS and OIDC discovery endpoints (A-10).
+    ///
+    /// Shared across all JWKS-family routes (`/jwks`, `/certs`,
+    /// `/.well-known/jwks.json`, `/realms/{name}/.well-known/jwks.json`,
+    /// `/realms/{name}/.well-known/openid-configuration`) so a caller
+    /// cannot evade the limit by rotating between aliases.
+    pub jwks_rate_limiter: Arc<JwksRateLimiter>,
 }
 
 impl AppState {
@@ -189,6 +209,7 @@ impl AppState {
             cluster: None,
             // zero key is overridden in production via with_dpop_nonce_secret
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
+            jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
         }
     }
 
@@ -216,6 +237,7 @@ impl AppState {
             trusted_proxies: Vec::new(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
+            jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
         }
     }
 
@@ -245,6 +267,7 @@ impl AppState {
             trusted_proxies: Vec::new(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
+            jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
         }
     }
 
@@ -304,6 +327,16 @@ impl AppState {
     /// is rejected at startup by an assertion in `main.rs`.
     pub fn with_dpop_nonce_secret(mut self, secret: [u8; 32]) -> Self {
         self.dpop = Arc::new(crate::identity::dpop::DPopProcessor::new(secret));
+        self
+    }
+
+    /// Replaces the default JWKS rate limiter with a pre-configured instance (A-10).
+    ///
+    /// Call this during server startup to apply an operator-configured RPS limit
+    /// (from `security.jwks_rps_limit` in `hearth.yaml`) instead of the 60 rps
+    /// compiled-in default.
+    pub fn with_jwks_rate_limiter(mut self, limiter: Arc<JwksRateLimiter>) -> Self {
+        self.jwks_rate_limiter = limiter;
         self
     }
 }
@@ -1331,11 +1364,25 @@ async fn health() -> impl IntoResponse {
 ///
 /// Returns the `OpenID` Connect Discovery 1.0 document describing the
 /// provider's configuration, endpoints, and supported features.
-async fn oidc_discovery(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn oidc_discovery(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // A-10: per-IP rate cap on all key-discovery endpoints.
+    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let now_micros = now_micros();
+    if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            Json(serde_json::json!({"error": "too_many_requests"})),
+        )
+            .into_response();
+    }
     // Serialize the domain type directly so optional fields like
     // end_session_endpoint are included without proto schema changes.
     let doc = state.identity.oidc_discovery();
-    (StatusCode::OK, Json(doc))
+    (StatusCode::OK, Json(doc)).into_response()
 }
 
 /// JWKS endpoint (`/jwks`, `/certs`, and `/.well-known/jwks.json`).
@@ -1350,9 +1397,22 @@ async fn oidc_discovery(State(state): State<Arc<AppState>>) -> impl IntoResponse
 /// as JSON, bypassing the proto `JsonWebKey` type — that proto only
 /// carries the OKP/Ed25519 field set and would drop RSA `n`/`e` and EC
 /// `y` coordinates.
-async fn jwks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+///
+/// A-10: subject to the per-IP JWKS rate cap (default 60 rps).
+async fn jwks(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    // A-10: per-IP rate cap.
+    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let now_micros = now_micros();
+    if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            Json(serde_json::json!({"error": "too_many_requests"})),
+        )
+            .into_response();
+    }
     let doc = state.identity.jwks();
-    (StatusCode::OK, Json(doc))
+    (StatusCode::OK, Json(doc)).into_response()
 }
 
 // === User management endpoints ===
@@ -1948,6 +2008,10 @@ fn identity_error_to_response(
         // A-37: silent-auth rate-limit exceeded (prompt=none).
         IdentityError::SilentAuthRateLimited => {
             (StatusCode::TOO_MANY_REQUESTS, "silent_auth_rate_limited")
+        }
+        // A-13: attestation policy violation (AAGUID not in allowlist, "none" rejected, etc.).
+        IdentityError::AttestationPolicyViolation { .. } => {
+            (StatusCode::FORBIDDEN, "attestation_policy_violation")
         }
     };
 
@@ -6709,10 +6773,22 @@ async fn magic_link_request(
         .into_response()
 }
 
+/// A-10: per-IP rate cap on all key-discovery endpoints.
 async fn realm_oidc_discovery(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let now_micros = now_micros();
+    if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            Json(serde_json::json!({"error": "too_many_requests"})),
+        )
+            .into_response();
+    }
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
@@ -6727,10 +6803,22 @@ async fn realm_oidc_discovery(
     }
 }
 
+/// A-10: per-IP rate cap on all key-discovery endpoints.
 async fn realm_jwks(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let now_micros = now_micros();
+    if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            Json(serde_json::json!({"error": "too_many_requests"})),
+        )
+            .into_response();
+    }
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,

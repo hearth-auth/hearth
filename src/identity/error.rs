@@ -509,6 +509,16 @@ pub enum IdentityError {
         /// The count at the time of the check.
         current: u64,
     },
+    /// A `WebAuthn` registration was rejected by the realm's attestation policy (A-13).
+    ///
+    /// Returned when the authenticator's AAGUID is not in the realm allowlist,
+    /// attestation format `"none"` is used but the realm forbids it, or a required
+    /// extension (PRF or `largeBlob`) is absent from the authenticator data.
+    AttestationPolicyViolation {
+        /// Human-readable description of the violated policy constraint.
+        /// Must not contain authenticator secrets or raw credential material.
+        reason: String,
+    },
 }
 
 impl fmt::Display for IdentityError {
@@ -747,6 +757,9 @@ impl fmt::Display for IdentityError {
                 f,
                 "realm quota exceeded: {resource} count is {current}, limit is {limit}"
             ),
+            Self::AttestationPolicyViolation { reason } => {
+                write!(f, "attestation policy violation: {reason}")
+            }
         }
     }
 }
@@ -899,6 +912,8 @@ impl IdentityError {
             Self::DPopProofReplay | Self::DPopNonceInvalid => Some("use_dpop_nonce"),
             Self::DPopBindingMismatch => Some("invalid_token"),
 
+            Self::AttestationPolicyViolation { .. } => Some("HEARTH_ATTESTATION_POLICY_VIOLATION"),
+
             // 5xx — do not leak internal detail
             Self::SigningError { .. }
             | Self::Storage(_)
@@ -1026,7 +1041,8 @@ impl std::error::Error for IdentityError {
             | Self::EmailReserved
             | Self::EmailChangeTokenInvalid
             | Self::SilentAuthRateLimited
-            | Self::QuotaExceeded { .. } => None,
+            | Self::QuotaExceeded { .. }
+            | Self::AttestationPolicyViolation { .. } => None,
         }
     }
 }
@@ -1641,5 +1657,41 @@ mod tests {
         })
         .source()
         .is_none());
+    }
+
+    #[test]
+    fn display_attestation_policy_violation() {
+        let err = IdentityError::AttestationPolicyViolation {
+            reason: "AAGUID not in allowlist".to_string(),
+        };
+        let display = format!("{err}");
+        assert!(
+            display.contains("attestation policy violation"),
+            "got: {display}"
+        );
+        assert!(
+            display.contains("AAGUID not in allowlist"),
+            "got: {display}"
+        );
+    }
+
+    #[test]
+    fn attestation_policy_violation_has_wire_code() {
+        let err = IdentityError::AttestationPolicyViolation {
+            reason: "none not permitted".to_string(),
+        };
+        assert_eq!(
+            err.wire_error_code(),
+            Some("HEARTH_ATTESTATION_POLICY_VIOLATION"),
+            "expected stable wire code"
+        );
+    }
+
+    #[test]
+    fn attestation_policy_violation_has_no_source() {
+        let err = IdentityError::AttestationPolicyViolation {
+            reason: "test".to_string(),
+        };
+        assert!(err.source().is_none());
     }
 }

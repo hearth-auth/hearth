@@ -240,18 +240,43 @@ pub const JWKS_RATE_LIMIT_PER_SEC: u32 = 60;
 pub const JWKS_RATE_WINDOW_MICROS: i64 = 1_000_000;
 
 /// Per-IP rate limiter for JWKS and OIDC discovery endpoints (A-10).
-#[derive(Debug, Default)]
+///
+/// The limit is configurable at construction time so operators can override the
+/// default via `security.jwks_rps_limit` in `hearth.yaml`.
+#[derive(Debug)]
 pub struct JwksRateLimiter {
+    /// Maximum allowed requests per second per IP.
+    rps_limit: u32,
     trackers: Mutex<HashMap<String, RateTracker>>,
 }
 
+impl Default for JwksRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JwksRateLimiter {
-    /// Creates an empty limiter.
+    /// Creates a limiter with the compiled-in default (60 rps per IP).
     pub fn new() -> Self {
-        Self::default()
+        Self::with_rps_limit(JWKS_RATE_LIMIT_PER_SEC)
+    }
+
+    /// Creates a limiter with a custom per-IP requests-per-second cap.
+    ///
+    /// Use this to apply the operator-configured value from
+    /// `security.jwks_rps_limit` in `hearth.yaml`.
+    pub fn with_rps_limit(rps_limit: u32) -> Self {
+        Self {
+            rps_limit,
+            trackers: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Records a request from `ip` and returns `true` when the request is allowed.
+    ///
+    /// `now_micros` is the current Unix timestamp in microseconds; pass a fixed
+    /// value in tests to drive time deterministically.
     pub fn check(&self, ip: &str, now_micros: i64) -> bool {
         let mut trackers = self
             .trackers
@@ -266,7 +291,7 @@ impl JwksRateLimiter {
             tracker.window_start_micros = now_micros;
         }
         tracker.count += 1;
-        tracker.count <= JWKS_RATE_LIMIT_PER_SEC
+        tracker.count <= self.rps_limit
     }
 }
 
@@ -473,6 +498,74 @@ mod tests {
             limiter.check(&b, 0),
             ExportRateLimitOutcome::Allowed,
             "different users must have independent quotas"
+        );
+    }
+
+    // --- JwksRateLimiter ---
+
+    #[test]
+    fn jwks_allows_under_limit() {
+        let limiter = JwksRateLimiter::with_rps_limit(5);
+        for _ in 0..5 {
+            assert!(
+                limiter.check("1.2.3.4", 0),
+                "requests within limit must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn jwks_rejects_over_limit() {
+        let limiter = JwksRateLimiter::with_rps_limit(3);
+        for _ in 0..3 {
+            let _ = limiter.check("1.2.3.4", 0);
+        }
+        assert!(
+            !limiter.check("1.2.3.4", 0),
+            "request beyond limit must be rejected"
+        );
+    }
+
+    #[test]
+    fn jwks_resets_after_one_second_window() {
+        let limiter = JwksRateLimiter::with_rps_limit(2);
+        for _ in 0..2 {
+            let _ = limiter.check("1.2.3.4", 0);
+        }
+        assert!(!limiter.check("1.2.3.4", 0), "must be limited in-window");
+        // Advance by just over 1 second.
+        let later = JWKS_RATE_WINDOW_MICROS + 1;
+        assert!(
+            limiter.check("1.2.3.4", later),
+            "window must reset after 1 second"
+        );
+    }
+
+    #[test]
+    fn jwks_separate_ips_are_independent() {
+        let limiter = JwksRateLimiter::with_rps_limit(1);
+        assert!(limiter.check("10.0.0.1", 0));
+        assert!(!limiter.check("10.0.0.1", 0), "ip1 must be limited");
+        assert!(
+            limiter.check("10.0.0.2", 0),
+            "different IP must have independent quota"
+        );
+    }
+
+    #[test]
+    fn jwks_custom_rps_limit_respected() {
+        let limit: u32 = 10;
+        let limiter = JwksRateLimiter::with_rps_limit(limit);
+        for i in 0..limit {
+            assert!(
+                limiter.check("5.5.5.5", 0),
+                "request {i} must be allowed (limit={limit})"
+            );
+        }
+        assert!(
+            !limiter.check("5.5.5.5", 0),
+            "request {} must be rejected (over limit)",
+            limit
         );
     }
 }

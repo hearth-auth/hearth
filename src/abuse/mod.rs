@@ -6,6 +6,7 @@
 //! | A-3  | Distributed-attack detector              | [`detector`]             |
 //! | A-4  | Outbound email/SMS volume shield         | [`detector`]             |
 //! | A-9  | Tenant-managed CIDR allow/deny lists     | [`cidr`]                 |
+//! | A-10 | Per-IP JWKS/discovery rate cap           | `src/protocol/admin_auth`|
 //! | A-12 | Adaptive exponential lockout backoff     | [`backoff`]              |
 //! | A-15 | gRPC rate-limit interceptor              | [`shaper`]               |
 //! | A-16 | CAPTCHA-of-last-resort challenge          | [`challenge`]            |

@@ -27,6 +27,7 @@ use hearth::identity::{
     RateLimitConfig, TokenConfig,
 };
 use hearth::protocol;
+use hearth::protocol::admin_auth::JwksRateLimiter;
 use hearth::protocol::http::{self, AppState};
 use hearth::protocol::tls::{build_server_config, ReloadableTlsConfig, TlsConfigParams};
 use hearth::protocol::web::{self, WebState};
@@ -1689,6 +1690,11 @@ async fn run_serve(
         "dpop_nonce_secret must not be the zero key — use \"auto\" or supply a real 32-byte hex secret"
     );
 
+    // A-10: build the JWKS rate limiter from the operator-configured RPS limit.
+    let jwks_rate_limiter = Arc::new(JwksRateLimiter::with_rps_limit(
+        config.security.jwks_rps_limit,
+    ));
+
     let app_state = if config.dev_mode {
         Arc::new(
             AppState::new_dev(
@@ -1701,7 +1707,8 @@ async fn run_serve(
             .with_metrics_bearer_token(config.metrics.bearer_token.clone())
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
-            .with_dpop_nonce_secret(dpop_nonce_secret),
+            .with_dpop_nonce_secret(dpop_nonce_secret)
+            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter)),
         )
     } else {
         Arc::new(
@@ -1715,7 +1722,8 @@ async fn run_serve(
             .with_metrics_bearer_token(config.metrics.bearer_token.clone())
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
-            .with_dpop_nonce_secret(dpop_nonce_secret),
+            .with_dpop_nonce_secret(dpop_nonce_secret)
+            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter)),
         )
     };
 

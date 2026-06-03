@@ -809,6 +809,89 @@ Future work tracked at HEA-1196.
 
 ---
 
+## A-5 — Reserved Slug Registry + Post-Delete Cooldown
+
+**What it prevents:** Squatting on reserved names (admin, api, www, …) as org or realm slugs; immediate re-registration of a just-deleted slug to harvest residual trust.
+
+**How it works:**
+
+- `security.reserved_slugs` in `hearth.yaml` declares a YAML list of names that are unconditionally rejected as realm names or organization slugs.  Built-in URL-routing keywords are always reserved regardless of this list.
+- When a realm or organization is deleted, its name is written to a cooldown index with a 30-day TTL.  `create_realm` and `create_organization` check the index and return `HEARTH_SLUG_IN_COOLDOWN` if a live entry exists.
+- The cooldown entry is cleaned up automatically on expiry; no operator action required.
+
+**Config keys:** `security.reserved_slugs` (list of strings in `hearth.yaml`).
+
+**Fail mode:** Fail-closed — a slug that matches a reserved name or an active cooldown entry is always rejected.  An empty list means only built-in routing keywords are reserved.
+
+---
+
+## A-6 — Bootstrap Endpoint Production Guard
+
+**What it prevents:** Accidental exposure of the one-shot `POST /admin/bootstrap` endpoint in production deployments, which creates a realm, admin user, and long-lived API token.
+
+**How it works:**
+
+- In production mode (i.e. `--dev` flag absent), the `/admin/bootstrap` route is **not registered** in the HTTP router.  Unregistered routes return 404, preventing fingerprinting.
+- Pass `--allow-bootstrap-in-prod` at startup to re-enable the route for initial provisioning of a fresh deployment.  When the flag is active, a startup-time `warn!()` is emitted to make the deviation visible in logs and alerting.
+- `--dev` mode continues to register the route unconditionally.
+
+**Config keys:** CLI flag `--allow-bootstrap-in-prod` (no `hearth.yaml` key).
+
+**Fail mode:** Fail-closed by default (route absent).  Operator must opt in explicitly.
+
+---
+
+## A-10 — Per-IP JWKS / OIDC Discovery Rate Cap
+
+**What it prevents:** Key-material enumeration and amplification attacks that hammer the JWKS or discovery endpoints to exfiltrate signing-key metadata or saturate the server.
+
+**How it works:**
+
+- A `JwksRateLimiter` (token-bucket, one bucket per source IP) gates `GET /.well-known/jwks.json` and `GET /.well-known/openid-configuration`.  Requests over the cap receive `429 Too Many Requests`.
+- JWKS and discovery responses are pre-serialized into an `Arc<Bytes>` at startup and on key rotation.  Hot-path serves the cached bytes directly — no allocations per request.
+- Default cap: 60 requests/second per source IP.
+
+**Config keys:** `security.jwks_rps_limit` (integer, requests/second per IP; default `60`).
+
+**Fail mode:** Fail-closed — requests exceeding the bucket are rejected.  The pre-serialized cache is rebuilt on key rotation and server reload.
+
+---
+
+## A-13 — WebAuthn Attestation Policy
+
+**What it prevents:** Authenticators that do not meet operator-mandated assurance level (e.g., software FIDO2 keys masquerading as hardware tokens, or unlisted authenticators).
+
+**How it works:**
+
+- Per-realm config (`realms.<name>.auth.webauthn_attestation`) exposes three controls:
+  - `allow_none: bool` — whether the `"none"` attestation format is accepted (default `true` for broad compatibility).
+  - `aaguid_allowlist: Vec<Uuid>` — when non-empty, only authenticators whose AAGUID appears in the list are accepted.
+  - `require_prf: bool` / `require_large_blob: bool` — optional extension requirements.
+- Policy is enforced at registration time.  Authenticators that fail any active control receive `400 Bad Request`; no credential is stored.
+
+**Config keys:** `realms.<name>.auth.webauthn_attestation.{allow_none,aaguid_allowlist,require_prf,require_large_blob}`.
+
+**Fail mode:** Absent config = fail-open (all authenticators accepted).  Non-empty allowlist = fail-closed for unlisted AAGUIDs.
+
+---
+
+## A-14 — Per-Realm TTL Hard Caps
+
+**What it prevents:** Excessively long password-reset or magic-link token lifetimes that widen the window for token theft, phishing, or link interception.
+
+**How it works:**
+
+- `to_realm_config` enforces hard upper bounds at config load time:
+  - `auth.token.password_reset_token_ttl` ≤ 1 hour.
+  - `auth.token.magic_link_ttl` ≤ 30 minutes.
+- If a realm config exceeds either cap, the load is rejected unless `auth.token.allow_unsafe_ttl: true` is also set.  When the flag is set, a `warn!()` is emitted so operators are aware of the deviation.
+
+**Config keys:** `auth.token.password_reset_token_ttl`, `auth.token.magic_link_ttl`, `auth.token.allow_unsafe_ttl` (all per-realm under `realms.<name>` or global under `auth.token`).
+
+**Fail mode:** Fail-closed — config that exceeds the cap without the opt-in flag is rejected at startup.
+
+---
+
 ## A-28 — Slug & Invitation Atomic CAS
 
 **What it prevents:** Two concurrent requests winning the same organization slug or double-spending an invitation token.
