@@ -390,7 +390,10 @@ async fn retention_config_roundtrip() {
     audit
         .set_retention_config(
             &realm_id,
-            &hearth::audit::AuditRetentionConfig { retention_days: 30 },
+            &hearth::audit::AuditRetentionConfig {
+                retention_days: 30,
+                max_rows: None,
+            },
         )
         .expect("set config");
 
@@ -401,7 +404,10 @@ async fn retention_config_roundtrip() {
     audit
         .set_retention_config(
             &realm_id,
-            &hearth::audit::AuditRetentionConfig { retention_days: 0 },
+            &hearth::audit::AuditRetentionConfig {
+                retention_days: 0,
+                max_rows: None,
+            },
         )
         .expect("set config");
     let back2 = audit.get_retention_config(&realm_id).expect("get config");

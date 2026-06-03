@@ -67,6 +67,16 @@ enum Commands {
         /// the startup phase only (respects existing log level for steady-state).
         #[arg(long, short = 'v')]
         verbose: bool,
+
+        /// Allow gRPC server reflection in production mode (A-43).
+        ///
+        /// gRPC reflection exposes the full API schema to any unauthenticated caller.
+        /// Hearth refuses to start with `security.grpc.reflection_enabled = true` in
+        /// production mode unless this flag is explicitly passed.
+        ///
+        /// Use only for debugging. Never enable in real deployments.
+        #[arg(long)]
+        allow_reflection_in_prod: bool,
     },
     /// Manage realms.
     Realm {
@@ -380,8 +390,18 @@ async fn main() {
             port,
             bind,
             verbose,
+            allow_reflection_in_prod,
         } => {
-            if let Err(e) = run_serve(dev, config_path, port, bind, verbose).await {
+            if let Err(e) = run_serve(
+                dev,
+                config_path,
+                port,
+                bind,
+                verbose,
+                allow_reflection_in_prod,
+            )
+            .await
+            {
                 // Use eprintln! here — tracing may not be initialized yet if
                 // the error occurred during config loading.
                 //
@@ -586,6 +606,7 @@ async fn run_serve(
     port_override: Option<u16>,
     bind_override: Option<String>,
     verbose: bool,
+    allow_reflection_in_prod: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config(dev, config_path.as_deref())?;
@@ -969,6 +990,23 @@ async fn run_serve(
     if config.email.transport == EmailTransport::Mailcatcher && !config.dev_mode {
         return Err(
             "email.transport = mailcatcher is only allowed in dev mode (start with --dev)".into(),
+        );
+    }
+
+    // A-43: Resolve effective reflection_enabled and apply the production guard.
+    // `None` in the config means "use the mode default": true in --dev, false in prod.
+    let reflection_enabled = config
+        .security
+        .grpc
+        .reflection_enabled
+        .unwrap_or(config.dev_mode);
+    if reflection_enabled && !config.dev_mode && !allow_reflection_in_prod {
+        return Err(
+            "security.grpc.reflection_enabled = true is not allowed in production mode. \
+             gRPC reflection exposes the full API schema to unauthenticated callers. \
+             Pass --allow-reflection-in-prod to override (debugging only; never in real \
+             deployments)."
+                .into(),
         );
     }
 
@@ -1451,12 +1489,13 @@ async fn run_serve(
         hearth::webhook::NotifyingAuditEngine::new(Arc::clone(&raw_audit), webhook_tx),
     );
 
-    // Background daily audit log pruning sweep.
-    // Iterates all realms and deletes events older than each realm's
-    // configured `retention_days`. Realms with `retention_days = 0` are skipped.
+    // Background daily audit log pruning sweep (A-25).
+    // Per realm: (1) time-based prune by retention_days, (2) max_rows backstop,
+    // (3) disk-pressure warning if max_disk_bytes is configured.
     {
         let prune_audit = Arc::clone(&raw_audit);
         let prune_identity = Arc::clone(&identity_engine);
+        let prune_storage = Arc::clone(&storage);
         tokio::spawn(async move {
             // 24-hour interval; first tick fires at startup + 24h.
             let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
@@ -1473,28 +1512,86 @@ async fn run_serve(
                         }
                     };
                     for realm in &page.items {
-                        let config = match prune_audit.get_retention_config(realm.id()) {
+                        let retention = match prune_audit.get_retention_config(realm.id()) {
                             Ok(c) => c,
                             Err(e) => {
                                 warn!(realm = %realm.name(), error = %e, "audit prune: config fetch failed");
                                 continue;
                             }
                         };
-                        if config.retention_days == 0 {
-                            continue; // unlimited
-                        }
-                        let now_micros = hearth::core::Timestamp::now().as_micros();
-                        let window_micros = (config.retention_days as i64) * 86_400 * 1_000_000;
-                        let cutoff = hearth::core::Timestamp::from_micros(
-                            now_micros.saturating_sub(window_micros),
-                        );
-                        match prune_audit.prune_before(realm.id(), cutoff) {
-                            Ok(0) => {}
-                            Ok(n) => {
-                                info!(realm = %realm.name(), deleted = n, "audit prune: pruned old events");
+
+                        // (1) Time-based retention prune.
+                        if retention.retention_days > 0 {
+                            let now_micros = hearth::core::Timestamp::now().as_micros();
+                            let window_micros =
+                                (retention.retention_days as i64) * 86_400 * 1_000_000;
+                            let cutoff = hearth::core::Timestamp::from_micros(
+                                now_micros.saturating_sub(window_micros),
+                            );
+                            match prune_audit.prune_before(realm.id(), cutoff) {
+                                Ok(0) => {}
+                                Ok(n) => {
+                                    info!(realm = %realm.name(), deleted = n, "audit prune: pruned old events");
+                                }
+                                Err(e) => {
+                                    warn!(realm = %realm.name(), error = %e, "audit prune: prune failed");
+                                }
                             }
-                            Err(e) => {
-                                warn!(realm = %realm.name(), error = %e, "audit prune: prune failed");
+                        }
+
+                        // (2) max_rows backstop — hard cap on total event count.
+                        if let Some(max_rows) = retention.max_rows {
+                            match prune_audit.count_events(realm.id()) {
+                                Ok(count) if count > max_rows => {
+                                    let excess = count - max_rows;
+                                    match prune_audit.prune_oldest(realm.id(), excess) {
+                                        Ok(0) => {}
+                                        Ok(n) => {
+                                            info!(
+                                                realm = %realm.name(),
+                                                deleted = n,
+                                                max_rows,
+                                                "audit prune: max_rows backstop trimmed oldest events"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(realm = %realm.name(), error = %e, "audit prune: max_rows trim failed");
+                                        }
+                                    }
+                                }
+                                Ok(_) => {} // within limit
+                                Err(e) => {
+                                    warn!(realm = %realm.name(), error = %e, "audit prune: count_events failed");
+                                }
+                            }
+                        }
+
+                        // (3) Disk-pressure warning — sampled, non-blocking.
+                        let max_disk_bytes = prune_identity
+                            .get_realm(realm.id())
+                            .ok()
+                            .flatten()
+                            .and_then(|r| {
+                                r.config().quotas.as_ref().and_then(|q| q.max_disk_bytes)
+                            });
+                        if let Some(limit) = max_disk_bytes {
+                            // Estimate realm disk usage by summing key+value bytes
+                            // across all storage entries for this realm.  Sampled
+                            // once per day — not checked on every write.
+                            let end_key = vec![0xFFu8; 256];
+                            let usage_bytes: u64 = prune_storage
+                                .scan(realm.id(), b"", &end_key)
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|e| (e.key.len() + e.value.len()) as u64)
+                                .sum();
+                            if usage_bytes >= limit {
+                                warn!(
+                                    realm = %realm.name(),
+                                    usage_bytes,
+                                    limit_bytes = limit,
+                                    "disk pressure: realm storage usage at or above configured max_disk_bytes"
+                                );
                             }
                         }
                     }
@@ -1831,7 +1928,9 @@ async fn run_serve(
             let shutdown = async {
                 let _ = shutdown_rx.await;
             };
-            if let Err(e) = protocol::grpc::serve(grpc_addr, grpc_state, shutdown).await {
+            if let Err(e) =
+                protocol::grpc::serve(grpc_addr, grpc_state, reflection_enabled, shutdown).await
+            {
                 error!(error = %e, "gRPC server exited with error");
             }
         });
@@ -2312,6 +2411,7 @@ async fn run_serve_tls(
         resolver: Arc::new(reloadable.resolver()),
         client_ca_path: config.server.tls_client_ca_path.clone(),
         require_client_cert: config.server.tls_require_client_cert,
+        crl_paths: config.security.tls.crl_paths.clone(),
     };
     let server_config =
         build_server_config(params).map_err(|e| format!("failed to build TLS config: {e}"))?;

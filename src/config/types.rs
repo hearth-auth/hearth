@@ -826,6 +826,12 @@ pub struct SecurityYaml {
     /// IP reputation provider configuration (P-2).
     #[serde(default)]
     pub ip_reputation: IpReputationYaml,
+    /// gRPC-specific security settings (A-43).
+    #[serde(default)]
+    pub grpc: GrpcSecurityYaml,
+    /// TLS-specific security settings (A-44).
+    #[serde(default)]
+    pub tls: TlsSecurityYaml,
 }
 
 /// `security.ip_reputation` — IP reputation policy and provider config (P-2).
@@ -860,6 +866,53 @@ pub struct IpReputationYaml {
     /// Absent / empty = MaxMind ASN lookup disabled.
     #[serde(default)]
     pub maxmind_db_path: Option<String>,
+}
+
+/// `security.grpc` — gRPC-specific security settings (A-43).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   grpc:
+///     reflection_enabled: false   # default; omit for production-safe behaviour
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GrpcSecurityYaml {
+    /// Whether the gRPC server reflection service is enabled.
+    ///
+    /// `null` / absent → `false` in production, `true` under `--dev`.
+    /// Setting this to `true` in production requires the `--allow-reflection-in-prod`
+    /// CLI flag; the server refuses to start without it.
+    ///
+    /// gRPC reflection exposes the full API schema to any unauthenticated caller.
+    /// Keep it off in production.
+    #[serde(default)]
+    pub reflection_enabled: Option<bool>,
+}
+
+/// `security.tls` — TLS-specific security settings (A-44).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   tls:
+///     crl_paths:
+///       - /etc/hearth/crl/client-ca.crl.pem
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TlsSecurityYaml {
+    /// Paths to PEM-encoded Certificate Revocation List (CRL) files for mTLS.
+    ///
+    /// When non-empty, mTLS client certificates are checked against every CRL in
+    /// the list on each handshake. Revoked certificates are rejected with a
+    /// TLS alert.  Paths are reloaded on `SIGHUP` alongside the server certificate.
+    ///
+    /// If empty (the default), no revocation check is performed — existing mTLS
+    /// behaviour is preserved.
+    #[serde(default)]
+    pub crl_paths: Vec<PathBuf>,
 }
 
 /// Action taken when IP reputation flags an IP.
@@ -2264,6 +2317,7 @@ impl RealmYamlConfig {
             absolute_timeout_secs: None,
             fapi_profile,
             risk_scorer_config: None,
+            quotas: None,
         })
     }
 }

@@ -104,10 +104,15 @@ const MAX_DECODING_MESSAGE_SIZE: usize = 1024 * 1024;
 /// Builds a fully-wired `tonic::transport::Server::router()` ready to serve.
 ///
 /// Includes all Hearth services plus `grpc.health.v1.Health` (reports SERVING
-/// by default) and `grpc.reflection.v1.ServerReflection` for grpcurl / Postman.
-/// The A-15 rate-limit interceptor is applied as a server-level layer.
+/// by default) and, when `reflection_enabled` is `true`,
+/// `grpc.reflection.v1.ServerReflection` for grpcurl / Postman.
+///
+/// A-43: reflection is gated by `reflection_enabled`. Default is `false` in
+/// production; pass `true` only for debugging (requires `--allow-reflection-in-prod`
+/// at startup). The A-15 rate-limit interceptor is applied as a server-level layer.
 pub async fn build_router(
     state: GrpcState,
+    reflection_enabled: bool,
 ) -> Result<tonic::transport::server::Router, Box<dyn std::error::Error + Send + Sync>> {
     use crate::protocol::proto::events::v1::audit_service_server::AuditServiceServer;
     use crate::protocol::proto::identity::v1::application_admin_service_server::ApplicationAdminServiceServer;
@@ -134,9 +139,16 @@ pub async fn build_router(
         .set_serving::<OAuthServiceServer<OAuthSvc>>()
         .await;
 
-    let reflection = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(super::FILE_DESCRIPTOR_SET)
-        .build_v1()?;
+    // A-43: reflection is off by default; only add it when explicitly enabled.
+    let reflection = if reflection_enabled {
+        Some(
+            tonic_reflection::server::Builder::configure()
+                .register_encoded_file_descriptor_set(super::FILE_DESCRIPTOR_SET)
+                .build_v1()?,
+        )
+    } else {
+        None
+    };
 
     let identity_svc = IdentityAdminServiceServer::new(IdentityAdminSvc::new(state.clone()))
         .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE);
@@ -152,7 +164,7 @@ pub async fn build_router(
     let router = Server::builder()
         .timeout(Duration::from_secs(60))
         .add_service(health_service)
-        .add_service(reflection)
+        .add_optional_service(reflection)
         .add_service(identity_svc)
         .add_service(app_svc)
         .add_service(rbac_svc)
@@ -164,11 +176,15 @@ pub async fn build_router(
 
 /// Binds a listener on `addr` and serves gRPC until `shutdown` resolves.
 ///
-/// A-15: the per-IP rate-limit interceptor is applied via
-/// `Server::layer()` (before `add_service`) so it covers every method.
+/// A-15: the per-IP rate-limit interceptor is applied via `Server::layer()`
+/// (before `add_service`) so it covers every method.
+///
+/// A-43: `reflection_enabled` gates the `grpc.reflection.v1.ServerReflection`
+/// service. Pass `false` (production default) to omit it entirely.
 pub async fn serve<F>(
     addr: SocketAddr,
     state: GrpcState,
+    reflection_enabled: bool,
     shutdown: F,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
@@ -202,9 +218,16 @@ where
         .set_serving::<OAuthServiceServer<OAuthSvc>>()
         .await;
 
-    let reflection = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(super::FILE_DESCRIPTOR_SET)
-        .build_v1()?;
+    // A-43: reflection is off by default; only add it when explicitly enabled.
+    let reflection = if reflection_enabled {
+        Some(
+            tonic_reflection::server::Builder::configure()
+                .register_encoded_file_descriptor_set(super::FILE_DESCRIPTOR_SET)
+                .build_v1()?,
+        )
+    } else {
+        None
+    };
 
     let identity_svc = IdentityAdminServiceServer::new(IdentityAdminSvc::new(state.clone()))
         .max_decoding_message_size(MAX_DECODING_MESSAGE_SIZE);
@@ -225,7 +248,7 @@ where
         .timeout(Duration::from_secs(60))
         .layer(rate_layer)
         .add_service(health_service)
-        .add_service(reflection)
+        .add_optional_service(reflection)
         .add_service(identity_svc)
         .add_service(app_svc)
         .add_service(rbac_svc)

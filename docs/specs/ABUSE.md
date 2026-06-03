@@ -1363,3 +1363,104 @@ security:
 A-16 **gates** the request (CAPTCHA required).  A-17 **adds latency** but
 does not gate.  Both can be active simultaneously; tarpit fires before the
 CAPTCHA check in handler order.
+
+---
+
+## A-43 — gRPC Reflection Production-Disable
+
+### Threat
+
+`grpc.reflection.v1.ServerReflection` exposes the full API schema
+(service names, method signatures, request/response types) to any unauthenticated
+caller.  In production this is an enumeration and reconnaissance primitive.
+
+### Mitigation
+
+`security.grpc.reflection_enabled` (default `false`) gates the reflection service.
+
+- **`--dev` mode**: defaults to `true` — grpcurl / Postman work out-of-the-box.
+- **Production (`null`/absent or `false`)**: service is omitted from the gRPC router entirely; clients that query it receive an "unimplemented" status, not schema data.
+- **Production with `true`**: Hearth **refuses to start** unless `--allow-reflection-in-prod` is passed.  The error message is actionable:
+
+  ```
+  security.grpc.reflection_enabled = true is not allowed in production mode.
+  Pass --allow-reflection-in-prod to override (debugging only; never in real deployments).
+  ```
+
+### Fail-closed
+
+The guard is fail-closed.  There is no runtime fallback: if the invariant is violated the process exits before accepting any connection.
+
+### Configuration surface
+
+```yaml
+security:
+  grpc:
+    reflection_enabled: false   # default; omit for production-safe behaviour
+```
+
+CLI:
+
+```
+hearth serve --allow-reflection-in-prod   # required when reflection_enabled = true in prod
+```
+
+---
+
+## A-44 — TLS 0-RTT Disable + mTLS CRL Revocation
+
+### Threat (0-RTT)
+
+TLS 1.3 0-RTT (early data) allows a client to send application data in the first
+flight, before the handshake completes.  Because 0-RTT data can be replayed by a
+network adversary, any idempotent-appearing endpoint hit with 0-RTT data is
+replayable.
+
+### Mitigation (0-RTT)
+
+`rustls` disables 0-RTT by default (`max_early_data_size = 0`).  Hearth asserts
+this invariant at server startup:
+
+```rust
+assert_eq!(config.max_early_data_size, 0,
+    "rustls changed the 0-RTT default — early data must remain disabled");
+```
+
+If a future `rustls` upgrade changes the default, the assertion panics at boot
+rather than silently permitting replays.  There is no configuration knob to re-enable
+0-RTT; operators who require it must modify the source.
+
+### Threat (mTLS revocation)
+
+`WebPkiClientVerifier` without a CRL bundle accepts any certificate signed by the
+configured CA, including certificates that have been revoked (e.g. because the
+private key was compromised).
+
+### Mitigation (mTLS CRL)
+
+`security.tls.crl_paths` accepts a list of PEM-encoded Certificate Revocation List
+files.  When configured:
+
+- Each CRL is loaded at startup and passed to `WebPkiClientVerifier::with_crls()`.
+- The verifier checks every client certificate against the union of all CRLs.
+- Revoked certificates are rejected with a TLS handshake alert before any
+  application data is exchanged.
+- Paths are reloaded on `SIGHUP` alongside the server certificate.
+
+### Fail-closed on opt-in
+
+If `crl_paths` is empty (the default), no revocation check is performed — existing
+mTLS deployments are not broken.  Once an operator configures paths:
+
+- A missing or unreadable CRL file causes startup to fail.
+- A malformed CRL file causes startup to fail.
+- A certificate absent from all CRLs is treated as not-revoked (CRL = explicit deny list).
+
+### Configuration surface
+
+```yaml
+security:
+  tls:
+    crl_paths:
+      - /etc/hearth/crl/client-ca.crl.pem   # PEM-encoded CRL, reloaded on SIGHUP
+```

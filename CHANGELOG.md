@@ -9,6 +9,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **A-43 gRPC reflection production-disable** — `security.grpc.reflection_enabled`
+  (default `false`; `true` in `--dev`) gates the `grpc.reflection.v1.ServerReflection`
+  service. Hearth refuses to start with reflection enabled in production mode unless
+  `--allow-reflection-in-prod` is explicitly passed on the command line (HEA-1209).
+
+- **A-44 TLS 0-RTT off + mTLS CRL revocation** — `rustls` `max_early_data_size` is
+  asserted `= 0` at startup so a future library upgrade cannot silently re-enable
+  replay-vulnerable early data. Optional `security.tls.crl_paths` accepts a list of
+  PEM-encoded CRL files; when configured, mTLS client certificates are checked against
+  every CRL on each handshake and revoked certificates are rejected (HEA-1209).
+
 - **P-2 IP reputation: Spamhaus DROP + MaxMind ASN/GeoIP2** — New pluggable
   `IpReputationProvider` trait (`src/abuse/ip_reputation/`).  Two reference
   adapters ship: (1) `SpamhausDropProvider` — checks source IPs against the
