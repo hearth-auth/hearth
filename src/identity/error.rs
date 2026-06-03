@@ -172,6 +172,19 @@ pub enum IdentityError {
     InvitationInvalid,
     /// An invitation for this email already exists for this organization.
     DuplicateInvitation,
+    /// The realm name or org slug is in the operator-configured reserved list (A-5).
+    ReservedSlug {
+        /// The name that was rejected.
+        slug: String,
+    },
+    /// The realm name or org slug is in a post-delete cooldown period (A-5).
+    ///
+    /// The slug was recently deleted and cannot be reused until the
+    /// cooldown window expires.
+    SlugInCooldown {
+        /// The name that was rejected.
+        slug: String,
+    },
     /// An operation targeted the reserved system realm, which only
     /// accepts writes from Hearth itself. The admin realm is not a
     /// place for application users, OAuth clients, organizations, or
@@ -236,6 +249,11 @@ pub enum IdentityError {
     /// audience, signature, nonce, or lifetime). Intentionally vague
     /// to avoid leaking which check failed to a tampering client.
     FederationTokenVerificationFailed,
+    /// The RFC 9207 `iss` authorization-response parameter was present but
+    /// did not match the expected issuer for this IdP connector.  A mismatch
+    /// signals a potential IdP-mixup attack where an attacker substituted a
+    /// callback from a different authorization server.  Fail-closed.
+    FederationIdpMixup,
     /// The upstream IdP returned `email_verified: false` for an
     /// operation that requires verified email (e.g., auto-linking to an
     /// existing user under `link_existing_accounts: auto`). The flow
@@ -458,6 +476,49 @@ pub enum IdentityError {
         /// Human-readable description of the violated constraint.
         reason: String,
     },
+    /// The requested email is under a 90-day post-deletion reservation (A-20).
+    ///
+    /// Returned by `create_user_with_status` when the target address was freed
+    /// by a `delete_user` within the last 90 days. Re-registration is blocked
+    /// to prevent account-squatting and privilege re-inheritance.
+    ///
+    /// Intentionally matches the `DuplicateEmail` error surface — callers
+    /// cannot distinguish "email in use" from "email reserved".
+    EmailReserved,
+    /// The email-change verification token is invalid, expired, or already used
+    /// (A-19).
+    ///
+    /// Intentionally conflates all failure modes for enumeration resistance.
+    EmailChangeTokenInvalid,
+    /// The `prompt=none` silent-auth probe rate limit was exceeded (A-37).
+    ///
+    /// Returned when a subject has made more than the per-realm cap of
+    /// `prompt=none` authorize requests within the sliding window.
+    SilentAuthRateLimited,
+    /// A per-realm resource quota was exceeded (A-24).
+    ///
+    /// The create operation was refused because the realm already has
+    /// `current` records of the given `resource` type and the configured
+    /// limit is `limit`.
+    QuotaExceeded {
+        /// Resource type that hit the limit (e.g. `"users"`, `"orgs"`,
+        /// `"clients"`, `"sessions"`, `"audit_rows"`).
+        resource: &'static str,
+        /// The configured maximum.
+        limit: u64,
+        /// The count at the time of the check.
+        current: u64,
+    },
+    /// A `WebAuthn` registration was rejected by the realm's attestation policy (A-13).
+    ///
+    /// Returned when the authenticator's AAGUID is not in the realm allowlist,
+    /// attestation format `"none"` is used but the realm forbids it, or a required
+    /// extension (PRF or `largeBlob`) is absent from the authenticator data.
+    AttestationPolicyViolation {
+        /// Human-readable description of the violated policy constraint.
+        /// Must not contain authenticator secrets or raw credential material.
+        reason: String,
+    },
 }
 
 impl fmt::Display for IdentityError {
@@ -537,6 +598,13 @@ impl fmt::Display for IdentityError {
             Self::DuplicateInvitation => {
                 write!(f, "an invitation for this email already exists")
             }
+            Self::ReservedSlug { slug } => {
+                write!(f, "name or slug '{slug}' is reserved and cannot be used")
+            }
+            Self::SlugInCooldown { slug } => write!(
+                f,
+                "name or slug '{slug}' is in a post-delete cooldown and cannot be reused yet"
+            ),
             Self::SystemRealmProtected { operation } => write!(
                 f,
                 "operation not permitted on the system realm: {operation}"
@@ -563,6 +631,9 @@ impl fmt::Display for IdentityError {
             }
             Self::FederationTokenVerificationFailed => {
                 write!(f, "federation token verification failed")
+            }
+            Self::FederationIdpMixup => {
+                write!(f, "federation IdP-mixup: iss parameter mismatch")
             }
             Self::FederationEmailNotVerified => {
                 write!(f, "upstream email is not verified")
@@ -664,10 +735,31 @@ impl fmt::Display for IdentityError {
             Self::FapiViolation { reason } => {
                 write!(f, "FAPI 2.0 violation: {reason}")
             }
+            Self::EmailReserved => write!(
+                f,
+                "a user with this email already exists or was recently deleted"
+            ),
+            Self::EmailChangeTokenInvalid => {
+                write!(f, "email change token is invalid or has expired")
+            }
+            Self::SilentAuthRateLimited => {
+                write!(f, "too many silent-auth requests; slow down")
+            }
             Self::SessionLimitExceeded { limit, active } => write!(
                 f,
                 "session limit exceeded: {active} active sessions, limit is {limit}"
             ),
+            Self::QuotaExceeded {
+                resource,
+                limit,
+                current,
+            } => write!(
+                f,
+                "realm quota exceeded: {resource} count is {current}, limit is {limit}"
+            ),
+            Self::AttestationPolicyViolation { reason } => {
+                write!(f, "attestation policy violation: {reason}")
+            }
         }
     }
 }
@@ -719,6 +811,7 @@ impl IdentityError {
 
             Self::RateLimited => Some("HEARTH_RATE_LIMITED"),
             Self::SessionLimitExceeded { .. } => Some("HEARTH_SESSION_LIMIT_EXCEEDED"),
+            Self::QuotaExceeded { .. } => Some("HEARTH_QUOTA_EXCEEDED"),
 
             Self::UserNotVerified => Some("HEARTH_EMAIL_UNVERIFIED"),
             Self::PasswordExpired => Some("HEARTH_PASSWORD_EXPIRED"),
@@ -745,7 +838,7 @@ impl IdentityError {
                 Some("HEARTH_INVALID_INPUT")
             }
 
-            Self::DuplicateEmail => Some("HEARTH_DUPLICATE_EMAIL"),
+            Self::DuplicateEmail | Self::EmailReserved => Some("HEARTH_DUPLICATE_EMAIL"),
             Self::DuplicateRealmName => Some("HEARTH_DUPLICATE_REALM_NAME"),
 
             Self::OrganizationNotFound => Some("HEARTH_ORG_NOT_FOUND"),
@@ -759,6 +852,9 @@ impl IdentityError {
             Self::InvitationInvalid => Some("HEARTH_INVITATION_INVALID"),
             Self::DuplicateInvitation => Some("HEARTH_INVITATION_DUPLICATE"),
 
+            Self::ReservedSlug { .. } => Some("HEARTH_RESERVED_SLUG"),
+            Self::SlugInCooldown { .. } => Some("HEARTH_SLUG_IN_COOLDOWN"),
+
             Self::RegistrationDisabled => Some("HEARTH_REGISTRATION_DISABLED"),
             Self::RegistrationDomainNotAllowed { .. } => {
                 Some("HEARTH_REGISTRATION_DOMAIN_NOT_ALLOWED")
@@ -768,6 +864,8 @@ impl IdentityError {
             Self::MagicLinkTokenInvalid => Some("HEARTH_MAGIC_LINK_INVALID"),
             Self::VerificationTokenInvalid => Some("HEARTH_VERIFICATION_TOKEN_INVALID"),
             Self::PasswordResetTokenInvalid => Some("HEARTH_PASSWORD_RESET_TOKEN_INVALID"),
+            Self::EmailChangeTokenInvalid => Some("HEARTH_EMAIL_CHANGE_TOKEN_INVALID"),
+            Self::SilentAuthRateLimited => Some("HEARTH_SILENT_AUTH_RATE_LIMITED"),
 
             Self::ConsentRequired => Some("HEARTH_CONSENT_REQUIRED"),
             Self::ConsentTicketNotFound | Self::ConsentTicketExpired => {
@@ -781,6 +879,7 @@ impl IdentityError {
             Self::FederationTokenVerificationFailed => {
                 Some("HEARTH_FEDERATION_TOKEN_VERIFICATION_FAILED")
             }
+            Self::FederationIdpMixup => Some("HEARTH_FEDERATION_IDP_MIXUP"),
             Self::FederationEmailNotVerified => Some("HEARTH_FEDERATION_EMAIL_NOT_VERIFIED"),
             Self::FederationLinkConfirmationRequired { .. } => {
                 Some("HEARTH_FEDERATION_LINK_CONFIRMATION_REQUIRED")
@@ -812,6 +911,8 @@ impl IdentityError {
             Self::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
             Self::DPopProofReplay | Self::DPopNonceInvalid => Some("use_dpop_nonce"),
             Self::DPopBindingMismatch => Some("invalid_token"),
+
+            Self::AttestationPolicyViolation { .. } => Some("HEARTH_ATTESTATION_POLICY_VIOLATION"),
 
             // 5xx — do not leak internal detail
             Self::SigningError { .. }
@@ -878,6 +979,8 @@ impl std::error::Error for IdentityError {
             | Self::MemberLimitReached
             | Self::InvitationInvalid
             | Self::DuplicateInvitation
+            | Self::ReservedSlug { .. }
+            | Self::SlugInCooldown { .. }
             | Self::RegistrationDisabled
             | Self::RegistrationDomainNotAllowed { .. }
             | Self::RegistrationRequiresInvitation
@@ -890,6 +993,7 @@ impl std::error::Error for IdentityError {
             | Self::FederationInvalidState
             | Self::FederationUpstreamError { .. }
             | Self::FederationTokenVerificationFailed
+            | Self::FederationIdpMixup
             | Self::FederationEmailNotVerified
             | Self::FederationLinkConfirmationRequired { .. }
             | Self::FederationNotLinked
@@ -933,7 +1037,12 @@ impl std::error::Error for IdentityError {
             | Self::InvalidJar { .. }
             | Self::SessionVersionDisabled
             | Self::SessionLimitExceeded { .. }
-            | Self::FapiViolation { .. } => None,
+            | Self::FapiViolation { .. }
+            | Self::EmailReserved
+            | Self::EmailChangeTokenInvalid
+            | Self::SilentAuthRateLimited
+            | Self::QuotaExceeded { .. }
+            | Self::AttestationPolicyViolation { .. } => None,
         }
     }
 }
@@ -1548,5 +1657,41 @@ mod tests {
         })
         .source()
         .is_none());
+    }
+
+    #[test]
+    fn display_attestation_policy_violation() {
+        let err = IdentityError::AttestationPolicyViolation {
+            reason: "AAGUID not in allowlist".to_string(),
+        };
+        let display = format!("{err}");
+        assert!(
+            display.contains("attestation policy violation"),
+            "got: {display}"
+        );
+        assert!(
+            display.contains("AAGUID not in allowlist"),
+            "got: {display}"
+        );
+    }
+
+    #[test]
+    fn attestation_policy_violation_has_wire_code() {
+        let err = IdentityError::AttestationPolicyViolation {
+            reason: "none not permitted".to_string(),
+        };
+        assert_eq!(
+            err.wire_error_code(),
+            Some("HEARTH_ATTESTATION_POLICY_VIOLATION"),
+            "expected stable wire code"
+        );
+    }
+
+    #[test]
+    fn attestation_policy_violation_has_no_source() {
+        let err = IdentityError::AttestationPolicyViolation {
+            reason: "test".to_string(),
+        };
+        assert!(err.source().is_none());
     }
 }

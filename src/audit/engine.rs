@@ -312,6 +312,39 @@ impl AuditEngine for EmbeddedAuditEngine {
         }
         Ok(deleted)
     }
+
+    fn count_events(&self, realm_id: &RealmId) -> Result<u64, AuditError> {
+        let prefix = keys::event_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self.storage.scan(realm_id, &prefix, &end)?;
+        Ok(entries.len() as u64)
+    }
+
+    fn prune_oldest(&self, realm_id: &RealmId, n: u64) -> Result<u64, AuditError> {
+        // Scan all primary event keys in chronological order (keys encode
+        // timestamp so lexicographic order = chronological order).
+        let prefix = keys::event_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self.storage.scan(realm_id, &prefix, &end)?;
+
+        let to_delete = (n as usize).min(entries.len());
+        let mut deleted: u64 = 0;
+
+        for entry in entries.into_iter().take(to_delete) {
+            let event: AuditEvent =
+                serde_json::from_slice(&entry.value).map_err(|e| AuditError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            self.storage.delete(realm_id, &entry.key)?;
+            let actor_key = keys::encode_actor_index(&event.actor, event.timestamp, &event.id);
+            self.storage.delete(realm_id, &actor_key)?;
+            let action_key =
+                keys::encode_action_index(event.action.as_str(), event.timestamp, &event.id);
+            self.storage.delete(realm_id, &action_key)?;
+            deleted += 1;
+        }
+        Ok(deleted)
+    }
 }
 
 impl EmbeddedAuditEngine {

@@ -1,4 +1,11 @@
 [advisories]
+# maxminddb 0.24 has RUSTSEC-2025-0132 (`Reader::open_mmap` unsoundly marks
+# an unsafe memmap operation as safe). Suppressed here because we do not use
+# `open_mmap` anywhere in Hearth — we use `open_readfile` (safe path only).
+# TODO: upgrade to maxminddb ≥ 0.27 once available on crates.io (GeoIP P-4).
+ignore = [
+    { id = "RUSTSEC-2025-0132", reason = "we use open_readfile (safe path); not exploitable in our call sites" },
+]
 
 [licenses]
 # cargo-deny 0.14+ uses a pure allowlist model: any license (or no license) not

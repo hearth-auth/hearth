@@ -38,6 +38,8 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::DuplicateRealmName
         | IdentityError::DuplicateOrgSlug
         | IdentityError::DuplicateInvitation
+        | IdentityError::ReservedSlug { .. }
+        | IdentityError::SlugInCooldown { .. }
         | IdentityError::MfaAlreadyEnabled
         | IdentityError::AlreadyMember
         | IdentityError::FederationAlreadyLinked
@@ -81,6 +83,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::FederationUnknownConnector
         | IdentityError::FederationInvalidState
         | IdentityError::FederationTokenVerificationFailed
+        | IdentityError::FederationIdpMixup
         | IdentityError::FederationEmailNotVerified
         | IdentityError::FederationLinkConfirmationRequired { .. }
         | IdentityError::WebAuthnRegistrationFailed { .. }
@@ -96,6 +99,11 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::SamlDestinationMismatch
         | IdentityError::SamlUnsupportedAlgorithm
         | IdentityError::SamlInvalidAuthnRequest { .. } => (Code::InvalidArgument, err.to_string()),
+        IdentityError::QuotaExceeded { .. } => (Code::ResourceExhausted, err.to_string()),
+        IdentityError::EmailReserved | IdentityError::EmailChangeTokenInvalid => {
+            (Code::InvalidArgument, err.to_string())
+        }
+        IdentityError::SilentAuthRateLimited => (Code::ResourceExhausted, err.to_string()),
         IdentityError::SamlUnknownSp | IdentityError::SamlUnknownIdp => {
             (Code::NotFound, err.to_string())
         }
@@ -169,6 +177,10 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             Code::Unauthenticated,
             "DPoP key binding mismatch".to_string(),
         ),
+        // A-13: attestation policy violation.
+        IdentityError::AttestationPolicyViolation { .. } => {
+            (Code::PermissionDenied, err.to_string())
+        }
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }

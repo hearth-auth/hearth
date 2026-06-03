@@ -12,19 +12,20 @@ pub use diff::{compute_diff, ConfigDiff, ConfigSnapshot};
 pub use env::{EnvVarWarning, EnvVarWarningKind};
 pub use error::ConfigError;
 pub use types::parse_duration_to_micros;
+pub use types::AgentAuthConfig;
 pub use types::ClusterConfig;
 pub use types::{
-    AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, ClaimsYamlConfig,
-    CompactionSection, EmailConfig, EmailTransport, FederationProviderYaml, FederationYamlConfig,
-    GlobalRateLimitYaml, GroupYamlConfig, IpRateLimitYaml, LinkModeYaml, MailgunConfig,
-    MailgunRegion, MailtrapConfig, MetricsConfig, MigrateConflictPolicy, ObservabilityConfig,
-    OidcYamlConfig, OnboardingConfig, OperationalConfig, OrgConfigYaml, OrganizationYamlConfig,
-    OtlpConfig, OtlpProtocol, PasswordPolicyYaml, PermissionYamlConfig, PostmarkConfig,
-    ProtectedResourceYamlConfig, RateLimitYaml, RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml,
-    RealmScimYaml, RealmTokenYaml, RealmWebYaml, RealmYamlConfig, RoleYamlConfig,
-    SamlServiceProviderYaml, ScopeBundleYamlConfig, SecurityYaml, SendgridConfig, ServerConfig,
-    SmsConfig, SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection,
-    TokenYamlConfig, TwilioConfig,
+    AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, CaptchaProviderKind,
+    CaptchaYaml, ClaimsYamlConfig, CompactionSection, EmailConfig, EmailTransport,
+    FederationProviderYaml, FederationYamlConfig, GlobalRateLimitYaml, GroupYamlConfig,
+    IpRateLimitYaml, LinkModeYaml, MailgunConfig, MailgunRegion, MailtrapConfig, MetricsConfig,
+    MigrateConflictPolicy, ObservabilityConfig, OidcYamlConfig, OnboardingConfig,
+    OperationalConfig, OrgConfigYaml, OrganizationYamlConfig, OtlpConfig, OtlpProtocol,
+    PasswordPolicyYaml, PermissionYamlConfig, PostmarkConfig, ProtectedResourceYamlConfig,
+    RateLimitYaml, RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml, RealmScimYaml, RealmTokenYaml,
+    RealmWebYaml, RealmYamlConfig, RoleYamlConfig, SamlServiceProviderYaml, ScopeBundleYamlConfig,
+    SecurityYaml, SendgridConfig, ServerConfig, SmsConfig, SmsTransport, SmtpConfig,
+    SmtpEncryption, SnsSmsConfig, StorageSection, TokenYamlConfig, TurnstileYaml, TwilioConfig,
 };
 
 /// Helper: construct a validation error without repeating the struct
@@ -113,6 +114,12 @@ pub struct Config {
     /// default), Hearth runs in single-node mode with no clustering overhead.
     #[serde(default)]
     pub cluster: Option<ClusterConfig>,
+    /// Agent authentication / authorization feature gate.
+    ///
+    /// Setting `agent_auth.enabled = true` while the Agent entity is not fully
+    /// implemented produces a startup error. See `docs/specs/AGENT_AUTH.md`.
+    #[serde(default)]
+    pub agent_auth: AgentAuthConfig,
     /// Whether development mode is active. Not serialized — set by [`Config::dev`].
     #[serde(skip)]
     pub dev_mode: bool,
@@ -206,6 +213,7 @@ impl Config {
             realms: None,
             cluster: None,
             security: SecurityYaml::default(),
+            agent_auth: AgentAuthConfig::default(),
             dev_mode: true,
             config_warnings: Vec::new(),
         }
@@ -392,6 +400,20 @@ impl Config {
             });
         }
 
+        // A-32: trusted_proxies safety check.
+        validate_trusted_proxies(&self.server, &mut issues);
+
+        // A-36: agent_auth guardrail.
+        if self.agent_auth.enabled {
+            issues.push(ValidationIssue {
+                field: "agent_auth.enabled".to_string(),
+                reason: "agent_auth is not yet fully implemented (Agent entity, delegation, \
+                         MCP/A2A surfaces, AATs are incomplete per docs/specs/AGENT_AUTH.md). \
+                         Set agent_auth.enabled = false until the feature ships."
+                    .to_string(),
+            });
+        }
+
         issues
     }
 
@@ -496,6 +518,17 @@ impl Config {
             });
         }
 
+        // A-36: agent_auth guardrail — checked before OIDC/token so it fires
+        // fast even when other production fields (oidc.issuer) are missing.
+        if self.agent_auth.enabled {
+            return Err(invalid(
+                "agent_auth.enabled",
+                "agent_auth is not yet fully implemented (Agent entity, delegation, \
+                 MCP/A2A surfaces, AATs are incomplete per docs/specs/AGENT_AUTH.md). \
+                 Set agent_auth.enabled = false until the feature ships.",
+            ));
+        }
+
         validate_oidc(&self.oidc, self.dev_mode)?;
         validate_token(&self.token)?;
         validate_email(&self.email)?;
@@ -528,7 +561,85 @@ impl Config {
             ));
         }
 
+        // A-32: trusted_proxies safety check.
+        let mut tp_issues = Vec::new();
+        validate_trusted_proxies(&self.server, &mut tp_issues);
+        if let Some(issue) = tp_issues.into_iter().next() {
+            return Err(invalid(&issue.field, issue.reason));
+        }
+
         Ok(())
+    }
+}
+
+/// Returns `true` when `addr` is a loopback address (IPv4 127.x.x.x or IPv6 ::1).
+fn is_loopback_str(addr: &str) -> bool {
+    addr.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Returns `true` when `addr` is an unspecified catch-all (0.0.0.0 or ::).
+fn is_unspecified_str(addr: &str) -> bool {
+    addr.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_unspecified())
+        .unwrap_or(false)
+}
+
+/// Returns `true` when the server is NOT bound to a loopback address
+/// (i.e., it accepts connections from outside the host).
+fn is_public_listener(bind_address: &str) -> bool {
+    !is_loopback_str(bind_address)
+}
+
+/// A-32: Validates `server.trusted_proxies` against known dangerous configurations.
+///
+/// Refuses:
+/// - `0.0.0.0` or `::` (unspecified / catch-all) — trusts every IP as a proxy.
+/// - `0.0.0.0/0` or `::/0` — CIDR catch-all notation (if someone wrote it as a string).
+/// - Loopback addresses (127.x.x.x, ::1) when the server is bound to a public address.
+fn validate_trusted_proxies(server: &types::ServerConfig, issues: &mut Vec<ValidationIssue>) {
+    for (i, entry) in server.trusted_proxies.iter().enumerate() {
+        let field = format!("server.trusted_proxies[{i}]");
+
+        // Reject CIDR wildcard notation.
+        if entry == "0.0.0.0/0" || entry == "::/0" {
+            issues.push(ValidationIssue {
+                field,
+                reason: format!(
+                    "'{entry}' is a catch-all CIDR that trusts every IP as a proxy; \
+                     this bypasses all IP-based protections. \
+                     List only your actual reverse-proxy IP addresses."
+                ),
+            });
+            continue;
+        }
+
+        // Reject unspecified (catch-all) IP addresses.
+        if is_unspecified_str(entry) {
+            issues.push(ValidationIssue {
+                field,
+                reason: format!(
+                    "'{entry}' is an unspecified/catch-all address that trusts every \
+                     IP as a proxy; list only your actual reverse-proxy IP addresses."
+                ),
+            });
+            continue;
+        }
+
+        // Reject loopback entries when the listener is public.
+        if is_loopback_str(entry) && is_public_listener(&server.bind_address) {
+            issues.push(ValidationIssue {
+                field,
+                reason: format!(
+                    "'{entry}' is a loopback address but the server is bound to '{}' \
+                     (a public listener). Loopback proxies cannot reach a public listener; \
+                     this entry is likely a misconfiguration. \
+                     If your proxy truly runs on localhost, bind the server to 127.0.0.1.",
+                    server.bind_address
+                ),
+            });
+        }
     }
 }
 

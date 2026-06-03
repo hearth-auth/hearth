@@ -31,6 +31,10 @@ pub(crate) const SEED_PERMISSIONS: &[(&str, &str)] = &[
         "Full superuser access to the Hearth system realm; manage realms, global config, and platform-level settings.",
     ),
     (
+        "hearth.export",
+        "Export realm data (backup archives, user CSV, audit logs) — required in addition to hearth.admin for all data-export endpoints (A-30).",
+    ),
+    (
         "realm.read",
         "View realm metadata, roles, groups, applications, and audit events within the current realm.",
     ),
@@ -114,6 +118,7 @@ const SEED_ROLES: &[SeedRoleSpec] = &[
         name: "realm.admin",
         permissions: &[
             "hearth.admin",
+            "hearth.export",
             "hearth.sv_feed",
             "realm.read",
             "realm.write",

@@ -22,7 +22,9 @@ pub mod oidc;
 pub mod onboarding;
 pub mod ra_token;
 pub mod reconcile;
+pub mod risk;
 pub mod session_version;
+pub mod sessions;
 pub mod sms;
 pub mod tokens;
 pub(crate) mod totp;
@@ -30,7 +32,10 @@ mod types;
 mod validation;
 pub(crate) mod webauthn;
 
-pub use credentials::{CleartextPassword, CredentialConfig};
+pub use credentials::{
+    hash_password, verify_password_with_pepper, CleartextPassword, CredentialConfig, PepperConfig,
+    PepperKey, StoredCredential,
+};
 pub use email::{
     ApiKey, EmailBranding, EmailError, EmailMessage, EmailSender, EmailService, LoggingEmailSender,
     MailgunEmailSender, MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender,
@@ -48,9 +53,9 @@ pub use oidc::{
     DeviceAuthorizationRequest, DeviceAuthorizationResponse, DeviceCodeStatus,
     IntrospectionResponse, JarClaims, JwtBearerRequest, OAuthClient, OidcConfig,
     OidcDiscoveryDocument, OidcTokenResponse, PasswordGrantRequest, PasswordGrantResponse,
-    PushedAuthorizationRequest, PushedAuthorizationResponse, RegisterClientRequest, ResponseMode,
-    StepUpMfaGrantRequest, TokenExchangeRequest, TokenIntrospectionRequest, TokenRevocationRequest,
-    UpdateClientRequest, UserInfoResponse,
+    PushedAuthorizationRequest, PushedAuthorizationResponse, RefreshBindContext,
+    RegisterClientRequest, ResponseMode, StepUpMfaGrantRequest, TokenExchangeRequest,
+    TokenIntrospectionRequest, TokenRevocationRequest, UpdateClientRequest, UserInfoResponse,
 };
 pub use session_version::{SessionVersionStore, SvDeltaEntry, SvDeltaResponse, SvSnapshotResponse};
 pub use sms::{
@@ -70,11 +75,11 @@ pub use types::{
     CreateWebhookRequest, CredentialExport, DcrPolicy, FapiProfile, ImportClientRequest,
     ImportUserRequest, InvitationStatus, MigrationReport, Organization, OrganizationConfig,
     OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
-    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
-    RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
-    UserStatus, Webhook,
+    PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig,
+    RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
+    RequiredAction, RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy,
+    SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
+    UpdateWebhookRequest, User, UserStatus, WebAuthnAttestationPolicy, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -85,6 +90,39 @@ pub use webauthn::{
 use crate::core::{
     ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
 };
+
+// Maximum page size for all paginated list operations (A-23).
+// Callers supplying `limit > MAX_PAGE_SIZE` receive `IdentityError::InvalidInput`.
+// This constant is also re-exported from `crate::abuse::MAX_PAGE_SIZE`.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Migration helpers (pepper rotation tooling)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns the storage scan prefix for credentials (used by migration tools).
+#[must_use]
+pub fn credential_scan_prefix_for_migration() -> Vec<u8> {
+    crate::identity::keys::credential_scan_prefix()
+}
+
+pub const MAX_PAGE_SIZE: usize = crate::abuse::MAX_PAGE_SIZE;
+
+/// Clamps `limit` to [`MAX_PAGE_SIZE`], returning an `IdentityError` if the
+/// caller requested more rows than the cap allows.
+///
+/// Handlers should call this before passing `limit` to any trait method.
+///
+/// # Errors
+///
+/// Returns `IdentityError::InvalidInput` when `limit > MAX_PAGE_SIZE`.
+pub fn cap_page_size(limit: usize) -> Result<usize, IdentityError> {
+    if limit > MAX_PAGE_SIZE {
+        return Err(IdentityError::InvalidInput {
+            reason: format!("page size {limit} exceeds maximum {MAX_PAGE_SIZE}"),
+        });
+    }
+    Ok(limit)
+}
 
 /// Trait defining the identity engine interface.
 ///
@@ -429,6 +467,20 @@ pub trait IdentityEngine: Send + Sync {
         limit: usize,
     ) -> Result<Page<Session>, IdentityError>;
 
+    /// Revokes all active sessions (and their grant families) for a user.
+    ///
+    /// `keep` exempts one session from revocation so the caller's device
+    /// can stay logged in after a sensitive credential mutation.
+    /// Pass `None` to revoke every session.
+    ///
+    /// Returns the count of sessions that were actually revoked.
+    fn revoke_all_user_sessions(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        keep: Option<&SessionId>,
+    ) -> Result<u32, IdentityError>;
+
     // ===== Token management =====
 
     /// Issues an access/refresh token pair for a session.
@@ -481,6 +533,7 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         refresh_token: &str,
         dpop_jkt: Option<&str>,
+        bind_ctx: Option<&RefreshBindContext>,
     ) -> Result<TokenPair, IdentityError>;
 
     /// Returns the JWKS document containing public keys for external verification.
@@ -989,6 +1042,51 @@ pub trait IdentityEngine: Send + Sync {
     /// expired, or already used. Intentionally vague for enumeration
     /// resistance.
     fn verify_email_token(&self, realm_id: &RealmId, token: &str) -> Result<UserId, IdentityError>;
+
+    // ===== A-19: Email-change re-verification flow =====
+
+    /// Begins an email-address change for `user_id` (A-19).
+    ///
+    /// Validates `new_email`, checks uniqueness (and the A-20 reservation),
+    /// generates a 32-byte random verification token, stores SHA-256(token)
+    /// in `email:change:{hash}`, emits `EmailChangeInitiated` audit.
+    ///
+    /// Returns the plaintext token. The caller is responsible for delivering
+    /// it to `new_email` (e.g. via `WebState::email`). The old address is
+    /// unchanged until `confirm_email_change` is called.
+    fn initiate_email_change(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        new_email: &str,
+    ) -> Result<String, IdentityError>;
+
+    /// Completes an email-address change (A-19).
+    ///
+    /// Validates the token (expiry, single-use), swaps the email indexes,
+    /// updates the user record, revokes all sessions, emits
+    /// `EmailChangeConfirmed` audit.
+    ///
+    /// Returns `Err(EmailChangeTokenInvalid)` for any token failure.
+    /// The caller MUST send a `security.email_changed` notification to the
+    /// returned old address (available from the updated `User` record before
+    /// this call or from the engine's old-email field in the stored token).
+    fn confirm_email_change(&self, realm_id: &RealmId, token: &str) -> Result<User, IdentityError>;
+
+    /// Checks and records a `prompt=none` probe for the given (realm, sub)
+    /// pair (A-37).
+    ///
+    /// Increments a sliding-window counter stored under
+    /// `rl:prompt_none:{user_uuid}`. Returns `Ok(())` while under the cap,
+    /// `Err(SilentAuthRateLimited)` when the hourly limit is exceeded.
+    /// Emits `OidcSilentAuthProbed` audit on every call (fail-open).
+    fn check_silent_auth_probe(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        client_id: &str,
+        outcome: &str,
+    ) -> Result<(), IdentityError>;
 
     // ===== UserInfo (OIDC Core §5.3) =====
 

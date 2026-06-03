@@ -167,10 +167,23 @@ pub struct IdpConfig {
     /// Azure AD). Empty for standard OIDC providers.
     #[serde(default)]
     pub claim_mappings: BTreeMap<String, String>,
+    /// Clock-skew allowance in seconds applied to ID-token `exp` and `nbf`
+    /// checks. Defaults to 60 s (standard OIDC RP tolerance). Operators can
+    /// raise this for enterprise federation scenarios where the IdP clock
+    /// is known to drift, or lower it for stricter security posture.
+    #[serde(default = "IdpConfig::default_leeway_seconds")]
+    pub leeway_seconds: u32,
     /// When this connector was first registered.
     pub created_at: Timestamp,
     /// When the connector config was last updated by reconcile.
     pub updated_at: Timestamp,
+}
+
+impl IdpConfig {
+    /// Default JWT clock-skew leeway (60 s — standard OIDC RP tolerance).
+    pub fn default_leeway_seconds() -> u32 {
+        60
+    }
 }
 
 /// A resolved external identity, extracted from an ID token or
@@ -394,6 +407,7 @@ mod tests {
             client_id: "client-xyz".to_string(),
             client_secret: FederationSecret::new("sekret".to_string()),
             claim_mappings: BTreeMap::new(),
+            leeway_seconds: IdpConfig::default_leeway_seconds(),
             created_at: Timestamp::from_micros(1),
             updated_at: Timestamp::from_micros(2),
         };

@@ -168,6 +168,7 @@ async fn test_delete_realm_cascading_one_event() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_destructive_delete_fails_when_audit_down() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let config = hearth::storage::StorageConfig::dev(temp_dir.path().to_path_buf());
@@ -217,6 +218,19 @@ async fn test_destructive_delete_fails_when_audit_down() {
             &self,
             _realm_id: &hearth::core::RealmId,
             _cutoff: hearth::core::Timestamp,
+        ) -> Result<u64, hearth::audit::AuditError> {
+            Ok(0)
+        }
+        fn count_events(
+            &self,
+            _realm_id: &hearth::core::RealmId,
+        ) -> Result<u64, hearth::audit::AuditError> {
+            Ok(0)
+        }
+        fn prune_oldest(
+            &self,
+            _realm_id: &hearth::core::RealmId,
+            _n: u64,
         ) -> Result<u64, hearth::audit::AuditError> {
             Ok(0)
         }

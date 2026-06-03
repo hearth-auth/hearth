@@ -36,6 +36,9 @@ pub struct EmbeddedRbacEngine {
     /// Injected at startup via [`Self::init_sv_bumper`]. Absent until the
     /// identity engine is fully constructed (avoids construction-order coupling).
     sv_bumper: OnceLock<Arc<dyn SvBumper>>,
+    /// Serializes concurrent role-assignment writes to prevent duplicate assignments
+    /// (A-28: same user+role+scope pair from two concurrent requests).
+    assign_write_lock: std::sync::Mutex<()>,
 }
 
 impl EmbeddedRbacEngine {
@@ -45,6 +48,7 @@ impl EmbeddedRbacEngine {
             storage,
             clock,
             sv_bumper: OnceLock::new(),
+            assign_write_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -354,6 +358,20 @@ impl EmbeddedRbacEngine {
             }
         }
         Ok(out)
+    }
+
+    /// Returns all [`RoleAssignment`]s for `subject`, regardless of whether it
+    /// is a user or a group. Used by [`Self::assign_role`] for the A-28
+    /// idempotency check under the write lock.
+    fn subject_assignments(
+        &self,
+        realm_id: &RealmId,
+        subject: &Subject,
+    ) -> Result<Vec<RoleAssignment>, RbacError> {
+        match subject {
+            Subject::User(u) => self.user_assignments(realm_id, u),
+            Subject::Group(g) => self.group_assignments(realm_id, g),
+        }
     }
 
     fn load_user_permissions(
@@ -1154,33 +1172,54 @@ impl RbacEngine for EmbeddedRbacEngine {
             }
         }
 
-        let now = self.clock.now();
-        let id = AssignmentId::generate();
-        let assignment = RoleAssignment {
-            id: id.clone(),
-            realm_id: realm_id.clone(),
-            subject: req.subject.clone(),
-            role_id: req.role_id.clone(),
-            scope: req.scope.clone(),
-            assigned_at: now,
-            assigned_by: req.assigned_by.clone(),
-        };
+        // A-28: acquire write lock to prevent concurrent duplicate assignments.
+        let assignment = {
+            let _guard = self
+                .assign_write_lock
+                .lock()
+                .expect("assign write lock poisoned");
 
-        let pri = keys::encode_assignment(&id);
-        let subject_idx = match &assignment.subject {
-            Subject::User(u) => keys::encode_assign_user(u, &id),
-            Subject::Group(g) => keys::encode_assign_group(g, &id),
-        };
-        let role_idx = keys::encode_assign_role(&assignment.role_id, &id);
+            // Idempotency: if this exact (subject, role, scope) already exists,
+            // return it without creating a duplicate record.
+            let existing = self
+                .subject_assignments(realm_id, &req.subject)?
+                .into_iter()
+                .find(|a| a.role_id == req.role_id && a.scope == req.scope);
+            if let Some(existing) = existing {
+                return Ok(existing);
+            }
 
-        self.storage.put_batch(
-            realm_id,
-            &[
-                (pri, Self::ser(&assignment)?),
-                (subject_idx, Self::ser(&id)?),
-                (role_idx, Self::ser(&id)?),
-            ],
-        )?;
+            let now = self.clock.now();
+            let id = AssignmentId::generate();
+            let assignment = RoleAssignment {
+                id: id.clone(),
+                realm_id: realm_id.clone(),
+                subject: req.subject.clone(),
+                role_id: req.role_id.clone(),
+                scope: req.scope.clone(),
+                assigned_at: now,
+                assigned_by: req.assigned_by.clone(),
+            };
+
+            let pri = keys::encode_assignment(&id);
+            let subject_idx = match &assignment.subject {
+                Subject::User(u) => keys::encode_assign_user(u, &id),
+                Subject::Group(g) => keys::encode_assign_group(g, &id),
+            };
+            let role_idx = keys::encode_assign_role(&assignment.role_id, &id);
+
+            self.storage.put_batch(
+                realm_id,
+                &[
+                    (pri, Self::ser(&assignment)?),
+                    (subject_idx, Self::ser(&id)?),
+                    (role_idx, Self::ser(&id)?),
+                ],
+            )?;
+
+            assignment
+            // _guard dropped here — lock released before sv_bump
+        };
 
         match &assignment.subject {
             Subject::User(uid) => self.bump_sv_for_user(realm_id, uid),

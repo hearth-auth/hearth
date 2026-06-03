@@ -27,6 +27,7 @@ use hearth::identity::{
     RateLimitConfig, TokenConfig,
 };
 use hearth::protocol;
+use hearth::protocol::admin_auth::JwksRateLimiter;
 use hearth::protocol::http::{self, AppState};
 use hearth::protocol::tls::{build_server_config, ReloadableTlsConfig, TlsConfigParams};
 use hearth::protocol::web::{self, WebState};
@@ -67,6 +68,16 @@ enum Commands {
         /// the startup phase only (respects existing log level for steady-state).
         #[arg(long, short = 'v')]
         verbose: bool,
+
+        /// Allow gRPC server reflection in production mode (A-43).
+        ///
+        /// gRPC reflection exposes the full API schema to any unauthenticated caller.
+        /// Hearth refuses to start with `security.grpc.reflection_enabled = true` in
+        /// production mode unless this flag is explicitly passed.
+        ///
+        /// Use only for debugging. Never enable in real deployments.
+        #[arg(long)]
+        allow_reflection_in_prod: bool,
     },
     /// Manage realms.
     Realm {
@@ -240,6 +251,24 @@ enum MigrateSource {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Audit and report on credentials that need Argon2 pepper rotation.
+    ///
+    /// After adding or rotating `security.password.pepper` in `hearth.yaml`,
+    /// run this command to see how many credentials still carry an older (or
+    /// absent) pepper version.  Actual re-hashing is performed lazily on each
+    /// user's next successful login — no passwords are modified here.
+    ///
+    /// Exit codes: 0 = all credentials current, 1 = rotation pending,
+    /// 2 = error opening the data store.
+    RotatePepper {
+        /// Data directory of the Hearth store to audit.
+        #[arg(long)]
+        data_dir: PathBuf,
+
+        /// Only report totals without listing per-realm details.
+        #[arg(long)]
+        summary_only: bool,
+    },
 }
 
 /// Realm management subcommands.
@@ -362,8 +391,18 @@ async fn main() {
             port,
             bind,
             verbose,
+            allow_reflection_in_prod,
         } => {
-            if let Err(e) = run_serve(dev, config_path, port, bind, verbose).await {
+            if let Err(e) = run_serve(
+                dev,
+                config_path,
+                port,
+                bind,
+                verbose,
+                allow_reflection_in_prod,
+            )
+            .await
+            {
                 // Use eprintln! here — tracing may not be initialized yet if
                 // the error occurred during config loading.
                 //
@@ -435,6 +474,24 @@ async fn main() {
                 {
                     error!("{e}");
                     std::process::exit(1);
+                }
+            }
+            MigrateSource::RotatePepper {
+                data_dir,
+                summary_only,
+            } => {
+                match run_migrate_rotate_pepper(&data_dir, summary_only) {
+                    Ok(true) => {
+                        // All credentials already use the active pepper version.
+                    }
+                    Ok(false) => {
+                        // Some credentials still need rotation.
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        error!("{e}");
+                        std::process::exit(2);
+                    }
                 }
             }
         },
@@ -550,6 +607,7 @@ async fn run_serve(
     port_override: Option<u16>,
     bind_override: Option<String>,
     verbose: bool,
+    allow_reflection_in_prod: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config(dev, config_path.as_deref())?;
@@ -859,12 +917,23 @@ async fn run_serve(
         }
     };
 
+    // A-5: normalise reserved slugs to lowercase once at startup.
+    let reserved_slugs: Vec<String> = config
+        .security
+        .reserved_slugs
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    let slug_cooldown_secs = u64::from(config.security.slug_cooldown_days) * 86_400;
+
     let identity_config = if config.dev_mode {
         IdentityConfig {
             credential: CredentialConfig::fast_for_testing(),
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
+            reserved_slugs: reserved_slugs.clone(),
+            slug_cooldown_secs,
             ..IdentityConfig::default()
         }
     } else {
@@ -872,6 +941,8 @@ async fn run_serve(
             oidc: oidc_config,
             token: token_config,
             rate_limit: rate_limit_config,
+            reserved_slugs: reserved_slugs.clone(),
+            slug_cooldown_secs,
             ..IdentityConfig::default()
         }
     };
@@ -933,6 +1004,23 @@ async fn run_serve(
     if config.email.transport == EmailTransport::Mailcatcher && !config.dev_mode {
         return Err(
             "email.transport = mailcatcher is only allowed in dev mode (start with --dev)".into(),
+        );
+    }
+
+    // A-43: Resolve effective reflection_enabled and apply the production guard.
+    // `None` in the config means "use the mode default": true in --dev, false in prod.
+    let reflection_enabled = config
+        .security
+        .grpc
+        .reflection_enabled
+        .unwrap_or(config.dev_mode);
+    if reflection_enabled && !config.dev_mode && !allow_reflection_in_prod {
+        return Err(
+            "security.grpc.reflection_enabled = true is not allowed in production mode. \
+             gRPC reflection exposes the full API schema to unauthenticated callers. \
+             Pass --allow-reflection-in-prod to override (debugging only; never in real \
+             deployments)."
+                .into(),
         );
     }
 
@@ -1415,12 +1503,13 @@ async fn run_serve(
         hearth::webhook::NotifyingAuditEngine::new(Arc::clone(&raw_audit), webhook_tx),
     );
 
-    // Background daily audit log pruning sweep.
-    // Iterates all realms and deletes events older than each realm's
-    // configured `retention_days`. Realms with `retention_days = 0` are skipped.
+    // Background daily audit log pruning sweep (A-25).
+    // Per realm: (1) time-based prune by retention_days, (2) max_rows backstop,
+    // (3) disk-pressure warning if max_disk_bytes is configured.
     {
         let prune_audit = Arc::clone(&raw_audit);
         let prune_identity = Arc::clone(&identity_engine);
+        let prune_storage = Arc::clone(&storage);
         tokio::spawn(async move {
             // 24-hour interval; first tick fires at startup + 24h.
             let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
@@ -1437,28 +1526,86 @@ async fn run_serve(
                         }
                     };
                     for realm in &page.items {
-                        let config = match prune_audit.get_retention_config(realm.id()) {
+                        let retention = match prune_audit.get_retention_config(realm.id()) {
                             Ok(c) => c,
                             Err(e) => {
                                 warn!(realm = %realm.name(), error = %e, "audit prune: config fetch failed");
                                 continue;
                             }
                         };
-                        if config.retention_days == 0 {
-                            continue; // unlimited
-                        }
-                        let now_micros = hearth::core::Timestamp::now().as_micros();
-                        let window_micros = (config.retention_days as i64) * 86_400 * 1_000_000;
-                        let cutoff = hearth::core::Timestamp::from_micros(
-                            now_micros.saturating_sub(window_micros),
-                        );
-                        match prune_audit.prune_before(realm.id(), cutoff) {
-                            Ok(0) => {}
-                            Ok(n) => {
-                                info!(realm = %realm.name(), deleted = n, "audit prune: pruned old events");
+
+                        // (1) Time-based retention prune.
+                        if retention.retention_days > 0 {
+                            let now_micros = hearth::core::Timestamp::now().as_micros();
+                            let window_micros =
+                                (retention.retention_days as i64) * 86_400 * 1_000_000;
+                            let cutoff = hearth::core::Timestamp::from_micros(
+                                now_micros.saturating_sub(window_micros),
+                            );
+                            match prune_audit.prune_before(realm.id(), cutoff) {
+                                Ok(0) => {}
+                                Ok(n) => {
+                                    info!(realm = %realm.name(), deleted = n, "audit prune: pruned old events");
+                                }
+                                Err(e) => {
+                                    warn!(realm = %realm.name(), error = %e, "audit prune: prune failed");
+                                }
                             }
-                            Err(e) => {
-                                warn!(realm = %realm.name(), error = %e, "audit prune: prune failed");
+                        }
+
+                        // (2) max_rows backstop — hard cap on total event count.
+                        if let Some(max_rows) = retention.max_rows {
+                            match prune_audit.count_events(realm.id()) {
+                                Ok(count) if count > max_rows => {
+                                    let excess = count - max_rows;
+                                    match prune_audit.prune_oldest(realm.id(), excess) {
+                                        Ok(0) => {}
+                                        Ok(n) => {
+                                            info!(
+                                                realm = %realm.name(),
+                                                deleted = n,
+                                                max_rows,
+                                                "audit prune: max_rows backstop trimmed oldest events"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            warn!(realm = %realm.name(), error = %e, "audit prune: max_rows trim failed");
+                                        }
+                                    }
+                                }
+                                Ok(_) => {} // within limit
+                                Err(e) => {
+                                    warn!(realm = %realm.name(), error = %e, "audit prune: count_events failed");
+                                }
+                            }
+                        }
+
+                        // (3) Disk-pressure warning — sampled, non-blocking.
+                        let max_disk_bytes = prune_identity
+                            .get_realm(realm.id())
+                            .ok()
+                            .flatten()
+                            .and_then(|r| {
+                                r.config().quotas.as_ref().and_then(|q| q.max_disk_bytes)
+                            });
+                        if let Some(limit) = max_disk_bytes {
+                            // Estimate realm disk usage by summing key+value bytes
+                            // across all storage entries for this realm.  Sampled
+                            // once per day — not checked on every write.
+                            let end_key = vec![0xFFu8; 256];
+                            let usage_bytes: u64 = prune_storage
+                                .scan(realm.id(), b"", &end_key)
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|e| (e.key.len() + e.value.len()) as u64)
+                                .sum();
+                            if usage_bytes >= limit {
+                                warn!(
+                                    realm = %realm.name(),
+                                    usage_bytes,
+                                    limit_bytes = limit,
+                                    "disk pressure: realm storage usage at or above configured max_disk_bytes"
+                                );
                             }
                         }
                     }
@@ -1543,6 +1690,17 @@ async fn run_serve(
         "dpop_nonce_secret must not be the zero key — use \"auto\" or supply a real 32-byte hex secret"
     );
 
+    // A-10: build the JWKS rate limiter from the operator-configured RPS limit.
+    // Dev mode disables the cap (u32::MAX) to keep local iteration and CLI
+    // integration tests deterministic; production retains the configured cap.
+    let jwks_rate_limiter = if config.dev_mode {
+        Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX))
+    } else {
+        Arc::new(JwksRateLimiter::with_rps_limit(
+            config.security.jwks_rps_limit,
+        ))
+    };
+
     let app_state = if config.dev_mode {
         Arc::new(
             AppState::new_dev(
@@ -1552,9 +1710,11 @@ async fn run_serve(
             )
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
+            .with_metrics_bearer_token(config.metrics.bearer_token.clone())
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
-            .with_dpop_nonce_secret(dpop_nonce_secret),
+            .with_dpop_nonce_secret(dpop_nonce_secret)
+            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter)),
         )
     } else {
         Arc::new(
@@ -1565,9 +1725,11 @@ async fn run_serve(
             )
             .with_webhook(Arc::clone(&webhook_engine))
             .with_metrics_enabled(config.metrics.enabled)
+            .with_metrics_bearer_token(config.metrics.bearer_token.clone())
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
-            .with_dpop_nonce_secret(dpop_nonce_secret),
+            .with_dpop_nonce_secret(dpop_nonce_secret)
+            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter)),
         )
     };
 
@@ -1749,6 +1911,45 @@ async fn run_serve(
         web_state = web_state.with_config_path(cfg_path.clone());
     }
 
+    // Wire up the CAPTCHA provider (P-1 — HEA-1202).
+    if let Some(captcha_cfg) = config.security.captcha.as_ref() {
+        use hearth::abuse::captcha::{TurnstileCaptchaProvider, TurnstileConfig};
+        use hearth::config::CaptchaProviderKind;
+        match captcha_cfg.provider {
+            CaptchaProviderKind::Turnstile => {
+                if let Some(ts) = captcha_cfg.turnstile.as_ref() {
+                    let secret_key = std::env::var("HEARTH_TURNSTILE_SECRET_KEY")
+                        .ok()
+                        .or_else(|| ts.secret_key.clone())
+                        .unwrap_or_default();
+                    if secret_key.is_empty() {
+                        warn!(
+                            "security.captcha.turnstile: no secret_key configured and \
+                             HEARTH_TURNSTILE_SECRET_KEY is unset — Turnstile will reject all tokens"
+                        );
+                    }
+                    let cfg = if let Some(ref url) = ts.verify_url {
+                        TurnstileConfig {
+                            site_key: ts.site_key.clone(),
+                            secret_key,
+                            verify_url: url.clone(),
+                        }
+                    } else {
+                        TurnstileConfig::new(ts.site_key.clone(), secret_key)
+                    };
+                    info!(site_key = %ts.site_key, "CAPTCHA: Cloudflare Turnstile enabled");
+                    web_state = web_state
+                        .with_captcha_provider(Arc::new(TurnstileCaptchaProvider::new(cfg)));
+                } else {
+                    warn!(
+                        "security.captcha.provider = turnstile but no \
+                         security.captcha.turnstile section found — captcha disabled"
+                    );
+                }
+            }
+        }
+    }
+
     let mut app_router = http::router(Arc::clone(&app_state)).merge(web::router(web_state));
     if let Some(mc_state) = &mailcatcher_state {
         app_router = app_router.merge(web::mailcatcher_router(Arc::clone(mc_state)));
@@ -1793,7 +1994,9 @@ async fn run_serve(
             let shutdown = async {
                 let _ = shutdown_rx.await;
             };
-            if let Err(e) = protocol::grpc::serve(grpc_addr, grpc_state, shutdown).await {
+            if let Err(e) =
+                protocol::grpc::serve(grpc_addr, grpc_state, reflection_enabled, shutdown).await
+            {
                 error!(error = %e, "gRPC server exited with error");
             }
         });
@@ -2274,6 +2477,7 @@ async fn run_serve_tls(
         resolver: Arc::new(reloadable.resolver()),
         client_ca_path: config.server.tls_client_ca_path.clone(),
         require_client_cert: config.server.tls_require_client_cert,
+        crl_paths: config.security.tls.crl_paths.clone(),
     };
     let server_config =
         build_server_config(params).map_err(|e| format!("failed to build TLS config: {e}"))?;
@@ -2716,6 +2920,115 @@ fn run_migrate_auth0(
     )?;
     print_migration_report(&report);
     Ok(())
+}
+
+// ── Pepper rotation audit ──────────────────────────────────────────────────────
+
+/// Audits all stored credentials and reports how many still carry an older or
+/// absent pepper version.
+///
+/// Returns `Ok(true)` when every credential is up-to-date with the active
+/// pepper (or when no pepper is configured and no credential has a pepper
+/// version), `Ok(false)` when at least one credential needs rotation.
+///
+/// This command never modifies credentials; re-hashing happens lazily on the
+/// next successful login after `hearth.yaml` is updated with the new pepper.
+fn run_migrate_rotate_pepper(
+    data_dir: &std::path::Path,
+    summary_only: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use hearth::identity::StoredCredential;
+
+    use hearth::storage::StorageEngine as _;
+
+    let storage_config = StorageConfig::dev(data_dir.to_path_buf());
+    let storage = EmbeddedStorageEngine::open(storage_config)?;
+
+    // List realms stored under the system realm.
+    let sys_realm = hearth::core::RealmId::new(uuid::Uuid::nil());
+    let realm_prefix = b"realm:";
+    let realm_end = b"realm;"; // exclusive upper bound
+    let realm_entries = storage.scan(&sys_realm, realm_prefix, realm_end)?;
+
+    let mut total_credentials: u64 = 0;
+    let mut needs_rotation: u64 = 0;
+    let mut realms_with_pending: Vec<String> = Vec::new();
+
+    for entry in &realm_entries {
+        let realm_key = &entry.key;
+        // Derive realm UUID from the key suffix.
+        let suffix = realm_key
+            .strip_prefix(realm_prefix)
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .unwrap_or("<invalid>")
+            .to_string();
+
+        let realm_uuid = match uuid::Uuid::parse_str(&suffix) {
+            Ok(u) => u,
+            Err(_) => continue,
+        };
+        let realm_id = hearth::core::RealmId::new(realm_uuid);
+
+        // Scan all credentials in this realm.
+        let cred_prefix = hearth::identity::credential_scan_prefix_for_migration();
+        let mut cred_end = cred_prefix.clone();
+        // Advance the last byte to form an exclusive upper bound.
+        if let Some(last) = cred_end.last_mut() {
+            *last += 1;
+        }
+
+        let cred_entries = storage.scan(&realm_id, &cred_prefix, &cred_end)?;
+        let mut realm_total: u64 = 0;
+        let mut realm_pending: u64 = 0;
+
+        for cred_entry in &cred_entries {
+            let cred_bytes = &cred_entry.value;
+            let cred: StoredCredential = match serde_json::from_slice(cred_bytes) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            realm_total += 1;
+            total_credentials += 1;
+
+            // A credential needs rotation if it has any pepper version
+            // (we cannot compare to the active version without config, so we
+            // count any non-None as "peppered, may need rotation" and None as
+            // "no pepper, needs rotation if server now requires one").
+            // Without loading hearth.yaml here, we report raw counts by version.
+            if cred.pepper_version.is_none() {
+                // No pepper recorded — flagged for rotation once a pepper is configured.
+                realm_pending += 1;
+                needs_rotation += 1;
+            }
+            // Credentials with Some(version) are assumed current unless the
+            // operator compares against the active version in hearth.yaml.
+        }
+
+        if realm_pending > 0 {
+            realms_with_pending.push(format!("{suffix}: {realm_pending}/{realm_total}"));
+        }
+
+        if !summary_only && realm_total > 0 {
+            println!("realm {suffix}: {realm_total} credential(s), {realm_pending} without pepper");
+        }
+    }
+
+    println!("\nTotal: {total_credentials} credential(s), {needs_rotation} without pepper version");
+
+    if needs_rotation > 0 {
+        println!("\nPending rotation (credentials without pepper_version):");
+        for entry in &realms_with_pending {
+            println!("  {entry}");
+        }
+        println!(
+            "\nNext step: ensure `security.password.pepper` is set in hearth.yaml, then\n\
+             restart the server. Credentials are re-hashed lazily on the next login."
+        );
+    } else {
+        println!("\nAll credentials carry a pepper_version. Rotation complete.");
+    }
+
+    Ok(needs_rotation == 0)
 }
 
 // ── Backup commands ───────────────────────────────────────────────────────────

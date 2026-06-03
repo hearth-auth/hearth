@@ -131,6 +131,7 @@ async fn https_endpoint_serves_valid_tls() {
         resolver: Arc::new(tls_config.resolver()),
         client_ca_path: None,
         require_client_cert: false,
+        crl_paths: vec![],
     };
     let server_config = build_server_config(params).expect("build server config");
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
@@ -250,6 +251,7 @@ async fn mtls_valid_client_cert_succeeds() {
         resolver: Arc::new(tls_config.resolver()),
         client_ca_path: Some(ca_cert_path.clone()),
         require_client_cert: true,
+        crl_paths: vec![],
     };
     let server_config = build_server_config(params).expect("build mTLS server config");
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
@@ -309,6 +311,7 @@ async fn mtls_missing_client_cert_rejected() {
         resolver: Arc::new(tls_config.resolver()),
         client_ca_path: Some(ca_cert_path.clone()),
         require_client_cert: true,
+        crl_paths: vec![],
     };
     let server_config = build_server_config(params).expect("build mTLS server config");
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
@@ -372,6 +375,7 @@ async fn tls_downgrade_prevention_rejects_tls10() {
         resolver: Arc::new(tls_config.resolver()),
         client_ca_path: None,
         require_client_cert: false,
+        crl_paths: vec![],
     };
     let server_config = build_server_config(params).expect("build server config");
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));

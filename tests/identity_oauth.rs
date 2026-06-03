@@ -354,7 +354,7 @@ fn refresh_token_rotation_issues_new_pair() {
     // Advance clock and refresh
     clock.advance(60 * 1_000_000); // 60 seconds in microseconds
     let new_tokens = engine
-        .refresh_tokens(&realm_id, tokens.refresh_token(), None)
+        .refresh_tokens(&realm_id, tokens.refresh_token(), None, None)
         .expect("refresh should succeed");
 
     // New tokens are different
@@ -367,7 +367,7 @@ fn refresh_token_rotation_issues_new_pair() {
     assert_eq!(new_refresh_claims.fid, refresh_claims.fid);
 
     // Old refresh token is now rejected (rotation)
-    let result = engine.refresh_tokens(&realm_id, tokens.refresh_token(), None);
+    let result = engine.refresh_tokens(&realm_id, tokens.refresh_token(), None, None);
     assert!(
         matches!(result, Err(IdentityError::TokenRevoked)),
         "old refresh token should be rejected after rotation, got: {result:?}"
@@ -447,7 +447,7 @@ fn refresh_token_rejects_forged_legacy_payload_without_fid() {
         .encode(serde_json::to_vec(&forged_claims).expect("serialize forged refresh claims"));
     let forged_token = format!("{}.{}.{}", parts[0], forged_payload, parts[2]);
 
-    let result = engine.refresh_tokens(&realm_id, &forged_token, None);
+    let result = engine.refresh_tokens(&realm_id, &forged_token, None, None);
     assert!(
         matches!(result, Err(IdentityError::InvalidToken)),
         "forged no-fid payload must be rejected, got: {result:?}"
@@ -566,7 +566,7 @@ fn revoke_refresh_token_invalidates_family() {
         .expect("revoke should succeed");
 
     // Refresh is now rejected
-    let result = engine.refresh_tokens(&realm_id, tokens.refresh_token(), None);
+    let result = engine.refresh_tokens(&realm_id, tokens.refresh_token(), None, None);
     assert!(
         matches!(result, Err(IdentityError::TokenRevoked)),
         "refresh should fail after revocation, got: {result:?}"
@@ -749,13 +749,13 @@ fn adversarial_refresh_token_theft_detection() {
     // Legitimate user rotates (advance clock for unique tokens)
     clock.advance(1_000_000);
     let new_pair = engine
-        .refresh_tokens(&realm_id, &stolen_refresh, None)
+        .refresh_tokens(&realm_id, &stolen_refresh, None, None)
         .expect("legitimate rotation");
     let legitimate_refresh = new_pair.refresh_token().to_string();
 
     // Attacker uses the stolen (old) refresh token
     clock.advance(1_000_000);
-    let attack_result = engine.refresh_tokens(&realm_id, &stolen_refresh, None);
+    let attack_result = engine.refresh_tokens(&realm_id, &stolen_refresh, None, None);
     assert!(
         attack_result.is_err(),
         "stolen refresh token must be rejected"
@@ -763,7 +763,7 @@ fn adversarial_refresh_token_theft_detection() {
 
     // Legitimate user's new refresh token should ALSO be revoked
     // (entire grant family revoked due to theft detection)
-    let legitimate_result = engine.refresh_tokens(&realm_id, &legitimate_refresh, None);
+    let legitimate_result = engine.refresh_tokens(&realm_id, &legitimate_refresh, None, None);
     assert!(
         legitimate_result.is_err(),
         "legitimate refresh token must also be revoked after theft detection"
@@ -1000,6 +1000,7 @@ mod oauth_proptests {
                             &realm_id,
                             &refresh_tokens[idx],
                             None,
+                            None,
                         ) {
                             access_tokens[idx] = new_pair.access_token().to_string();
                             refresh_tokens[idx] = new_pair.refresh_token().to_string();
@@ -1112,7 +1113,7 @@ mod oauth_proptests {
                 // Advance clock 1 second to get unique timestamps
                 clock.advance(1_000_000);
 
-                let new_pair = engine.refresh_tokens(&realm_id, &current_refresh, None)
+                let new_pair = engine.refresh_tokens(&realm_id, &current_refresh, None, None)
                     .unwrap_or_else(|e| panic!("rotation {i} failed: {e}"));
 
                 old_refresh_tokens.push(current_refresh);
@@ -1132,7 +1133,7 @@ mod oauth_proptests {
 
             // After all rotations, none of the old refresh tokens should work
             for (i, old_token) in old_refresh_tokens.iter().enumerate() {
-                let result = engine.refresh_tokens(&realm_id, old_token, None);
+                let result = engine.refresh_tokens(&realm_id, old_token, None, None);
                 // First old token reuse triggers theft detection
                 if result.is_err() {
                     // After theft detection, all tokens in the family are revoked
@@ -1333,6 +1334,7 @@ fn pending_authorization_ticket_is_single_use() {
     let (_dir, engine, clock, realm, user, client) = setup_consent_env();
     let now = clock.now();
     let pending = PendingAuthorizationRequest {
+        realm_id: realm.clone(),
         user_id: user.clone(),
         client_id: client.clone(),
         redirect_uri: "https://app.example.com/cb".to_string(),
@@ -1365,6 +1367,7 @@ fn pending_authorization_ticket_expires() {
     let (_dir, engine, clock, realm, user, client) = setup_consent_env();
     let now = clock.now();
     let pending = PendingAuthorizationRequest {
+        realm_id: realm.clone(),
         user_id: user,
         client_id: client,
         redirect_uri: "https://app.example.com/cb".to_string(),

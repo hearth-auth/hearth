@@ -1350,7 +1350,7 @@ async fn fapi_b11_realm_baseline_enforces_dpop_on_refresh_for_standard_profile_c
     let err = env
         .harness
         .identity()
-        .refresh_tokens(&env.realm, initial_tokens.refresh_token(), None)
+        .refresh_tokens(&env.realm, initial_tokens.refresh_token(), None, None)
         .expect_err("FAPI Baseline realm must reject refresh without DPoP");
     assert!(
         matches!(err, IdentityError::FapiViolation { .. }),
@@ -1360,7 +1360,12 @@ async fn fapi_b11_realm_baseline_enforces_dpop_on_refresh_for_standard_profile_c
     // Refresh WITH DPoP — must succeed.
     env.harness
         .identity()
-        .refresh_tokens(&env.realm, initial_tokens.refresh_token(), Some(DPOP_JKT))
+        .refresh_tokens(
+            &env.realm,
+            initial_tokens.refresh_token(),
+            Some(DPOP_JKT),
+            None,
+        )
         .expect("refresh with DPoP must succeed");
 }
 

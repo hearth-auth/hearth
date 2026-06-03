@@ -21,7 +21,8 @@ use hearth::audit::{AuditEngine, AuditQuery};
 use hearth::core::{Clock, IdpId, SystemClock, Timestamp};
 use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::federation::{
-    FederationSecret, IdpConfig, IdpKind, LinkMode, StateBag, StubFederationTransport,
+    compute_federation_state_mac, FederationSecret, IdpConfig, IdpKind, LinkMode, StateBag,
+    StubFederationTransport,
 };
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::tokens::RsaSigningKey;
@@ -117,6 +118,7 @@ fn build_rig(stub: Arc<StubFederationTransport>) -> Rig {
             client_id: "demo-client".to_string(),
             client_secret: FederationSecret::new("demo-secret".to_string()),
             claim_mappings: BTreeMap::new(),
+            leeway_seconds: IdpConfig::default_leeway_seconds(),
             created_at: hearth::core::Timestamp::from_micros(0),
             updated_at: hearth::core::Timestamp::from_micros(0),
         })
@@ -174,6 +176,12 @@ fn set_link_mode(rig: &Rig, mode: LinkMode) {
             },
         )
         .expect("update realm");
+}
+
+/// Returns the `Cookie` header value containing the A-48 state-binding MAC.
+fn fed_bind_cookie(state_token: &str) -> String {
+    let mac = compute_federation_state_mac(&COOKIE_SECRET, state_token);
+    format!("hearth_fed_bind={mac}")
 }
 
 fn seed_state(rig: &Rig, state_token: &str, nonce: &str) {
@@ -329,6 +337,7 @@ fn callback_with_error_redirects_to_login_denied() {
     let resp = send(
         &rig.app,
         Request::builder()
+            .header("cookie", fed_bind_cookie("whatever"))
             .uri("/ui/realms/demo/federation/callback?state=whatever&error=access_denied")
             .body(Body::empty())
             .unwrap(),
@@ -345,6 +354,7 @@ fn callback_with_unknown_state_redirects_to_login_failed() {
     let resp = send(
         &rig.app,
         Request::builder()
+            .header("cookie", fed_bind_cookie("unknown"))
             .uri("/ui/realms/demo/federation/callback?state=unknown&code=xyz")
             .body(Body::empty())
             .unwrap(),
@@ -449,6 +459,7 @@ fn callback_auto_links_existing_user_on_verified_email() {
     let resp = send(
         &rig.app,
         Request::builder()
+            .header("cookie", fed_bind_cookie("state-auto"))
             .uri("/ui/realms/demo/federation/callback?state=state-auto&code=code-auto")
             .body(Body::empty())
             .unwrap(),
@@ -497,6 +508,7 @@ fn callback_confirm_mode_redirects_to_confirm_link_for_existing_user() {
     let resp = send(
         &rig.app,
         Request::builder()
+            .header("cookie", fed_bind_cookie("state-confirm"))
             .uri("/ui/realms/demo/federation/callback?state=state-confirm&code=code-confirm")
             .body(Body::empty())
             .unwrap(),
@@ -555,6 +567,7 @@ fn callback_disabled_mode_creates_separate_user_on_email_collision() {
     let resp = send(
         &rig.app,
         Request::builder()
+            .header("cookie", fed_bind_cookie("state-disabled"))
             .uri("/ui/realms/demo/federation/callback?state=state-disabled&code=code-disabled")
             .body(Body::empty())
             .unwrap(),

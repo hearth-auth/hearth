@@ -11,6 +11,7 @@ pub mod error_codes;
 pub mod grpc;
 pub mod http;
 pub mod proto;
+pub mod redact;
 pub mod scim;
 pub mod tls;
 pub mod web;

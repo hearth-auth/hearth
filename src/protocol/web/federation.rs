@@ -26,7 +26,8 @@ use serde::Deserialize;
 use crate::audit::{AuditAction, CreateAuditEvent};
 use crate::core::{IdpId, RealmId, Timestamp, UserId};
 use crate::identity::federation::{
-    compute_confirm_ticket_mac, verify_confirm_ticket_mac, FederationOutcome, FederationService,
+    compute_confirm_ticket_mac, compute_federation_state_mac, verify_confirm_ticket_mac,
+    verify_federation_state_mac, FederationOutcome, FederationService,
 };
 use crate::identity::SessionContext;
 use crate::identity::{CreateUserRequest, IdentityError};
@@ -36,9 +37,14 @@ use super::handlers_common;
 use super::realm_resolver::{self, Resolved};
 use super::templates::render;
 use super::WebState;
+use crate::abuse::redirect::validate_return_to;
 
 /// Cookie carrying the confirm-link ticket to `/ui/federation/confirm-link`.
 const CONFIRM_LINK_COOKIE: &str = "hearth_ui_fed_confirm";
+
+/// Short-lived HttpOnly cookie binding the federation `state` to the originating
+/// browser (A-48).  Planted at `begin`, verified and cleared at `callback`.
+const FED_BIND_COOKIE: &str = "hearth_fed_bind";
 
 /// Query-string parameters for `begin`.
 #[derive(Debug, Deserialize)]
@@ -62,6 +68,11 @@ pub struct CallbackQuery {
     /// consent prompt (e.g., `access_denied`).
     #[serde(default)]
     pub error: Option<String>,
+    /// RFC 9207 `iss` parameter — the issuer URL of the authorization server
+    /// that produced this callback.  When present, validated against the
+    /// expected issuer for the IdP connector (A-29 IdP-mixup defense).
+    #[serde(default)]
+    pub iss: Option<String>,
 }
 
 /// `GET /ui/realms/{realm}/federation/begin?idp=...`
@@ -95,12 +106,27 @@ async fn begin_impl(state: Arc<WebState>, realm_id: RealmId, q: BeginQuery) -> R
         Some(s) => s,
         None => return handlers_common::server_error(),
     };
-    let return_to = q.return_to.as_deref().unwrap_or("/ui/account");
+    // A-52: validate return_to before storing in federation state bag.
+    let return_to_raw = q.return_to.as_deref().unwrap_or("/ui/account");
+    let return_to =
+        validate_return_to(return_to_raw, &[]).unwrap_or_else(|| "/ui/account".to_string());
     let now = Timestamp::from_micros(now_micros());
-    match service.begin(&realm_id, &q.idp, return_to, now) {
-        Ok(url) => {
+    match service.begin(&realm_id, &q.idp, &return_to, now) {
+        Ok((url, state_token)) => {
             audit_federation_started(&state, &realm_id, &q.idp);
-            Redirect::to(url.as_str()).into_response()
+            // A-48: plant session-binding cookie.  SameSite=Lax is required
+            // because the IdP redirect is a top-level cross-origin navigation.
+            let bind_mac = compute_federation_state_mac(cookie_secret_32(&state), &state_token);
+            let bind_cookie = format!(
+                "{FED_BIND_COOKIE}={bind_mac}; HttpOnly; Path=/; SameSite=Lax; Max-Age=600"
+            );
+            let mut resp = Redirect::to(url.as_str()).into_response();
+            resp.headers_mut().insert(
+                header::SET_COOKIE,
+                header::HeaderValue::from_str(&bind_cookie)
+                    .unwrap_or_else(|_| header::HeaderValue::from_static("")),
+            );
+            resp
         }
         Err(IdentityError::FederationUnknownConnector) => {
             handlers_common::not_found("Connector not found")
@@ -154,6 +180,28 @@ async fn callback_impl(
         // User denied consent at the upstream — quietly land on login.
         return Redirect::to("/ui/login?error=federation_denied").into_response();
     }
+
+    // A-48: verify session-binding cookie before touching storage.
+    // Fail-closed: a missing or invalid cookie rejects the callback.
+    {
+        let cookie_hdr = headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let bind_mac = cookie_hdr.split(';').find_map(|part| {
+            let part = part.trim();
+            part.strip_prefix(&format!("{FED_BIND_COOKIE}="))
+        });
+        match bind_mac {
+            Some(mac) if verify_federation_state_mac(cookie_secret_32(&state), &q.state, mac) => {}
+            _ => {
+                tracing::warn!(
+                    "federation callback: missing or invalid state-binding cookie (A-48)"
+                );
+                return Redirect::to("/ui/login?error=federation_failed").into_response();
+            }
+        }
+    }
     let Some(code) = q.code else {
         return handlers_common::bad_request("Missing code");
     };
@@ -172,7 +220,7 @@ async fn callback_impl(
     };
     let now = Timestamp::from_micros(now_micros());
     let (bag, outcome) = match service
-        .callback(&realm_id, &q.state, &code, link_mode, now)
+        .callback(&realm_id, &q.state, &code, q.iss.as_deref(), link_mode, now)
         .await
     {
         Ok(v) => v,
@@ -541,6 +589,11 @@ fn complete_login(
     let mut response = Redirect::to(return_to).into_response();
     super::handlers::append_cookie(&mut response, &session_cookie);
     super::handlers::append_cookie(&mut response, &csrf_cookie);
+    // A-48: clear the binding cookie — flow is complete.
+    super::handlers::append_cookie(
+        &mut response,
+        &format!("{FED_BIND_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0"),
+    );
     response
 }
 

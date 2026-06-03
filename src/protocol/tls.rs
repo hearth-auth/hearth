@@ -13,7 +13,7 @@ use rustls::server::ResolvesServerCert;
 use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
 use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer};
 use tracing::info;
 
 /// Errors originating from TLS configuration and certificate handling.
@@ -52,6 +52,13 @@ pub enum TlsError {
         /// Description of the failure.
         reason: String,
     },
+    /// Failed to load a Certificate Revocation List (CRL) file for mTLS (A-44).
+    CrlLoad {
+        /// The path that could not be read or parsed.
+        path: PathBuf,
+        /// Description of the failure.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for TlsError {
@@ -75,6 +82,9 @@ impl std::fmt::Display for TlsError {
             Self::ClientCa { reason } => {
                 write!(f, "failed to load client CA: {reason}")
             }
+            Self::CrlLoad { path, reason } => {
+                write!(f, "failed to load CRL '{}': {reason}", path.display())
+            }
         }
     }
 }
@@ -87,7 +97,8 @@ impl std::error::Error for TlsError {
             | Self::NoPrivateKey { .. }
             | Self::InvalidPrivateKey { .. }
             | Self::ConfigBuild { .. }
-            | Self::ClientCa { .. } => None,
+            | Self::ClientCa { .. }
+            | Self::CrlLoad { .. } => None,
         }
     }
 }
@@ -137,6 +148,38 @@ pub fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsError>
             source: std::io::Error::other(other),
         },
     })
+}
+
+/// Loads PEM-encoded Certificate Revocation Lists from a file (A-44).
+///
+/// Returns all CRL entries found in the file. Returns an error if the file
+/// cannot be read or contains no CRL entries.
+pub fn load_crls(path: &Path) -> Result<Vec<CertificateRevocationListDer<'static>>, TlsError> {
+    let map_err = |e: rustls_pki_types::pem::Error| TlsError::CrlLoad {
+        path: path.to_path_buf(),
+        reason: match e {
+            rustls_pki_types::pem::Error::Io(io_err) => io_err.to_string(),
+            other => other.to_string(),
+        },
+    };
+
+    let crls: Vec<CertificateRevocationListDer<'static>> =
+        CertificateRevocationListDer::pem_file_iter(path)
+            .map_err(map_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| TlsError::CrlLoad {
+                path: path.to_path_buf(),
+                reason: e.to_string(),
+            })?;
+
+    if crls.is_empty() {
+        return Err(TlsError::CrlLoad {
+            path: path.to_path_buf(),
+            reason: "no CRL entries found in file".to_string(),
+        });
+    }
+
+    Ok(crls)
 }
 
 /// Builds a [`CertifiedKey`] from PEM files on disk.
@@ -228,6 +271,12 @@ pub struct TlsConfigParams {
     pub client_ca_path: Option<PathBuf>,
     /// Whether to require client certificates (mTLS).
     pub require_client_cert: bool,
+    /// Paths to PEM-encoded CRL files for mTLS client certificate revocation (A-44).
+    ///
+    /// When non-empty, each client certificate presented during the TLS handshake
+    /// is checked against every CRL in the list. Revoked certificates are rejected.
+    /// Empty (the default) preserves the pre-A-44 behaviour: no revocation check.
+    pub crl_paths: Vec<PathBuf>,
 }
 
 /// Builds a [`rustls::ServerConfig`] with the given parameters.
@@ -236,10 +285,29 @@ pub struct TlsConfigParams {
 /// `require_client_cert` is true, enables mutual TLS by configuring a
 /// [`WebPkiClientVerifier`](rustls::server::WebPkiClientVerifier).
 ///
+/// When `crl_paths` is non-empty, each CRL file is loaded and attached to the
+/// mTLS verifier so revoked client certificates are rejected at the handshake
+/// level (A-44).
+///
 /// `rustls` structurally supports only TLS 1.2 and 1.3 — it does not implement
 /// TLS 1.0/1.1, nor any weak cipher suites (RC4, DES, NULL, export).
+///
+/// **0-RTT / early data (A-44):** `rustls` disables 0-RTT by default
+/// (`max_early_data_size = 0`). We explicitly assert this invariant below —
+/// if a future rustls version changes the default, the server will fail to
+/// start rather than silently allowing replay-vulnerable early data.
 pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+    // A-44: load CRL files so mTLS revocation is enforced at the TLS layer.
+    let crls: Vec<CertificateRevocationListDer<'static>> = params
+        .crl_paths
+        .iter()
+        .map(|p| load_crls(p))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
 
     let builder = if let Some(ca_path) = params.client_ca_path {
         let ca_certs = load_certs(&ca_path).map_err(|e| TlsError::ClientCa {
@@ -258,6 +326,7 @@ pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsE
                 Arc::new(root_store),
                 Arc::clone(&provider),
             )
+            .with_crls(crls)
             .build()
             .map_err(|e| TlsError::ClientCa {
                 reason: e.to_string(),
@@ -267,6 +336,7 @@ pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsE
                 Arc::new(root_store),
                 Arc::clone(&provider),
             )
+            .with_crls(crls)
             .allow_unauthenticated()
             .build()
             .map_err(|e| TlsError::ClientCa {
@@ -291,6 +361,14 @@ pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsE
 
     let mut config = builder.with_cert_resolver(params.resolver);
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    // A-44: Explicitly assert that 0-RTT early data is disabled.
+    // rustls defaults max_early_data_size to 0; this assertion ensures a future
+    // rustls version cannot silently enable replay-vulnerable early data.
+    assert_eq!(
+        config.max_early_data_size, 0,
+        "rustls changed the 0-RTT default — early data must remain disabled"
+    );
 
     Ok(config)
 }
@@ -496,6 +574,7 @@ mod tests {
             resolver: Arc::new(tls_config.resolver()),
             client_ca_path: None,
             require_client_cert: false,
+            crl_paths: vec![],
         };
 
         let server_config = build_server_config(params).expect("build config");
@@ -521,6 +600,7 @@ mod tests {
             resolver: Arc::new(tls_config.resolver()),
             client_ca_path: None,
             require_client_cert: false,
+            crl_paths: vec![],
         };
 
         let server_config = build_server_config(params).expect("build config");
@@ -551,6 +631,7 @@ mod tests {
             resolver: Arc::new(tls_config.resolver()),
             client_ca_path: None,
             require_client_cert: false,
+            crl_paths: vec![],
         };
 
         let server_config = build_server_config(params).expect("build config");
@@ -590,6 +671,7 @@ mod tests {
             resolver: Arc::new(tls_config.resolver()),
             client_ca_path: Some(ca_cert_path),
             require_client_cert: true,
+            crl_paths: vec![],
         };
 
         let result = build_server_config(params);

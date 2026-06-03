@@ -94,3 +94,34 @@ fn a52_return_to_not_in_allowlist_rejected() {}
 /// A-52 — see src/protocol/web/saml.rs (HEA-1188).
 #[test]
 fn a52_open_redirect_via_federation_blocked() {}
+
+// A-1: AbuseGuard middleware + AbusePolicy trait ──────────────────────────────
+
+/// A `Deny(reason)` decision from the abuse policy must reject the request and
+/// emit the corresponding `AbuseDetected` audit event.
+/// A-1 — unified `AbuseGuard` trait is not yet built; today's checks live in
+/// `src/abuse/{shaper,detector,guards}.rs` and `AbuseGuard.check()` is the
+/// planned facade. See docs/plans/HEA-1114-abuse-prevention.md row A-1.
+#[test]
+fn a1_abuse_guard_deny_decision_rejects_request() {}
+
+/// A `Challenge` decision must surface `HEARTH_ABUSE_CHALLENGE_REQUIRED`
+/// without leaking the underlying signal that tripped the policy.
+/// A-1 — see docs/plans/HEA-1114-abuse-prevention.md row A-1.
+#[test]
+fn a1_abuse_guard_challenge_decision_returns_challenge_required() {}
+
+// A-51: external audit-log attestation ────────────────────────────────────────
+
+/// A tampered audit row between two attestation checkpoints must be detected
+/// on next chain verification.
+/// A-51 — external attestation shipping is not yet implemented; see
+/// `src/audit/engine.rs` chain verification and docs/plans/HEA-1114-abuse-prevention.md row A-51.
+#[test]
+fn a51_tampered_row_between_attestations_detected() {}
+
+/// On restart, a missing or mismatched prior attestation must fail closed
+/// rather than silently re-seeding the chain.
+/// A-51 — see docs/plans/HEA-1114-abuse-prevention.md row A-51.
+#[test]
+fn a51_missing_prior_attestation_fails_closed() {}

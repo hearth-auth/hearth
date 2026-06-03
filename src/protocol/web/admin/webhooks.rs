@@ -124,6 +124,7 @@ pub struct WebhookEventType {
 
 fn available_event_types(subscribed: &[String]) -> Vec<WebhookEventType> {
     [
+        // ── Identity events ──────────────────────────────────────────────────
         ("user.created", "User was created"),
         ("user.updated", "User profile was updated"),
         ("user.deleted", "User was deleted"),
@@ -132,6 +133,28 @@ fn available_event_types(subscribed: &[String]) -> Vec<WebhookEventType> {
         ("role.assigned", "Role was assigned to a user"),
         ("role.revoked", "Role was revoked from a user"),
         ("credential.changed", "User changed their password"),
+        // ── Security events (A-7) ────────────────────────────────────────────
+        // Wire these to SIEM, Slack, or a custom WAF via `security.*`.
+        (
+            "security.login_failed",
+            "Credential verification failed (login attempt)",
+        ),
+        (
+            "security.account_locked",
+            "Account temporarily locked after repeated failures",
+        ),
+        (
+            "security.abuse_detected",
+            "Abuse pattern detected (credential stuffing / spray)",
+        ),
+        (
+            "security.password_compromised",
+            "Password rejected as known-compromised (HIBP)",
+        ),
+        (
+            "security.rate_limit_exceeded",
+            "Per-IP login rate limit was exceeded",
+        ),
     ]
     .into_iter()
     .map(|(value, desc)| WebhookEventType {

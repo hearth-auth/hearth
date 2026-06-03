@@ -80,4 +80,15 @@ pub trait AuditEngine: Send + Sync {
     ///
     /// Returns the number of primary events deleted.
     fn prune_before(&self, realm_id: &RealmId, cutoff: Timestamp) -> Result<u64, AuditError>;
+
+    /// Returns the total number of audit events stored for this realm (A-25).
+    ///
+    /// Used by the background pruner to enforce the `max_rows` backstop.
+    fn count_events(&self, realm_id: &RealmId) -> Result<u64, AuditError>;
+
+    /// Deletes the oldest `n` audit events for this realm (A-25 max_rows backstop).
+    ///
+    /// Returns the number of primary events actually deleted (may be less than
+    /// `n` if the realm has fewer events).
+    fn prune_oldest(&self, realm_id: &RealmId, n: u64) -> Result<u64, AuditError>;
 }

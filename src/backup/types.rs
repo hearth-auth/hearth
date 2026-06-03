@@ -92,6 +92,19 @@ pub struct BackupManifest {
     /// recover the 32-byte DEK.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dek_wrapping_params: Option<DekWrappingParams>,
+    /// Detached Ed25519 signature over the canonical manifest bytes (A-30).
+    ///
+    /// When `Some`, the restore handler verifies this signature against the
+    /// operator public key configured in `security.backup_verify_key` before
+    /// applying the archive. If the key is configured and the signature is
+    /// absent or invalid, the restore is rejected (fail-closed).
+    ///
+    /// The signature covers the manifest JSON serialized with this field set to
+    /// `null` (i.e. the serialization produced by `canonical_bytes()`).
+    ///
+    /// Archives produced without operator signing omit this field entirely.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub detached_signature_b64: Option<String>,
 }
 
 impl BackupManifest {
@@ -108,7 +121,22 @@ impl BackupManifest {
             checksums: HashMap::new(),
             signing_key_dek_b64: None,
             dek_wrapping_params: None,
+            detached_signature_b64: None,
         }
+    }
+
+    /// Returns the canonical JSON bytes that the detached signature covers.
+    ///
+    /// Serializes this manifest with `detached_signature_b64 = null`. Both the
+    /// signer and verifier MUST use this method to obtain the signed payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if JSON serialization fails (should not happen in practice).
+    pub fn canonical_bytes(&self) -> serde_json::Result<Vec<u8>> {
+        let mut clone = self.clone();
+        clone.detached_signature_b64 = None;
+        serde_json::to_vec(&clone)
     }
 }
 
@@ -179,11 +207,41 @@ mod tests {
                 .collect(),
             signing_key_dek_b64: None,
             dek_wrapping_params: None,
+            detached_signature_b64: None,
         };
 
         let json = serde_json::to_string(&manifest).expect("serialize");
         let deserialized: BackupManifest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(manifest, deserialized);
+    }
+
+    /// `canonical_bytes` serializes the manifest with `detached_signature_b64 = null`
+    /// so the signature covers a stable payload regardless of the field value.
+    #[test]
+    fn canonical_bytes_strips_signature_field() {
+        let mut manifest = BackupManifest::new(vec![]);
+        manifest.detached_signature_b64 = Some("some_sig".to_string());
+        let bytes = manifest.canonical_bytes().expect("canonical_bytes");
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("parse canonical bytes");
+        assert!(
+            value.get("detached_signature_b64").is_none(),
+            "detached_signature_b64 must be absent in canonical bytes"
+        );
+    }
+
+    /// A manifest with a signature round-trips through serde correctly.
+    #[test]
+    fn manifest_with_signature_serde_roundtrip() {
+        let mut manifest = BackupManifest::new(vec![]);
+        manifest.detached_signature_b64 = Some("AAEC".to_string());
+        let json = serde_json::to_string(&manifest).expect("serialize");
+        let back: BackupManifest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.detached_signature_b64.as_deref(),
+            Some("AAEC"),
+            "signature field must survive serde round-trip"
+        );
     }
 
     #[test]

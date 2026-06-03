@@ -13,6 +13,7 @@ use crate::identity::credentials::CleartextPassword;
 use crate::identity::email::stored_templates::LocalizedEmailTemplate;
 use crate::identity::email::EmailBranding;
 use crate::identity::federation::LinkMode;
+use crate::identity::risk::RiskScorerConfig;
 use crate::rbac::{Group, PermissionDefinition, ProtectedResource, Role, ScopeBundle};
 
 /// A cursor-based page of results.
@@ -365,6 +366,15 @@ pub struct Session {
     user_agent_raw: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device_label: Option<String>,
+    /// Deadline after which the session is idle-expired (A-18).
+    /// Stored in the session record so `get_session` avoids a realm lookup on
+    /// every access. Reset on each `refresh()`. `None` = no idle timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) idle_deadline: Option<Timestamp>,
+    /// Hard absolute expiry deadline set at creation time (A-18).
+    /// Never updated on refresh. `None` = no absolute timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) absolute_deadline: Option<Timestamp>,
 }
 
 impl Session {
@@ -375,7 +385,12 @@ impl Session {
         created_at: Timestamp,
         expires_at: Timestamp,
         context: &SessionContext,
+        idle_timeout_secs: Option<u32>,
+        absolute_timeout_secs: Option<u32>,
     ) -> Self {
+        let idle_deadline = idle_timeout_secs.map(|s| created_at.add_micros(s as i64 * 1_000_000));
+        let absolute_deadline =
+            absolute_timeout_secs.map(|s| created_at.add_micros(s as i64 * 1_000_000));
         Self {
             id,
             user_id,
@@ -386,6 +401,8 @@ impl Session {
             ip_address: context.ip_address.clone(),
             user_agent_raw: context.user_agent_raw.clone(),
             device_label: context.device_label.clone(),
+            idle_deadline,
+            absolute_deadline,
         }
     }
 
@@ -429,10 +446,37 @@ impl Session {
         self.revoked = true;
     }
 
-    /// Refreshes the session by extending the TTL.
+    /// Refreshes the session by extending the TTL and resetting the idle deadline.
     pub(crate) fn refresh(&mut self, now: Timestamp, ttl_micros: i64) {
+        // Recover idle window BEFORE overwriting last_refreshed_at.
+        let new_idle = self.idle_deadline.map(|deadline| {
+            let window = deadline.as_micros() - self.last_refreshed_at.as_micros();
+            now.add_micros(window)
+        });
         self.expires_at = now.add_micros(ttl_micros);
         self.last_refreshed_at = now;
+        if let Some(d) = new_idle {
+            self.idle_deadline = Some(d);
+        }
+        // absolute_deadline is intentionally NOT updated — it is a hard cap.
+    }
+
+    /// Returns `true` if the session has exceeded its idle or absolute timeout
+    /// policy (A-18). Does NOT check the standard TTL (`is_valid`).
+    pub(crate) fn is_policy_expired(&self, now: Timestamp) -> bool {
+        self.idle_deadline.map_or(false, |d| now >= d)
+            || self.absolute_deadline.map_or(false, |d| now >= d)
+    }
+
+    /// Returns the eviction reason string for audit metadata.
+    pub(crate) fn policy_expiry_reason(&self, now: Timestamp) -> Option<&'static str> {
+        if self.idle_deadline.map_or(false, |d| now >= d) {
+            return Some("idle_timeout");
+        }
+        if self.absolute_deadline.map_or(false, |d| now >= d) {
+            return Some("absolute_timeout");
+        }
+        None
     }
 
     /// Returns the client IP address captured at session creation, if available.
@@ -565,6 +609,9 @@ pub enum RealmStatus {
     /// Behaves like `Suspended` (auth denied) but additionally signals
     /// that the realm can be permanently deleted from the admin UI.
     Archived,
+    /// Background cascade deletion is running. Auth is denied; the realm
+    /// will be fully removed once the cascade completes.
+    DeletingInProgress,
 }
 
 /// Controls who may self-register in a realm.
@@ -878,6 +925,70 @@ pub struct RealmConfig {
     /// `None` (default) means standard OAuth 2.0 / OIDC rules apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fapi_profile: Option<FapiProfile>,
+    /// Idle session timeout in seconds (A-18).
+    ///
+    /// A session whose `last_refreshed_at` is older than this window is evicted
+    /// on next access and by the background session reaper. `None` = no idle
+    /// timeout (fail-open; standard TTL governs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u32>,
+    /// Absolute session lifetime cap in seconds (A-18).
+    ///
+    /// A session older than this is evicted regardless of recent activity.
+    /// `None` = no hard cap (fail-open; standard TTL governs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absolute_timeout_secs: Option<u32>,
+    /// Per-realm risk scorer configuration (A-11 / A-49).
+    ///
+    /// `None` → scorer disabled (fail-open per §6.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_scorer_config: Option<RiskScorerConfig>,
+    /// Per-realm resource quota limits (A-24).
+    ///
+    /// `None` means no quotas (unlimited). When set, create operations for the
+    /// covered resource types are rejected with [`crate::identity::IdentityError::QuotaExceeded`]
+    /// when the current count equals or exceeds the configured limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quotas: Option<RealmQuotaConfig>,
+    /// Per-realm magic link token TTL in microseconds (A-14).
+    ///
+    /// `None` falls back to the compiled default (15 minutes). Hard-capped at
+    /// 30 minutes unless `allow_unsafe_ttl` is also set in the realm's YAML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub magic_link_ttl_micros: Option<i64>,
+    /// WebAuthn attestation policy for this realm (A-13).
+    ///
+    /// `None` means no policy — attestation format and AAGUID are unrestricted
+    /// (fail-open per §6.1 of the abuse plan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webauthn_attestation: Option<WebAuthnAttestationPolicy>,
+}
+
+/// Per-realm WebAuthn attestation policy (A-13).
+///
+/// Controls which authenticators are permitted to register credentials in this
+/// realm. All fields fail-open by default (absent policy = any authenticator).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WebAuthnAttestationPolicy {
+    /// Whether attestation format `"none"` is accepted (default: `true`).
+    pub allow_none: bool,
+    /// AAGUID allowlist (lowercase UUID format). Empty = any AAGUID accepted.
+    pub aaguid_allowlist: Vec<String>,
+    /// Require PRF extension on registered credentials (default: `false`).
+    pub require_prf: bool,
+    /// Require `largeBlob` extension on registered credentials (default: `false`).
+    pub require_large_blob: bool,
+}
+
+impl Default for WebAuthnAttestationPolicy {
+    fn default() -> Self {
+        Self {
+            allow_none: true,
+            aaguid_allowlist: Vec::new(),
+            require_prf: false,
+            require_large_blob: false,
+        }
+    }
 }
 
 /// FAPI 2.0 Security Profile enforcement level.
@@ -957,6 +1068,48 @@ pub enum SessionLimitPolicy {
     /// victim's sessions via repeated login. Only use when the application
     /// requires single-session semantics and the threat model accepts it.
     EvictOldest,
+}
+
+/// Per-realm resource quota configuration (A-24).
+///
+/// All limits are `None` by default (unlimited). When a limit is set, the
+/// corresponding create operation is rejected with
+/// [`crate::identity::IdentityError::QuotaExceeded`] once the current count
+/// reaches the limit.  Enforcement is synchronous and fail-closed: if the
+/// storage scan that determines the count fails, the create is rejected.
+///
+/// Disk-usage (`max_disk_bytes`) is checked asynchronously by the background
+/// audit-pruner task (sampled). Enforcement is a warning log only; no create
+/// is blocked. Pair it with `max_audit_rows` for a hard data-size backstop.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RealmQuotaConfig {
+    /// Maximum number of users that may exist in this realm at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_users: Option<u64>,
+    /// Maximum number of organizations that may exist in this realm at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_orgs: Option<u64>,
+    /// Maximum number of OAuth/OIDC clients registered in this realm at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_clients: Option<u64>,
+    /// Maximum total number of active sessions across all users in this realm.
+    ///
+    /// Checked synchronously on `create_session`. Because checking the total
+    /// requires a full-prefix scan, set this only when the realm has a known
+    /// bounded user population.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u64>,
+    /// Maximum number of audit log rows for this realm (A-24 hard backstop
+    /// complement to A-25 `max_rows`). Enforced by the background pruner;
+    /// see also [`crate::audit::types::AuditRetentionConfig::max_rows`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_audit_rows: Option<u64>,
+    /// Disk-usage warning threshold in bytes for this realm's storage prefix.
+    ///
+    /// Checked by the background pruner task (sampled, once per day).
+    /// Exceeding this limit emits a `warn!()` but does NOT block writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_disk_bytes: Option<u64>,
 }
 
 // ── SecretString serde helpers ────────────────────────────────────────────────
@@ -1816,6 +1969,10 @@ pub struct ConsentListEntry {
 /// ticket (single-use).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingAuthorizationRequest {
+    /// The realm this pending request belongs to. Prevents cross-realm replay:
+    /// a consent ticket issued in realm A cannot be redeemed in realm B even
+    /// if the ticket cookie somehow survives a realm switch.
+    pub realm_id: RealmId,
     /// The user who owns this pending request. Prevents cross-user replay.
     pub user_id: UserId,
     /// The client requesting authorization.
@@ -2702,6 +2859,7 @@ mod tests {
     #[test]
     fn pending_authorization_request_serde_round_trip() {
         let pending = PendingAuthorizationRequest {
+            realm_id: RealmId::generate(),
             user_id: UserId::generate(),
             client_id: ClientId::generate(),
             redirect_uri: "https://app.example.com/cb".to_string(),

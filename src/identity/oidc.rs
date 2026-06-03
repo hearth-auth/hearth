@@ -1065,6 +1065,15 @@ pub(crate) struct StoredAuthorizationCode {
     pub(crate) amr_values: Vec<String>,
 }
 
+/// Context from the refresh request used to detect binding drift (A-49).
+#[derive(Debug, Clone, Default)]
+pub struct RefreshBindContext {
+    /// Raw `User-Agent` header value from the refresh request.
+    pub user_agent: Option<String>,
+    /// Originating ASN (stub — always `None` until HEA-1205 ships).
+    pub asn: Option<u32>,
+}
+
 /// OIDC Discovery document (`OpenID` Connect Discovery 1.0).
 ///
 /// Contains metadata about the `OpenID` Provider's configuration.
@@ -1499,6 +1508,14 @@ pub(crate) struct StoredGrantFamily {
     /// without needing to embed them in the refresh token itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) amr_values: Vec<String>,
+
+    /// SHA-256 hex of the User-Agent string at grant creation (A-49).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ua_hash: Option<String>,
+
+    /// Originating ASN at grant creation (A-49, stub — P-4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) bound_asn: Option<u32>,
 }
 
 // ===== Token Revocation (RFC 7009) =====

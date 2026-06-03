@@ -321,7 +321,7 @@ async fn refresh_token_rotation_e2e() {
     //    The rotation is tracked by the stored hash, not the token string.
     let refreshed = harness
         .identity()
-        .refresh_tokens(&realm, &original_refresh, None)
+        .refresh_tokens(&realm, &original_refresh, None, None)
         .expect("refresh tokens");
 
     // 4. Validate new access token — should succeed
@@ -334,7 +334,7 @@ async fn refresh_token_rotation_e2e() {
     // 5. Use old refresh token — should fail (grant family hash was rotated)
     let reuse_result = harness
         .identity()
-        .refresh_tokens(&realm, &original_refresh, None);
+        .refresh_tokens(&realm, &original_refresh, None, None);
     assert!(
         reuse_result.is_err(),
         "reusing old refresh token after rotation must fail"
@@ -345,7 +345,7 @@ async fn refresh_token_rotation_e2e() {
     let new_refresh = refreshed.refresh_token().to_string();
     let new_refresh_result = harness
         .identity()
-        .refresh_tokens(&realm, &new_refresh, None);
+        .refresh_tokens(&realm, &new_refresh, None, None);
     assert!(
         new_refresh_result.is_err(),
         "current refresh token should also be revoked after theft detection"

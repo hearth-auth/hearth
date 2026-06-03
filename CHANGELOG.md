@@ -9,6 +9,438 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **P-1 Cloudflare Turnstile CAPTCHA adapter** — new `TurnstileCaptchaProvider` in
+  `src/abuse/captcha/` implements the `CaptchaProvider` trait with Cloudflare's
+  siteverify API.  Widget HTML is injected at the `<!-- captcha-widget-slot -->`
+  marker in the register and forgot-password UI forms.  Server-side verification
+  runs via `spawn_blocking`.  Fail-open on transport errors per §6.1.  Configure
+  via `security.captcha.provider: turnstile` in `hearth.yaml`; defaults to
+  `NoopCaptchaProvider` (no CAPTCHA shown) when absent (HEA-1202).
+- **A-30 Backup/export hardening** — export operations now require a separate
+  `hearth.export` permission in addition to `hearth.admin` (granted to the
+  `realm.admin` role by default). A per-user rate limit of 10 exports per hour
+  caps blast radius from a compromised credential. Every backup, user-export, and
+  audit-export call emits a `RealmExportWatermarked` audit event with a unique
+  `export_id` UUID, `export_type`, and actor (HEA-1206).
+
+- **A-30 Restore archive signature verification** — `BackupManifest` gains a
+  `detached_signature_b64` field (base64url Ed25519). When
+  `security.backup.verify_key` is configured (raw Ed25519 public key, base64url),
+  the restore handler verifies the detached signature over `canonical_bytes()`
+  before importing any data. Fail-closed: archives without a valid signature are
+  rejected with `400 missing_manifest_signature` (HEA-1206).
+
+- **A-5 Reserved realm/org slug names** — `security.reserved_slugs` in `hearth.yaml`
+  lets operators declare a list of names that cannot be used as realm names or
+  organization slugs (e.g. `["support", "www", "mail"]`).  Built-in URL-routing
+  keywords remain reserved as before (HEA-1212).
+
+- **A-5 Post-delete slug cooldown** — when a realm or organization is deleted its name
+  enters a 30-day cooldown window.  Attempts to create a new realm or org with the
+  same name during the window are rejected with `HEARTH_SLUG_IN_COOLDOWN` (HEA-1212).
+
+- **A-6 Bootstrap endpoint production guard** — `POST /admin/bootstrap` is now absent
+  from the route table in production by default (the route is not registered, preventing
+  fingerprinting).  Pass `--allow-bootstrap-in-prod` to enable it for initial
+  provisioning of a fresh deployment; a startup warning is emitted (HEA-1212).
+
+- **A-10 Per-IP JWKS / OIDC discovery rate cap** — JWKS and OpenID discovery endpoints
+  are now capped at 60 requests per second per source IP (`JwksRateLimiter`).  Exceeding
+  the limit returns `429 Too Many Requests` (HEA-1212).  Dev mode (`--dev`) disables the
+  cap so local SDK smoke tests and CLI integration tests do not race the limiter.
+
+### Fixed
+
+- **A-33 `update_realm` vs delete cascade race** — `delete_realm` releases the realm
+  ops lock after stamping `DeletingInProgress` so the (potentially long) cascade does
+  not block other realms.  Without a status check on `update_realm`, a concurrent
+  rename could re-put the realm record between the cascade's record-delete and
+  signing-key-delete, leaving `record=Some / key=None`.  `update_realm` now refuses
+  updates against a realm whose cascade has started.
+
+- **A-13 WebAuthn attestation policy** — per-realm configuration (`realms.<name>.auth.webauthn_attestation`)
+  controls: `allow_none` (whether the `"none"` attestation format is accepted),
+  `aaguid_allowlist` (allowlist of authenticator AAGUIDs in UUID format), and
+  `require_prf` / `require_large_blob` flags.  Absent = fail-open (HEA-1212).
+
+- **A-14 Per-realm TTL hard caps** — `to_realm_config` rejects realm configs where
+  `auth.token.password_reset_token_ttl` exceeds 1 hour or `auth.token.magic_link_ttl`
+  exceeds 30 minutes unless `auth.token.allow_unsafe_ttl: true` is also set.  Operators
+  accept the wider token-theft window by explicitly setting the flag (HEA-1212).
+
+- **P-8 Pluggable `SecretsBackend` trait** — `src/abuse/secrets_backend/` provides
+  a `dyn SecretsBackend` abstraction for signing keys (PKCS#8 DER), encryption-at-rest
+  keys (32 bytes), and Argon2 pepper (32 bytes). Adapters: `StorageSecretsBackend`
+  (default, today's WAL storage layout), `FileSecretsBackend` (reads from a
+  directory), and stubs `KmsSecretsBackend` / `HsmSecretsBackend` for future
+  HSM/KMS integration (HEA-1206).
+
+- **`hearth.export` permission** — seeded in all realms and included in the
+  `realm.admin` role. Service accounts can be granted `hearth.export` without
+  full `hearth.admin` for dedicated DR pipelines (HEA-1206).
+
+- **A-31 Per-realm JWT leeway (federation)** — `federation.<idp>.leeway_seconds`
+  replaces the hardcoded 60-second clock-skew allowance on OIDC ID-token `exp` and
+  `nbf` checks. Defaults to 60 s; capped at 300 s. Raises are only necessary for
+  enterprise IdPs with known clock drift (HEA-1213).
+
+- **A-32 `trusted_proxies` startup validator** — Hearth now refuses to start when
+  `server.trusted_proxies` contains `0.0.0.0/0`, `::/0`, `0.0.0.0`, or `::` (catch-all
+  entries that would trust every IP as a reverse proxy). Loopback addresses
+  (127.x.x.x, ::1) are also rejected when the listener is bound to a public address
+  (HEA-1213).
+
+- **A-34 Consent page clickjacking protection** — `GET /ui/oauth/consent` and
+  `POST /ui/oauth/consent` now emit `Content-Security-Policy: frame-ancestors 'none'`
+  to prevent UI-redressing attacks on the approve/deny buttons. The consent ticket
+  also embeds the issuing realm's ID; submitting a ticket from realm A into realm B's
+  consent flow is now rejected (HEA-1213).
+
+- **A-36 `agent_auth` feature guardrail** — Setting `agent_auth.enabled: true` in
+  `hearth.yaml` now produces a startup error. The Agent entity, delegation chains,
+  MCP/A2A surfaces, and Agent Authorization Tokens (AATs) described in
+  `docs/specs/AGENT_AUTH.md` are not yet fully implemented; the guardrail prevents
+  silent misconfiguration until the feature ships (HEA-1213).
+
+- **A-24 Per-realm resource quotas** — `RealmConfig.quotas` (`RealmQuotaConfig`)
+  adds optional per-realm caps for users, orgs, OAuth clients, total sessions,
+  and audit rows. Create operations are rejected with HTTP 429 /
+  `HEARTH_QUOTA_EXCEEDED` once the current count reaches the limit. All limits
+  default to `None` (unlimited). Disk-usage soft-warning (`max_disk_bytes`) is
+  checked by the daily background pruner (HEA-1195).
+
+- **A-25 Audit auto-retention: `max_rows` backstop** — `AuditRetentionConfig`
+  gains an optional `max_rows: u64` field.  The background daily pruner now
+  enforces it after the time-based `retention_days` sweep: if the event count
+  still exceeds `max_rows`, the oldest events are trimmed until the count is
+  within the limit.  Two new `AuditEngine` trait methods: `count_events` and
+  `prune_oldest` (HEA-1195).
+
+### Changed
+
+- **Atomic org-slug reservation and invitation acceptance** — concurrent requests can no
+  longer both win the same organization slug or double-spend an invitation token; a
+  per-engine mutex serializes the check-then-write sequence and `put_batch` makes the
+  primary record + index land atomically (A-28, HEA-1207).
+- **RBAC assignment deduplication** — concurrent role assignments for the same
+  (subject, role, scope) tuple are now idempotent; the second caller receives the
+  existing assignment record (A-28, HEA-1207).
+- **Bounded realm deletion cascade** — `delete_realm` marks the realm
+  `DeletingInProgress` before cascading, preventing new auth ops; the cascade is
+  chunked (default 200 keys/chunk) and backgrounded for realms exceeding 1 000 items,
+  preventing write storms that would degrade all tenants (A-33, HEA-1207).
+
+- **Reserved slug registry and cooldown** — YAML-driven list of reserved names (admin, api,
+  www, …) cannot be used as org or realm slugs; deleted slugs enter a 30-day cooldown before
+  reuse (A-5, HEA-1212).
+- **Bootstrap production guard** — `/admin/bootstrap` requires `--allow-bootstrap-in-prod`
+  when running outside `--dev`; a loud warning is logged when the flag is active (A-6, HEA-1212).
+- **JWKS/discovery per-IP rate cap** — JWKS and discovery endpoints capped at 60 req/s per
+  source IP (configurable via `security.jwks_rps_limit`); responses served from pre-serialized
+  `Arc<Bytes>` (A-10, HEA-1212).
+- **WebAuthn attestation policy** — per-realm AAGUID allowlist, configurable rejection of
+  "none" attestation, and optional PRF/large-blob requirement (A-13, HEA-1212).
+- **TTL hard caps** — per-realm password-reset tokens capped at 1 h and magic-link tokens
+  at 30 min; `allow_unsafe_ttl: true` in realm config bypasses the cap with a warning
+  (A-14, HEA-1212).
+
+### Security
+
+- **A-43 gRPC reflection production-disable** — `security.grpc.reflection_enabled`
+  (default `false`; `true` in `--dev`) gates the `grpc.reflection.v1.ServerReflection`
+  service. Hearth refuses to start with reflection enabled in production mode unless
+  `--allow-reflection-in-prod` is explicitly passed on the command line (HEA-1209).
+
+- **A-44 TLS 0-RTT off + mTLS CRL revocation** — `rustls` `max_early_data_size` is
+  asserted `= 0` at startup so a future library upgrade cannot silently re-enable
+  replay-vulnerable early data. Optional `security.tls.crl_paths` accepts a list of
+  PEM-encoded CRL files; when configured, mTLS client certificates are checked against
+  every CRL on each handshake and revoked certificates are rejected (HEA-1209).
+
+- **P-2 IP reputation: Spamhaus DROP + MaxMind ASN/GeoIP2** — New pluggable
+  `IpReputationProvider` trait (`src/abuse/ip_reputation/`).  Two reference
+  adapters ship: (1) `SpamhausDropProvider` — checks source IPs against the
+  Spamhaus DROP (IPv4) and EDROP (IPv6) blocklists, refreshed daily in a
+  background Tokio task via an Arc-swapped `CidrFilter` (lock-free, zero-alloc
+  on the read path); (2) `MaxMindAsnProvider` — looks up the ASN for a source
+  IP from a local MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB file (operator
+  provides the database; absent = fail-open noop).  Both adapters are
+  fail-open.  Per-realm enable/action policy configured under
+  `security.ip_reputation` in `hearth.yaml`.  (HEA-1203)
+
+- **A-50 Cross-realm SMS / email aggregation cap** — Closes §3.53: a global
+  (cluster-wide) counter keyed by recipient hash (email or E.164 phone number)
+  now tracks how many distinct realms have sent to each address in a rolling
+  window.  Three escalating outcomes fire as the distinct-realm count rises:
+  `MultiRealmAlert` (emit A-7 operator webhook; send still allowed),
+  `SoftCap` (CAPTCHA / queue required), and `HardCap` (send rejected with
+  HTTP 429).  This closes the bypass where an attacker splits sends across N
+  realms to slip past A-4's per-realm cap.  Fail-open on lock poisoning.  New
+  config section `security.cross_realm_aggregation_cap` in `hearth.yaml`.
+  New types: `CrossRealmAggCapConfig`, `CrossRealmOutcome`,
+  `CrossRealmAggregationCap` in `src/abuse/detector`.  (HEA-1201)
+
+- **P-4 `RiskScorer` pluggable trait + rule-based reference engine** — The A-11
+  step-up MFA risk scorer is now exposed as a public pluggable trait
+  (`src/abuse/risk_scorer`).  Operators can replace the built-in
+  `RuleBasedRiskScorer` with any vendor risk engine or custom HTTP adapter by
+  implementing `RiskScorer: Send + Sync`.  The built-in engine aggregates five
+  configurable signals (`NewDevice`, `NewCountry`, `PasswordAge`,
+  `BreachCorpusHit`, `RefreshContextDelta`) with per-weight YAML config under
+  `security.risk_scorer`.  Fail-open: `enabled: false` (the default) and
+  `NoopRiskScorer` both always return score `0.0`.  New type: `NoopRiskScorer`.
+  Renamed public type: `RuleBasedRiskScorer` (was `DefaultRiskScorer` — alias
+  preserved for existing call sites).  (HEA-1205)
+
+- **A-46 Argon2 pepper rotation policy** — `CredentialConfig` gains an optional
+  `PepperConfig` that applies `HMAC-SHA256(key=pepper, msg=password)` before
+  Argon2id hashing. The pepper version is stored in `StoredCredential::pepper_version`
+  (`serde(default)` for backward compatibility). On login, the engine tries the
+  active pepper first; if the credential carries the previous pepper version
+  (grace window open in config), it is also accepted and the credential is lazily
+  re-hashed with the active pepper. Credentials without a pepper version (pre-upgrade)
+  are also lazily upgraded. A new `hearth migrate rotate-pepper --data-dir <path>`
+  CLI subcommand reports how many credentials in each realm still lack a pepper version.
+  Fail-choice: fail-open (no pepper = still logs in) until operator installs pepper.
+  New types: `PepperKey`, `PepperConfig`. New functions: `hash_password`,
+  `verify_password_with_pepper` (both public for migration tooling). (HEA-1210)
+
+- **A-3 Distributed-attack detector** — `DistributedAttackDetector` in
+  `src/abuse/detector` tracks two cardinality dimensions per realm using a
+  two-bucket rotating `DistinctWindow`: (1) distinct usernames tried per
+  source IP and (2) distinct source IPs targeting one username.  When either
+  count exceeds the configured threshold in the rolling window, `check()`
+  returns `DetectorOutcome::Challenge` with a reason string for logging.
+  Callers must emit `AuditAction::AbuseDetected` and apply A-16 / A-17.
+  Fail-open on lock poisoning; `disabled()` constructor for opt-out.
+  Config: `security.distributed_attack_detector` (`window`, per-dimension
+  thresholds).  No new dependencies (HEA-1189).
+
+- **A-4 Outbound email/SMS volume shield** — `OutboundVolumeShield` in
+  `src/abuse/detector` enforces per-realm rolling-window distinct-recipient
+  caps for outbound email (and SMS when that module ships).  Two thresholds:
+  `SoftCap` for operator-review alerting (A-7 webhook / A-8 dashboard) and
+  `HardCap` for mandatory send rejection (HTTP 429).  Recipients are stored
+  as `SipHash-1-3` hashes — PII never written to memory.  Fail-open on lock
+  poisoning; `disabled()` constructor for opt-out.  Config:
+  `security.outbound_volume_shield` (`window`, `email_soft_cap`,
+  `email_hard_cap`, `sms_soft_cap`, `sms_hard_cap`) (HEA-1189).
+
+- **A-9 Tenant-managed CIDR allow/deny lists** — `CidrFilter` in `src/abuse/cidr`
+  provides per-realm IPv4/IPv6 CIDR allow and deny lists evaluated in `AbuseGuard`.
+  Stored under the `abuse:{realm}:cidr:*` key prefix.  Evaluation order: allow list
+  overrides deny list (explicit trust); non-empty allow list enables strict whitelist
+  mode; empty filter is fail-open per §6.1 (HEA-1191).
+
+- **A-12 Adaptive exponential lockout backoff** — `AdaptiveBackoffStore` in
+  `src/abuse/backoff` escalates per-key lockout durations across repeat offenses:
+  **1 min → 5 min → 30 min → 24 h** (configurable).  The offense counter resets after
+  a configurable cooldown period following the end of the most recent lockout.
+  Disabled (fail-open) by default; enable via `security.adaptive_backoff` (HEA-1191).
+
+- **A-17 Login-event tarpit** — `TarpitStore` in `src/abuse/tarpit` injects a
+  deterministic delay (default 200 ms, configurable 100–500 ms) into auth `POST`
+  requests once a source IP exceeds the failure threshold.  The delay is applied
+  off the hot path by the caller (`tokio::time::sleep`); the `check()` method is
+  allocation-free and meets the ≤5 µs p99 hot-path budget.  Disabled (fail-open)
+  by default; enable via `security.tarpit` (HEA-1191).
+
+- **P-3 BotSignal provider** — `BotSignalProvider` trait and reference
+  `HeuristicBotSignalProvider` adapter in `src/abuse/bot_signal`.  The adapter
+  applies three layers: JA3/JA4 hash blocklist (proxy-injected headers), `woothee`
+  crawler-category detection, and scripting-client / headless-browser UA substring
+  matching.  Default: fail-open; `NoopBotSignalProvider` ships as the default so
+  no request is blocked until an adapter is configured.  External adapters
+  (Cloudflare Bot Management, Datadome, Kasada, Akamai) implement the trait
+  and plug in via `security.providers.bot_signal` (HEA-1204).
+
+- **P-5 EmailReputation provider** — `EmailReputation` trait and reference
+  `BuiltinEmailReputation` adapter in `src/abuse/email_reputation`.  The adapter
+  checks the email domain against a bundled ~400-entry disposable-domain list and
+  flags well-known role addresses (`noreply@`, `postmaster@`, `admin@`, etc.).
+  DNS MX validity is stubbed (always passes); the upgrade path to
+  `hickory-resolver` is documented in the module.  Default: fail-open;
+  `NoopEmailReputation` ships as the default.  External adapters (Kickbox,
+  ZeroBounce, NeverBounce) implement the trait and plug in via
+  `security.providers.email_reputation` (HEA-1204).
+
+- **A-48 Federation state↔session binding** — at `begin`, Hearth now plants a
+  short-lived `hearth_fed_bind` cookie containing `HMAC-SHA256(cookie_secret,
+  state_token)`. At `callback`, the server rejects requests that lack the
+  cookie or whose MAC does not match — preventing cross-browser callback
+  injection (IdP callback hijacking). Fail-closed (HEA-1200).
+
+- **A-49 Refresh-token UA/ASN context binding** — grant families now record
+  the SHA-256 hash of the `User-Agent` at grant creation time. On each refresh
+  exchange, the engine computes a `RefreshContextDelta` risk signal when the
+  UA hash changes. The signal is fed to the `DefaultRiskScorer`; when
+  `security.risk_scorer.enabled = true` and the combined score exceeds
+  `step_up_threshold`, the engine returns `StepUpChallengeRequired` so the
+  caller must force re-authentication. Fail-open by default (HEA-1200).
+
+- **A-26 `/metrics` authentication + `Server:` header suppression** — the
+  Prometheus scrape endpoint now enforces `Authorization: Bearer <token>`
+  (constant-time comparison) when `metrics.bearer_token` is set in
+  `hearth.yaml`; unauthenticated requests receive HTTP 401 with
+  `WWW-Authenticate: Bearer`. All responses no longer include a `Server:`
+  header, preventing runtime/version fingerprinting (HEA-1196).
+
+- **A-27 Tracing PII / token redaction** — a `Redact<T>` newtype in
+  `src/protocol/redact.rs` wraps sensitive values so both `Display` and
+  `Debug` emit `[REDACTED]`; the first usage guards the password-reset URL
+  logged when no email transport is configured (`reset_url` span field in
+  `protocol/web/handlers.rs`). Default-redacted fields: `reset_url`,
+  `magic_link_url`, `password`, `token`, `cookie`, raw email (HEA-1196).
+
+- **A-19 Email-change re-verification** — changing a user's email address now
+  requires the new address to be verified via a separate 32-byte random token
+  (SHA-256 stored, 24-hour TTL, single-use) before the swap is committed.
+  Two new identity-engine methods are exposed: `initiate_email_change` (issues
+  token, caller delivers to new address) and `confirm_email_change` (validates
+  token, swaps indexes, revokes all sessions, caller notifies old address).
+  New `EmailChangeInitiated` and `EmailChangeConfirmed` audit actions; new
+  `EmailChangeTokenInvalid` error code `HEARTH_EMAIL_CHANGE_TOKEN_INVALID`
+  (HEA-1194).
+
+- **A-20 Deleted-account email reservation** — `delete_user` now writes a
+  90-day tombstone under `email:reserved:{normalized_email}`. While the
+  tombstone is live, `create_user` and `initiate_email_change` for that address
+  return `EmailReserved` (same wire code as `DuplicateEmail` —
+  `HEARTH_DUPLICATE_EMAIL` — for enumeration resistance). The tombstone is
+  automatically cleaned up when it expires. (HEA-1194).
+
+- **A-37 `prompt=none` silent-auth probe rate limit** — the OIDC
+  `GET /ui/oauth/authorize` handler now tracks every `prompt=none` request per
+  (realm, subject) in a 1-hour sliding window (cap: 50 probes/hour). Probes
+  over the limit receive `error=login_required`. An `OidcSilentAuthProbed`
+  audit event is emitted on every probe with `outcome` and `probe_count`
+  metadata; new error code `HEARTH_SILENT_AUTH_RATE_LIMITED` (HEA-1194).
+
+- **A-45 Tenant-content sanitization** — all operator- and tenant-supplied
+  SVG and CSS is sanitized before unescaped render (HEA-1199):
+  - **SVG** (`logo_svg_inline` in email templates) — `<script>`,
+    `<foreignObject>`, `on*` event handlers, external `href`/`xlink:href`,
+    and `style` values containing `expression()` / `javascript:` are stripped
+    by `sanitize_svg()` inside `prepare_svg_for_email()`.
+  - **CSS** (`branding.custom_css` and per-realm `web.custom_css`) —
+    `expression()`, `javascript:`, `behavior:`, `-moz-binding`, `@import`,
+    `url(data:...)`, and `progid:` patterns are stripped by `sanitize_css()`
+    at startup before the CSS is served to browsers.
+  - See `docs/specs/ABUSE.md` §A-45 for the full contract.
+
+### Added
+
+- **A-7 Security webhook channel** — operators can now subscribe webhooks to the
+  `security.*` event family: `security.login_failed`, `security.account_locked`,
+  `security.abuse_detected`, `security.password_compromised`, and
+  `security.rate_limit_exceeded`. The webhook admin create/edit form lists these
+  five event types with descriptions so they can be wired to a SIEM, Slack, or
+  custom WAF without polling the audit log (HEA-1190).
+
+- **A-8 Abuse monitor dashboard** — new admin page
+  `/ui/admin/realms/{realm}/abuse` shows security event counters (login
+  failures, locked accounts, rate-limit hits, compromised-password rejections,
+  and abuse detections) over a rolling 24-hour window, plus a top-10 failing
+  IPs table and a 50-event security timeline. ASN view, geo heat-map, and
+  one-click block/unblock are placeholders pending the A-9 CIDR allow/deny
+  lists and P-2 IP-reputation integration (HEA-1190).
+
+- **`AuditAction::AbuseDetected`** — new `abuse_detected` wire-format audit
+  action for the A-3 distributed-attack detector. Fail-open (`LogOnly`);
+  included in `AuditAction::all()` for the audit-log filter UI (HEA-1190).
+
+- **A-18 Session lifecycle policy + P-7 `SessionStore` trait** — per-realm
+  `idle_timeout_secs` and `absolute_timeout_secs` on `RealmConfig` (also in
+  `hearth.yaml` under `auth:` and per-realm). Sessions are evicted lazily on
+  `get_session` / `refresh_session` and proactively by a background reaper task
+  that runs alongside the existing OAuth cleanup sweep. A new `SessionEvicted`
+  audit event (distinct from `SessionRevoked`) is emitted on every policy
+  eviction. `SessionStore` pluggable trait (`src/identity/sessions.rs`) defines
+  the persistence interface for multi-node deployments; `EmbeddedSessionStore`
+  is the reference adapter backed by the WAL storage engine (HEA-1193).
+
+- **A-11 Step-up MFA risk scorer** — new `src/identity/risk.rs` aggregates
+  signals (new device, new country, password age, breach corpus hit) into a
+  normalised score `[0.0, 1.0]`; when score ≥ threshold (default 0.5),
+  `StepUpChallengeRequired` is returned at login.  Disabled by default
+  (fail-open); enable via `security.risk_scorer.enabled: true` in `hearth.yaml`.
+  P-4 extension point (`RiskScorer` trait) ready for HEA-1205 adapters (HEA-1192).
+- **A-16 CAPTCHA-of-last-resort challenge plumbing** — new
+  `src/abuse/challenge.rs` tracks per-IP failed-auth counts; IPs over the
+  threshold enter "challenge" state and callers receive
+  `HEARTH_ABUSE_CHALLENGE_REQUIRED` (HTTP 403).  UI forms carry a widget
+  injection slot; `NoopCaptchaProvider` ships as the built-in (P-1 Turnstile
+  adapter in HEA-1202).  Disabled by default; activate via
+  `security.captcha.challenge_threshold` (HEA-1192).
+- **Phase-0 abuse-prevention builtins** — HTTP-layer and strictness-default
+  primitives that the rest of the abuse plane depends on (HEA-1188):
+  - **A-2 Global request shaper** — per-IP (100 rps) + per-realm (1 000 rps)
+    sliding-window rate limiter applied to all public routes.  Configurable
+    via `security.request_shaper` in `hearth.yaml`.
+  - **A-15 gRPC rate-limit interceptor** — mirrors the HTTP shaper on all
+    gRPC methods; the per-IP interceptor is wired via `Server::layer()`.
+  - **A-21 JSON parse-bomb guard** — inbound JSON bodies are rejected with
+    413 if nesting depth > 128 levels or any single array has ≥ 65 536
+    elements.
+  - **A-22 Decompression-bomb cap** — `Content-Encoding: gzip` payloads are
+    capped at 4 MiB decompressed; oversized streams are aborted.
+  - **A-23 Pagination hard cap** — `cap_page_size(limit)` helper enforces a
+    1 000-row maximum at the trait boundary; handlers' hardcoded 10 000 limit
+    is superseded.
+  - **A-39 HTTP/2 rapid-reset defense** — TLS connections set
+    `max_concurrent_streams = 100` and `max_pending_reset_streams = 10`
+    (CVE-2023-44487 mitigations).
+  - **A-40 COOP / COEP / Permissions-Policy headers** — the UI security-
+    headers middleware now emits `Cross-Origin-Opener-Policy: same-origin`,
+    `Cross-Origin-Embedder-Policy: require-corp`, and
+    `Permissions-Policy: camera=(), microphone=(), geolocation=(), …` on
+    every UI response.  Configurable via `SecurityConfig.coop_coep_enabled`.
+  - **A-47 `deny_unknown_fields` on admin request bodies** — key admin
+    request shapes (`ImportUsersBody`, `HttpBulkUsersRequest`,
+    `PatchRealmBrandingRequest`, RBAC role/group bodies) now reject extra
+    fields.  OAuth/OIDC protocol bodies are explicitly exempted (RFC 6749
+    extension-parameter allowance documented).
+  - **A-52 Unified `return_to` allowlist** — `crate::abuse::redirect::validate_return_to`
+    consolidates all open-redirect prevention.  Federation start and SAML ACS
+    handlers now validate `return_to` before persisting it in the state bag.
+    Operator-whitelisted absolute origins are supported via
+    `security.allowed_return_to_origins`.
+
+- **A-41 Session-ID rotation on every authentication event** (HEA-1198):
+  Every successful primary-auth, MFA challenge completion, passkey login, and
+  forced TOTP enrollment now revokes the pre-existing session cookie before
+  minting a fresh one via `revoke_prior_session_cookie`.  Pre-planted session
+  cookies (session-fixation attack vector §3.44) cannot survive a login.
+
+- **A-42 Sensitive-mutation mass-revocation** (HEA-1198):
+  `set_password`, `change_password`, `disable_mfa`, and email changes (via
+  `update_user`) now revoke all active sessions and their refresh-token grant
+  families for the affected user.  A single `sessions_revoked` audit event
+  is emitted with the count.  The new `revoke_all_user_sessions` engine
+  method accepts an optional `keep` session ID so callers can preserve the
+  user's own active device session if desired.
+
+- **A-35 SCIM/SAML payload caps** (HEA-1208):
+  - **SCIM PATCH `Operations` count cap** — SCIM PATCH requests with more than
+    1 000 `Operations` entries are rejected with HTTP 400 / `scimType: tooMany`.
+    Closes the resource-exhaustion vector where a single PATCH could fan out
+    over an unbounded operations loop.
+  - **SAML XML event cap** — `parse_response` and `find_element_range` now
+    abort with `SamlParse` after 10 000 XML events.  Closes the complementary
+    exhaustion vector for crafted responses with thousands of elements
+    (DOCTYPE/XXE was already blocked; this cap adds depth against non-DTD bulk).
+
+- **A-38 Token-exchange depth & DPoP `cnf.jkt` coverage** (HEA-1208):
+  - **`client_credentials` + JWT-bearer FAPI enforcement** — when a realm has
+    `fapi_profile` set or the client was registered with `profile: Fapi2`, the
+    token endpoint now rejects `client_credentials` and `jwt-bearer` requests
+    that omit `dpop_jkt`.  Previously only the authorization-code exchange path
+    was guarded; all access-token-issuing grant types are now consistent.
+  - **RFC 8693 `act` chain depth cap** — `validate_token` rejects inbound
+    access tokens whose `act` delegation chain exceeds 3 levels (constant
+    `MAX_ACT_CHAIN_DEPTH`).  Hearth does not issue `act` chains itself; this
+    cap defends against externally-crafted delegation-bomb tokens.
+
 - **§3.41 adversarial test-quality gate** — a new CI job (`abuse-coverage`) and
   `make abuse-check` target enforce that every A-N row in
   `docs/plans/HEA-1114-abuse-prevention.md` has at least one adversarial

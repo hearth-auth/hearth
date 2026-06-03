@@ -230,6 +230,17 @@ pub struct MetricsConfig {
     /// collected via a sidecar instead of a direct scrape).
     #[serde(default = "MetricsConfig::default_enabled")]
     pub enabled: bool,
+
+    /// Optional Bearer token required to access the `/metrics` scrape endpoint (A-26).
+    ///
+    /// When set, requests without a matching `Authorization: Bearer <token>`
+    /// header receive HTTP 401. When absent (the default), the endpoint is
+    /// unauthenticated — operators SHOULD firewall it at the network layer or
+    /// bind the server to a loopback / internal address.
+    ///
+    /// Comparison is constant-time to prevent timing-based enumeration.
+    #[serde(default)]
+    pub bearer_token: Option<String>,
 }
 
 impl MetricsConfig {
@@ -242,6 +253,7 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             enabled: Self::default_enabled(),
+            bearer_token: None,
         }
     }
 }
@@ -791,6 +803,365 @@ pub struct SecurityYaml {
     /// **Never use the zero key `0000…` in production.** The server rejects it at startup.
     #[serde(default)]
     pub dpop_nonce_secret: Option<String>,
+    /// Allowlist of `Host` header values the server accepts (A-40).
+    ///
+    /// Requests whose `Host` header is not in this list are rejected with
+    /// 400 Bad Request.  Absent or empty = accept any host (fail-open for
+    /// backward compat).  Include the port for non-standard ports
+    /// (e.g. `"localhost:8420"`).
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// HTTP/2 rapid-reset defense parameters (A-39).
+    #[serde(default)]
+    pub http2: Http2SecurityYaml,
+    /// Global per-IP + per-realm request shaper (A-2).
+    #[serde(default)]
+    pub request_shaper: Option<RequestShaperYaml>,
+    /// Absolute origins permitted as `return_to` redirect targets (A-52).
+    ///
+    /// Relative paths (`/ui/…`) are always accepted.  Absolute URLs are only
+    /// accepted when their `scheme://host[:port]` matches an entry here.
+    #[serde(default)]
+    pub allowed_return_to_origins: Vec<String>,
+    /// IP reputation provider configuration (P-2).
+    #[serde(default)]
+    pub ip_reputation: IpReputationYaml,
+    /// CAPTCHA provider configuration (P-1 — HEA-1202).
+    #[serde(default)]
+    pub captcha: Option<CaptchaYaml>,
+    /// gRPC-specific security settings (A-43).
+    #[serde(default)]
+    pub grpc: GrpcSecurityYaml,
+    /// TLS-specific security settings (A-44).
+    #[serde(default)]
+    pub tls: TlsSecurityYaml,
+    /// Backup and export hardening (A-30).
+    #[serde(default)]
+    pub backup: BackupSecurityYaml,
+    /// A-5: Slug names that are permanently reserved and may never be used
+    /// as an organization or realm slug (case-insensitive).
+    ///
+    /// Operators may override this list entirely via `security.reserved_slugs`
+    /// in `hearth.yaml`. Default list includes: `admin`, `api`, `support`,
+    /// `www`, `mail`, `help`, `status`, `blog`, `app`, `auth`, `login`,
+    /// `logout`, `signup`, `register`, `account`, `profile`, `settings`,
+    /// `dashboard`, `billing`, `security`, `webhook`, `callback`, `oauth`,
+    /// `oidc`, `saml`, `scim`.
+    #[serde(default = "SecurityYaml::default_reserved_slugs")]
+    pub reserved_slugs: Vec<String>,
+    /// A-5: Days a slug is reserved after deletion before it can be reused.
+    /// Default: `30`.
+    #[serde(default = "SecurityYaml::default_slug_cooldown_days")]
+    pub slug_cooldown_days: u32,
+    /// A-10: Maximum JWKS / discovery requests per IP per second.
+    ///
+    /// Applies to all unauthenticated key-discovery endpoints:
+    /// `/jwks`, `/certs`, `/.well-known/jwks.json`,
+    /// `/realms/{name}/.well-known/jwks.json`, and
+    /// `/realms/{name}/.well-known/openid-configuration`.
+    /// Requests beyond this threshold receive `429 Too Many Requests` with a
+    /// `Retry-After: 1` header.  Default: `60`.
+    #[serde(default = "SecurityYaml::default_jwks_rps_limit")]
+    pub jwks_rps_limit: u32,
+}
+
+impl SecurityYaml {
+    /// Default JWKS / discovery rate limit: 60 requests per second per IP (A-10).
+    const fn default_jwks_rps_limit() -> u32 {
+        60
+    }
+
+    /// Default set of permanently reserved slug names (A-5).
+    fn default_reserved_slugs() -> Vec<String> {
+        [
+            "admin",
+            "api",
+            "support",
+            "www",
+            "mail",
+            "help",
+            "status",
+            "blog",
+            "app",
+            "auth",
+            "login",
+            "logout",
+            "signup",
+            "register",
+            "account",
+            "profile",
+            "settings",
+            "dashboard",
+            "billing",
+            "security",
+            "webhook",
+            "callback",
+            "oauth",
+            "oidc",
+            "saml",
+            "scim",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+    }
+
+    /// Default slug cooldown in days (A-5).
+    const fn default_slug_cooldown_days() -> u32 {
+        30
+    }
+}
+
+/// `security.captcha` — CAPTCHA provider configuration (P-1 — HEA-1202).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   captcha:
+///     provider: turnstile
+///     turnstile:
+///       site_key: "0x4AAAAAAA..."
+///       secret_key: "0x4AAAAAAA..."
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct CaptchaYaml {
+    /// Which CAPTCHA provider to activate.
+    pub provider: CaptchaProviderKind,
+    /// Cloudflare Turnstile settings (required when `provider = "turnstile"`).
+    #[serde(default)]
+    pub turnstile: Option<TurnstileYaml>,
+}
+
+/// Supported CAPTCHA provider identifiers.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptchaProviderKind {
+    /// Cloudflare Turnstile (reference adapter — HEA-1202).
+    Turnstile,
+}
+
+/// `security.captcha.turnstile` — Cloudflare Turnstile settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TurnstileYaml {
+    /// Turnstile **site key** (public — safe to embed in HTML).
+    pub site_key: String,
+    /// Turnstile **secret key** (private — use env-var injection in production).
+    ///
+    /// Prefer `HEARTH_TURNSTILE_SECRET_KEY` over embedding in the config file.
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    /// Override for the Cloudflare siteverify URL (omit in production).
+    #[serde(default)]
+    pub verify_url: Option<String>,
+}
+
+/// `security.backup` — backup and export hardening (A-30).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   backup:
+///     verify_key: "base64url-encoded-ed25519-public-key"
+///     export_rate_limit: 10
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BackupSecurityYaml {
+    /// Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-pad).
+    ///
+    /// When set, the restore handler verifies that every uploaded archive's
+    /// `manifest.json` carries a `detached_signature_b64` field whose Ed25519
+    /// signature (made with the corresponding private key) covers the canonical
+    /// manifest bytes. Archives without a valid signature are rejected
+    /// (fail-closed). When absent, signature verification is skipped.
+    #[serde(default)]
+    pub verify_key: Option<String>,
+    /// Maximum backup/export calls per admin user per hour (A-30).
+    ///
+    /// Defaults to 10 when absent.  Set to `0` to disable per-export rate limiting.
+    #[serde(default)]
+    pub export_rate_limit: Option<u32>,
+}
+
+/// `security.ip_reputation` — IP reputation policy and provider config (P-2).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   ip_reputation:
+///     enabled: true
+///     action: block          # block | challenge | log (default: log)
+///     spamhaus:
+///       drop_url: https://www.spamhaus.org/drop/drop.txt
+///       dropv6_url: https://www.spamhaus.org/drop/dropv6.txt
+///       refresh_interval_secs: 86400
+///     maxmind_db_path: /etc/hearth/GeoLite2-ASN.mmdb
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct IpReputationYaml {
+    /// Whether IP reputation checks are enabled.  Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Action to take when the provider flags an IP (block / challenge / log).
+    /// Default: `"log"`.
+    #[serde(default)]
+    pub action: IpReputationActionYaml,
+    /// Spamhaus DROP / EDROP provider settings.
+    #[serde(default)]
+    pub spamhaus: SpamhausDropYaml,
+    /// Path to the MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB file.
+    ///
+    /// Absent / empty = MaxMind ASN lookup disabled.
+    #[serde(default)]
+    pub maxmind_db_path: Option<String>,
+}
+
+/// `security.grpc` — gRPC-specific security settings (A-43).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   grpc:
+///     reflection_enabled: false   # default; omit for production-safe behaviour
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GrpcSecurityYaml {
+    /// Whether the gRPC server reflection service is enabled.
+    ///
+    /// `null` / absent → `false` in production, `true` under `--dev`.
+    /// Setting this to `true` in production requires the `--allow-reflection-in-prod`
+    /// CLI flag; the server refuses to start without it.
+    ///
+    /// gRPC reflection exposes the full API schema to any unauthenticated caller.
+    /// Keep it off in production.
+    #[serde(default)]
+    pub reflection_enabled: Option<bool>,
+}
+
+/// `security.tls` — TLS-specific security settings (A-44).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   tls:
+///     crl_paths:
+///       - /etc/hearth/crl/client-ca.crl.pem
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TlsSecurityYaml {
+    /// Paths to PEM-encoded Certificate Revocation List (CRL) files for mTLS.
+    ///
+    /// When non-empty, mTLS client certificates are checked against every CRL in
+    /// the list on each handshake. Revoked certificates are rejected with a
+    /// TLS alert.  Paths are reloaded on `SIGHUP` alongside the server certificate.
+    ///
+    /// If empty (the default), no revocation check is performed — existing mTLS
+    /// behaviour is preserved.
+    #[serde(default)]
+    pub crl_paths: Vec<PathBuf>,
+}
+
+/// Action taken when IP reputation flags an IP.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IpReputationActionYaml {
+    /// Reject the request with HTTP 403.
+    Block,
+    /// Return a challenge response (A-16 CAPTCHA-of-last-resort).
+    Challenge,
+    /// Allow but record the signal (default, fail-open posture).
+    #[default]
+    Log,
+}
+
+/// `security.ip_reputation.spamhaus` — Spamhaus DROP/EDROP refresh settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpamhausDropYaml {
+    /// URL for the Spamhaus DROP (IPv4) list.
+    #[serde(default = "SpamhausDropYaml::default_drop_url")]
+    pub drop_url: String,
+    /// URL for the Spamhaus EDROP (IPv6) list.
+    #[serde(default = "SpamhausDropYaml::default_dropv6_url")]
+    pub dropv6_url: String,
+    /// Refresh interval in seconds.  Default: 86 400 (24 hours).
+    #[serde(default = "SpamhausDropYaml::default_refresh_interval_secs")]
+    pub refresh_interval_secs: u64,
+}
+
+impl SpamhausDropYaml {
+    fn default_drop_url() -> String {
+        "https://www.spamhaus.org/drop/drop.txt".into()
+    }
+    fn default_dropv6_url() -> String {
+        "https://www.spamhaus.org/drop/dropv6.txt".into()
+    }
+    fn default_refresh_interval_secs() -> u64 {
+        86_400
+    }
+}
+
+impl Default for SpamhausDropYaml {
+    fn default() -> Self {
+        Self {
+            drop_url: Self::default_drop_url(),
+            dropv6_url: Self::default_dropv6_url(),
+            refresh_interval_secs: Self::default_refresh_interval_secs(),
+        }
+    }
+}
+
+/// `security.http2` — HTTP/2 rapid-reset defense (A-39, CVE-2023-44487).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Http2SecurityYaml {
+    /// Maximum concurrent HTTP/2 streams per connection.  Default: 100.
+    #[serde(default = "Http2SecurityYaml::default_max_concurrent_streams")]
+    pub max_concurrent_streams: u32,
+    /// Maximum number of pending RST_STREAM frames (rapid-reset budget).
+    /// Default: 10.
+    #[serde(default = "Http2SecurityYaml::default_max_pending_reset_streams")]
+    pub max_pending_reset_streams: usize,
+}
+
+impl Http2SecurityYaml {
+    fn default_max_concurrent_streams() -> u32 {
+        100
+    }
+    fn default_max_pending_reset_streams() -> usize {
+        10
+    }
+}
+
+impl Default for Http2SecurityYaml {
+    fn default() -> Self {
+        Self {
+            max_concurrent_streams: Self::default_max_concurrent_streams(),
+            max_pending_reset_streams: Self::default_max_pending_reset_streams(),
+        }
+    }
+}
+
+/// `security.request_shaper` — global per-IP + per-realm rate limiter (A-2).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RequestShaperYaml {
+    /// Maximum requests per second per source IP.  Default: 100.
+    #[serde(default = "RequestShaperYaml::default_ip_rps")]
+    pub ip_rps: u32,
+    /// Maximum requests per second per realm.  Default: 1000.
+    #[serde(default = "RequestShaperYaml::default_realm_rps")]
+    pub realm_rps: u32,
+}
+
+impl RequestShaperYaml {
+    fn default_ip_rps() -> u32 {
+        100
+    }
+    fn default_realm_rps() -> u32 {
+        1_000
+    }
 }
 
 /// `security.rate_limiting` — operator-tunable per-IP and per-account thresholds.
@@ -897,6 +1268,44 @@ pub struct RealmAuthYaml {
     /// Controls dynamic client registration (RFC 7591). Defaults to `disabled` when absent.
     #[serde(default)]
     pub dcr: Option<DcrPolicyYaml>,
+    /// WebAuthn attestation policy for this realm (A-13).
+    ///
+    /// Absent = no restrictions (fail-open per §6.1 of the abuse plan).
+    #[serde(default)]
+    pub webauthn_attestation: Option<WebAuthnAttestationYaml>,
+}
+
+/// WebAuthn attestation policy in YAML (`realms.<name>.auth.webauthn_attestation`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WebAuthnAttestationYaml {
+    /// Whether attestation format `"none"` is allowed (default: `true`).
+    #[serde(default = "WebAuthnAttestationYaml::default_allow_none")]
+    pub allow_none: bool,
+    /// AAGUID allowlist (lowercase UUID format). Empty = any AAGUID accepted.
+    #[serde(default)]
+    pub aaguid_allowlist: Vec<String>,
+    /// Require PRF extension (default: `false`).
+    #[serde(default)]
+    pub require_prf: bool,
+    /// Require `largeBlob` extension (default: `false`).
+    #[serde(default)]
+    pub require_large_blob: bool,
+}
+
+impl WebAuthnAttestationYaml {
+    fn default_allow_none() -> bool {
+        true
+    }
+
+    /// Projects the YAML declaration into the engine-level policy struct.
+    pub(crate) fn to_domain(&self) -> crate::identity::WebAuthnAttestationPolicy {
+        crate::identity::WebAuthnAttestationPolicy {
+            allow_none: self.allow_none,
+            aaguid_allowlist: self.aaguid_allowlist.clone(),
+            require_prf: self.require_prf,
+            require_large_blob: self.require_large_blob,
+        }
+    }
 }
 
 /// Self-service registration policy in YAML.
@@ -1021,9 +1430,20 @@ pub struct RealmTokenYaml {
     #[serde(default)]
     pub refresh_token_ttl: Option<String>,
     /// Password reset token TTL as a duration string (e.g. `"30m"`).
-    /// Defaults to 30 minutes when absent.
+    /// Defaults to 30 minutes when absent. Hard-capped at 1 hour (A-14).
     #[serde(default)]
     pub password_reset_token_ttl: Option<String>,
+    /// Magic link token TTL as a duration string (e.g. `"15m"`).
+    /// Defaults to 15 minutes when absent. Hard-capped at 30 minutes (A-14).
+    #[serde(default)]
+    pub magic_link_ttl: Option<String>,
+    /// Lift A-14 TTL hard caps for this realm.
+    ///
+    /// When `true`, `password_reset_token_ttl` may exceed 1 hour and
+    /// `magic_link_ttl` may exceed 30 minutes. Operators accept the
+    /// additional token-theft window by enabling this flag.
+    #[serde(default)]
+    pub allow_unsafe_ttl: bool,
 }
 
 /// Per-realm rate limit overrides in YAML.
@@ -1537,6 +1957,11 @@ pub struct FederationProviderYaml {
     /// Ignored for `type: saml` (use `attribute_map` instead).
     #[serde(default)]
     pub claim_mappings: Option<std::collections::BTreeMap<String, String>>,
+    /// Clock-skew allowance (seconds) applied to OIDC ID-token `exp` / `nbf`
+    /// checks. Omit to use the default of 60 s (standard OIDC RP tolerance).
+    /// Raise only for enterprise IdPs with known clock drift; maximum 300 s.
+    #[serde(default)]
+    pub leeway_seconds: Option<u32>,
 
     // --- SAML-specific fields (when `type: saml`) ---
     /// SAML IdP entity ID (SAML issuer).
@@ -1577,6 +2002,7 @@ impl FederationProviderYaml {
             client_secret: None,
             scopes: None,
             claim_mappings: None,
+            leeway_seconds: None,
             entity_id: None,
             sso_url: None,
             slo_url: None,
@@ -1586,6 +2012,23 @@ impl FederationProviderYaml {
             attribute_map: None,
         }
     }
+}
+
+/// Agent authentication / authorization feature gate.
+///
+/// The Agent entity, delegation chains, MCP/A2A surfaces, approval lifecycle,
+/// and Agent Authorization Tokens (AATs) described in `docs/specs/AGENT_AUTH.md`
+/// are **not yet fully implemented**. Setting `enabled: true` will be refused
+/// at startup until the feature ships to prevent silent misconfiguration.
+///
+/// See `docs/specs/AGENT_AUTH.md` for current implementation status.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct AgentAuthConfig {
+    /// Whether agent authentication primitives are enabled. Defaults to
+    /// `false`. Setting `true` currently produces a startup error because the
+    /// underlying Agent entity implementation is incomplete.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Parses a human-readable duration string into microseconds.
@@ -1739,6 +2182,20 @@ impl RealmYamlConfig {
             .and_then(|t| t.password_reset_token_ttl.as_deref())
             .and_then(|s| parse_duration_to_micros(s).ok());
 
+        let magic_link_ttl_micros_parsed = auth
+            .and_then(|a| a.token.as_ref())
+            .and_then(|t| t.magic_link_ttl.as_deref())
+            .and_then(|s| parse_duration_to_micros(s).ok());
+
+        let allow_unsafe_ttl = auth
+            .and_then(|a| a.token.as_ref())
+            .map(|t| t.allow_unsafe_ttl)
+            .unwrap_or(false);
+
+        let webauthn_attestation_policy = auth
+            .and_then(|a| a.webauthn_attestation.as_ref())
+            .map(WebAuthnAttestationYaml::to_domain);
+
         let max_failed_logins = auth
             .and_then(|a| a.rate_limit.as_ref())
             .and_then(|r| r.max_failed_logins);
@@ -1759,6 +2216,31 @@ impl RealmYamlConfig {
         // Accumulate all validation errors upfront so callers see the full
         // set of problems in one pass rather than stopping at the first error.
         let mut errors: Vec<RegistryError> = Vec::new();
+
+        // --- A-14: TTL hard caps (fail-closed unless allow_unsafe_ttl) -----
+        const PASSWORD_RESET_TTL_CAP_MICROS: i64 = 3_600 * 1_000_000; // 1 hour
+        const MAGIC_LINK_TTL_CAP_MICROS: i64 = 1_800 * 1_000_000; // 30 minutes
+
+        if let Some(pr_ttl) = password_reset_token_ttl_micros {
+            if pr_ttl > PASSWORD_RESET_TTL_CAP_MICROS && !allow_unsafe_ttl {
+                errors.push(RegistryError::InvalidRealmConfigField {
+                    field: "auth.token.password_reset_token_ttl".to_string(),
+                    value: format!("{pr_ttl}µs"),
+                    reason: "exceeds 1h hard cap (A-14); set auth.token.allow_unsafe_ttl: true to override"
+                        .to_string(),
+                });
+            }
+        }
+        if let Some(ml_ttl) = magic_link_ttl_micros_parsed {
+            if ml_ttl > MAGIC_LINK_TTL_CAP_MICROS && !allow_unsafe_ttl {
+                errors.push(RegistryError::InvalidRealmConfigField {
+                    field: "auth.token.magic_link_ttl".to_string(),
+                    value: format!("{ml_ttl}µs"),
+                    reason: "exceeds 30m hard cap (A-14); set auth.token.allow_unsafe_ttl: true to override"
+                        .to_string(),
+                });
+            }
+        }
 
         // --- Permissions: grammar-validate each name -----------------------
 
@@ -2007,12 +2489,14 @@ impl RealmYamlConfig {
             access_token_ttl_micros,
             refresh_token_ttl_micros,
             password_reset_token_ttl_micros,
+            magic_link_ttl_micros: magic_link_ttl_micros_parsed,
             max_failed_logins,
             lockout_duration_micros,
             passkey_requires_mfa,
             webauthn_required: None,
             webauthn_resident_key: None,
             webauthn_user_verification: None,
+            webauthn_attestation: webauthn_attestation_policy,
             registration_policy,
             dcr_policy,
             // Realm-level federation link mode. `None` → `Confirm`
@@ -2092,7 +2576,11 @@ impl RealmYamlConfig {
             session_version: crate::identity::SessionVersionConfig::default(),
             max_concurrent_sessions,
             session_over_limit_policy,
+            idle_timeout_secs: None,
+            absolute_timeout_secs: None,
             fapi_profile,
+            risk_scorer_config: None,
+            quotas: None,
         })
     }
 }

@@ -473,6 +473,45 @@ async fn authorize_get_impl(
     let force_prompt = q.prompt == "consent";
     let silent_only = q.prompt == "none";
 
+    // A-37: track every `prompt=none` request per (realm, sub) and enforce
+    // a rate limit.  The outcome label is determined after the bypass check,
+    // so we pass "pending" here and emit the real label via the probe helper.
+    // We call the helper now (before the bypass branch) so the counter is
+    // always incremented, and we use the actual outcome to fill `outcome`.
+    let silent_auth_probe_result = if silent_only {
+        let outcome = if !client.require_consent() || covered {
+            "code_issued"
+        } else {
+            "consent_required"
+        };
+        Some(state.identity.check_silent_auth_probe(
+            realm,
+            &session.user_id,
+            &client_id.to_string(),
+            outcome,
+        ))
+    } else {
+        None
+    };
+
+    // If the probe check returned a rate-limit error, redirect with
+    // `error=login_required` (the least informative RFC-defined error for
+    // silent-auth failures per OIDC Core §3.1.2.6).
+    if let Some(Err(crate::identity::IdentityError::SilentAuthRateLimited)) =
+        &silent_auth_probe_result
+    {
+        return jarm_aware_error_redirect(
+            state,
+            realm,
+            &client_id.to_string(),
+            &q.redirect_uri,
+            "login_required",
+            "silent auth rate limit exceeded",
+            &q.state,
+            client.authorization_signed_response_alg(),
+        );
+    }
+
     let bypass = !client.require_consent() || (covered && !force_prompt);
 
     let parsed_response_mode = if let Some(mode_str) = q.response_mode.as_deref() {
@@ -527,6 +566,7 @@ async fn authorize_get_impl(
 
     // 8. Store pending-auth + redirect to consent page.
     let pending = PendingAuthorizationRequest {
+        realm_id: realm.clone(),
         user_id: session.user_id.clone(),
         client_id: client_id.clone(),
         redirect_uri: q.redirect_uri.clone(),
@@ -597,6 +637,14 @@ pub async fn consent_page(
         return handlers_common::bad_request("consent ticket invalid");
     }
 
+    // A-34: Cross-realm guard. The pending request embeds the realm it was
+    // issued in; a mismatch means the user switched realms after initiating
+    // the consent flow. Reject rather than silently issue a code in the
+    // wrong realm.
+    if pending.realm_id != session.realm_id {
+        return handlers_common::bad_request("consent ticket invalid");
+    }
+
     // Load the client for display fields + determine pre-granted scopes.
     let client = match state
         .identity
@@ -641,7 +689,15 @@ pub async fn consent_page(
         realm_theme_url: state.realm_theme_url(),
         inline_theme_css: state.inline_theme_css(),
     };
-    render(&tmpl)
+    // A-34: Prevent clickjacking of the consent prompt. The page must never
+    // be rendered inside an iframe — an attacker-controlled frame could layer
+    // invisible UI over the approve/deny buttons (UI redressing / clickjack).
+    let mut resp = render(&tmpl);
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +787,11 @@ pub async fn consent_submit(
 
     // Ownership guard redundant with the cookie MAC check, but cheap.
     if pending.user_id != session.user_id {
+        return handlers_common::bad_request("consent ticket invalid");
+    }
+
+    // A-34: Cross-realm guard on submit path.
+    if pending.realm_id != session.realm_id {
         return handlers_common::bad_request("consent ticket invalid");
     }
 

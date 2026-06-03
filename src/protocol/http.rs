@@ -33,7 +33,8 @@ use crate::identity::{
     UpdateRealmRequest,
 };
 use crate::protocol::admin_auth::{
-    AdminRateLimiter, RateLimitOutcome, TokenRateLimitOutcome, TokenRateLimiter,
+    AdminRateLimiter, ExportRateLimitOutcome, ExportRateLimiter, JwksRateLimiter, RateLimitOutcome,
+    TokenRateLimitOutcome, TokenRateLimiter,
 };
 use crate::protocol::client_info::extract_client_ip;
 use crate::protocol::convert::identity::{
@@ -59,6 +60,19 @@ use crate::webhook::{
 /// proxies are configured, matching the web-handler pattern.
 const FALLBACK_PEER: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+
+/// HTTP/2 maximum concurrent streams per connection (A-39, CVE-2023-44487).
+///
+/// Caps the number of active streams to limit the amplification factor of
+/// rapid-reset attacks. This is the `SETTINGS_MAX_CONCURRENT_STREAMS` value
+/// sent to HTTP/2 clients.
+const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 100;
+
+/// HTTP/2 maximum pending RST_STREAM frames per connection (A-39).
+///
+/// Limits the per-connection RST budget so a rapid-reset attacker cannot
+/// exhaust server resources by opening and immediately cancelling streams.
+const HTTP2_MAX_PENDING_RESET_STREAMS: usize = 10;
 
 /// Default maximum request body size (1 MiB).
 ///
@@ -86,6 +100,19 @@ const BODY_LIMIT_SMALL: usize = 64 * 1024;
 /// gates network ingress rather than in-process RAM usage.
 pub const BACKUP_RESTORE_BODY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
 
+/// Returns the current Unix timestamp in microseconds.
+///
+/// Used for rate-limiter calls throughout the HTTP layer. Extracted into a
+/// helper so the `#[allow(cast_possible_truncation)]` suppression is in one
+/// place.
+#[allow(clippy::cast_possible_truncation)]
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as i64
+}
+
 /// Shared application state passed to all route handlers.
 pub struct AppState {
     /// The identity engine for all domain operations.
@@ -106,6 +133,12 @@ pub struct AppState {
     ///
     /// Controlled by `metrics.enabled` in `hearth.yaml` (default: `true`).
     pub metrics_enabled: bool,
+    /// Optional Bearer token required to access `/metrics` (A-26).
+    ///
+    /// When `Some`, the handler enforces `Authorization: Bearer <token>`
+    /// using constant-time comparison. When `None` the endpoint is
+    /// unauthenticated (operators should firewall or bind to loopback).
+    pub metrics_bearer_token: Option<String>,
     /// Shared admin API rate limiter. Shared between the HTTP and gRPC
     /// admin surfaces so a caller cannot evade the limit by switching
     /// protocols.
@@ -114,6 +147,18 @@ pub struct AppState {
     /// device-authorization endpoints. Returns 429 with `Retry-After` when
     /// exceeded.
     pub token_rate_limiter: Arc<TokenRateLimiter>,
+    /// Per-user rate limiter for backup/export endpoints (A-30).
+    ///
+    /// Limits each admin user to [`crate::protocol::admin_auth::EXPORT_RATE_LIMIT`]
+    /// export operations per hour to limit blast radius of a compromised token.
+    pub export_rate_limiter: Arc<ExportRateLimiter>,
+    /// Ed25519 public key (32 raw bytes) used to verify detached signatures
+    /// on restore archives (A-30). `None` when signature verification is disabled.
+    ///
+    /// When `Some`, the restore handler enforces that every uploaded archive
+    /// carries a valid `detached_signature_b64` in its manifest. Fail-closed:
+    /// archives without a valid signature are rejected.
+    pub backup_verify_key_bytes: Option<[u8; 32]>,
     /// Grace period (seconds) during which a retiring signing key remains in
     /// JWKS after rotation. Sourced from `token.signing_key_rotation_grace_period`.
     pub signing_key_rotation_grace_period_secs: u64,
@@ -131,6 +176,13 @@ pub struct AppState {
     /// DPoP state (replay-cache + nonce secret). Lives in the identity layer
     /// and is shared across all request handlers via `Arc`.
     pub dpop: Arc<crate::identity::dpop::DPopProcessor>,
+    /// Per-IP rate limiter for JWKS and OIDC discovery endpoints (A-10).
+    ///
+    /// Shared across all JWKS-family routes (`/jwks`, `/certs`,
+    /// `/.well-known/jwks.json`, `/realms/{name}/.well-known/jwks.json`,
+    /// `/realms/{name}/.well-known/openid-configuration`) so a caller
+    /// cannot evade the limit by rotating between aliases.
+    pub jwks_rate_limiter: Arc<JwksRateLimiter>,
 }
 
 impl AppState {
@@ -147,13 +199,17 @@ impl AppState {
             webhook: None,
             dev_mode: false,
             metrics_enabled: true,
+            metrics_bearer_token: None,
             admin_rate_limiter: Arc::new(AdminRateLimiter::new()),
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
+            export_rate_limiter: Arc::new(ExportRateLimiter::new()),
+            backup_verify_key_bytes: None,
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
             // zero key is overridden in production via with_dpop_nonce_secret
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
+            jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
         }
     }
 
@@ -172,12 +228,21 @@ impl AppState {
             webhook: None,
             dev_mode: true,
             metrics_enabled: true,
+            metrics_bearer_token: None,
             admin_rate_limiter: Arc::new(AdminRateLimiter::new()),
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
+            export_rate_limiter: Arc::new(ExportRateLimiter::new()),
+            backup_verify_key_bytes: None,
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
+            // A-10 dev relaxation: production default (60 rps) would otherwise
+            // cause flakes when test harnesses share 127.0.0.1 against a hot
+            // limiter. Operators still get the production cap via `serve`'s
+            // explicit `with_jwks_rate_limiter` call wired from
+            // `config.security.jwks_rps_limit`.
+            jwks_rate_limiter: Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX)),
         }
     }
 
@@ -198,12 +263,16 @@ impl AppState {
             webhook: None,
             dev_mode: false,
             metrics_enabled: true,
+            metrics_bearer_token: None,
             admin_rate_limiter,
             token_rate_limiter: Arc::new(TokenRateLimiter::new()),
+            export_rate_limiter: Arc::new(ExportRateLimiter::new()),
+            backup_verify_key_bytes: None,
             signing_key_rotation_grace_period_secs: 86_400,
             trusted_proxies: Vec::new(),
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
+            jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
         }
     }
 
@@ -219,9 +288,29 @@ impl AppState {
         self
     }
 
+    /// Sets the Ed25519 public key used to verify detached manifest signatures
+    /// on restore archives (A-30).
+    ///
+    /// `key_bytes` must be 32 raw bytes (the uncompressed Ed25519 public key).
+    /// When set, the restore handler enforces that every uploaded archive carries
+    /// a valid signature. Pass `None` to disable signature verification.
+    pub fn with_backup_verify_key(mut self, key_bytes: Option<[u8; 32]>) -> Self {
+        self.backup_verify_key_bytes = key_bytes;
+        self
+    }
+
     /// Sets whether the `/metrics` Prometheus scrape endpoint is exposed.
     pub fn with_metrics_enabled(mut self, enabled: bool) -> Self {
         self.metrics_enabled = enabled;
+        self
+    }
+
+    /// Sets the Bearer token required to access `/metrics` (A-26).
+    ///
+    /// When `Some`, every `/metrics` request must supply a matching
+    /// `Authorization: Bearer <token>` header. Comparison is constant-time.
+    pub fn with_metrics_bearer_token(mut self, token: Option<String>) -> Self {
+        self.metrics_bearer_token = token;
         self
     }
 
@@ -245,16 +334,30 @@ impl AppState {
         self.dpop = Arc::new(crate::identity::dpop::DPopProcessor::new(secret));
         self
     }
+
+    /// Replaces the default JWKS rate limiter with a pre-configured instance (A-10).
+    ///
+    /// Call this during server startup to apply an operator-configured RPS limit
+    /// (from `security.jwks_rps_limit` in `hearth.yaml`) instead of the 60 rps
+    /// compiled-in default.
+    pub fn with_jwks_rate_limiter(mut self, limiter: Arc<JwksRateLimiter>) -> Self {
+        self.jwks_rate_limiter = limiter;
+        self
+    }
 }
 
 /// Authenticated admin context extracted from request headers.
 ///
 /// Contains the realm and user that passed both token validation
-/// and the `hearth.admin` permission check.
+/// and the `hearth.admin` permission check. `permissions` carries the full
+/// permission set from the token claims so callers can check capability-level
+/// gates (e.g. `hearth.export`) without re-validating the token.
 #[derive(Debug, Clone)]
 pub(crate) struct AdminAuth {
     pub(crate) realm_id: RealmId,
     pub(crate) user_id: UserId,
+    /// Full permission set from the validated token claims.
+    pub(crate) permissions: Vec<String>,
 }
 
 /// Extracts and validates admin authentication from request headers.
@@ -330,7 +433,11 @@ pub(crate) fn extract_admin_auth(
     // Rate limiting
     check_admin_rate_limit(state, &user_id)?;
 
-    Ok(AdminAuth { realm_id, user_id })
+    Ok(AdminAuth {
+        realm_id,
+        user_id,
+        permissions: claims.permissions,
+    })
 }
 
 /// Extracts and validates admin authentication for cluster-level operations.
@@ -382,6 +489,139 @@ fn check_admin_rate_limit(
             Json(serde_json::json!({"error": "rate limit exceeded"})),
         )),
     }
+}
+
+/// Checks that the authenticated admin token carries the `hearth.export`
+/// permission required for backup/export endpoints (A-30).
+///
+/// Returns `403 Forbidden` when the permission is absent. The check is separate
+/// from the normal `hearth.admin` gate so operators can grant export access to
+/// dedicated service accounts without granting full admin privileges.
+fn check_export_capability(auth: &AdminAuth) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let has_export = auth.permissions.iter().any(|p| p == "hearth.export");
+    if !has_export {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "error_description": "hearth.export permission required for export operations"
+            })),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the per-user export rate limit (A-30).
+///
+/// Returns `429 Too Many Requests` when the user has exceeded the export quota
+/// in the current hour. The limit is intentionally low (10/hour by default)
+/// to limit the blast radius of a compromised admin token.
+fn check_export_rate_limit(
+    state: &AppState,
+    user_id: &UserId,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    #[allow(clippy::cast_possible_truncation)]
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as i64;
+
+    match state.export_rate_limiter.check(user_id, now) {
+        ExportRateLimitOutcome::Allowed => Ok(()),
+        ExportRateLimitOutcome::Exceeded => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "export_rate_limit_exceeded",
+                "error_description": "export rate limit exceeded; maximum exports per hour reached"
+            })),
+        )),
+    }
+}
+
+/// Emits a `RealmExportWatermarked` audit event for every export operation (A-30).
+///
+/// Called at the START of export operations regardless of the outcome so the
+/// watermark exists even when the export is later rate-limited or rejected.
+fn emit_export_watermark(
+    state: &AppState,
+    realm_id: &RealmId,
+    user_id: &UserId,
+    export_type: &str,
+    realm_slug: Option<&str>,
+    export_id: &str,
+) {
+    let mut metadata = serde_json::json!({
+        "export_id": export_id,
+        "export_type": export_type,
+    });
+    if let Some(slug) = realm_slug {
+        metadata["realm_slug"] = serde_json::Value::String(slug.to_string());
+    }
+    let _ = state.audit.append(&crate::audit::CreateAuditEvent {
+        realm_id: realm_id.clone(),
+        actor: user_id.as_uuid().to_string(),
+        action: crate::audit::AuditAction::RealmExportWatermarked,
+        resource_type: "export".to_string(),
+        resource_id: export_id.to_string(),
+        metadata: Some(metadata),
+    });
+}
+
+/// Verifies a detached Ed25519 signature on a backup manifest (A-30).
+///
+/// `public_key_bytes` must be the 32-byte raw Ed25519 public key.
+/// `manifest` must carry a `detached_signature_b64` field; the signature
+/// is verified against `manifest.canonical_bytes()`.
+///
+/// Returns `Err` with a 400 body when:
+/// - the signature field is absent
+/// - the signature is not valid base64url
+/// - the Ed25519 verification fails
+fn verify_manifest_signature(
+    manifest: &crate::backup::BackupManifest,
+    public_key_bytes: &[u8; 32],
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    use ring::signature::{UnparsedPublicKey, ED25519};
+
+    let sig_b64 = manifest.detached_signature_b64.as_deref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "missing_manifest_signature",
+                "error_description": "restore archive must carry a detached_signature_b64 when backup_verify_key is configured"
+            })),
+        )
+    })?;
+
+    let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(sig_b64)
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_manifest_signature",
+                    "error_description": "detached_signature_b64 is not valid base64url"
+                })),
+            )
+        })?;
+
+    let canonical = manifest.canonical_bytes().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "failed to serialize manifest for signature verification"})),
+        )
+    })?;
+
+    let pk = UnparsedPublicKey::new(&ED25519, public_key_bytes.as_slice());
+    pk.verify(&canonical, &sig_bytes).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_manifest_signature",
+                "error_description": "manifest signature verification failed; archive may be tampered or signed with the wrong key"
+            })),
+        )
+    })
 }
 
 /// Checks the per-`(realm, client)` token endpoint rate limit.
@@ -758,6 +998,8 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
         )
         .layer(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
+        // A-26: strip Server: header so the runtime identity is not disclosed.
+        .layer(axum::middleware::from_fn(strip_server_header))
         .with_state(state)
 }
 
@@ -865,12 +1107,20 @@ pub async fn serve_tls_router(
                         app.into_service(),
                     );
 
-                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                    // A-39: HTTP/2 rapid-reset defense (CVE-2023-44487).
+                    // Cap concurrent streams and RST_STREAM budget to limit
+                    // the amplification factor of rapid-reset attacks.
+                    let mut builder = hyper_util::server::conn::auto::Builder::new(
                         hyper_util::rt::TokioExecutor::new(),
-                    )
-                    .serve_connection(io, service)
-                    .await
-                    {
+                    );
+                    builder
+                        .http2()
+                        .max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS)
+                        .max_pending_accept_reset_streams(Some(
+                            HTTP2_MAX_PENDING_RESET_STREAMS,
+                        ));
+
+                    if let Err(e) = builder.serve_connection(io, service).await {
                         debug!(peer = %peer_addr, error = %e, "connection error");
                     }
                 });
@@ -1007,6 +1257,14 @@ pub(crate) async fn track_metrics(request: Request, next: Next) -> Response {
     response
 }
 
+/// A-26: removes the `Server:` response header from every response so the
+/// runtime identity (hyper version, OS) is not disclosed to callers.
+async fn strip_server_header(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().remove(axum::http::header::SERVER);
+    resp
+}
+
 // === Route handlers ===
 
 /// Liveness probe endpoint.
@@ -1049,10 +1307,14 @@ async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// format (version 0.0.4). Operators should point their Prometheus scrape
 /// config at this path.
 ///
-/// No authentication is required by default — operators SHOULD firewall this
-/// endpoint from the public internet if the metric cardinality reveals
-/// sensitive business data (e.g. realm names in label sets).
-async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// When `metrics.bearer_token` is set in `hearth.yaml`, requests must supply
+/// a matching `Authorization: Bearer <token>` header or receive HTTP 401
+/// (A-26). When no token is configured the endpoint is unauthenticated —
+/// operators SHOULD firewall it at the network layer or bind to loopback.
+async fn metrics_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     if !state.metrics_enabled {
         return (
             StatusCode::NOT_FOUND,
@@ -1061,6 +1323,26 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
         )
             .into_response();
     }
+
+    // A-26: enforce Bearer auth when a token is configured (constant-time).
+    if let Some(expected) = &state.metrics_bearer_token {
+        use subtle::ConstantTimeEq as _;
+        let supplied = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let ok: bool = supplied.as_bytes().ct_eq(expected.as_bytes()).into();
+        if !ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                String::new(),
+            )
+                .into_response();
+        }
+    }
+
     let body = crate::metrics::metrics().render();
     (
         StatusCode::OK,
@@ -1087,11 +1369,25 @@ async fn health() -> impl IntoResponse {
 ///
 /// Returns the `OpenID` Connect Discovery 1.0 document describing the
 /// provider's configuration, endpoints, and supported features.
-async fn oidc_discovery(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn oidc_discovery(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // A-10: per-IP rate cap on all key-discovery endpoints.
+    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let now_micros = now_micros();
+    if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            Json(serde_json::json!({"error": "too_many_requests"})),
+        )
+            .into_response();
+    }
     // Serialize the domain type directly so optional fields like
     // end_session_endpoint are included without proto schema changes.
     let doc = state.identity.oidc_discovery();
-    (StatusCode::OK, Json(doc))
+    (StatusCode::OK, Json(doc)).into_response()
 }
 
 /// JWKS endpoint (`/jwks`, `/certs`, and `/.well-known/jwks.json`).
@@ -1106,9 +1402,22 @@ async fn oidc_discovery(State(state): State<Arc<AppState>>) -> impl IntoResponse
 /// as JSON, bypassing the proto `JsonWebKey` type — that proto only
 /// carries the OKP/Ed25519 field set and would drop RSA `n`/`e` and EC
 /// `y` coordinates.
-async fn jwks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+///
+/// A-10: subject to the per-IP JWKS rate cap (default 60 rps).
+async fn jwks(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    // A-10: per-IP rate cap.
+    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let now_micros = now_micros();
+    if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            Json(serde_json::json!({"error": "too_many_requests"})),
+        )
+            .into_response();
+    }
     let doc = state.identity.jwks();
-    (StatusCode::OK, Json(doc))
+    (StatusCode::OK, Json(doc)).into_response()
 }
 
 // === User management endpoints ===
@@ -1574,6 +1883,8 @@ fn identity_error_to_response(
         }
         IdentityError::InvitationInvalid => (StatusCode::BAD_REQUEST, "invalid invitation"),
         IdentityError::DuplicateInvitation => (StatusCode::CONFLICT, "duplicate invitation"),
+        IdentityError::ReservedSlug { .. } => (StatusCode::CONFLICT, "slug_reserved"),
+        IdentityError::SlugInCooldown { .. } => (StatusCode::CONFLICT, "slug_cooldown"),
         IdentityError::SystemRealmProtected { .. } => {
             (StatusCode::FORBIDDEN, "system realm is read-only")
         }
@@ -1608,6 +1919,7 @@ fn identity_error_to_response(
         IdentityError::FederationEmailNotVerified => {
             (StatusCode::FORBIDDEN, "upstream email not verified")
         }
+        IdentityError::FederationIdpMixup => (StatusCode::BAD_REQUEST, "federation IdP mismatch"),
         IdentityError::FederationLinkConfirmationRequired { .. } => {
             // Browser flows redirect to /ui/federation/confirm-link; JSON
             // callers (rare for federation) get a terse 409 so they know
@@ -1690,6 +2002,21 @@ fn identity_error_to_response(
         IdentityError::FapiViolation { .. } => (StatusCode::BAD_REQUEST, "invalid_request"),
         IdentityError::SessionLimitExceeded { .. } => {
             (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
+        }
+        // A-19: email-change flow errors.
+        IdentityError::QuotaExceeded { .. } => (StatusCode::TOO_MANY_REQUESTS, "quota_exceeded"),
+        IdentityError::EmailReserved => (StatusCode::CONFLICT, "email_reserved"),
+        IdentityError::EmailChangeTokenInvalid => (
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired email-change link",
+        ),
+        // A-37: silent-auth rate-limit exceeded (prompt=none).
+        IdentityError::SilentAuthRateLimited => {
+            (StatusCode::TOO_MANY_REQUESTS, "silent_auth_rate_limited")
+        }
+        // A-13: attestation policy violation (AAGUID not in allowlist, "none" rejected, etc.).
+        IdentityError::AttestationPolicyViolation { .. } => {
+            (StatusCode::FORBIDDEN, "attestation_policy_violation")
         }
     };
 
@@ -2268,10 +2595,20 @@ async fn token_exchange_impl(
                     .into_response();
             };
 
-            match state
-                .identity
-                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
-            {
+            let refresh_bind = crate::identity::RefreshBindContext {
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+                asn: None,
+            };
+
+            match state.identity.refresh_tokens(
+                &realm_id,
+                &refresh_token,
+                dpop_jkt.as_deref(),
+                Some(&refresh_bind),
+            ) {
                 Ok(tokens) => {
                     crate::metrics::metrics()
                         .tokens_issued_total
@@ -3096,13 +3433,19 @@ async fn admin_list_users(
 }
 
 /// Import request body — one entry per user to import.
+// A-47: admin request bodies use deny_unknown_fields to prevent silent
+// extension-field bypass.  OAuth/OIDC protocol bodies (HttpTokenRequest,
+// HttpRevocationBody, HttpParRequest) are exempt — RFC 6749 §3.2 allows
+// extension parameters.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportUsersBody {
     users: Vec<ImportUserEntry>,
 }
 
 /// Single user entry in a bulk import request.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportUserEntry {
     email: String,
     display_name: String,
@@ -3225,6 +3568,25 @@ async fn admin_export_users(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+
+    // A-30: require hearth.export capability.
+    if let Err(e) = check_export_capability(&auth) {
+        return e.into_response();
+    }
+    // A-30: per-export rate limit.
+    if let Err(e) = check_export_rate_limit(&state, &auth.user_id) {
+        return e.into_response();
+    }
+    // A-30: watermark this export.
+    let export_id = uuid::Uuid::new_v4().to_string();
+    emit_export_watermark(
+        &state,
+        &auth.realm_id,
+        &auth.user_id,
+        "users",
+        None,
+        &export_id,
+    );
 
     // Collect all users by draining pages.
     let mut all_users: Vec<crate::identity::User> = Vec::new();
@@ -3509,6 +3871,7 @@ async fn admin_delete_user_device_fingerprints(
 
 /// HTTP request body for bulk user operations.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HttpBulkUsersRequest {
     operation: String,
     #[serde(default)]
@@ -4110,6 +4473,7 @@ async fn admin_rotate_realm_signing_key(
 
 /// Request body for `PATCH /realms/{id}/branding`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PatchRealmBrandingRequest {
     #[serde(default)]
     logo_url: Option<String>,
@@ -5387,6 +5751,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
 // =======================================================================
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateRoleBody {
     name: String,
     #[serde(default)]
@@ -5398,6 +5763,7 @@ struct CreateRoleBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateRoleBody {
     #[serde(default)]
     name: Option<String>,
@@ -5410,6 +5776,7 @@ struct UpdateRoleBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateGroupBody {
     name: String,
     slug: String,
@@ -5418,6 +5785,7 @@ struct CreateGroupBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateGroupBody {
     #[serde(default)]
     name: Option<String>,
@@ -5428,6 +5796,7 @@ struct UpdateGroupBody {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddGroupMemberBody {
     /// `"user"` or `"group"`.
     #[serde(rename = "type")]
@@ -6409,10 +6778,22 @@ async fn magic_link_request(
         .into_response()
 }
 
+/// A-10: per-IP rate cap on all key-discovery endpoints.
 async fn realm_oidc_discovery(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let now_micros = now_micros();
+    if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            Json(serde_json::json!({"error": "too_many_requests"})),
+        )
+            .into_response();
+    }
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
@@ -6427,10 +6808,22 @@ async fn realm_oidc_discovery(
     }
 }
 
+/// A-10: per-IP rate cap on all key-discovery endpoints.
 async fn realm_jwks(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    let client_ip = extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let now_micros = now_micros();
+    if !state.jwks_rate_limiter.check(&client_ip, now_micros) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "1")],
+            Json(serde_json::json!({"error": "too_many_requests"})),
+        )
+            .into_response();
+    }
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
         Ok(id) => id,
         Err(e) => return e,
@@ -6593,10 +6986,19 @@ async fn realm_token_exchange(
                 )
                     .into_response();
             };
-            match state
-                .identity
-                .refresh_tokens(&realm_id, &refresh_token, dpop_jkt.as_deref())
-            {
+            let refresh_bind = crate::identity::RefreshBindContext {
+                user_agent: headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
+                asn: None,
+            };
+            match state.identity.refresh_tokens(
+                &realm_id,
+                &refresh_token,
+                dpop_jkt.as_deref(),
+                Some(&refresh_bind),
+            ) {
                 Ok(tokens) => {
                     let resp = pb::OidcTokenResponse {
                         access_token: tokens.access_token().to_string(),
@@ -7455,6 +7857,27 @@ async fn admin_backup_create(
         Err(e) => return e.into_response(),
     };
 
+    // A-30: require hearth.export capability (separate from hearth.admin).
+    if let Err(e) = check_export_capability(&auth) {
+        return e.into_response();
+    }
+
+    // A-30: per-export rate limit (10/hour per user).
+    if let Err(e) = check_export_rate_limit(&state, &auth.user_id) {
+        return e.into_response();
+    }
+
+    // A-30: emit audit watermark at the start of every export.
+    let export_id = uuid::Uuid::new_v4().to_string();
+    emit_export_watermark(
+        &state,
+        &auth.realm_id,
+        &auth.user_id,
+        "backup",
+        params.realm.as_deref(),
+        &export_id,
+    );
+
     let identity = Arc::clone(&state.identity);
     let audit_engine = Arc::clone(&state.audit);
     let rbac = Arc::clone(&state.rbac);
@@ -7618,6 +8041,8 @@ async fn admin_backup_restore(
     let mode_str = params.mode.as_deref().unwrap_or("skip").to_string();
     let realm_filter = params.realm.clone();
     let dry_run = params.dry_run;
+    // Clone out of Arc before entering spawn_blocking.
+    let verify_key_bytes = state.backup_verify_key_bytes;
 
     // Stream the `file` multipart field to a tempfile to avoid holding the
     // entire archive in memory while parsing.
@@ -7719,6 +8144,12 @@ async fn admin_backup_restore(
         };
 
         let reader = BackupArchive::open(&tmp_path).map_err(|e| format!("open archive: {e}"))?;
+
+        // A-30: verify detached manifest signature when an operator verify key is configured.
+        if let Some(key_bytes) = verify_key_bytes.as_ref() {
+            verify_manifest_signature(&reader.manifest, key_bytes)
+                .map_err(|(_, body)| format!("{}", body.0))?;
+        }
 
         let importer = BackupImporter::new(identity, rbac);
         let opts = ImportOptions {

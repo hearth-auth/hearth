@@ -107,6 +107,29 @@ pub fn verify_confirm_ticket_mac(
     expected.as_bytes().ct_eq(candidate_tag.as_bytes()).into()
 }
 
+/// Computes the HMAC-SHA256 binding tag for a federation `state` parameter (A-48).
+///
+/// Planted as `hearth_fed_bind=<tag>` at `begin`; verified at `callback` to prove
+/// the callback originates from the same browser that initiated the flow.
+/// Domain-separated from the confirm-ticket MAC via the `"fed-state-bind|"` prefix.
+pub fn compute_federation_state_mac(secret: &[u8; 32], state_token: &str) -> String {
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC-SHA256 accepts any 32-byte key");
+    mac.update(b"fed-state-bind|");
+    mac.update(state_token.as_bytes());
+    URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+}
+
+/// Constant-time-verifies a federation state binding tag (A-48).
+pub fn verify_federation_state_mac(
+    secret: &[u8; 32],
+    state_token: &str,
+    candidate_tag: &str,
+) -> bool {
+    let expected = compute_federation_state_mac(secret, state_token);
+    expected.as_bytes().ct_eq(candidate_tag.as_bytes()).into()
+}
+
 /// Internal: fills `n` random bytes and base64url-encodes them.
 fn fill_random_b64(n: usize) -> Result<String, IdentityError> {
     let mut bytes = vec![0u8; n];

@@ -160,7 +160,7 @@ async fn token_refresh_flow_end_to_end() {
     // Refresh using the refresh token
     let refreshed_pair = harness
         .identity()
-        .refresh_tokens(&realm, original_pair.refresh_token(), None)
+        .refresh_tokens(&realm, original_pair.refresh_token(), None, None)
         .expect("refresh tokens");
 
     // New access token should be valid and bound to same user/session
@@ -180,9 +180,10 @@ async fn token_refresh_flow_end_to_end() {
     assert_eq!(refreshed_refresh_claims.sub, user.id().to_string());
 
     // Attempt to use access token as refresh token should fail
-    let bad_refresh = harness
-        .identity()
-        .refresh_tokens(&realm, original_pair.access_token(), None);
+    let bad_refresh =
+        harness
+            .identity()
+            .refresh_tokens(&realm, original_pair.access_token(), None, None);
     assert!(
         matches!(&bad_refresh, Err(IdentityError::InvalidToken)),
         "using access token as refresh must return InvalidToken"
@@ -367,7 +368,9 @@ async fn refresh_token_rejects_tampered_user_binding() {
         payload["sub"] = serde_json::Value::String(other_user.id().to_string());
     });
 
-    let result = harness.identity().refresh_tokens(&realm, &tampered, None);
+    let result = harness
+        .identity()
+        .refresh_tokens(&realm, &tampered, None, None);
     assert!(
         matches!(result, Err(IdentityError::InvalidToken)),
         "tampered refresh token must be rejected with InvalidToken, got: {result:?}"
@@ -672,7 +675,9 @@ async fn refresh_token_rejects_forged_exp_extension() {
         }
     });
 
-    let result = harness.identity().refresh_tokens(&realm, &tampered, None);
+    let result = harness
+        .identity()
+        .refresh_tokens(&realm, &tampered, None, None);
     assert!(
         matches!(&result, Err(IdentityError::InvalidToken)),
         "refresh token with forged exp extension must return InvalidToken (signature mismatch)"
@@ -722,7 +727,9 @@ async fn refresh_token_rejects_forged_session_impersonation() {
         payload["sid"] = serde_json::Value::String(victim_session.id().to_string());
     });
 
-    let result = harness.identity().refresh_tokens(&realm, &tampered, None);
+    let result = harness
+        .identity()
+        .refresh_tokens(&realm, &tampered, None, None);
     assert!(
         matches!(&result, Err(IdentityError::InvalidToken)),
         "refresh token with forged session ID must return InvalidToken (signature mismatch)"

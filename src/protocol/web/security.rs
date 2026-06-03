@@ -6,6 +6,9 @@
 //! - `X-Content-Type-Options: nosniff` — blocks MIME-type sniffing.
 //! - `Referrer-Policy: strict-origin-when-cross-origin`
 //! - `Strict-Transport-Security` — only when TLS is enabled.
+//! - `Cross-Origin-Opener-Policy: same-origin` (A-40)
+//! - `Cross-Origin-Embedder-Policy: require-corp` (A-40)
+//! - `Permissions-Policy` — disables powerful features (A-40)
 
 use std::future::Future;
 use std::pin::Pin;
@@ -20,6 +23,8 @@ use tower::{Layer, Service};
 pub struct SecurityConfig {
     /// Emit HSTS header (only set when the server is serving TLS).
     pub hsts_enabled: bool,
+    /// Emit COOP/COEP headers (A-40). Default: `true`.
+    pub coop_coep_enabled: bool,
 }
 
 /// Tower layer that wraps services with security header injection.
@@ -73,6 +78,7 @@ where
 
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         let hsts_enabled = self.config.hsts_enabled;
+        let coop_coep_enabled = self.config.coop_coep_enabled;
         let fut = self.inner.call(req);
         Box::pin(async move {
             let mut resp = fut.await?;
@@ -107,6 +113,25 @@ where
                     "max-age=31536000; includeSubDomains",
                 );
             }
+            if coop_coep_enabled {
+                // A-40: Cross-origin isolation headers.
+                // COOP prevents cross-origin windows from retaining a reference
+                // to the opener, blocking cross-site leaks via window.opener.
+                insert(headers, "cross-origin-opener-policy", "same-origin");
+                // COEP prevents the page from loading cross-origin resources
+                // that don't grant explicit permission, enabling SharedArrayBuffer
+                // isolation.
+                insert(headers, "cross-origin-embedder-policy", "require-corp");
+                // Permissions-Policy: disable all powerful/tracking features
+                // not required by an IdP UI.
+                insert(
+                    headers,
+                    "permissions-policy",
+                    "camera=(), microphone=(), geolocation=(), \
+                     payment=(), usb=(), bluetooth=(), \
+                     interest-cohort=()",
+                );
+            }
             Ok(resp)
         })
     }
@@ -138,6 +163,7 @@ mod tests {
     async fn security_headers_present() {
         let layer = SecurityHeadersLayer::new(SecurityConfig {
             hsts_enabled: false,
+            coop_coep_enabled: true,
         });
         let svc = layer.layer(tower::service_fn(ok_handler));
         let resp = svc
@@ -159,7 +185,10 @@ mod tests {
 
     #[tokio::test]
     async fn hsts_emitted_when_tls_enabled() {
-        let layer = SecurityHeadersLayer::new(SecurityConfig { hsts_enabled: true });
+        let layer = SecurityHeadersLayer::new(SecurityConfig {
+            hsts_enabled: true,
+            coop_coep_enabled: false,
+        });
         let svc = layer.layer(tower::service_fn(ok_handler));
         let resp = svc
             .oneshot(

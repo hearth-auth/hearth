@@ -27,6 +27,19 @@ pub enum AuditAction {
     SessionCreated,
     /// A session was revoked.
     SessionRevoked,
+    /// All sessions for a user were revoked due to a sensitive credential
+    /// mutation (`set_password`, `change_password`, `disable_mfa`, or email
+    /// change).
+    ///
+    /// Metadata carries `user_id`, `count` (sessions revoked), and `trigger`
+    /// (e.g. `"set_password"` / `"disable_mfa"` / `"email_change"`).
+    SessionsRevoked,
+    /// A session was evicted by a realm-level lifecycle policy (idle or
+    /// absolute timeout). Distinct from [`SessionRevoked`] (user/admin action).
+    ///
+    /// Metadata carries `user_id`, `session_id`, and `reason`
+    /// (`"idle_timeout"` | `"absolute_timeout"`). Fail-open (LogOnly).
+    SessionEvicted,
     /// Tokens were issued for a session.
     TokenIssued,
     /// Tokens were refreshed.
@@ -195,6 +208,14 @@ pub enum AuditAction {
     /// Metadata carries `dry_run` (`"true"` / `"false"`) and the list of
     /// restored realm slugs.
     BackupRestored,
+    /// A realm export was requested and watermarked (A-30).
+    ///
+    /// Emitted on every invocation of `/admin/backup`, `/admin/users/export`,
+    /// and `/admin/realms/{r}/audit/export` regardless of the outcome.
+    /// Metadata carries `export_id` (UUIDv4), `export_type` (one of
+    /// `"backup"`, `"users"`, `"audit"`), `realm_slug` (when filtered), and
+    /// `actor_ip` (the request's remote address when available).
+    RealmExportWatermarked,
     /// A required action was assigned to a user by an admin.
     ///
     /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `admin_id`.
@@ -272,6 +293,38 @@ pub enum AuditAction {
     /// 0 for `RejectNew`), `policy` (`"reject_new"` | `"evict_oldest"`),
     /// and `limit`.
     SessionLimitEnforced,
+    /// An abuse pattern was detected by the distributed-attack detector
+    /// (A-3: cardinality sketch per realm) — e.g. too many distinct usernames
+    /// from one IP, or too many distinct IPs targeting one username.
+    ///
+    /// Failure policy: `LogOnly` (informational; the request continues into
+    /// `Challenge` state per the `AbuseGuard` decision). Metadata carries
+    /// `ip`, `username` (if targeted), `detector` (`"credential_stuffing"` /
+    /// `"password_spray"` / `"distributed_brute_force"`), and `realm_id`.
+    AbuseDetected,
+    /// A user initiated an email-address change (A-19).
+    ///
+    /// A verification token has been issued for the new address; the old
+    /// address remains in use until `confirm_email_change` is called.
+    /// Metadata carries `user_id` and `new_email` (partially redacted:
+    /// domain retained, local-part starred).
+    EmailChangeInitiated,
+    /// A user confirmed an email-address change via the verification token (A-19).
+    ///
+    /// The old address received a `security.email_changed` notification
+    /// with a revoke link; all sessions were revoked.
+    /// Metadata carries `user_id`, `old_email` (partially redacted), and
+    /// `new_email` (partially redacted).
+    EmailChangeConfirmed,
+    /// A `prompt=none` OIDC authorization request was observed for an
+    /// authenticated subject (A-37).
+    ///
+    /// Emitted on every `prompt=none` request while a valid session exists,
+    /// regardless of outcome (bypass / `consent_required`). Rate-limited
+    /// callers also receive `SilentAuthRateLimited`.
+    /// Metadata carries `user_id`, `client_id`, and `outcome`
+    /// (`"code_issued"` / `"consent_required"` / `"rate_limited"`).
+    OidcSilentAuthProbed,
 }
 
 impl AuditAction {
@@ -290,6 +343,7 @@ impl AuditAction {
             Self::CredentialVerified,
             Self::SessionCreated,
             Self::SessionRevoked,
+            Self::SessionEvicted,
             Self::TokenIssued,
             Self::TokenRefreshed,
             Self::RealmCreated,
@@ -365,6 +419,12 @@ impl AuditAction {
             Self::SmsMfaLocked,
             Self::DeviceFingerprintsErased,
             Self::SessionLimitEnforced,
+            Self::SessionsRevoked,
+            Self::AbuseDetected,
+            Self::EmailChangeInitiated,
+            Self::EmailChangeConfirmed,
+            Self::OidcSilentAuthProbed,
+            Self::RealmExportWatermarked,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -381,6 +441,7 @@ impl AuditAction {
             Self::CredentialVerified => "credential_verified",
             Self::SessionCreated => "session_created",
             Self::SessionRevoked => "session_revoked",
+            Self::SessionEvicted => "session_evicted",
             Self::TokenIssued => "token_issued",
             Self::TokenRefreshed => "token_refreshed",
             Self::RealmCreated => "realm_created",
@@ -456,6 +517,12 @@ impl AuditAction {
             Self::SmsMfaLocked => "sms_mfa_locked",
             Self::DeviceFingerprintsErased => "device_fingerprints_erased",
             Self::SessionLimitEnforced => "session_limit_enforced",
+            Self::SessionsRevoked => "sessions_revoked",
+            Self::AbuseDetected => "abuse_detected",
+            Self::EmailChangeInitiated => "email_change_initiated",
+            Self::EmailChangeConfirmed => "email_change_confirmed",
+            Self::OidcSilentAuthProbed => "oidc_silent_auth_probed",
+            Self::RealmExportWatermarked => "realm_export_watermarked",
         }
     }
 }
@@ -473,6 +540,7 @@ impl std::str::FromStr for AuditAction {
             "credential_verified" => Ok(Self::CredentialVerified),
             "session_created" => Ok(Self::SessionCreated),
             "session_revoked" => Ok(Self::SessionRevoked),
+            "session_evicted" => Ok(Self::SessionEvicted),
             "token_issued" => Ok(Self::TokenIssued),
             "token_refreshed" => Ok(Self::TokenRefreshed),
             "realm_created" => Ok(Self::RealmCreated),
@@ -548,6 +616,12 @@ impl std::str::FromStr for AuditAction {
             "sms_mfa_locked" => Ok(Self::SmsMfaLocked),
             "device_fingerprints_erased" => Ok(Self::DeviceFingerprintsErased),
             "session_limit_enforced" => Ok(Self::SessionLimitEnforced),
+            "sessions_revoked" => Ok(Self::SessionsRevoked),
+            "abuse_detected" => Ok(Self::AbuseDetected),
+            "email_change_initiated" => Ok(Self::EmailChangeInitiated),
+            "email_change_confirmed" => Ok(Self::EmailChangeConfirmed),
+            "oidc_silent_auth_probed" => Ok(Self::OidcSilentAuthProbed),
+            "realm_export_watermarked" => Ok(Self::RealmExportWatermarked),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -643,7 +717,12 @@ impl AuditAction {
             | Self::SmsOtpEnrollmentStarted
             | Self::SmsOtpEnrollmentVerified
             | Self::SmsMfaChallengeSucceeded
-            | Self::SessionLimitEnforced => LogOnly,
+            | Self::SessionLimitEnforced
+            | Self::SessionEvicted
+            | Self::AbuseDetected
+            | Self::EmailChangeInitiated
+            | Self::OidcSilentAuthProbed
+            | Self::RealmExportWatermarked => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
@@ -668,7 +747,10 @@ impl AuditAction {
             | Self::SmsOtpEnrollmentFailed
             | Self::SmsMfaChallengeFailed
             | Self::SmsMfaLocked
-            | Self::DeviceFingerprintsErased => FailOperation,
+            | Self::DeviceFingerprintsErased
+            | Self::SessionsRevoked
+            // Email-change confirmation revokes all sessions — security-sensitive.
+            | Self::EmailChangeConfirmed => FailOperation,
         }
     }
 }
@@ -723,7 +805,7 @@ pub struct CreateAuditEvent {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Retention configuration for a realm's audit log.
+/// Retention configuration for a realm's audit log (A-25).
 ///
 /// Controls automatic pruning of old audit events. Pruning intentionally
 /// breaks the hash chain for the removed window — this is expected and
@@ -733,11 +815,22 @@ pub struct AuditRetentionConfig {
     /// Number of days to retain audit events. `0` means unlimited (no pruning).
     /// Default: 90 days.
     pub retention_days: u32,
+    /// Hard row backstop (A-25): if the realm has more than this many audit
+    /// events after the time-based prune pass, the oldest rows are removed
+    /// until the count is within the limit. `None` means no row backstop.
+    ///
+    /// Use this together with `retention_days` for defence-in-depth: the
+    /// time window bounds normal growth; `max_rows` caps runaway event storms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rows: Option<u64>,
 }
 
 impl Default for AuditRetentionConfig {
     fn default() -> Self {
-        Self { retention_days: 90 }
+        Self {
+            retention_days: 90,
+            max_rows: None,
+        }
     }
 }
 

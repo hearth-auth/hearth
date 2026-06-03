@@ -138,4 +138,12 @@ impl crate::audit::AuditEngine for NotifyingAuditEngine {
     ) -> Result<u64, crate::audit::AuditError> {
         self.inner.prune_before(realm_id, cutoff)
     }
+
+    fn count_events(&self, realm_id: &RealmId) -> Result<u64, crate::audit::AuditError> {
+        self.inner.count_events(realm_id)
+    }
+
+    fn prune_oldest(&self, realm_id: &RealmId, n: u64) -> Result<u64, crate::audit::AuditError> {
+        self.inner.prune_oldest(realm_id, n)
+    }
 }

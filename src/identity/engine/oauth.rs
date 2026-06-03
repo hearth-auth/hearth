@@ -108,6 +108,15 @@ impl EmbeddedIdentityEngine {
                 operation: "register_client",
             });
         }
+        // A-24: enforce per-realm client quota before writing.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_clients {
+                    let prefix = keys::oauth_client_scan_prefix();
+                    self.check_resource_quota(realm_id, "clients", &prefix, max)?;
+                }
+            }
+        }
         // Validate client name (non-empty, length limit)
         let client_name = validation::validate_client_name(&request.client_name)?;
 
@@ -941,11 +950,12 @@ impl EmbeddedIdentityEngine {
             expires_at: crate::core::Timestamp::from_micros(
                 now.as_micros() + refresh_ttl_secs * 1_000_000,
             ),
-            // Store the client_id so the refresh path can perform a
-            // consent digest re-check without a separate client lookup.
             client_id: Some(request.client_id.clone()),
             resources: resource_uri.iter().cloned().collect(),
             amr_values: stored_code.amr_values.clone(),
+            // UA/ASN binding context (A-49) recorded on first refresh exchange.
+            ua_hash: None,
+            bound_asn: None,
         };
         let family_bytes =
             serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -1267,6 +1277,23 @@ impl EmbeddedIdentityEngine {
         }
 
         self.validate_client_scope_request(&client, request.scope.as_deref().unwrap_or(""))?;
+
+        // 3b. FAPI enforcement: realm-level AND per-client profile both gate DPoP (A-38).
+        {
+            let realm_fapi = self
+                .get_realm(realm_id)?
+                .ok_or(IdentityError::RealmNotFound)?
+                .config()
+                .fapi_profile;
+            let fapi_enforced = client.profile().is_fapi2() || realm_fapi.is_some();
+            if fapi_enforced && request.dpop_jkt.is_none() {
+                return Err(IdentityError::FapiViolation {
+                    reason: "FAPI 2.0 requires sender-constrained tokens; \
+                             include a DPoP proof and dpop_jkt in the token request"
+                        .to_string(),
+                });
+            }
+        }
 
         // 4. Issue access token (no session, no refresh token per RFC 6749 §4.4.3)
         let now = self.clock.now();

@@ -40,14 +40,15 @@ pub use http::{
     StubResponse, UreqFederationTransport,
 };
 pub use oidc::{
-    fuzz_parse_id_token_claims, verify_id_token_claims, verify_rs256, DiscoveryDocument,
-    GenericOidcConnector, IdTokenClaims, Jwk, JwksDoc,
+    fuzz_parse_id_token_claims, verify_id_token_claims, verify_iss_param, verify_rs256,
+    DiscoveryDocument, GenericOidcConnector, IdTokenClaims, Jwk, JwksDoc,
 };
 pub use presets::{lookup as preset_lookup, Preset};
 pub use service::{FederationOutcome, FederationService};
 pub use state::{
-    compute_confirm_ticket_mac, generate_nonce, generate_pkce_verifier, generate_state_token,
-    pkce_s256_challenge, verify_confirm_ticket_mac,
+    compute_confirm_ticket_mac, compute_federation_state_mac, generate_nonce,
+    generate_pkce_verifier, generate_state_token, pkce_s256_challenge, verify_confirm_ticket_mac,
+    verify_federation_state_mac,
 };
 pub use types::{
     ConfirmLinkTicket, ExternalIdentity, FederationSecret, IdpConfig, IdpKind, LinkMode, StateBag,
