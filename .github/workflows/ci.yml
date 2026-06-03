@@ -51,6 +51,7 @@ jobs:
       fuzz-targets: ${{ steps.filter.outputs.fuzz-targets }}
       bench-targets: ${{ steps.filter.outputs.bench-targets }}
       docs-only: ${{ steps.filter.outputs.docs-only }}
+      abuse-coverage: ${{ steps.filter.outputs.abuse-coverage }}
 
     steps:
       - name: Checkout
@@ -122,6 +123,11 @@ jobs:
               - 'docs/**'
               - '**.md'
               - 'CHANGELOG.md'
+            abuse-coverage:
+              - 'docs/plans/HEA-1114-abuse-prevention.md'
+              - 'tests/abuse_*.rs'
+              - 'scripts/check-abuse-coverage.sh'
+              - '.github/workflows/ci.yml'
 
       - name: Summarize filter results
         run: |
@@ -138,6 +144,7 @@ jobs:
             echo "| fuzz-targets | ${{ steps.filter.outputs.fuzz-targets }} |"
             echo "| bench-targets | ${{ steps.filter.outputs.bench-targets }} |"
             echo "| docs-only | ${{ steps.filter.outputs.docs-only }} |"
+            echo "| abuse-coverage | ${{ steps.filter.outputs.abuse-coverage }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # HEA-858: static guard against committing real secret material.
@@ -395,6 +402,35 @@ jobs:
       - name: Check SDK conformance (spec sections 2,4,5,8,10)
         run: bash scripts/check-sdk-conformance.sh
 
+  # ── §3.41 adversarial test-quality gate (HEA-1214) ─────────────────────────
+  #
+  # Verifies every A-N row in docs/plans/HEA-1114-abuse-prevention.md has at
+  # least one adversarial test in tests/abuse_*.rs. Grep-only — no Rust build.
+  # Runs on every PR that touches the plan doc, abuse tests, the gate script,
+  # or this workflow file. Always runs on main and scheduled events.
+  #
+  # Rollback: add SKIP_ABUSE_COVERAGE_CHECK: '1' to the job env below and
+  # document the reason in the PR. Remove it once coverage is restored.
+
+  abuse-coverage:
+    name: abuse-coverage (§3.41 adversarial test gate)
+    needs: filter
+    # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.abuse-coverage == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: §3.41 gate — every A-N row must have an adversarial test
+        # To bypass temporarily: set SKIP_ABUSE_COVERAGE_CHECK: '1' in the env
+        # block above. Document the reason and the tracking issue in the PR.
+        run: bash scripts/check-abuse-coverage.sh
+
   # ── Required-summary gate (HEA-693) ──────────────────────────────────────────
   #
   # Branch protection requires ONLY this job for the CI workflow. It always runs
@@ -412,7 +448,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, ui, sdk-node, sdk-conformance]
+    needs: [filter, quality, ui, sdk-node, sdk-conformance, abuse-coverage]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -424,9 +460,10 @@ jobs:
           UI: ${{ needs.ui.result }}
           SDK_NODE: ${{ needs.sdk-node.result }}
           SDK_CONFORMANCE: ${{ needs.sdk-conformance.result }}
+          ABUSE_COVERAGE: ${{ needs.abuse-coverage.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-conformance=$SDK_CONFORMANCE"
-          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_CONFORMANCE"; do
+          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE"
+          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "A required job failed or was cancelled."
               exit 1
