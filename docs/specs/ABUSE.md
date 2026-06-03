@@ -6,6 +6,80 @@ phase-by-phase threat model.
 
 ---
 
+## P-2 — IP Reputation: Spamhaus DROP + MaxMind ASN
+
+**Status:** Shipped (HEA-1203)  
+**Module:** `src/abuse/ip_reputation/` → `IpReputationProvider` (trait), `SpamhausDropProvider`, `MaxMindAsnProvider`
+
+### What it provides
+
+| Adapter | Signal | Source | Refresh |
+|---------|--------|--------|---------|
+| `SpamhausDropProvider` | `is_blocklisted: bool` | Spamhaus DROP (IPv4) + EDROP (IPv6) CIDR lists | Daily, background task |
+| `MaxMindAsnProvider` | `asn: Option<u32>`, `asn_org: Option<String>` | Local MaxMind GeoLite2-ASN / GeoIP2-ASN MMDB file | On restart / manual |
+
+### Trait contract
+
+```rust
+pub trait IpReputationProvider: Send + Sync {
+    fn check(&self, ip: IpAddr) -> IpReputationVerdict;
+}
+```
+
+`check()` MUST be synchronous, allocation-free on the happy path, and
+**fail-open** (return `IpReputationVerdict::default()` on any error).
+
+### Data structure
+
+`SpamhausDropProvider` holds a `Arc<ArcSwap<CidrFilter>>`.  The background
+refresh task builds a new `CidrFilter` from the downloaded DROP + EDROP text,
+then calls `ArcSwap::store(Arc::new(new_filter))` to replace it atomically.
+Hot-path reads call `ArcSwap::load()` (zero allocation, no locks), then perform
+a linear scan over the deny `Vec<Cidr>`.  For the current DROP list size (~800
+IPv4 + ~100 IPv6 CIDRs) this stays well under the 5 µs `AbuseGuard.check()`
+budget.
+
+### Outcome and caller contract
+
+Callers inspect `IpReputationVerdict`:
+- `is_blocklisted = true` → IP is in Spamhaus DROP/EDROP.  Callers apply the
+  per-realm `IpReputationPolicy.action` (Block / Challenge / Log).
+- `asn`, `asn_org` → populated by `MaxMindAsnProvider` when available; used
+  as an input signal for A-11 risk scoring.  Never used as a direct block
+  decision — ASN alone does not block.
+
+Callers MUST NOT expose `is_blocklisted` reason to the client.
+
+### Failure mode: fail-open
+
+Per §6.1 of the abuse-prevention plan: `IpReputation` is **fail-open**.
+
+- `SpamhausDropProvider` starts with an empty filter until the first background
+  refresh succeeds.  If a refresh fails, the previous filter is retained.
+- `MaxMindAsnProvider` returns `IpReputationVerdict::default()` if the MMDB
+  file is missing, unreadable, or the IP has no ASN record.
+- Both: any internal error returns the default verdict — no request is ever
+  blocked by a provider fault.
+
+### Configuration (`hearth.yaml`)
+
+```yaml
+security:
+  ip_reputation:
+    enabled: true           # false (default) = checks skipped entirely
+    action: block           # block | challenge | log (default: log)
+    spamhaus:
+      drop_url: https://www.spamhaus.org/drop/drop.txt
+      dropv6_url: https://www.spamhaus.org/drop/dropv6.txt
+      refresh_interval_secs: 86400   # 24 hours
+    maxmind_db_path: /etc/hearth/GeoLite2-ASN.mmdb   # absent = disabled
+```
+
+Per-realm override: set `security.ip_reputation.enabled: false` in the realm
+block to opt a realm out of IP reputation checks.
+
+---
+
 ## A-3 — Distributed-Attack Detector
 
 **Status:** Shipped (HEA-1189)  

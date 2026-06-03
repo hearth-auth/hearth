@@ -9,6 +9,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **P-2 IP reputation: Spamhaus DROP + MaxMind ASN/GeoIP2** — New pluggable
+  `IpReputationProvider` trait (`src/abuse/ip_reputation/`).  Two reference
+  adapters ship: (1) `SpamhausDropProvider` — checks source IPs against the
+  Spamhaus DROP (IPv4) and EDROP (IPv6) blocklists, refreshed daily in a
+  background Tokio task via an Arc-swapped `CidrFilter` (lock-free, zero-alloc
+  on the read path); (2) `MaxMindAsnProvider` — looks up the ASN for a source
+  IP from a local MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB file (operator
+  provides the database; absent = fail-open noop).  Both adapters are
+  fail-open.  Per-realm enable/action policy configured under
+  `security.ip_reputation` in `hearth.yaml`.  (HEA-1203)
+
 - **A-50 Cross-realm SMS / email aggregation cap** — Closes §3.53: a global
   (cluster-wide) counter keyed by recipient hash (email or E.164 phone number)
   now tracks how many distinct realms have sent to each address in a rolling
