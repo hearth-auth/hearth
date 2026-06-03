@@ -14,6 +14,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tracing::{debug, info};
 
+use crate::abuse::{AbusePolicy, NoopAbusePolicy};
 use crate::audit::AuditEngine;
 use crate::identity::IdentityEngine;
 use crate::protocol::admin_auth::AdminRateLimiter;
@@ -33,6 +34,10 @@ pub struct GrpcState {
     pub rbac: Arc<dyn RbacEngine>,
     pub audit: Arc<dyn AuditEngine>,
     pub admin_rate_limiter: Arc<AdminRateLimiter>,
+    /// Abuse-prevention policy shared with the HTTP surface.
+    ///
+    /// Defaults to [`NoopAbusePolicy`] until a concrete policy is wired in.
+    pub abuse: Arc<dyn AbusePolicy>,
 }
 
 impl GrpcState {
@@ -47,7 +52,14 @@ impl GrpcState {
             rbac,
             audit,
             admin_rate_limiter,
+            abuse: Arc::new(NoopAbusePolicy),
         }
+    }
+
+    /// Registers an abuse-prevention policy, replacing the default no-op.
+    pub fn with_abuse(mut self, policy: Arc<dyn AbusePolicy>) -> Self {
+        self.abuse = policy;
+        self
     }
 }
 

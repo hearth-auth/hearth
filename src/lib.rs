@@ -4,6 +4,7 @@
 //! authorization, and session management with a custom embedded
 //! storage engine.
 
+pub mod abuse;
 pub mod audit;
 pub mod backup;
 pub mod cluster;

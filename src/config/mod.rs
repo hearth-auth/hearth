@@ -14,7 +14,7 @@ pub use error::ConfigError;
 pub use types::parse_duration_to_micros;
 pub use types::ClusterConfig;
 pub use types::{
-    AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, ClaimsYamlConfig,
+    AccountRateLimitYaml, ApplicationYamlConfig, AbuseYaml, AuthConfig, BrandingConfig, ClaimsYamlConfig,
     CompactionSection, EmailConfig, EmailTransport, FederationProviderYaml, FederationYamlConfig,
     GlobalRateLimitYaml, GroupYamlConfig, IpRateLimitYaml, LinkModeYaml, MailgunConfig,
     MailgunRegion, MailtrapConfig, MetricsConfig, MigrateConflictPolicy, ObservabilityConfig,

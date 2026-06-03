@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Abuse-prevention foundation (HEA-1187)** — introduces the `src/abuse/` module with the
+  `AbusePolicy` trait, `NoopAbusePolicy` (allow-all default), `AbuseGuard` HTTP middleware, and
+  per-realm YAML configuration (`realms.<name>.abuse.enabled` / `fail_closed`). The guard is
+  wired into the HTTP router as a `route_layer` before metrics; `GrpcState` carries the same
+  policy. Default behaviour is **fail-open** — existing realms without an `abuse:` YAML block are
+  unaffected. New realms should add `abuse: { enabled: true }` to opt in. See
+  `docs/specs/ABUSE.md` for the normative spec and threat model.
+
 - **Offline breach corpus for air-gapped realms (HEA-96)** — `BreachCheckConfig` gains a new
   `mode` field (`online` | `offline`). When set to `offline`, a locally-provided binary corpus
   of sorted 20-byte SHA-1 hashes is binary-searched instead of calling the HIBP API, enabling

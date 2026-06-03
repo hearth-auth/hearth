@@ -1363,6 +1363,52 @@ pub struct RealmYamlConfig {
     /// instead of setting this flag.
     #[serde(default)]
     pub rotate_signing_key: Option<bool>,
+
+    /// Abuse-prevention policy for this realm.
+    ///
+    /// When absent, the realm is **not** subject to abuse checks (backward-
+    /// compatible opt-in for existing realms). When present with the default
+    /// `enabled: true`, the `AbuseGuard` middleware enforces the active policy.
+    #[serde(default)]
+    pub abuse: Option<AbuseYaml>,
+}
+
+/// YAML for `realms.{name}.abuse.*`.
+///
+/// Controls the abuse-prevention policy for a specific realm.
+///
+/// # Example
+///
+/// ```yaml
+/// realms:
+///   my-realm:
+///     abuse:
+///       enabled: true
+///       fail_closed: false
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AbuseYaml {
+    /// Enable abuse-prevention checks for this realm.
+    ///
+    /// Default: `true` when the `abuse:` block is present (opt-in for new
+    /// realms); realms that omit the block entirely are unaffected.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// When `true`, a policy evaluation error blocks the request (fail-closed).
+    /// When `false` (default), errors allow the request through (fail-open).
+    #[serde(default)]
+    pub fail_closed: bool,
+}
+
+impl Default for AbuseYaml {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            fail_closed: false,
+        }
+    }
 }
 
 /// YAML for `realms.{name}.scim.*`.

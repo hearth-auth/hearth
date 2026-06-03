@@ -25,6 +25,7 @@ use tokio::net::TcpListener;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{debug, error, info, Level};
 
+use crate::abuse::{guard_check, AbuseDecision, AbusePolicy, NoopAbusePolicy};
 use crate::audit::{AuditEngine, CreateAuditEvent};
 use crate::cluster::ClusterEngine;
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
@@ -83,6 +84,11 @@ pub struct AppState {
     pub rbac: Arc<dyn RbacEngine>,
     /// The audit engine for mutation logging.
     pub audit: Arc<dyn AuditEngine>,
+    /// Abuse-prevention policy evaluated by [`abuse_guard`] on every request.
+    ///
+    /// Defaults to [`NoopAbusePolicy`] (allow-all) until a concrete policy
+    /// implementation is registered for the realm.
+    pub abuse: Arc<dyn AbusePolicy>,
     /// Webhook subscription and delivery engine (optional; absent in test
     /// harnesses that don't configure outbound delivery).
     pub webhook: Option<Arc<dyn WebhookEngine>>,
@@ -130,6 +136,7 @@ impl AppState {
             identity,
             rbac,
             audit,
+            abuse: Arc::new(NoopAbusePolicy),
             webhook: None,
             dev_mode: false,
             metrics_enabled: true,
@@ -153,6 +160,7 @@ impl AppState {
             identity,
             rbac,
             audit,
+            abuse: Arc::new(NoopAbusePolicy),
             webhook: None,
             dev_mode: true,
             metrics_enabled: true,
@@ -178,6 +186,7 @@ impl AppState {
             identity,
             rbac,
             audit,
+            abuse: Arc::new(NoopAbusePolicy),
             webhook: None,
             dev_mode: false,
             metrics_enabled: true,
@@ -187,6 +196,15 @@ impl AppState {
             trusted_proxies: Vec::new(),
             cluster: None,
         }
+    }
+
+    /// Registers an abuse-prevention policy implementation.
+    ///
+    /// Replaces the default [`NoopAbusePolicy`]. Called at startup after the
+    /// realm abuse configs have been loaded from `hearth.yaml`.
+    pub fn with_abuse(mut self, policy: Arc<dyn AbusePolicy>) -> Self {
+        self.abuse = policy;
+        self
     }
 
     /// Configures trusted reverse-proxy IPs for `X-Forwarded-For` extraction.
@@ -674,6 +692,10 @@ pub fn router(state: Arc<AppState>) -> Router {
                         .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
                 ),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            abuse_guard,
+        ))
         .route_layer(axum::middleware::from_fn(track_metrics))
         .layer(
             TraceLayer::new_for_http()
@@ -908,6 +930,81 @@ fn coerce_string_ints(v: serde_json::Value) -> serde_json::Value {
 /// Must be applied via [`Router::route_layer`] so that [`MatchedPath`] is
 /// already populated by the router before this middleware runs. Routes without
 /// a matched pattern (e.g. 404s) fall back to the raw URI path.
+/// Axum middleware that evaluates the realm's [`AbusePolicy`] before every request.
+///
+/// Extracts the realm ID from the `X-Realm-ID` header when present. Endpoints
+/// that carry no realm header (e.g. `/health`, `/jwks`) are allowed through
+/// unconditionally (fail-open by design — see `docs/specs/ABUSE.md §3`).
+///
+/// On `Block` or `Challenge` returns `429 Too Many Requests` with an
+/// RFC 6749-compatible JSON error body. The reason string is logged at WARN
+/// level but **never** included in the response to avoid leaking signal to
+/// the caller.
+pub(crate) async fn abuse_guard(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let realm_id: Option<RealmId> = request
+        .headers()
+        .get("x-realm-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(RealmId::new);
+
+    let client_ip: IpAddr = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+        .unwrap_or(FALLBACK_PEER.ip());
+
+    let endpoint: &'static str = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|mp| abuse_endpoint_label(mp.as_str()))
+        .unwrap_or("other");
+
+    let decision = guard_check(state.abuse.as_ref(), realm_id.as_ref(), client_ip, endpoint);
+
+    match decision {
+        AbuseDecision::Allow => next.run(request).await,
+        AbuseDecision::Block { reason } | AbuseDecision::Challenge { reason } => {
+            tracing::warn!(
+                realm_id = realm_id.as_ref().map(|r| r.to_string()),
+                %client_ip,
+                %reason,
+                "abuse guard blocked request",
+            );
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "too_many_requests",
+                    "error_description": "Request rate limited."
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Maps a matched route path to a static endpoint label for telemetry.
+///
+/// Using `&'static str` avoids a heap allocation on every request —
+/// route strings come from the static route table, so we match on them
+/// and return a corresponding literal.
+fn abuse_endpoint_label(path: &str) -> &'static str {
+    match path {
+        "/token" | "/realms/:realm_name/token" => "token",
+        "/authorize" | "/realms/:realm_name/authorize" => "authorize",
+        "/introspect" | "/realms/:realm_name/introspect" => "introspect",
+        "/revoke" | "/realms/:realm_name/revoke" => "revoke",
+        "/device_authorization" | "/realms/:realm_name/device_authorization" => "device_authorization",
+        "/users" => "users",
+        "/register" | "/realms/:realm_name/register" => "register",
+        _ => "other",
+    }
+}
+
 pub(crate) async fn track_metrics(request: Request, next: Next) -> Response {
     let path = request
         .extensions()
