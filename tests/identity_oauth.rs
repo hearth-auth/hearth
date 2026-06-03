@@ -1334,6 +1334,7 @@ fn pending_authorization_ticket_is_single_use() {
     let (_dir, engine, clock, realm, user, client) = setup_consent_env();
     let now = clock.now();
     let pending = PendingAuthorizationRequest {
+        realm_id: realm.clone(),
         user_id: user.clone(),
         client_id: client.clone(),
         redirect_uri: "https://app.example.com/cb".to_string(),
@@ -1366,6 +1367,7 @@ fn pending_authorization_ticket_expires() {
     let (_dir, engine, clock, realm, user, client) = setup_consent_env();
     let now = clock.now();
     let pending = PendingAuthorizationRequest {
+        realm_id: realm.clone(),
         user_id: user,
         client_id: client,
         redirect_uri: "https://app.example.com/cb".to_string(),

@@ -106,6 +106,7 @@ fn build_rig() -> Rig {
             client_id: "demo-client-id".to_string(),
             client_secret: FederationSecret::new("demo-secret".to_string()),
             claim_mappings: BTreeMap::new(),
+            leeway_seconds: IdpConfig::default_leeway_seconds(),
             created_at: Timestamp::from_micros(0),
             updated_at: Timestamp::from_micros(0),
         })

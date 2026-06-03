@@ -42,6 +42,7 @@ fn sample_cfg() -> IdpConfig {
         client_id: "conformance-client".to_string(),
         client_secret: FederationSecret::new("s".to_string()),
         claim_mappings: BTreeMap::new(),
+        leeway_seconds: IdpConfig::default_leeway_seconds(),
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),
     }

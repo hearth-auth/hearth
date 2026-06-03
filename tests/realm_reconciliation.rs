@@ -287,6 +287,7 @@ async fn reconcile_federation_wires_claim_mappings_to_idp() {
             client_secret: Some("app-secret".to_string()),
             scopes: None,
             claim_mappings: Some(claim_mappings.clone()),
+            leeway_seconds: None,
             entity_id: None,
             sso_url: None,
             slo_url: None,

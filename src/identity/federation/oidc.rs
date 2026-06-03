@@ -437,12 +437,15 @@ pub fn verify_id_token_claims(
     if !audience_contains(&claims.aud, &cfg.client_id) {
         return Err(IdentityError::FederationTokenVerificationFailed);
     }
-    // 60s clock-skew allowance on both edges — standard OIDC RP tolerance.
-    if claims.exp + 60 < now_unix_secs {
+    // Configurable clock-skew allowance on both edges (default 60 s, max
+    // 300 s — enforced at reconcile time). Operators with enterprise IdPs
+    // that drift can raise this via `federation.<idp>.leeway_seconds`.
+    let leeway = i64::from(cfg.leeway_seconds);
+    if claims.exp + leeway < now_unix_secs {
         return Err(IdentityError::FederationTokenVerificationFailed);
     }
     if let Some(nbf) = claims.nbf {
-        if nbf > now_unix_secs + 60 {
+        if nbf > now_unix_secs + leeway {
             return Err(IdentityError::FederationTokenVerificationFailed);
         }
     }
@@ -569,6 +572,7 @@ mod tests {
             client_id: "client-abc".to_string(),
             client_secret: FederationSecret::new("sekret".to_string()),
             claim_mappings: BTreeMap::new(),
+            leeway_seconds: IdpConfig::default_leeway_seconds(),
             created_at: Timestamp::from_micros(0),
             updated_at: Timestamp::from_micros(0),
         }

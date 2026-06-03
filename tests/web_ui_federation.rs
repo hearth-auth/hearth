@@ -118,6 +118,7 @@ fn build_rig(stub: Arc<StubFederationTransport>) -> Rig {
             client_id: "demo-client".to_string(),
             client_secret: FederationSecret::new("demo-secret".to_string()),
             claim_mappings: BTreeMap::new(),
+            leeway_seconds: IdpConfig::default_leeway_seconds(),
             created_at: hearth::core::Timestamp::from_micros(0),
             updated_at: hearth::core::Timestamp::from_micros(0),
         })

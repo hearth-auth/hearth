@@ -566,6 +566,7 @@ async fn authorize_get_impl(
 
     // 8. Store pending-auth + redirect to consent page.
     let pending = PendingAuthorizationRequest {
+        realm_id: realm.clone(),
         user_id: session.user_id.clone(),
         client_id: client_id.clone(),
         redirect_uri: q.redirect_uri.clone(),
@@ -636,6 +637,14 @@ pub async fn consent_page(
         return handlers_common::bad_request("consent ticket invalid");
     }
 
+    // A-34: Cross-realm guard. The pending request embeds the realm it was
+    // issued in; a mismatch means the user switched realms after initiating
+    // the consent flow. Reject rather than silently issue a code in the
+    // wrong realm.
+    if pending.realm_id != session.realm_id {
+        return handlers_common::bad_request("consent ticket invalid");
+    }
+
     // Load the client for display fields + determine pre-granted scopes.
     let client = match state
         .identity
@@ -680,7 +689,15 @@ pub async fn consent_page(
         realm_theme_url: state.realm_theme_url(),
         inline_theme_css: state.inline_theme_css(),
     };
-    render(&tmpl)
+    // A-34: Prevent clickjacking of the consent prompt. The page must never
+    // be rendered inside an iframe — an attacker-controlled frame could layer
+    // invisible UI over the approve/deny buttons (UI redressing / clickjack).
+    let mut resp = render(&tmpl);
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -770,6 +787,11 @@ pub async fn consent_submit(
 
     // Ownership guard redundant with the cookie MAC check, but cheap.
     if pending.user_id != session.user_id {
+        return handlers_common::bad_request("consent ticket invalid");
+    }
+
+    // A-34: Cross-realm guard on submit path.
+    if pending.realm_id != session.realm_id {
         return handlers_common::bad_request("consent ticket invalid");
     }
 

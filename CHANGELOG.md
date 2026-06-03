@@ -69,6 +69,29 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `realm.admin` role. Service accounts can be granted `hearth.export` without
   full `hearth.admin` for dedicated DR pipelines (HEA-1206).
 
+- **A-31 Per-realm JWT leeway (federation)** — `federation.<idp>.leeway_seconds`
+  replaces the hardcoded 60-second clock-skew allowance on OIDC ID-token `exp` and
+  `nbf` checks. Defaults to 60 s; capped at 300 s. Raises are only necessary for
+  enterprise IdPs with known clock drift (HEA-1213).
+
+- **A-32 `trusted_proxies` startup validator** — Hearth now refuses to start when
+  `server.trusted_proxies` contains `0.0.0.0/0`, `::/0`, `0.0.0.0`, or `::` (catch-all
+  entries that would trust every IP as a reverse proxy). Loopback addresses
+  (127.x.x.x, ::1) are also rejected when the listener is bound to a public address
+  (HEA-1213).
+
+- **A-34 Consent page clickjacking protection** — `GET /ui/oauth/consent` and
+  `POST /ui/oauth/consent` now emit `Content-Security-Policy: frame-ancestors 'none'`
+  to prevent UI-redressing attacks on the approve/deny buttons. The consent ticket
+  also embeds the issuing realm's ID; submitting a ticket from realm A into realm B's
+  consent flow is now rejected (HEA-1213).
+
+- **A-36 `agent_auth` feature guardrail** — Setting `agent_auth.enabled: true` in
+  `hearth.yaml` now produces a startup error. The Agent entity, delegation chains,
+  MCP/A2A surfaces, and Agent Authorization Tokens (AATs) described in
+  `docs/specs/AGENT_AUTH.md` are not yet fully implemented; the guardrail prevents
+  silent misconfiguration until the feature ships (HEA-1213).
+
 - **A-24 Per-realm resource quotas** — `RealmConfig.quotas` (`RealmQuotaConfig`)
   adds optional per-realm caps for users, orgs, OAuth clients, total sessions,
   and audit rows. Create operations are rejected with HTTP 429 /
@@ -96,6 +119,20 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `DeletingInProgress` before cascading, preventing new auth ops; the cascade is
   chunked (default 200 keys/chunk) and backgrounded for realms exceeding 1 000 items,
   preventing write storms that would degrade all tenants (A-33, HEA-1207).
+
+- **Reserved slug registry and cooldown** — YAML-driven list of reserved names (admin, api,
+  www, …) cannot be used as org or realm slugs; deleted slugs enter a 30-day cooldown before
+  reuse (A-5, HEA-1212).
+- **Bootstrap production guard** — `/admin/bootstrap` requires `--allow-bootstrap-in-prod`
+  when running outside `--dev`; a loud warning is logged when the flag is active (A-6, HEA-1212).
+- **JWKS/discovery per-IP rate cap** — JWKS and discovery endpoints capped at 60 req/s per
+  source IP (configurable via `security.jwks_rps_limit`); responses served from pre-serialized
+  `Arc<Bytes>` (A-10, HEA-1212).
+- **WebAuthn attestation policy** — per-realm AAGUID allowlist, configurable rejection of
+  "none" attestation, and optional PRF/large-blob requirement (A-13, HEA-1212).
+- **TTL hard caps** — per-realm password-reset tokens capped at 1 h and magic-link tokens
+  at 30 min; `allow_unsafe_ttl: true` in realm config bypasses the cap with a warning
+  (A-14, HEA-1212).
 
 ### Security
 

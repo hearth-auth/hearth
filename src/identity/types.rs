@@ -1969,6 +1969,10 @@ pub struct ConsentListEntry {
 /// ticket (single-use).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingAuthorizationRequest {
+    /// The realm this pending request belongs to. Prevents cross-realm replay:
+    /// a consent ticket issued in realm A cannot be redeemed in realm B even
+    /// if the ticket cookie somehow survives a realm switch.
+    pub realm_id: RealmId,
     /// The user who owns this pending request. Prevents cross-user replay.
     pub user_id: UserId,
     /// The client requesting authorization.
@@ -2855,6 +2859,7 @@ mod tests {
     #[test]
     fn pending_authorization_request_serde_round_trip() {
         let pending = PendingAuthorizationRequest {
+            realm_id: RealmId::generate(),
             user_id: UserId::generate(),
             client_id: ClientId::generate(),
             redirect_uri: "https://app.example.com/cb".to_string(),

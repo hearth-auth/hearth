@@ -853,9 +853,24 @@ pub struct SecurityYaml {
     /// Default: `30`.
     #[serde(default = "SecurityYaml::default_slug_cooldown_days")]
     pub slug_cooldown_days: u32,
+    /// A-10: Maximum JWKS / discovery requests per IP per second.
+    ///
+    /// Applies to all unauthenticated key-discovery endpoints:
+    /// `/jwks`, `/certs`, `/.well-known/jwks.json`,
+    /// `/realms/{name}/.well-known/jwks.json`, and
+    /// `/realms/{name}/.well-known/openid-configuration`.
+    /// Requests beyond this threshold receive `429 Too Many Requests` with a
+    /// `Retry-After: 1` header.  Default: `60`.
+    #[serde(default = "SecurityYaml::default_jwks_rps_limit")]
+    pub jwks_rps_limit: u32,
 }
 
 impl SecurityYaml {
+    /// Default JWKS / discovery rate limit: 60 requests per second per IP (A-10).
+    const fn default_jwks_rps_limit() -> u32 {
+        60
+    }
+
     /// Default set of permanently reserved slug names (A-5).
     fn default_reserved_slugs() -> Vec<String> {
         [
@@ -1942,6 +1957,11 @@ pub struct FederationProviderYaml {
     /// Ignored for `type: saml` (use `attribute_map` instead).
     #[serde(default)]
     pub claim_mappings: Option<std::collections::BTreeMap<String, String>>,
+    /// Clock-skew allowance (seconds) applied to OIDC ID-token `exp` / `nbf`
+    /// checks. Omit to use the default of 60 s (standard OIDC RP tolerance).
+    /// Raise only for enterprise IdPs with known clock drift; maximum 300 s.
+    #[serde(default)]
+    pub leeway_seconds: Option<u32>,
 
     // --- SAML-specific fields (when `type: saml`) ---
     /// SAML IdP entity ID (SAML issuer).
@@ -1982,6 +2002,7 @@ impl FederationProviderYaml {
             client_secret: None,
             scopes: None,
             claim_mappings: None,
+            leeway_seconds: None,
             entity_id: None,
             sso_url: None,
             slo_url: None,
@@ -1991,6 +2012,23 @@ impl FederationProviderYaml {
             attribute_map: None,
         }
     }
+}
+
+/// Agent authentication / authorization feature gate.
+///
+/// The Agent entity, delegation chains, MCP/A2A surfaces, approval lifecycle,
+/// and Agent Authorization Tokens (AATs) described in `docs/specs/AGENT_AUTH.md`
+/// are **not yet fully implemented**. Setting `enabled: true` will be refused
+/// at startup until the feature ships to prevent silent misconfiguration.
+///
+/// See `docs/specs/AGENT_AUTH.md` for current implementation status.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct AgentAuthConfig {
+    /// Whether agent authentication primitives are enabled. Defaults to
+    /// `false`. Setting `true` currently produces a startup error because the
+    /// underlying Agent entity implementation is incomplete.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Parses a human-readable duration string into microseconds.
