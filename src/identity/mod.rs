@@ -22,6 +22,7 @@ pub mod oidc;
 pub mod onboarding;
 pub mod ra_token;
 pub mod reconcile;
+pub mod risk;
 pub mod session_version;
 pub mod sms;
 pub mod tokens;
@@ -452,6 +453,20 @@ pub trait IdentityEngine: Send + Sync {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Page<Session>, IdentityError>;
+
+    /// Revokes all active sessions (and their grant families) for a user.
+    ///
+    /// `keep` exempts one session from revocation so the caller's device
+    /// can stay logged in after a sensitive credential mutation.
+    /// Pass `None` to revoke every session.
+    ///
+    /// Returns the count of sessions that were actually revoked.
+    fn revoke_all_user_sessions(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        keep: Option<&SessionId>,
+    ) -> Result<u32, IdentityError>;
 
     // ===== Token management =====
 

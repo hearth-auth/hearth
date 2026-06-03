@@ -477,6 +477,27 @@ pub fn parse_session_cookie(secret: &CookieSecret, value: &str) -> Option<(Sessi
     }
 }
 
+/// Revokes the active UI session cookie, if any (A-41 session-ID rotation).
+///
+/// Called at every successful authentication gate — password login, passkey
+/// login, MFA challenge completion, and forced TOTP enrollment — so that any
+/// pre-planted session cookie is destroyed before a fresh one is issued.
+///
+/// Errors are silently absorbed: the cookie may be expired, already revoked,
+/// or from a prior server instance.  The security invariant is upheld by
+/// the freshness of the *new* session, not by confirmed deletion of the old.
+pub fn revoke_prior_session_cookie(
+    engine: &dyn crate::identity::IdentityEngine,
+    headers: &axum::http::HeaderMap,
+    secret: &CookieSecret,
+) {
+    if let Some(raw) = cookie_value_from_headers(headers, SESSION_COOKIE) {
+        if let Some((session_id, realm_id)) = parse_session_cookie(secret, raw) {
+            let _ = engine.revoke_session(&realm_id, &session_id);
+        }
+    }
+}
+
 impl<S> FromRequestParts<S> for UiSession
 where
     Arc<WebState>: FromRef<S>,

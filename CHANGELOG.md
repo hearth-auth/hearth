@@ -7,8 +7,35 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **A-45 Tenant-content sanitization** — all operator- and tenant-supplied
+  SVG and CSS is sanitized before unescaped render (HEA-1199):
+  - **SVG** (`logo_svg_inline` in email templates) — `<script>`,
+    `<foreignObject>`, `on*` event handlers, external `href`/`xlink:href`,
+    and `style` values containing `expression()` / `javascript:` are stripped
+    by `sanitize_svg()` inside `prepare_svg_for_email()`.
+  - **CSS** (`branding.custom_css` and per-realm `web.custom_css`) —
+    `expression()`, `javascript:`, `behavior:`, `-moz-binding`, `@import`,
+    `url(data:...)`, and `progid:` patterns are stripped by `sanitize_css()`
+    at startup before the CSS is served to browsers.
+  - See `docs/specs/ABUSE.md` §A-45 for the full contract.
+
 ### Added
 
+- **A-11 Step-up MFA risk scorer** — new `src/identity/risk.rs` aggregates
+  signals (new device, new country, password age, breach corpus hit) into a
+  normalised score `[0.0, 1.0]`; when score ≥ threshold (default 0.5),
+  `StepUpChallengeRequired` is returned at login.  Disabled by default
+  (fail-open); enable via `security.risk_scorer.enabled: true` in `hearth.yaml`.
+  P-4 extension point (`RiskScorer` trait) ready for HEA-1205 adapters (HEA-1192).
+- **A-16 CAPTCHA-of-last-resort challenge plumbing** — new
+  `src/abuse/challenge.rs` tracks per-IP failed-auth counts; IPs over the
+  threshold enter "challenge" state and callers receive
+  `HEARTH_ABUSE_CHALLENGE_REQUIRED` (HTTP 403).  UI forms carry a widget
+  injection slot; `NoopCaptchaProvider` ships as the built-in (P-1 Turnstile
+  adapter in HEA-1202).  Disabled by default; activate via
+  `security.captcha.challenge_threshold` (HEA-1192).
 - **Phase-0 abuse-prevention builtins** — HTTP-layer and strictness-default
   primitives that the rest of the abuse plane depends on (HEA-1188):
   - **A-2 Global request shaper** — per-IP (100 rps) + per-realm (1 000 rps)
@@ -42,6 +69,41 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
     handlers now validate `return_to` before persisting it in the state bag.
     Operator-whitelisted absolute origins are supported via
     `security.allowed_return_to_origins`.
+
+- **A-41 Session-ID rotation on every authentication event** (HEA-1198):
+  Every successful primary-auth, MFA challenge completion, passkey login, and
+  forced TOTP enrollment now revokes the pre-existing session cookie before
+  minting a fresh one via `revoke_prior_session_cookie`.  Pre-planted session
+  cookies (session-fixation attack vector §3.44) cannot survive a login.
+
+- **A-42 Sensitive-mutation mass-revocation** (HEA-1198):
+  `set_password`, `change_password`, `disable_mfa`, and email changes (via
+  `update_user`) now revoke all active sessions and their refresh-token grant
+  families for the affected user.  A single `sessions_revoked` audit event
+  is emitted with the count.  The new `revoke_all_user_sessions` engine
+  method accepts an optional `keep` session ID so callers can preserve the
+  user's own active device session if desired.
+
+- **A-35 SCIM/SAML payload caps** (HEA-1208):
+  - **SCIM PATCH `Operations` count cap** — SCIM PATCH requests with more than
+    1 000 `Operations` entries are rejected with HTTP 400 / `scimType: tooMany`.
+    Closes the resource-exhaustion vector where a single PATCH could fan out
+    over an unbounded operations loop.
+  - **SAML XML event cap** — `parse_response` and `find_element_range` now
+    abort with `SamlParse` after 10 000 XML events.  Closes the complementary
+    exhaustion vector for crafted responses with thousands of elements
+    (DOCTYPE/XXE was already blocked; this cap adds depth against non-DTD bulk).
+
+- **A-38 Token-exchange depth & DPoP `cnf.jkt` coverage** (HEA-1208):
+  - **`client_credentials` + JWT-bearer FAPI enforcement** — when a realm has
+    `fapi_profile` set or the client was registered with `profile: Fapi2`, the
+    token endpoint now rejects `client_credentials` and `jwt-bearer` requests
+    that omit `dpop_jkt`.  Previously only the authorization-code exchange path
+    was guarded; all access-token-issuing grant types are now consistent.
+  - **RFC 8693 `act` chain depth cap** — `validate_token` rejects inbound
+    access tokens whose `act` delegation chain exceeds 3 levels (constant
+    `MAX_ACT_CHAIN_DEPTH`).  Hearth does not issue `act` chains itself; this
+    cap defends against externally-crafted delegation-bomb tokens.
 
 ### Changed
 

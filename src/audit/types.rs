@@ -27,6 +27,13 @@ pub enum AuditAction {
     SessionCreated,
     /// A session was revoked.
     SessionRevoked,
+    /// All sessions for a user were revoked due to a sensitive credential
+    /// mutation (`set_password`, `change_password`, `disable_mfa`, or email
+    /// change).
+    ///
+    /// Metadata carries `user_id`, `count` (sessions revoked), and `trigger`
+    /// (e.g. `"set_password"` / `"disable_mfa"` / `"email_change"`).
+    SessionsRevoked,
     /// Tokens were issued for a session.
     TokenIssued,
     /// Tokens were refreshed.
@@ -365,6 +372,7 @@ impl AuditAction {
             Self::SmsMfaLocked,
             Self::DeviceFingerprintsErased,
             Self::SessionLimitEnforced,
+            Self::SessionsRevoked,
         ];
         v.sort_by_key(|a| a.as_str());
         v
@@ -456,6 +464,7 @@ impl AuditAction {
             Self::SmsMfaLocked => "sms_mfa_locked",
             Self::DeviceFingerprintsErased => "device_fingerprints_erased",
             Self::SessionLimitEnforced => "session_limit_enforced",
+            Self::SessionsRevoked => "sessions_revoked",
         }
     }
 }
@@ -548,6 +557,7 @@ impl std::str::FromStr for AuditAction {
             "sms_mfa_locked" => Ok(Self::SmsMfaLocked),
             "device_fingerprints_erased" => Ok(Self::DeviceFingerprintsErased),
             "session_limit_enforced" => Ok(Self::SessionLimitEnforced),
+            "sessions_revoked" => Ok(Self::SessionsRevoked),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -668,7 +678,8 @@ impl AuditAction {
             | Self::SmsOtpEnrollmentFailed
             | Self::SmsMfaChallengeFailed
             | Self::SmsMfaLocked
-            | Self::DeviceFingerprintsErased => FailOperation,
+            | Self::DeviceFingerprintsErased
+            | Self::SessionsRevoked => FailOperation,
         }
     }
 }

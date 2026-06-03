@@ -404,6 +404,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::SmsMfaLocked => "SMS MFA Locked",
         A::DeviceFingerprintsErased => "Device Fingerprints Erased",
         A::SessionLimitEnforced => "Session Limit Enforced",
+        A::SessionsRevoked => "All Sessions Revoked",
     }
 }
 
@@ -435,6 +436,7 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         // Session — sessions, tokens, login attempts (logins gate session entry).
         A::SessionCreated
         | A::SessionRevoked
+        | A::SessionsRevoked
         | A::TokenIssued
         | A::TokenRefreshed
         | A::LoginFailed
@@ -2629,6 +2631,7 @@ mod action_category_tests {
         for a in [
             A::SessionCreated,
             A::SessionRevoked,
+            A::SessionsRevoked,
             A::TokenIssued,
             A::TokenRefreshed,
             A::LoginFailed,

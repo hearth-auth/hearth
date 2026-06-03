@@ -2181,6 +2181,26 @@ impl EmbeddedIdentityEngine {
         let sub_uuid = uuid::Uuid::parse_str(sub_str).map_err(|_| IdentityError::InvalidToken)?;
         Ok(UserId::new(sub_uuid))
     }
+
+    /// Returns the depth of an RFC 8693 `act` delegation chain (A-38).
+    ///
+    /// An `act` object with no nested `act` has depth 1.  Each level of
+    /// nesting increments the count.  The loop is bounded by
+    /// `MAX_ACT_CHAIN_DEPTH + 2` to prevent any theoretical overflow.
+    fn act_chain_depth(act: &serde_json::Value) -> usize {
+        let mut depth: usize = 0;
+        let mut cur = act;
+        loop {
+            depth += 1;
+            if depth > crate::abuse::MAX_ACT_CHAIN_DEPTH + 1 {
+                return depth;
+            }
+            match cur.get("act") {
+                Some(next) => cur = next,
+                None => return depth,
+            }
+        }
+    }
 }
 
 impl EmbeddedIdentityEngine {
@@ -3584,6 +3604,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .ok_or(IdentityError::UserNotFound)?;
 
         let old_email = user.email().to_string();
+        let mut email_changed = false;
 
         // 2. Apply email change if requested
         if let Some(ref new_email) = request.email {
@@ -3613,6 +3634,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .map_err(Self::storage_err)?;
 
                 user.set_email(normalized);
+                email_changed = true;
             }
         }
 
@@ -3681,6 +3703,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             "user",
             &user_id.as_uuid().to_string(),
         )?;
+
+        // A-42: Email address change is a security event — an attacker who
+        // hijacks the new address could receive password-reset emails.  Revoke
+        // all existing sessions so stale holders must re-authenticate.
+        if email_changed {
+            if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
+                tracing::warn!(
+                    user_id = %user_id.as_uuid(),
+                    error = %e,
+                    "revoke_all_user_sessions failed on email change"
+                );
+            }
+        }
 
         Ok(user)
     }
@@ -4040,6 +4075,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             "credential",
             &user_id.as_uuid().to_string(),
         )?;
+
+        // A-42: Revoke all sessions when a credential changes — phished or
+        // stale sessions must not survive a password reset or admin password set.
+        if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
+            tracing::warn!(
+                user_id = %user_id.as_uuid(),
+                error = %e,
+                "revoke_all_user_sessions failed on set_password"
+            );
+        }
 
         Ok(())
     }
@@ -4584,6 +4629,63 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(Page { items, next_cursor })
     }
 
+    fn revoke_all_user_sessions(
+        &self,
+        realm_id: &RealmId,
+        user_id: &UserId,
+        keep: Option<&SessionId>,
+    ) -> Result<u32, IdentityError> {
+        let mut cursor: Option<String> = None;
+        let mut revoked: u32 = 0;
+        let now = self.clock.now();
+
+        loop {
+            let page = self.list_sessions_by_user(
+                realm_id,
+                user_id,
+                cursor.as_deref(),
+                crate::abuse::MAX_PAGE_SIZE,
+            )?;
+            let has_next = page.next_cursor.is_some();
+            cursor = page.next_cursor;
+
+            for session in &page.items {
+                if let Some(keep_id) = keep {
+                    if session.id() == keep_id {
+                        continue;
+                    }
+                }
+                if session.is_valid(now) {
+                    let _ = self.revoke_session(realm_id, session.id());
+                    revoked += 1;
+                }
+            }
+
+            if !has_next {
+                break;
+            }
+        }
+
+        if revoked > 0 {
+            let ctx = AuditContext {
+                actor: Actor::User(user_id.clone()),
+                metadata: Some(serde_json::json!({
+                    "user_id": user_id.as_uuid().to_string(),
+                    "count": revoked,
+                })),
+            };
+            let _ = self.record_audit(
+                realm_id,
+                Some(&ctx),
+                AuditAction::SessionsRevoked,
+                "user",
+                &user_id.as_uuid().to_string(),
+            );
+        }
+
+        Ok(revoked)
+    }
+
     // ===== Token management =====
 
     fn issue_tokens(
@@ -4822,6 +4924,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Only accept access tokens — refresh tokens must not be accepted here.
         if claims.token_type != "access" {
             return Err(IdentityError::InvalidToken);
+        }
+
+        // A-38: reject tokens with deeply-nested `act` delegation chains.
+        // The `act` claim lands in `custom` (flattened map) since Hearth does
+        // not issue RFC 8693 act chains itself.
+        if let Some(act_val) = claims.custom.get("act") {
+            if Self::act_chain_depth(act_val) > crate::abuse::MAX_ACT_CHAIN_DEPTH {
+                return Err(IdentityError::InvalidToken);
+            }
         }
 
         // Enforce expiration before any session or permission check.
@@ -5424,6 +5535,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     "credential",
                     &user_id.as_uuid().to_string(),
                 )?;
+                // A-42: MFA removal weakens the credential posture — revoke
+                // all existing sessions so compromised devices cannot linger.
+                if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
+                    tracing::warn!(
+                        user_id = %user_id.as_uuid(),
+                        error = %e,
+                        "revoke_all_user_sessions failed on disable_mfa"
+                    );
+                }
                 Ok(())
             }
             _ => Err(IdentityError::MfaNotEnabled),
@@ -14691,5 +14811,45 @@ mod tests {
             stats.rate_trackers_pruned, 5,
             "one stale entry from each of the five maps must be pruned"
         );
+    }
+
+    // A-38: act_chain_depth unit tests
+    //
+    // `act_chain_depth(v)` counts the act object itself as 1; each
+    // nested `act` adds 1. Validation rejects depth > MAX (3).
+
+    #[test]
+    fn act_chain_depth_leaf_is_1() {
+        let v = serde_json::json!({ "sub": "alice" });
+        assert_eq!(EmbeddedIdentityEngine::act_chain_depth(&v), 1);
+    }
+
+    #[test]
+    fn act_chain_depth_one_nested_is_2() {
+        let v = serde_json::json!({ "sub": "alice", "act": { "sub": "bob" } });
+        assert_eq!(EmbeddedIdentityEngine::act_chain_depth(&v), 2);
+    }
+
+    #[test]
+    fn act_chain_depth_at_max_accepted() {
+        // Two wraps → depth 3 = MAX; must pass the guard.
+        let leaf = serde_json::json!({ "sub": "leaf" });
+        let mid = serde_json::json!({ "sub": "a1", "act": leaf });
+        let root = serde_json::json!({ "sub": "a0", "act": mid });
+        let depth = EmbeddedIdentityEngine::act_chain_depth(&root);
+        assert_eq!(depth, crate::abuse::MAX_ACT_CHAIN_DEPTH);
+        assert!(depth <= crate::abuse::MAX_ACT_CHAIN_DEPTH);
+    }
+
+    #[test]
+    fn act_chain_depth_over_max_rejected() {
+        // Three wraps → depth 4 = MAX + 1; must exceed the cap.
+        let leaf = serde_json::json!({ "sub": "leaf" });
+        let l2 = serde_json::json!({ "sub": "a2", "act": leaf });
+        let l1 = serde_json::json!({ "sub": "a1", "act": l2 });
+        let root = serde_json::json!({ "sub": "a0", "act": l1 });
+        let depth = EmbeddedIdentityEngine::act_chain_depth(&root);
+        assert_eq!(depth, crate::abuse::MAX_ACT_CHAIN_DEPTH + 1);
+        assert!(depth > crate::abuse::MAX_ACT_CHAIN_DEPTH);
     }
 }

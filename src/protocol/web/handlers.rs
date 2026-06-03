@@ -55,8 +55,8 @@ const FALLBACK_PEER: SocketAddr =
 
 use super::auth::{
     clear_mfa_pending_cookie, cookie_value_from_headers, issue_auth_cookies,
-    issue_mfa_pending_cookie, parse_mfa_pending_cookie, sanitize_return_to, IssuedCookies,
-    MFA_PENDING_COOKIE,
+    issue_mfa_pending_cookie, parse_mfa_pending_cookie, revoke_prior_session_cookie,
+    sanitize_return_to, IssuedCookies, MFA_PENDING_COOKIE,
 };
 use super::realm_resolver::{self, Resolved};
 use super::templates::{render, render_status, Flash};
@@ -1105,6 +1105,9 @@ fn login_submit_impl(
         return ra_response;
     }
 
+    // A-41: Destroy any pre-existing session cookie before issuing a new one.
+    revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
+
     match state
         .identity
         .create_session(realm.id(), user.id(), &session_ctx)
@@ -1405,6 +1408,7 @@ fn passkey_login_complete_impl(
         user_handle_bytes.as_ref(),
         &origin,
         &session_ctx,
+        &headers,
         state.is_secure_request(&headers),
     )
 }
@@ -1424,6 +1428,7 @@ fn passkey_complete_for_user(
     user_handle_bytes: Option<&Vec<u8>>,
     origin: &str,
     session_ctx: &SessionContext,
+    headers: &HeaderMap,
     secure: bool,
 ) -> Response {
     let _ = user_id;
@@ -1486,6 +1491,10 @@ fn passkey_complete_for_user(
     // Passkey authentication bypasses the TOTP gate — a passkey
     // is inherently multi-factor (possession + biometric/PIN).
     // Only reached if passkey_requires_mfa is false or user has no MFA enrolled.
+
+    // A-41: Destroy any pre-existing session cookie before issuing a new one.
+    revoke_prior_session_cookie(state.identity.as_ref(), headers, &state.cookie_secret);
+
     match state
         .identity
         .create_session(realm.id(), auth_result.user_id(), session_ctx)
@@ -1629,6 +1638,10 @@ pub async fn mfa_challenge_submit(
     }
 
     // MFA passed — create the session.
+
+    // A-41: Destroy any pre-existing session cookie before issuing a new one.
+    revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
+
     match state
         .identity
         .create_session(&pending.realm_id, &pending.user_id, &session_ctx)
@@ -1818,6 +1831,10 @@ pub async fn mfa_enroll_required_submit(
 
     // Enrollment confirmed — complete login.
     let secure = state.is_secure_request(&headers);
+
+    // A-41: Destroy any pre-existing session cookie before issuing a new one.
+    revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);
+
     match state
         .identity
         .create_session(&pending.realm_id, &pending.user_id, &session_ctx)
