@@ -108,6 +108,15 @@ impl EmbeddedIdentityEngine {
                 operation: "register_client",
             });
         }
+        // A-24: enforce per-realm client quota before writing.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_clients {
+                    let prefix = keys::oauth_client_scan_prefix();
+                    self.check_resource_quota(realm_id, "clients", &prefix, max)?;
+                }
+            }
+        }
         // Validate client name (non-empty, length limit)
         let client_name = validation::validate_client_name(&request.client_name)?;
 

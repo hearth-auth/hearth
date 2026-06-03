@@ -75,11 +75,11 @@ pub use types::{
     CreateWebhookRequest, CredentialExport, DcrPolicy, FapiProfile, ImportClientRequest,
     ImportUserRequest, InvitationStatus, MigrationReport, Organization, OrganizationConfig,
     OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig, RealmStatus,
-    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, RequiredAction,
-    RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy, SessionVersionConfig,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User,
-    UserStatus, Webhook,
+    PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig,
+    RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
+    RequiredAction, RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy,
+    SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
+    UpdateWebhookRequest, User, UserStatus, Webhook,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{

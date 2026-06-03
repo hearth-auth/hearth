@@ -2556,6 +2556,32 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Counts keys under `prefix` in the realm and returns `QuotaExceeded` if
+    /// the count is at or above `limit`. Fail-closed: a storage error becomes
+    /// `QuotaExceeded` to prevent unbounded growth on scan failure.
+    fn check_resource_quota(
+        &self,
+        realm_id: &RealmId,
+        resource: &'static str,
+        prefix: &[u8],
+        limit: u64,
+    ) -> Result<(), IdentityError> {
+        let end = keys::prefix_end(prefix);
+        let current = self
+            .storage
+            .scan(realm_id, prefix, &end)
+            .map(|e| e.len() as u64)
+            .unwrap_or(limit); // fail-closed
+        if current >= limit {
+            return Err(IdentityError::QuotaExceeded {
+                resource,
+                limit,
+                current,
+            });
+        }
+        Ok(())
+    }
+
     fn build_discovery_document(
         &self,
         issuer: &str,
@@ -3709,6 +3735,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
         self.require_active_realm(realm_id)?;
+        // A-24: enforce per-realm user quota before writing.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_users {
+                    let prefix = keys::user_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "users", &prefix, max)?;
+                }
+            }
+        }
         self.create_user_with_status(realm_id, request, self.config.default_status)
     }
 
@@ -4425,6 +4460,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         context: &SessionContext,
     ) -> Result<Session, IdentityError> {
         self.require_active_realm(realm_id)?;
+
+        // A-24: enforce per-realm total session quota before writing.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_sessions {
+                    let prefix = keys::session_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "sessions", &prefix, max)?;
+                }
+            }
+        }
 
         // Enforce mfa_required policy unless the session originates from a
         // passkey ceremony (passkeys are inherently multi-factor).
@@ -7668,6 +7713,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
         self.require_active_realm(realm_id)?;
+        // A-24: enforce per-realm org quota before writing.
+        if let Ok(Some(realm)) = self.get_realm(realm_id) {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_orgs {
+                    let prefix = keys::org_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "orgs", &prefix, max)?;
+                }
+            }
+        }
         let slug = validation::validate_slug(&request.slug)?;
         let name = validation::validate_display_name(&request.name)?;
 

@@ -7,6 +7,22 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **A-24 Per-realm resource quotas** — `RealmConfig.quotas` (`RealmQuotaConfig`)
+  adds optional per-realm caps for users, orgs, OAuth clients, total sessions,
+  and audit rows. Create operations are rejected with HTTP 429 /
+  `HEARTH_QUOTA_EXCEEDED` once the current count reaches the limit. All limits
+  default to `None` (unlimited). Disk-usage soft-warning (`max_disk_bytes`) is
+  checked by the daily background pruner (HEA-1195).
+
+- **A-25 Audit auto-retention: `max_rows` backstop** — `AuditRetentionConfig`
+  gains an optional `max_rows: u64` field.  The background daily pruner now
+  enforces it after the time-based `retention_days` sweep: if the event count
+  still exceeds `max_rows`, the oldest events are trimmed until the count is
+  within the limit.  Two new `AuditEngine` trait methods: `count_events` and
+  `prune_oldest` (HEA-1195).
+
 ### Security
 
 - **A-43 gRPC reflection production-disable** — `security.grpc.reflection_enabled`

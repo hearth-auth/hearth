@@ -482,6 +482,20 @@ pub enum IdentityError {
     /// Returned when a subject has made more than the per-realm cap of
     /// `prompt=none` authorize requests within the sliding window.
     SilentAuthRateLimited,
+    /// A per-realm resource quota was exceeded (A-24).
+    ///
+    /// The create operation was refused because the realm already has
+    /// `current` records of the given `resource` type and the configured
+    /// limit is `limit`.
+    QuotaExceeded {
+        /// Resource type that hit the limit (e.g. `"users"`, `"orgs"`,
+        /// `"clients"`, `"sessions"`, `"audit_rows"`).
+        resource: &'static str,
+        /// The configured maximum.
+        limit: u64,
+        /// The count at the time of the check.
+        current: u64,
+    },
 }
 
 impl fmt::Display for IdentityError {
@@ -705,6 +719,14 @@ impl fmt::Display for IdentityError {
                 f,
                 "session limit exceeded: {active} active sessions, limit is {limit}"
             ),
+            Self::QuotaExceeded {
+                resource,
+                limit,
+                current,
+            } => write!(
+                f,
+                "realm quota exceeded: {resource} count is {current}, limit is {limit}"
+            ),
         }
     }
 }
@@ -756,6 +778,7 @@ impl IdentityError {
 
             Self::RateLimited => Some("HEARTH_RATE_LIMITED"),
             Self::SessionLimitExceeded { .. } => Some("HEARTH_SESSION_LIMIT_EXCEEDED"),
+            Self::QuotaExceeded { .. } => Some("HEARTH_QUOTA_EXCEEDED"),
 
             Self::UserNotVerified => Some("HEARTH_EMAIL_UNVERIFIED"),
             Self::PasswordExpired => Some("HEARTH_PASSWORD_EXPIRED"),
@@ -977,7 +1000,8 @@ impl std::error::Error for IdentityError {
             | Self::FapiViolation { .. }
             | Self::EmailReserved
             | Self::EmailChangeTokenInvalid
-            | Self::SilentAuthRateLimited => None,
+            | Self::SilentAuthRateLimited
+            | Self::QuotaExceeded { .. } => None,
         }
     }
 }

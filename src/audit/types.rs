@@ -793,7 +793,7 @@ pub struct CreateAuditEvent {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Retention configuration for a realm's audit log.
+/// Retention configuration for a realm's audit log (A-25).
 ///
 /// Controls automatic pruning of old audit events. Pruning intentionally
 /// breaks the hash chain for the removed window — this is expected and
@@ -803,11 +803,22 @@ pub struct AuditRetentionConfig {
     /// Number of days to retain audit events. `0` means unlimited (no pruning).
     /// Default: 90 days.
     pub retention_days: u32,
+    /// Hard row backstop (A-25): if the realm has more than this many audit
+    /// events after the time-based prune pass, the oldest rows are removed
+    /// until the count is within the limit. `None` means no row backstop.
+    ///
+    /// Use this together with `retention_days` for defence-in-depth: the
+    /// time window bounds normal growth; `max_rows` caps runaway event storms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rows: Option<u64>,
 }
 
 impl Default for AuditRetentionConfig {
     fn default() -> Self {
-        Self { retention_days: 90 }
+        Self {
+            retention_days: 90,
+            max_rows: None,
+        }
     }
 }
 

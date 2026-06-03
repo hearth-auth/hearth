@@ -1464,3 +1464,108 @@ security:
     crl_paths:
       - /etc/hearth/crl/client-ca.crl.pem   # PEM-encoded CRL, reloaded on SIGHUP
 ```
+
+---
+
+## A-24 — Per-Realm Resource Quotas
+
+### Threat
+
+Without resource caps, a single tenant can fill the disk with users, organizations,
+OAuth clients, sessions, or audit rows — denying service to every other realm.
+
+### Mitigation
+
+`RealmConfig.quotas` (`RealmQuotaConfig`) exposes per-realm limits:
+
+| Field | Resource guarded |
+|-------|-----------------|
+| `max_users` | Total user records in the realm |
+| `max_orgs` | Total organizations in the realm |
+| `max_clients` | Registered OAuth/OIDC clients |
+| `max_sessions` | Total active sessions across all users |
+| `max_audit_rows` | Hard audit-row cap (enforced by background pruner) |
+| `max_disk_bytes` | Disk-usage warning threshold (sampled, non-blocking) |
+
+All fields are `None` by default (unlimited). When a limit is set, the
+corresponding create operation is rejected with `HEARTH_QUOTA_EXCEEDED` (HTTP
+429) once `current >= limit`.
+
+### Enforcement
+
+- **Synchronous / fail-closed**: count-based quotas (users, orgs, clients,
+  sessions) are checked on every create by scanning the relevant storage prefix.
+  A storage scan error is treated as `current = limit` — the create is rejected
+  rather than bypassing the quota.
+- **Sampled / warn-only**: `max_disk_bytes` is checked once per day by the
+  background pruner. Exceeding it emits a `warn!()` but does NOT block writes.
+- **Background pruner**: `max_audit_rows` is enforced by the daily pruner after
+  the time-based `retention_days` sweep (see A-25).
+
+### Fail-open vs fail-closed (§6.1)
+
+Count-based quotas are **fail-closed**: a storage failure returns `QuotaExceeded`
+to prevent unbounded growth even when the storage layer is degraded.
+
+`max_disk_bytes` is **fail-open**: it is advisory only. Operators should pair it
+with OS-level disk quotas or alerting for hard enforcement.
+
+### Configuration surface
+
+```yaml
+realms:
+  my-realm:
+    quotas:
+      max_users: 10000
+      max_orgs: 100
+      max_clients: 50
+      max_sessions: 50000
+      max_audit_rows: 500000
+      max_disk_bytes: 10737418240   # 10 GiB (warn-only, sampled daily)
+```
+
+---
+
+## A-25 — Audit Auto-Retention + `max_rows` Backstop
+
+### Threat
+
+An event storm (e.g. repeated failed logins, high-frequency token issues) can
+exhaust disk by filling the audit log, even when `retention_days` is set.
+Without a row-count backstop, a realm can grow unboundedly between daily prune
+runs.
+
+### Mitigation
+
+`AuditRetentionConfig` gains a `max_rows: Option<u64>` field. The background daily
+pruner (already enforcing `retention_days`) now runs a second pass after the
+time-based prune:
+
+1. Count current audit events via `AuditEngine::count_events`.
+2. If `count > max_rows`, delete the oldest `(count - max_rows)` events via
+   `AuditEngine::prune_oldest`.
+
+The pruner logs `info!` when rows are trimmed:
+```
+audit prune: max_rows backstop trimmed oldest events realm=X deleted=N max_rows=M
+```
+
+### Hash-chain integrity after pruning
+
+Pruning intentionally breaks the hash chain for the removed window. Integrity
+verification (`verify_integrity`) should only be run against the retained window
+after a prune operation. This is the same design as the existing `prune_before`.
+
+### Configuration surface
+
+```yaml
+# Set via API: PUT /admin/realms/{id}/audit/retention
+# Body:
+{
+  "retention_days": 90,
+  "max_rows": 500000
+}
+```
+
+`retention_days = 0` disables time-based pruning. `max_rows = null` disables the
+row backstop. Both can be active simultaneously for defence-in-depth.

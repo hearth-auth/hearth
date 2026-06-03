@@ -13,6 +13,8 @@
 //! | A-21 | JSON parse-bomb guard (depth + length)   | [`guards`]               |
 //! | A-22 | Decompression-bomb cap                   | [`guards`]               |
 //! | A-23 | Trait-level pagination hard cap          | (constant here)          |
+//! | A-24 | Per-realm resource quotas                | `src/identity/engine`    |
+//! | A-25 | Audit auto-retention + max_rows backstop | `src/audit/engine` + `src/main` |
 //! | A-38 | ACT actor-chain depth cap                | (constant here)          |
 //! | A-39 | HTTP/2 rapid-reset defense               | `src/protocol/http`      |
 //! | A-40 | Host allowlist + COOP/COEP + cookies     | `src/protocol/web`       |

@@ -940,6 +940,13 @@ pub struct RealmConfig {
     /// `None` → scorer disabled (fail-open per §6.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub risk_scorer_config: Option<RiskScorerConfig>,
+    /// Per-realm resource quota limits (A-24).
+    ///
+    /// `None` means no quotas (unlimited). When set, create operations for the
+    /// covered resource types are rejected with [`crate::identity::IdentityError::QuotaExceeded`]
+    /// when the current count equals or exceeds the configured limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quotas: Option<RealmQuotaConfig>,
 }
 
 /// FAPI 2.0 Security Profile enforcement level.
@@ -1019,6 +1026,48 @@ pub enum SessionLimitPolicy {
     /// victim's sessions via repeated login. Only use when the application
     /// requires single-session semantics and the threat model accepts it.
     EvictOldest,
+}
+
+/// Per-realm resource quota configuration (A-24).
+///
+/// All limits are `None` by default (unlimited). When a limit is set, the
+/// corresponding create operation is rejected with
+/// [`crate::identity::IdentityError::QuotaExceeded`] once the current count
+/// reaches the limit.  Enforcement is synchronous and fail-closed: if the
+/// storage scan that determines the count fails, the create is rejected.
+///
+/// Disk-usage (`max_disk_bytes`) is checked asynchronously by the background
+/// audit-pruner task (sampled). Enforcement is a warning log only; no create
+/// is blocked. Pair it with `max_audit_rows` for a hard data-size backstop.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RealmQuotaConfig {
+    /// Maximum number of users that may exist in this realm at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_users: Option<u64>,
+    /// Maximum number of organizations that may exist in this realm at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_orgs: Option<u64>,
+    /// Maximum number of OAuth/OIDC clients registered in this realm at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_clients: Option<u64>,
+    /// Maximum total number of active sessions across all users in this realm.
+    ///
+    /// Checked synchronously on `create_session`. Because checking the total
+    /// requires a full-prefix scan, set this only when the realm has a known
+    /// bounded user population.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u64>,
+    /// Maximum number of audit log rows for this realm (A-24 hard backstop
+    /// complement to A-25 `max_rows`). Enforced by the background pruner;
+    /// see also [`crate::audit::types::AuditRetentionConfig::max_rows`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_audit_rows: Option<u64>,
+    /// Disk-usage warning threshold in bytes for this realm's storage prefix.
+    ///
+    /// Checked by the background pruner task (sampled, once per day).
+    /// Exceeding this limit emits a `warn!()` but does NOT block writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_disk_bytes: Option<u64>,
 }
 
 // ── SecretString serde helpers ────────────────────────────────────────────────
