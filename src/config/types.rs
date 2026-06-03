@@ -823,6 +823,92 @@ pub struct SecurityYaml {
     /// accepted when their `scheme://host[:port]` matches an entry here.
     #[serde(default)]
     pub allowed_return_to_origins: Vec<String>,
+    /// IP reputation provider configuration (P-2).
+    #[serde(default)]
+    pub ip_reputation: IpReputationYaml,
+}
+
+/// `security.ip_reputation` — IP reputation policy and provider config (P-2).
+///
+/// Example:
+///
+/// ```yaml
+/// security:
+///   ip_reputation:
+///     enabled: true
+///     action: block          # block | challenge | log (default: log)
+///     spamhaus:
+///       drop_url: https://www.spamhaus.org/drop/drop.txt
+///       dropv6_url: https://www.spamhaus.org/drop/dropv6.txt
+///       refresh_interval_secs: 86400
+///     maxmind_db_path: /etc/hearth/GeoLite2-ASN.mmdb
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct IpReputationYaml {
+    /// Whether IP reputation checks are enabled.  Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Action to take when the provider flags an IP (block / challenge / log).
+    /// Default: `"log"`.
+    #[serde(default)]
+    pub action: IpReputationActionYaml,
+    /// Spamhaus DROP / EDROP provider settings.
+    #[serde(default)]
+    pub spamhaus: SpamhausDropYaml,
+    /// Path to the MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB file.
+    ///
+    /// Absent / empty = MaxMind ASN lookup disabled.
+    #[serde(default)]
+    pub maxmind_db_path: Option<String>,
+}
+
+/// Action taken when IP reputation flags an IP.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IpReputationActionYaml {
+    /// Reject the request with HTTP 403.
+    Block,
+    /// Return a challenge response (A-16 CAPTCHA-of-last-resort).
+    Challenge,
+    /// Allow but record the signal (default, fail-open posture).
+    #[default]
+    Log,
+}
+
+/// `security.ip_reputation.spamhaus` — Spamhaus DROP/EDROP refresh settings.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpamhausDropYaml {
+    /// URL for the Spamhaus DROP (IPv4) list.
+    #[serde(default = "SpamhausDropYaml::default_drop_url")]
+    pub drop_url: String,
+    /// URL for the Spamhaus EDROP (IPv6) list.
+    #[serde(default = "SpamhausDropYaml::default_dropv6_url")]
+    pub dropv6_url: String,
+    /// Refresh interval in seconds.  Default: 86 400 (24 hours).
+    #[serde(default = "SpamhausDropYaml::default_refresh_interval_secs")]
+    pub refresh_interval_secs: u64,
+}
+
+impl SpamhausDropYaml {
+    fn default_drop_url() -> String {
+        "https://www.spamhaus.org/drop/drop.txt".into()
+    }
+    fn default_dropv6_url() -> String {
+        "https://www.spamhaus.org/drop/dropv6.txt".into()
+    }
+    fn default_refresh_interval_secs() -> u64 {
+        86_400
+    }
+}
+
+impl Default for SpamhausDropYaml {
+    fn default() -> Self {
+        Self {
+            drop_url: Self::default_drop_url(),
+            dropv6_url: Self::default_dropv6_url(),
+            refresh_interval_secs: Self::default_refresh_interval_secs(),
+        }
+    }
 }
 
 /// `security.http2` — HTTP/2 rapid-reset defense (A-39, CVE-2023-44487).
