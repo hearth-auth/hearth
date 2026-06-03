@@ -49,6 +49,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   the limit returns `429 Too Many Requests` (HEA-1212).  Dev mode (`--dev`) disables the
   cap so local SDK smoke tests and CLI integration tests do not race the limiter.
 
+### Fixed
+
+- **A-33 `update_realm` vs delete cascade race** — `delete_realm` releases the realm
+  ops lock after stamping `DeletingInProgress` so the (potentially long) cascade does
+  not block other realms.  Without a status check on `update_realm`, a concurrent
+  rename could re-put the realm record between the cascade's record-delete and
+  signing-key-delete, leaving `record=Some / key=None`.  `update_realm` now refuses
+  updates against a realm whose cascade has started.
+
 - **A-13 WebAuthn attestation policy** — per-realm configuration (`realms.<name>.auth.webauthn_attestation`)
   controls: `allow_none` (whether the `"none"` attestation format is accepted),
   `aaguid_allowlist` (allowlist of authenticator AAGUIDs in UUID format), and
