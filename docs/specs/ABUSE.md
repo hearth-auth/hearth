@@ -6,6 +6,124 @@ phase-by-phase threat model.
 
 ---
 
+## A-3 — Distributed-Attack Detector
+
+**Status:** Shipped (HEA-1189)  
+**Module:** `src/abuse/detector` → `DistributedAttackDetector`
+
+### What it detects
+
+Two cardinality dimensions, independently thresholded:
+
+| Dimension | Pattern caught |
+|-----------|---------------|
+| Distinct usernames tried per source IP | Password spray: one IP cycling through many accounts |
+| Distinct source IPs targeting one username | Distributed credential stuffing: botnet each trying one account once |
+
+### Data structure
+
+A `DistinctWindow` per (IP or username) key uses two rotating `HashSet<u64>`
+buckets backed by `SipHash-1-3` (Rust `DefaultHasher`).  Rotation schedule:
+- `elapsed ≥ full_window` → full clear (both buckets emptied).
+- `elapsed ≥ half_window` → partial rotation (`prev ← current`, fresh `current`).
+
+The distinct count is `current ∪ prev` computed via early-exit iteration once
+the threshold is hit, so the check is O(threshold) not O(n).
+
+Each bucket is capped at `2 × threshold` entries, bounding memory per key
+regardless of attack rate.
+
+### Outcome and caller contract
+
+```
+DetectorOutcome::Challenge { reason: &'static str }
+```
+
+Callers receiving `Challenge` MUST:
+1. Emit `AuditAction::AbuseDetected` with IP and username in metadata.
+2. Apply a challenge response (A-16 CAPTCHA or A-17 tarpit).
+3. Return an appropriate error to the client (HTTP 429 or challenge token).
+
+MUST NOT surface the `reason` field to the client.
+
+### Failure mode: fail-open
+
+Lock poisoning returns `DetectorOutcome::Allow`.  The hard rate limiter (A-2)
+and per-account lockout (A-12) remain backstops.
+
+### Configuration (`hearth.yaml`)
+
+```yaml
+security:
+  distributed_attack_detector:
+    window: 300s              # rolling window length (default: 5 min)
+    username_per_ip_threshold: 20   # distinct usernames per IP
+    ip_per_username_threshold: 20   # distinct IPs per username
+```
+
+Set `username_per_ip_threshold` or `ip_per_username_threshold` to `usize::MAX`
+(or use `DistributedAttackDetector::disabled()`) to disable individual
+dimensions without recompiling.
+
+---
+
+## A-4 — Outbound Email/SMS Volume Shield
+
+**Status:** Shipped (HEA-1189)  
+**Module:** `src/abuse/detector` → `OutboundVolumeShield`
+
+Prevents a tenant from using Hearth as an email-pumping amplifier against
+third-party recipients.  Tracks *distinct* outbound recipients per realm in a
+rolling window.
+
+### Caps
+
+| Outcome | Meaning | Required caller action |
+|---------|---------|------------------------|
+| `Allow` | Within budget | Proceed with send |
+| `SoftCap` | Unusual breadth — review recommended | Emit `AbuseDetected` audit + A-7 security webhook; MAY still send |
+| `HardCap` | Budget exhausted | MUST reject send (HTTP 429 or equivalent); emit `AbuseDetected` audit |
+
+### Privacy
+
+Recipient addresses are stored as `SipHash-1-3` hashes (`u64`).  Plaintext
+recipient addresses are never retained in memory.
+
+### Integration point
+
+Callers that dispatch outbound email call
+`OutboundVolumeShield::check_email(realm_id, recipient)` before the actual
+send.  For SMS (when `src/identity/sms.rs` ships), call `check_sms(...)`.
+
+```rust
+match volume_shield.check_email(realm_id, recipient) {
+    VolumeShieldOutcome::HardCap => return Err(EmailError::VolumeLimitExceeded),
+    VolumeShieldOutcome::SoftCap => {
+        // emit AbuseDetected audit + security webhook
+    }
+    VolumeShieldOutcome::Allow => {}
+}
+email_service.send_verification_email(recipient, ...)?;
+```
+
+### Failure mode: fail-open
+
+Lock poisoning returns `VolumeShieldOutcome::Allow`.
+
+### Configuration (`hearth.yaml`)
+
+```yaml
+security:
+  outbound_volume_shield:
+    window: 3600s           # rolling window (default: 1 hour)
+    email_soft_cap: 1000    # distinct email recipients before SoftCap
+    email_hard_cap: 5000    # distinct email recipients before HardCap
+    sms_soft_cap: 100       # distinct SMS recipients before SoftCap
+    sms_hard_cap: 500       # distinct SMS recipients before HardCap
+```
+
+---
+
 ## A-7 — Security Webhook Channel
 
 **Status:** Shipped (HEA-1190)
@@ -894,3 +1012,136 @@ counter resets to zero, and the next probe starts a new window.
 
 This counter is per (realm, subject) — each user has an independent counter
 in each realm.  There is no cross-realm sharing.
+
+
+---
+
+## A-9 — Tenant-Managed CIDR Allow/Deny Lists
+
+**Status:** Shipped (HEA-1191)  
+**Module:** `src/abuse/cidr`  
+**Storage prefix:** `abuse:{realm}:cidr:{allow|deny}:{seq}`
+
+Per-realm IPv4/IPv6 CIDR lists that gate every public auth request.  Loaded
+from storage by the admin plane and held in an `Arc<ArcSwap<CidrFilter>>`
+for zero-lock hot-path lookup.
+
+### Evaluation order
+
+1. If the source IP matches any entry in the **allow list** → `Allow`.  
+   Explicit trust cannot be overridden by the deny list.
+2. If the source IP matches any entry in the **deny list** → `Deny`.
+3. If the allow list is **non-empty** and the IP is **not** in it → `Deny`
+   (strict allowlist mode).
+4. Otherwise → `Allow` (fail-open, §6.1).
+
+### Fail-open policy
+
+An empty `CidrFilter` (both lists empty) always returns `Allow`.  This
+ensures a misconfigured or missing policy does not lock operators out.
+
+### Configuration surface
+
+```yaml
+# Per-realm (hearth.yaml)
+realms:
+  my-realm:
+    security:
+      cidr_policy:
+        allow:
+          - "10.0.0.0/8"
+          - "2001:db8::/32"
+        deny:
+          - "198.51.100.0/24"
+```
+
+### Not yet implemented
+
+- Admin UI action ("block this IP") wired to A-9 storage (tracked in
+  the A-8 admin-abuse-dashboard stub).
+- Reload-on-change without restart (requires `ArcSwap` integration in
+  the realm-config reloader).
+
+---
+
+## A-12 — Adaptive Exponential Lockout Backoff
+
+**Status:** Shipped (HEA-1191)  
+**Module:** `src/abuse/backoff`
+
+Tracks per-key (IP address or user ID) consecutive lockout events and
+escalates the lockout duration on each repeat offense.
+
+### Default backoff schedule
+
+| Offense level | Lockout duration |
+|:---:|---:|
+| 1st | 1 minute |
+| 2nd | 5 minutes |
+| 3rd | 30 minutes |
+| 4th+ | 24 hours (saturates) |
+
+### Offense counter reset
+
+The offense counter resets to zero after `offense_cooldown` (default 7 days)
+has elapsed since the *end* of the most recent lockout.  A patient attacker
+who waits exactly for the lockout to expire does not regain a clean slate
+until the full cooldown window has passed.
+
+### Configuration surface
+
+```yaml
+security:
+  adaptive_backoff:
+    durations: ["1m", "5m", "30m", "24h"]   # optional; these are the defaults
+    offense_cooldown: "7d"                    # optional; default 7 days
+```
+
+Setting `durations: []` disables adaptive backoff (fail-open); the existing
+flat per-account lockout from `RateLimitConfig` remains active.
+
+### Key format
+
+The backoff key is a free-form string.  Auth handlers use:
+- `"ip:{addr}"` for per-IP throttling
+- `"user:{user_id}"` for per-account throttling
+
+---
+
+## A-17 — Login-Event Tarpit
+
+**Status:** Shipped (HEA-1191)  
+**Module:** `src/abuse/tarpit`
+
+Once a source IP exceeds the failure threshold, every subsequent auth `POST`
+from that IP receives a deterministic fixed delay before credential
+verification.  The delay is **off the hot path**: `check()` returns
+immediately; the caller applies `tokio::time::sleep(delay)`.
+
+### Hot-path contract
+
+`TarpitStore::check()` is:
+- Synchronous and allocation-free.
+- Holds a `Mutex` only for the duration of a hash-map lookup.
+- Completes in ≤1 µs p99; the overall `AbuseGuard::check()` budget is ≤5 µs.
+
+### Fail-open policy
+
+`threshold: None` (the default) means all calls return `Allow`.  The tarpit
+does not activate until explicitly configured.
+
+### Configuration surface
+
+```yaml
+security:
+  tarpit:
+    threshold: 5          # failures in `window_secs` before tarpit activates
+    window_secs: 60       # rolling window for counting failures
+    delay_ms: 200         # deterministic delay (100–500 ms per plan §4.1 A-17)
+```
+
+### Relationship to A-16 (Challenge)
+
+A-16 **gates** the request (CAPTCHA required).  A-17 **adds latency** but
+does not gate.  Both can be active simultaneously; tarpit fires before the
+CAPTCHA check in handler order.

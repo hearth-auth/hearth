@@ -3,8 +3,13 @@
 //! | ID   | Feature                                  | Location in module       |
 //! |------|------------------------------------------|--------------------------|
 //! | A-2  | Global request shaper (per-IP + realm)   | [`shaper`]               |
+//! | A-3  | Distributed-attack detector              | [`detector`]             |
+//! | A-4  | Outbound email/SMS volume shield         | [`detector`]             |
+//! | A-9  | Tenant-managed CIDR allow/deny lists     | [`cidr`]                 |
+//! | A-12 | Adaptive exponential lockout backoff     | [`backoff`]              |
 //! | A-15 | gRPC rate-limit interceptor              | [`shaper`]               |
 //! | A-16 | CAPTCHA-of-last-resort challenge          | [`challenge`]            |
+//! | A-17 | Login tarpit (deterministic delay)       | [`tarpit`]               |
 //! | A-21 | JSON parse-bomb guard (depth + length)   | [`guards`]               |
 //! | A-22 | Decompression-bomb cap                   | [`guards`]               |
 //! | A-23 | Trait-level pagination hard cap          | (constant here)          |
@@ -18,13 +23,17 @@
 //! | P-3  | Bot-signal trait + UA/JA3/JA4 heuristics | [`bot_signal`]           |
 //! | P-5  | Email-reputation trait + disposable list | [`email_reputation`]     |
 
+pub mod backoff;
 pub mod bot_signal;
 pub mod challenge;
+pub mod cidr;
+pub mod detector;
 pub mod email_reputation;
 pub mod guards;
 pub mod redirect;
 pub mod sanitize;
 pub mod shaper;
+pub mod tarpit;
 
 /// Maximum page size accepted at every paginated list endpoint (A-23).
 pub const MAX_PAGE_SIZE: usize = 1_000;

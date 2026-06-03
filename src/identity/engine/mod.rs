@@ -7528,6 +7528,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 algorithm,
                 hash: raw.phc_string.clone(),
                 created_at,
+                pepper_version: None,
             };
             let cred_bytes = Self::serialize_credential(&stored)?;
             let cred_key = keys::encode_credential_key(&user_id);

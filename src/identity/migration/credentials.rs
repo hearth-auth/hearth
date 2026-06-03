@@ -176,6 +176,7 @@ mod tests {
             algorithm: PasswordAlgorithm::Pbkdf2Sha256,
             hash: parsed.phc_string,
             created_at: 0,
+            pepper_version: None,
         };
         let ok = verify_password(
             &CleartextPassword::from_string("hunter2".to_string()),

@@ -9,6 +9,59 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **A-46 Argon2 pepper rotation policy** — `CredentialConfig` gains an optional
+  `PepperConfig` that applies `HMAC-SHA256(key=pepper, msg=password)` before
+  Argon2id hashing. The pepper version is stored in `StoredCredential::pepper_version`
+  (`serde(default)` for backward compatibility). On login, the engine tries the
+  active pepper first; if the credential carries the previous pepper version
+  (grace window open in config), it is also accepted and the credential is lazily
+  re-hashed with the active pepper. Credentials without a pepper version (pre-upgrade)
+  are also lazily upgraded. A new `hearth migrate rotate-pepper --data-dir <path>`
+  CLI subcommand reports how many credentials in each realm still lack a pepper version.
+  Fail-choice: fail-open (no pepper = still logs in) until operator installs pepper.
+  New types: `PepperKey`, `PepperConfig`. New functions: `hash_password`,
+  `verify_password_with_pepper` (both public for migration tooling). (HEA-1210)
+
+- **A-3 Distributed-attack detector** — `DistributedAttackDetector` in
+  `src/abuse/detector` tracks two cardinality dimensions per realm using a
+  two-bucket rotating `DistinctWindow`: (1) distinct usernames tried per
+  source IP and (2) distinct source IPs targeting one username.  When either
+  count exceeds the configured threshold in the rolling window, `check()`
+  returns `DetectorOutcome::Challenge` with a reason string for logging.
+  Callers must emit `AuditAction::AbuseDetected` and apply A-16 / A-17.
+  Fail-open on lock poisoning; `disabled()` constructor for opt-out.
+  Config: `security.distributed_attack_detector` (`window`, per-dimension
+  thresholds).  No new dependencies (HEA-1189).
+
+- **A-4 Outbound email/SMS volume shield** — `OutboundVolumeShield` in
+  `src/abuse/detector` enforces per-realm rolling-window distinct-recipient
+  caps for outbound email (and SMS when that module ships).  Two thresholds:
+  `SoftCap` for operator-review alerting (A-7 webhook / A-8 dashboard) and
+  `HardCap` for mandatory send rejection (HTTP 429).  Recipients are stored
+  as `SipHash-1-3` hashes — PII never written to memory.  Fail-open on lock
+  poisoning; `disabled()` constructor for opt-out.  Config:
+  `security.outbound_volume_shield` (`window`, `email_soft_cap`,
+  `email_hard_cap`, `sms_soft_cap`, `sms_hard_cap`) (HEA-1189).
+
+- **A-9 Tenant-managed CIDR allow/deny lists** — `CidrFilter` in `src/abuse/cidr`
+  provides per-realm IPv4/IPv6 CIDR allow and deny lists evaluated in `AbuseGuard`.
+  Stored under the `abuse:{realm}:cidr:*` key prefix.  Evaluation order: allow list
+  overrides deny list (explicit trust); non-empty allow list enables strict whitelist
+  mode; empty filter is fail-open per §6.1 (HEA-1191).
+
+- **A-12 Adaptive exponential lockout backoff** — `AdaptiveBackoffStore` in
+  `src/abuse/backoff` escalates per-key lockout durations across repeat offenses:
+  **1 min → 5 min → 30 min → 24 h** (configurable).  The offense counter resets after
+  a configurable cooldown period following the end of the most recent lockout.
+  Disabled (fail-open) by default; enable via `security.adaptive_backoff` (HEA-1191).
+
+- **A-17 Login-event tarpit** — `TarpitStore` in `src/abuse/tarpit` injects a
+  deterministic delay (default 200 ms, configurable 100–500 ms) into auth `POST`
+  requests once a source IP exceeds the failure threshold.  The delay is applied
+  off the hot path by the caller (`tokio::time::sleep`); the `check()` method is
+  allocation-free and meets the ≤5 µs p99 hot-path budget.  Disabled (fail-open)
+  by default; enable via `security.tarpit` (HEA-1191).
+
 - **P-3 BotSignal provider** — `BotSignalProvider` trait and reference
   `HeuristicBotSignalProvider` adapter in `src/abuse/bot_signal`.  The adapter
   applies three layers: JA3/JA4 hash blocklist (proxy-injected headers), `woothee`

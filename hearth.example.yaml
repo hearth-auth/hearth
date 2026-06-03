@@ -260,6 +260,26 @@ oidc:
 #       max_failures: 5       # default: 5; consecutive failures before lockout
 #       lockout_seconds: 300  # default: 300 (5 min); per-account lockout duration
 
+# --- Argon2 pepper (A-46) ---------------------------------------------------
+# Adding a pepper hashes HMAC-SHA256(key=pepper_key, msg=password) before
+# Argon2id, so that even a stolen database cannot be brute-forced without the
+# pepper secret. Credentials are lazily re-hashed on the next successful login.
+#
+# Rotation procedure:
+#   1. Copy the current `active_version` / `active_hex` to `previous_*`.
+#   2. Increment `active_version` and supply a new 32-byte hex key in `active_hex`.
+#   3. Deploy — credentials are re-hashed lazily as users log in.
+#   4. Once all active users have logged in (check `hearth migrate rotate-pepper`),
+#      remove the `previous_*` keys to close the grace window.
+#
+# security:
+#   password:
+#     pepper:
+#       active_version: 1               # monotonically increasing integer
+#       active_hex: "${PEPPER_KEY_HEX}" # 32-byte (64 hex chars) secret
+#       # previous_version: 0           # uncomment during rotation grace window
+#       # previous_hex: "${OLD_PEPPER_HEX}"
+
 # --- Auth defaults (global) -------------------------------------------------
 # These apply to all realms unless overridden per-realm below.
 

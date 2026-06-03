@@ -32,7 +32,10 @@ mod types;
 mod validation;
 pub(crate) mod webauthn;
 
-pub use credentials::{CleartextPassword, CredentialConfig};
+pub use credentials::{
+    hash_password, verify_password_with_pepper, CleartextPassword, CredentialConfig, PepperConfig,
+    PepperKey, StoredCredential,
+};
 pub use email::{
     ApiKey, EmailBranding, EmailError, EmailMessage, EmailSender, EmailService, LoggingEmailSender,
     MailgunEmailSender, MailtrapEmailSender, PostmarkEmailSender, SendgridEmailSender,
@@ -88,11 +91,20 @@ use crate::core::{
     ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
 };
 
-/// Maximum page size for all paginated list operations (A-23).
-///
-/// Callers supplying `limit > MAX_PAGE_SIZE` receive
-/// [`IdentityError::InvalidInput`].  This constant is also re-exported from
-/// `crate::abuse::MAX_PAGE_SIZE` for use in handlers and tests.
+// Maximum page size for all paginated list operations (A-23).
+// Callers supplying `limit > MAX_PAGE_SIZE` receive `IdentityError::InvalidInput`.
+// This constant is also re-exported from `crate::abuse::MAX_PAGE_SIZE`.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Migration helpers (pepper rotation tooling)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns the storage scan prefix for credentials (used by migration tools).
+#[must_use]
+pub fn credential_scan_prefix_for_migration() -> Vec<u8> {
+    crate::identity::keys::credential_scan_prefix()
+}
+
 pub const MAX_PAGE_SIZE: usize = crate::abuse::MAX_PAGE_SIZE;
 
 /// Clamps `limit` to [`MAX_PAGE_SIZE`], returning an `IdentityError` if the
