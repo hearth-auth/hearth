@@ -112,8 +112,8 @@ Verify the `X-Hearth-Signature-256` header on all incoming webhook deliveries.
 
 ## TLS Configuration
 
-Hearth uses `rustls` 0.23 and supports TLS 1.2 and TLS 1.3. TLS 1.0 and 1.1 are not
-supported.
+Hearth uses `rustls` 0.23 and enforces **TLS 1.3 only**. TLS 1.0, 1.1, and 1.2 are not
+accepted — downgrade to TLS 1.2 is explicitly rejected at the protocol level.
 
 - **Terminate TLS at Hearth, not a reverse proxy**, unless you have a specific reason to use
   a proxy. Terminating at the proxy creates a plaintext hop between proxy and Hearth.

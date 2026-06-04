@@ -236,8 +236,8 @@ pub struct TlsConfigParams {
 /// `require_client_cert` is true, enables mutual TLS by configuring a
 /// [`WebPkiClientVerifier`](rustls::server::WebPkiClientVerifier).
 ///
-/// `rustls` structurally supports only TLS 1.2 and 1.3 — it does not implement
-/// TLS 1.0/1.1, nor any weak cipher suites (RC4, DES, NULL, export).
+/// Enforces **TLS 1.3 only** — TLS 1.2 and earlier are not accepted. `rustls`
+/// does not implement TLS 1.0/1.1 or weak cipher suites (RC4, DES, NULL, export).
 pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
@@ -275,14 +275,14 @@ pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsE
         };
 
         ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+            .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|e| TlsError::ConfigBuild {
                 reason: e.to_string(),
             })?
             .with_client_cert_verifier(verifier)
     } else {
         ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+            .with_protocol_versions(&[&rustls::version::TLS13])
             .map_err(|e| TlsError::ConfigBuild {
                 reason: e.to_string(),
             })?
@@ -539,10 +539,56 @@ mod tests {
         }
     }
 
-    /// Verifies that we configure both TLS 1.2 and TLS 1.3 by checking
-    /// that the cipher suites include both TLS 1.2-specific and TLS 1.3-specific suites.
+    /// Verifies TLS 1.3-only enforcement: a TLS 1.2-only client is rejected at the handshake.
     #[test]
-    fn supports_tls12_and_tls13_cipher_suites() {
+    fn tls12_client_rejected() {
+        use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use rustls::{ClientConnection, DigitallySignedStruct, Error, ServerConnection, SignatureScheme};
+
+        /// No-op cert verifier so TLS handshakes succeed without a real PKI chain.
+        #[derive(Debug)]
+        struct SkipCertVerification;
+
+        impl ServerCertVerifier for SkipCertVerification {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &ServerName<'_>,
+                _ocsp: &[u8],
+                _now: UnixTime,
+            ) -> Result<ServerCertVerified, Error> {
+                Ok(ServerCertVerified::assertion())
+            }
+
+            fn verify_tls12_signature(
+                &self,
+                _msg: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+
+            fn verify_tls13_signature(
+                &self,
+                _msg: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                vec![
+                    SignatureScheme::ECDSA_NISTP256_SHA256,
+                    SignatureScheme::RSA_PSS_SHA256,
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                ]
+            }
+        }
+
         let dir = TempDir::new().expect("tempdir");
         let (cert_path, key_path) = generate_test_certs(dir.path());
         let tls_config = ReloadableTlsConfig::load(cert_path, key_path).expect("load config");
@@ -553,28 +599,53 @@ mod tests {
             require_client_cert: false,
         };
 
-        let server_config = build_server_config(params).expect("build config");
+        let server_config = Arc::new(build_server_config(params).expect("build config"));
 
-        let suite_names: Vec<String> = server_config
-            .crypto_provider()
-            .cipher_suites
-            .iter()
-            .map(|s| format!("{:?}", s.suite()))
-            .collect();
-
-        // TLS 1.3 suites contain "TLS13"
-        let has_tls13 = suite_names.iter().any(|n| n.contains("TLS13"));
-        assert!(
-            has_tls13,
-            "should have TLS 1.3 cipher suites: {suite_names:?}"
+        // TLS 1.2-only client
+        let client_config = Arc::new(
+            rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS12])
+            .expect("tls12 client config")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipCertVerification))
+            .with_no_client_auth(),
         );
 
-        // TLS 1.2 suites contain "TLS_ECDHE"
-        let has_tls12 = suite_names.iter().any(|n| n.contains("TLS_ECDHE"));
-        assert!(
-            has_tls12,
-            "should have TLS 1.2 cipher suites: {suite_names:?}"
-        );
+        let server_name: ServerName<'_> = "localhost".try_into().expect("server name");
+        let mut client =
+            ClientConnection::new(client_config, server_name).expect("client conn");
+        let mut server = ServerConnection::new(server_config).expect("server conn");
+
+        // Drive handshake — TLS 1.2 ClientHello must be rejected by the TLS 1.3-only server.
+        let mut c_buf = Vec::new();
+        let mut s_buf = Vec::new();
+        let mut rejected = false;
+
+        for _ in 0..10 {
+            c_buf.clear();
+            let _ = client.write_tls(&mut c_buf);
+            if !c_buf.is_empty() {
+                let _ = server.read_tls(&mut c_buf.as_slice());
+                if server.process_new_packets().is_err() {
+                    rejected = true;
+                    break;
+                }
+            }
+
+            s_buf.clear();
+            let _ = server.write_tls(&mut s_buf);
+            if !s_buf.is_empty() {
+                let _ = client.read_tls(&mut s_buf.as_slice());
+                if client.process_new_packets().is_err() {
+                    rejected = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(rejected, "TLS 1.2 handshake must be rejected by the TLS 1.3-only server");
     }
 
     // === mTLS config build ===

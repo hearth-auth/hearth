@@ -38,6 +38,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **TLS 1.3 only — TLS 1.2 downgrade path removed (HEA-1241)** — both the mTLS and
+  no-client-auth server config paths now call `.with_protocol_versions(&[&TLS13])` instead
+  of accepting TLS 1.2 and 1.3. TLS 1.2 `ClientHello`s are rejected at the rustls handshake
+  layer before any application data is processed. `docs/guides/security-hardening.md` updated
+  to document TLS 1.3-only support.
+
 - **Step-up MFA rate-limit gaps closed (HEA-836)** — three additional findings
   from the SecurityAuditor re-review resolved: the pre-flight IP rate-limit check
   now covers `grant_type=urn:hearth:params:grant-type:step-up-mfa` (previously
