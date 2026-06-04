@@ -24,7 +24,10 @@
         action="/ui/admin/realms/{{ realm_name }}/organizations/new"
         autocomplete="off"
         class="space-y-4"
-        x-data="{ name: '{{ form_name }}', slug: '{{ form_slug }}', slugTouched: {% if form_slug.is_empty() %}false{% else %}true{% endif %} }">
+        x-data="orgNewForm"
+        data-name="{{ form_name }}"
+        data-slug="{{ form_slug }}"
+        data-slug-touched="{% if form_slug.is_empty() %}false{% else %}true{% endif %}">
     {% match csrf %}
       {% when Some with (token) %}
         <input type="hidden" name="_csrf" value="{{ token }}">
@@ -40,7 +43,7 @@
              autofocus
              maxlength="80"
              x-model="name"
-             @input="if (!slugTouched) slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63)"
+             @input="updateSlug()"
              class="mt-1 input">
     </div>
 

@@ -45,6 +45,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Remove `unsafe-eval` from Content-Security-Policy (HEA-1281)** — replaces the
+  standard Alpine.js v3 build with `@alpinejs/csp` v3.15.12, which uses an eval-free
+  Pratt parser instead of `new Function()` / `AsyncFunction`. All inline `x-data`
+  object literals and complex inline event-handler expressions are migrated to
+  pre-registered `Alpine.data()` components. The `script-src` directive no longer
+  contains `'unsafe-eval'`, restoring the CSP as an effective XSS escalation barrier.
+
 - **Webhook SSRF protection — private/loopback IP rejection (HEA-1252)** —
   webhook URLs are now validated against private/reserved IP ranges at both
   registration time and at each delivery attempt (defeating DNS-rebinding).

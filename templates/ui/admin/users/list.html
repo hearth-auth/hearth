@@ -61,27 +61,8 @@
    accidental destructive actions (Loss Aversion + Forgiveness heuristics). #}
 <form method="post"
       action="{{ list_url }}/bulk-action"
-      x-data="{
-        selected: 0,
-        action: '',
-        confirmPending: false,
-        allChecked: false,
-        idsCsv: '',
-        updateCount() {
-          let checked = $el.querySelectorAll('input.row-check:checked');
-          this.selected = checked.length;
-          this.idsCsv = Array.from(checked).map(c => c.value).join(',');
-          this.confirmPending = false;
-        },
-        submit() {
-          if (!this.action) return;
-          if (['deactivate'].includes(this.action) && !this.confirmPending) {
-            this.confirmPending = true;
-            return;
-          }
-          $root.submit();
-        }
-      }"
+      x-data="userBulkAction"
+      data-total-count="{{ users.len() }}"
       class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
   {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
   <input type="hidden" name="ids" :value="idsCsv">
@@ -90,7 +71,7 @@
   {# Toolbar #}
   <div class="flex items-center justify-between gap-3 border-b border-divider-subtle px-4 py-2 min-h-[2.75rem]">
     <span class="font-mono text-xs text-ht-content-muted"
-          x-text="selected === 0 ? '{{ users.len() }} user{% if users.len() != 1 %}s{% endif %}' : selected + ' selected'"></span>
+          x-text="statusText"></span>
     <div class="flex items-center gap-2" x-show="selected > 0" x-cloak>
       {# Action picker #}
       <select x-model="action"

@@ -13,29 +13,8 @@
   {% endmatch %}
 
   <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/new" class="space-y-4"
-        x-data="{
-          email: '{{ form_email }}',
-          password: '',
-          emailDirty: false,
-          passwordDirty: false,
-          get emailValid() { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.email); },
-          get passwordStrength() {
-            const p = this.password;
-            let s = 0;
-            if (p.length >= 8)  s++;
-            if (p.length >= 12) s++;
-            if (/[A-Z]/.test(p)) s++;
-            if (/[0-9]/.test(p)) s++;
-            if (/[^A-Za-z0-9]/.test(p)) s++;
-            return Math.min(s, 4);
-          },
-          get strengthLabel() {
-            return ['Very weak','Weak','Fair','Strong','Very strong'][this.passwordStrength];
-          },
-          get strengthColor() {
-            return ['bg-danger','bg-warning','bg-warning','bg-teal-500','bg-success'][this.passwordStrength];
-          }
-        }">
+        x-data="userNewForm"
+        data-email="{{ form_email }}">
     {% match csrf %}
       {% when Some with (token) %}
         <input type="hidden" name="_csrf" value="{{ token }}">
@@ -92,15 +71,15 @@
         <div class="flex h-1.5 gap-0.5 rounded-full overflow-hidden">
           <template x-for="i in [1,2,3,4]" :key="i">
             <div class="h-full flex-1 rounded-full transition-colors duration-200"
-                 :class="i <= passwordStrength ? strengthColor : 'bg-divider-strong'"></div>
+                 :class="i <= pwStrength ? pwStrengthColor : 'bg-divider-strong'"></div>
           </template>
         </div>
         <p class="text-xs text-ht-content-muted">
           Strength: <span :class="{
-            'text-danger-fg': passwordStrength <= 1,
-            'text-warning-fg': passwordStrength === 2,
-            'text-success-fg': passwordStrength >= 3
-          }" x-text="strengthLabel"></span>
+            'text-danger-fg': pwStrength <= 1,
+            'text-warning-fg': pwStrength === 2,
+            'text-success-fg': pwStrength >= 3
+          }" x-text="pwStrengthLabel"></span>
         </p>
       </div>
 

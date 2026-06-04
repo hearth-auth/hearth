@@ -1,4 +1,4 @@
-<div x-data="{ grantOpen: false, scopeType: 'realm', selectedOrg: '' }">
+<div x-data="userPermGrant">
 
   {# Permissions inherited from role assignments, grouped by source role (read-only) #}
   {% if !role_inherited_groups.is_empty() %}
@@ -75,7 +75,7 @@
         {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
 
         {# Hidden scope field — kept in sync by Alpine #}
-        <input type="hidden" name="scope" :value="scopeType === 'org' && selectedOrg ? 'org:' + selectedOrg : 'realm'">
+        <input type="hidden" name="scope" :value="scopeValue">
 
         <div class="grid gap-4 sm:grid-cols-2">
           <div>

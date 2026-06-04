@@ -14,42 +14,42 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Bind Address</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">IP address the server listens on.</p>
       <input type="text" :value="getVal('server.bind_address', '')" @input="setVal('server.bind_address', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('server.bind_address'))">
+             :class="fieldClass('server.bind_address'))">
       <p x-show="errors['server.bind_address']" x-text="errors['server.bind_address']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Port</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">HTTP port (1–65535). Supports env var substitution.</p>
       <input type="number" min="1" max="65535" :value="getVal('server.port', '')" @input="setVal('server.port', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('server.port'))">
+             :class="fieldClass('server.port'))">
       <p x-show="errors['server.port']" x-text="errors['server.port']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">TLS Certificate Path</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Path to PEM certificate file (optional).</p>
       <input type="text" :value="getVal('server.tls_cert_path', '')" @input="setVal('server.tls_cert_path', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('server.tls_cert_path'))">
+             :class="fieldClass('server.tls_cert_path'))">
       <p x-show="errors['server.tls_cert_path']" x-text="errors['server.tls_cert_path']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">TLS Key Path</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Path to PEM private key file (optional).</p>
       <input type="text" :value="getVal('server.tls_key_path', '')" @input="setVal('server.tls_key_path', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('server.tls_key_path'))">
+             :class="fieldClass('server.tls_key_path'))">
       <p x-show="errors['server.tls_key_path']" x-text="errors['server.tls_key_path']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">TLS Client CA Path</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">CA cert for mTLS client verification (optional).</p>
       <input type="text" :value="getVal('server.tls_client_ca_path', '')" @input="setVal('server.tls_client_ca_path', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('server.tls_client_ca_path'))">
+             :class="fieldClass('server.tls_client_ca_path'))">
       <p x-show="errors['server.tls_client_ca_path']" x-text="errors['server.tls_client_ca_path']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Require Client Cert</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Require a valid client certificate (mTLS).</p>
       <select @change="setVal('server.tls_require_client_cert', $el.value === 'true' ? true : $el.value === 'false' ? false : null)"
-              :class="(Object.keys(errors).length, fieldClass('server.tls_require_client_cert'))">
+              :class="fieldClass('server.tls_require_client_cert'))">
         <option value="" :selected="getVal('server.tls_require_client_cert', null) === null">— not set —</option>
         <option value="true" :selected="getVal('server.tls_require_client_cert', null) === true">Enabled</option>
         <option value="false" :selected="getVal('server.tls_require_client_cert', null) === false">Disabled</option>
@@ -99,35 +99,35 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Data Directory</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Path for WAL and SST files. Default: ./data</p>
       <input type="text" :value="getVal('storage.data_dir', '')" @input="setVal('storage.data_dir', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('storage.data_dir'))">
+             :class="fieldClass('storage.data_dir'))">
       <p x-show="errors['storage.data_dir']" x-text="errors['storage.data_dir']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">WAL Max Size (bytes)</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Max WAL file size before rotation. Default: 268435456 (256 MiB).</p>
       <input type="number" min="0" :value="getVal('storage.wal_max_size_bytes', '')" @input="setVal('storage.wal_max_size_bytes', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('storage.wal_max_size_bytes'))">
+             :class="fieldClass('storage.wal_max_size_bytes'))">
       <p x-show="errors['storage.wal_max_size_bytes']" x-text="errors['storage.wal_max_size_bytes']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Memtable Flush (bytes)</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Memtable size threshold before SST flush. Default: 67108864 (64 MiB).</p>
       <input type="number" min="0" :value="getVal('storage.memtable_flush_bytes', '')" @input="setVal('storage.memtable_flush_bytes', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('storage.memtable_flush_bytes'))">
+             :class="fieldClass('storage.memtable_flush_bytes'))">
       <p x-show="errors['storage.memtable_flush_bytes']" x-text="errors['storage.memtable_flush_bytes']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Hot Tier Capacity</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Max entries in hot tier cache. Default: 10000.</p>
       <input type="number" min="0" :value="getVal('storage.hot_tier_capacity', '')" @input="setVal('storage.hot_tier_capacity', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('storage.hot_tier_capacity'))">
+             :class="fieldClass('storage.hot_tier_capacity'))">
       <p x-show="errors['storage.hot_tier_capacity']" x-text="errors['storage.hot_tier_capacity']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">fsync Writes</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">MUST be true in production. Ensures WAL durability.</p>
       <select @change="setVal('storage.fsync', $el.value === 'true' ? true : $el.value === 'false' ? false : null)"
-              :class="(Object.keys(errors).length, fieldClass('storage.fsync'))">
+              :class="fieldClass('storage.fsync'))">
         <option value="" :selected="getVal('storage.fsync', null) === null">— not set —</option>
         <option value="true" :selected="getVal('storage.fsync', null) === true">Enabled</option>
         <option value="false" :selected="getVal('storage.fsync', null) === false">Disabled</option>
@@ -148,7 +148,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Log Level</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Tracing filter level.</p>
       <select :value="getVal('observability.log_level', 'info')" @change="setVal('observability.log_level', $el.value)"
-              :class="(Object.keys(errors).length, fieldClass('observability.log_level'))">
+              :class="fieldClass('observability.log_level'))">
         <option value="trace">trace</option>
         <option value="debug">debug</option>
         <option value="info">info</option>
@@ -161,7 +161,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Log Format</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Output format: human-readable or structured JSON.</p>
       <select :value="getVal('observability.log_format', 'text')" @change="setVal('observability.log_format', $el.value)"
-              :class="(Object.keys(errors).length, fieldClass('observability.log_format'))">
+              :class="fieldClass('observability.log_format'))">
         <option value="text">text</option>
         <option value="json">json</option>
       </select>
@@ -181,28 +181,28 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Request Timeout (sec)</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Per-request timeout in seconds. Default: 30.</p>
       <input type="number" min="0" :value="getVal('operational.request_timeout_secs', '')" @input="setVal('operational.request_timeout_secs', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('operational.request_timeout_secs'))">
+             :class="fieldClass('operational.request_timeout_secs'))">
       <p x-show="errors['operational.request_timeout_secs']" x-text="errors['operational.request_timeout_secs']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Shutdown Timeout (sec)</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Graceful shutdown timeout in seconds. Default: 10.</p>
       <input type="number" min="0" :value="getVal('operational.shutdown_timeout_secs', '')" @input="setVal('operational.shutdown_timeout_secs', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('operational.shutdown_timeout_secs'))">
+             :class="fieldClass('operational.shutdown_timeout_secs'))">
       <p x-show="errors['operational.shutdown_timeout_secs']" x-text="errors['operational.shutdown_timeout_secs']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Max Connections</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Maximum concurrent connections. Default: 1024.</p>
       <input type="number" min="0" :value="getVal('operational.max_connections', '')" @input="setVal('operational.max_connections', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('operational.max_connections'))">
+             :class="fieldClass('operational.max_connections'))">
       <p x-show="errors['operational.max_connections']" x-text="errors['operational.max_connections']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Queue Depth</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Internal work queue depth. Default: 4096.</p>
       <input type="number" min="0" :value="getVal('operational.queue_depth', '')" @input="setVal('operational.queue_depth', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('operational.queue_depth'))">
+             :class="fieldClass('operational.queue_depth'))">
       <p x-show="errors['operational.queue_depth']" x-text="errors['operational.queue_depth']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
   </div>
@@ -219,21 +219,21 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Product Name</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Shown in UI and email subjects. Default: Hearth.</p>
       <input type="text" :value="getVal('branding.product_name', '')" @input="setVal('branding.product_name', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('branding.product_name'))">
+             :class="fieldClass('branding.product_name'))">
       <p x-show="errors['branding.product_name']" x-text="errors['branding.product_name']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Logo URL</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">URL or file path for the logo image.</p>
       <input type="text" :value="getVal('branding.logo_url', '')" @input="setVal('branding.logo_url', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('branding.logo_url'))">
+             :class="fieldClass('branding.logo_url'))">
       <p x-show="errors['branding.logo_url']" x-text="errors['branding.logo_url']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Theme</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Named UI theme: ember, ocean, midnight, forest, cloud, parchment.</p>
       <input type="text" :value="getVal('branding.theme', '')" @input="setVal('branding.theme', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('branding.theme'))"
+             :class="fieldClass('branding.theme'))"
              placeholder="ember">
     </div>
     <div>
@@ -270,7 +270,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">From Address</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Sender address for the From: header. Required for non-log transports.</p>
       <input type="text" :value="getVal('email.from', '')" @input="setVal('email.from', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('email.from'))">
+             :class="fieldClass('email.from'))">
       <p x-show="errors['email.from']" x-text="errors['email.from']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
   </div>
@@ -282,20 +282,20 @@
       <div class="grid gap-5 sm:grid-cols-2">
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Host</label>
-          <input type="text" :value="getVal('email.smtp.host', '')" @input="ensure('email.smtp'); setVal('email.smtp.host', $el.value)"
-                 :class="(Object.keys(errors).length, fieldClass('email.smtp.host'))">
+          <input type="text" :value="getVal('email.smtp.host', '')" @input="setVal('email.smtp.host', $el.value)"
+                 :class="fieldClass('email.smtp.host'))">
       <p x-show="errors['email.smtp.host']" x-text="errors['email.smtp.host']" class="mt-1 text-xs text-danger-fg"></p>
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Port</label>
-          <input type="number" min="1" max="65535" :value="getVal('email.smtp.port', '')" @input="ensure('email.smtp'); setVal('email.smtp.port', $el.value)"
-                 :class="(Object.keys(errors).length, fieldClass('email.smtp.port'))">
+          <input type="number" min="1" max="65535" :value="getVal('email.smtp.port', '')" @input="setVal('email.smtp.port', $el.value)"
+                 :class="fieldClass('email.smtp.port'))">
       <p x-show="errors['email.smtp.port']" x-text="errors['email.smtp.port']" class="mt-1 text-xs text-danger-fg"></p>
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Encryption</label>
-          <select :value="getVal('email.smtp.encryption', 'starttls')" @change="ensure('email.smtp'); setVal('email.smtp.encryption', $el.value)"
-                  :class="(Object.keys(errors).length, fieldClass('email.smtp.encryption'))">
+          <select :value="getVal('email.smtp.encryption', 'starttls')" @change="setVal('email.smtp.encryption', $el.value)"
+                  :class="fieldClass('email.smtp.encryption'))">
             <option value="none">none</option>
             <option value="starttls">starttls</option>
             <option value="tls">tls</option>
@@ -304,14 +304,14 @@
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Username</label>
-          <input type="text" :value="getVal('email.smtp.username', '')" @input="ensure('email.smtp'); setVal('email.smtp.username', $el.value)"
-                 :class="(Object.keys(errors).length, fieldClass('email.smtp.username'))">
+          <input type="text" :value="getVal('email.smtp.username', '')" @input="setVal('email.smtp.username', $el.value)"
+                 :class="fieldClass('email.smtp.username'))">
       <p x-show="errors['email.smtp.username']" x-text="errors['email.smtp.username']" class="mt-1 text-xs text-danger-fg"></p>
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Password</label>
-          <input type="text" :value="getVal('email.smtp.password', '')" @input="ensure('email.smtp'); setVal('email.smtp.password', $el.value)"
-                 :class="(Object.keys(errors).length, fieldClass('email.smtp.password'))"
+          <input type="text" :value="getVal('email.smtp.password', '')" @input="setVal('email.smtp.password', $el.value)"
+                 :class="fieldClass('email.smtp.password'))"
                  placeholder="Supports ${'{'}VAR{'}'}">
         </div>
       </div>
@@ -324,7 +324,7 @@
       <p class="font-mono text-xs font-medium text-ht-content-muted">SendGrid Settings</p>
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">API Key</label>
-        <input type="text" :value="getVal('email.sendgrid.api_key', '')" @input="ensure('email.sendgrid'); setVal('email.sendgrid.api_key', $el.value)"
+        <input type="text" :value="getVal('email.sendgrid.api_key', '')" @input="setVal('email.sendgrid.api_key', $el.value)"
                class="mt-1.5 input">
       </div>
     </div>
@@ -336,7 +336,7 @@
       <p class="font-mono text-xs font-medium text-ht-content-muted">Postmark Settings</p>
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Server Token</label>
-        <input type="text" :value="getVal('email.postmark.server_token', '')" @input="ensure('email.postmark'); setVal('email.postmark.server_token', $el.value)"
+        <input type="text" :value="getVal('email.postmark.server_token', '')" @input="setVal('email.postmark.server_token', $el.value)"
                class="mt-1.5 input">
       </div>
     </div>
@@ -349,17 +349,17 @@
       <div class="grid gap-5 sm:grid-cols-2">
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">API Key</label>
-          <input type="text" :value="getVal('email.mailgun.api_key', '')" @input="ensure('email.mailgun'); setVal('email.mailgun.api_key', $el.value)"
+          <input type="text" :value="getVal('email.mailgun.api_key', '')" @input="setVal('email.mailgun.api_key', $el.value)"
                  class="mt-1.5 input">
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Domain</label>
-          <input type="text" :value="getVal('email.mailgun.domain', '')" @input="ensure('email.mailgun'); setVal('email.mailgun.domain', $el.value)"
+          <input type="text" :value="getVal('email.mailgun.domain', '')" @input="setVal('email.mailgun.domain', $el.value)"
                  class="mt-1.5 input">
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Region</label>
-          <select :value="getVal('email.mailgun.region', 'us')" @change="ensure('email.mailgun'); setVal('email.mailgun.region', $el.value)"
+          <select :value="getVal('email.mailgun.region', 'us')" @change="setVal('email.mailgun.region', $el.value)"
                   class="mt-1.5 input">
             <option value="us">US</option>
             <option value="eu">EU</option>
@@ -377,14 +377,14 @@
       <div class="grid gap-5 sm:grid-cols-2">
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">API Key</label>
-          <input type="text" :value="getVal('email.mailtrap.api_key', '')" @input="ensure('email.mailtrap'); setVal('email.mailtrap.api_key', $el.value)"
-                 :class="(Object.keys(errors).length, fieldClass('email.mailtrap.api_key'))">
+          <input type="text" :value="getVal('email.mailtrap.api_key', '')" @input="setVal('email.mailtrap.api_key', $el.value)"
+                 :class="fieldClass('email.mailtrap.api_key'))">
       <p x-show="errors['email.mailtrap.api_key']" x-text="errors['email.mailtrap.api_key']" class="mt-1 text-xs text-danger-fg"></p>
         </div>
         <div>
           <label class="block text-sm font-medium text-ht-content-secondary">Inbox ID</label>
-          <input type="text" :value="getVal('email.mailtrap.inbox_id', '')" @input="ensure('email.mailtrap'); setVal('email.mailtrap.inbox_id', $el.value)"
-                 :class="(Object.keys(errors).length, fieldClass('email.mailtrap.inbox_id'))"
+          <input type="text" :value="getVal('email.mailtrap.inbox_id', '')" @input="setVal('email.mailtrap.inbox_id', $el.value)"
+                 :class="fieldClass('email.mailtrap.inbox_id'))"
                  placeholder="For sandbox/testing mode">
         </div>
       </div>
@@ -398,22 +398,22 @@
     <div class="mt-4 grid gap-5 sm:grid-cols-2">
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Company Name</label>
-        <input type="text" :value="getVal('email.branding.company_name', '')" @input="ensure('email.branding'); setVal('email.branding.company_name', $el.value)"
+        <input type="text" :value="getVal('email.branding.company_name', '')" @input="setVal('email.branding.company_name', $el.value)"
                class="mt-1.5 input">
       </div>
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Support Email</label>
-        <input type="text" :value="getVal('email.branding.support_email', '')" @input="ensure('email.branding'); setVal('email.branding.support_email', $el.value)"
+        <input type="text" :value="getVal('email.branding.support_email', '')" @input="setVal('email.branding.support_email', $el.value)"
                class="mt-1.5 input">
       </div>
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Logo URL</label>
-        <input type="text" :value="getVal('email.branding.logo_url', '')" @input="ensure('email.branding'); setVal('email.branding.logo_url', $el.value)"
+        <input type="text" :value="getVal('email.branding.logo_url', '')" @input="setVal('email.branding.logo_url', $el.value)"
                class="mt-1.5 input">
       </div>
       <div>
         <label class="block text-sm font-medium text-ht-content-secondary">Primary Color</label>
-        <input type="text" :value="getVal('email.branding.primary_color', '')" @input="ensure('email.branding'); setVal('email.branding.primary_color', $el.value)"
+        <input type="text" :value="getVal('email.branding.primary_color', '')" @input="setVal('email.branding.primary_color', $el.value)"
                class="mt-1.5 input">
       </div>
     </div>
@@ -470,28 +470,28 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Issuer</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">The iss claim value. Defaults to oidc.issuer.</p>
       <input type="text" :value="getVal('token.issuer', '')" @input="setVal('token.issuer', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('token.issuer'))">
+             :class="fieldClass('token.issuer'))">
       <p x-show="errors['token.issuer']" x-text="errors['token.issuer']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Audience</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">The aud claim value.</p>
       <input type="text" :value="getVal('token.audience', '')" @input="setVal('token.audience', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('token.audience'))">
+             :class="fieldClass('token.audience'))">
       <p x-show="errors['token.audience']" x-text="errors['token.audience']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Access Token TTL</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Duration string (e.g. 15m). Default: 15m.</p>
       <input type="text" :value="getVal('token.access_token_ttl', '')" @input="setVal('token.access_token_ttl', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('token.access_token_ttl'))">
+             :class="fieldClass('token.access_token_ttl'))">
       <p x-show="errors['token.access_token_ttl']" x-text="errors['token.access_token_ttl']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Refresh Token TTL</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Duration string (e.g. 7d). Default: 7d.</p>
       <input type="text" :value="getVal('token.refresh_token_ttl', '')" @input="setVal('token.refresh_token_ttl', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('token.refresh_token_ttl'))">
+             :class="fieldClass('token.refresh_token_ttl'))">
       <p x-show="errors['token.refresh_token_ttl']" x-text="errors['token.refresh_token_ttl']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
   </div>
@@ -508,28 +508,28 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Session TTL</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Default session lifetime (e.g. 24h, 30m).</p>
       <input type="text" :value="getVal('auth.session_ttl', '')" @input="setVal('auth.session_ttl', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('auth.session_ttl'))">
+             :class="fieldClass('auth.session_ttl'))">
       <p x-show="errors['auth.session_ttl']" x-text="errors['auth.session_ttl']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Password Memory Cost</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Argon2id memory cost in KiB.</p>
       <input type="number" min="0" :value="getVal('auth.password_memory_cost', '')" @input="setVal('auth.password_memory_cost', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('auth.password_memory_cost'))">
+             :class="fieldClass('auth.password_memory_cost'))">
       <p x-show="errors['auth.password_memory_cost']" x-text="errors['auth.password_memory_cost']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Password Time Cost</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Argon2id time cost (iterations).</p>
       <input type="number" min="0" :value="getVal('auth.password_time_cost', '')" @input="setVal('auth.password_time_cost', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('auth.password_time_cost'))">
+             :class="fieldClass('auth.password_time_cost'))">
       <p x-show="errors['auth.password_time_cost']" x-text="errors['auth.password_time_cost']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">MFA Required</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Require MFA for all users (global default).</p>
       <select @change="setVal('auth.mfa_required', $el.value === 'true' ? true : $el.value === 'false' ? false : null)"
-              :class="(Object.keys(errors).length, fieldClass('auth.mfa_required'))">
+              :class="fieldClass('auth.mfa_required'))">
         <option value="" :selected="getVal('auth.mfa_required', null) === null">— not set —</option>
         <option value="true" :selected="getVal('auth.mfa_required', null) === true">Enabled</option>
         <option value="false" :selected="getVal('auth.mfa_required', null) === false">Disabled</option>
@@ -540,7 +540,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Passkey Requires MFA</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Require TOTP after passkey login (for regulated environments).</p>
       <select @change="setVal('auth.passkey_requires_mfa', $el.value === 'true' ? true : $el.value === 'false' ? false : null)"
-              :class="(Object.keys(errors).length, fieldClass('auth.passkey_requires_mfa'))">
+              :class="fieldClass('auth.passkey_requires_mfa'))">
         <option value="" :selected="getVal('auth.passkey_requires_mfa', null) === null">— not set —</option>
         <option value="true" :selected="getVal('auth.passkey_requires_mfa', null) === true">Enabled</option>
         <option value="false" :selected="getVal('auth.passkey_requires_mfa', null) === false">Disabled</option>
@@ -551,7 +551,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Passkey Required</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Require all users to register a passkey (blocks password-only login).</p>
       <select @change="setVal('auth.webauthn_required', $el.value === 'true' ? true : $el.value === 'false' ? false : null)"
-              :class="(Object.keys(errors).length, fieldClass('auth.webauthn_required'))">
+              :class="fieldClass('auth.webauthn_required'))">
         <option value="" :selected="getVal('auth.webauthn_required', null) === null">— not set —</option>
         <option value="true" :selected="getVal('auth.webauthn_required', null) === true">Required</option>
         <option value="false" :selected="getVal('auth.webauthn_required', null) === false">Optional</option>
@@ -562,7 +562,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Resident Key (residentKey)</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Controls whether passkeys are stored on the authenticator device (enables username-less login).</p>
       <select @change="setVal('auth.webauthn_resident_key', $el.value || null)"
-              :class="(Object.keys(errors).length, fieldClass('auth.webauthn_resident_key'))">
+              :class="fieldClass('auth.webauthn_resident_key'))">
         <option value="" :selected="!getVal('auth.webauthn_resident_key', null)">— inherit default (preferred) —</option>
         <option value="required" :selected="getVal('auth.webauthn_resident_key', null) === 'required'">Required</option>
         <option value="preferred" :selected="getVal('auth.webauthn_resident_key', null) === 'preferred'">Preferred</option>
@@ -574,7 +574,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">User Verification (userVerification)</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Controls whether biometric/PIN verification is required during authentication ceremonies.</p>
       <select @change="setVal('auth.webauthn_user_verification', $el.value || null)"
-              :class="(Object.keys(errors).length, fieldClass('auth.webauthn_user_verification'))">
+              :class="fieldClass('auth.webauthn_user_verification'))">
         <option value="" :selected="!getVal('auth.webauthn_user_verification', null)">— inherit default (preferred) —</option>
         <option value="required" :selected="getVal('auth.webauthn_user_verification', null) === 'required'">Required</option>
         <option value="preferred" :selected="getVal('auth.webauthn_user_verification', null) === 'preferred'">Preferred</option>
@@ -596,7 +596,7 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Enabled</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Enable first-run setup flow at /ui/setup.</p>
       <select @change="setVal('onboarding.enabled', $el.value === 'true' ? true : $el.value === 'false' ? false : null)"
-              :class="(Object.keys(errors).length, fieldClass('onboarding.enabled'))">
+              :class="fieldClass('onboarding.enabled'))">
         <option value="" :selected="getVal('onboarding.enabled', null) === null">— not set —</option>
         <option value="true" :selected="getVal('onboarding.enabled', null) === true">Enabled</option>
         <option value="false" :selected="getVal('onboarding.enabled', null) === false">Disabled</option>
@@ -607,14 +607,14 @@
       <label class="block text-sm font-medium text-ht-content-secondary">Base URL</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Public URL for verification emails (e.g. https://auth.example.com).</p>
       <input type="text" :value="getVal('onboarding.base_url', '')" @input="setVal('onboarding.base_url', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('onboarding.base_url'))">
+             :class="fieldClass('onboarding.base_url'))">
       <p x-show="errors['onboarding.base_url']" x-text="errors['onboarding.base_url']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
     <div>
       <label class="block text-sm font-medium text-ht-content-secondary">Notification Email</label>
       <p class="mt-0.5 text-xs text-ht-content-muted">Email address for setup URL delivery at startup.</p>
       <input type="text" :value="getVal('onboarding.notification_email', '')" @input="setVal('onboarding.notification_email', $el.value)"
-             :class="(Object.keys(errors).length, fieldClass('onboarding.notification_email'))">
+             :class="fieldClass('onboarding.notification_email'))">
       <p x-show="errors['onboarding.notification_email']" x-text="errors['onboarding.notification_email']" class="mt-1 text-xs text-danger-fg"></p>
     </div>
   </div>
@@ -793,7 +793,7 @@
       Applications
     </summary>
     <div class="mt-4 space-y-4">
-      <template x-for="appKey in Object.keys(config.realms?.[activeRealm]?.applications || {})" :key="appKey">
+      <template x-for="appKey in activeAppKeys" :key="appKey">
         <div class="rounded-md border border-divider-subtle p-4">
           <div class="flex items-center justify-between">
             <span class="font-mono text-sm font-medium text-ht-content-primary" x-text="appKey"></span>
@@ -856,7 +856,7 @@
       Organizations
     </summary>
     <div class="mt-4 space-y-4">
-      <template x-for="orgKey in Object.keys(config.realms?.[activeRealm]?.organizations || {})" :key="orgKey">
+      <template x-for="orgKey in activeOrgKeys" :key="orgKey">
         <div class="rounded-md border border-divider-subtle p-4">
           <div class="flex items-center justify-between">
             <span class="font-mono text-sm font-medium text-ht-content-primary" x-text="orgKey"></span>

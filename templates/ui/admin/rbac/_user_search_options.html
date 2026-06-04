@@ -9,7 +9,7 @@
 {% else %}
   {% for u in users %}
   <button type="button"
-          @click="userId = '{{ u.id().as_uuid() }}'; showDropdown = false; $refs.userIdInput && $refs.userIdInput.focus()"
+          @click="selectUser('{{ u.id().as_uuid() }}')"
           class="flex w-full items-start gap-3 px-3 py-2 text-left text-sm hover-bg-divider">
     <div class="min-w-0 flex-1">
       <div class="truncate font-medium text-ht-content-primary">{{ u.display_name() }}</div>

@@ -15,7 +15,7 @@
   {% else %}
     <ul class="divide-y divide-divider-faint">
       {% for row in role_assignments %}
-      <li class="py-2.5" x-data="{ open: false }">
+      <li class="py-2.5" x-data="disclosure" data-open="false">
         <div class="flex items-center justify-between gap-3">
           <div class="flex min-w-0 flex-1 items-center gap-2.5">
             <span class="inline-flex items-center rounded-full bg-teal-bg px-2.5 py-0.5 text-xs font-medium text-teal-fg">{{ row.role_name }}</span>
@@ -82,7 +82,7 @@
           {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
 
           {# Hidden scope field — kept in sync by Alpine #}
-          <input type="hidden" name="scope" :value="scopeType === 'org' && selectedOrg ? 'org:' + selectedOrg : 'realm'">
+          <input type="hidden" name="scope" :value="scopeValue">
 
           <div class="grid gap-4 sm:grid-cols-2">
             <div>

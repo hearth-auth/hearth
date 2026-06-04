@@ -147,7 +147,7 @@
   <form method="post"
         action="/ui/admin/realms/{{ realm_name }}/groups/{{ group_id }}/roles/assign"
         class="mb-6 flex flex-wrap items-end gap-3 rounded-sm border border-divider-subtle bg-ht-surface-base p-4"
-        x-data="{ scope: 'realm' }">
+        x-data="groupRoleAssign">
     {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
     <div class="min-w-[200px] flex-1">
       <label for="assign_role_id" class="block text-xs font-medium text-ht-content-secondary">Role</label>

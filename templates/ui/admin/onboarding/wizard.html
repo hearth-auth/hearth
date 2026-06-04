@@ -43,11 +43,10 @@
           action="/ui/admin/onboarding/realm"
           autocomplete="off"
           class="space-y-5"
-          x-data="{
-            displayName: '{{ form_display_name }}',
-            realmName: '{{ form_realm_name }}',
-            nameTouched: {% if form_realm_name.is_empty() %}false{% else %}true{% endif %}
-          }">
+          x-data="onboardingWizard"
+          data-display-name="{{ form_display_name }}"
+          data-realm-name="{{ form_realm_name }}"
+          data-name-touched="{% if form_realm_name.is_empty() %}false{% else %}true{% endif %}">
       {% match csrf %}
         {% when Some with (token) %}
           <input type="hidden" name="_csrf" value="{{ token }}">
@@ -67,7 +66,7 @@
                maxlength="80"
                placeholder="Acme Corp"
                x-model="displayName"
-               @input="if (!nameTouched) realmName = displayName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63)"
+               @input="updateRealmName()"
                value="{{ form_display_name }}"
                class="mt-1 input">
         <p class="mt-1 text-xs text-ht-content-muted">Shown in the login UI and emails.</p>

@@ -30,7 +30,7 @@
   <div class="space-y-4">
 
     {# ── Server ── #}
-    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ open: true }">
+    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="disclosure">
       <button type="button" @click="open = !open"
               class="flex w-full items-center justify-between px-6 py-4 text-left">
         <h2 class="font-display text-base font-medium text-ht-content-primary">Server</h2>
@@ -88,7 +88,7 @@
     </div>
 
     {# ── Storage ── #}
-    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ open: true }">
+    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="disclosure">
       <button type="button" @click="open = !open"
               class="flex w-full items-center justify-between px-6 py-4 text-left">
         <h2 class="font-display text-base font-medium text-ht-content-primary">Storage</h2>
@@ -139,7 +139,7 @@
     </div>
 
     {# ── Observability ── #}
-    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ open: true }">
+    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="disclosure">
       <button type="button" @click="open = !open"
               class="flex w-full items-center justify-between px-6 py-4 text-left">
         <h2 class="font-display text-base font-medium text-ht-content-primary">Observability</h2>
@@ -165,7 +165,7 @@
     </div>
 
     {# ── Operational ── #}
-    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ open: true }">
+    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="disclosure">
       <button type="button" @click="open = !open"
               class="flex w-full items-center justify-between px-6 py-4 text-left">
         <h2 class="font-display text-base font-medium text-ht-content-primary">Operational</h2>
@@ -199,7 +199,7 @@
     </div>
 
     {# ── Email ── #}
-    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ open: true }">
+    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="disclosure">
       <button type="button" @click="open = !open"
               class="flex w-full items-center justify-between px-6 py-4 text-left">
         <h2 class="font-display text-base font-medium text-ht-content-primary">Email</h2>
@@ -342,7 +342,7 @@
     </div>
 
     {# ── Branding ── #}
-    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ open: true }">
+    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="disclosure">
       <button type="button" @click="open = !open"
               class="flex w-full items-center justify-between px-6 py-4 text-left">
         <h2 class="font-display text-base font-medium text-ht-content-primary">Branding</h2>
@@ -376,7 +376,7 @@
     </div>
 
     {# ── Auth Defaults ── #}
-    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ open: true }">
+    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="disclosure">
       <button type="button" @click="open = !open"
               class="flex w-full items-center justify-between px-6 py-4 text-left">
         <h2 class="font-display text-base font-medium text-ht-content-primary">Auth Defaults</h2>
@@ -421,7 +421,7 @@
     </div>
 
     {# ── Onboarding ── #}
-    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="{ open: true }">
+    <div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle" x-data="disclosure">
       <button type="button" @click="open = !open"
               class="flex w-full items-center justify-between px-6 py-4 text-left">
         <h2 class="font-display text-base font-medium text-ht-content-primary">Onboarding</h2>

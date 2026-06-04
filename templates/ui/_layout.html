@@ -26,7 +26,7 @@
   </a>
   {% if chrome %}
   {# ── Authenticated layout: sidebar + main content ── #}
-  <div class="flex h-screen overflow-hidden bg-ht-surface-base" x-data="{ sidebarOpen: false }">
+  <div class="flex h-screen overflow-hidden bg-ht-surface-base" x-data="shellLayout">
     {# Mobile overlay backdrop #}
     <div x-show="sidebarOpen" x-transition:enter="transition-opacity ease-out duration-200"
          x-transition:enter-start="opacity-0" x-transition:enter-end="opacity-100"
@@ -120,18 +120,18 @@
           </template>
           <ul class="space-y-0.5" x-show="!loading && realms.length > 0">
             <template x-for="r in realms" :key="r.name">
-              <li x-data="{ open: r.name === currentRealm }">
-                <button @click="open = !open"
+              <li>
+                <button @click="toggleRealm(r.name)"
                         class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm font-medium hover-bg-divider"
                         :class="r.name === currentRealm ? 'text-ht-content-primary' : 'text-ht-content-secondary hover:text-ht-content-primary'">
-                  <svg class="h-3 w-3 shrink-0 transition-transform" :class="open ? 'rotate-90' : ''" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+                  <svg class="h-3 w-3 shrink-0 transition-transform" :class="isRealmOpen(r.name) ? 'rotate-90' : ''" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
                   <svg class="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
                   <span x-text="r.name" :class="r.archived ? 'text-ht-content-muted line-through' : ''"></span>
                   <template x-if="r.archived">
                     <span class="ml-auto rounded bg-steel-bg px-1.5 py-0.5 text-[10px] font-medium uppercase text-steel-fg">archived</span>
                   </template>
                 </button>
-                <ul x-show="open" x-transition.duration.150ms class="ml-3 mt-0.5 space-y-0.5 border-l border-divider pl-2">
+                <ul x-show="isRealmOpen(r.name)" x-transition.duration.150ms class="ml-3 mt-0.5 space-y-0.5 border-l border-divider pl-2">
                   <template x-for="link in subPages" :key="link.key">
                     <li>
                       <a :href="link.href.replace('{realm}', encodeURIComponent(r.name))"
@@ -190,7 +190,7 @@
           {% block breadcrumb %}{% endblock %}
           {# Realm pill: visible on any /ui/admin/realms/{realm}/* route.
              Alpine extracts the slug from the URL path — no server changes needed. #}
-          <div x-data="{ get realm() { const m = location.pathname.match(/\/ui\/admin\/realms\/([^/]+)/); return m ? decodeURIComponent(m[1]) : ''; } }"
+          <div x-data="breadcrumbRealm"
                x-show="realm" x-cloak
                class="ml-auto flex shrink-0 items-center gap-1.5 rounded-full bg-ht-surface-elevated px-2.5 py-1 text-xs font-medium text-ht-content-secondary ring-1 ring-divider-subtle">
             <svg class="h-3 w-3 shrink-0 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
@@ -218,8 +218,8 @@
 
   {# Toast container (populated by HTMX HX-Trigger events via Alpine) #}
   <div id="toast-container" class="fixed right-4 top-4 z-50 flex flex-col gap-2"
-       x-data="{ toasts: [] }"
-       @show-toast.window="toasts.push({message: $event.detail.message, kind: $event.detail.kind, id: Date.now()}); setTimeout(() => toasts.shift(), 5000)">
+       x-data="toastContainer"
+       @show-toast.window="addToast($event.detail)">
     <template x-for="toast in toasts" :key="toast.id">
       <div class="animate-toast-in rounded px-4 py-3 text-sm font-medium shadow-md"
            :class="toast.kind === 'error' ? 'bg-danger text-ht-content-primary' : 'bg-success text-ht-content-primary'">
@@ -256,7 +256,7 @@
      so these pages no longer require 'unsafe-eval' in the CSP. #}
   <script src="/ui/static/passkey.js"></script>
   <script src="/ui/static/alpine.min.js"
-          integrity="sha384-9Ax3MmS9AClxJyd5/zafcXXjxmwFhZCdsT6HJoJjarvCaAkJlk5QDzjLJm+Wdx5F"
+          integrity="sha384-MKLWq9B+VC0W3U8kDIBEsSu8uCnQ1B0UQpRaB+F7uR5ocXFbymMUKuLRntu5LLdu"
           defer></script>
   <script src="/ui/static/htmx.min.js"
           integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"></script>

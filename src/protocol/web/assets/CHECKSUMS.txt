@@ -4,6 +4,12 @@
 # re-record the checksum with `sha256sum`, and run the binary so the
 # `include_bytes!` macro picks up the new bytes.
 
+alpine.min.js
+  version: 3.15.12 (@alpinejs/csp — eval-free CSP-compatible build, HEA-1281)
+  upstream: https://cdn.jsdelivr.net/npm/@alpinejs/csp@3.15.12/dist/cdn.min.js
+  sha256:   566167134bb2347110904e2ced6e816d2e8d837200c158f98b72372b3bb0b9a6
+  sri-sha384: sha384-MKLWq9B+VC0W3U8kDIBEsSu8uCnQ1B0UQpRaB+F7uR5ocXFbymMUKuLRntu5LLdu
+
 htmx.min.js
   version: 1.9.12
   upstream: https://unpkg.com/htmx.org@1.9.12/dist/htmx.min.js

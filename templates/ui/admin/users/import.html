@@ -20,37 +20,7 @@
 {% endmatch %}
 
 <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle"
-     x-data="{
-       file: null,
-       fileName: '',
-       headers: [],
-       mapping: { email: '', name: '', role: '' },
-       dragOver: false,
-       step: 'upload',
-
-       handleFile(f) {
-         if (!f) return;
-         this.file = f;
-         this.fileName = f.name;
-         const reader = new FileReader();
-         reader.onload = (e) => {
-           const firstLine = e.target.result.split('\n')[0] || '';
-           this.headers = firstLine.split(',').map(h => h.trim().replace(/^['\"]|['\"]$/g, ''));
-           const guess = (candidates) => candidates.find(c => this.headers.map(h => h.toLowerCase()).includes(c)) || '';
-           this.mapping.email = this.headers.find(h => h.toLowerCase().includes('email')) || '';
-           this.mapping.name  = this.headers.find(h => h.toLowerCase().includes('name'))  || '';
-           this.mapping.role  = this.headers.find(h => h.toLowerCase().includes('role'))  || '';
-           this.step = 'map';
-         };
-         reader.readAsText(f);
-       },
-
-       onDrop(e) {
-         this.dragOver = false;
-         const f = e.dataTransfer.files[0];
-         if (f) this.handleFile(f);
-       }
-     }">
+     x-data="userImport">
 
   <form method="post"
         action="{{ list_url }}/import"
@@ -100,7 +70,7 @@
         <svg class="h-4 w-4 shrink-0 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
         <span class="min-w-0 truncate font-mono text-xs text-ht-content-secondary" x-text="fileName"></span>
         <button type="button"
-                @click="step = 'upload'; file = null; fileName = ''; headers = [];"
+                @click="resetUpload()"
                 class="ml-auto shrink-0 text-xs text-ht-content-muted hover:text-ht-content-secondary">
           Change file
         </button>

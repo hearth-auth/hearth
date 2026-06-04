@@ -1,15 +1,12 @@
 // Hearth admin UI behaviours.
 //
-// Every Alpine component used by `/ui/**` templates is registered here so
-// the Content-Security-Policy can ship `script-src 'self' 'unsafe-eval'`
-// without `'unsafe-inline'` (HEA-630). Server-rendered templates pass
-// dynamic values via `data-*` attributes or `<script type="application/json">`
-// tags, both of which are CSP-safe.
-//
-// Alpine v3 standard build still needs `'unsafe-eval'` for inline directive
-// expressions like `:class="..."` / `x-show="..."`. Removing that would
-// require porting to `@alpinejs/csp` and dropping every inline expression —
-// tracked as a follow-up.
+// Every Alpine component used by `/ui/**` templates is registered here.
+// Using @alpinejs/csp (eval-free Pratt parser), so:
+//   - x-data MUST reference a pre-registered component name, never an inline
+//     object literal like x-data="{ open: false }".
+//   - Server-rendered values are passed via data-* attributes or
+//     <script type="application/json"> tags, both of which are CSP-safe.
+// This allows script-src 'self' with NO 'unsafe-eval' (HEA-1281).
 
 document.addEventListener('alpine:init', () => {
   // -----------------------------------------------------------------------
@@ -22,14 +19,22 @@ document.addEventListener('alpine:init', () => {
     submit() { this.submitting = true; }
   }));
 
+  // Authenticated shell layout — owns mobile sidebar open/close state.
+  Alpine.data('shellLayout', () => ({
+    sidebarOpen: false,
+  }));
+
   // Sidebar realm tree. Fetches realms once at mount, derives the current
   // realm from `/ui/admin/realms/{name}/...` per UI_ROUTING.md R-1, so the
   // matching subtree auto-expands and highlights.
+  // openRealms tracks which rows are expanded. isRealmOpen/toggleRealm are
+  // called from x-for children — no inner x-data inline object on each <li>.
   Alpine.data('realmNav', (activePage) => ({
     loading: true,
     realms: [],
     currentRealm: '',
     activePage: activePage || '',
+    openRealms: {},
     subPages: [
       { key: 'overview',           label: 'Overview',          href: '/ui/admin/realms/{realm}' },
       { key: 'users',              label: 'Users',             href: '/ui/admin/realms/{realm}/users' },
@@ -45,6 +50,8 @@ document.addEventListener('alpine:init', () => {
       { key: 'rbac_scopes',        label: 'Scopes',            href: '/ui/admin/realms/{realm}/rbac/scopes' },
       { key: 'rbac_debug',         label: 'Permission Check',  href: '/ui/admin/realms/{realm}/rbac/debug' },
     ],
+    isRealmOpen(name) { return !!this.openRealms[name]; },
+    toggleRealm(name) { this.openRealms[name] = !this.openRealms[name]; },
     deriveCurrentRealm() {
       const m = window.location.pathname.match(/^\/ui\/admin\/realms\/([^\/?#]+)(?:\/|$)/);
       return m ? decodeURIComponent(m[1]) : '';
@@ -55,11 +62,33 @@ document.addEventListener('alpine:init', () => {
     init() {
       const d = this;
       d.currentRealm = d.deriveCurrentRealm();
+      if (d.currentRealm) d.openRealms[d.currentRealm] = true;
       fetch('/ui/admin/api/nav/realms', { credentials: 'same-origin' })
         .then(res => res.ok ? res.json() : null)
         .then(data => { if (data) d.realms = data.realms || []; })
         .catch(() => { /* sidebar tree is non-essential */ })
         .finally(() => { d.loading = false; });
+    },
+  }));
+
+  // Breadcrumb realm pill — extracts the active realm slug from the URL
+  // path so the header pill is driven without a server round-trip.
+  Alpine.data('breadcrumbRealm', () => ({
+    get realm() {
+      const m = location.pathname.match(/\/ui\/admin\/realms\/([^/]+)/);
+      return m ? decodeURIComponent(m[1]) : '';
+    },
+  }));
+
+  // Toast container — receives show-toast window events and shows them
+  // as ephemeral banners that auto-dismiss after 5 s.
+  Alpine.data('toastContainer', () => ({
+    toasts: [],
+    addToast(detail) {
+      const d = typeof detail === 'string' ? JSON.parse(detail) : detail;
+      this.toasts.push({ message: d.message, kind: d.kind, id: Date.now() });
+      const toasts = this.toasts;
+      setTimeout(() => { toasts.shift(); }, 5000);
     },
   }));
 
@@ -109,6 +138,12 @@ document.addEventListener('alpine:init', () => {
       }
     },
     get inheritedPerms() { return this.rolePerms[this.selectedRoleId] || []; },
+    // Scope hidden-input value for the role-assign form.
+    get scopeValue() {
+      return this.scopeType === 'org' && this.selectedOrg
+        ? 'org:' + this.selectedOrg
+        : 'realm';
+    },
   }));
 
   // -----------------------------------------------------------------------
@@ -164,6 +199,346 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // -----------------------------------------------------------------------
+  // Role assignment (admin → Groups → detail)
+  // -----------------------------------------------------------------------
+
+  // Simple scope selector — 'realm' | 'org'. Scope drives whether the org
+  // dropdown is visible.
+  Alpine.data('groupRoleAssign', () => ({
+    scope: 'realm',
+  }));
+
+  // -----------------------------------------------------------------------
+  // Group create form (admin → Groups → new)
+  // -----------------------------------------------------------------------
+
+  // Reads initial name/slug from data-* so Tera-rendered values are
+  // CSP-safe. updateSlug() auto-derives the slug from the name until the
+  // user edits the slug field directly.
+  Alpine.data('groupNewForm', () => ({
+    name: '',
+    slug: '',
+    slugTouched: false,
+    init() {
+      this.name = this.$el.dataset.name || '';
+      this.slug = this.$el.dataset.slug || '';
+      this.slugTouched = this.$el.dataset.slugTouched === 'true';
+    },
+    updateSlug() {
+      if (!this.slugTouched) {
+        this.slug = this.name.toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 128);
+      }
+    },
+  }));
+
+  // -----------------------------------------------------------------------
+  // Onboarding wizard form (admin → Onboarding)
+  // -----------------------------------------------------------------------
+
+  // Reads initial display name / realm name from data-* attributes.
+  // updateRealmName() auto-derives the realm slug until the user edits it.
+  Alpine.data('onboardingWizard', () => ({
+    displayName: '',
+    realmName: '',
+    nameTouched: false,
+    init() {
+      this.displayName = this.$el.dataset.displayName || '';
+      this.realmName = this.$el.dataset.realmName || '';
+      this.nameTouched = this.$el.dataset.nameTouched === 'true';
+    },
+    updateRealmName() {
+      if (!this.nameTouched) {
+        this.realmName = this.displayName.toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 63);
+      }
+    },
+  }));
+
+  // -----------------------------------------------------------------------
+  // Webhook create form (admin → Webhooks → new)
+  // -----------------------------------------------------------------------
+
+  Alpine.data('webhookNewForm', () => ({
+    showSecret: false,
+    testResult: null,
+    testLoading: false,
+  }));
+
+  // -----------------------------------------------------------------------
+  // Organization invite — role picker (admin → Orgs → detail)
+  // -----------------------------------------------------------------------
+
+  Alpine.data('orgRolePicker', () => ({
+    role: 'Member',
+  }));
+
+  // -----------------------------------------------------------------------
+  // Organization bulk-delete (admin → Orgs → list)
+  // -----------------------------------------------------------------------
+
+  Alpine.data('orgBulkDelete', () => ({
+    selected: 0,
+    confirmPending: false,
+    allChecked: false,
+    idsCsv: '',
+    // Called from the select-all checkbox @change.
+    updateAll() {
+      this.$el.querySelectorAll('input.row-check').forEach(c => { c.checked = this.allChecked; });
+      this.$dispatch('org-checked');
+    },
+    // Called from @org-checked.window — counts currently-checked rows.
+    handleOrgChecked() {
+      const checked = this.$el.querySelectorAll('input.row-check:checked');
+      this.selected = checked.length;
+      this.idsCsv = Array.from(checked).map(c => c.value).join(',');
+    },
+    attemptDelete() {
+      if (!this.confirmPending) {
+        this.confirmPending = true;
+        const self = this;
+        setTimeout(() => { self.confirmPending = false; }, 4000);
+        return;
+      }
+      this.$root.submit();
+    },
+  }));
+
+  // -----------------------------------------------------------------------
+  // Organization member row (admin → Orgs → detail member table)
+  // -----------------------------------------------------------------------
+
+  // Drives the per-member role/permission accordions.
+  Alpine.data('orgMemberRow', () => ({
+    addRoleOpen: false,
+    addPermOpen: false,
+    expandedRole: null,
+    toggleRoleForm() { this.addRoleOpen = !this.addRoleOpen; this.addPermOpen = false; },
+    togglePermForm() { this.addPermOpen = !this.addPermOpen; this.addRoleOpen = false; },
+    closeRoleForm() { this.addRoleOpen = false; },
+    closePermForm() { this.addPermOpen = false; },
+    toggleRoleExpand(id) { this.expandedRole = this.expandedRole === id ? null : id; },
+    isRoleExpanded(id) { return this.expandedRole === id; },
+  }));
+
+  // Per-row destructive-action confirm (member remove button).
+  Alpine.data('orgConfirmDelete', () => ({
+    confirm: false,
+  }));
+
+  // -----------------------------------------------------------------------
+  // Organization create form (admin → Orgs → new)
+  // Mirrors groupNewForm — reads server values from data-* attributes.
+  // -----------------------------------------------------------------------
+
+  Alpine.data('orgNewForm', () => ({
+    name: '',
+    slug: '',
+    slugTouched: false,
+    init() {
+      this.name = this.$el.dataset.name || '';
+      this.slug = this.$el.dataset.slug || '';
+      this.slugTouched = this.$el.dataset.slugTouched === 'true';
+    },
+    updateSlug() {
+      if (!this.slugTouched) {
+        this.slug = this.name.toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 128);
+      }
+    },
+  }));
+
+  // -----------------------------------------------------------------------
+  // RBAC debug — tab panel + user-search typeahead
+  // -----------------------------------------------------------------------
+
+  Alpine.data('rbacDebug', () => ({
+    tab: 'check',
+  }));
+
+  // User-search input on the RBAC debug page. Reads initial userId from
+  // data-user-id so server-rendered values are CSP-safe.
+  Alpine.data('rbacUserSearch', () => ({
+    userId: '',
+    showDropdown: false,
+    init() {
+      this.userId = this.$el.dataset.userId || '';
+    },
+    // Called from HTMX partial when a suggestion row is clicked.
+    selectUser(userId) {
+      this.userId = userId;
+      this.showDropdown = false;
+      const input = this.$refs.userIdInput;
+      if (input) input.focus();
+    },
+  }));
+
+  // -----------------------------------------------------------------------
+  // RBAC role detail — delete-confirmation dialog
+  // -----------------------------------------------------------------------
+
+  Alpine.data('rbacRoleDeleteDialog', () => ({
+    showDeleteDialog: false,
+  }));
+
+  // -----------------------------------------------------------------------
+  // User detail — access tab panel (Roles / Extra Permissions / Effective)
+  // -----------------------------------------------------------------------
+
+  Alpine.data('userAccessTabs', () => ({
+    tab: 'roles',
+  }));
+
+  // -----------------------------------------------------------------------
+  // User CSV import (admin → Users → import)
+  // -----------------------------------------------------------------------
+
+  Alpine.data('userImport', () => ({
+    file: null,
+    fileName: '',
+    headers: [],
+    mapping: { email: '', name: '', role: '' },
+    dragOver: false,
+    step: 'upload',
+    handleFile(f) {
+      if (!f) return;
+      this.file = f;
+      this.fileName = f.name;
+      const self = this;
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const firstLine = e.target.result.split('\n')[0] || '';
+        self.headers = firstLine.split(',').map(h => h.trim().replace(/^['"]|['"]$/g, ''));
+        self.mapping.email = self.headers.find(h => h.toLowerCase().includes('email')) || '';
+        self.mapping.name  = self.headers.find(h => h.toLowerCase().includes('name'))  || '';
+        self.mapping.role  = self.headers.find(h => h.toLowerCase().includes('role'))  || '';
+        self.step = 'map';
+      };
+      reader.readAsText(f);
+    },
+    onDrop(e) {
+      this.dragOver = false;
+      const f = e.dataTransfer.files[0];
+      if (f) this.handleFile(f);
+    },
+    resetUpload() {
+      this.step = 'upload';
+      this.file = null;
+      this.fileName = '';
+      this.headers = [];
+    },
+  }));
+
+  // -----------------------------------------------------------------------
+  // User list — bulk-action toolbar (admin → Users → list)
+  // -----------------------------------------------------------------------
+
+  // total-count is passed via data-total-count on the <form> element so the
+  // status text ("N users") can be rendered without server-rendered Alpine.
+  Alpine.data('userBulkAction', () => ({
+    selected: 0,
+    action: '',
+    confirmPending: false,
+    allChecked: false,
+    idsCsv: '',
+    totalCount: 0,
+    init() {
+      this.totalCount = parseInt(this.$el.dataset.totalCount || '0', 10);
+    },
+    get statusText() {
+      if (this.selected === 0) {
+        const n = this.totalCount;
+        return n + ' user' + (n !== 1 ? 's' : '');
+      }
+      return this.selected + ' selected';
+    },
+    updateCount() {
+      const checked = this.$el.querySelectorAll('input.row-check:checked');
+      this.selected = checked.length;
+      this.idsCsv = Array.from(checked).map(c => c.value).join(',');
+      this.confirmPending = false;
+    },
+    submit() {
+      if (!this.action) return;
+      if (this.action === 'deactivate' && !this.confirmPending) {
+        this.confirmPending = true;
+        return;
+      }
+      this.$root.submit();
+    },
+  }));
+
+  // -----------------------------------------------------------------------
+  // New user form (admin → Users → new)
+  // Email pre-filled from data-email; password strength computed inline.
+  // -----------------------------------------------------------------------
+
+  Alpine.data('userNewForm', () => ({
+    email: '',
+    password: '',
+    emailDirty: false,
+    passwordDirty: false,
+    init() {
+      this.email = this.$el.dataset.email || '';
+    },
+    get emailValid() {
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.email);
+    },
+    get pwStrength() {
+      const p = this.password;
+      let s = 0;
+      if (p.length >= 8)  s++;
+      if (p.length >= 12) s++;
+      if (/[A-Z]/.test(p)) s++;
+      if (/[0-9]/.test(p)) s++;
+      if (/[^A-Za-z0-9]/.test(p)) s++;
+      return Math.min(s, 4);
+    },
+    get strengthLabel() {
+      return ['Very weak','Weak','Fair','Strong','Very strong'][this.pwStrength];
+    },
+    get strengthColor() {
+      return ['bg-danger','bg-warning','bg-warning','bg-teal-500','bg-success'][this.pwStrength];
+    },
+  }));
+
+  // -----------------------------------------------------------------------
+  // User permissions tab (admin → Users → detail → Extra Permissions)
+  // -----------------------------------------------------------------------
+
+  Alpine.data('userPermGrant', () => ({
+    grantOpen: false,
+    scopeType: 'realm',
+    selectedOrg: '',
+    get scopeValue() {
+      return this.scopeType === 'org' && this.selectedOrg
+        ? 'org:' + this.selectedOrg
+        : 'realm';
+    },
+    toggleGrant() { this.grantOpen = !this.grantOpen; },
+    closeGrant()  { this.grantOpen = false; },
+  }));
+
+  // -----------------------------------------------------------------------
+  // Collapsible disclosure sections (admin → Settings → System Info)
+  // -----------------------------------------------------------------------
+
+  // Single-boolean open/close toggle. Defaults to open; set
+  // data-open="false" on the host element to start collapsed.
+  Alpine.data('disclosure', () => ({
+    open: true,
+    init() {
+      if (this.$el.dataset.open === 'false') this.open = false;
+    },
+  }));
+
+  // -----------------------------------------------------------------------
   // Admin → Settings → Config Editor
   // -----------------------------------------------------------------------
 
@@ -210,6 +585,37 @@ document.addEventListener('alpine:init', () => {
       ],
 
       get realmKeys() { return Object.keys(this.config.realms || {}); },
+      get activeAppKeys() {
+        const realm = this.config.realms && this.config.realms[this.activeRealm];
+        return realm && realm.applications ? Object.keys(realm.applications) : [];
+      },
+      get activeOrgKeys() {
+        const realm = this.config.realms && this.config.realms[this.activeRealm];
+        return realm && realm.organizations ? Object.keys(realm.organizations) : [];
+      },
+
+      // Hides the SSR fallback div and syncs the YAML textarea mirror
+      // once Alpine mounts. Replaces x-init on the component root and the
+      // textarea element respectively so those x-init expressions don't
+      // need to carry function literals (unsupported by the CSP evaluator).
+      init() {
+        queueMicrotask(() => {
+          const f = document.getElementById('ssr-editor-fallback');
+          if (f) f.style.display = 'none';
+        });
+      },
+      initTextarea() {
+        this.$nextTick(() => {
+          this.syncMirror();
+          this.syncMirrorScroll();
+        });
+      },
+
+      // Navigation helpers — used in editor.html and _editor_sections.html
+      // instead of multi-statement expressions (CSP evaluator has no semicolons).
+      setSection(key) { this.activeSection = key; this.activeRealm = null; },
+      setRealmSection(rk) { this.activeSection = 'realm'; this.activeRealm = rk; },
+      setMode(m) { this.mode = m; },
 
       ensure(path) {
         const parts = path.split('.');

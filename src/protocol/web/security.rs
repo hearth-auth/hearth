@@ -84,18 +84,17 @@ where
                 "referrer-policy",
                 "strict-origin-when-cross-origin",
             );
-            // Alpine.js v3 needs 'unsafe-eval' for directive expressions
-            // (:class="…", x-show="…"). All scripts are self-hosted; no
-            // third-party origins remain. Fonts are self-hosted (HEA-630).
-            // Alpine also injects inline style attributes for x-show/x-cloak
-            // (e.g. style="display: none;") — 'unsafe-inline' on style-src is
-            // required for those to take effect. Inline styles carry low risk
-            // compared to inline scripts; XSS is still blocked by script-src.
+            // @alpinejs/csp (HEA-1281) replaced the standard Alpine.js build,
+            // eliminating the 'unsafe-eval' requirement. The CSP build uses a
+            // Pratt parser instead of new Function() / AsyncFunction for
+            // expression evaluation. Alpine still injects inline style
+            // attributes for x-show/x-cloak — 'unsafe-inline' on style-src is
+            // required for those; inline styles carry low XSS risk vs scripts.
             insert(
                 headers,
                 "content-security-policy",
                 "default-src 'self'; \
-                 script-src 'self' 'unsafe-eval'; \
+                 script-src 'self'; \
                  style-src 'self' 'unsafe-inline'; \
                  font-src 'self'; \
                  img-src 'self' data:; \
@@ -156,7 +155,9 @@ mod tests {
         let headers = resp.headers();
         assert_eq!(headers["x-frame-options"], "DENY");
         assert_eq!(headers["x-content-type-options"], "nosniff");
-        assert!(headers.contains_key("content-security-policy"));
+        let csp = headers["content-security-policy"].to_str().expect("CSP is ASCII");
+        assert!(csp.contains("script-src 'self'"), "script-src must be present");
+        assert!(!csp.contains("unsafe-eval"), "unsafe-eval must be absent (HEA-1281)");
         assert!(!headers.contains_key("strict-transport-security"));
     }
 

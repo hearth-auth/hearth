@@ -41,7 +41,7 @@
                 wrap="off"
                 @input="syncMirror()"
                 @scroll="syncMirrorScroll()"
-                x-init="$nextTick(() => { syncMirror(); syncMirrorScroll(); })"
+                x-init="initTextarea()"
                 class="yaml-editor relative block w-full resize-y border-0 bg-transparent px-6 py-4 font-mono text-sm leading-relaxed text-transparent caret-ht-content-primary placeholder:text-ht-content-muted focus:outline-none"
                 style="tab-size: 2; -moz-tab-size: 2;"
                 rows="32">{{ yaml_content }}</textarea>
