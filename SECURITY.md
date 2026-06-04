@@ -76,7 +76,14 @@ We will not pursue civil or criminal action against researchers who:
 
 ## Audit Status
 
-A pre-release third-party security audit is in progress. This page will be updated with the audit report or public summary when available. An internal pre-audit assessment was completed with no critical findings across all in-scope components.
+| Item | Status | Date | Document |
+|---|---|---|---|
+| Threat model (STRIDE) | ✅ Published | 2026-06-03 | [docs/security-audit/threat-model.md](docs/security-audit/threat-model.md) |
+| Independent security review | 🔄 Commissioned — reviewer TBD | 2026-06-03 | [docs/security-audit/security-review-2026-06-03.md](docs/security-audit/security-review-2026-06-03.md) |
+
+The threat model covers all in-scope auth surface components using STRIDE methodology: login flows (password, MFA, magic-link, passkey), token issuance and validation, admin API, multi-tenancy boundary, and OAuth/OIDC/SAML endpoints. Five explicit gaps with no current mitigation are tracked as part of the independent review scope.
+
+This section will be updated with the reviewer name, findings summary, and remediation status once the independent review is complete. All Critical and High findings must be remediated or formally risk-accepted before Hearth 1.0 ships.
 
 ## Known Exceptions
 
