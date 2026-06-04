@@ -4,7 +4,7 @@
   <div class="px-3 py-3 text-sm text-ht-content-muted">
     No users found.
     <button type="button"
-            @click="showInviteModal = true; inviteEmail = searchQuery; showDropdown = false"
+            @click="openInviteModal()"
             class="ml-1 text-ht-content-brand hover:text-ht-brand-deep underline">
       Invite "{{ query }}" instead?
     </button>
@@ -13,7 +13,7 @@
 {% else %}
   {% for u in users %}
   <button type="button"
-          @click="selectedUser = { id: '{{ u.id().as_uuid() }}', name: '{{ u.display_name() }}', email: '{{ u.email() }}' }; showDropdown = false"
+          @click="selectOrgUser('{{ u.id().as_uuid() }}', '{{ u.display_name() }}', '{{ u.email() }}')"
           class="flex w-full items-center gap-3 px-3 py-2 text-left text-sm hover-bg-divider">
     <div class="min-w-0 flex-1">
       <div class="truncate font-medium text-ht-content-primary">{{ u.display_name() }}</div>
