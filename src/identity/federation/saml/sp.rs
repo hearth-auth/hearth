@@ -11,6 +11,22 @@ use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 use crate::identity::federation::types::ExternalIdentity;
 
+/// Maximum clock-skew tolerance (seconds) applied when validating SAML assertion
+/// timestamps (`NotBefore`, `NotOnOrAfter`).
+///
+/// Must not exceed the replay-guard window (currently 60 s as enforced by the
+/// compile-time assertion below).  If you raise this value, raise the replay-guard
+/// `CLOCK_SKEW_MICROS` constant in `src/protocol/web/saml.rs` proportionally so
+/// the guard record always outlives the assertion's validity window.
+pub(crate) const SAML_CLOCK_SKEW_SECS: i64 = 60;
+
+// Compile-time guard: validation tolerance must not exceed the replay-guard window.
+const _: () = assert!(
+    SAML_CLOCK_SKEW_SECS <= 60,
+    "SAML clock-skew tolerance exceeds the 60 s replay-guard window — \
+     raise CLOCK_SKEW_MICROS in src/protocol/web/saml.rs first"
+);
+
 /// Outcome of a completed SP login round-trip.
 pub enum SamlSpOutcome {
     /// A valid assertion was accepted. The caller should proceed to
@@ -97,7 +113,7 @@ impl SamlSpService {
                 idp_entity_id: &idp.entity_id,
                 expected_in_response_to,
                 now,
-                clock_skew_secs: 60,
+                clock_skew_secs: SAML_CLOCK_SKEW_SECS,
             },
         )?;
 

@@ -171,6 +171,11 @@ pub struct EmbeddedStorageEngine {
     key_registry: Arc<KeyRegistry>,
     /// System realm identifier used for file-level encryption.
     system_realm: RealmId,
+    /// Serialises conditional-write operations (`put_if_absent`).
+    ///
+    /// Held for the full get→put span so two concurrent callers cannot both
+    /// observe a key as absent and both proceed to write.
+    cas_lock: Mutex<()>,
 }
 
 impl EmbeddedStorageEngine {
@@ -300,6 +305,7 @@ impl EmbeddedStorageEngine {
             hot_tier,
             data_dir: config.data_dir,
             flush_lock: Mutex::new(()),
+            cas_lock: Mutex::new(()),
             sst_counter: std::sync::atomic::AtomicU64::new(max_sst_num + 1),
             fs,
             key_registry,
@@ -623,6 +629,25 @@ impl StorageEngine for EmbeddedStorageEngine {
         }
 
         Ok(())
+    }
+
+    fn put_if_absent(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, StorageError> {
+        // Hold cas_lock for the entire get→put span to prevent two concurrent
+        // callers from both observing the key absent and both writing.
+        let _guard = self
+            .cas_lock
+            .lock()
+            .map_err(|_| StorageError::Io(std::io::Error::other("cas_lock poisoned")))?;
+        if self.get(realm_id, key)?.is_some() {
+            return Ok(false);
+        }
+        self.put(realm_id, key, value)?;
+        Ok(true)
     }
 
     fn put_batch(

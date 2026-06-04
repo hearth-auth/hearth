@@ -191,7 +191,15 @@ pub async fn sp_acs(
             // Replay guard: the consumed record must outlive the assertion's
             // NotOnOrAfter window (+ clock skew) so a replayer cannot reuse
             // the same assertion ID before it naturally expires.
+            // Replay-guard window: replay-guard record expires at NotOnOrAfter
+            // + CLOCK_SKEW_MICROS, which must be >= the validation clock-skew
+            // tolerance so no valid assertion can slip past an expired guard record.
             const CLOCK_SKEW_MICROS: i64 = 60 * 1_000_000;
+            const _: () = assert!(
+                CLOCK_SKEW_MICROS
+                    >= crate::identity::federation::saml::sp::SAML_CLOCK_SKEW_SECS * 1_000_000,
+                "replay-guard window must be >= SAML validation clock-skew tolerance"
+            );
             let assertion_expires_at = {
                 let noa = assertion.not_on_or_after.unwrap_or_else(|| {
                     // Absent NotOnOrAfter — use a conservative 5-minute window.

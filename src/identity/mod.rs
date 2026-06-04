@@ -1417,12 +1417,20 @@ pub trait IdentityEngine: Send + Sync {
     ) -> Result<federation::saml::SamlStateBag, IdentityError>;
 
     /// Marks an assertion ID consumed for this IdP (replay guard).
-    /// Returns `SamlReplay` if the ID has already been seen.
+    ///
+    /// Returns `SamlReplay` if the ID has already been seen and its
+    /// `expires_at` is still in the future. Records with a past `expires_at`
+    /// are lazily deleted — the assertion's own `NotOnOrAfter` check already
+    /// rejects it, so both guards must fail for a replay to succeed.
+    ///
+    /// `expires_at` should be set to the assertion's `NotOnOrAfter` plus clock
+    /// skew tolerance so the consumed record outlives any valid replay window.
     fn mark_saml_assertion_consumed(
         &self,
         realm_id: &RealmId,
         idp_id: &crate::core::IdpId,
         assertion_id: &str,
+        expires_at: Timestamp,
     ) -> Result<(), IdentityError>;
 
     /// Records that the IdP issued an assertion to an SP for a user session.

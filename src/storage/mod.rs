@@ -65,6 +65,26 @@ pub trait StorageEngine: Send + Sync {
         end: &[u8],
     ) -> Result<Vec<ScanEntry>, StorageError>;
 
+    /// Writes `value` for `key` only if the key does not already exist.
+    ///
+    /// Returns `true` if the value was written, `false` if the key was already
+    /// present.  The default implementation is **not** atomic — production
+    /// engines must override this method to provide a serialised check-then-write
+    /// so that two concurrent callers cannot both observe the key as absent and
+    /// both proceed to write.
+    fn put_if_absent(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, StorageError> {
+        if self.get(realm_id, key)?.is_some() {
+            return Ok(false);
+        }
+        self.put(realm_id, key, value)?;
+        Ok(true)
+    }
+
     /// Atomically writes a batch of `(key, value)` pairs for a single realm.
     ///
     /// All entries land durably or none do: a crash or I/O fault mid-way

@@ -10247,18 +10247,47 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         idp_id: &crate::core::IdpId,
         assertion_id: &str,
+        expires_at: Timestamp,
     ) -> Result<(), IdentityError> {
         let key = keys::encode_saml_assertion_id(idp_id, assertion_id);
+        let value = expires_at.as_micros().to_le_bytes();
+
+        // Atomically write the replay-guard record only when the key is absent.
+        // This eliminates the TOCTOU between the read and write that could
+        // allow two concurrent identical assertions to both create sessions.
         if self
+            .storage
+            .put_if_absent(realm_id, &key, &value)
+            .map_err(Self::storage_err)?
+        {
+            return Ok(()); // Fresh assertion — guard record written.
+        }
+
+        // Key already exists — decode its stored expiry and decide.
+        let stored = self
             .storage
             .get(realm_id, &key)
             .map_err(Self::storage_err)?
-            .is_some()
-        {
+            .unwrap_or_default();
+
+        // Decode the 8-byte little-endian expiry stored with the record.
+        // Legacy records written as empty bytes are treated as permanent.
+        let expiry_micros = if stored.len() == 8 {
+            i64::from_le_bytes(stored[..8].try_into().unwrap_or([0; 8]))
+        } else {
+            i64::MAX
+        };
+
+        if self.clock.now().as_micros() < expiry_micros {
             return Err(IdentityError::SamlReplay);
         }
+
+        // Stale record (NotOnOrAfter already passed): overwrite it without a
+        // preceding delete so there is no tombstone window another concurrent
+        // caller could exploit. The assertion's own NotOnOrAfter check is the
+        // primary guard; reaching here means both guards failed.
         self.storage
-            .put(realm_id, &key, &[])
+            .put(realm_id, &key, &value)
             .map_err(Self::storage_err)
     }
 

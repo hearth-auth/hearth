@@ -45,6 +45,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **SAML replay guard made atomic (HEA-1282 / SEC-2026-002)** —
+  `mark_saml_assertion_consumed` now uses a storage-level `put_if_absent` (backed
+  by `EmbeddedStorageEngine::cas_lock`) instead of a non-atomic `get`/`put` pair.
+  Closes CWE-367 TOCTOU: two concurrent identical assertions at the expiry boundary
+  can no longer both pass the replay guard and each produce a valid session.
+  Defense-in-depth unchanged: `NotOnOrAfter` skew tolerance is bounded at compile
+  time to ≤ 60 s (the replay-guard window). A 16-thread concurrent test was added.
+
 - **Remove `unsafe-eval` from Content-Security-Policy (HEA-1281)** — replaces the
   standard Alpine.js v3 build with `@alpinejs/csp` v3.15.12, which uses an eval-free
   Pratt parser instead of `new Function()` / `AsyncFunction`. All inline `x-data`
