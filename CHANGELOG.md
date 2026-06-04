@@ -45,7 +45,7 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
-- **SAML replay guard made atomic (HEA-1282 / SEC-2026-002)** —
+- **SAML replay guard made atomic (HEA-1280 / SEC-2026-002)** —
   `mark_saml_assertion_consumed` now uses a storage-level `put_if_absent` (backed
   by `EmbeddedStorageEngine::cas_lock`) instead of a non-atomic `get`/`put` pair.
   Closes CWE-367 TOCTOU: two concurrent identical assertions at the expiry boundary
