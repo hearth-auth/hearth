@@ -4,6 +4,8 @@ This guide walks you through moving an existing Auth0 tenant to Hearth. Because 
 
 > **Both the bundler and the importer are provided.** A reference Node.js bundler script lives at `examples/auth0-migration-bundler/`. The Hearth importer is the `hearth migrate auth0` CLI command.
 
+> **Runnable example:** `examples/auth0-migration/` contains a self-contained end-to-end example — a hand-authored sample bundle, annotated config, and a one-command `./run.sh` that migrates, boots Hearth, and verifies login + permissions + JWKS. Run it on a clean checkout to confirm the migration pipeline works before using your own bundle.
+
 ---
 
 ## Conceptual mapping

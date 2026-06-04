@@ -1,0 +1,56 @@
+# Annotated Hearth config for the Keycloak migration example.
+#
+# This file is intentionally minimal. The run.sh boots Hearth with --dev,
+# which enables:
+#   • ephemeral in-memory storage (overridden via HEARTH_DEV_DATA_DIR)
+#   • POST /admin/bootstrap  (abuse-prevention guard A-6, dev-only)
+#   • JWKS rate-limiter in dev mode (A-10)
+#   • automatic skip of the 30-day slug cooldown (A-5)
+#
+# Storage note: --dev mode ignores storage.data_dir from this file and
+# uses a tempdir instead. Set HEARTH_DEV_DATA_DIR before launch to point
+# it at the directory created by `hearth migrate keycloak --data-dir …`
+# (run.sh does this automatically).
+#
+# For full documentation of every option see hearth.example.yaml.
+
+# ── OIDC / token ────────────────────────────────────────────────────────────
+#
+# Keycloak → Hearth mapping
+#   realm.accessTokenLifespan   →  token.access_token_ttl
+#   realm.ssoSessionMaxLifespan →  token.refresh_token_ttl
+#   realm.ssoSessionIdleTimeout →  auth.session_ttl
+#
+# Ed25519 note: Hearth signs all JWTs with Ed25519 (alg: EdDSA). If your
+# Keycloak realm was using RS256 or HS256 you will need to update any
+# resource-server (API gateway, SDK) to accept EdDSA tokens after migration.
+# See docs/guides/migrating-from-keycloak.md for the transition checklist.
+
+oidc:
+  issuer: "http://127.0.0.1:8420"   # must match the URL clients use in prod
+
+token:
+  access_token_ttl:  "15m"   # Keycloak default: accessTokenLifespan = 5m
+  refresh_token_ttl: "7d"    # Keycloak default: ssoSessionMaxLifespan = 36000s
+
+auth:
+  session_ttl: "24h"         # Keycloak default: ssoSessionIdleTimeout = 1800s
+
+# ── Security ─────────────────────────────────────────────────────────────────
+#
+# For a full list of security options including reserved_slugs and captcha
+# see hearth.example.yaml §Security.
+#
+#   security.reserved_slugs  — prevents realm names that clash with built-in
+#                              HTTP paths (e.g. "admin", "api", "health").
+#   security.captcha         — hCaptcha / Cloudflare Turnstile integration for
+#                              login and registration forms.
+#
+security:
+  rate_limiting:
+    login_per_ip:
+      max_attempts: 10
+      window_seconds: 60
+    login_per_account:
+      max_failures: 5
+      lockout_seconds: 300

@@ -15,6 +15,8 @@ outside"* — not exhaustive coverage, not a template starter kit.
 | [`grpc-admin-flow/`](./grpc-admin-flow/) | End-to-end tour of the gRPC management API: admin CRUD, authorization engine with live `Watch` streaming, audit log, health, reflection. Single-command runner (`./run.sh`) boots Hearth and tears it down when the demo exits. | Node.js 18+ (plain ESM) |
 | [`scim-provisioning/`](./scim-provisioning/) | SCIM 2.0 (RFC 7643 + 7644) user and group provisioning against Hearth's `/scim/v2/*` surface: discovery, user CRUD with `externalId` idempotency, filter, pagination, PATCH, group membership reconciliation, and the resulting `Scim*` audit trail. Single-command runner. | Node.js 18+ (plain ESM, zero deps) |
 | [`auth0-migration-bundler/`](./auth0-migration-bundler/) | Auth0 → Hearth migration tooling: assembles a tenant from the Auth0 Management API (users, clients, organizations with members, roles with assignments) into a single JSON bundle that `hearth migrate auth0` can import. Covers the password-hash export caveat explicitly. | Node.js 18+ (`auth0` SDK) |
+| [`keycloak-migration/`](./keycloak-migration/) | Keycloak → Hearth migration end-to-end: a committed sample realm export (3 users, 2 roles, 1 client), annotated `hearth.yaml` with Keycloak → Hearth key mappings, and a single `./run.sh` that migrates, boots Hearth on the migrated store, and verifies roles + JWKS via `verify.mjs`. | Node.js 18+ (zero deps) |
+| [`auth0-migration/`](./auth0-migration/) | Auth0 → Hearth migration end-to-end (consume bundle): hand-authored `sample-bundle.json` (3 users with bcrypt/pending/blocked states, 2 clients, 1 org, 2 roles), annotated `hearth.yaml` with Auth0 → Hearth config mappings, and `./run.sh` that migrates, boots Hearth, and verifies login + permissions + JWKS via `verify.mjs`. Pairs with `auth0-migration-bundler/` for live tenants. | Node.js 18+ (zero deps) |
 
 Contributions welcome — see [Adding a new example](#adding-a-new-example) below.
 
@@ -50,6 +52,19 @@ Contributions welcome — see [Adding a new example](#adding-a-new-example) belo
    feature. Prerequisites, exact commands, expected output at each step,
    and pointers back to the relevant source code and specs should all be
    in the example's README.
+
+## Adding a new migration provider example
+
+Every new importer must ship a runnable example directory containing:
+
+- [ ] `README.md` — full runbook (export → import → verify → troubleshoot)
+- [ ] Sample fixture (`sample-export.json` or `sample-bundle.json`) — committed, minimal, no secrets
+- [ ] Annotated `hearth.yaml` — source provider settings → Hearth keys
+- [ ] `run.sh` — one command; MUST use `hearth serve --dev` and an ephemeral temp data dir (`mktemp -d`)
+- [ ] `verify.mjs` — Node ESM, zero-dep; non-zero exit on any assertion failure
+- [ ] CHANGELOG entry under `### Added`
+
+Before merging, loop in SecurityAuditor to review credential import messaging.
 
 ## Adding a new example
 

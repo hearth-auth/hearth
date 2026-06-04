@@ -1,0 +1,87 @@
+# hearth.yaml — Production configuration after Auth0 → Hearth migration.
+#
+# This file is NOT used by run.sh (which boots with --dev for the smoke test).
+# Copy it to /etc/hearth/hearth.yaml, fill in the <placeholders>, then run:
+#
+#   hearth migrate auth0 --file bundle.json --data-dir /var/lib/hearth/data
+#   hearth serve -c /etc/hearth/hearth.yaml
+#
+# Auth0 tenant concept → Hearth configuration key:
+#   Auth0 tenant name/domain      → oidc.issuer (your public HTTPS URL)
+#   Token Expiration (seconds)    → token.access_token_lifetime_secs
+#   Absolute Token Expiration     → token.refresh_token_lifetime_secs
+#   Auth0 custom domains          → server.{bind_address,port,tls_cert_path,tls_key_path}
+#   Email Templates → sender      → email.from
+#   Branding → Universal Login    → branding.theme
+#   RS256/RS512 JWKS              → Hearth uses Ed25519 only; no config key required
+#   Rules / Actions / Hooks       → not imported; reimplement in application middleware
+#   Social connections            → not imported; add via hearth.yaml realms config
+
+# ── Server ────────────────────────────────────────────────────────────────────
+
+server:
+  # Auth0 equivalent: custom domain load-balancer binding address.
+  bind_address: "0.0.0.0"
+  port: 443
+
+  # TLS certificate — required in production.
+  # Auth0 equivalent: the TLS cert behind your Auth0 custom domain.
+  tls_cert_path: "/etc/hearth/tls/server.crt"
+  tls_key_path:  "/etc/hearth/tls/server.key"
+
+# ── OIDC / Issuer ─────────────────────────────────────────────────────────────
+
+oidc:
+  # Auth0 equivalent: Auth0 domain used as the `iss` claim in tokens.
+  # MUST be your public HTTPS URL. OIDC clients validate this against the
+  # discovery document at <issuer>/.well-known/openid-configuration.
+  issuer: "https://auth.your-company.com"
+
+# ── Token lifetimes ───────────────────────────────────────────────────────────
+
+token:
+  # Auth0 equivalent: Applications → <app> → Token Expiration (seconds).
+  # Auth0 default is 86400 (24 h). Hearth default is 3600 (1 h); tighten as needed.
+  access_token_lifetime_secs: 3600
+
+  # Auth0 equivalent: Applications → <app> → Refresh Token → Expiration settings.
+  # Rotate-on-use is always enabled in Hearth; detected theft revokes the whole family.
+  refresh_token_lifetime_secs: 2592000   # 30 days
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+
+storage:
+  # MUST point to the same directory used with --data-dir during migration.
+  # Auth0 has no equivalent — all state lived in Auth0's cloud.
+  data_dir: "/var/lib/hearth/data"
+  fsync: true                           # always true in production
+
+# ── Email ─────────────────────────────────────────────────────────────────────
+
+email:
+  # Auth0 equivalent: Branding → Email Templates → From address.
+  from: "Hearth Identity <noreply@your-company.com>"
+
+  # Users imported WITHOUT a password hash (bob in this example) receive a
+  # password-reset email on first login attempt. Configure a real transport
+  # before go-live so those emails are delivered.
+  transport: smtp
+  smtp:
+    host: "smtp.your-company.com"
+    port: 587
+    encryption: starttls
+    username: "${SMTP_USERNAME}"
+    password: "${SMTP_PASSWORD}"
+
+# ── Branding ──────────────────────────────────────────────────────────────────
+
+branding:
+  # Auth0 equivalent: Branding → Universal Login → colour scheme.
+  # Options: ember (dark default) | ocean | midnight | forest | cloud | slate.
+  theme: ember
+
+# ── Observability ─────────────────────────────────────────────────────────────
+
+observability:
+  log_level: "info"
+  log_format: "json"    # structured logging for log-aggregation pipelines

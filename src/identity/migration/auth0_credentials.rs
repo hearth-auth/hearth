@@ -64,6 +64,8 @@ pub fn parse_auth0_credential(
         });
     }
 
+    // $2y$ is a PHP-introduced prefix cosmetically distinct from $2b$ but
+    // functionally identical. verify_hash dispatches all three to bcrypt::verify.
     if value.starts_with("$2a$") || value.starts_with("$2b$") || value.starts_with("$2y$") {
         return Ok(ParsedAuth0Credential {
             algorithm: PasswordAlgorithm::Bcrypt,

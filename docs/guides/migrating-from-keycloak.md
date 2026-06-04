@@ -4,6 +4,8 @@ This guide walks you through moving an existing Keycloak deployment to Hearth. Y
 
 > **Scope of this guide:** Keycloak realm exports produced by Keycloak 21 and later. The importer handles PBKDF2-SHA256 and PBKDF2-SHA512 password credentials natively. Users with bcrypt or other hashes are imported without a credential and must reset their passwords on first login.
 
+> **Runnable example:** `examples/keycloak-migration/` contains a self-contained end-to-end example — a committed sample export, annotated config, and a one-command `./run.sh` that migrates, boots Hearth, and verifies the result. Run it on a clean checkout to confirm the migration pipeline works before using your own export.
+
 ---
 
 ## Conceptual mapping

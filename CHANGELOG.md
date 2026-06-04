@@ -9,6 +9,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Migration runnable examples** — `examples/keycloak-migration/` and `examples/auth0-migration/` provide
+  self-contained end-to-end examples (sample fixture → `hearth migrate` → `hearth serve --dev` → verify).
+  A **Migration provider checklist** in `examples/README.md` codifies the requirement for every future
+  importer (HEA-1179).
+
 - **P-1 Cloudflare Turnstile CAPTCHA adapter** — new `TurnstileCaptchaProvider` in
   `src/abuse/captcha/` implements the `CaptchaProvider` trait with Cloudflare's
   siteverify API.  Widget HTML is injected at the `<!-- captcha-widget-slot -->`
@@ -50,6 +55,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   cap so local SDK smoke tests and CLI integration tests do not race the limiter.
 
 ### Fixed
+
+- **`$2y$` bcrypt prefix now verifies correctly** — `verify_hash` previously only dispatched
+  `$2a$`/`$2b$` prefixes to `bcrypt::verify`; `$2y$` hashes (produced by PHP-backed tenants and
+  accepted by the Auth0 migration importer) fell through to `PasswordHash::new`, which cannot
+  parse the non-PHC bcrypt format and returned an `unsupported algorithm` error on every login
+  attempt. Users migrated from Auth0 with `$2y$` hashes can now authenticate (HEA-1225).
 
 - **A-33 `update_realm` vs delete cascade race** — `delete_realm` releases the realm
   ops lock after stamping `DeletingInProgress` so the (potentially long) cascade does
