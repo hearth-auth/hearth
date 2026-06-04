@@ -1305,10 +1305,13 @@ async fn run_serve(
 
     // Build webhook engine and broadcast channel before wrapping the audit
     // engine, so the dispatcher receives every successful audit append.
+    let webhook_allowed_prefixes: Arc<Vec<String>> =
+        Arc::new(config.webhook.allowed_url_prefixes.clone());
     let webhook_engine: Arc<dyn hearth::webhook::WebhookEngine> =
         Arc::new(hearth::webhook::EmbeddedWebhookEngine::new(
             Arc::clone(&storage) as Arc<dyn StorageEngine>,
             Arc::clone(&clock),
+            config.webhook.allowed_url_prefixes.clone(),
         ));
     let (webhook_tx, webhook_rx) = hearth::webhook::dispatcher::audit_event_channel();
 
@@ -1627,6 +1630,7 @@ async fn run_serve(
                 wh_clock,
                 webhook_rx,
                 wh_shutdown_rx,
+                Arc::clone(&webhook_allowed_prefixes),
             )
             .await;
         });

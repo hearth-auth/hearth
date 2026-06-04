@@ -597,6 +597,21 @@ onboarding:
   # base_url: "https://auth.example.com"  # used in the setup URL logged at startup
   # notification_email: ops@example.com   # receives the setup URL on first boot (requires SMTP)
 
+# ── Webhook delivery ──────────────────────────────────────────────────────────
+#
+# Hearth rejects webhook URLs that resolve to private/loopback/link-local IPs
+# (including 169.254.169.254 — the AWS IMDSv1 endpoint) to prevent SSRF.
+# This check runs at both registration time and at every delivery attempt to
+# defeat DNS-rebinding attacks.
+#
+# Use allowed_url_prefixes ONLY when you have a legitimate internal receiver
+# (e.g. an internal audit log aggregator). Each prefix is compared as a
+# plain string prefix — not a glob or regex.
+#
+# webhook:
+#   allowed_url_prefixes:
+#     - "https://internal.corp/hooks/"   # allow this specific internal receiver
+
 # ── Cluster (multi-node Raft) ─────────────────────────────────────────────────
 #
 # Omit this section entirely for single-node deployments. When absent, Hearth

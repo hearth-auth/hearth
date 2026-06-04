@@ -7,6 +7,7 @@ use crate::storage::StorageEngine;
 
 use super::error::WebhookError;
 use super::keys;
+use super::ssrf;
 use super::types::{
     CreateWebhookRequest, DeliveryQuery, DeliveryStatus, UpdateWebhookRequest, WebhookDelivery,
     WebhookQuery, WebhookSubscription, MIN_SECRET_LEN,
@@ -17,11 +18,27 @@ use super::WebhookEngine;
 pub struct EmbeddedWebhookEngine {
     storage: Arc<dyn StorageEngine>,
     clock: Arc<dyn Clock>,
+    /// Operator-configured URL prefixes that bypass SSRF protection.
+    /// Empty by default — no internal URLs are reachable.
+    allowed_url_prefixes: Vec<String>,
 }
 
 impl EmbeddedWebhookEngine {
-    pub fn new(storage: Arc<dyn StorageEngine>, clock: Arc<dyn Clock>) -> Self {
-        Self { storage, clock }
+    /// Creates a new engine with SSRF protection enabled.
+    ///
+    /// `allowed_url_prefixes` is an optional operator allowlist: any webhook
+    /// URL that starts with one of these prefixes bypasses the private-IP
+    /// rejection check. Pass an empty `Vec` for the default (safe) behaviour.
+    pub fn new(
+        storage: Arc<dyn StorageEngine>,
+        clock: Arc<dyn Clock>,
+        allowed_url_prefixes: Vec<String>,
+    ) -> Self {
+        Self {
+            storage,
+            clock,
+            allowed_url_prefixes,
+        }
     }
 }
 
@@ -30,7 +47,7 @@ impl WebhookEngine for EmbeddedWebhookEngine {
         if req.secret.len() < MIN_SECRET_LEN {
             return Err(WebhookError::SecretTooShort);
         }
-        validate_url(&req.url)?;
+        validate_url(&req.url, &self.allowed_url_prefixes)?;
 
         let now = self.clock.now();
         let sub = WebhookSubscription {
@@ -73,7 +90,7 @@ impl WebhookEngine for EmbeddedWebhookEngine {
         let mut sub = self.get(realm_id, id)?;
 
         if let Some(url) = &req.url {
-            validate_url(url)?;
+            validate_url(url, &self.allowed_url_prefixes)?;
             sub.url = url.clone();
         }
         if let Some(secret) = &req.secret {
@@ -187,7 +204,7 @@ pub(crate) fn make_delivery(
     }
 }
 
-fn validate_url(url: &str) -> Result<(), WebhookError> {
+fn validate_url(url: &str, allowed_url_prefixes: &[String]) -> Result<(), WebhookError> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(WebhookError::InvalidUrl {
             reason: "URL must begin with http:// or https://".to_string(),
@@ -198,6 +215,10 @@ fn validate_url(url: &str) -> Result<(), WebhookError> {
             reason: "URL exceeds 2048 characters".to_string(),
         });
     }
+    let (host, port) = ssrf::extract_host_port(url).ok_or_else(|| WebhookError::InvalidUrl {
+        reason: "URL has no valid host".to_string(),
+    })?;
+    ssrf::check_host_for_ssrf(&host, port, url, allowed_url_prefixes)?;
     Ok(())
 }
 
@@ -216,7 +237,7 @@ mod tests {
         std::mem::forget(temp_dir);
         let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
         let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
-        EmbeddedWebhookEngine::new(storage, clock)
+        EmbeddedWebhookEngine::new(storage, clock, vec![])
     }
 
     #[test]
@@ -272,6 +293,76 @@ mod tests {
             Err(WebhookError::InvalidUrl { .. })
         ));
     }
+
+    // ── SSRF acceptance-criteria tests ──────────────────────────────────────
+
+    fn make_ssrf_req(url: &str) -> CreateWebhookRequest {
+        CreateWebhookRequest {
+            realm_id: RealmId::generate(),
+            url: url.to_string(),
+            secret: "super-secret-key-16+".to_string(),
+            enabled: true,
+            event_filters: vec![],
+        }
+    }
+
+    #[test]
+    fn create_rejects_loopback_ip() {
+        let engine = make_engine();
+        assert!(matches!(
+            engine.create(&make_ssrf_req("http://127.0.0.1:8080/hook")),
+            Err(WebhookError::InvalidUrl { .. })
+        ));
+    }
+
+    #[test]
+    fn create_rejects_rfc1918_10_block() {
+        let engine = make_engine();
+        assert!(matches!(
+            engine.create(&make_ssrf_req("http://10.0.0.1/hook")),
+            Err(WebhookError::InvalidUrl { .. })
+        ));
+    }
+
+    #[test]
+    fn create_rejects_link_local_cloud_metadata() {
+        let engine = make_engine();
+        // AWS IMDSv1 — MEDIUM-01 finding from pentest-2026-06-03
+        assert!(matches!(
+            engine.create(&make_ssrf_req("http://169.254.169.254/")),
+            Err(WebhookError::InvalidUrl { .. })
+        ));
+    }
+
+    #[test]
+    fn create_rejects_ipv6_loopback() {
+        let engine = make_engine();
+        assert!(matches!(
+            engine.create(&make_ssrf_req("http://[::1]/hook")),
+            Err(WebhookError::InvalidUrl { .. })
+        ));
+    }
+
+    #[test]
+    fn create_allowlist_bypasses_ssrf_check() {
+        // Operators can allowlist specific internal URLs for legitimate use-cases.
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config = crate::storage::StorageConfig::dev(temp_dir.path().to_path_buf());
+        std::mem::forget(temp_dir);
+        let storage = Arc::new(EmbeddedStorageEngine::open(config).expect("storage"));
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let engine = EmbeddedWebhookEngine::new(
+            storage,
+            clock,
+            vec!["http://10.0.0.1/".to_string()],
+        );
+        let req = make_ssrf_req("http://10.0.0.1/hook");
+        // Should succeed because the prefix matches the allowlist.
+        assert!(engine.create(&req).is_ok());
+    }
+
+    // Note: `validate_url("https://example.com/hook")` → Ok is already exercised
+    // by `create_and_get_webhook` above, which uses that URL and expects success.
 
     #[test]
     fn update_webhook() {

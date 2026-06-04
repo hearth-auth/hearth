@@ -24,7 +24,7 @@ pub use types::{
     RealmScimYaml, RealmTokenYaml, RealmWebYaml, RealmYamlConfig, RoleYamlConfig,
     SamlServiceProviderYaml, ScopeBundleYamlConfig, SecurityYaml, SendgridConfig, ServerConfig,
     SmsConfig, SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection,
-    TokenYamlConfig, TwilioConfig,
+    TokenYamlConfig, TwilioConfig, WebhookConfig,
 };
 
 /// Helper: construct a validation error without repeating the struct
@@ -106,6 +106,9 @@ pub struct Config {
     /// realms are managed via API/onboarding (backward compatible).
     #[serde(default)]
     pub realms: Option<std::collections::HashMap<String, RealmYamlConfig>>,
+    /// Webhook delivery settings (SSRF allowlist).
+    #[serde(default)]
+    pub webhook: WebhookConfig,
     /// Raft clustering configuration.
     ///
     /// When `Some`, Hearth starts a Raft consensus engine and participates in
@@ -202,6 +205,7 @@ impl Config {
             token: TokenYamlConfig::default(),
             auth: AuthConfig::default(),
             metrics: MetricsConfig::default(),
+            webhook: WebhookConfig::default(),
             realms: None,
             cluster: None,
             security: SecurityYaml::default(),

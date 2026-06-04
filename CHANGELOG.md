@@ -36,7 +36,22 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   `ENROLL_PHONE_OTP` to the user's required actions so they are prompted to
   re-enroll on next login. Exposed as `POST /ui/admin/realms/{realm}/users/{id}/remove-phone`.
 
+### Added
+
+- **`webhook.allowed_url_prefixes` config key (HEA-1252)** — operators can
+  allowlist specific internal webhook receiver URLs that would otherwise be
+  blocked by SSRF protection (e.g. `["https://internal.corp/hooks/"]`). The
+  default is an empty list — no internal destinations are reachable.
+
 ### Security
+
+- **Webhook SSRF protection — private/loopback IP rejection (HEA-1252)** —
+  webhook URLs are now validated against private/reserved IP ranges at both
+  registration time and at each delivery attempt (defeating DNS-rebinding).
+  Rejected ranges: `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`,
+  `192.168.0.0/16`, `169.254.0.0/16` (AWS IMDSv1), `100.64.0.0/10`, `::1`,
+  `fd00::/8` / `fc00::/7`, `fe80::/10`. Finding MEDIUM-01 from the
+  2026-06-03 internal pre-pentest assessment.
 
 - **TLS 1.3 only — TLS 1.2 downgrade path removed (HEA-1241)** — both the mTLS and
   no-client-auth server config paths now call `.with_protocol_versions(&[&TLS13])` instead

@@ -33,6 +33,7 @@ use crate::audit::AuditEvent;
 use crate::core::{Clock, WebhookDeliveryId};
 
 use super::engine::make_delivery;
+use super::ssrf;
 use super::types::{DeliveryStatus, WebhookQuery, BACKOFF_SECONDS, MAX_DELIVERY_ATTEMPTS};
 use super::WebhookEngine;
 
@@ -57,17 +58,27 @@ pub fn audit_event_channel() -> (AuditEventSender, AuditEventReceiver) {
 /// Receives audit events from `rx`, looks up matching subscriptions in
 /// `engine`, and delivers them with retry logic. Stops when `rx` is closed
 /// or a shutdown signal is received via `shutdown`.
+///
+/// `allowed_url_prefixes` mirrors the engine's allowlist and is re-checked
+/// at delivery time to defeat DNS-rebinding attacks (the hostname may resolve
+/// to a different IP between registration and delivery).
 pub async fn run_dispatcher(
     engine: Arc<dyn WebhookEngine>,
     clock: Arc<dyn Clock>,
     mut rx: AuditEventReceiver,
     mut shutdown: tokio::sync::watch::Receiver<()>,
+    allowed_url_prefixes: Arc<Vec<String>>,
 ) {
     loop {
         tokio::select! {
             result = rx.recv() => {
                 match result {
-                    Ok(event) => dispatch_event(Arc::clone(&engine), Arc::clone(&clock), event).await,
+                    Ok(event) => dispatch_event(
+                        Arc::clone(&engine),
+                        Arc::clone(&clock),
+                        event,
+                        Arc::clone(&allowed_url_prefixes),
+                    ).await,
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("webhook dispatcher lagged, skipped {n} events");
                     }
@@ -86,7 +97,12 @@ pub async fn run_dispatcher(
 }
 
 /// Finds matching subscriptions and spawns a delivery task for each one.
-async fn dispatch_event(engine: Arc<dyn WebhookEngine>, clock: Arc<dyn Clock>, event: AuditEvent) {
+async fn dispatch_event(
+    engine: Arc<dyn WebhookEngine>,
+    clock: Arc<dyn Clock>,
+    event: AuditEvent,
+    allowed_url_prefixes: Arc<Vec<String>>,
+) {
     let query = WebhookQuery {
         realm_id: event.realm_id.clone(),
         enabled_only: true,
@@ -108,18 +124,24 @@ async fn dispatch_event(engine: Arc<dyn WebhookEngine>, clock: Arc<dyn Clock>, e
         let eng = Arc::clone(&engine);
         let clk = Arc::clone(&clock);
         let ev = event.clone();
+        let prefixes = Arc::clone(&allowed_url_prefixes);
         tokio::spawn(async move {
-            deliver_with_retry(eng, clk, sub, ev).await;
+            deliver_with_retry(eng, clk, sub, ev, prefixes).await;
         });
     }
 }
 
 /// Delivers an event to a single subscription with exponential backoff.
+///
+/// Re-resolves the webhook URL's hostname before each attempt to detect
+/// DNS-rebinding attacks where the hostname was valid at registration time
+/// but now resolves to a private IP.
 async fn deliver_with_retry(
     engine: Arc<dyn WebhookEngine>,
     clock: Arc<dyn Clock>,
     sub: super::types::WebhookSubscription,
     event: AuditEvent,
+    allowed_url_prefixes: Arc<Vec<String>>,
 ) {
     let body = match serde_json::to_vec(&event) {
         Ok(b) => b,
@@ -141,9 +163,16 @@ async fn deliver_with_retry(
         let delivery_id_str = delivery_id.to_string();
         let url = sub.url.clone();
         let body_clone = body.clone();
+        let prefixes_clone = Arc::clone(&allowed_url_prefixes);
 
         // ureq is a blocking client; run it on the blocking thread pool.
+        // The SSRF check (DNS resolution) is also blocking — both run here.
         let result = tokio::task::spawn_blocking(move || {
+            // Re-validate at delivery time to defeat DNS-rebinding attacks.
+            if let Some((host, port)) = ssrf::extract_host_port(&url) {
+                ssrf::check_host_for_ssrf(&host, port, &url, &prefixes_clone)
+                    .map_err(|e| format!("SSRF guard blocked delivery: {e}"))?;
+            }
             deliver_once(&url, &body_clone, &signature, &event_type, &delivery_id_str)
         })
         .await;

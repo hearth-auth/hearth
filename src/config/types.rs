@@ -617,6 +617,19 @@ pub struct SmsConfig {
     pub aws_sns: Option<SnsSmsConfig>,
 }
 
+/// Webhook delivery settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WebhookConfig {
+    /// URL prefixes that bypass SSRF protection.
+    ///
+    /// By default all private/loopback/link-local IP addresses are rejected.
+    /// Set this to allowlist specific internal receiver URLs — e.g.
+    /// `["https://internal.corp/hooks/"]`. An empty list (the default) means
+    /// no internal destinations are reachable.
+    #[serde(default)]
+    pub allowed_url_prefixes: Vec<String>,
+}
+
 /// Global branding configuration.
 ///
 /// Applies across the admin UI and email templates. When `logo_url` is
