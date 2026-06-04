@@ -1,2 +1,43 @@
 Hearth
 Copyright (c) 2026-present Hearth contributors.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+────────────────────────────────────────────────────────────────────────────────
+
+Third-Party Attribution
+=======================
+
+This product is built from open-source components. Full license texts for all
+third-party crates compiled into Hearth are in THIRD_PARTY_LICENSES.
+
+A complete list of crates and their SPDX identifiers can be reproduced at any
+time by running:
+
+    cargo deny list             # license summary
+    make notice                 # regenerate THIRD_PARTY_LICENSES from Cargo.lock
+
+No third-party crate in Hearth's current dependency tree ships its own NOTICE
+file. If that changes as dependencies are updated, run `make notice` and commit
+both THIRD_PARTY_LICENSES and this file with the updated attribution text.
+
+Key cryptographic dependencies and their provenance:
+
+  ring 0.17.x
+    BoringSSL (portions) — ISC / OpenSSL / MIT hybrid license.
+    BoringSSL itself contains code derived from OpenSSL.
+    See THIRD_PARTY_LICENSES for the full ring license text.
+
+  aws-lc-rs / aws-lc-sys
+    AWS-LC — Apache-2.0.
+    AWS-LC is a general-purpose cryptographic library maintained by AWS.
+    Based in part on BoringSSL.
+    See THIRD_PARTY_LICENSES for the full aws-lc-rs and aws-lc-sys license text.
+
+  rustls 0.23.x
+    Apache-2.0 / MIT / ISC (your choice).
+    See THIRD_PARTY_LICENSES for the full text.
+
+────────────────────────────────────────────────────────────────────────────────
+
+This NOTICE file satisfies Apache License 2.0 §4(d).
+THIRD_PARTY_LICENSES satisfies §4(a)–§4(c) for distribution.

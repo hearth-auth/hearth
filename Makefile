@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check notice notice-check ci-fast bench-gate cluster-route-check ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -147,6 +147,36 @@ openapi-check: openapi
 		exit 1; \
 	fi
 
+# ── License Attribution ───────────────────────────────
+
+## Regenerate THIRD_PARTY_LICENSES from the current Cargo.lock (requires cargo-about).
+## Also updates THIRD_PARTY_LICENSES.sha256 for the staleness check.
+## Run after any dependency update: `cargo update && make notice`.
+notice:
+	@command -v cargo-about >/dev/null 2>&1 || cargo install cargo-about --features cli
+	cargo about generate about.hbs -o THIRD_PARTY_LICENSES
+	sha256sum Cargo.lock > THIRD_PARTY_LICENSES.sha256
+	@echo "✓ THIRD_PARTY_LICENSES regenerated. Commit both files if the tree changed."
+
+## CI gate: fail if THIRD_PARTY_LICENSES is stale relative to Cargo.lock.
+## Does not regenerate — just checks the stored sha256 fingerprint.
+notice-check:
+	@if [ ! -f THIRD_PARTY_LICENSES ]; then \
+		echo "ERROR: THIRD_PARTY_LICENSES missing. Run 'make notice' and commit."; \
+		exit 1; \
+	fi
+	@if [ ! -f THIRD_PARTY_LICENSES.sha256 ]; then \
+		echo "ERROR: THIRD_PARTY_LICENSES.sha256 missing. Run 'make notice' and commit."; \
+		exit 1; \
+	fi
+	@STORED=$$(awk '{print $$1}' THIRD_PARTY_LICENSES.sha256); \
+	CURRENT=$$(sha256sum Cargo.lock | awk '{print $$1}'); \
+	if [ "$$STORED" != "$$CURRENT" ]; then \
+		echo "ERROR: THIRD_PARTY_LICENSES is stale (Cargo.lock changed). Run 'make notice' and commit."; \
+		exit 1; \
+	fi
+	@echo "✓ THIRD_PARTY_LICENSES is up to date."
+
 # ── SDK Tests ─────────────────────────────────────────
 
 ## Run TypeScript and Go SDK integration tests.
@@ -207,6 +237,7 @@ ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check
+	@echo "==> notice-check"             && $(MAKE) notice-check
 	@echo "==> cargo deny"               && cargo deny check
 	@echo "==> sdk-conformance"          && bash scripts/check-sdk-conformance.sh
 	@echo "==> sdk-smoke-local"          && $(MAKE) sdk-smoke-local
