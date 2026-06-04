@@ -10,7 +10,6 @@ pub(crate) mod credentials;
 pub mod device_fingerprint;
 pub mod device_fp;
 pub mod email;
-pub(crate) mod breach_corpus;
 mod engine;
 pub mod error;
 pub mod federation;

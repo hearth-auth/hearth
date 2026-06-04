@@ -412,7 +412,7 @@ pub struct EmbeddedIdentityEngine {
     /// Loaded once at startup when any realm config specifies
     /// `breach_check.mode = offline`. `None` when all realms use online mode
     /// or breach checking is disabled.
-    offline_corpus: Option<Arc<crate::identity::breach_corpus::OfflineBreachCorpus>>,
+    offline_corpus: Option<Arc<crate::storage::breach_corpus::OfflineBreachCorpus>>,
     /// Device fingerprint store for adaptive (risk-based) MFA.
     ///
     /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
@@ -815,7 +815,7 @@ impl EmbeddedIdentityEngine {
                 max_corpus_age_days,
             } = bc.mode
             {
-                match crate::identity::breach_corpus::OfflineBreachCorpus::load(
+                match crate::storage::breach_corpus::OfflineBreachCorpus::load(
                     &corpus_path,
                     max_corpus_age_days,
                 ) {
@@ -905,7 +905,7 @@ impl EmbeddedIdentityEngine {
     #[allow(dead_code)]
     pub(crate) fn with_offline_corpus(
         mut self,
-        corpus: crate::identity::breach_corpus::OfflineBreachCorpus,
+        corpus: crate::storage::breach_corpus::OfflineBreachCorpus,
     ) -> Self {
         self.offline_corpus = Some(Arc::new(corpus));
         self

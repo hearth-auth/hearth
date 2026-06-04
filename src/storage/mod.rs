@@ -10,6 +10,7 @@
 //! WAL, memtable, SST, and hot tier components.
 
 pub mod auto_size;
+pub(crate) mod breach_corpus;
 pub mod encryption;
 mod engine;
 pub mod error;
