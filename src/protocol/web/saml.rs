@@ -188,12 +188,23 @@ pub async fn sp_acs(
             assertion,
             ..
         } => {
-            // Replay guard.
-            if let Err(_e) =
-                state
-                    .identity
-                    .mark_saml_assertion_consumed(&realm, &bag.idp_id, &assertion.id)
-            {
+            // Replay guard: the consumed record must outlive the assertion's
+            // NotOnOrAfter window (+ clock skew) so a replayer cannot reuse
+            // the same assertion ID before it naturally expires.
+            const CLOCK_SKEW_MICROS: i64 = 60 * 1_000_000;
+            let assertion_expires_at = {
+                let noa = assertion.not_on_or_after.unwrap_or_else(|| {
+                    // Absent NotOnOrAfter — use a conservative 5-minute window.
+                    Timestamp::from_micros(now.as_micros() + 5 * 60 * 1_000_000)
+                });
+                Timestamp::from_micros(noa.as_micros() + CLOCK_SKEW_MICROS)
+            };
+            if let Err(_e) = state.identity.mark_saml_assertion_consumed(
+                &realm,
+                &bag.idp_id,
+                &assertion.id,
+                assertion_expires_at,
+            ) {
                 let _ = state.audit.append(&CreateAuditEvent {
                     realm_id: realm.clone(),
                     actor: "system".to_string(),

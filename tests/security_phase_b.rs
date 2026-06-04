@@ -208,10 +208,11 @@ async fn hsts_header_present_when_tls_enabled() {
     );
 }
 
-/// CSP must allow 'unsafe-eval' (Alpine.js) but contain no 'unsafe-inline'
-/// anywhere and no third-party origins (HEA-630).
+/// CSP must not contain 'unsafe-eval' (ported to @alpinejs/csp, HEA-1281/1283),
+/// must not allow 'unsafe-inline' in script-src, and must reference no
+/// third-party origins (HEA-630).
 #[tokio::test]
-async fn csp_allows_eval_no_inline_no_third_party() {
+async fn csp_no_eval_no_inline_no_third_party() {
     let app = web::router(make_web_state());
     let resp = app
         .oneshot(
@@ -230,8 +231,8 @@ async fn csp_allows_eval_no_inline_no_third_party() {
         .expect("CSP header");
 
     assert!(
-        csp.contains("'unsafe-eval'"),
-        "CSP must allow unsafe-eval for Alpine.js directive expressions"
+        !csp.contains("'unsafe-eval'"),
+        "CSP must not contain unsafe-eval — @alpinejs/csp build is eval-free (HEA-1281/1283): {csp}"
     );
     // style-src intentionally allows 'unsafe-inline' for Alpine.js x-show/x-cloak
     // directives that inject inline style attributes. Script-src must never allow it.

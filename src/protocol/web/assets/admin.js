@@ -270,6 +270,28 @@ document.addEventListener('alpine:init', () => {
   }));
 
   // -----------------------------------------------------------------------
+  // Organization member search (admin → Orgs → detail member-add section)
+  // -----------------------------------------------------------------------
+
+  // Drives the user-search typeahead and invite modal for org member addition.
+  Alpine.data('orgMemberSearch', () => ({
+    showDropdown: false,
+    showInviteModal: false,
+    inviteEmail: '',
+    searchQuery: '',
+    selectedUser: null,
+    openInviteModal() {
+      this.showInviteModal = true;
+      this.inviteEmail = this.searchQuery;
+      this.showDropdown = false;
+    },
+    selectOrgUser(id, name, email) {
+      this.selectedUser = { id: id, name: name, email: email };
+      this.showDropdown = false;
+    },
+  }));
+
+  // -----------------------------------------------------------------------
   // Organization invite — role picker (admin → Orgs → detail)
   // -----------------------------------------------------------------------
 
@@ -609,6 +631,40 @@ document.addEventListener('alpine:init', () => {
           this.syncMirror();
           this.syncMirrorScroll();
         });
+      },
+
+      // Boolean realm setting — converts 'true'/'false'/'' to true/false/deleted.
+      setRealmBool(path, val) {
+        const parts = path.split('.');
+        if (parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) return;
+        let obj = this.config;
+        for (let i = 0; i < parts.length - 1; i++) {
+          if (obj[parts[i]] === undefined || obj[parts[i]] === null) obj[parts[i]] = {};
+          obj = obj[parts[i]];
+        }
+        const key = parts[parts.length - 1];
+        if (val === 'true') obj[key] = true;
+        else if (val === 'false') obj[key] = false;
+        else delete obj[key];
+        delete this.errors[path];
+      },
+
+      // Comma-separated list realm setting — splits, trims, filters.
+      setRealmList(path, val) {
+        const items = val.split(',').map(s => s.trim()).filter(s => s);
+        if (items.length === 0) {
+          this.setVal(path, '');
+        } else {
+          const parts = path.split('.');
+          if (parts.some(p => p === '__proto__' || p === 'constructor' || p === 'prototype')) return;
+          let obj = this.config;
+          for (let i = 0; i < parts.length - 1; i++) {
+            if (obj[parts[i]] === undefined || obj[parts[i]] === null) obj[parts[i]] = {};
+            obj = obj[parts[i]];
+          }
+          obj[parts[parts.length - 1]] = items;
+          delete this.errors[path];
+        }
       },
 
       // Navigation helpers — used in editor.html and _editor_sections.html
