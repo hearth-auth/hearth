@@ -83,7 +83,7 @@ We will not pursue civil or criminal action against researchers who:
 | Internal pre-pentest code assessment | ✅ Complete | 2026-06-03 | [docs/security-audit/pentest-2026-06-03-summary.md](docs/security-audit/pentest-2026-06-03-summary.md) |
 | External third-party penetration test | ⏳ Pending board budget approval | TBD | TBD |
 
-The internal pre-pentest assessment (2026-06-03) found 0 Critical, 0 High, 2 Medium, and 2 Low findings. The two Medium findings — Webhook SSRF (HEA-1245) and SAML assertion replay verification (HEA-1246) — are tracked as open issues and must be remediated before 1.0 ships. The external third-party pentest is a formal §2 gate requirement and is pending board budget approval for firm engagement.
+The internal pre-pentest assessment (2026-06-03) found 0 Critical, 0 High, 2 Medium, and 2 Low findings. The two Medium findings — Webhook SSRF ([HEA-1255](/HEA/issues/HEA-1255)) and SAML assertion replay verification ([HEA-1256](/HEA/issues/HEA-1256)) — are tracked as open issues and must be remediated before 1.0 ships. The external third-party pentest is a formal §2 gate requirement and is pending board budget approval for firm engagement.
 
 All Critical and High findings (internal or external) must be remediated or formally risk-accepted before Hearth 1.0 ships.
 
