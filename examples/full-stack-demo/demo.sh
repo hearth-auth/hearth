@@ -27,7 +27,9 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
-HEARTH_BIN="$REPO_ROOT/target/release/hearth"
+# Respect CARGO_TARGET_DIR if set (common for shared build caches).
+_cargo_target="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+HEARTH_BIN="$_cargo_target/release/hearth"
 CONFIG="$HERE/hearth.yaml"
 
 HEARTH_PORT="${HEARTH_PORT:-8420}"
@@ -68,6 +70,12 @@ done
 
 echo "▸ building hearth (release)…"
 (cd "$REPO_ROOT" && cargo build --release --bin hearth --quiet)
+if [[ ! -f "$HEARTH_BIN" ]]; then
+  echo "✗ binary not found at $HEARTH_BIN" >&2
+  echo "  CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-<unset, expected $REPO_ROOT/target>}" >&2
+  echo "  Run 'cargo build --release --bin hearth' in $REPO_ROOT" >&2
+  exit 1
+fi
 echo "  ✓ build complete"
 
 # ── Start Hearth ──────────────────────────────────────────────────────────────
