@@ -24,15 +24,16 @@ import (
 
 func main() {
 	hearthURL := mustEnv("HEARTH_URL")
-	realmID := mustEnv("REALM_ID")
+	realmID := mustEnv("REALM_ID")   // UUID — used for admin API X-Realm-ID header
+	realmSlug := mustEnv("REALM_SLUG") // slug — used for OIDC/JWKS URL path
 	port := getenv("PORT", "8421")
 
 	ctx := context.Background()
 
 	client := hearth.NewClient(hearthURL, realmID)
 
-	// JWKS endpoint follows Hearth's realm-scoped OIDC discovery path.
-	jwksURL := fmt.Sprintf("%s/%s/.well-known/jwks.json", hearthURL, realmID)
+	// JWKS lives at /realms/{slug}/.well-known/jwks.json (slug-based OIDC routes).
+	jwksURL := fmt.Sprintf("%s/realms/%s/.well-known/jwks.json", hearthURL, realmSlug)
 
 	validator, err := middleware.NewJWKSValidator(ctx, jwksURL)
 	if err != nil {

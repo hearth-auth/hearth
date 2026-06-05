@@ -200,7 +200,8 @@ echo "  ✓ frontend/.env"
 
 cat > "$HERE/backend/.env" <<EOF
 HEARTH_URL=http://localhost:${HEARTH_PORT}
-REALM_ID=demo
+REALM_ID=${REALM_ID}
+REALM_SLUG=demo
 PORT=${BACKEND_PORT}
 EOF
 echo "  ✓ backend/.env"
