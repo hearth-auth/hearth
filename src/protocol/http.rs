@@ -8301,10 +8301,26 @@ async fn realm_end_session(
     if let Ok(val) = axum::http::HeaderValue::from_str(&realm_id.as_uuid().to_string()) {
         h.insert("x-realm-id", val);
     }
-    // Delegate to the core handler with the patched headers.
-    end_session(State(state), h, Query(params))
+    let is_secure = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
+
+    // Delegate to the core OIDC end_session handler.
+    let mut resp = end_session(State(state), h, Query(params))
         .await
-        .into_response()
+        .into_response();
+
+    // Also clear the Hearth UI session cookies so the browser login form
+    // requires re-authentication on the next authorize redirect.
+    for cookie in crate::protocol::web::auth::clearing_cookies(is_secure) {
+        if let Ok(val) = axum::http::HeaderValue::from_str(&cookie) {
+            resp.headers_mut()
+                .append(axum::http::header::SET_COOKIE, val);
+        }
+    }
+    resp
 }
 
 /// Query parameters for `GET /end_session`.
