@@ -16,7 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { MockHearthProvider } from "@hearth/sdk/testing";
-import { Dashboard } from "./App.js";
+import { ClaimProbe, Dashboard } from "./App.js";
 
 describe("Dashboard", () => {
   afterEach(() => cleanup());
@@ -68,5 +68,59 @@ describe("Dashboard", () => {
       </MockHearthProvider>,
     );
     expect(screen.getByRole("button", { name: /admin panel/i })).toBeTruthy();
+  });
+});
+
+// ─── C4: ClaimProbe tests ─────────────────────────────────────────────────────
+//
+// Verify that useInGroup / useInOrg return `true` when MockHearthProvider is
+// seeded with the demo-team group and acme org — the same values declared in
+// hearth.yaml (HEA-1300). These tests prove the hooks wire correctly before the
+// live server is set up.
+
+describe("ClaimProbe", () => {
+  afterEach(() => cleanup());
+
+  it("shows false for both claims when user has no group or org", () => {
+    render(
+      <MockHearthProvider>
+        <ClaimProbe />
+      </MockHearthProvider>,
+    );
+    expect(screen.getByLabelText("in-demo-team").textContent).toBe("false");
+    expect(screen.getByLabelText("in-acme").textContent).toBe("false");
+  });
+
+  it("shows true for demo-team when user is in the demo-team group", () => {
+    render(
+      <MockHearthProvider groups={["demo-team"]}>
+        <ClaimProbe />
+      </MockHearthProvider>,
+    );
+    expect(screen.getByLabelText("in-demo-team").textContent).toBe("true");
+    expect(screen.getByLabelText("in-acme").textContent).toBe("false");
+  });
+
+  it("shows true for acme when user is in the acme org", () => {
+    render(
+      <MockHearthProvider org="acme">
+        <ClaimProbe />
+      </MockHearthProvider>,
+    );
+    expect(screen.getByLabelText("in-demo-team").textContent).toBe("false");
+    expect(screen.getByLabelText("in-acme").textContent).toBe("true");
+  });
+
+  it("shows true for both when admin@hearth.test is seeded into demo-team and acme", () => {
+    // This is the acceptance case: once admin@hearth.test has been added to
+    // the demo-team group and acme org (via Admin UI after bootstrap), the JWT
+    // will carry groups:["demo-team"] and oid:"acme" and both probes go true.
+    render(
+      <MockHearthProvider groups={["demo-team"]} org="acme">
+        <ClaimProbe />
+      </MockHearthProvider>,
+    );
+    expect(screen.getByLabelText("in-demo-team").textContent).toBe("true");
+    expect(screen.getByLabelText("in-acme").textContent).toBe("true");
   });
 });

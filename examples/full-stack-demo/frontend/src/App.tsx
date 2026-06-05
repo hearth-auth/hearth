@@ -1,7 +1,7 @@
 /**
  * Capstone demo — full-stack SPA using every new SDK ergonomic (HEA-1309).
  *
- * What this file demonstrates (one-to-one with the S1–S7 audit items):
+ * What this file demonstrates (one-to-one with the S1–S7 + C3–C4 audit items):
  *
  *   S1  useUser()        — identity from context, no manual decodePayload
  *   S2  useSession()     — session restore from stored RT, no custom loop
@@ -11,6 +11,10 @@
  *   S5  useApiClient()   — authenticated fetch, no custom api.ts
  *   S6  createHearth()   — single unified facade, no dual-construct
  *   S7  VITE_REALM       — one env var, accepts UUID or slug
+ *   C3  <UserMenu>       — "Sign out everywhere" revokes the RT so silent-
+ *                          refresh fails on all open tabs (HEA-1300)
+ *   C4  <ClaimProbe>     — useInGroup / useInOrg wired to real seeded values
+ *                          from hearth.yaml (demo-team group, acme org) (HEA-1300)
  *
  * Zero custom auth code. Zero manual JWT parsing. Imports from @hearth/sdk,
  * react, and react-router-dom only.
@@ -25,6 +29,8 @@ import {
   RequireAuth,
   createHearth,
   useApiClient,
+  useInGroup,
+  useInOrg,
   useSession,
   useUser,
 } from "@hearth/sdk";
@@ -139,6 +145,84 @@ function CallbackPage(): React.ReactElement {
   );
 }
 
+// ─── C3: User menu — "Sign out everywhere" ───────────────────────────────────
+
+/**
+ * C3: Demonstrates session-version logout. "Sign out everywhere" revokes the
+ * stored refresh token via POST /revoke, clears local state, and hard-reloads
+ * to the root. On the next silent-refresh cycle any other open tab receives a
+ * token_revoked error and falls back to the LoginPrompt (HEA-1300).
+ *
+ * When a session-version bump endpoint lands (HEA-1288), replace the /revoke
+ * call with POST /v1/me/session-version to invalidate all sessions atomically.
+ */
+function UserMenu(): React.ReactElement {
+  const user = useUser();
+  const [busy, setBusy] = React.useState(false);
+
+  async function signOutEverywhere(): Promise<void> {
+    setBusy(true);
+    const rt = localStorage.getItem("hearth_rt");
+    if (rt) {
+      try {
+        // Revoke the refresh token — any future silent-refresh using this RT
+        // will receive token_revoked and fall through to LoginPrompt.
+        await fetch(`${BASE_URL}/realms/${REALM}/revoke`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            Authorization: `Bearer ${hearth.getToken() ?? ""}`,
+          },
+          body: new URLSearchParams({
+            token: rt,
+            token_type_hint: "refresh_token",
+          }),
+        });
+      } catch {
+        // Proceed with local sign-out even if the network call fails.
+      }
+    }
+    localStorage.removeItem("hearth_rt");
+    hearth.setToken(null);
+    // Hard-reload so React state is fully reset; RequireAuth shows LoginPrompt.
+    window.location.assign("/");
+  }
+
+  return (
+    <div>
+      <span>{user?.name || user?.email || user?.sub || "Signed in"}</span>
+      {" · "}
+      <button disabled={busy} onClick={() => void signOutEverywhere()}>
+        Sign out everywhere
+      </button>
+    </div>
+  );
+}
+
+// ─── C4: Claim probe ──────────────────────────────────────────────────────────
+
+/**
+ * C4: Wires useInGroup / useInOrg to real seeded values from hearth.yaml.
+ * Shows `true` once admin@hearth.test is a member of `demo-team` / `acme`
+ * (add via Admin UI → Groups / Organisations after bootstrapping) (HEA-1300).
+ */
+export function ClaimProbe(): React.ReactElement {
+  const inDemoTeam = useInGroup("demo-team");
+  const inAcme = useInOrg("acme");
+  return (
+    <dl>
+      <dt>
+        <code>useInGroup("demo-team")</code>
+      </dt>
+      <dd aria-label="in-demo-team">{String(inDemoTeam)}</dd>
+      <dt>
+        <code>useInOrg("acme")</code>
+      </dt>
+      <dd aria-label="in-acme">{String(inAcme)}</dd>
+    </dl>
+  );
+}
+
 // ─── Protected dashboard ──────────────────────────────────────────────────────
 
 /**
@@ -146,6 +230,8 @@ function CallbackPage(): React.ReactElement {
  *     no manual JWT decoding, re-renders automatically on token refresh.
  * S3: <Authorized> gates UI by claim — no custom RoleGate component.
  * S5: useApiClient() returns a stable authenticated fetch — no custom api.ts.
+ * C3: <UserMenu> provides "Sign out everywhere".
+ * C4: <ClaimProbe> surfaces group/org claims from real seeded YAML data.
  */
 export function Dashboard(): React.ReactElement {
   const user = useUser(); // S1: identity from context, not a prop
@@ -161,8 +247,12 @@ export function Dashboard(): React.ReactElement {
 
   return (
     <main>
+      {/* C3: user identity + sign-out-everywhere */}
+      <UserMenu />
       {/* S1: user identity from hook, not prop */}
       <h1>Welcome, {user?.name || user?.sub || "Unknown"}</h1>
+      {/* C4: group / org claim probe */}
+      <ClaimProbe />
       {/* S3: <Authorized> replaces manual useHasPermission guard */}
       <Authorized permission="docs.edit">
         <button>Edit document</button>

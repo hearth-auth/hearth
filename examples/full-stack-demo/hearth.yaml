@@ -39,3 +39,11 @@ realms:
           - docs.edit
           - docs.delete
           - hearth.admin
+    groups:
+      - name: Demo Team
+        slug: demo-team
+        description: "Cross-functional demo group — used to test useInGroup() in the SPA."
+    organizations:
+      acme:
+        name: "Acme Corp"
+        description: "Demo organisation — used to test useInOrg() in the SPA."
