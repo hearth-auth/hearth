@@ -68,6 +68,19 @@ for bin in cargo go node npm curl jq; do
   fi
 done
 
+# ── Free demo ports ───────────────────────────────────────────────────────────
+# Kill any leftover backend/frontend processes from a previous demo run so
+# their ports are free before we start new services.  The Hearth port (8420)
+# is handled separately below — its existing-instance logic may reuse it.
+
+for _port in "${BACKEND_PORT}" "${FRONTEND_PORT}"; do
+  if _pids=$(lsof -ti tcp:"$_port" 2>/dev/null); then
+    echo "  → freeing port $_port (pid $_pids)"
+    # shellcheck disable=SC2086
+    kill $_pids 2>/dev/null || true
+  fi
+done
+
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 echo "▸ building hearth (release)…"
