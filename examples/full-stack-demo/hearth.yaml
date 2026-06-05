@@ -1,0 +1,41 @@
+server:
+  port: 8420
+
+realms:
+  demo:
+    applications:
+      hearth-hub:
+        name: "Hearth Hub"
+        confidential: false
+        redirect_uris:
+          - "http://localhost:5173/auth/callback"
+        grant_types:
+          - authorization_code
+          - refresh_token
+    permissions:
+      - name: docs.read
+        display_name: "Read documents"
+        category: docs
+      - name: docs.edit
+        display_name: "Edit documents"
+        category: docs
+      - name: docs.delete
+        display_name: "Delete documents"
+        category: docs
+    roles:
+      viewer:
+        display_name: "Viewer"
+        permissions:
+          - docs.read
+      editor:
+        display_name: "Editor"
+        permissions:
+          - docs.read
+          - docs.edit
+      admin:
+        display_name: "Admin"
+        permissions:
+          - docs.read
+          - docs.edit
+          - docs.delete
+          - hearth.admin

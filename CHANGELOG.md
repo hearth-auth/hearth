@@ -9,6 +9,21 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Full-stack demo (HEA-1273–1276, HEA-1309)** — new `examples/full-stack-demo/` showing
+  end-to-end Hearth integration: Vite/React SPA with `@hearth/sdk` (zero custom auth code) backed
+  by a Go/Gin API that validates JWTs via JWKS and calls `client.Admin(token).ListUsers()`. Run
+  with `./demo.sh`; seeds viewer, editor, and admin demo users automatically. Frontend tests use
+  `<MockHearthProvider>` from `@hearth/sdk/testing`.
+
+- **React test utilities in TypeScript SDK (HEA-1308)** — new `@hearth/sdk/testing` sub-entry exports
+  `mockHearth({ roles, permissions, groups, org, sub, claims })` and `<MockHearthProvider>` for
+  Vitest / Jest + RTL consumers. `mockHearth()` returns a fully synchronous `MockHearthFacade`
+  (satisfies `HearthFacade`) with a `notify()` helper that fires claim-change subscribers — use it
+  to simulate silent token refreshes inside tests. `<MockHearthProvider>` wraps
+  `HearthContext.Provider` with a memo-stable facade; for dynamic control use `mockHearth()` with
+  `<HearthContext.Provider>` directly. No network calls are made and no JWT signature is verified.
+  A sample `Dashboard.test.tsx` in `examples/react-spa/` demonstrates the pattern end-to-end.
+
 - **Realm auto-resolution in TypeScript SDK (HEA-1307)** — `createHearth()` now accepts a single
   `realm` value (either a UUID or a human-readable slug) rather than requiring both. Pass a plain
   string: `createHearth({ baseUrl, realm: "acme" })` or `createHearth({ baseUrl, realm: "550e…" })`.
@@ -99,6 +114,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   allowlist specific internal webhook receiver URLs that would otherwise be
   blocked by SSRF protection (e.g. `["https://internal.corp/hooks/"]`). The
   default is an empty list — no internal destinations are reachable.
+
+### Changed
+
+- **Demo SPA refactored to use full SDK ergonomics (HEA-1309)** —
+  `examples/react-spa/src/App.tsx` now demonstrates all seven SDK additions:
+  `useUser()` for identity (no manual JWT decoding), `useSession()` for session
+  restore, `<RequireAuth>` and `<Authorized>` for auth gates, `<HearthCallback>`
+  for the OAuth callback route, `useApiClient()` for authenticated fetch, single
+  `createHearth()` facade, and `VITE_REALM` as the one realm env var. Zero custom
+  auth code. Imports come exclusively from `@hearth/sdk`, `react`, and
+  `react-router-dom`. `Dashboard.test.tsx` updated to test `useUser()` integration
+  and `<Authorized role>` via `MockHearthProvider`.
 
 ### Security
 
