@@ -71,10 +71,11 @@ echo "▸ building hearth (release)…"
 echo "  ✓ build complete"
 
 # ── Start Hearth ──────────────────────────────────────────────────────────────
+# If a Hearth instance is already running, verify it was started with the demo
+# config (i.e. the "demo" realm exists). If not — e.g. a leftover dev server
+# from another session — kill it and restart with hearth.yaml.
 
-if curl -sf "$BASE/health" >/dev/null 2>&1; then
-  echo "▸ hearth already running on $BASE"
-else
+start_hearth() {
   echo "▸ starting hearth on $BASE"
   "$HEARTH_BIN" serve \
     --dev \
@@ -96,6 +97,36 @@ else
     exit 1
   fi
   echo "  ✓ server is healthy"
+}
+
+if curl -sf "$BASE/health" >/dev/null 2>&1; then
+  # Running — check whether it has the demo realm (config-defined realms only
+  # exist when started with the right hearth.yaml).
+  _tmp=$(curl -sf -X POST "$BASE/admin/bootstrap" 2>/dev/null || echo '{}')
+  _tok=$(echo "$_tmp" | jq -r '.access_token // empty' 2>/dev/null || true)
+  _has_demo=""
+  if [[ -n "$_tok" ]]; then
+    _has_demo=$(
+      curl -sf -H "Authorization: Bearer $_tok" "$BASE/admin/realms" 2>/dev/null \
+      | jq -r '.realms[]? | select(.name == "demo" or .slug == "demo") | .id' \
+      2>/dev/null || true
+    )
+  fi
+
+  if [[ -n "$_has_demo" && "$_has_demo" != "null" ]]; then
+    echo "▸ hearth already running on $BASE (demo realm present)"
+  else
+    echo "▸ hearth running without demo realm — restarting with demo config…"
+    pkill -x hearth 2>/dev/null || pkill -f "hearth serve" 2>/dev/null || true
+    # Wait for the port to free up.
+    for _ in {1..40}; do
+      curl -sf "$BASE/health" >/dev/null 2>&1 || break
+      sleep 0.25
+    done
+    start_hearth
+  fi
+else
+  start_hearth
 fi
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
