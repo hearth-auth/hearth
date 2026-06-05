@@ -14,7 +14,7 @@ const hearthUrl = import.meta.env.VITE_HEARTH_URL as string;
 const realmSlug = import.meta.env.VITE_REALM_SLUG as string;
 const realmId = import.meta.env.VITE_REALM_ID as string;
 
-const apiClient = new HearthApiClient({ baseUrl: `${hearthUrl}/${realmSlug}`, realmId });
+const apiClient = new HearthApiClient({ baseUrl: `${hearthUrl}/realms/${realmSlug}`, realmId });
 
 export const hearthAuth = createHearthAuth(apiClient, {
   clientId: import.meta.env.VITE_CLIENT_ID as string,
