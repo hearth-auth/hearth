@@ -954,7 +954,10 @@ pub fn router(state: Arc<AppState>) -> Router {
                     axum::routing::get(realm_oidc_discovery),
                 )
                 .route("/.well-known/jwks.json", axum::routing::get(realm_jwks))
-                .route("/authorize", axum::routing::post(realm_authorize))
+                .route(
+                    "/authorize",
+                    axum::routing::get(realm_authorize_browser_redirect).post(realm_authorize),
+                )
                 .route(
                     "/as/par",
                     axum::routing::post(realm_pushed_authorization_request)
@@ -6832,6 +6835,22 @@ async fn realm_jwks(
         Ok(doc) => (StatusCode::OK, Json(doc)).into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
+}
+
+/// `GET /realms/{realm}/authorize` — browser redirect shim.
+///
+/// The OIDC discovery document advertises `authorization_endpoint` as
+/// `{issuer}/authorize`.  Browser-based PKCE clients (SPAs) redirect the
+/// user's browser here via GET.  The interactive login+consent UI lives at
+/// `/ui/realms/{realm}/oauth/authorize`, so this handler 302-redirects the
+/// browser there, preserving all query parameters.
+async fn realm_authorize_browser_redirect(
+    Path(realm_name): Path<String>,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = format!("/ui/realms/{realm_name}/oauth/authorize{query}");
+    axum::response::Redirect::to(&target)
 }
 
 async fn realm_authorize(
