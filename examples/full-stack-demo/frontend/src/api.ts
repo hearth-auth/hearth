@@ -1,6 +1,6 @@
 // Typed fetch wrapper that auto-attaches Authorization: Bearer <token>.
 
-import { getAccessToken } from "./auth/session.js";
+import { getAccessToken } from "@hearth/sdk";
 
 const API_BASE = (import.meta.env.VITE_API_URL as string) ?? "http://localhost:8421";
 

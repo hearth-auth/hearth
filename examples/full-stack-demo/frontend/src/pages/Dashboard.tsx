@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { useHasRole, useHasPermission, useInGroup, useInOrg } from "@hearth/sdk";
 import UserMenu from "../components/UserMenu.js";
-import { getAccessToken } from "../auth/session.js";
+import { getAccessToken } from "@hearth/sdk";
 
 function decodePayload(token: string): Record<string, unknown> {
   try {

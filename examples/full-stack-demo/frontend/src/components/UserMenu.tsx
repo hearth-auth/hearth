@@ -1,5 +1,5 @@
 import { hearthAuth } from "../main.js";
-import { getAccessToken } from "../auth/session.js";
+import { getAccessToken } from "@hearth/sdk";
 
 /** Decode only the JWT payload — signature is trusted because we issued it. */
 function decodePayload(token: string): Record<string, unknown> {

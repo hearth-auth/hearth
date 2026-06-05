@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Navigate } from "react-router-dom";
 import { hearthAuth } from "../main.js";
-import { isAuthenticated } from "../auth/session.js";
+import { isAuthenticated } from "@hearth/sdk";
 
 export default function Login() {
   const [loading, setLoading] = useState(false);

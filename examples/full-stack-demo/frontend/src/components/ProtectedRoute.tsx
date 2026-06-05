@@ -1,5 +1,5 @@
 import { Navigate, Outlet } from "react-router-dom";
-import { isAuthenticated } from "../auth/session.js";
+import { isAuthenticated } from "@hearth/sdk";
 
 /** Redirects unauthenticated visitors to `/`. */
 export default function ProtectedRoute() {

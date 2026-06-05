@@ -93,3 +93,14 @@ export type {
   UserInfoResponse,
 } from "./types.js";
 export { SessionVersionCache } from "./session-version-cache.js";
+
+// Browser auth: token store + PKCE login facade for SPAs.
+export {
+  getAccessToken,
+  getRefreshToken,
+  getIdToken,
+  isAuthenticated,
+  clearTokens,
+  createHearthAuth,
+} from "./browser-auth.js";
+export type { AuthConfig, HearthBrowserAuth } from "./browser-auth.js";
