@@ -22,13 +22,13 @@ func NewNotes(s *store.Notes, c *hearth.Client) *Notes {
 }
 
 type createNoteReq struct {
-	Title string `json:"title" binding:"required"`
-	Body  string `json:"body"`
+	Title   string `json:"title" binding:"required"`
+	Content string `json:"content"`
 }
 
 type updateNoteReq struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
 }
 
 // List handles GET /notes — returns all notes. Requires any authenticated user.
@@ -48,12 +48,12 @@ func (h *Notes) Create(c *gin.Context) {
 	token, _ := raw.(string)
 
 	// Extract subject from JWT claims to tag the note's author.
-	var authorID string
+	var author string
 	if claims, err := hearth.ParseClaims(token); err == nil {
-		authorID = claims.Subject()
+		author = claims.Subject()
 	}
 
-	note := h.store.Create(req.Title, req.Body, authorID)
+	note := h.store.Create(req.Title, req.Content, author)
 	c.JSON(http.StatusCreated, note)
 }
 
@@ -66,7 +66,7 @@ func (h *Notes) Update(c *gin.Context) {
 	}
 
 	id := c.Param("id")
-	note, ok := h.store.Update(id, req.Title, req.Body)
+	note, ok := h.store.Update(id, req.Title, req.Content)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "note not found"})
 		return

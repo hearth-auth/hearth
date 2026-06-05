@@ -241,7 +241,7 @@ func TestNoteCreateSetsAuthorID(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&note); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if note.AuthorID != "user-abc" {
-		t.Errorf("want author_id=user-abc, got %q", note.AuthorID)
+	if note.Author != "user-abc" {
+		t.Errorf("want author=user-abc, got %q", note.Author)
 	}
 }

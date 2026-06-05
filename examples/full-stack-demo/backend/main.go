@@ -60,8 +60,8 @@ func main() {
 	requireEditor := middleware.RequirePermission(client, "content.write")
 	requireAdmin := middleware.RequireRole(client, "admin")
 
-	// /notes — content CRUD
-	notes := r.Group("/notes", auth)
+	// /api/notes — content CRUD
+	notes := r.Group("/api/notes", auth)
 	{
 		notes.GET("", notesH.List)                          // any authenticated user
 		notes.POST("", requireEditor, notesH.Create)        // content.write

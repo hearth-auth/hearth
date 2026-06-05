@@ -11,8 +11,8 @@ import (
 type Note struct {
 	ID        string    `json:"id"`
 	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	AuthorID  string    `json:"author_id"`
+	Content   string    `json:"content"`
+	Author    string    `json:"author"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -41,15 +41,15 @@ func (s *Notes) List() []Note {
 }
 
 // Create inserts a new note and returns it.
-func (s *Notes) Create(title, body, authorID string) Note {
+func (s *Notes) Create(title, content, author string) Note {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seq++
 	n := Note{
 		ID:        fmt.Sprintf("note-%d", s.seq),
 		Title:     title,
-		Body:      body,
-		AuthorID:  authorID,
+		Content:   content,
+		Author:    author,
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
@@ -57,9 +57,9 @@ func (s *Notes) Create(title, body, authorID string) Note {
 	return n
 }
 
-// Update patches the title and/or body of an existing note.
+// Update patches the title and/or content of an existing note.
 // Returns the updated note and true, or the zero value and false when not found.
-func (s *Notes) Update(id, title, body string) (Note, bool) {
+func (s *Notes) Update(id, title, content string) (Note, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n, ok := s.items[id]
@@ -69,8 +69,8 @@ func (s *Notes) Update(id, title, body string) (Note, bool) {
 	if title != "" {
 		n.Title = title
 	}
-	if body != "" {
-		n.Body = body
+	if content != "" {
+		n.Content = content
 	}
 	n.UpdatedAt = time.Now().UTC()
 	s.items[id] = n
