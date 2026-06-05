@@ -250,7 +250,7 @@ echo "  ✓ backend is healthy"
 # ── Start Vite dev server ─────────────────────────────────────────────────────
 
 echo "▸ starting frontend on :${FRONTEND_PORT}…"
-(cd "$HERE/frontend" && npm run dev -- --port "${FRONTEND_PORT}" --strictPort >"$HERE/.frontend.log" 2>&1) &
+(cd "$HERE/frontend" && npm run dev -- --port "${FRONTEND_PORT}" --strictPort --host 127.0.0.1 >"$HERE/.frontend.log" 2>&1) &
 FRONTEND_PID=$!
 
 echo -n "  waiting for frontend"
