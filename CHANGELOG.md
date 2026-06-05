@@ -9,6 +9,52 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Unified `createHearth()` facade in TypeScript SDK (HEA-1306)** — eliminates the two-client
+  boilerplate (`createHearth` for RBAC + a separate `HearthApiClient` for token exchange/refresh).
+  New call form: `createHearth({ baseUrl, realm: { id, slug? }, auth?: { clientId, redirectUri? } })`
+  returns a `UnifiedHearthFacade` with an internal token store. Call `hearth.setToken(accessToken)`
+  after session restore or token refresh — it updates the RBAC predicates and fires all React
+  subscribers in one step, removing the need for an external `tokenRef`. When `auth` config is
+  supplied, `hearth.auth.refreshTokens(rt)` and `hearth.auth.exchangeCode({ code, codeVerifier })`
+  are available, bound to the configured `clientId`. `createHearthAuth()` is introduced as a
+  born-deprecated alias pointing to the same implementation; the old `createHearth({ realmId,
+  getToken })` form remains supported for backward compatibility.
+
+- **`createAuthenticatedFetch()` and `useApiClient()` in TypeScript SDK (HEA-1305)** —
+  eliminates hand-rolled Bearer-token fetch wrappers. `createAuthenticatedFetch({ getAccessToken,
+  getRefreshToken, refresh, onRefresh, onRefreshFailure, baseUrl })` returns a `fetch`-shaped
+  function that attaches the current access token, intercepts 401 responses, and triggers exactly
+  one token refresh regardless of how many concurrent requests all received a 401 simultaneously
+  (refresh-storm de-duplication via a single shared in-flight promise). Both `onRefresh` and
+  `onRefreshFailure` are called at most once per refresh cycle. `useApiClient(opts)` is the
+  React-hook wrapper: it creates a stable function identity across renders (safe as an effect
+  dependency) while routing all callbacks through a ref so stale closures are never an issue.
+  Works outside React too — usable in Node.js services and Cloudflare Workers.
+
+- **`<HearthCallback>` component and `useOAuthCallback()` hook in TypeScript SDK (HEA-1304)** —
+  eliminates hand-rolled `Callback.tsx` boilerplate. `useOAuthCallback` parses `code`, `state`,
+  `error`, and `error_description` from the URL, validates the `state` parameter against a
+  caller-supplied `expectedState` for CSRF protection, then calls `exchangeCode` once and fires
+  `onSuccess` or `onError`. `<HearthCallback>` wraps the hook for declarative use: accepts an
+  `exchangeCode` function, `onSuccess`, optional `onError`, and a `loading` slot rendered
+  during the exchange. Both handle the `error_description` field, state-mismatch,
+  and missing-code edge cases as typed `CallbackError` objects.
+
+- **`<RequireAuth>` and `<Authorized>` React components in TypeScript SDK (HEA-1303)** —
+  pre-built gate components that eliminate `ProtectedRoute.tsx` / `RoleGate.tsx` boilerplate.
+  `<RequireAuth fallback={<Navigate to="/login" />}>` renders children only when a valid
+  session exists; `<Authorized role permission group org fallback>` gates on any combination
+  of JWT claims (AND semantics, omitted props are ignored). Both are SSR-safe, subscribe to
+  token-change events so silent refresh triggers an automatic re-render, and work with any
+  router or no router at all.
+
+- **`useSession()` React hook in TypeScript SDK (HEA-1302)** — replaces hand-rolled
+  session-restore boilerplate. The hook accepts `getRefreshToken`, `refresh`, and `onRefresh`
+  callbacks; starts in `'loading'`, resolves to `'authenticated'` (with `user: UserProfile` and
+  `claims: Claims`) on success, or `'unauthenticated'` when no refresh token is stored or the
+  grant is expired/revoked. Standalone — no `<HearthProvider>` required. See
+  `examples/react-spa/src/App.tsx` for the recommended composition pattern.
+
 - **Abuse-prevention foundation (HEA-1187)** — introduces the `src/abuse/` module with the
   `AbusePolicy` trait, `NoopAbusePolicy` (allow-all default), `AbuseGuard` HTTP middleware, and
   per-realm YAML configuration (`realms.<name>.abuse.enabled` / `fail_closed`). The guard is

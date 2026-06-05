@@ -32,11 +32,16 @@ export { Claims } from "./claims.js";
 export { HearthApiClient, HearthError } from "./client.js";
 export type { HearthApiClientConfig } from "./client.js";
 export { AdminClient } from "./admin.js";
-export { createHearth } from "./hearth.js";
+export { createHearth, createHearthAuth } from "./hearth.js";
 export type {
   HearthFacade,
   HearthHttpClient,
   HearthOptions,
+  HearthConfig,
+  HearthRealmConfig,
+  HearthAuthConfig,
+  UnifiedHearthFacade,
+  UnifiedHearthAuth,
 } from "./hearth.js";
 export {
   HearthContext,
@@ -47,8 +52,34 @@ export {
   useInOrg,
   useClaims,
   useUser,
+  useSession,
+  useOAuthCallback,
+  HearthCallback,
+  RequireAuth,
+  Authorized,
+  useApiClient,
 } from "./react.js";
-export type { HearthProviderProps, UserProfile } from "./react.js";
+export type {
+  HearthProviderProps,
+  UserProfile,
+  SessionStatus,
+  SessionState,
+  UseSessionOptions,
+  CallbackError,
+  CallbackStatus,
+  CallbackState,
+  UseOAuthCallbackOptions,
+  HearthCallbackProps,
+  RequireAuthProps,
+  AuthorizedProps,
+  UseApiClientOptions,
+} from "./react.js";
+// Authenticated fetch — usable outside React (e.g. Node.js services, Workers).
+export { createAuthenticatedFetch } from "./fetch.js";
+export type {
+  AuthenticatedFetch,
+  AuthenticatedFetchOptions,
+} from "./fetch.js";
 export type {
   AuthorizeParams,
   AuthorizeResponse,
