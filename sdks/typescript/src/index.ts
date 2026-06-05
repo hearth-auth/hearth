@@ -18,6 +18,7 @@ export {
   HearthSdkError,
   IntrospectionError,
   JWKSFetchError,
+  RealmResolutionError,
   TokenAudienceError,
   TokenExpiredError,
   TokenInvalidError,
@@ -74,6 +75,10 @@ export type {
   AuthorizedProps,
   UseApiClientOptions,
 } from "./react.js";
+// Realm resolution utilities.
+export { looksLikeUuid, resolveRealm, resolveRealmId } from "./realm-resolver.js";
+export type { ResolvedRealm } from "./realm-resolver.js";
+
 // Authenticated fetch — usable outside React (e.g. Node.js services, Workers).
 export { createAuthenticatedFetch } from "./fetch.js";
 export type {

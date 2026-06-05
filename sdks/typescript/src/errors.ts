@@ -98,3 +98,20 @@ export class IntrospectionError extends HearthSdkError {
     super(message);
   }
 }
+
+/**
+ * Thrown when realm slug ↔ UUID resolution fails — endpoint unreachable,
+ * returned non-2xx, or the response is missing required fields.
+ */
+export class RealmResolutionError extends HearthSdkError {
+  constructor(
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message);
+    if (options?.cause !== undefined) {
+      // ErrorOptions.cause is ES2022; assign manually for broader compat
+      (this as { cause?: unknown }).cause = options.cause;
+    }
+  }
+}

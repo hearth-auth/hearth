@@ -9,6 +9,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Realm auto-resolution in TypeScript SDK (HEA-1307)** — `createHearth()` now accepts a single
+  `realm` value (either a UUID or a human-readable slug) rather than requiring both. Pass a plain
+  string: `createHearth({ baseUrl, realm: "acme" })` or `createHearth({ baseUrl, realm: "550e…" })`.
+  When only one form is supplied the SDK calls `GET {baseUrl}/v1/realms/{value}` on the first API
+  call that needs the other form and caches the mapping for the process lifetime (no TTL — realm
+  identity is immutable). The resolution result is cached by both input key and both canonical keys,
+  so a second caller with the UUID form hits the cache even after the first caller used the slug.
+  Failure modes: `RealmResolutionError` is thrown (and exported) when the endpoint is unreachable,
+  returns non-2xx, or the response lacks `id` / `slug` fields. Demo `.env` simplified from two vars
+  (`VITE_REALM_ID` + `VITE_REALM_SLUG`) to one (`VITE_REALM`).
+
 - **Unified `createHearth()` facade in TypeScript SDK (HEA-1306)** — eliminates the two-client
   boilerplate (`createHearth` for RBAC + a separate `HearthApiClient` for token exchange/refresh).
   New call form: `createHearth({ baseUrl, realm: { id, slug? }, auth?: { clientId, redirectUri? } })`
