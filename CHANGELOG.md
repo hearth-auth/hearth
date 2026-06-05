@@ -9,6 +9,11 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Fixed
 
+- **Realm OIDC discovery now includes `end_session_endpoint`** — the realm-scoped
+  `/.well-known/openid-configuration` handler was serializing through the protobuf
+  path which lacks the field, so SPA clients never saw the logout endpoint and
+  fell back to a no-op URL leaving the Hearth session alive (HEA-1294).
+
 - **`delete_realm` now purges `email:reserved:` tombstones** — the 90-day
   A-20 email-reservation records (plaintext email addresses) were previously
   absent from both the sync and background cascade prefix lists, leaving them
