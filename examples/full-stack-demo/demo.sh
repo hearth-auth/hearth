@@ -206,7 +206,7 @@ cat > "$HERE/frontend/.env" <<EOF
 VITE_HEARTH_URL=http://localhost:${FRONTEND_PORT}
 VITE_REALM_SLUG=demo
 VITE_REALM_ID=${REALM_ID}
-VITE_CLIENT_ID=hearth-hub
+VITE_CLIENT_ID=f7057d27-61fd-555e-b2af-ba8edd112237
 VITE_API_URL=http://localhost:${BACKEND_PORT}
 EOF
 echo "  ✓ frontend/.env"
