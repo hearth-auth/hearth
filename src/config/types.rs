@@ -1718,6 +1718,36 @@ fn default_true() -> bool {
     true
 }
 
+/// A single seed user declared under `realms.<name>.seed_users`.
+///
+/// Seed users are created at startup if they do not already exist.
+/// Reconciliation is additive-only — existing accounts are never deleted or
+/// modified by the reconciler.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeedUserYamlConfig {
+    /// Email address for the user (unique within the realm).
+    pub email: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Initial plaintext password. Stored as an Argon2id hash at startup.
+    pub password: String,
+    /// Role names to assign at creation time. Must match roles declared in
+    /// `roles:` or default RBAC seeds for this realm.
+    #[serde(default)]
+    pub roles: Vec<String>,
+    /// Whether the email address is pre-verified. Defaults to `true`; when
+    /// `true` the user is activated immediately without an email verification
+    /// step. Set to `false` to leave the user in `PendingVerification`.
+    #[serde(default = "SeedUserYamlConfig::default_email_verified")]
+    pub email_verified: bool,
+}
+
+impl SeedUserYamlConfig {
+    const fn default_email_verified() -> bool {
+        true
+    }
+}
+
 /// Per-realm YAML configuration block.
 ///
 /// Fields are optional — `None` inherits from global `auth:` defaults.
@@ -1833,6 +1863,12 @@ pub struct RealmYamlConfig {
     /// standard OAuth 2.0 / OIDC rules apply with no FAPI constraints.
     #[serde(default)]
     pub fapi_profile: Option<String>,
+    /// Declarative seed users for this realm.
+    ///
+    /// Each entry is created at startup if the email does not already exist.
+    /// Additive-only: the reconciler never deletes or modifies existing users.
+    #[serde(default)]
+    pub seed_users: Option<Vec<SeedUserYamlConfig>>,
 }
 
 /// YAML for `realms.{name}.scim.*`.

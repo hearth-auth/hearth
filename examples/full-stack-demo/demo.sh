@@ -216,7 +216,8 @@ fi
 # ── Start Go backend ──────────────────────────────────────────────────────────
 
 echo "▸ starting Go backend on :${BACKEND_PORT}…"
-(cd "$HERE/backend" && go run . >"$HERE/.backend.log" 2>&1) &
+# shellcheck disable=SC1091  # .env sourced at runtime, not present at lint time
+(cd "$HERE/backend" && set -a && source .env && set +a && go run . >"$HERE/.backend.log" 2>&1) &
 BACKEND_PID=$!
 
 echo -n "  waiting for backend"
