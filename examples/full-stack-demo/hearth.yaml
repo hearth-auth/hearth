@@ -80,3 +80,17 @@ realms:
           - content.read
           - content.write
           - content.admin
+
+    seed_users:
+      - email: viewer@hearth.test
+        display_name: Vera Viewer
+        password: HearthTest123!
+        roles: [viewer]
+      - email: editor@hearth.test
+        display_name: Ed Editor
+        password: HearthTest123!
+        roles: [editor]
+      - email: admin@hearth.test
+        display_name: Ada Admin
+        password: HearthTest123!
+        roles: [admin]

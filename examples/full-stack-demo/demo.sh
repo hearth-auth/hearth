@@ -6,12 +6,14 @@
 #   2. Starts Hearth on :8420 in --dev mode (in-memory storage).
 #   3. Bootstraps the system realm and obtains an admin token.
 #   4. Resolves the "demo" realm ID configured in hearth.yaml.
-#   5. Seeds three demo users with roles (viewer, editor, admin).
-#   6. Writes .env files for frontend and backend.
-#   7. Installs frontend dependencies (npm install) if node_modules is absent.
-#   8. Starts the Go API backend on :8421.
-#   9. Starts the Vite dev server on :5173.
-#  10. Opens http://localhost:5173 — log in and explore.
+#   5. Writes .env files for frontend and backend.
+#   6. Installs frontend dependencies (npm install) if node_modules is absent.
+#   7. Starts the Go API backend on :8421.
+#   8. Starts the Vite dev server on :5173.
+#   9. Opens http://localhost:5173 — log in and explore.
+#
+# Demo users (viewer, editor, admin) are seeded by Hearth at startup via
+# the seed_users block in hearth.yaml — no shell-side user creation needed.
 #
 # Idempotent: safe to re-run. Bootstrap is a no-op if Hearth is already up;
 # user creation skips on 409; env files are overwritten with fresh values.
@@ -182,60 +184,6 @@ if [[ -z "$REALM_ID" || "$REALM_ID" == "null" ]]; then
   exit 1
 fi
 echo "  ✓ realm id: $REALM_ID"
-
-# ── Seed users ────────────────────────────────────────────────────────────────
-
-create_user() {
-  local email="$1" display_name="$2"
-  local body
-  body=$(jq -n \
-    --arg email "$email" --arg name "$display_name" --arg pw "HearthTest123!" \
-    '{email: $email, display_name: $name, password: $pw, email_verified: true}')
-  local status
-  status=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" -d "$body" \
-    "$BASE/admin/realms/$REALM_ID/users")
-  case "$status" in
-    200|201) echo "  ✓ created $email" ;;
-    409)     echo "  · $email already exists" ;;
-    *)       echo "✗ HTTP $status creating $email" >&2; exit 1 ;;
-  esac
-}
-
-echo "▸ seeding users…"
-create_user "viewer@hearth.test" "Vera Viewer"
-create_user "editor@hearth.test" "Ed Editor"
-create_user "admin@hearth.test"  "Ada Admin"
-
-# ── Assign roles ──────────────────────────────────────────────────────────────
-
-assign_role() {
-  local email="$1" role="$2"
-  local user_id
-  user_id=$(curl -sf \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    "$BASE/admin/realms/$REALM_ID/users?email=$( \
-      python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" \
-        "$email" 2>/dev/null || printf '%s' "$email")" \
-    | jq -r '.users[0].id // empty')
-  [[ -z "$user_id" ]] && { echo "✗ user not found: $email" >&2; exit 1; }
-  local status
-  status=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg r "$role" '{role: $r}')" \
-    "$BASE/admin/realms/$REALM_ID/users/$user_id/roles")
-  case "$status" in
-    200|201|204|409) echo "  ✓ $email → $role" ;;
-    *)               echo "✗ HTTP $status assigning $role to $email" >&2; exit 1 ;;
-  esac
-}
-
-echo "▸ assigning roles…"
-assign_role "viewer@hearth.test" "viewer"
-assign_role "editor@hearth.test" "editor"
-assign_role "admin@hearth.test"  "admin"
 
 # ── Write env files ───────────────────────────────────────────────────────────
 
