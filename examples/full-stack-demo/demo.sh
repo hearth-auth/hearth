@@ -203,7 +203,7 @@ echo "  ✓ realm id: $REALM_ID"
 echo "▸ writing env files…"
 
 cat > "$HERE/frontend/.env" <<EOF
-VITE_HEARTH_URL=http://localhost:${HEARTH_PORT}
+VITE_HEARTH_URL=http://localhost:${FRONTEND_PORT}
 VITE_REALM_SLUG=demo
 VITE_REALM_ID=${REALM_ID}
 VITE_CLIENT_ID=hearth-hub
