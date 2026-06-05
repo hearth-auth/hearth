@@ -6806,11 +6806,9 @@ async fn realm_oidc_discovery(
         Err(e) => return e,
     };
     match state.identity.realm_oidc_discovery(&realm_id) {
-        Ok(doc) => (
-            StatusCode::OK,
-            Json(proto_to_rest_json(&pb::OidcDiscoveryDocument::from(&doc))),
-        )
-            .into_response(),
+        // Serialize the domain type directly so optional fields like
+        // end_session_endpoint are included without proto schema changes.
+        Ok(doc) => (StatusCode::OK, Json(doc)).into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }

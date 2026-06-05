@@ -121,7 +121,7 @@ export function createHearthAuth(
       clearTokens();
       const doc = await client.discovery().catch(() => null);
       const end = (doc?.["end_session_endpoint"] as string | undefined)
-        ?? `${config.hearthUrl}/${config.realmSlug}/oidc/logout`;
+        ?? `${config.hearthUrl}/realms/${config.realmSlug}/end_session`;
       const params = new URLSearchParams({ post_logout_redirect_uri: window.location.origin });
       if (idToken) params.set("id_token_hint", idToken);
       window.location.href = `${end}?${params}`;
