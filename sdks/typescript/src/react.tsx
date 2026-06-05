@@ -1,5 +1,6 @@
 import * as React from "react";
 import type { HearthFacade } from "./hearth.js";
+import type { Claims } from "./claims.js";
 
 /**
  * React context carrying a {@link HearthFacade} down the tree.
@@ -54,4 +55,66 @@ export function useInGroup(group: string): boolean {
 export function useInOrg(org: string): boolean {
   const client = React.useContext(HearthContext);
   return client !== null && client.inOrg(org);
+}
+
+/**
+ * Returns the typed {@link Claims} from the current access token, or `null`
+ * when unauthenticated or no {@link HearthProvider} is mounted.
+ *
+ * Subscribes to token-change events (e.g. silent refresh) so the component
+ * re-renders automatically when the token is replaced — avoiding the latent
+ * bug of manually decoded claims going stale after refresh.
+ */
+export function useClaims(): Claims | null {
+  const client = React.useContext(HearthContext);
+  const [claims, setClaims] = React.useState<Claims | null>(
+    () => client?.getClaims() ?? null,
+  );
+
+  React.useEffect(() => {
+    if (!client) {
+      setClaims(null);
+      return;
+    }
+    setClaims(client.getClaims());
+    return client.subscribe(() => {
+      setClaims(client.getClaims());
+    });
+  }, [client]);
+
+  return claims;
+}
+
+/** Common user identity fields extracted from the JWT for convenience. */
+export interface UserProfile {
+  /** The `sub` (subject) claim — typically a stable user ID. */
+  sub: string;
+  /** The `name` claim, or an empty string when absent. */
+  name: string;
+  /** The `email` claim, or an empty string when absent. */
+  email: string;
+  /** The `email_verified` claim. */
+  emailVerified: boolean;
+  /** The `picture` claim (avatar URL), or null when absent. */
+  picture: string | null;
+}
+
+/**
+ * Returns common user identity fields from the current access token, or
+ * `null` when unauthenticated. Re-renders on token refresh via
+ * {@link useClaims}.
+ */
+export function useUser(): UserProfile | null {
+  const claims = useClaims();
+  if (!claims) return null;
+  return {
+    sub: claims.subject(),
+    name: String(claims.get("name") ?? ""),
+    email: String(claims.get("email") ?? ""),
+    emailVerified: Boolean(claims.get("email_verified")),
+    picture:
+      typeof claims.get("picture") === "string"
+        ? (claims.get("picture") as string)
+        : null,
+  };
 }

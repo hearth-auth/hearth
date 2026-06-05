@@ -1,5 +1,6 @@
 import { decodeJwt } from "jose";
 import { HearthApiClient } from "./client.js";
+import { Claims } from "./claims.js";
 import type { MePermissionsResponse } from "./types.js";
 
 /** Options for creating a {@link HearthClient} facade. */
@@ -14,6 +15,16 @@ export interface HearthOptions {
    * caller is unauthenticated.
    */
   getToken: () => string | null | undefined;
+  /**
+   * Optional: wire up a token-change event bus (e.g. from a browser auth
+   * client's silent-refresh mechanism). The callback is invoked whenever the
+   * access token changes. Returns an unsubscribe function.
+   *
+   * When absent, {@link HearthFacade.subscribe} is a no-op — existing
+   * integrations continue to work, they just will not auto-rerender on
+   * silent refresh.
+   */
+  subscribe?: (callback: () => void) => () => void;
 }
 
 /**
@@ -54,6 +65,21 @@ export interface HearthFacade {
    * Returns `true` iff the JWT `oid` claim equals `org`.
    */
   inOrg(org: string): boolean;
+  /**
+   * Returns the typed {@link Claims} decoded from the current access token,
+   * or `null` when the token is absent or unparseable.
+   * Signature is NOT verified.
+   */
+  getClaims(): Claims | null;
+  /**
+   * Subscribe to token-change events (e.g. silent refresh).
+   * The callback is invoked each time the access token is replaced.
+   * Returns an unsubscribe function to be called on cleanup.
+   *
+   * When no `subscribe` option was provided to {@link createHearth},
+   * this is a no-op that returns an empty unsubscribe function.
+   */
+  subscribe(callback: () => void): () => void;
   /** Narrow HTTP surface for live RBAC resolution. */
   client: HearthHttpClient;
 }
@@ -99,6 +125,8 @@ export function createHearth(opts: HearthOptions): HearthFacade {
     return safeDecode(opts.getToken());
   }
 
+  const subscribeFn = opts.subscribe ?? (() => () => undefined);
+
   return {
     hasPermission(permission: string): boolean {
       const c = claims();
@@ -115,6 +143,18 @@ export function createHearth(opts: HearthOptions): HearthFacade {
     inOrg(org: string): boolean {
       const c = claims();
       return c !== null && typeof c.oid === "string" && c.oid === org;
+    },
+    getClaims(): Claims | null {
+      const token = opts.getToken();
+      if (!token) return null;
+      try {
+        return Claims.decode(token);
+      } catch {
+        return null;
+      }
+    },
+    subscribe(callback: () => void): () => void {
+      return subscribeFn(callback);
     },
     client: {
       permissions(): Promise<MePermissionsResponse> {

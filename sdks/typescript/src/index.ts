@@ -45,8 +45,10 @@ export {
   useHasRole,
   useInGroup,
   useInOrg,
+  useClaims,
+  useUser,
 } from "./react.js";
-export type { HearthProviderProps } from "./react.js";
+export type { HearthProviderProps, UserProfile } from "./react.js";
 export type {
   AuthorizeParams,
   AuthorizeResponse,
