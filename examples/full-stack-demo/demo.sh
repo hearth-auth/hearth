@@ -112,11 +112,13 @@ if curl -sf "$BASE/health" >/dev/null 2>&1; then
   # exist when started with the right hearth.yaml).
   _tmp=$(curl -sf -X POST "$BASE/admin/bootstrap" 2>/dev/null || echo '{}')
   _tok=$(echo "$_tmp" | jq -r '.access_token // empty' 2>/dev/null || true)
+  _sys=$(echo "$_tmp" | jq -r '.realm_id // empty' 2>/dev/null || true)
   _has_demo=""
-  if [[ -n "$_tok" ]]; then
+  if [[ -n "$_tok" && -n "$_sys" ]]; then
     _has_demo=$(
-      curl -sf -H "Authorization: Bearer $_tok" "$BASE/admin/realms" 2>/dev/null \
-      | jq -r '.realms[]? | select(.name == "demo" or .slug == "demo") | .id' \
+      curl -sf -H "Authorization: Bearer $_tok" -H "X-Realm-ID: $_sys" \
+        "$BASE/admin/realms" 2>/dev/null \
+      | jq -r '.items[]? | select(.name == "demo") | .id' \
       2>/dev/null || true
     )
   fi
@@ -142,6 +144,8 @@ fi
 echo "▸ bootstrapping…"
 BOOTSTRAP=$(curl -sf -X POST "$BASE/admin/bootstrap")
 ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
+# The system realm ID is required as X-Realm-ID on admin API calls.
+SYS_REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
 
 if [[ -z "$ADMIN_TOKEN" || "$ADMIN_TOKEN" == "null" ]]; then
   echo "✗ could not obtain admin token" >&2
@@ -154,15 +158,16 @@ echo "  ✓ admin token acquired"
 
 echo "▸ resolving demo realm…"
 
-# Retry a few times — the realm is created from hearth.yaml on startup but
-# may not be visible immediately if the server just started.
+# GET /admin/realms requires X-Realm-ID (system realm UUID) for auth context.
+# The response uses the "items" field, not "realms".
 REALM_ID=""
 for _ in {1..20}; do
   REALM_ID=$(
     curl -sf \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "X-Realm-ID: $SYS_REALM_ID" \
       "$BASE/admin/realms" \
-    | jq -r '.realms[] | select(.name == "demo" or .slug == "demo") | .id // empty' \
+    | jq -r '.items[] | select(.name == "demo") | .id // empty' \
     2>/dev/null || true
   )
   [[ -n "$REALM_ID" && "$REALM_ID" != "null" ]] && break
@@ -172,7 +177,8 @@ done
 if [[ -z "$REALM_ID" || "$REALM_ID" == "null" ]]; then
   echo "✗ could not find 'demo' realm — is hearth.yaml in $HERE?" >&2
   echo "  Raw realm list:" >&2
-  curl -sf -H "Authorization: Bearer $ADMIN_TOKEN" "$BASE/admin/realms" | jq . >&2 || true
+  curl -sf -H "Authorization: Bearer $ADMIN_TOKEN" -H "X-Realm-ID: $SYS_REALM_ID" \
+    "$BASE/admin/realms" | jq . >&2 || true
   exit 1
 fi
 echo "  ✓ realm id: $REALM_ID"
