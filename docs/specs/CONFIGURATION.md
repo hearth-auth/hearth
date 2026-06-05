@@ -873,6 +873,39 @@ curl -s -X PATCH \
 
 ---
 
+### `realms.<name>.seed_users`
+
+Declarative user accounts created at startup if they do not already exist. Reconciliation is **additive-only** — existing accounts are never modified or deleted by the reconciler. Useful for local development, demo environments, and automated test setups.
+
+Each entry in the list is a `SeedUserYamlConfig`:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `email` | string | — | Email address, unique within the realm. **Required.** |
+| `display_name` | string | — | Human-readable display name. **Required.** |
+| `password` | string | — | Initial plaintext password. Hashed with Argon2id at startup before storage. **Required.** Use `${ENV_VAR}` substitution to avoid committing passwords. |
+| `roles` | string[] | `[]` | Role names to assign at creation time. Must match roles declared under `realms.<name>.rbac.roles` or the built-in RBAC seed roles for this realm. |
+| `email_verified` | bool | `true` | When `true`, the account is activated immediately with no email verification step. Set to `false` to leave the account in `PendingVerification`. |
+
+```yaml
+realms:
+  - name: my-app
+    seed_users:
+      - email: "admin@example.com"
+        display_name: "Admin User"
+        password: "${SEED_ADMIN_PASSWORD}"
+        roles: ["realm.admin"]
+        email_verified: true
+      - email: "viewer@example.com"
+        display_name: "Viewer"
+        password: "${SEED_VIEWER_PASSWORD}"
+        roles: ["viewer"]
+```
+
+> **Security note:** Seed user passwords appear in `hearth.yaml`. Always use `${ENV_VAR}` substitution in production so plaintext passwords are never committed to version control.
+
+---
+
 ## Complete Example
 
 ```yaml
@@ -1006,6 +1039,8 @@ Every field's default value at a glance.
 | `realms.<name>.auth.token` | `allow_unsafe_ttl` | `false` |
 | `realms.<name>.federation.providers.<idp>` | `leeway_seconds` | `60` |
 | `agent_auth` | `enabled` | `false` |
+| `realms.<name>.seed_users[*]` | `email_verified` | `true` |
+| `realms.<name>.seed_users[*]` | `roles` | `[]` |
 | `security` | `dpop_nonce_secret` | `"auto"` (random per startup) |
 | `security` | `reserved_slugs` | 26-item built-in list |
 | `security` | `slug_cooldown_days` | `30` |

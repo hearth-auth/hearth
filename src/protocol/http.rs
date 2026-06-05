@@ -959,6 +959,10 @@ pub fn router(state: Arc<AppState>) -> Router {
                     axum::routing::get(realm_authorize_browser_redirect).post(realm_authorize),
                 )
                 .route(
+                    "/end_session",
+                    axum::routing::get(realm_end_session).post(realm_end_session),
+                )
+                .route(
                     "/as/par",
                     axum::routing::post(realm_pushed_authorization_request)
                         .route_layer(DefaultBodyLimit::max(BODY_LIMIT_SMALL)),
@@ -8275,6 +8279,33 @@ async fn admin_backup_restore(
 }
 
 // === RP-Initiated Logout (OIDC RPL §2 + OIDC BCL §2.5) ===
+
+/// `GET /realms/{realm}/end_session` — realm-path-scoped RP-initiated logout.
+///
+/// Identical to [`end_session`] but resolves the realm from the URL path
+/// instead of the `X-Realm-ID` header, so browser navigations from SPAs work.
+#[allow(clippy::too_many_lines)]
+async fn realm_end_session(
+    State(state): State<Arc<AppState>>,
+    Path(realm_name): Path<String>,
+    headers: HeaderMap,
+    Query(params): Query<EndSessionParams>,
+) -> impl IntoResponse {
+    let realm_id = match resolve_realm_by_name(&state, &realm_name) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    // Synthesise an X-Realm-ID header so the shared end_session logic can be
+    // reused by constructing a fake HeaderMap with the resolved realm UUID.
+    let mut h = headers.clone();
+    if let Ok(val) = axum::http::HeaderValue::from_str(&realm_id.as_uuid().to_string()) {
+        h.insert("x-realm-id", val);
+    }
+    // Delegate to the core handler with the patched headers.
+    end_session(State(state), h, Query(params))
+        .await
+        .into_response()
+}
 
 /// Query parameters for `GET /end_session`.
 #[derive(Debug, Deserialize, Default)]
