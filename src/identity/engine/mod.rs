@@ -2834,9 +2834,13 @@ impl EmbeddedIdentityEngine {
             b"webauthn:disc:",
             b"magic:link:",
             b"email:verify:",
+            b"email:change:",
+            b"email:reserved:",
             b"rst:token:",
+            b"dfp:user:",
             b"org:id:",
             b"org:slug:",
+            b"slug:org:",
             b"orgm:org:",
             b"orgm:user:",
             b"orgi:id:",
@@ -2900,6 +2904,16 @@ impl EmbeddedIdentityEngine {
         //     indexes are normally cleaned up inside `delete_user`, but a
         //     crash (or an orphaned primary) can leave stragglers. Scanning
         //     by prefix guarantees we reach them on any retry.
+        //
+        //     email:reserved: is the A-20 90-day tombstone written by
+        //     delete_user. It holds a plaintext email address and MUST be
+        //     purged when the realm is deleted so no PII outlives the realm.
+        //
+        //     dfp:user: holds HMAC-SHA256 hashes of device signals (not raw
+        //     PII), but must still be swept for completeness.
+        //
+        //     email:change: holds SHA-256 token hashes (not plaintext), but
+        //     pending change requests reference deleted users and should go.
         for prefix in [
             &b"usr:email:"[..],
             &b"cred:user:"[..],
@@ -2910,7 +2924,10 @@ impl EmbeddedIdentityEngine {
             &b"webauthn:disc:"[..],
             &b"magic:link:"[..],
             &b"email:verify:"[..],
+            &b"email:change:"[..],
+            &b"email:reserved:"[..],
             &b"rst:token:"[..],
+            &b"dfp:user:"[..],
         ] {
             let end = keys::prefix_end(prefix);
             let entries = self
@@ -2930,9 +2947,13 @@ impl EmbeddedIdentityEngine {
         }
 
         // 1b. Unconditional sweep of organization-related prefixes.
+        //     slug:org: holds post-delete org-slug cooldown tombstones (A-5)
+        //     written by delete_organization. They persist until the cooldown
+        //     expires but must not outlive the realm itself.
         for prefix in [
             &b"org:id:"[..],
             &b"org:slug:"[..],
+            &b"slug:org:"[..],
             &b"orgm:org:"[..],
             &b"orgm:user:"[..],
             &b"orgi:id:"[..],
@@ -3677,6 +3698,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     // directly since we cannot call delete_user from a
                     // background task; the unconditional sweep covers all
                     // user-related key spaces idempotently.
+                    //
+                    // email:reserved: is the A-20 90-day PII tombstone and
+                    // must be included so no email address outlives its realm.
+                    // dfp:user: and email:change: are also swept for
+                    // completeness. slug:org: holds post-delete org-slug
+                    // cooldown tombstones (A-5) that must not outlive the realm.
                     let all_prefixes: &[&[u8]] = &[
                         &b"usr:id:"[..],
                         &b"usr:email:"[..],
@@ -3688,9 +3715,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         &b"webauthn:disc:"[..],
                         &b"magic:link:"[..],
                         &b"email:verify:"[..],
+                        &b"email:change:"[..],
+                        &b"email:reserved:"[..],
                         &b"rst:token:"[..],
+                        &b"dfp:user:"[..],
                         &b"org:id:"[..],
                         &b"org:slug:"[..],
+                        &b"slug:org:"[..],
                         &b"orgm:org:"[..],
                         &b"orgm:user:"[..],
                         &b"orgi:id:"[..],

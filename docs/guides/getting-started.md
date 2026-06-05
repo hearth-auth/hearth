@@ -2,11 +2,36 @@
 
 **Goal:** First authenticated request in your app. **Time:** ~5 minutes.
 
-**Prerequisites:** A Rust toolchain plus `curl` (and `jq` for JSON parsing).
+**Prerequisites:** `docker` and `curl` (and `jq` for JSON parsing). No Rust toolchain required. If you prefer to build from source, see [§1 below](#1-start-hearth-in-dev-mode-from-source).
 
 ---
 
-## 1. Start Hearth in dev mode
+## Quick install (no Rust required)
+
+Run Hearth in dev mode with a single Docker command:
+
+```bash
+docker run --rm -p 8420:8420 ghcr.io/hearth-rs/hearth:latest serve --dev --bind 0.0.0.0
+```
+
+`--dev` uses in-memory storage, enables the bootstrap endpoint, and starts the built-in **mailcatcher** (captured email visible at `http://127.0.0.1:8420/dev/mail`). **Data does not persist across container restarts.** `--bind 0.0.0.0` makes the process reachable through Docker's port mapping.
+
+Verify it is running (in a second terminal):
+
+```bash
+curl -fsS http://127.0.0.1:8420/health
+# → {"status":"ok"}
+```
+
+Once this returns `{"status":"ok"}`, skip to [§2 — Bootstrap a realm and admin token](#2-bootstrap-a-realm-and-admin-token). All subsequent `curl` commands in this guide target `http://127.0.0.1:8420` and work against the Docker container without modification.
+
+> For production deployment (Docker Compose, systemd, Helm), see [`deploy/README.md`](../../deploy/README.md).
+
+---
+
+## 1. Start Hearth in dev mode (from source)
+
+> **Prerequisite:** A Rust toolchain. Skip this section if you used the Docker path above.
 
 ```bash
 make dev

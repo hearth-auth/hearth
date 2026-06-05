@@ -1,23 +1,34 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { createHearth, HearthProvider } from "@hearth/sdk";
-import { HearthAuthClient } from "./auth/index.js";
+import { HearthApiClient, createHearth, HearthProvider } from "@hearth/sdk";
+import { createHearthAuth } from "./auth/index.js";
 import { getAccessToken } from "./auth/session.js";
 import App from "./App.js";
 import "./index.css";
 
-// Auth client — handles PKCE / token exchange / refresh / logout.
-export const hearthAuth = new HearthAuthClient({
-  hearthUrl: import.meta.env.VITE_HEARTH_URL as string,
-  realmSlug: import.meta.env.VITE_REALM_SLUG as string,
-  clientId: import.meta.env.VITE_CLIENT_ID as string,
-  redirectUri: `${window.location.origin}/callback`,
+const hearthUrl = import.meta.env.VITE_HEARTH_URL as string;
+const realmSlug = import.meta.env.VITE_REALM_SLUG as string;
+const realmId = import.meta.env.VITE_REALM_ID as string;
+const clientId = import.meta.env.VITE_CLIENT_ID as string;
+
+// SDK API client — handles discovery, token exchange, and refresh.
+const apiClient = new HearthApiClient({
+  baseUrl: `${hearthUrl}/${realmSlug}`,
+  realmId,
 });
 
-// SDK facade — decodes JWT claims synchronously for permission/role hooks.
+// Auth facade: wires SDK methods to session storage. No custom auth logic.
+export const hearthAuth = createHearthAuth(apiClient, {
+  clientId,
+  redirectUri: `${window.location.origin}/callback`,
+  hearthUrl,
+  realmSlug,
+});
+
+// SDK facade — decodes JWT claims synchronously for useHasPermission / useHasRole hooks.
 const hearthFacade = createHearth({
-  baseUrl: import.meta.env.VITE_HEARTH_URL as string,
-  realmId: import.meta.env.VITE_REALM_ID as string,
+  baseUrl: hearthUrl,
+  realmId,
   getToken: () => getAccessToken(),
 });
 

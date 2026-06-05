@@ -291,6 +291,22 @@ oidc:
 #   passkey_requires_mfa: false     # enforce TOTP even after passkey login (global default)
 #   audit_log_retention: "365d"     # how long audit events are retained (default: forever)
 #                                   # SOC 2 Type II typically requires 90d; ISO 27001 often 1y
+#
+# --- Post-deletion email tombstone (A-20) -----------------------------------
+# When a user account is deleted, Hearth writes an `email:reserved:{email}`
+# record that blocks re-registration of the same email for 90 days (abuse
+# prevention — prevents account-cycling to evade blocklists).
+#
+# This record contains a plaintext email address and therefore counts as
+# residual PII.  Operators MUST disclose it in their privacy notice; see
+# docs/guides/privacy.md §5 for GDPR/CCPA lawful-basis options.
+#
+# The tombstone is automatically purged when the owning realm is deleted —
+# no email address outlives its realm.  The 90-day TTL applies to user-level
+# deletion only (the user is gone, but the realm is still live).
+#
+# The retention window is not currently configurable; if you need a shorter
+# window, open a feature request against HEA-1270.
 
 # --- Realms ----------------------------------------------------------------
 # Realms are managed declaratively in this file. On startup, Hearth

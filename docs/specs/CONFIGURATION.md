@@ -59,6 +59,8 @@ Network binding and TLS configuration.
 | `tls_key_path` | string | — | Path to the PEM-encoded private key for the TLS certificate. |
 | `tls_client_ca_path` | string | — | Path to a CA certificate for client certificate verification (mTLS). |
 | `tls_require_client_cert` | bool | `false` | When `true`, all connections must present a valid client certificate signed by `tls_client_ca_path`. |
+| `trusted_proxies` | list of strings | `[]` | IP addresses of trusted reverse proxies. When non-empty, the real client IP is extracted from `X-Forwarded-For` using the rightmost-non-trusted algorithm. When empty (the default), the peer socket address is used and `X-Forwarded-For` is ignored — the safe default for direct-to-internet deployments. CIDR notation is not yet supported; supply individual IPs. |
+| `trust_forwarded_proto` | bool | `false` | Trust the `X-Forwarded-Proto: https` header from proxies listed in `trusted_proxies`. When `true`, session cookies gain the `Secure` attribute when the forwarded proto header indicates HTTPS. Only enable when `trusted_proxies` is correctly configured. |
 
 When TLS is enabled, Hearth also spawns an HTTP → HTTPS redirect listener on `port - 1` (or port 80 when `port: 443`). Send `SIGHUP` to hot-reload the certificate and key without downtime.
 
@@ -375,10 +377,62 @@ Global security hardening options.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dpop_nonce_secret` | string | `"auto"` | 32-byte HMAC secret for stateless DPoP nonce generation (RFC 9449). Absent or `"auto"`: a fresh random key is generated at each startup — safe for single-node deployments but invalidates all outstanding DPoP proofs on restart. A 64-character lowercase hex string is decoded to 32 bytes and used verbatim; use a stable hex key to keep nonces valid across rolling restarts or in multi-node deployments where all nodes must share the same secret. **Never use the all-zero key (`0000…`) in production** — the server rejects it at startup. Set via `HEARTH_DPOP_NONCE_SECRET` env var to avoid storing secrets in the YAML file. |
+| `reserved_slugs` | list of strings | 26-item built-in list | Slug names that may never be used as a realm or organization slug (case-insensitive). Setting this key **replaces** the built-in list entirely — include all names you still want reserved. The built-in default includes: `admin`, `api`, `support`, `www`, `mail`, `help`, `status`, `blog`, `app`, `auth`, `login`, `logout`, `signup`, `register`, `account`, `profile`, `settings`, `dashboard`, `billing`, `security`, `webhook`, `callback`, `oauth`, `oidc`, `saml`, `scim`. |
+| `slug_cooldown_days` | integer | `30` | Days a slug is held in reserve after its realm or organization is deleted, before it may be reused. |
 
 ```yaml
 security:
   dpop_nonce_secret: "${HEARTH_DPOP_NONCE_SECRET}"  # 64-char hex, or omit for auto
+  reserved_slugs:
+    - admin
+    - api
+    - auth
+    - login
+    - logout
+    - signup
+  slug_cooldown_days: 30
+```
+
+#### `security.backup`
+
+Backup and restore hardening (A-30). When `verify_key` is set, the restore endpoint verifies that every uploaded archive's `manifest.json` carries a valid Ed25519 detached signature. Archives without a valid signature are rejected unconditionally (fail-closed). When absent, signature verification is skipped.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `verify_key` | string | — | Base64url-encoded Ed25519 public key (32 bytes, URL-safe no-padding). When set, all restore uploads must carry a matching `detached_signature_b64` in their manifest or they are rejected. |
+| `export_rate_limit` | integer | `10` | Maximum backup/export calls per admin user per hour. Set to `0` to disable per-export rate limiting. |
+
+```yaml
+security:
+  backup:
+    verify_key: "${HEARTH_BACKUP_VERIFY_KEY}"  # base64url Ed25519 public key
+    export_rate_limit: 10
+```
+
+#### `security.captcha`
+
+CAPTCHA provider integration (P-1). When configured, Hearth renders a CAPTCHA challenge on the login, registration, and password-reset pages and verifies the token server-side before proceeding.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | — | **Required.** CAPTCHA provider to activate. Currently supported: `turnstile` (Cloudflare Turnstile). |
+| `turnstile` | object | — | Turnstile-specific settings. **Required** when `provider: turnstile`. |
+
+##### `security.captcha.turnstile`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `site_key` | string | *required* | Cloudflare Turnstile site key (public — safe to embed in HTML). Obtain from the Cloudflare Zero Trust dashboard. |
+| `secret_key` | string | — | Cloudflare Turnstile secret key (private). Set via the `HEARTH_TURNSTILE_SECRET_KEY` environment variable rather than embedding in the config file. |
+| `verify_url` | string | Cloudflare default | Override for the Turnstile siteverify URL. Omit in production; useful only for testing with a mock server. |
+
+```yaml
+security:
+  captcha:
+    provider: turnstile
+    turnstile:
+      site_key: "0x4AAAAAAA..."
+      secret_key: "${HEARTH_TURNSTILE_SECRET_KEY}"
 ```
 
 #### `security.rate_limiting`
@@ -425,6 +479,21 @@ Not all rate limiters survive a server restart:
 
 > **Future work:** WAL-persisted magic-link, password-reset, and IP rate trackers are tracked in
 > [HEA-1139](/HEA/issues/HEA-1139). Contributions welcome.
+
+### `agent_auth`
+
+Agent authentication feature gate. The Agent entity, delegation chains, MCP/A2A surfaces, approval lifecycle, and Agent Authorization Tokens (AATs) described in `docs/specs/AGENT_AUTH.md` are **not yet fully implemented**.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | **Must be `false`.** Setting this to `true` is a **startup error** — Hearth refuses to start until the underlying Agent entity, delegation, MCP, AAT, and approval features are complete. This guardrail prevents silent misconfiguration on partial implementations. |
+
+```yaml
+agent_auth:
+  enabled: false  # default; omit this block entirely unless explicitly testing
+```
+
+> **Note:** Do not set `agent_auth.enabled: true` in any environment until the feature ships. The server will refuse to start with a descriptive error message pointing to `docs/specs/AGENT_AUTH.md` for current implementation status.
 
 ---
 
@@ -504,6 +573,9 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 |-------|------|---------|-------------|
 | `access_token_ttl` | duration | inherits `token.access_token_ttl` | Per-realm access token lifetime. |
 | `refresh_token_ttl` | duration | inherits `token.refresh_token_ttl` | Per-realm refresh token lifetime. |
+| `password_reset_token_ttl` | duration | `"30m"` | Per-realm password reset token lifetime. Hard-capped at `1h` unless `allow_unsafe_ttl: true`. |
+| `magic_link_ttl` | duration | `"15m"` | Per-realm magic link token lifetime. Hard-capped at `30m` unless `allow_unsafe_ttl: true`. |
+| `allow_unsafe_ttl` | bool | `false` | Lift the A-14 TTL hard caps for this realm. When `true`, `password_reset_token_ttl` may exceed 1 hour and `magic_link_ttl` may exceed 30 minutes. Operators accept the additional token-theft window by enabling this flag. Never enable without a documented operational justification. |
 
 #### `realms.<name>.auth.rate_limit`
 
@@ -533,6 +605,27 @@ realms:
 ```
 
 > **Key management:** See [Device fingerprint HMAC secret](../guides/security-hardening.md#device-fingerprint-hmac-secret) for key generation, minimum-length enforcement, Kubernetes injection, and the 9-step rotation runbook.
+
+#### `realms.<name>.auth.webauthn_attestation`
+
+WebAuthn attestation policy for the realm (A-13). When absent, any authenticator is accepted (fail-open default). Use this block to restrict which authenticators may register in the realm.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `allow_none` | bool | `true` | Whether attestation format `"none"` is accepted. When `false`, platform and cross-platform authenticators that omit attestation are rejected at registration. Most consumer authenticators (Touch ID, Face ID, Android) send `"none"` — only set `false` in environments where authenticator provenance is a hard requirement. |
+| `aaguid_allowlist` | list of strings | `[]` | Allowlist of authenticator AAGUID values in lowercase UUID format (e.g. `"aaguid-value-here"`). When non-empty, only authenticators whose AAGUID matches an entry in this list may register. An empty list (the default) accepts any AAGUID. |
+| `require_prf` | bool | `false` | Require the `prf` WebAuthn extension. Reject authenticators that do not support PRF. |
+| `require_large_blob` | bool | `false` | Require the `largeBlob` WebAuthn extension. Reject authenticators that do not support large blob storage. |
+
+```yaml
+realms:
+  enterprise:
+    auth:
+      webauthn_attestation:
+        allow_none: false          # require attestation
+        aaguid_allowlist:
+          - "08987058-cadc-4b81-b6e1-30de50dcbe96"  # YubiKey 5 series
+```
 
 ### `realms.<name>.applications`
 
@@ -600,6 +693,49 @@ realms:
           max_members: 500
       beta-testers:
         name: "Beta Testers"
+```
+
+### `realms.<name>.federation`
+
+Declarative external IdP connector configuration. Reconciled with storage at startup; connectors not represented in YAML are removed.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `link_existing_accounts` | string | `"confirm"` | How to handle an external identity that matches an existing local user by email. One of: `disabled` (always JIT-provision a new account), `confirm` (require local-credential re-auth before linking — Keycloak-equivalent default), `auto` (auto-link on verified email match). |
+| `providers` | map | `{}` | Connector definitions keyed by a slug used as the `?idp=<slug>` query parameter on the login page. |
+
+#### `realms.<name>.federation.providers.<idp>`
+
+Each entry under `providers` declares one external identity provider. The `type` field selects the underlying protocol.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | string | *required* | Protocol selector: `oidc` (generic), `google`, `microsoft`, `apple`, `github`, or `saml`. Presets (`google`, `microsoft`, etc.) have discovery URLs and scopes pre-filled. |
+| `display_name` | string | preset default | Human-readable label shown on the login button. Overrides the preset default. |
+| `client_id` | string | — | OAuth client ID registered at the upstream IdP. |
+| `client_secret` | string | — | OAuth client secret. Use `${ENV_VAR}` substitution — never commit plaintext. |
+| `issuer` | string | — | OIDC issuer URL. **Required** for `type: oidc`; optional for presets (use to pin to a specific Azure AD tenant). |
+| `scopes` | list | preset default | OAuth scopes to request. Defaults to `["openid", "email", "profile"]` for OIDC types. |
+| `claim_mappings` | map | — | Per-claim renames for IdPs that use non-standard claim names. Maps a Hearth field name (e.g. `"email"`) to the upstream claim name the IdP sends (e.g. `"upn"`). Useful for Azure AD (`"email": "upn"`) and custom Okta apps. |
+| `leeway_seconds` | integer | `60` | Clock-skew allowance in seconds applied to OIDC ID-token `exp` and `nbf` checks. The default (60 s) follows standard OIDC RP tolerance. Raise only for enterprise IdPs with known clock drift; **maximum 300 s**. |
+
+```yaml
+realms:
+  prod:
+    federation:
+      link_existing_accounts: confirm
+      providers:
+        google:
+          type: google
+          client_id: "${GOOGLE_CLIENT_ID}"
+          client_secret: "${GOOGLE_CLIENT_SECRET}"
+        corp-sso:
+          type: oidc
+          display_name: "Corp SSO"
+          issuer: "https://idp.corp.example.com"
+          client_id: "${CORP_SSO_CLIENT_ID}"
+          client_secret: "${CORP_SSO_CLIENT_SECRET}"
+          leeway_seconds: 120   # corp IdP has known 2-minute clock drift
 ```
 
 ### `realms.<name>.rbac`
@@ -704,6 +840,37 @@ realms:
 
 The first user created in a realm is automatically assigned the seed `realm.admin` role (not configurable). All other role assignments happen at runtime via the admin API.
 
+### `realms.<name>.quotas`
+
+> **Admin API only.** Per-realm resource quotas are not currently configurable via `hearth.yaml`. They are set and read via `PATCH /admin/realms/{id}/config` and `GET /admin/realms/{id}`. This section documents the available quota fields for operators using the admin API.
+
+Resource quotas cap the number of entities that can exist in a realm at once. All limits are enforced synchronously on the create path (except `max_disk_bytes`, which is sampled by a background task).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_users` | integer | unlimited | Maximum number of user records allowed in the realm. Attempts to create a user when this limit is reached return HTTP 422. |
+| `max_orgs` | integer | unlimited | Maximum number of organizations allowed in the realm. |
+| `max_clients` | integer | unlimited | Maximum number of OAuth/OIDC clients registered in the realm. |
+| `max_sessions` | integer | unlimited | Maximum total active sessions across all users in the realm. Checked synchronously on `create_session`. Because this requires a full-prefix scan, only set this for realms with a known bounded user population. |
+| `max_audit_rows` | integer | unlimited | Maximum number of audit log rows retained for the realm. Enforced by the background pruner — oldest rows are deleted when the limit is exceeded. |
+| `max_disk_bytes` | integer | unlimited | Disk-usage warning threshold in bytes for the realm's storage prefix. Checked by the background pruner (sampled, once per day). Exceeding this limit emits a warning log but does **not** block writes. |
+
+**Example (admin API):**
+
+```bash
+curl -s -X PATCH \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://127.0.0.1:8420/admin/realms/<realm-id>/config \
+  -d '{
+    "quotas": {
+      "max_users": 10000,
+      "max_clients": 50,
+      "max_audit_rows": 1000000
+    }
+  }'
+```
+
 ---
 
 ## Complete Example
@@ -798,6 +965,8 @@ Every field's default value at a glance.
 | `server` | `bind_address` | `"127.0.0.1"` |
 | `server` | `port` | `8420` |
 | `server` | `tls_require_client_cert` | `false` |
+| `server` | `trusted_proxies` | `[]` (disabled) |
+| `server` | `trust_forwarded_proto` | `false` |
 | `cluster` | `peer_address` | `"127.0.0.1:8421"` |
 | `cluster` | `read_lag_threshold_ms` | `500` |
 | `storage` | `data_dir` | `"./data"` |
@@ -829,7 +998,19 @@ Every field's default value at a glance.
 | `auth` | `passkey_requires_mfa` | `false` |
 | `realms.<name>.auth.adaptive_mfa` | `enabled` | `false` |
 | `realms.<name>.auth.adaptive_mfa` | `recognition_window_days` | `30` |
+| `realms.<name>.auth.webauthn_attestation` | `allow_none` | `true` |
+| `realms.<name>.auth.webauthn_attestation` | `require_prf` | `false` |
+| `realms.<name>.auth.webauthn_attestation` | `require_large_blob` | `false` |
+| `realms.<name>.auth.token` | `password_reset_token_ttl` | `"30m"` |
+| `realms.<name>.auth.token` | `magic_link_ttl` | `"15m"` |
+| `realms.<name>.auth.token` | `allow_unsafe_ttl` | `false` |
+| `realms.<name>.federation.providers.<idp>` | `leeway_seconds` | `60` |
+| `agent_auth` | `enabled` | `false` |
 | `security` | `dpop_nonce_secret` | `"auto"` (random per startup) |
+| `security` | `reserved_slugs` | 26-item built-in list |
+| `security` | `slug_cooldown_days` | `30` |
+| `security.backup` | `export_rate_limit` | `10` |
+| `security.captcha.turnstile` | `verify_url` | Cloudflare default |
 | `security.rate_limiting.login_per_ip` | `max_attempts` | `10` |
 | `security.rate_limiting.login_per_ip` | `window_seconds` | `60` |
 | `security.rate_limiting.login_per_account` | `max_failures` | `5` |

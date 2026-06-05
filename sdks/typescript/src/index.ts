@@ -1,5 +1,19 @@
 // Primary entry point — recommended for all new integrations.
 export { HearthClient } from "./hearth-client.js";
+
+// PKCE browser utilities (RFC 7636).
+export {
+  generateCodeVerifier,
+  generateCodeChallenge,
+  buildAuthorizationUrl,
+  startLogin,
+} from "./pkce.js";
+export type {
+  BuildAuthorizationUrlOptions,
+  AuthorizationUrlResult,
+  StartLoginOptions,
+  StartLoginResult,
+} from "./pkce.js";
 export type { HearthClientConfig } from "./hearth-client.js";
 
 // Lower-level primitives (JWKS and introspection).
