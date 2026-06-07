@@ -12,8 +12,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HEARTH_PID=""
 GIN_PID=""
+DEMO_PID=""
 
 cleanup() {
+    [ -n "$DEMO_PID" ]   && kill "$DEMO_PID"   2>/dev/null || true
     [ -n "$GIN_PID" ]    && kill "$GIN_PID"    2>/dev/null || true
     [ -n "$HEARTH_PID" ] && kill "$HEARTH_PID" 2>/dev/null || true
     [ -n "$HEARTH_PID" ] && wait "$HEARTH_PID" 2>/dev/null || true
@@ -144,6 +146,48 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
 
 kill "$GIN_PID" 2>/dev/null || true
 GIN_PID=""
+
+# ── 7. Full-stack demo backend smoke ─────────────────────────────────────────
+echo "==> SDK smoke — full-stack-demo backend"
+cd "$REPO_ROOT/examples/full-stack-demo/backend"
+go build ./...
+echo "    go build: OK"
+go vet ./...
+echo "    go vet: OK"
+
+DEMO_PORT=$(free_port)
+HEARTH_URL="$HEARTH_BASE_URL" REALM_ID="$HEARTH_REALM_ID" PORT="$DEMO_PORT" go run . &
+DEMO_PID=$!
+
+echo "    Waiting for demo backend on port ${DEMO_PORT}"
+for i in $(seq 1 40); do
+    if curl -sf "http://127.0.0.1:${DEMO_PORT}/health" > /dev/null 2>&1; then
+        echo "    demo backend ready after ${i}×0.5s"
+        break
+    fi
+    sleep 0.5
+done
+curl -sf "http://127.0.0.1:${DEMO_PORT}/health" > /dev/null \
+    || { echo "FAIL: demo backend did not start within 20s"; exit 1; }
+echo "    OK: /health"
+
+# Unauthenticated requests must be rejected with 401.
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${DEMO_PORT}/notes")
+[ "$STATUS" = "401" ] \
+    && echo "    OK: 401 without token on /notes" \
+    || { echo "FAIL: expected 401 on /notes (no token), got $STATUS"; exit 1; }
+
+# A valid admin token (from bootstrap) must be accepted for the read endpoint.
+STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    -H "Authorization: Bearer $HEARTH_ACCESS_TOKEN" \
+    "http://127.0.0.1:${DEMO_PORT}/notes")
+[ "$STATUS" = "200" ] \
+    && echo "    OK: 200 with valid token on /notes" \
+    || { echo "FAIL: expected 200 on /notes (valid token), got $STATUS"; exit 1; }
+
+kill "$DEMO_PID" 2>/dev/null || true
+DEMO_PID=""
+echo "    full-stack-demo backend: PASS"
 
 echo ""
 echo "sdk-smoke-local: PASS"

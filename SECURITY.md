@@ -76,7 +76,13 @@ We will not pursue civil or criminal action against researchers who:
 
 ## Audit Status
 
-A pre-release third-party security audit is in progress. This page will be updated with the audit report or public summary when available. An internal pre-audit assessment was completed with no critical findings across all in-scope components.
+| Audit type | Status | Notes |
+|------------|--------|-------|
+| Internal pre-release assessment | ✅ Complete | No critical findings across all in-scope components |
+| Third-party penetration test | 🔄 In procurement | Scope document at `docs/security-audit/pentest-scope.md`; board budget approval pending (HEA-1244) |
+| Independent threat model review | ⏳ Pending pentest | Blocked on HEA-1244 completion (HEA-1243) |
+
+This page will be updated with the pentest report summary and firm name once the engagement concludes. The redacted full report will be stored at `docs/security-audit/pentest-YYYY-MM-DD-summary.md`.
 
 ## Known Exceptions
 

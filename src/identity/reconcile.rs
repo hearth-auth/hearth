@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::config::{
     ApplicationYamlConfig, AuthConfig, Config, ConfigDiff, ConfigSnapshot, FederationProviderYaml,
-    FederationYamlConfig, OrganizationYamlConfig, RealmYamlConfig,
+    FederationYamlConfig, OrganizationYamlConfig, RealmYamlConfig, SeedUserYamlConfig,
 };
 use crate::core::{ClientId, RealmId, Timestamp};
 use crate::identity::error::IdentityError;
@@ -30,11 +30,14 @@ use crate::identity::keys::{
 };
 use crate::identity::oidc::{ApplicationStatus, ClientProfile, UpdateClientRequest};
 use crate::identity::{
-    CreateOrganizationRequest, CreateRealmRequest, IdentityEngine, ImportClientRequest,
-    OrganizationConfig, OrganizationStatus, RealmConfig, RealmStatus, UpdateOrganizationRequest,
-    UpdateRealmRequest,
+    CleartextPassword, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
+    IdentityEngine, ImportClientRequest, OrganizationConfig, OrganizationStatus, RealmConfig,
+    RealmStatus, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UserStatus,
 };
-use crate::rbac::{Group, GroupId, Permission, ProtectedResource, RbacEngine, ScopeBundle};
+use crate::rbac::{
+    AssignRoleRequest, Group, GroupId, Permission, ProtectedResource, RbacEngine, Scope,
+    ScopeBundle, Subject,
+};
 use crate::storage::{StorageEngine, StorageError};
 
 /// Metadata about an archived realm that has live users but no declared
@@ -501,6 +504,153 @@ fn reconcile_rbac_for_realm(
     }
 }
 
+/// Creates seed users declared under `realms.<name>.seed_users`.
+///
+/// Each user is created-if-missing (idempotent by email). Existing users are
+/// never updated or deleted. Per-user errors are `warn!`-logged and do not
+/// abort startup.
+#[allow(clippy::too_many_lines)]
+fn reconcile_seed_users(
+    engine: &dyn IdentityEngine,
+    rbac: &dyn RbacEngine,
+    realm_id: &RealmId,
+    realm_name: &str,
+    seed_users: &[SeedUserYamlConfig],
+) {
+    for user_cfg in seed_users {
+        // 1. Skip if the user already exists (idempotent).
+        match engine.get_user_by_email(realm_id, &user_cfg.email) {
+            Ok(Some(_)) => {
+                tracing::trace!(
+                    realm = realm_name,
+                    email = %user_cfg.email,
+                    "seed user already exists; skipping"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    realm = realm_name,
+                    email = %user_cfg.email,
+                    error = %e,
+                    "seed user: get_user_by_email failed; skipping"
+                );
+                continue;
+            }
+            Ok(None) => {}
+        }
+
+        // 2. Create the user.
+        let user = match engine.create_user(
+            realm_id,
+            &CreateUserRequest {
+                email: user_cfg.email.clone(),
+                display_name: user_cfg.display_name.clone(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        ) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(
+                    realm = realm_name,
+                    email = %user_cfg.email,
+                    error = %e,
+                    "seed user: create_user failed; skipping"
+                );
+                continue;
+            }
+        };
+
+        // 3. Activate the user. When email_verified, also clear required actions
+        //    so the account does not demand email verification on first login.
+        let required_actions = if user_cfg.email_verified {
+            Some(Vec::new())
+        } else {
+            None
+        };
+        if let Err(e) = engine.update_user(
+            realm_id,
+            user.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                required_actions,
+                ..Default::default()
+            },
+        ) {
+            tracing::warn!(
+                realm = realm_name,
+                email = %user_cfg.email,
+                error = %e,
+                "seed user: update_user (activate) failed"
+            );
+        }
+
+        // 4. Set password.
+        if let Err(e) = engine.set_password(
+            realm_id,
+            user.id(),
+            &CleartextPassword::from_string(user_cfg.password.clone()),
+        ) {
+            tracing::warn!(
+                realm = realm_name,
+                email = %user_cfg.email,
+                error = %e,
+                "seed user: set_password failed"
+            );
+        }
+
+        // 5. Assign declared roles.
+        for role_name in &user_cfg.roles {
+            match rbac.get_role_by_name(realm_id, role_name) {
+                Ok(Some(role)) => {
+                    if let Err(e) = rbac.assign_role(
+                        realm_id,
+                        &AssignRoleRequest {
+                            subject: Subject::User(user.id().clone()),
+                            role_id: role.id.clone(),
+                            scope: Scope::Realm,
+                            assigned_by: None,
+                        },
+                    ) {
+                        tracing::warn!(
+                            realm = realm_name,
+                            email = %user_cfg.email,
+                            role = role_name,
+                            error = %e,
+                            "seed user: assign_role failed"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        realm = realm_name,
+                        email = %user_cfg.email,
+                        role = role_name,
+                        "seed user: role not found; skipping assignment"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        realm = realm_name,
+                        email = %user_cfg.email,
+                        role = role_name,
+                        error = %e,
+                        "seed user: get_role_by_name failed; skipping assignment"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            realm = realm_name,
+            email = %user_cfg.email,
+            "created seed user"
+        );
+    }
+}
+
 /// Reconciles a declared `realms:` map.
 fn reconcile_declared_realms(
     engine: &dyn IdentityEngine,
@@ -590,6 +740,12 @@ fn reconcile_declared_realms(
         // Errors are logged (not fatal) so a bad RBAC block doesn't abort
         // reconciliation of other realms.
         reconcile_rbac_for_realm(rbac, &realm_id, name, yaml_cfg);
+
+        // Reconcile seed users declared under this realm. Runs after RBAC
+        // so that role names from the YAML `roles:` block are resolvable.
+        if let Some(seed_users) = yaml_cfg.seed_users.as_deref() {
+            reconcile_seed_users(engine, rbac, &realm_id, name, seed_users);
+        }
 
         // Reconcile managed OAuth clients declared under this realm.
         if let Some(apps) = yaml_cfg

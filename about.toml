@@ -1,0 +1,28 @@
+# cargo-about configuration for THIRD_PARTY_LICENSES generation.
+# Mirrors the license allowlist in deny.toml so a crate that passes
+# `cargo deny check` will also pass `cargo about generate`.
+#
+# Run:   make notice        — regenerate THIRD_PARTY_LICENSES
+# Check: make notice-check  — fail if file is stale (used in CI)
+
+# Accept the same SPDX identifiers as deny.toml.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MPL-2.0",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "0BSD",
+    "Unlicense",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "Zlib",
+    # ring ships a bespoke OpenSSL/ISC/MIT combination; cargo-about surfaces
+    # this as OpenSSL for the crypto portions.
+    "OpenSSL",
+]

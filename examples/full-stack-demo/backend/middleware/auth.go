@@ -1,0 +1,116 @@
+// Package middleware provides Gin middleware for JWT authentication and RBAC.
+package middleware
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+
+	"github.com/gin-gonic/gin"
+	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jwt"
+)
+
+// KeyRawToken is the gin.Context key under which the raw Bearer token string
+// is stored after successful authentication.
+//
+// Downstream handlers forward this raw token to Hearth's Admin API so the
+// original signature is preserved — re-serializing the parsed token would risk
+// stripping claims or changing the canonical form, which could break Hearth's
+// validation on the admin side.
+const KeyRawToken = "raw_token"
+
+// JWKSValidator validates JWTs against a cached JWKS key set.
+//
+// Why JWKS instead of a shared secret? Hearth signs tokens with Ed25519
+// (asymmetric). The backend only needs the public key — it can verify signatures
+// without ever seeing the private key. JWKS is the standard way to publish those
+// public keys; fetching them from Hearth at startup means there is no out-of-band
+// key distribution step.
+//
+// The key set is refreshed automatically on a key-miss (handles key rotation).
+type JWKSValidator struct {
+	// mu guards keySet during concurrent reads and during rotation replacement.
+	// Reads hold a read-lock so they don't block each other; rotation holds a
+	// write-lock only for the brief pointer swap.
+	mu      sync.RWMutex
+	keySet  jwk.Set
+	jwksURL string
+}
+
+// NewJWKSValidator fetches the JWKS from jwksURL and returns a ready validator.
+//
+// Fetching eagerly at startup ensures the server fails fast if Hearth is
+// unreachable, rather than accepting requests and returning 401 on every one.
+// Call this once at startup — subsequent key rotations are handled automatically.
+func NewJWKSValidator(ctx context.Context, jwksURL string) (*JWKSValidator, error) {
+	set, err := jwk.Fetch(ctx, jwksURL)
+	if err != nil {
+		return nil, fmt.Errorf("fetch JWKS from %s: %w", jwksURL, err)
+	}
+	return &JWKSValidator{keySet: set, jwksURL: jwksURL}, nil
+}
+
+// Auth returns a Gin middleware that validates the Authorization: Bearer token
+// against the JWKS. On success the raw token string is stored under KeyRawToken.
+func (v *JWKSValidator) Auth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		raw, ok := extractBearer(c)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "missing or malformed Authorization header",
+			})
+			return
+		}
+
+		// Try the cached key set first (fast path, no I/O).
+		// On failure, re-fetch once from Hearth to handle key rotation — Hearth
+		// rotates its Ed25519 signing key periodically. Without this re-fetch, a
+		// deployment that rotates the key would force a backend restart to pick up
+		// the new JWKS. One re-fetch per rotation event is an acceptable trade-off
+		// vs. fetching on every request (which would add latency and DOS surface).
+		_, err := v.parse(raw)
+		if err != nil {
+			if refreshed, fetchErr := jwk.Fetch(c.Request.Context(), v.jwksURL); fetchErr == nil {
+				v.mu.Lock()
+				v.keySet = refreshed
+				v.mu.Unlock()
+				_, err = v.parse(raw)
+			}
+		}
+		if err != nil {
+			// Return a generic 401 — do not echo the parse error to the client,
+			// as error details can leak information about expected token structure.
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+
+		c.Set(KeyRawToken, raw)
+		c.Next()
+	}
+}
+
+func (v *JWKSValidator) parse(raw string) (jwt.Token, error) {
+	v.mu.RLock()
+	ks := v.keySet
+	v.mu.RUnlock()
+	return jwt.Parse([]byte(raw), jwt.WithKeySet(ks))
+}
+
+func extractBearer(c *gin.Context) (string, bool) {
+	// Validate the Authorization scheme before touching the token value.
+	// Rejecting non-Bearer credentials here prevents accidentally accepting
+	// Basic or Digest auth strings as JWTs, which would produce confusing
+	// parse errors rather than a clean 401.
+	h := c.GetHeader("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return "", false
+	}
+	tok := strings.TrimPrefix(h, "Bearer ")
+	if tok == "" {
+		return "", false
+	}
+	return tok, true
+}

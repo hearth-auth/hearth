@@ -954,7 +954,14 @@ pub fn router(state: Arc<AppState>) -> Router {
                     axum::routing::get(realm_oidc_discovery),
                 )
                 .route("/.well-known/jwks.json", axum::routing::get(realm_jwks))
-                .route("/authorize", axum::routing::post(realm_authorize))
+                .route(
+                    "/authorize",
+                    axum::routing::get(realm_authorize_browser_redirect).post(realm_authorize),
+                )
+                .route(
+                    "/end_session",
+                    axum::routing::get(realm_end_session).post(realm_end_session),
+                )
                 .route(
                     "/as/par",
                     axum::routing::post(realm_pushed_authorization_request)
@@ -6799,11 +6806,9 @@ async fn realm_oidc_discovery(
         Err(e) => return e,
     };
     match state.identity.realm_oidc_discovery(&realm_id) {
-        Ok(doc) => (
-            StatusCode::OK,
-            Json(proto_to_rest_json(&pb::OidcDiscoveryDocument::from(&doc))),
-        )
-            .into_response(),
+        // Serialize the domain type directly so optional fields like
+        // end_session_endpoint are included without proto schema changes.
+        Ok(doc) => (StatusCode::OK, Json(doc)).into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }
@@ -6832,6 +6837,22 @@ async fn realm_jwks(
         Ok(doc) => (StatusCode::OK, Json(doc)).into_response(),
         Err(e) => identity_error_to_response(&e).into_response(),
     }
+}
+
+/// `GET /realms/{realm}/authorize` — browser redirect shim.
+///
+/// The OIDC discovery document advertises `authorization_endpoint` as
+/// `{issuer}/authorize`.  Browser-based PKCE clients (SPAs) redirect the
+/// user's browser here via GET.  The interactive login+consent UI lives at
+/// `/ui/realms/{realm}/oauth/authorize`, so this handler 302-redirects the
+/// browser there, preserving all query parameters.
+async fn realm_authorize_browser_redirect(
+    Path(realm_name): Path<String>,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = format!("/ui/realms/{realm_name}/oauth/authorize{query}");
+    axum::response::Redirect::to(&target)
 }
 
 async fn realm_authorize(
@@ -8256,6 +8277,49 @@ async fn admin_backup_restore(
 }
 
 // === RP-Initiated Logout (OIDC RPL §2 + OIDC BCL §2.5) ===
+
+/// `GET /realms/{realm}/end_session` — realm-path-scoped RP-initiated logout.
+///
+/// Identical to [`end_session`] but resolves the realm from the URL path
+/// instead of the `X-Realm-ID` header, so browser navigations from SPAs work.
+#[allow(clippy::too_many_lines)]
+async fn realm_end_session(
+    State(state): State<Arc<AppState>>,
+    Path(realm_name): Path<String>,
+    headers: HeaderMap,
+    Query(params): Query<EndSessionParams>,
+) -> impl IntoResponse {
+    let realm_id = match resolve_realm_by_name(&state, &realm_name) {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    // Synthesise an X-Realm-ID header so the shared end_session logic can be
+    // reused by constructing a fake HeaderMap with the resolved realm UUID.
+    let mut h = headers.clone();
+    if let Ok(val) = axum::http::HeaderValue::from_str(&realm_id.as_uuid().to_string()) {
+        h.insert("x-realm-id", val);
+    }
+    let is_secure = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
+
+    // Delegate to the core OIDC end_session handler.
+    let mut resp = end_session(State(state), h, Query(params))
+        .await
+        .into_response();
+
+    // Also clear the Hearth UI session cookies so the browser login form
+    // requires re-authentication on the next authorize redirect.
+    for cookie in crate::protocol::web::auth::clearing_cookies(is_secure) {
+        if let Ok(val) = axum::http::HeaderValue::from_str(&cookie) {
+            resp.headers_mut()
+                .append(axum::http::header::SET_COOKIE, val);
+        }
+    }
+    resp
+}
 
 /// Query parameters for `GET /end_session`.
 #[derive(Debug, Deserialize, Default)]

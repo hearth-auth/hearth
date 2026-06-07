@@ -1,0 +1,96 @@
+# hearth.yaml — Full-stack demo configuration.
+#
+# Used by demo.sh to boot Hearth with a pre-wired "demo" realm and the
+# "hearth-hub" OAuth application (public client, PKCE).
+#
+# NOT for production use — storage is ephemeral (in-memory via --dev),
+# oidc.issuer is localhost-only, and TLS is disabled.
+
+server:
+  bind_address: "127.0.0.1"
+  port: 8420
+
+storage:
+  data_dir: "./data"       # demo.sh overrides this with a temp dir
+  fsync: false             # --dev mode; in-memory, no durability needed
+
+oidc:
+  issuer: "http://localhost:8420"
+
+observability:
+  log_level: "info"
+  log_format: "text"
+
+email:
+  transport: mailcatcher   # captures all mail; view at http://localhost:8420/dev/mail
+
+realms:
+  demo:
+    display_name: "Hearth Hub Demo"
+
+    applications:
+      hearth-hub:
+        name: "Hearth Hub"
+        # Public client — no client secret; PKCE is required.
+        confidential: false
+        redirect_uris:
+          - "http://localhost:5173/callback"
+        grant_types:
+          - authorization_code
+          - refresh_token
+        # post_logout_redirect_uri lets the frontend redirect cleanly after sign-out.
+        post_logout_redirect_uris:
+          - "http://localhost:5173"
+
+    permissions:
+      - name: content.read
+        display_name: "Read content"
+        description: "View published articles and resources."
+        category: content
+      - name: content.write
+        display_name: "Write content"
+        description: "Create and edit articles."
+        category: content
+      - name: content.admin
+        display_name: "Administer content"
+        description: "Publish, delete, and manage all content."
+        category: content
+
+    roles:
+      - name: viewer
+        display_name: "Viewer"
+        description: "Read-only access to published content."
+        scope_kind: realm
+        permissions:
+          - content.read
+
+      - name: editor
+        display_name: "Editor"
+        description: "Create and edit content."
+        scope_kind: realm
+        permissions:
+          - content.read
+          - content.write
+
+      - name: admin
+        display_name: "Admin"
+        description: "Full content administration access."
+        scope_kind: realm
+        permissions:
+          - content.read
+          - content.write
+          - content.admin
+
+    seed_users:
+      - email: viewer@hearth.test
+        display_name: Vera Viewer
+        password: HearthTest123!
+        roles: [viewer]
+      - email: editor@hearth.test
+        display_name: Ed Editor
+        password: HearthTest123!
+        roles: [editor]
+      - email: admin@hearth.test
+        display_name: Ada Admin
+        password: HearthTest123!
+        roles: [admin]

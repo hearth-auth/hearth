@@ -30,6 +30,7 @@ Hearth implements OpenID Connect Core 1.0 and the following related specificatio
 | JWT Profile for Access Tokens (RFC 9068) | MUST |
 | OAuth 2.0 Demonstrating Proof of Possession (DPoP, RFC 9449) | MUST |
 | OAuth 2.0 Rich Authorization Requests (RAR, RFC 9396) | SHOULD |
+| OpenID Connect RP-Initiated Logout 1.0 | MUST |
 
 ### 1.1 PKCE Enforcement
 
@@ -223,15 +224,61 @@ The `/.well-known/openid-configuration` endpoint advertises FAPI-relevant capabi
   "require_pushed_authorization_requests": false,
   "response_modes_supported": ["query", "fragment", "form_post", "query.jwt", "fragment.jwt", "jwt"],
   "request_parameter_supported": true,
-  "request_uri_parameter_supported": true
+  "request_uri_parameter_supported": true,
+  "end_session_endpoint": "https://as.example.com/realms/{realm}/end_session"
 }
 ```
 
 When a FAPI 2.0 Advanced realm is active, `require_pushed_authorization_requests` is set to `true`.
 
+> **Note — Discovery serialization path.** The realm-scoped discovery handler at
+> `GET /realms/{realm}/.well-known/openid-configuration` serializes the domain type directly
+> (not through protobuf) to ensure all fields including `end_session_endpoint` are included.
+> The global `/.well-known/openid-configuration` handler uses the same approach.
+
 ---
 
-## 6. Test Coverage
+## 6. RP-Initiated Logout
+
+Hearth implements [OpenID Connect RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html).
+
+### 6.1 Endpoints
+
+| Endpoint | Method | Realm resolution |
+|----------|--------|-----------------|
+| `/end_session` | GET, POST | `X-Realm-ID` header (machine clients) |
+| `/realms/{realm}/end_session` | GET, POST | URL path (browser / SPA clients) |
+
+The realm-path-scoped endpoint additionally clears Hearth UI session cookies in the response so that a browser redirect after logout forces re-authentication on the next `/authorize` visit.
+
+### 6.2 Query Parameters
+
+All parameters are optional.
+
+| Parameter | Description |
+|-----------|-------------|
+| `id_token_hint` | Previously issued ID token. Accepted even when expired. Used to identify the session to revoke. |
+| `post_logout_redirect_uri` | URI to redirect the browser after logout. Must be registered on the client when `client_id` is present. |
+| `client_id` | Client identifier — used to validate `post_logout_redirect_uri` against the client's registered list. |
+| `state` | Opaque value echoed to `post_logout_redirect_uri` as `?state=…`. |
+
+When neither `id_token_hint` nor an inferable session is present, the endpoint returns `400 invalid_request`.
+When the session is already gone, the endpoint still redirects cleanly (idempotent behavior).
+
+### 6.3 Back-Channel Logout Fan-Out
+
+On successful logout, Hearth fans out back-channel logout tokens to all registered RPs that have a `backchannel_logout_uri` configured. Front-channel logout URIs are served via a redirect page when `post_logout_redirect_uri` is absent.
+
+### 6.4 Authorization Endpoint — GET Shim for SPAs
+
+The OIDC discovery document advertises `authorization_endpoint` as `{issuer}/authorize`. Browser-based PKCE clients (SPAs) redirect the user's browser there via `GET`. The interactive login+consent UI lives at `/ui/realms/{realm}/oauth/authorize`, so:
+
+- `GET /realms/{realm}/authorize` — 302-redirects to the UI authorize page, preserving all query parameters.
+- `POST /realms/{realm}/authorize` — machine API path returning JSON authorization codes (unchanged).
+
+---
+
+## 7. Test Coverage
 
 | Test file | What it covers |
 |-----------|----------------|
@@ -245,8 +292,9 @@ When a FAPI 2.0 Advanced realm is active, `require_pushed_authorization_requests
 
 ---
 
-## 7. References
+## 8. References
 
+- [OpenID Connect RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)
 - [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-2_0-security-profile.html)
 - [RFC 9126 — Pushed Authorization Requests](https://www.rfc-editor.org/rfc/rfc9126)
 - [RFC 9101 — JWT Authorization Requests](https://www.rfc-editor.org/rfc/rfc9101)

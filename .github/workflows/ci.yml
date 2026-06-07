@@ -80,6 +80,10 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
+              - 'about.toml'
+              - 'NOTICE'
+              - 'THIRD_PARTY_LICENSES'
+              - 'THIRD_PARTY_LICENSES.sha256'
               - 'rustfmt.toml'
               - 'clippy.toml'
               - 'proto/**'
@@ -223,6 +227,13 @@ jobs:
 
       - name: make openapi-check (regenerate and fail if openapi.json drifts — HEA-972)
         run: make openapi-check
+
+      # HEA-1268: THIRD_PARTY_LICENSES staleness gate.
+      # Checks that THIRD_PARTY_LICENSES.sha256 still matches Cargo.lock — does
+      # not regenerate the file, just compares the stored hash. Re-run
+      # `make notice` whenever Cargo.lock changes and commit the updated file.
+      - name: make notice-check (fail if THIRD_PARTY_LICENSES is stale — HEA-1268)
+        run: make notice-check
 
   # ── UI tests — merged smoke/regression/accessibility + exploratory ──────────
   #

@@ -1,5 +1,19 @@
 // Primary entry point — recommended for all new integrations.
 export { HearthClient } from "./hearth-client.js";
+
+// PKCE browser utilities (RFC 7636).
+export {
+  generateCodeVerifier,
+  generateCodeChallenge,
+  buildAuthorizationUrl,
+  startLogin,
+} from "./pkce.js";
+export type {
+  BuildAuthorizationUrlOptions,
+  AuthorizationUrlResult,
+  StartLoginOptions,
+  StartLoginResult,
+} from "./pkce.js";
 export type { HearthClientConfig } from "./hearth-client.js";
 
 // Lower-level primitives (JWKS and introspection).
@@ -79,3 +93,14 @@ export type {
   UserInfoResponse,
 } from "./types.js";
 export { SessionVersionCache } from "./session-version-cache.js";
+
+// Browser auth: token store + PKCE login facade for SPAs.
+export {
+  getAccessToken,
+  getRefreshToken,
+  getIdToken,
+  isAuthenticated,
+  clearTokens,
+  createHearthAuth,
+} from "./browser-auth.js";
+export type { AuthConfig, HearthBrowserAuth } from "./browser-auth.js";
