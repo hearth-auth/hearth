@@ -262,7 +262,7 @@
           {% if !s.revoked && !s.expired %}
           <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/sessions/{{ s.id }}/revoke">
             {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-            <button type="submit" class="text-xs text-danger-fg hover:text-red-300">Revoke</button>
+            <button type="submit" class="rounded-md bg-danger/[0.12] px-2.5 py-1 text-xs font-semibold text-danger-fg hover:bg-danger/[0.2]">Revoke</button>
           </form>
           {% endif %}
         </td>
@@ -316,7 +316,7 @@
         <td class="px-3 py-2 text-right">
           <form method="post" action="/ui/admin/realms/{{ realm_name }}/users/{{ user.id().as_uuid() }}/webauthn/{{ c.id_b64url }}/revoke">
             {% match csrf %}{% when Some with (token) %}<input type="hidden" name="_csrf" value="{{ token }}">{% when None %}{% endmatch %}
-            <button type="submit" class="text-xs text-danger-fg hover:text-red-300">Revoke</button>
+            <button type="submit" class="rounded-md bg-danger/[0.12] px-2.5 py-1 text-xs font-semibold text-danger-fg hover:bg-danger/[0.2]">Revoke</button>
           </form>
         </td>
       </tr>
