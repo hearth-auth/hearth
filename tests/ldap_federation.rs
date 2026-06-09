@@ -47,7 +47,7 @@ fn ldap_test_config(url: &str, bind_dn: &str, bind_password: &str, base_dn: &str
         url: url.to_string(),
         allow_insecure: true, // CI uses plain ldap:// for the test container
         bind_dn: bind_dn.to_string(),
-        bind_password: LdapBindPassword(bind_password.to_string()),
+        bind_password: LdapBindPassword::new(bind_password.to_string()),
         base_dn: base_dn.to_string(),
         user_filter: "(objectClass=inetOrgPerson)".to_string(),
         page_size: 100,
@@ -305,7 +305,7 @@ async fn ldaps_connection_succeeds() {
         url: ldaps_url,
         allow_insecure: false,
         bind_dn,
-        bind_password: LdapBindPassword(bind_password),
+        bind_password: LdapBindPassword::new(bind_password),
         base_dn,
         user_filter: "(objectClass=inetOrgPerson)".to_string(),
         page_size: 100,

@@ -114,9 +114,16 @@ mod tests {
     fn escape_asterisk_prevents_wildcard_injection() {
         let injected = "admin*)(uid=*)";
         let escaped = escape_assertion_value(injected);
-        // Must not contain unescaped * or )
-        assert!(!escaped.contains('*') || escaped.contains(r"\2a"));
-        assert!(!escaped.contains(')') || escaped.contains(r"\29"));
+        assert!(
+            !escaped.contains('*'),
+            "unescaped * must not appear in output"
+        );
+        assert!(
+            !escaped.contains(')'),
+            "unescaped ) must not appear in output"
+        );
+        assert!(escaped.contains(r"\2a"), "* must be encoded as \\2a");
+        assert!(escaped.contains(r"\29"), ") must be encoded as \\29");
     }
 
     #[test]

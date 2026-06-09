@@ -357,7 +357,7 @@ mod tests {
             url: url.to_string(),
             allow_insecure,
             bind_dn: "cn=admin,dc=example,dc=com".to_string(),
-            bind_password: LdapBindPassword("secret".to_string()),
+            bind_password: LdapBindPassword::new("secret".to_string()),
             base_dn: "dc=example,dc=com".to_string(),
             user_filter: "(objectClass=person)".to_string(),
             page_size: 500,

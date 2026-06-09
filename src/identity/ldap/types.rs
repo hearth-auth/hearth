@@ -151,7 +151,7 @@ impl LdapConfig {
 
 /// Bind password wrapper — zeroized on drop, never logs or serializes contents.
 #[derive(Clone, Zeroize, ZeroizeOnDrop, Deserialize)]
-pub struct LdapBindPassword(pub String);
+pub struct LdapBindPassword(String);
 
 impl std::fmt::Debug for LdapBindPassword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -160,11 +160,32 @@ impl std::fmt::Debug for LdapBindPassword {
 }
 
 impl LdapBindPassword {
+    /// Wraps a raw password string. The value is zeroized on drop.
+    pub fn new(password: String) -> Self {
+        Self(password)
+    }
+
     /// Returns the raw password value for use in LDAP bind calls.
     ///
     /// Callers MUST NOT log, cache, or copy this value.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_password_debug_redacts_value() {
+        let pw = LdapBindPassword::new("hunter2".to_string());
+        let debug = format!("{pw:?}");
+        assert!(debug.contains("[REDACTED]"), "debug must show [REDACTED]");
+        assert!(
+            !debug.contains("hunter2"),
+            "debug must not reveal the password value"
+        );
     }
 }
 
