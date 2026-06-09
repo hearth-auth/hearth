@@ -13,6 +13,9 @@ use hearth::rbac::Permission;
 
 const SEED_ROLE_NAMES: &[&str] = &[
     "realm.admin",
+    "hearth.users.admin",
+    "hearth.clients.admin",
+    "hearth.realm.admin",
     "realm.member",
     "org.member",
     "org.admin",

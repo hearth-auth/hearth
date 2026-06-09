@@ -164,7 +164,7 @@ impl EmbeddedLdapConnector {
                 match map_entry(&se.dn, &se.attrs, attr_map) {
                     Ok(user) => users.push(user),
                     Err(e) => {
-                        warn!(dn = %se.dn, error = %e, "LDAP entry skipped: mapping failed");
+                        warn!(error = %e, "LDAP entry skipped: attribute mapping failed");
                     }
                 }
             }
@@ -250,11 +250,19 @@ impl EmbeddedLdapConnector {
     /// All other LDAP errors propagate as `LdapError`.
     ///
     /// The password is never cached, logged, or stored.
+    ///
+    /// # Security contract
+    /// `user_dn` MUST be obtained from a prior [`search_paged`] call.
+    /// Never construct `user_dn` from user-provided strings — doing so risks anonymous-bind
+    /// bypass on RFC 4513-compliant servers.
     pub async fn authenticate_user(
         &self,
         user_dn: &str,
         password: &str,
     ) -> Result<bool, LdapError> {
+        if user_dn.is_empty() || password.is_empty() {
+            return Ok(false);
+        }
         let settings = LdapConnSettings::new().set_no_tls_verify(false);
         let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &self.config.url)
             .await
@@ -323,12 +331,8 @@ impl EmbeddedLdapConnector {
         ldap.unbind().await.ok();
 
         // Advance the high-watermark to the maximum sync_cursor seen.
-        let new_cursor = users
-            .iter()
-            .map(|u| u.sync_cursor.as_str())
-            .max()
-            .map(str::to_string)
-            .or(checkpoint.cursor.clone());
+        let new_cursor =
+            advance_cursor(&users, self.config.sync_strategy, checkpoint.cursor.clone());
 
         let new_checkpoint = LdapSyncCheckpoint {
             cursor: new_cursor,
@@ -345,10 +349,44 @@ impl EmbeddedLdapConnector {
     }
 }
 
+/// Computes the new sync cursor high-watermark from a batch of synced users.
+///
+/// USN cursors are integers and MUST be compared numerically — lexicographic max
+/// incorrectly ranks "999" above "1000" at digit-length boundaries.
+/// Timestamp cursors use lexicographic max because ISO-8601 strings sort correctly.
+fn advance_cursor(
+    users: &[LdapUser],
+    strategy: SyncStrategy,
+    prev: Option<String>,
+) -> Option<String> {
+    match strategy {
+        SyncStrategy::UsnChanged => {
+            let max_usn = users
+                .iter()
+                .filter_map(|u| {
+                    u.sync_cursor
+                        .parse::<u64>()
+                        .map_err(|_| warn!(cursor = %u.sync_cursor, "USN cursor parse failed"))
+                        .ok()
+                })
+                .max()
+                .map(|n| n.to_string());
+            max_usn.or(prev)
+        }
+        SyncStrategy::ModifyTimestamp => users
+            .iter()
+            .map(|u| u.sync_cursor.as_str())
+            .max()
+            .map(str::to_string)
+            .or(prev),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::identity::ldap::types::{LdapAttributeMap, LdapBindPassword};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -437,5 +475,63 @@ mod tests {
         assert!(cp.cursor.is_none());
         assert!(cp.last_sync_at.is_none());
         assert_eq!(cp.last_sync_count, 0);
+    }
+
+    fn make_ldap_user(sync_cursor: &str) -> LdapUser {
+        LdapUser {
+            dn: "uid=test,dc=example,dc=com".to_string(),
+            external_id: "test-uuid".to_string(),
+            email: "test@example.com".to_string(),
+            display_name: "Test User".to_string(),
+            given_name: None,
+            family_name: None,
+            username: None,
+            sync_cursor: sync_cursor.to_string(),
+            extra: HashMap::new(),
+        }
+    }
+
+    // LOW-3: USN cursors that cross a digit-length boundary must be compared
+    // numerically — "1000" > "999" as integers but "999" > "1000" lexicographically.
+    #[test]
+    fn advance_cursor_usn_picks_numeric_max_across_digit_boundary() {
+        let users = vec![make_ldap_user("999"), make_ldap_user("1000")];
+        let result = advance_cursor(&users, SyncStrategy::UsnChanged, None);
+        assert_eq!(
+            result.as_deref(),
+            Some("1000"),
+            "USN max must use numeric comparison"
+        );
+    }
+
+    #[test]
+    fn advance_cursor_usn_falls_back_to_prev_when_no_users() {
+        let result = advance_cursor(&[], SyncStrategy::UsnChanged, Some("500".to_string()));
+        assert_eq!(result.as_deref(), Some("500"));
+    }
+
+    // LOW-4: empty DN or empty password must short-circuit before any network call.
+    #[tokio::test]
+    async fn authenticate_user_rejects_empty_dn() {
+        let cfg = make_config("ldaps://ldap.example.com:636", false);
+        let conn = EmbeddedLdapConnector::new(cfg, Arc::new(NullStorage))
+            .expect("valid ldaps config should construct successfully");
+        let result = conn
+            .authenticate_user("", "password")
+            .await
+            .expect("authenticate_user must not error on empty DN");
+        assert!(!result, "empty DN must not authenticate");
+    }
+
+    #[tokio::test]
+    async fn authenticate_user_rejects_empty_password() {
+        let cfg = make_config("ldaps://ldap.example.com:636", false);
+        let conn = EmbeddedLdapConnector::new(cfg, Arc::new(NullStorage))
+            .expect("valid ldaps config should construct successfully");
+        let result = conn
+            .authenticate_user("uid=user,dc=example,dc=com", "")
+            .await
+            .expect("authenticate_user must not error on empty password");
+        assert!(!result, "empty password must not authenticate");
     }
 }

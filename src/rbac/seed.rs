@@ -31,6 +31,18 @@ pub(crate) const SEED_PERMISSIONS: &[(&str, &str)] = &[
         "Full superuser access to the Hearth system realm; manage realms, global config, and platform-level settings.",
     ),
     (
+        "hearth.users.admin",
+        "Manage users, credentials, sessions, and consents within the current realm. Enables Keycloak-style sub-admin delegation for user management without full superuser access.",
+    ),
+    (
+        "hearth.clients.admin",
+        "Manage OAuth clients and application registrations within the current realm. Enables sub-admin delegation for application management without full superuser access.",
+    ),
+    (
+        "hearth.realm.admin",
+        "Manage realm settings, roles, groups, role assignments, webhooks, and audit logs within the current realm. Enables sub-admin delegation for realm configuration without full superuser access.",
+    ),
+    (
         "hearth.export",
         "Export realm data (backup archives, user CSV, audit logs) — required in addition to hearth.admin for all data-export endpoints (A-30).",
     ),
@@ -108,16 +120,24 @@ struct SeedRoleSpec {
     scope_kind: RoleScopeKind,
 }
 
-/// The five seed roles (§ 9.2).
+/// The seed roles (§ 9.2).
 ///
 /// Order matters: parents must be created before children. `realm.admin`
 /// and `realm.member` are standalone; `org.member` is parent of
 /// `org.admin`, which is parent of `org.owner`.
+///
+/// Three sub-admin roles (`hearth.users.admin`, `hearth.clients.admin`,
+/// `hearth.realm.admin`) allow Keycloak-style delegation without granting full
+/// superuser access. Assign one of these instead of `realm.admin` to restrict
+/// a service account or operator to only the endpoints they need.
 const SEED_ROLES: &[SeedRoleSpec] = &[
     SeedRoleSpec {
         name: "realm.admin",
         permissions: &[
             "hearth.admin",
+            "hearth.users.admin",
+            "hearth.clients.admin",
+            "hearth.realm.admin",
             "hearth.export",
             "hearth.sv_feed",
             "realm.read",
@@ -131,6 +151,24 @@ const SEED_ROLES: &[SeedRoleSpec] = &[
             "user.write",
             "user.impersonate",
         ],
+        parent_names: &[],
+        scope_kind: RoleScopeKind::Realm,
+    },
+    SeedRoleSpec {
+        name: "hearth.users.admin",
+        permissions: &["hearth.users.admin"],
+        parent_names: &[],
+        scope_kind: RoleScopeKind::Realm,
+    },
+    SeedRoleSpec {
+        name: "hearth.clients.admin",
+        permissions: &["hearth.clients.admin"],
+        parent_names: &[],
+        scope_kind: RoleScopeKind::Realm,
+    },
+    SeedRoleSpec {
+        name: "hearth.realm.admin",
+        permissions: &["hearth.realm.admin"],
         parent_names: &[],
         scope_kind: RoleScopeKind::Realm,
     },

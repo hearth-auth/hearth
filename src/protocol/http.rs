@@ -418,11 +418,16 @@ pub(crate) fn extract_admin_auth(
     let user_id = UserId::new(user_uuid);
 
     // Check admin role via the token's `permissions` claim (§ 5.2).
-    // Design decision: a single `hearth.admin` gate is intentional — all admin
-    // endpoints share the same all-or-nothing permission. Granular sub-scopes
-    // (e.g. `hearth.admin.users:read`) are not required by the current spec and
-    // would require changes to token issuance, RBAC seeding, and every handler.
-    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
+    // Accepts hearth.admin (full superuser) or any granular sub-permission
+    // (hearth.users.admin, hearth.clients.admin, hearth.realm.admin). Sub-admins
+    // pass this outer gate but are still checked per-handler via
+    // require_admin_permission(). hearth.admin bypasses all per-handler checks.
+    let is_admin = claims.permissions.iter().any(|p| {
+        matches!(
+            p.as_str(),
+            "hearth.admin" | "hearth.users.admin" | "hearth.clients.admin" | "hearth.realm.admin"
+        )
+    });
     if !is_admin {
         return Err((
             StatusCode::FORBIDDEN,
@@ -505,6 +510,33 @@ fn check_export_capability(auth: &AdminAuth) -> Result<(), (StatusCode, Json<ser
             Json(serde_json::json!({
                 "error": "forbidden",
                 "error_description": "hearth.export permission required for export operations"
+            })),
+        ));
+    }
+    Ok(())
+}
+
+/// Checks that the caller holds either `hearth.admin` (full superuser) or the
+/// specific granular sub-permission `required`. Call this in handlers that
+/// belong to a sub-admin domain (users, clients, realm management) immediately
+/// after [`extract_admin_auth`].
+///
+/// Returns `403 Forbidden` when neither permission is present. `hearth.admin`
+/// always grants access regardless of `required`.
+pub(crate) fn require_admin_permission(
+    auth: &AdminAuth,
+    required: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let permitted = auth
+        .permissions
+        .iter()
+        .any(|p| p == "hearth.admin" || p == required);
+    if !permitted {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "error_description": format!("{required} or hearth.admin permission required")
             })),
         ));
     }
@@ -3310,6 +3342,9 @@ async fn admin_list_users(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     if let Some(q) = &params.search {
         // Short queries return empty results immediately (no index hit).
@@ -3482,6 +3517,9 @@ async fn admin_import_users(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     if body.users.is_empty() {
         return (
@@ -3581,6 +3619,9 @@ async fn admin_export_users(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     // A-30: require hearth.export capability.
     if let Err(e) = check_export_capability(&auth) {
@@ -3661,6 +3702,9 @@ async fn admin_create_user(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     let request = crate::identity::CreateUserRequest::from(body);
 
@@ -3703,6 +3747,9 @@ async fn admin_get_user(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     let user_uuid: uuid::Uuid = match id.parse() {
         Ok(u) => u,
@@ -3744,6 +3791,9 @@ async fn admin_update_user(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     let user_uuid: uuid::Uuid = match id.parse() {
         Ok(u) => u,
@@ -3800,6 +3850,9 @@ async fn admin_delete_user(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     let user_uuid: uuid::Uuid = match id.parse() {
         Ok(u) => u,
@@ -3846,6 +3899,9 @@ async fn admin_delete_user_device_fingerprints(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     let user_uuid: uuid::Uuid = match id.parse() {
         Ok(u) => u,
@@ -3904,6 +3960,9 @@ async fn admin_bulk_users(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     match body.operation.as_str() {
         "create" => {
@@ -3992,10 +4051,13 @@ async fn admin_list_realms(
     headers: HeaderMap,
     Query(params): Query<PaginationParams>,
 ) -> impl IntoResponse {
-    let _auth = match extract_admin_auth(&headers, &state) {
+    let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
 
     match state
         .identity
@@ -4083,6 +4145,9 @@ async fn admin_delete_realm(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
 
     let realm_uuid: uuid::Uuid = match id.parse() {
         Ok(u) => u,
@@ -4157,6 +4222,9 @@ async fn admin_patch_user_required_actions(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
 
     let realm_uuid: uuid::Uuid = match realm_id_str.parse() {
         Ok(u) => u,
@@ -4309,6 +4377,9 @@ async fn admin_patch_realm_config(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
 
     let realm_uuid: uuid::Uuid = match realm_id_str.parse() {
         Ok(u) => u,
@@ -4441,6 +4512,9 @@ async fn admin_rotate_realm_signing_key(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
 
     let realm_id = match parse_realm_id(&id) {
         Ok(r) => r,
@@ -4535,7 +4609,11 @@ async fn admin_get_realm_branding(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = extract_admin_auth(&headers, &state) {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
     let realm_id = match parse_realm_id(&id) {
@@ -4572,6 +4650,9 @@ async fn admin_patch_realm_branding(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let realm_id = match parse_realm_id(&id) {
         Ok(r) => r,
         Err(e) => return e,
@@ -4703,6 +4784,9 @@ async fn admin_put_realm_email_template(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let realm_id = match parse_realm_id(&id) {
         Ok(r) => r,
         Err(e) => return e,
@@ -4791,6 +4875,9 @@ async fn admin_delete_realm_email_template(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let realm_id = match parse_realm_id(&id) {
         Ok(r) => r,
         Err(e) => return e,
@@ -4843,6 +4930,9 @@ async fn admin_list_clients(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.clients.admin") {
+        return e.into_response();
+    }
 
     match state.identity.list_clients(
         &auth.realm_id,
@@ -4868,6 +4958,9 @@ async fn admin_register_client(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.clients.admin") {
+        return e.into_response();
+    }
 
     let mut request = crate::identity::RegisterClientRequest::from(body);
     request.client_secret = None;
@@ -4902,6 +4995,9 @@ async fn admin_get_client(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.clients.admin") {
+        return e.into_response();
+    }
 
     let client_uuid: uuid::Uuid = match id.parse() {
         Ok(u) => u,
@@ -4956,6 +5052,10 @@ struct AdminUpdateClientBody {
     require_consent: Option<bool>,
     /// Access-token authorization mode. `null`/omitted leaves unchanged.
     access_token_authorization: Option<String>,
+    /// Per-client MFA requirement. `true` forces MFA enrollment for all users
+    /// of this client. `null`/omitted leaves unchanged.
+    #[serde(default)]
+    mfa_required: Option<bool>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -4983,6 +5083,9 @@ async fn admin_update_client(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.clients.admin") {
+        return e.into_response();
+    }
 
     let client_uuid: uuid::Uuid = match id.parse() {
         Ok(u) => u,
@@ -5018,6 +5121,7 @@ async fn admin_update_client(
         post_logout_redirect_uris: body.post_logout_redirect_uris,
         require_consent: body.require_consent,
         access_token_authorization,
+        mfa_required: body.mfa_required.map(Some),
         ..Default::default()
     };
 
@@ -5054,6 +5158,9 @@ async fn admin_delete_client(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.clients.admin") {
+        return e.into_response();
+    }
 
     let client_uuid: uuid::Uuid = match id.parse() {
         Ok(u) => u,
@@ -5112,6 +5219,9 @@ async fn admin_list_audit(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
 
     let action = params
         .action
@@ -5261,6 +5371,9 @@ async fn admin_list_user_consents(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
     let Ok(uuid) = user_id_str.parse::<uuid::Uuid>() else {
         return (
             StatusCode::BAD_REQUEST,
@@ -5301,6 +5414,9 @@ async fn admin_revoke_user_consent(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
     let Ok(uuid_u) = user_id_str.parse::<uuid::Uuid>() else {
         return (
             StatusCode::BAD_REQUEST,
@@ -5356,6 +5472,9 @@ async fn admin_get_user_effective_permissions(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
     let Ok(uuid) = user_id_str.parse::<uuid::Uuid>() else {
         return (
             StatusCode::BAD_REQUEST,
@@ -5891,6 +6010,9 @@ async fn admin_list_roles(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     match state.rbac.list_roles(
         &auth.realm_id,
         pagination.cursor.as_deref(),
@@ -5917,6 +6039,9 @@ async fn admin_create_role(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let permissions = match permissions_from_strings(body.permissions) {
         Ok(p) => p,
         Err(e) => return rbac_error_to_response(&e).into_response(),
@@ -5979,6 +6104,9 @@ async fn admin_update_role(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let role_id = match parse_role_id(&id) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
@@ -6027,6 +6155,9 @@ async fn admin_delete_role(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let role_id = match parse_role_id(&id) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
@@ -6046,6 +6177,9 @@ async fn admin_list_groups(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     match state.rbac.list_groups(
         &auth.realm_id,
         pagination.cursor.as_deref(),
@@ -6072,6 +6206,9 @@ async fn admin_create_group(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     match state.rbac.create_group(
         &auth.realm_id,
         &CreateGroupRequest {
@@ -6119,6 +6256,9 @@ async fn admin_update_group(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -6146,6 +6286,9 @@ async fn admin_delete_group(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -6278,6 +6421,9 @@ async fn admin_list_user_assignments(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let user_id = match parse_user_id_path(&id) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
@@ -6298,6 +6444,9 @@ async fn admin_assign_role(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let user_id = match parse_user_id_path(&id) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
@@ -6345,6 +6494,9 @@ async fn admin_unassign_role(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let aid = match parse_assignment_id(&id) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
@@ -7479,6 +7631,7 @@ async fn realm_register_client_dynamic(
         jwks_uri: None,
         authorization_signed_response_alg: None,
         profile: crate::identity::ClientProfile::Standard,
+        mfa_required: None,
     };
     match state.identity.register_client(&realm_id, &request) {
         Ok(client) => {
@@ -7568,6 +7721,9 @@ async fn admin_list_webhooks(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let engine = match require_webhook_engine(&state) {
         Ok(e) => e,
         Err(e) => return e.into_response(),
@@ -7605,6 +7761,9 @@ async fn admin_create_webhook(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let engine = match require_webhook_engine(&state) {
         Ok(e) => e,
         Err(e) => return e.into_response(),
@@ -7656,6 +7815,9 @@ async fn admin_get_webhook(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let engine = match require_webhook_engine(&state) {
         Ok(e) => e,
         Err(e) => return e.into_response(),
@@ -7694,6 +7856,9 @@ async fn admin_update_webhook(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let engine = match require_webhook_engine(&state) {
         Ok(e) => e,
         Err(e) => return e.into_response(),
@@ -7756,6 +7921,9 @@ async fn admin_delete_webhook(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let engine = match require_webhook_engine(&state) {
         Ok(e) => e,
         Err(e) => return e.into_response(),

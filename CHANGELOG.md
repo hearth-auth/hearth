@@ -9,6 +9,20 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Granular admin sub-permissions** — `hearth.admin` is now complemented by three
+  fine-grained sub-permissions that enable Keycloak-style sub-admin delegation without
+  granting full superuser access (HEA-1328):
+  - `hearth.users.admin` — user CRUD, sessions, credentials, consents, effective-permissions
+  - `hearth.clients.admin` — OAuth client/application registration and management
+  - `hearth.realm.admin` — realm settings, roles, groups, assignments, webhooks, audit logs
+
+  Three matching seed roles (`hearth.users.admin`, `hearth.clients.admin`,
+  `hearth.realm.admin`) are now seeded alongside `realm.admin` on every new realm,
+  ready to assign to service accounts or restricted operators. The `realm.admin` role
+  is unchanged and still carries all three sub-permissions plus `hearth.admin`.
+  The `hearth.admin` permission continues to grant unrestricted access to all admin
+  endpoints. Existing integrations require no changes.
+
 - **`hearth migrate auth0` command** — imports an Auth0 Management API export bundle
   (`hearth migrate auth0 --file export.json --data-dir /var/lib/hearth`). The operator
   assembles the bundle from Auth0's Management API (users, clients, organizations, roles)

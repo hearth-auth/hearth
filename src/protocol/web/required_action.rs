@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::{Form, Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
@@ -138,9 +138,10 @@ pub fn required_action_check(
 
     let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
 
-    // Dynamic injection: if the realm requires SMS MFA and the user has no
-    // verified phone, ensure ENROLL_PHONE_OTP is in the pending actions list.
+    // Dynamic injection: SMS MFA enrollment if realm requires it.
     inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
+    // Dynamic injection: TOTP/MFA enrollment if client or role requires it.
+    inject_enroll_mfa_if_needed(state, realm, user_id, Some(&q.client_id), &mut actions);
 
     if actions.is_empty() {
         return None;
@@ -213,9 +214,11 @@ pub fn required_action_check_browser(
 
     let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
 
-    // Dynamic injection: if the realm requires SMS MFA and the user has no
-    // verified phone, ensure ENROLL_PHONE_OTP is in the pending actions list.
+    // Dynamic injection: SMS MFA enrollment if realm requires it.
     inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
+    // Dynamic injection: TOTP/MFA enrollment if role requires it (no client on
+    // the direct browser login path; client-level enforcement is OIDC-only).
+    inject_enroll_mfa_if_needed(state, realm, user_id, None, &mut actions);
 
     if actions.is_empty() {
         return None;
@@ -599,6 +602,76 @@ fn inject_enroll_phone_otp_if_needed(
                 "inject_enroll_phone_otp_if_needed: failed to persist ENROLL_PHONE_OTP"
             );
         }
+    }
+}
+
+/// Dynamically injects `ENROLL_MFA` when a client-level or role-level MFA
+/// requirement is in effect and the user has no enrolled MFA factor.
+///
+/// Idempotent: no-op if the user already has TOTP enabled, a registered
+/// passkey, or if `EnrollMfa` is already in the pending actions list.
+/// Does NOT persist the injected action — it is re-evaluated on every
+/// authorize request because the condition is external (client config / roles).
+fn inject_enroll_mfa_if_needed(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    client_id_str: Option<&str>,
+    actions: &mut Vec<RequiredAction>,
+) {
+    if actions.contains(&RequiredAction::EnrollMfa) {
+        return;
+    }
+
+    // User with TOTP or passkeys already satisfies any MFA requirement.
+    let has_totp = state.identity.mfa_enabled(realm, user_id).unwrap_or(false);
+    let has_passkeys = !state
+        .identity
+        .list_webauthn_credentials(realm, user_id)
+        .unwrap_or_default()
+        .is_empty();
+    if has_totp || has_passkeys {
+        return;
+    }
+
+    // Per-client requirement.
+    let client_requires_mfa = client_id_str
+        .and_then(|cid| uuid::Uuid::parse_str(cid).ok())
+        .map(ClientId::new)
+        .and_then(|cid| state.identity.get_client(realm, &cid).ok().flatten())
+        .and_then(|c| c.mfa_required())
+        .unwrap_or(false);
+
+    // Per-role requirement: any role the user holds that appears in
+    // `realm.config.mfa_required_roles` triggers enforcement.
+    let role_requires_mfa = (|| -> Option<bool> {
+        let required_roles = state
+            .identity
+            .get_realm(realm)
+            .ok()
+            .flatten()?
+            .config()
+            .mfa_required_roles
+            .clone()?;
+        if required_roles.is_empty() {
+            return Some(false);
+        }
+        let assignments = state.rbac.list_user_assignments(realm, user_id).ok()?;
+        let hit = assignments.iter().any(|a| {
+            state
+                .rbac
+                .get_role(realm, &a.role_id)
+                .ok()
+                .flatten()
+                .map(|r| required_roles.iter().any(|req| req == &r.name))
+                .unwrap_or(false)
+        });
+        Some(hit)
+    })()
+    .unwrap_or(false);
+
+    if client_requires_mfa || role_requires_mfa {
+        actions.push(RequiredAction::EnrollMfa);
     }
 }
 
@@ -1544,6 +1617,258 @@ fn percent_encode_into(value: &str, out: &mut String) {
                 let _ = write!(out, "%{b:02X}");
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET + POST /required-action/enroll-mfa
+// ---------------------------------------------------------------------------
+
+/// Rendered by `GET /required-action/enroll-mfa`.
+#[derive(Template)]
+#[template(path = "ui/required_action/enroll_mfa.html")]
+struct EnrollMfaPageTemplate {
+    error: Option<String>,
+    secret_base32: String,
+    provisioning_uri: String,
+    qr_svg: String,
+    recovery_codes: Vec<String>,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// `application/x-www-form-urlencoded` body for `POST /required-action/enroll-mfa`.
+#[derive(Debug, Deserialize)]
+pub struct EnrollMfaForm {
+    #[serde(default)]
+    pub code: String,
+}
+
+/// Initiates TOTP enrollment for the `EnrollMfa` required action.
+///
+/// Reads the RA session cookie to identify the user, calls `enroll_totp` to
+/// generate a fresh TOTP secret, and renders the QR code + recovery codes.
+/// Each GET generates a new pending enrollment (idempotent from the user's
+/// perspective; the previous pending secret is overwritten).
+pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    let Some(token_str) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token_str) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token_str, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return handlers_common::bad_request("Required-action session has expired");
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let identity = state.identity.clone();
+
+    let enroll_result = tokio::task::spawn_blocking(move || identity.enroll_totp(&realm, &user_id))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "enroll_mfa_page: enroll_totp panicked");
+            Err(IdentityError::Storage(Box::new(e)))
+        });
+
+    match enroll_result {
+        Ok(enrollment) => {
+            let qr_svg = super::account::generate_qr_svg(&enrollment.provisioning_uri);
+            let tmpl = EnrollMfaPageTemplate {
+                error: None,
+                secret_base32: enrollment.secret_base32,
+                provisioning_uri: enrollment.provisioning_uri,
+                qr_svg,
+                recovery_codes: enrollment.recovery_codes.as_slice().to_vec(),
+                chrome: false,
+                active: "",
+                user_email: None,
+                is_admin: false,
+                narrow: true,
+                flash: None,
+                csrf: None,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            };
+            super::templates::render(&tmpl)
+        }
+        Err(IdentityError::MfaAlreadyEnabled) => {
+            // Already enrolled — skip this action automatically by redirecting
+            // to the generic action_complete path.
+            Redirect::to("/required-action/enroll-mfa").into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "enroll_mfa_page: enroll_totp failed");
+            let tmpl = EnrollMfaPageTemplate {
+                error: Some("Unable to start MFA enrollment. Please try again.".to_string()),
+                secret_base32: String::new(),
+                provisioning_uri: String::new(),
+                qr_svg: String::new(),
+                recovery_codes: Vec::new(),
+                chrome: false,
+                active: "",
+                user_email: None,
+                is_admin: false,
+                narrow: true,
+                flash: None,
+                csrf: None,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            };
+            super::templates::render_status(&tmpl, StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Verifies the TOTP code from the enrollment form and advances the RA flow.
+///
+/// On success the `EnrollMfa` action is removed from the RA token and the flow
+/// either advances to the next action or resumes OIDC / browser flow.
+#[allow(clippy::too_many_lines)]
+pub async fn enroll_mfa_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<EnrollMfaForm>,
+) -> Response {
+    let Some(token_str) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token_str) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token_str, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return handlers_common::bad_request("Required-action session has expired");
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let realm_clone = realm.clone();
+    let user_id_clone = user_id.clone();
+    let code = form.code.trim().to_string();
+    let identity = state.identity.clone();
+
+    let verify_result = tokio::task::spawn_blocking(move || {
+        identity.verify_totp_enrollment(&realm_clone, &user_id_clone, &code)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "enroll_mfa_submit: verify_totp_enrollment panicked");
+        Err(IdentityError::Storage(Box::new(e)))
+    });
+
+    let render_error = |msg: &str| {
+        let tmpl = EnrollMfaPageTemplate {
+            error: Some(msg.to_string()),
+            secret_base32: String::new(),
+            provisioning_uri: String::new(),
+            qr_svg: String::new(),
+            recovery_codes: Vec::new(),
+            chrome: false,
+            active: "",
+            user_email: None,
+            is_admin: false,
+            narrow: true,
+            flash: None,
+            csrf: None,
+            product_name: state.product_name.clone(),
+            logo_url: state.logo_url.clone(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
+        };
+        super::templates::render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY)
+    };
+
+    match verify_result {
+        Err(IdentityError::InvalidMfaCode) => {
+            return render_error("Invalid code. Please re-scan the QR code and try again.");
+        }
+        Err(IdentityError::MfaNotEnabled) => {
+            return Redirect::to("/required-action/enroll-mfa").into_response();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "enroll_mfa_submit: verify_totp_enrollment failed");
+            return render_error("Unable to verify the code. Please try again.");
+        }
+        Ok(()) => {}
+    }
+
+    // Enrollment confirmed — advance the RA flow (remove EnrollMfa from pending).
+    let secure = state.is_secure_request(&headers);
+    let remaining: Vec<RequiredAction> = claims
+        .pending_actions
+        .into_iter()
+        .filter(|a| *a != RequiredAction::EnrollMfa)
+        .collect();
+
+    if remaining.is_empty() {
+        if claims.browser_return_to.is_some() {
+            resume_browser_flow(
+                &state,
+                &realm,
+                &claims.sub,
+                claims.browser_return_to,
+                secure,
+            )
+        } else if let Some(oidc_params) = claims.oidc_params {
+            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
+        } else {
+            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
+        }
+    } else {
+        next_required_action(
+            &state,
+            &realm,
+            &claims.sub,
+            remaining,
+            claims.oidc_params,
+            claims.browser_return_to,
+            secure,
+            now,
+        )
     }
 }
 

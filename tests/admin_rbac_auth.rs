@@ -1,4 +1,6 @@
-//! Integration tests for admin HTTP auth (permission-gated via `hearth.admin`).
+//! Integration tests for admin HTTP auth (permission-gated via `hearth.admin`
+//! and the granular sub-permissions `hearth.users.admin`, `hearth.clients.admin`,
+//! `hearth.realm.admin`).
 
 mod common;
 
@@ -188,4 +190,231 @@ async fn unauthenticated_returns_401() {
         .await
         .expect("resp");
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Issues a token for a user assigned the named seed sub-admin role
+/// (e.g. `"hearth.users.admin"`). The realm must already be seeded.
+async fn issue_sub_admin_token(
+    harness: &common::TestHarness,
+    realm: &RealmId,
+    email: &str,
+    role_name: &str,
+) -> String {
+    let user = harness
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: email.into(),
+                display_name: "SubAdmin".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+
+    let role = harness
+        .rbac()
+        .get_role_by_name(realm, role_name)
+        .expect("lookup")
+        .unwrap_or_else(|| panic!("seed role '{role_name}' not found — realm was seeded?"));
+    harness
+        .rbac()
+        .assign_role(
+            realm,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign role");
+
+    let session = harness
+        .identity()
+        .create_session(realm, user.id(), &SessionContext::default())
+        .expect("session");
+    harness
+        .identity()
+        .issue_tokens(realm, user.id(), session.id())
+        .expect("issue")
+        .access_token()
+        .to_string()
+}
+
+async fn http_get(app: axum::Router, token: &str, realm: &RealmId, uri: &str) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Realm-ID", realm.as_uuid().to_string())
+            .body(Body::empty())
+            .expect("req"),
+    )
+    .await
+    .expect("resp")
+    .status()
+}
+
+// ---------------------------------------------------------------------------
+// HEA-1328: Granular sub-admin delegation tests
+// ---------------------------------------------------------------------------
+
+/// hearth.users.admin can reach user endpoints.
+#[tokio::test]
+async fn sub_admin_users_can_access_users_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token =
+        issue_sub_admin_token(&h, &realm, "usersadmin@example.com", "hearth.users.admin").await;
+    let app = build_app(&h).await;
+
+    let status = http_get(app, &token, &realm, "/admin/users").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hearth.users.admin must be allowed on /admin/users"
+    );
+}
+
+/// hearth.users.admin is denied on client endpoints.
+#[tokio::test]
+async fn sub_admin_users_denied_clients_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token =
+        issue_sub_admin_token(&h, &realm, "usersadmin2@example.com", "hearth.users.admin").await;
+    let app = build_app(&h).await;
+
+    let status = http_get(app, &token, &realm, "/admin/applications").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.users.admin must be denied on /admin/applications"
+    );
+}
+
+/// hearth.users.admin is denied on realm-management endpoints.
+#[tokio::test]
+async fn sub_admin_users_denied_realm_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token =
+        issue_sub_admin_token(&h, &realm, "usersadmin3@example.com", "hearth.users.admin").await;
+    let app = build_app(&h).await;
+
+    let status = http_get(app, &token, &realm, "/admin/roles").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.users.admin must be denied on /admin/roles"
+    );
+}
+
+/// hearth.clients.admin can reach client endpoints.
+#[tokio::test]
+async fn sub_admin_clients_can_access_clients_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "clientsadmin@example.com",
+        "hearth.clients.admin",
+    )
+    .await;
+    let app = build_app(&h).await;
+
+    let status = http_get(app, &token, &realm, "/admin/applications").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hearth.clients.admin must be allowed on /admin/applications"
+    );
+}
+
+/// hearth.clients.admin is denied on user endpoints.
+#[tokio::test]
+async fn sub_admin_clients_denied_users_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "clientsadmin2@example.com",
+        "hearth.clients.admin",
+    )
+    .await;
+    let app = build_app(&h).await;
+
+    let status = http_get(app, &token, &realm, "/admin/users").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.clients.admin must be denied on /admin/users"
+    );
+}
+
+/// hearth.realm.admin can reach role-management endpoints.
+#[tokio::test]
+async fn sub_admin_realm_can_access_roles_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token =
+        issue_sub_admin_token(&h, &realm, "realmadmin@example.com", "hearth.realm.admin").await;
+    let app = build_app(&h).await;
+
+    let status = http_get(app, &token, &realm, "/admin/roles").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hearth.realm.admin must be allowed on /admin/roles"
+    );
+}
+
+/// hearth.realm.admin is denied on user endpoints.
+#[tokio::test]
+async fn sub_admin_realm_denied_users_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token =
+        issue_sub_admin_token(&h, &realm, "realmadmin2@example.com", "hearth.realm.admin").await;
+    let app = build_app(&h).await;
+
+    let status = http_get(app, &token, &realm, "/admin/users").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.realm.admin must be denied on /admin/users"
+    );
+}
+
+/// hearth.admin (full superuser) still grants access to all domains.
+#[tokio::test]
+async fn full_admin_accesses_all_domains() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = issue_token_for(&h, &realm, "fulladmin@example.com", true).await;
+    let app = build_app(&h).await;
+
+    // The token is shared across oneshot calls via clone.
+    for uri in ["/admin/users", "/admin/applications", "/admin/roles"] {
+        let status = http_get(app.clone(), &token, &realm, uri).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "hearth.admin must be allowed on {uri}"
+        );
+    }
 }
