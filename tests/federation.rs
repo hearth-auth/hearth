@@ -40,6 +40,7 @@ fn oidc_config(realm_id: &hearth::core::RealmId, idp_id: &IdpId, name: &str) -> 
         client_secret: FederationSecret::new("s".to_string()),
         claim_mappings: BTreeMap::new(),
         leeway_seconds: IdpConfig::default_leeway_seconds(),
+        apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),
     }
@@ -120,6 +121,7 @@ async fn state_bag_is_single_use() {
         pkce_verifier: "v".to_string(),
         return_to: "/ui/account".to_string(),
         expires_at: Timestamp::from_micros(i64::MAX),
+        apple_user_json: None,
     };
     h.identity().put_federation_state(&bag).unwrap();
     let taken = h
@@ -152,6 +154,7 @@ async fn state_bag_expiry_is_enforced() {
         return_to: "/".to_string(),
         // Zero microseconds ≡ well in the past.
         expires_at: Timestamp::from_micros(0),
+        apple_user_json: None,
     };
     h.identity().put_federation_state(&bag).unwrap();
     let err = h

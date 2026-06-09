@@ -955,7 +955,7 @@ pub fn router(state: WebState) -> Router {
         .route("/federation/begin", axum::routing::get(federation::begin))
         .route(
             "/federation/callback",
-            axum::routing::get(federation::callback),
+            axum::routing::get(federation::callback).post(federation::callback_post),
         )
         .route(
             "/federation/confirm-link",
@@ -967,7 +967,7 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/realms/{realm}/federation/callback",
-            axum::routing::get(federation::callback_scoped),
+            axum::routing::get(federation::callback_scoped).post(federation::callback_scoped_post),
         )
         // --- SAML 2.0 SP + IdP endpoints ---
         .route(

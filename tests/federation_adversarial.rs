@@ -37,6 +37,7 @@ fn oidc_config(realm_id: &RealmId, idp_id: &IdpId, name: &str) -> IdpConfig {
         client_secret: FederationSecret::new("s".to_string()),
         claim_mappings: BTreeMap::new(),
         leeway_seconds: IdpConfig::default_leeway_seconds(),
+        apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),
     }
@@ -71,6 +72,7 @@ async fn state_token_cannot_be_consumed_twice() {
         pkce_verifier: "v".to_string(),
         return_to: "/".to_string(),
         expires_at: Timestamp::from_micros(i64::MAX),
+        apple_user_json: None,
     };
     h.identity().put_federation_state(&bag).unwrap();
     h.identity()
@@ -106,6 +108,7 @@ async fn state_token_put_in_one_realm_is_invisible_to_another() {
         pkce_verifier: "v".to_string(),
         return_to: "/".to_string(),
         expires_at: Timestamp::from_micros(i64::MAX),
+        apple_user_json: None,
     };
     h.identity().put_federation_state(&bag).unwrap();
 
@@ -220,6 +223,7 @@ fn state_bag_for(nonce: &str) -> StateBag {
         pkce_verifier: "v".to_string(),
         return_to: "/".to_string(),
         expires_at: Timestamp::from_micros(i64::MAX),
+        apple_user_json: None,
     }
 }
 

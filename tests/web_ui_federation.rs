@@ -119,6 +119,7 @@ fn build_rig(stub: Arc<StubFederationTransport>) -> Rig {
             client_secret: FederationSecret::new("demo-secret".to_string()),
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
+            apple: None,
             created_at: hearth::core::Timestamp::from_micros(0),
             updated_at: hearth::core::Timestamp::from_micros(0),
         })
@@ -194,6 +195,7 @@ fn seed_state(rig: &Rig, state_token: &str, nonce: &str) {
             pkce_verifier: "verifier-123".to_string(),
             return_to: "/ui/account".to_string(),
             expires_at: Timestamp::from_micros(i64::MAX),
+            apple_user_json: None,
         })
         .expect("seed federation state");
 }

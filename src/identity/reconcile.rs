@@ -1370,6 +1370,7 @@ fn build_idp_config(
             .leeway_seconds
             .map(|s| s.min(300)) // cap at 300 s per config docs
             .unwrap_or_else(crate::identity::federation::IdpConfig::default_leeway_seconds),
+        apple: None,
         created_at: now,
         updated_at: now,
     })
@@ -1428,6 +1429,7 @@ fn build_saml_idp_config(
         // SAML uses XML timestamps, not JWT; leeway is OIDC-specific but the
         // field is required in the shared struct — use the default value.
         leeway_seconds: crate::identity::federation::IdpConfig::default_leeway_seconds(),
+        apple: None,
         created_at: now,
         updated_at: now,
     })

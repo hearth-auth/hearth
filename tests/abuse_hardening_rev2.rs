@@ -111,6 +111,7 @@ fn make_idp_config(leeway_seconds: u32) -> hearth::identity::federation::IdpConf
         client_secret: FederationSecret::new("secret".to_string()),
         claim_mappings: Default::default(),
         leeway_seconds,
+        apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),
     }
@@ -150,6 +151,7 @@ fn make_state_bag() -> hearth::identity::federation::StateBag {
         pkce_verifier: "verifier".to_string(),
         return_to: String::new(),
         expires_at: Timestamp::from_micros(9_999_999_999_999_999),
+        apple_user_json: None,
     }
 }
 

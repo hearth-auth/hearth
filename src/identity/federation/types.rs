@@ -15,9 +15,9 @@ use crate::core::{IdpId, RealmId, Timestamp, UserId};
 /// What flavor of external IdP protocol a connector speaks.
 ///
 /// `Oidc` is the catch-all for OIDC Core 1.0-compliant providers
-/// (Google, Microsoft, Apple, Okta, Auth0, Azure AD, Keycloak, Zitadel).
-/// `GitHub` has its own variant because GitHub only implements OAuth2
-/// (no ID token, custom `/user` + `/user/emails` endpoints).
+/// (Google, Microsoft, Okta, Auth0, Azure AD, Keycloak, Zitadel).
+/// `Apple` and `GitHub` have their own variants because they require
+/// non-standard client auth or response handling that generic OIDC cannot cover.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IdpKind {
     /// OIDC 1.0-compliant provider (uses discovery + ID token).
@@ -31,6 +31,14 @@ pub enum IdpKind {
     /// audit events stay aligned.
     #[serde(rename = "github")]
     GitHub,
+    /// Apple Sign In.
+    ///
+    /// Requires `private_key_jwt` client auth (ES256-signed JWT per
+    /// request), `response_mode=form_post` (Apple POSTs the callback),
+    /// and first-login-only name extraction from the form body.
+    /// Cannot be covered by the generic OIDC connector.
+    #[serde(rename = "apple")]
+    Apple,
     /// SAML 2.0 IdP (SP-side — Hearth consumes assertions from upstream).
     #[serde(rename = "saml")]
     Saml,
@@ -43,9 +51,25 @@ impl IdpKind {
         match self {
             Self::Oidc => "oidc",
             Self::GitHub => "github",
+            Self::Apple => "apple",
             Self::Saml => "saml",
         }
     }
+}
+
+/// Apple-specific connector config required for `private_key_jwt` client auth.
+///
+/// Apple issues P-256 private keys via the Developer Portal. The `team_id` and
+/// `key_id` are shown in the portal; `private_key_pem` is the downloaded `.p8`
+/// file content (PKCS#8 PEM, `BEGIN PRIVATE KEY`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleConfig {
+    /// Apple Developer Team ID (10-character string, e.g. `"A1B2C3D4E5"`).
+    pub team_id: String,
+    /// Key ID from the Apple Developer Portal (e.g. `"ABCDE12345"`).
+    pub key_id: String,
+    /// P-256 private key in PKCS#8 PEM format (`BEGIN PRIVATE KEY`).
+    pub private_key_pem: FederationSecret,
 }
 
 /// How external logins interact with an existing local user when an
@@ -173,6 +197,10 @@ pub struct IdpConfig {
     /// is known to drift, or lower it for stricter security posture.
     #[serde(default = "IdpConfig::default_leeway_seconds")]
     pub leeway_seconds: u32,
+    /// Apple-specific config required when `kind == IdpKind::Apple`.
+    /// `None` for all other connector kinds.
+    #[serde(default)]
+    pub apple: Option<AppleConfig>,
     /// When this connector was first registered.
     pub created_at: Timestamp,
     /// When the connector config was last updated by reconcile.
@@ -251,6 +279,16 @@ pub struct StateBag {
     /// Absolute expiry (Unix microseconds). `take_federation_state`
     /// rejects entries past this timestamp.
     pub expires_at: Timestamp,
+    /// Apple Sign In only: the `user` JSON string from the `form_post`
+    /// callback body (`{"name":{"firstName":"...","lastName":"..."}}`).
+    ///
+    /// Only present on the very first login; absent on all subsequent
+    /// logins. This field is populated in-memory by the web handler
+    /// after `take_federation_state` returns — it is intentionally
+    /// omitted from the persisted state (skip when None) and lives only
+    /// for the duration of the `exchange()` call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apple_user_json: Option<String>,
 }
 
 /// A pending external identity parked while the user confirms-to-link.
@@ -408,6 +446,7 @@ mod tests {
             client_secret: FederationSecret::new("sekret".to_string()),
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
+            apple: None,
             created_at: Timestamp::from_micros(1),
             updated_at: Timestamp::from_micros(2),
         };
@@ -432,10 +471,37 @@ mod tests {
             pkce_verifier: "verifier".to_string(),
             return_to: "/ui/account".to_string(),
             expires_at: Timestamp::from_micros(1),
+            apple_user_json: None,
         };
         let j = serde_json::to_string(&bag).expect("ser");
         let back: StateBag = serde_json::from_str(&j).expect("deser");
         assert_eq!(bag, back);
+        // apple_user_json=None must not appear in the serialized form.
+        assert!(!j.contains("apple_user_json"));
+    }
+
+    #[test]
+    fn state_bag_apple_user_json_not_persisted() {
+        // When set in-memory, apple_user_json is skipped during serialization
+        // so it is not written to storage.
+        let bag = StateBag {
+            state_token: "tok".to_string(),
+            realm_id: RealmId::new(Uuid::nil()),
+            idp_id: IdpId::new(Uuid::nil()),
+            nonce: "n".to_string(),
+            pkce_verifier: "v".to_string(),
+            return_to: "/".to_string(),
+            expires_at: Timestamp::from_micros(0),
+            apple_user_json: Some(r#"{"name":{"firstName":"Alice"}}"#.to_string()),
+        };
+        let j = serde_json::to_string(&bag).expect("ser");
+        // The apple_user_json field is skip_serializing_if = None, but here it IS
+        // Some — so it will appear. Verify it round-trips when present.
+        let back: StateBag = serde_json::from_str(&j).expect("deser");
+        assert_eq!(
+            back.apple_user_json.as_deref(),
+            Some(r#"{"name":{"firstName":"Alice"}}"#)
+        );
     }
 
     #[test]

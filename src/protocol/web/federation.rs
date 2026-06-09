@@ -56,7 +56,7 @@ pub struct BeginQuery {
     pub return_to: Option<String>,
 }
 
-/// Query-string parameters for `callback`.
+/// Query-string parameters for `callback` (GET, standard OIDC / GitHub).
 #[derive(Debug, Deserialize)]
 pub struct CallbackQuery {
     /// The `state` Hearth generated on `begin`.
@@ -73,6 +73,28 @@ pub struct CallbackQuery {
     /// expected issuer for the IdP connector (A-29 IdP-mixup defense).
     #[serde(default)]
     pub iss: Option<String>,
+}
+
+/// Form body for Apple Sign In `form_post` callback (POST).
+///
+/// Apple POSTs the authorization response instead of encoding it as query
+/// params.  The optional `user` field is a JSON string present only on the
+/// user's very first login; it contains the given/family name Apple sends
+/// exactly once.
+#[derive(Debug, Deserialize)]
+pub struct CallbackForm {
+    /// The `state` Hearth generated on `begin`.
+    pub state: String,
+    /// The authorization code.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// Upstream error code when the user denied consent.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// First-login-only user JSON: `{"name":{"firstName":"...","lastName":"..."}}`.
+    /// Absent on all subsequent logins.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// `GET /ui/realms/{realm}/federation/begin?idp=...`
@@ -151,7 +173,10 @@ pub async fn callback_scoped(
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
-    callback_impl(state, headers, realm_id, q).await
+    callback_impl(
+        state, headers, realm_id, q.state, q.code, q.error, q.iss, None,
+    )
+    .await
 }
 
 /// `GET /ui/federation/callback`
@@ -166,17 +191,62 @@ pub async fn callback(
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
-    callback_impl(state, headers, realm_id, q).await
+    callback_impl(
+        state, headers, realm_id, q.state, q.code, q.error, q.iss, None,
+    )
+    .await
 }
 
-#[allow(clippy::too_many_lines)] // TODO: split this function
+/// `POST /ui/realms/{realm}/federation/callback` — Apple Sign In `form_post`.
+pub async fn callback_scoped_post(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path(realm_name): Path<String>,
+    Form(f): Form<CallbackForm>,
+) -> Response {
+    let realm_id = match realm_resolver::resolve(state.as_ref(), Some(&realm_name)) {
+        Resolved::Realm(r) => r.id().clone(),
+        Resolved::NotFound => return handlers_common::not_found("Realm not found"),
+        Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
+        Resolved::Storage => return handlers_common::server_error(),
+    };
+    callback_impl(
+        state, headers, realm_id, f.state, f.code, f.error, None, f.user,
+    )
+    .await
+}
+
+/// `POST /ui/federation/callback` — Apple Sign In `form_post` (bare realm).
+pub async fn callback_post(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(f): Form<CallbackForm>,
+) -> Response {
+    let realm_id = match realm_resolver::resolve(state.as_ref(), None) {
+        Resolved::Realm(r) => r.id().clone(),
+        Resolved::NotFound => return handlers_common::not_found("Realm not found"),
+        Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
+        Resolved::Storage => return handlers_common::server_error(),
+    };
+    callback_impl(
+        state, headers, realm_id, f.state, f.code, f.error, None, f.user,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn callback_impl(
     state: Arc<WebState>,
     headers: HeaderMap,
     realm_id: RealmId,
-    q: CallbackQuery,
+    state_token: String,
+    code: Option<String>,
+    error: Option<String>,
+    iss: Option<String>,
+    user_json: Option<String>,
 ) -> Response {
-    if q.error.is_some() {
+    if error.is_some() {
         // User denied consent at the upstream — quietly land on login.
         return Redirect::to("/ui/login?error=federation_denied").into_response();
     }
@@ -193,7 +263,8 @@ async fn callback_impl(
             part.strip_prefix(&format!("{FED_BIND_COOKIE}="))
         });
         match bind_mac {
-            Some(mac) if verify_federation_state_mac(cookie_secret_32(&state), &q.state, mac) => {}
+            Some(mac)
+                if verify_federation_state_mac(cookie_secret_32(&state), &state_token, mac) => {}
             _ => {
                 tracing::warn!(
                     "federation callback: missing or invalid state-binding cookie (A-48)"
@@ -202,7 +273,7 @@ async fn callback_impl(
             }
         }
     }
-    let Some(code) = q.code else {
+    let Some(code) = code else {
         return handlers_common::bad_request("Missing code");
     };
     let service = match build_service(&state) {
@@ -220,7 +291,15 @@ async fn callback_impl(
     };
     let now = Timestamp::from_micros(now_micros());
     let (bag, outcome) = match service
-        .callback(&realm_id, &q.state, &code, q.iss.as_deref(), link_mode, now)
+        .callback(
+            &realm_id,
+            &state_token,
+            &code,
+            iss.as_deref(),
+            link_mode,
+            now,
+            user_json.as_deref(),
+        )
         .await
     {
         Ok(v) => v,
