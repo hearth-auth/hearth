@@ -16,7 +16,7 @@
 //! Scan prefix `usr:id:` enables listing all users in a realm.
 
 use crate::core::{
-    ClientId, IdpId, InvitationId, OrganizationId, RealmId, SessionId, UserId, WebhookId,
+    AgentId, ClientId, IdpId, InvitationId, OrganizationId, RealmId, SessionId, UserId, WebhookId,
 };
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1408,6 +1408,68 @@ pub(crate) fn config_migration_history_key(source_slug: &str) -> Vec<u8> {
 /// Returns the byte prefix used to scan all migration history records.
 pub(crate) fn config_migration_history_scan_prefix() -> Vec<u8> {
     CONFIG_MIGRATION_HISTORY_PREFIX.as_bytes().to_vec()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent key encoding (AGENT_AUTH.md §13.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Prefix for agent primary keys.
+///
+/// Format: `agt:id:{agent_uuid}`
+const AGENT_ID_PREFIX: &str = "agt:id:";
+
+/// Prefix for the owner → agent index.
+///
+/// Format: `agt:owner:{owner_tag}:{owner_uuid}:{agent_uuid}` — empty value.
+/// Supports prefix scanning all agents for a given owner.
+const AGENT_OWNER_PREFIX: &str = "agt:owner:";
+
+/// Encodes the primary key for an agent record.
+///
+/// Format: `agt:id:{agent_uuid}`
+pub(crate) fn encode_agent_id(agent_id: &AgentId) -> Vec<u8> {
+    format!("{AGENT_ID_PREFIX}{}", agent_id.as_uuid()).into_bytes()
+}
+
+/// Returns the scan prefix for all agent records in a realm.
+///
+/// Format: `agt:id:`
+pub(crate) fn agent_id_scan_prefix() -> Vec<u8> {
+    AGENT_ID_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the owner index key for an agent.
+///
+/// Format: `agt:owner:{owner_tag}:{owner_uuid}:{agent_uuid}`
+///
+/// `owner_tag` is `"user"` or `"org"` — enables separate prefix scans
+/// by owner type if needed, while a single `agt:owner:` scan lists all.
+pub(crate) fn encode_agent_owner_index(
+    owner_tag: &str,
+    owner_uuid: &str,
+    agent_id: &AgentId,
+) -> Vec<u8> {
+    format!(
+        "{AGENT_OWNER_PREFIX}{owner_tag}:{owner_uuid}:{}",
+        agent_id.as_uuid()
+    )
+    .into_bytes()
+}
+
+/// Returns the scan prefix for all agents owned by a specific owner.
+///
+/// Format: `agt:owner:{owner_tag}:{owner_uuid}:`
+pub(crate) fn agent_owner_scan_prefix(owner_tag: &str, owner_uuid: &str) -> Vec<u8> {
+    format!("{AGENT_OWNER_PREFIX}{owner_tag}:{owner_uuid}:").into_bytes()
+}
+
+/// Returns the realm-wide scan prefix for all owner index entries.
+///
+/// Format: `agt:owner:`
+#[allow(dead_code)]
+pub(crate) fn agent_owner_global_scan_prefix() -> Vec<u8> {
+    AGENT_OWNER_PREFIX.as_bytes().to_vec()
 }
 
 // ===== Attempt tracker WAL keys =====
