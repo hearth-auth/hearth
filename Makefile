@@ -238,17 +238,7 @@ cluster-route-check:
 ## All tests run in-process (no real ports, no TLS). Exit 1 if any scenario fails.
 ## Estimated runtime: ~60 s on a laptop (election timeouts dominate).
 cluster-smoke:
-	PROTOC=$(PROTOC) cargo nextest run \
-	  --package hearth-simulation \
-	  --test-threads=1 \
-	  $(CARGO_FLAGS) \
-	  -E 'test(simulation_partition_and_convergence) \
-	    | test(simulation_leader_kill_and_election) \
-	    | test(simulation_rolling_restart_zero_errors) \
-	    | test(simulation_snapshot_catchup_new_follower) \
-	    | test(simulation_leader_kill_mid_write_sequence) \
-	    | test(simulation_wal_replay_after_crash) \
-	    | test(simulation_write_contention_across_leadership_changes)'
+	PROTOC=$(PROTOC) cargo nextest run --package hearth-simulation --test-threads=1 $(CARGO_FLAGS) -E 'test(~simulation)'
 
 ## CI standard tier: fast + tests + SDK tests + proto breaking + perf gate + cluster route check (merge).
 ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster-route-check

@@ -620,14 +620,18 @@ async fn simulation_wal_replay_after_crash() {
 
 // ── AC-7: Write contention across two leadership changes ──────────────────────
 
-/// AC-7: Given a 3-node cluster, run two rounds of write+kill. After each kill
+/// AC-7: Given a 5-node cluster, run two rounds of write+kill. After each kill
 /// a new leader is elected. All writes that Raft confirmed as committed must be
 /// present on every surviving node after both leadership transitions. Validates
 /// that committed writes survive two sequential leadership changes — the pattern
 /// most likely to expose incorrect log truncation or index reset bugs.
+///
+/// A 5-node cluster is required: killing 2 leaders still leaves 3 survivors,
+/// which satisfies the ⌊5/2⌋ + 1 = 3 quorum requirement. A 3-node cluster
+/// would lose quorum after the second kill (only 1 node left).
 #[tokio::test]
 async fn simulation_write_contention_across_leadership_changes() {
-    let cluster = Arc::new(ChaosCluster::new(3).await);
+    let cluster = Arc::new(ChaosCluster::new(5).await);
 
     let mut committed_keys: HashMap<u8, u8> = HashMap::new();
     let mut killed_ids: Vec<u64> = Vec::new();

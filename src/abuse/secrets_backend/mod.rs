@@ -528,7 +528,7 @@ mod tests {
         backend.ensure_dirs().expect("ensure_dirs");
 
         let realm = random_realm();
-        let der = vec![0xABu8; 48];
+        let key_der = vec![0xABu8; 48];
 
         assert!(
             matches!(
@@ -537,9 +537,11 @@ mod tests {
             ),
             "absent key must return NotFound"
         );
-        backend.store_signing_key_der(&realm, &der).expect("store");
+        backend
+            .store_signing_key_der(&realm, &key_der)
+            .expect("store");
         let got = backend.signing_key_der(&realm).expect("retrieve");
-        assert_eq!(got, der, "stored DER must round-trip exactly");
+        assert_eq!(got, key_der, "stored DER must round-trip exactly");
     }
 
     /// Absence of `pepper.bin` returns `NotConfigured`.
