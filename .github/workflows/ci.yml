@@ -52,6 +52,7 @@ jobs:
       bench-targets: ${{ steps.filter.outputs.bench-targets }}
       docs-only: ${{ steps.filter.outputs.docs-only }}
       abuse-coverage: ${{ steps.filter.outputs.abuse-coverage }}
+      ldap: ${{ steps.filter.outputs.ldap }}
 
     steps:
       - name: Checkout
@@ -132,6 +133,12 @@ jobs:
               - 'tests/abuse_*.rs'
               - 'scripts/check-abuse-coverage.sh'
               - '.github/workflows/ci.yml'
+            ldap:
+              - 'src/identity/ldap/**'
+              - 'tests/ldap_*.rs'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
 
       - name: Summarize filter results
         run: |
@@ -149,6 +156,7 @@ jobs:
             echo "| bench-targets | ${{ steps.filter.outputs.bench-targets }} |"
             echo "| docs-only | ${{ steps.filter.outputs.docs-only }} |"
             echo "| abuse-coverage | ${{ steps.filter.outputs.abuse-coverage }} |"
+            echo "| ldap | ${{ steps.filter.outputs.ldap }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # HEA-858: static guard against committing real secret material.
@@ -442,6 +450,171 @@ jobs:
         # block above. Document the reason and the tracking issue in the PR.
         run: bash scripts/check-abuse-coverage.sh
 
+  # ── LDAP / Active Directory integration tests (HEA-1331) ────────────────────
+  #
+  # Spins up bitnami/openldap with LDAPS enabled. LDAP integration tests must
+  # be marked #[ignore] in source so the `quality` job skips them when no LDAP
+  # server is present. This job runs them via --run-ignored against the real
+  # service container.
+  #
+  # Service credentials are test-only — the OpenLDAP container is ephemeral
+  # with no real user data.
+  #
+  # TODO(HEA-1331): pin bitnami/openldap to a SHA digest before the 1.1 release.
+
+  ldap-integration:
+    name: ldap-integration (OpenLDAP — HEA-1331)
+    needs: filter
+    if: (needs.filter.result == 'success' && needs.filter.outputs.ldap == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      openldap:
+        image: bitnami/openldap:2.6
+        ports:
+          - 1389:1389
+          - 1636:1636
+        env:
+          LDAP_ADMIN_USERNAME: admin
+          # Test-only credential for ephemeral CI container — no real data.
+          LDAP_ADMIN_PASSWORD: HearthLdapCI1!
+          LDAP_ROOT: dc=hearth,dc=test
+          LDAP_ENABLE_TLS: "yes"
+          LDAP_TLS_VERIFY_CLIENT: never
+          # Seed one test user so password-bind tests can exercise a non-admin bind.
+          LDAP_USERS: hearthldaptest
+          LDAP_PASSWORDS: HearthLdapUser1!
+        options: >-
+          --health-cmd "ldapsearch -x -H ldap://localhost:1389 -b dc=hearth,dc=test -D cn=admin,dc=hearth,dc=test -w HearthLdapCI1!"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+          --health-start-period 30s
+
+    env:
+      # Consumed by LDAP integration tests (see tests/ldap_*.rs).
+      HEARTH_TEST_LDAP_URL: ldap://localhost:1389
+      HEARTH_TEST_LDAPS_URL: ldaps://localhost:1636
+      HEARTH_TEST_LDAP_BIND_DN: cn=admin,dc=hearth,dc=test
+      HEARTH_TEST_LDAP_BIND_PASSWORD: HearthLdapCI1!
+      HEARTH_TEST_LDAP_BASE_DN: dc=hearth,dc=test
+      HEARTH_TEST_LDAP_USER: hearthldaptest
+      HEARTH_TEST_LDAP_USER_PASSWORD: HearthLdapUser1!
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Setup Rust toolchain (HEA-676 reusable)
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-nextest
+
+      - name: Install ldap-utils (runner-side ldapsearch for readiness probe)
+        run: sudo apt-get install -y --no-install-recommends ldap-utils
+
+      - name: Wait for OpenLDAP to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if ldapsearch -x -H ldap://localhost:1389 \
+                 -b dc=hearth,dc=test \
+                 -D cn=admin,dc=hearth,dc=test \
+                 -w HearthLdapCI1! > /dev/null 2>&1; then
+              echo "OpenLDAP ready (attempt $i)"
+              break
+            fi
+            echo "Waiting for OpenLDAP... (attempt $i/30)"
+            sleep 3
+          done
+
+      - name: Run LDAP integration tests (run-ignored against real server)
+        run: |
+          cargo nextest run --workspace \
+            --run-ignored all \
+            -E 'test(ldap)' \
+            --no-fail-fast
+        env:
+          PROTOC: protoc
+
+  # ── Raft cluster chaos validation (Gap C-1, HEA-1323) ───────────────────────
+  #
+  # Runs the full cluster simulation suite (AC-1 through AC-7) in a single
+  # thread so election timeouts do not interfere with each other. Gated on the
+  # `rust` filter because it only changes when src/**, simulation/**, or
+  # Cargo.lock change — the same condition that rebuilds the simulation crate.
+  #
+  # Why a dedicated job (not just quality/make check):
+  #   • Single-threaded execution (--test-threads=1) is required for timing-
+  #     sensitive Raft election timeout tests (150–300 ms). Running them with
+  #     the default parallelism inside the quality job can cause flaky timeouts.
+  #   • Named CI badge: "cluster-chaos" is an explicit readiness gate that is
+  #     clearly visible in PR check lists — satisfying Gap C-1 of the 1.0
+  #     Readiness Audit.
+
+  cluster-chaos:
+    name: cluster-chaos (Raft AC-1 through AC-7)
+    needs: filter
+    # HEA-685: guard with `needs.filter.result == 'success'` — see `quality` above.
+    if: (needs.filter.result == 'success' && needs.filter.outputs.rust == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # AC-5–7 each have election windows (up to 10–15 s) and write loops.
+    # 10 minutes is generous; typical runtime is ~90 s.
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Free disk space (Rust debug builds need ~12 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-nextest
+
+      - name: make cluster-smoke (Raft AC-1..AC-7 — single-threaded, ~90 s)
+        run: PROTOC=protoc make cluster-smoke
+
+      - name: Summarize cluster-chaos result
+        if: always()
+        run: |
+          {
+            echo "## Cluster Chaos Results (HEA-1323 Gap C-1)"
+            echo ""
+            echo "| Scenario | Test file |"
+            echo "| --- | --- |"
+            echo "| AC-1: network partition + convergence | cluster_failover.rs |"
+            echo "| AC-2: leader kill + re-election | cluster_failover.rs |"
+            echo "| AC-3: rolling restart, zero read errors | cluster_failover.rs |"
+            echo "| AC-4: snapshot catch-up (cold follower) | cluster_failover.rs |"
+            echo "| AC-5: leader kill mid-write-sequence | cluster_chaos.rs |"
+            echo "| AC-6: WAL replay after node crash | cluster_chaos.rs |"
+            echo "| AC-7: write contention, 2 leadership changes | cluster_chaos.rs |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # ── Required-summary gate (HEA-693) ──────────────────────────────────────────
   #
   # Branch protection requires ONLY this job for the CI workflow. It always runs
@@ -459,7 +632,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, ui, sdk-node, sdk-conformance, abuse-coverage]
+    needs: [filter, quality, ui, sdk-node, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -472,9 +645,11 @@ jobs:
           SDK_NODE: ${{ needs.sdk-node.result }}
           SDK_CONFORMANCE: ${{ needs.sdk-conformance.result }}
           ABUSE_COVERAGE: ${{ needs.abuse-coverage.result }}
+          LDAP_INTEGRATION: ${{ needs.ldap-integration.result }}
+          CLUSTER_CHAOS: ${{ needs.cluster-chaos.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE"
-          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE"; do
+          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS"
+          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "A required job failed or was cancelled."
               exit 1

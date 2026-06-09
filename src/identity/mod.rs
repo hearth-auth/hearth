@@ -16,6 +16,7 @@ pub mod error;
 pub mod federation;
 pub mod hibp;
 pub(crate) mod keys;
+pub mod ldap;
 pub(crate) mod magic_link;
 pub mod migration;
 pub mod oidc;
