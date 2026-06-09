@@ -9,6 +9,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Apple Sign In connector** (`type: apple`) — native Sign In with Apple support
+  via `private_key_jwt` client authentication (ES256-signed per-request JWT),
+  `response_mode=form_post` callback handling, and first-login-only name extraction
+  from the `user` form field. Cannot be covered by the generic OIDC connector.
+  Configure via `realms.<name>.federation` with `type: apple`, `team_id`, `key_id`,
+  and `private_key_pem` (HEA-1326).
+
 - **Pre-token enrichment webhook** (`realms.<name>.pre_token_webhook`) — before
   issuing an access token, Hearth POSTs a JSON context payload (user ID, client
   ID, grant type, scope, resolved roles/groups/permissions) to a configured URL.
