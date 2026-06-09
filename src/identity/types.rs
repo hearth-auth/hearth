@@ -803,6 +803,13 @@ pub struct RealmConfig {
     pub web_theme_name: Option<String>,
     /// Whether MFA is required for all users in this realm.
     pub mfa_required: Option<bool>,
+    /// Role names (slugs) whose holders must have MFA enrolled.
+    ///
+    /// When set, any user assigned one of these roles is intercepted by the
+    /// `EnrollMfa` required-action gate if they have no MFA factor enrolled.
+    /// This is orthogonal to `mfa_required` (which applies to all users).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mfa_required_roles: Option<Vec<String>>,
     /// Allowed MFA methods (e.g. `["totp", "webauthn", "sms"]`).
     pub mfa_methods: Option<Vec<String>>,
     /// Per-realm SMS OTP expiry in seconds. `None` falls back to the module default (600 s / 10 min).

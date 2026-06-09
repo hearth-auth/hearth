@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Conditional MFA enforcement** — `mfa_required: true` on a client registration
+  forces users accessing that client to enroll an MFA factor (TOTP or passkey)
+  before an authorization code is issued. `mfa_required_roles: [...]` on realm config
+  enforces MFA for users assigned any of the named roles, regardless of which client
+  they are authenticating against. Both gates inject the `EnrollMfa` required action
+  which redirects to a dedicated enrollment page (`/required-action/enroll-mfa`) within
+  the existing required-action flow (HEA-1330).
+
 - **Granular admin sub-permissions** — `hearth.admin` is now complemented by three
   fine-grained sub-permissions that enable Keycloak-style sub-admin delegation without
   granting full superuser access (HEA-1328):

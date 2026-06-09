@@ -230,6 +230,9 @@ impl EmbeddedIdentityEngine {
             }
         }
         client.set_profile(request.profile);
+        if request.mfa_required.is_some() {
+            client.set_mfa_required(request.mfa_required);
+        }
 
         // Serialize and persist
         let client_bytes =
@@ -3066,6 +3069,9 @@ impl EmbeddedIdentityEngine {
                 });
             }
             client.set_profile(profile);
+        }
+        if let Some(mfa_req) = request.mfa_required {
+            client.set_mfa_required(mfa_req);
         }
 
         let updated_bytes =

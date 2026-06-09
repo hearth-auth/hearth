@@ -71,6 +71,7 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
             jwks_uri: None,
             authorization_signed_response_alg: None,
             profile: domain::ClientProfile::Standard,
+            mfa_required: None,
         }
     }
 }
@@ -116,6 +117,7 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
             }),
             authorization_signed_response_alg: None,
             profile: None,
+            mfa_required: None,
         }
     }
 }

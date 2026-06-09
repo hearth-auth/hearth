@@ -404,6 +404,7 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         jwks_uri: None,
         authorization_signed_response_alg: None,
         profile: crate::identity::ClientProfile::Standard,
+        mfa_required: None,
     }
 }
 
@@ -742,6 +743,7 @@ pub async fn admin_app_edit_submit(
         access_token_authorization,
         authorization_signed_response_alg: None,
         profile: None,
+        mfa_required: None,
     };
 
     let realm_name = target.0.name().to_string();

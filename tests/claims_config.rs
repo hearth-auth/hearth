@@ -73,6 +73,7 @@ async fn default_profile_emits_roles_for_first_party() {
                 jwks_uri: None,
                 authorization_signed_response_alg: None,
                 profile: Default::default(),
+                mfa_required: None,
             },
         )
         .expect("client");
@@ -147,6 +148,7 @@ async fn default_profile_suppresses_roles_for_third_party() {
                 jwks_uri: None,
                 authorization_signed_response_alg: None,
                 profile: Default::default(),
+                mfa_required: None,
             },
         )
         .expect("client");
@@ -221,6 +223,7 @@ async fn required_scopes_gate_uses_granted_not_requested() {
                 jwks_uri: None,
                 authorization_signed_response_alg: None,
                 profile: Default::default(),
+                mfa_required: None,
             },
         )
         .expect("client");
@@ -377,6 +380,7 @@ async fn yaml_override_fallback_to_default_when_gate_fails() {
                 jwks_uri: None,
                 authorization_signed_response_alg: None,
                 profile: Default::default(),
+                mfa_required: None,
             },
         )
         .expect("client");
@@ -474,6 +478,7 @@ async fn omit_source_suppresses_default_claim() {
                 jwks_uri: None,
                 authorization_signed_response_alg: None,
                 profile: Default::default(),
+                mfa_required: None,
             },
         )
         .expect("client");

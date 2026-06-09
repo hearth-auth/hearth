@@ -2620,6 +2620,7 @@ impl RealmYamlConfig {
             // Pre-token webhook is configured via admin API or per-realm YAML.
             // Defaults to None (disabled) so existing realms are unaffected.
             pre_token_webhook: None,
+            mfa_required_roles: None,
         })
     }
 }
