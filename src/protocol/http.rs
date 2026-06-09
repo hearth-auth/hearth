@@ -2025,6 +2025,12 @@ fn identity_error_to_response(
         IdentityError::AttestationPolicyViolation { .. } => {
             (StatusCode::FORBIDDEN, "attestation_policy_violation")
         }
+        IdentityError::AgentNotFound => (StatusCode::NOT_FOUND, "agent not found"),
+        IdentityError::AgentRevoked => (StatusCode::FORBIDDEN, "agent revoked"),
+        // HEA-1324: pre-token webhook failed with fail_closed policy.
+        IdentityError::PreTokenWebhookFailed { .. } => {
+            (StatusCode::BAD_GATEWAY, "pre_token_webhook_failed")
+        }
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);

@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::core::{
-    ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
+    AgentId, ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId,
+    WebhookId,
 };
 use crate::identity::claims_config::ClaimProfile;
 use crate::identity::credentials::CleartextPassword;
@@ -962,6 +963,65 @@ pub struct RealmConfig {
     /// (fail-open per §6.1 of the abuse plan).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webauthn_attestation: Option<WebAuthnAttestationPolicy>,
+    /// Pre-token enrichment webhook (HEA-1324, Gap C-3).
+    ///
+    /// When set, Hearth POSTs a JSON context payload to the configured URL
+    /// immediately before issuing an access token. The endpoint may return
+    /// `extra_claims` that are merged into the token's top-level claims.
+    /// Reserved JWT claims (`sub`, `iss`, `exp`, etc.) cannot be overridden.
+    ///
+    /// `None` (default) disables the webhook for this realm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_token_webhook: Option<PreTokenWebhookConfig>,
+}
+
+/// How to handle a pre-token webhook call failure.
+///
+/// Governs whether a webhook transport error (network failure, timeout,
+/// non-2xx response) blocks token issuance or is tolerated.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PreTokenWebhookErrorPolicy {
+    /// Token is issued without extra claims; a warning is logged and a
+    /// `PreTokenWebhookFailed` audit event is emitted. This is the safe
+    /// default — Auth availability takes precedence over enrichment.
+    #[default]
+    FailOpen,
+    /// Token issuance is rejected with `IdentityError::PreTokenWebhookFailed`.
+    /// Use when the enrichment data is required for authorization decisions
+    /// downstream and issuing a token without it would be a security risk.
+    FailClosed,
+}
+
+/// Per-realm pre-token enrichment webhook configuration (HEA-1324, Gap C-3).
+///
+/// When configured, Hearth POSTs a JSON context payload to `url` immediately
+/// before issuing an access token. The response may include `extra_claims`
+/// that are merged into the token.
+///
+/// See `docs/specs/CONFIGURATION.md §realms.<name>.pre_token_webhook` for
+/// the full YAML reference.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreTokenWebhookConfig {
+    /// The HTTPS endpoint to POST to.
+    pub url: String,
+    /// Request timeout in milliseconds. Defaults to `1000`.
+    #[serde(default = "default_webhook_timeout_ms")]
+    pub timeout_ms: u64,
+    /// What to do when the webhook call fails. Defaults to `fail_open`.
+    #[serde(default)]
+    pub on_error: PreTokenWebhookErrorPolicy,
+    /// HMAC-SHA256 signing secret.
+    ///
+    /// When set, the request body is signed and the signature is sent in
+    /// `X-Hearth-Signature-256: sha256=<hex>` so the endpoint can verify
+    /// authenticity. `None` skips signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac_secret: Option<String>,
+}
+
+fn default_webhook_timeout_ms() -> u64 {
+    1000
 }
 
 /// Per-realm WebAuthn attestation policy (A-13).
@@ -2878,4 +2938,224 @@ mod tests {
         let back: PendingAuthorizationRequest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(pending, back);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Agent entity types (AGENT_AUTH.md Phase A, HEA-1325)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lifecycle state of an agent entity.
+///
+/// Transitions:
+/// - `Active → Suspended → Active` (reversible)
+/// - `Active | Suspended → Revoked` (terminal; no re-activation)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    /// Agent is operational and may authenticate.
+    Active,
+    /// Agent is temporarily suspended; cannot authenticate or be delegated to.
+    Suspended,
+    /// Agent is permanently revoked; no re-activation possible.
+    Revoked,
+}
+
+/// The owner of an agent — either a user or an organization within the same realm.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type", content = "id")]
+pub enum AgentOwner {
+    /// The agent is owned by a specific user.
+    User(UserId),
+    /// The agent is owned by an organization (B2B workload identity).
+    Organization(OrganizationId),
+}
+
+impl AgentOwner {
+    /// Returns the string tag used in storage key indexes.
+    pub fn storage_tag(&self) -> &'static str {
+        match self {
+            Self::User(_) => "user",
+            Self::Organization(_) => "org",
+        }
+    }
+
+    /// Returns the UUID string of the inner owner ID for storage key encoding.
+    pub fn uuid_str(&self) -> String {
+        match self {
+            Self::User(id) => id.as_uuid().to_string(),
+            Self::Organization(id) => id.as_uuid().to_string(),
+        }
+    }
+}
+
+/// An autonomous agent entity registered in a realm.
+///
+/// Agents are distinct from users and OAuth clients. They represent
+/// autonomous software entities with their own identity lifecycle,
+/// credential set, capability declarations, and delegation chain support.
+/// See `AGENT_AUTH.md` for the normative specification.
+///
+/// Fields are private; access via accessor methods.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Agent {
+    id: AgentId,
+    realm_id: RealmId,
+    owner: AgentOwner,
+    display_name: String,
+    description: String,
+    capabilities: Vec<String>,
+    status: AgentStatus,
+    /// Maximum number of delegation hops this agent may initiate (1–10).
+    max_delegation_depth: u8,
+    created_at: Timestamp,
+    updated_at: Timestamp,
+}
+
+impl Agent {
+    /// Creates a new agent record. Used internally by the identity engine.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        id: AgentId,
+        realm_id: RealmId,
+        owner: AgentOwner,
+        display_name: String,
+        description: String,
+        capabilities: Vec<String>,
+        status: AgentStatus,
+        max_delegation_depth: u8,
+        created_at: Timestamp,
+        updated_at: Timestamp,
+    ) -> Self {
+        Self {
+            id,
+            realm_id,
+            owner,
+            display_name,
+            description,
+            capabilities,
+            status,
+            max_delegation_depth,
+            created_at,
+            updated_at,
+        }
+    }
+
+    /// Returns the agent's unique identifier.
+    pub fn id(&self) -> &AgentId {
+        &self.id
+    }
+
+    /// Returns the realm this agent belongs to.
+    pub fn realm_id(&self) -> &RealmId {
+        &self.realm_id
+    }
+
+    /// Returns the owner of this agent.
+    pub fn owner(&self) -> &AgentOwner {
+        &self.owner
+    }
+
+    /// Returns the agent's human-readable display name.
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    /// Returns the agent's description.
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Returns the declared capability URIs for this agent.
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
+    /// Returns the agent's current lifecycle status.
+    pub fn status(&self) -> AgentStatus {
+        self.status
+    }
+
+    /// Returns the maximum delegation chain depth this agent may initiate.
+    pub fn max_delegation_depth(&self) -> u8 {
+        self.max_delegation_depth
+    }
+
+    /// Returns when the agent was created (UTC microseconds).
+    pub fn created_at(&self) -> Timestamp {
+        self.created_at
+    }
+
+    /// Returns when the agent was last updated (UTC microseconds).
+    pub fn updated_at(&self) -> Timestamp {
+        self.updated_at
+    }
+
+    /// Updates the display name. Used internally during agent updates.
+    pub(crate) fn set_display_name(&mut self, name: String) {
+        self.display_name = name;
+    }
+
+    /// Updates the description. Used internally during agent updates.
+    pub(crate) fn set_description(&mut self, description: String) {
+        self.description = description;
+    }
+
+    /// Updates the capability list. Used internally during agent updates.
+    pub(crate) fn set_capabilities(&mut self, capabilities: Vec<String>) {
+        self.capabilities = capabilities;
+    }
+
+    /// Updates the status. Used internally for lifecycle transitions.
+    pub(crate) fn set_status(&mut self, status: AgentStatus) {
+        self.status = status;
+    }
+
+    /// Updates the max delegation depth.
+    pub(crate) fn set_max_delegation_depth(&mut self, depth: u8) {
+        self.max_delegation_depth = depth;
+    }
+
+    /// Updates the `updated_at` timestamp.
+    pub(crate) fn set_updated_at(&mut self, ts: Timestamp) {
+        self.updated_at = ts;
+    }
+}
+
+/// Request to create a new agent.
+#[derive(Clone, Debug)]
+pub struct CreateAgentRequest {
+    /// Human-readable display name (1–256 chars).
+    pub display_name: String,
+    /// Optional description of what the agent does (max 2048 chars).
+    pub description: Option<String>,
+    /// Owner of this agent — a user or organization in the same realm.
+    pub owner: AgentOwner,
+    /// Declared capability URIs (informational; enforcement via RBAC).
+    pub capabilities: Vec<String>,
+    /// Maximum number of delegation hops (1–10, default 1).
+    pub max_delegation_depth: u8,
+}
+
+/// Request to update an existing agent's mutable fields.
+#[derive(Clone, Debug, Default)]
+pub struct UpdateAgentRequest {
+    /// New display name, or `None` to leave unchanged.
+    pub display_name: Option<String>,
+    /// New description, or `None` to leave unchanged.
+    pub description: Option<String>,
+    /// New capability list, or `None` to leave unchanged.
+    pub capabilities: Option<Vec<String>>,
+    /// New max delegation depth, or `None` to leave unchanged.
+    pub max_delegation_depth: Option<u8>,
+}
+
+/// Query parameters for listing agents.
+#[derive(Clone, Debug, Default)]
+pub struct ListAgentsQuery {
+    /// Filter agents by owner. `None` returns all owners.
+    pub owner_id: Option<AgentOwner>,
+    /// Filter agents by status. `None` returns all statuses.
+    pub status: Option<AgentStatus>,
+    /// Filter agents that declare a specific capability URI.
+    pub capability: Option<String>,
 }

@@ -63,6 +63,11 @@
       {% when None %}
     {% endmatch %}
     <input type="hidden" name="locale" value="{{ locale }}">
+    {% match csrf %}
+      {% when Some with (c) %}
+        <input type="hidden" name="_csrf" value="{{ c }}">
+      {% when None %}
+    {% endmatch %}
 
     <div>
       <label for="email" class="block text-sm font-medium text-ht-content-secondary">{{ email_label }}</label>

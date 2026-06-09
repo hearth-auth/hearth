@@ -260,6 +260,98 @@ oidc:
 #       max_failures: 5       # default: 5; consecutive failures before lockout
 #       lockout_seconds: 300  # default: 300 (5 min); per-account lockout duration
 
+# --- Metrics auth (A-26) ----------------------------------------------------
+# Protect /metrics from unauthenticated scraping. Alternatively, firewall the
+# port at the network layer. Comparison is constant-time.
+#
+# security:
+#   bearer_token: "${HEARTH_METRICS_TOKEN}"
+
+# --- Host header allowlist (A-40) -------------------------------------------
+# Reject requests with unexpected Host headers (DNS rebinding protection).
+# Include the port for non-standard ports: "auth.example.com:8420"
+#
+# security:
+#   allowed_hosts:
+#     - "auth.example.com"
+#     - "auth.internal.example.com"
+
+# --- DPoP nonce stability (multi-node / rolling restarts) -------------------
+# By default a new random key is generated at startup, invalidating outstanding
+# DPoP proofs on restart. Set a stable 64-char hex key in multi-node deployments
+# so all nodes share the same secret. Zero key is rejected at startup.
+#
+# security:
+#   dpop_nonce_secret: "${HEARTH_DPOP_NONCE_SECRET}"
+
+# --- JWKS / discovery rate limit (A-10) ------------------------------------
+# Default: 60 req/s per source IP. Lower in high-threat environments.
+#
+# security:
+#   jwks_rps_limit: 60
+
+# --- HTTP/2 rapid-reset defense (A-39 / CVE-2023-44487) --------------------
+# Cap concurrent streams and RST_STREAM budget per connection.
+#
+# security:
+#   http2:
+#     max_concurrent_streams: 100   # default: 100
+#     max_pending_reset_streams: 10  # default: 10
+
+# --- Request shaper: per-IP and per-realm token buckets (A-2) ---------------
+# Global rate limiter applied before per-realm auth logic. Works independently
+# of rate_limiting above (which is login-specific). Both are active when set.
+#
+# security:
+#   request_shaper:
+#     ip_rps: 100       # default: 100 req/s per source IP
+#     realm_rps: 1000   # default: 1000 req/s per realm
+
+# --- IP reputation (P-2) ----------------------------------------------------
+# Block or challenge IPs on the Spamhaus DROP/EDROP list, or from flagged ASNs
+# via MaxMind. action: "block" | "challenge" (CAPTCHA) | "log" (metrics only).
+# Requires a MaxMind MMDB for ASN lookups (download free GeoLite2-ASN.mmdb).
+#
+# security:
+#   ip_reputation:
+#     enabled: true
+#     action: block
+#     maxmind_db_path: "/var/lib/hearth/GeoLite2-ASN.mmdb"  # optional
+#     spamhaus:
+#       refresh_interval_secs: 86400  # default: 24 hours
+
+# --- gRPC reflection gate (A-43) --------------------------------------------
+# Disabled in production by default. Enabling also requires --allow-reflection-in-prod.
+#
+# security:
+#   grpc:
+#     reflection_enabled: false
+
+# --- mTLS certificate revocation (A-44) ------------------------------------
+# PEM-encoded CRL files checked on every TLS handshake. Reloaded on SIGHUP.
+# Only relevant when server.tls_require_client_cert is true.
+#
+# security:
+#   tls:
+#     crl_paths:
+#       - "/etc/hearth/crl/ca.crl"
+
+# --- Backup restore signing (A-30) -----------------------------------------
+# When set, the restore endpoint rejects archives without a valid Ed25519
+# detached signature on manifest.json. export_rate_limit caps exports per hour.
+#
+# security:
+#   backup:
+#     verify_key: "${HEARTH_BACKUP_VERIFY_KEY}"  # base64url Ed25519 public key
+#     export_rate_limit: 10                       # default: 10/hr per admin
+
+# --- Return-to redirect allowlist (A-52) -----------------------------------
+# Relative paths (/ui/…) are always accepted. Absolute URLs require a match here.
+#
+# security:
+#   allowed_return_to_origins:
+#     - "https://app.example.com"
+
 # --- Argon2 pepper (A-46) ---------------------------------------------------
 # Adding a pepper hashes HMAC-SHA256(key=pepper_key, msg=password) before
 # Argon2id, so that even a stolen database cannot be brute-forced without the

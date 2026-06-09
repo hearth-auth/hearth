@@ -20,6 +20,7 @@ pub(crate) mod magic_link;
 pub mod migration;
 pub mod oidc;
 pub mod onboarding;
+pub mod pre_token_webhook;
 pub mod ra_token;
 pub mod reconcile;
 pub mod risk;
@@ -75,11 +76,15 @@ pub use types::{
     CreateWebhookRequest, CredentialExport, DcrPolicy, FapiProfile, ImportClientRequest,
     ImportUserRequest, InvitationStatus, MigrationReport, Organization, OrganizationConfig,
     OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PasswordPolicy, PendingAuthorizationRequest, RawCredential, Realm, RealmConfig,
-    RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
-    RequiredAction, RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy,
-    SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
-    UpdateWebhookRequest, User, UserStatus, WebAuthnAttestationPolicy, Webhook,
+    PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy,
+    RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest,
+    RegisterUserResponse, RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, Session,
+    SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
+    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
+    WebAuthnAttestationPolicy, Webhook,
+};
+pub use types::{
+    Agent, AgentOwner, AgentStatus, CreateAgentRequest, ListAgentsQuery, UpdateAgentRequest,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -88,7 +93,8 @@ pub use webauthn::{
 };
 
 use crate::core::{
-    ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
+    AgentId, ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId,
+    WebhookId,
 };
 
 // Maximum page size for all paginated list operations (A-23).
@@ -1818,6 +1824,82 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         webhook_id: &WebhookId,
     ) -> Result<(), IdentityError>;
+
+    // =========================================================================
+    // Agents (AGENT_AUTH.md Phase A, HEA-1325)
+    // =========================================================================
+
+    /// Creates a new agent in the given realm.
+    ///
+    /// Validates `display_name` (1–256 chars), `max_delegation_depth` (1–10),
+    /// and verifies that the owning user/organization exists in the realm.
+    /// Persists the agent record and owner index atomically.
+    fn create_agent(
+        &self,
+        realm_id: &RealmId,
+        request: &types::CreateAgentRequest,
+    ) -> Result<types::Agent, IdentityError>;
+
+    /// Retrieves an agent by ID. Returns `None` if not found.
+    fn get_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<Option<types::Agent>, IdentityError>;
+
+    /// Updates mutable fields on an agent.
+    ///
+    /// Only non-`None` fields in the request are applied. Returns the
+    /// updated agent. Validates `max_delegation_depth` (1–10) when supplied.
+    fn update_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        request: &types::UpdateAgentRequest,
+    ) -> Result<types::Agent, IdentityError>;
+
+    /// Permanently deletes an agent and cascades: removes all credentials,
+    /// RBAC role assignments, and the owner index entry. Emits `AgentDeleted` audit.
+    fn delete_agent(&self, realm_id: &RealmId, agent_id: &AgentId) -> Result<(), IdentityError>;
+
+    /// Lists agents in a realm with optional filtering and cursor-based pagination.
+    ///
+    /// Supports filtering by owner, status, and declared capability URI.
+    fn list_agents(
+        &self,
+        realm_id: &RealmId,
+        query: &types::ListAgentsQuery,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<types::Page<types::Agent>, IdentityError>;
+
+    /// Transitions an agent from `Active` to `Suspended`.
+    ///
+    /// Returns `AgentRevoked` if the agent is already revoked (terminal).
+    fn suspend_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<types::Agent, IdentityError>;
+
+    /// Transitions an agent from `Suspended` back to `Active`.
+    ///
+    /// Returns `AgentRevoked` if the agent is revoked (terminal).
+    fn reactivate_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<types::Agent, IdentityError>;
+
+    /// Permanently revokes an agent (`Active | Suspended → Revoked`).
+    ///
+    /// Revocation is terminal — a revoked agent cannot be reactivated.
+    /// Emits `AgentRevoked` audit event.
+    fn revoke_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<types::Agent, IdentityError>;
 
     /// Sweeps expired entities (authorization codes, device codes,
     /// pending authorization tickets, grant families) from storage.

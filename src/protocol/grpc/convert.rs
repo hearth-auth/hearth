@@ -181,6 +181,9 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::AttestationPolicyViolation { .. } => {
             (Code::PermissionDenied, err.to_string())
         }
+        IdentityError::AgentNotFound => (Code::NotFound, err.to_string()),
+        IdentityError::AgentRevoked => (Code::PermissionDenied, err.to_string()),
+        IdentityError::PreTokenWebhookFailed { .. } => (Code::PermissionDenied, err.to_string()),
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }

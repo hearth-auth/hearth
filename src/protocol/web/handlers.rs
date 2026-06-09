@@ -832,7 +832,27 @@ fn login_form_impl(
     tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
     tmpl.inline_theme_css = state.inline_theme_css();
     tmpl.federation_buttons = federation_buttons_for(&state, realm.id(), &action_prefix);
-    render(&tmpl)
+
+    // Issue or reuse the pre-auth CSRF cookie. If the browser already has a
+    // hearth_ui_csrf cookie (e.g. from a prior session), embed its value so
+    // the POST handler can verify the double-submit. If not, generate a fresh
+    // token and set a new cookie on this response.
+    let secure = state.is_secure_request(&headers);
+    let (csrf_value, fresh_cookie) =
+        match super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+            Some(existing) => (existing.to_string(), None),
+            None => {
+                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+                (val, Some(cookie))
+            }
+        };
+    tmpl.csrf = Some(csrf_value);
+
+    let mut resp = render(&tmpl);
+    if let Some(cookie) = fresh_cookie {
+        append_cookie(&mut resp, &cookie);
+    }
+    resp
 }
 
 /// Builds the list of federation sign-in buttons rendered on a login
@@ -875,6 +895,9 @@ pub struct LoginForm {
     /// Optional locale submitted via hidden field.
     #[serde(default)]
     pub locale: Option<String>,
+    /// CSRF token echoed from the hidden `_csrf` field.
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
 }
 
 /// Handles login submission at the bare `/ui/login` URL.
@@ -962,6 +985,7 @@ fn login_submit_impl(
         let inline_theme_css_val = inline_theme_css_val.clone();
         let submitted_email = email.to_string();
         let product_name = product_name.clone();
+        let logo_url = logo_url.clone();
         move || {
             let mut tmpl = LoginTemplate::new(
                 Some("Sign-in failed. Check your credentials and try again.".to_string()),
@@ -982,6 +1006,48 @@ fn login_submit_impl(
             render_status(&tmpl, StatusCode::UNAUTHORIZED)
         }
     };
+
+    // CSRF form-field double-submit check: if the browser has a hearth_ui_csrf
+    // cookie (set when the login page was rendered), the hidden _csrf field must
+    // match it. An absent cookie skips this check so dev/test tooling that POSTs
+    // credentials directly (without going through the GET endpoint) continues to
+    // work. A mismatch means the form was not served by this server — show a
+    // specific error rather than collapsing into the generic credential error.
+    if let Some(cookie_val) =
+        super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE)
+    {
+        if !super::auth::csrf_token_eq(cookie_val, &form.csrf) {
+            let mut tmpl = LoginTemplate::new(
+                Some("Invalid security token. Please reload the page and try again.".to_string()),
+                return_to.clone(),
+                &action_prefix,
+                show_register,
+                locale,
+                product_name.clone(),
+                logo_url.clone(),
+            );
+            tmpl.realm_theme_url.clone_from(&realm_theme);
+            tmpl.inline_theme_css.clone_from(&inline_theme_css_val);
+            return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    // Login CSRF guard: reject cross-origin POSTs.
+    // Browsers always send `Origin` on cross-site POST; an absent header means
+    // same-site and is allowed. Collapsing into `generic_error()` prevents the
+    // response from leaking whether the address or realm exists (enumeration
+    // resistance).
+    if let Some(origin_val) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        let expected = state.public_origin_str(&headers);
+        if origin_val != expected {
+            tracing::warn!(
+                origin = origin_val,
+                expected = %expected,
+                "login: CSRF origin mismatch"
+            );
+            return generic_error();
+        }
+    }
 
     // Enforce realm policy: password auth must be in the allow-list.
     if let Some(ref methods) = realm.config().allowed_auth_methods {

@@ -5,6 +5,7 @@
 //! - F-04: `Secure` cookie attribute when TLS is active
 //! - F-05: CORS preflight and response headers on OAuth token endpoints
 //! - F-06: Per-`(realm, client)` token endpoint rate limiting (429 + Retry-After)
+//! - HEA-1318: Login CSRF — Origin header validation on login endpoints
 
 mod common;
 
@@ -18,8 +19,8 @@ use hearth::core::{ClientId, RealmId, SessionId};
 use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
-    CreateRealmRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig,
-    RegisterClientRequest,
+    CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
+    EmbeddedIdentityEngine, IdentityConfig, RegisterClientRequest, UpdateUserRequest, UserStatus,
 };
 use hearth::protocol::admin_auth::TOKEN_RATE_LIMIT;
 use hearth::protocol::http::{router as http_router, AppState};
@@ -496,5 +497,296 @@ async fn token_rate_limit_returns_429_with_retry_after() {
     assert!(
         resp.headers().contains_key("retry-after"),
         "429 response must include Retry-After header"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HEA-1318: Login CSRF — Origin header validation
+// ---------------------------------------------------------------------------
+
+const CSRF_TEST_EMAIL: &str = "csrf-test@hearth.test";
+const CSRF_TEST_PASSWORD: &str = "CsrfTest123!";
+
+/// Seeds a user in the "default" realm (sole realm in `make_web_state`).
+/// Returns the realm's id so callers can target it if needed.
+fn seed_login_user(state: &WebState) {
+    // The sole realm resolves automatically (sole-realm shortcut in the resolver).
+    let realm = state
+        .identity
+        .get_realm_by_name("default")
+        .expect("get realm")
+        .expect("default realm must exist");
+
+    let user = state
+        .identity
+        .create_user(
+            realm.id(),
+            &CreateUserRequest {
+                email: CSRF_TEST_EMAIL.to_string(),
+                display_name: "CSRF Test".to_string(),
+                first_name: "CSRF".to_string(),
+                last_name: "Test".to_string(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create test user");
+
+    state
+        .identity
+        .set_password(
+            realm.id(),
+            user.id(),
+            &CleartextPassword::from_string(CSRF_TEST_PASSWORD.to_string()),
+        )
+        .expect("set password");
+
+    state
+        .identity
+        .update_user(
+            realm.id(),
+            user.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate user");
+}
+
+/// Seeds an admin user in the system realm for admin-login CSRF tests.
+fn seed_admin_login_user(state: &WebState) {
+    let user = state
+        .identity
+        .create_admin_user(&CreateUserRequest {
+            email: "csrf-admin@hearth.test".to_string(),
+            display_name: "CSRF Admin".to_string(),
+            first_name: "CSRF".to_string(),
+            last_name: "Admin".to_string(),
+            attributes: Default::default(),
+        })
+        .expect("create admin user");
+
+    let system_realm = RealmId::new(Uuid::nil());
+
+    state
+        .identity
+        .set_password(
+            &system_realm,
+            user.id(),
+            &CleartextPassword::from_string(CSRF_TEST_PASSWORD.to_string()),
+        )
+        .expect("set admin password");
+
+    state
+        .identity
+        .update_user(
+            &system_realm,
+            user.id(),
+            &UpdateUserRequest {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            },
+        )
+        .expect("activate admin user");
+}
+
+/// Cross-origin POST to `/ui/login` with valid credentials must be rejected
+/// (must NOT return `303 See Other` to the dashboard).
+///
+/// Fails against pre-fix code where the login succeeds regardless of Origin.
+#[tokio::test]
+async fn login_csrf_cross_origin_rejected() {
+    let state = make_web_state();
+    seed_login_user(&state);
+    let app = web::router(state);
+
+    let body = format!("email={}&password={}", CSRF_TEST_EMAIL, CSRF_TEST_PASSWORD);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("host", "localhost")
+                .header("origin", "https://evil.example.com")
+                .body(Body::from(body))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_ne!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "cross-origin login must NOT redirect to dashboard (CSRF rejected)"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "cross-origin login must return 401 via generic_error()"
+    );
+}
+
+/// POST to `/ui/login` with no `Origin` header and valid credentials must
+/// succeed (same-site form submission; CSRF guard must not fire).
+#[tokio::test]
+async fn login_csrf_same_origin_no_header_accepted() {
+    let state = make_web_state();
+    seed_login_user(&state);
+    let app = web::router(state);
+
+    let body = format!("email={}&password={}", CSRF_TEST_EMAIL, CSRF_TEST_PASSWORD);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("host", "localhost")
+                .body(Body::from(body))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "login without Origin header must succeed (same-site flow)"
+    );
+}
+
+/// Cross-origin POST to `/ui/admin/login` with valid credentials must be
+/// rejected (must NOT return `303 See Other`).
+///
+/// Fails against pre-fix code where the admin login succeeds regardless of Origin.
+#[tokio::test]
+async fn admin_login_csrf_cross_origin_rejected() {
+    let state = make_web_state();
+    seed_admin_login_user(&state);
+    let app = web::router(state);
+
+    let body = format!(
+        "email={}&password={}",
+        "csrf-admin@hearth.test", CSRF_TEST_PASSWORD
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/admin/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("host", "localhost")
+                .header("origin", "https://evil.example.com")
+                .body(Body::from(body))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_ne!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "cross-origin admin login must NOT redirect (CSRF rejected)"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "cross-origin admin login must return 401 via generic_error()"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HEA-1321: CSRF form-field double-submit verification on login
+// ---------------------------------------------------------------------------
+
+/// POST to `/ui/admin/login` with a `hearth_ui_csrf` cookie present but a
+/// mismatched `_csrf` form field must show a CSRF-specific error (not silently
+/// log the user in). Before the fix, valid credentials + wrong `_csrf` field
+/// returned 303 See Other — the silent redirect described in the issue.
+#[tokio::test]
+async fn admin_login_mismatched_csrf_token_shows_error() {
+    let state = make_web_state();
+    seed_admin_login_user(&state);
+    let app = web::router(state);
+
+    // Cookie claims one token; form field submits a different one.
+    let body = format!(
+        "email={}&password={}&_csrf=intentionally-wrong-token",
+        "csrf-admin@hearth.test", CSRF_TEST_PASSWORD
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/admin/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("host", "localhost")
+                .header("cookie", "hearth_ui_csrf=correct-cookie-value")
+                .body(Body::from(body))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_ne!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "mismatched CSRF token must NOT redirect to the dashboard"
+    );
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "mismatched CSRF token must return 422"
+    );
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body bytes");
+    let body_str = std::str::from_utf8(&body_bytes).expect("body is utf-8");
+    assert!(
+        body_str.contains("Invalid security token"),
+        "response must contain the CSRF-specific error message"
+    );
+}
+
+/// POST to `/ui/login` with a matching `hearth_ui_csrf` cookie + `_csrf` form
+/// field must succeed (303 redirect) — the CSRF guard must not fire for a
+/// correct double-submit pair.
+#[tokio::test]
+async fn login_matching_csrf_token_accepted() {
+    let state = make_web_state();
+    seed_login_user(&state);
+    let app = web::router(state);
+
+    let shared_token = "shared-csrf-token-abc123";
+    let body = format!(
+        "email={}&password={}&_csrf={}",
+        CSRF_TEST_EMAIL, CSRF_TEST_PASSWORD, shared_token
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("host", "localhost")
+                // Cookie and form field both carry the same value.
+                .header("cookie", format!("hearth_ui_csrf={shared_token}"))
+                .body(Body::from(body))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "login with matching CSRF cookie+field must succeed (303)"
     );
 }

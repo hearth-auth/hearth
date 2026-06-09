@@ -7,6 +7,19 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **Pre-token enrichment webhook** (`realms.<name>.pre_token_webhook`) — before
+  issuing an access token, Hearth POSTs a JSON context payload (user ID, client
+  ID, grant type, scope, resolved roles/groups/permissions) to a configured URL.
+  The endpoint may return `extra_claims` that are merged into the token's
+  top-level claims. Reserved JWT claims (`sub`, `iss`, `exp`, etc.) cannot be
+  overridden. Supports `on_error: fail_open` (default — token issued without
+  extra claims on failure) or `fail_closed` (token rejected). Optional
+  `hmac_secret` for `X-Hearth-Signature-256` request signing. Covers Gap C-3
+  from the 1.0 Readiness Audit — minimal Auth0 "Actions" / Keycloak protocol
+  mapper escape hatch (HEA-1324).
+
 ### Fixed
 
 - **Realm OIDC discovery now includes `end_session_endpoint`** — the realm-scoped

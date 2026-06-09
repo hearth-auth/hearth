@@ -490,6 +490,39 @@ impl WebState {
         false
     }
 
+    /// Returns the expected `Origin` header value for same-origin login
+    /// requests, used by `login_submit_impl` as a CSRF guard.
+    ///
+    /// Prefers the canonical OIDC issuer origin when configured (strips the
+    /// path, e.g. `"https://auth.example.com/foo"` → `"https://auth.example.com"`).
+    /// Falls back to the `Host` header + TLS-derived scheme for dev and test
+    /// environments where `oidc.issuer` is not set.
+    #[must_use]
+    pub fn public_origin_str(&self, headers: &axum::http::HeaderMap) -> String {
+        if let Some(issuer) = self.config.as_ref().and_then(|c| c.oidc.issuer.as_deref()) {
+            // Extract bare origin: strip path at the first "/" after the authority.
+            if let Some(after_scheme) = issuer.find("://").map(|i| i + 3) {
+                let authority_end = issuer[after_scheme..]
+                    .find('/')
+                    .map(|i| i + after_scheme)
+                    .unwrap_or(issuer.len());
+                return issuer[..authority_end].to_string();
+            }
+            return issuer.to_string();
+        }
+        // Dev/test fallback: build origin from Host header + TLS scheme.
+        let scheme = if self.is_secure_request(headers) {
+            "https"
+        } else {
+            "http"
+        };
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("localhost");
+        format!("{}://{}", scheme, host)
+    }
+
     /// Looks up the per-realm theme CSS for a specific realm, bypassing
     /// the process-global `current_realm` cache. Prefer this in pre-auth
     /// handlers where the realm is resolved from the URL or cookie.

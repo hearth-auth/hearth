@@ -411,6 +411,12 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::SessionLimitEnforced => "Session Limit Enforced",
         A::SessionsRevoked => "All Sessions Revoked",
         A::RealmExportWatermarked => "Realm Export (Watermarked)",
+        A::AgentCreated => "Agent Created",
+        A::AgentUpdated => "Agent Updated",
+        A::AgentSuspended => "Agent Suspended",
+        A::AgentReactivated => "Agent Reactivated",
+        A::AgentRevoked => "Agent Revoked",
+        A::AgentDeleted => "Agent Deleted",
     }
 }
 
@@ -523,7 +529,13 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::BackupRestored
         | A::RealmExportWatermarked
         | A::Cleanup
-        | A::SessionLimitEnforced => "System",
+        | A::SessionLimitEnforced
+        | A::AgentCreated
+        | A::AgentUpdated
+        | A::AgentSuspended
+        | A::AgentReactivated
+        | A::AgentRevoked
+        | A::AgentDeleted => "System",
     }
 }
 

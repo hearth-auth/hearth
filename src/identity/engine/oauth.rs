@@ -820,6 +820,23 @@ impl EmbeddedIdentityEngine {
         );
         validate_claim_payload(ClaimTarget::IdToken, &id_roles, &id_groups, &id_permissions)?;
 
+        // 8c. Pre-token enrichment webhook: fire before signing, merge extra claims
+        //     into the access token's custom map.
+        let webhook_extra = self.fire_pre_token_webhook(
+            realm_id,
+            &stored_code.user_id.to_string(),
+            &request.client_id.to_string(),
+            "authorization_code",
+            (!scope_value.is_empty()).then_some(scope_value.as_str()),
+            None, // session created below — not yet available
+            &access_roles,
+            &access_groups,
+            &access_permissions,
+            &access_custom,
+        )?;
+        let access_custom =
+            crate::identity::pre_token_webhook::merge_extra_claims(access_custom, webhook_extra);
+
         // 9. Mark the code as used
         stored_code.used = true;
         let updated_bytes =

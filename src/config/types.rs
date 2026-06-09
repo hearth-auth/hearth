@@ -2617,6 +2617,9 @@ impl RealmYamlConfig {
             fapi_profile,
             risk_scorer_config: None,
             quotas: None,
+            // Pre-token webhook is configured via admin API or per-realm YAML.
+            // Defaults to None (disabled) so existing realms are unaffected.
+            pre_token_webhook: None,
         })
     }
 }

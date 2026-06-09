@@ -519,6 +519,23 @@ pub enum IdentityError {
         /// Must not contain authenticator secrets or raw credential material.
         reason: String,
     },
+    /// The requested agent was not found in this realm.
+    AgentNotFound,
+    /// The agent has been permanently revoked and cannot be reactivated
+    /// or delegated to.
+    AgentRevoked,
+    /// The pre-token enrichment webhook call failed and the realm's error
+    /// policy is `fail_closed`.
+    ///
+    /// Returned only when `pre_token_webhook.on_error = fail_closed` and the
+    /// webhook transport returns an error (network failure, timeout, or
+    /// non-2xx response). When `on_error = fail_open` (the default), a
+    /// transport failure logs a warning and issues the token without extra
+    /// claims instead of returning this error.
+    PreTokenWebhookFailed {
+        /// Description of the transport or parse failure.
+        reason: String,
+    },
 }
 
 impl fmt::Display for IdentityError {
@@ -760,6 +777,11 @@ impl fmt::Display for IdentityError {
             Self::AttestationPolicyViolation { reason } => {
                 write!(f, "attestation policy violation: {reason}")
             }
+            Self::AgentNotFound => write!(f, "agent not found"),
+            Self::AgentRevoked => write!(f, "agent has been permanently revoked"),
+            Self::PreTokenWebhookFailed { reason } => {
+                write!(f, "pre-token webhook failed: {reason}")
+            }
         }
     }
 }
@@ -914,6 +936,11 @@ impl IdentityError {
 
             Self::AttestationPolicyViolation { .. } => Some("HEARTH_ATTESTATION_POLICY_VIOLATION"),
 
+            Self::AgentNotFound => Some("agent_not_found"),
+            Self::AgentRevoked => Some("agent_revoked"),
+
+            Self::PreTokenWebhookFailed { .. } => Some("HEARTH_PRE_TOKEN_WEBHOOK_FAILED"),
+
             // 5xx — do not leak internal detail
             Self::SigningError { .. }
             | Self::Storage(_)
@@ -1042,7 +1069,10 @@ impl std::error::Error for IdentityError {
             | Self::EmailChangeTokenInvalid
             | Self::SilentAuthRateLimited
             | Self::QuotaExceeded { .. }
-            | Self::AttestationPolicyViolation { .. } => None,
+            | Self::AttestationPolicyViolation { .. }
+            | Self::AgentNotFound
+            | Self::AgentRevoked
+            | Self::PreTokenWebhookFailed { .. } => None,
         }
     }
 }
