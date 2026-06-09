@@ -1578,6 +1578,23 @@ pub(crate) fn sms_resend_count_scan_prefix() -> Vec<u8> {
     SMS_RESEND_COUNT_PREFIX.as_bytes().to_vec()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  Email OTP keys
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Prefix for pending Email OTP records.
+const EMAIL_PENDING_OTP_PREFIX: &str = "email:pending_otp:";
+
+/// Encodes the storage key for a pending Email OTP record.
+///
+/// Format: `email:pending_otp:{nonce_hex}`
+///
+/// The nonce is a 128-bit CSPRNG value encoded as 32 lowercase hex characters.
+/// Value: JSON-serialized `StoredOtp`.
+pub(crate) fn encode_email_pending_otp(nonce: &str) -> Vec<u8> {
+    format!("{EMAIL_PENDING_OTP_PREFIX}{nonce}").into_bytes()
+}
+
 /// Prefix for Pushed Authorization Request entries (RFC 9126).
 const PAR_PREFIX: &str = "oauth:par:";
 

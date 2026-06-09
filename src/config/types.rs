@@ -2609,6 +2609,9 @@ impl RealmYamlConfig {
             // SMS OTP expiry and max-attempt config; `None` uses OTP module defaults.
             sms_otp_expiry_seconds: None,
             sms_otp_max_attempts: None,
+            // Email OTP expiry and max-attempt config; `None` uses OTP module defaults.
+            email_otp_expiry_seconds: None,
+            email_otp_max_attempts: None,
             session_version: crate::identity::SessionVersionConfig::default(),
             max_concurrent_sessions,
             session_over_limit_policy,

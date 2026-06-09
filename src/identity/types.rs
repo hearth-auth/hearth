@@ -83,12 +83,18 @@ pub enum RequiredAction {
     /// Injected automatically when a realm has `mfa_methods: ["sms"]` and the
     /// user has no verified phone number on record.
     EnrollPhoneOtp,
+    /// User must enroll email OTP (6-digit code) as an MFA factor before proceeding.
+    ///
+    /// Injected automatically when a realm has `mfa_methods: ["email_otp"]` and the
+    /// user has not yet enrolled email OTP.
+    EnrollEmailOtp,
 }
 
 impl RequiredAction {
     /// Canonical execution priority. Lower numbers run first.
     ///
-    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_PHONE_OTP=4`.
+    /// `VERIFY_EMAIL=1`, `UPDATE_PASSWORD=2`, `ENROLL_MFA=3`, `ENROLL_PHONE_OTP=4`,
+    /// `ENROLL_EMAIL_OTP=5`.
     #[must_use]
     pub fn priority(self) -> u8 {
         match self {
@@ -96,6 +102,7 @@ impl RequiredAction {
             Self::UpdatePassword => 2,
             Self::EnrollMfa => 3,
             Self::EnrollPhoneOtp => 4,
+            Self::EnrollEmailOtp => 5,
         }
     }
 
@@ -107,6 +114,7 @@ impl RequiredAction {
             Self::UpdatePassword => "UPDATE_PASSWORD",
             Self::EnrollMfa => "enroll-mfa",
             Self::EnrollPhoneOtp => "ENROLL_PHONE_OTP",
+            Self::EnrollEmailOtp => "ENROLL_EMAIL_OTP",
         }
     }
 
@@ -117,6 +125,7 @@ impl RequiredAction {
             "UPDATE_PASSWORD" => Some(Self::UpdatePassword),
             "enroll-mfa" => Some(Self::EnrollMfa),
             "ENROLL_PHONE_OTP" => Some(Self::EnrollPhoneOtp),
+            "ENROLL_EMAIL_OTP" => Some(Self::EnrollEmailOtp),
             _ => None,
         }
     }
@@ -148,6 +157,9 @@ pub struct User {
     /// Whether the stored phone number has been verified via OTP.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     phone_verified: bool,
+    /// Whether the user has enrolled email OTP as an MFA factor.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    email_otp_enabled: bool,
     created_at: Timestamp,
     updated_at: Timestamp,
 }
@@ -177,6 +189,7 @@ impl User {
             email_verified: false,
             phone_number: None,
             phone_verified: false,
+            email_otp_enabled: false,
             created_at,
             updated_at,
         }
@@ -307,6 +320,16 @@ impl User {
     /// Marks the user's phone number as verified (or unverified). Used internally.
     pub(crate) fn set_phone_verified(&mut self, verified: bool) {
         self.phone_verified = verified;
+    }
+
+    /// Returns whether the user has email OTP enrolled as an MFA factor.
+    pub fn email_otp_enabled(&self) -> bool {
+        self.email_otp_enabled
+    }
+
+    /// Sets the email OTP enabled flag. Used internally by the identity engine.
+    pub(crate) fn set_email_otp_enabled(&mut self, enabled: bool) {
+        self.email_otp_enabled = enabled;
     }
 
     /// Updates the `updated_at` timestamp.
@@ -593,6 +616,8 @@ pub struct UpdateUserRequest {
     pub phone_number: Option<Option<String>>,
     /// Set the phone-verified flag. `None` leaves unchanged.
     pub phone_verified: Option<bool>,
+    /// Set the email OTP enrolled flag. `None` leaves unchanged.
+    pub email_otp_enabled: Option<bool>,
 }
 
 // ===== Realm types =====
@@ -817,6 +842,11 @@ pub struct RealmConfig {
     /// Per-realm SMS OTP maximum verification attempts before the record is discarded.
     /// `None` falls back to the module default (5).
     pub sms_otp_max_attempts: Option<u32>,
+    /// Per-realm Email OTP expiry in seconds. `None` falls back to the module default (600 s / 10 min).
+    pub email_otp_expiry_seconds: Option<u64>,
+    /// Per-realm Email OTP maximum verification attempts before the record is discarded.
+    /// `None` falls back to the module default (5).
+    pub email_otp_max_attempts: Option<u32>,
     /// Allowed authentication methods (e.g. `["password", "magic_link", "passkey"]`).
     pub allowed_auth_methods: Option<Vec<String>>,
     /// Password complexity policy.

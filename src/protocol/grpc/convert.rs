@@ -154,6 +154,10 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             Code::ResourceExhausted,
             "SMS OTP resend limit exceeded".to_string(),
         ),
+        IdentityError::InvalidEmailOtp => (
+            Code::InvalidArgument,
+            "invalid or expired email OTP".to_string(),
+        ),
         IdentityError::InvalidPushedAuthorizationRequest => (
             Code::InvalidArgument,
             "invalid, expired, or already used request_uri".to_string(),

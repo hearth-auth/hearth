@@ -127,6 +127,43 @@ impl EmailService {
         self.sender.send(&msg)
     }
 
+    /// Sends a 6-digit Email OTP code to the given address.
+    ///
+    /// The `code` is the plaintext 6-digit string. Callers MUST zeroize it
+    /// after this call returns. Subject line and body are branded with the
+    /// resolved per-realm branding; no external template files are needed.
+    pub fn send_otp_email(
+        &self,
+        to: &str,
+        code: &str,
+        realm_branding: Option<&EmailBranding>,
+    ) -> Result<(), super::EmailError> {
+        use super::reject_crlf;
+        reject_crlf("recipient", to)?;
+        reject_crlf("code", code)?;
+        let branding = self.resolve_branding(realm_branding);
+        let product = branding.product_name.as_str();
+        let subject = format!("Your {product} verification code");
+        let text_body = format!(
+            "Your {product} verification code is: {code}\n\nThis code expires in 10 minutes. Do not share it with anyone.\n"
+        );
+        let html_body = format!(
+            "<!DOCTYPE html><html><body style=\"font-family:sans-serif;max-width:600px;margin:auto;padding:32px\">\
+            <h2 style=\"margin-bottom:8px\">{product}</h2>\
+            <p style=\"color:#555\">Your verification code is:</p>\
+            <p style=\"font-size:36px;font-weight:bold;letter-spacing:6px;text-align:center;\
+            background:#f5f5f5;padding:16px;border-radius:8px\">{code}</p>\
+            <p style=\"color:#888;font-size:13px\">This code expires in 10 minutes. Do not share it with anyone.</p>\
+            </body></html>"
+        );
+        self.sender.send(&super::EmailMessage {
+            to: to.to_string(),
+            subject,
+            text_body,
+            html_body,
+        })
+    }
+
     /// Sends a password reset email with per-realm branding.
     ///
     /// Resolves branding (global defaults + realm overrides), renders

@@ -38,6 +38,7 @@ fn required_action_to_str(action: RequiredAction) -> &'static str {
         RequiredAction::UpdatePassword => "UPDATE_PASSWORD",
         RequiredAction::EnrollMfa => "ENROLL_MFA",
         RequiredAction::EnrollPhoneOtp => "ENROLL_PHONE_OTP",
+        RequiredAction::EnrollEmailOtp => "ENROLL_EMAIL_OTP",
     }
 }
 
@@ -99,6 +100,7 @@ impl From<pb::UpdateUserRequest> for domain::UpdateUserRequest {
             required_actions: None,
             phone_number: None,
             phone_verified: None,
+            email_otp_enabled: None,
         }
     }
 }

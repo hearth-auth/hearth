@@ -140,6 +140,8 @@ pub fn required_action_check(
 
     // Dynamic injection: SMS MFA enrollment if realm requires it.
     inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
+    // Dynamic injection: Email OTP enrollment if realm requires it.
+    inject_enroll_email_otp_if_needed(state, realm, user_id, &user, &mut actions);
     // Dynamic injection: TOTP/MFA enrollment if client or role requires it.
     inject_enroll_mfa_if_needed(state, realm, user_id, Some(&q.client_id), &mut actions);
 
@@ -216,6 +218,8 @@ pub fn required_action_check_browser(
 
     // Dynamic injection: SMS MFA enrollment if realm requires it.
     inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
+    // Dynamic injection: Email OTP enrollment if realm requires it.
+    inject_enroll_email_otp_if_needed(state, realm, user_id, &user, &mut actions);
     // Dynamic injection: TOTP/MFA enrollment if role requires it (no client on
     // the direct browser login path; client-level enforcement is OIDC-only).
     inject_enroll_mfa_if_needed(state, realm, user_id, None, &mut actions);
@@ -600,6 +604,58 @@ fn inject_enroll_phone_otp_if_needed(
             tracing::warn!(
                 error = %e,
                 "inject_enroll_phone_otp_if_needed: failed to persist ENROLL_PHONE_OTP"
+            );
+        }
+    }
+}
+
+/// Dynamically injects `ENROLL_EMAIL_OTP` when a realm requires email OTP MFA
+/// and the user has not yet enrolled email OTP.
+///
+/// Persists the action to the user record. Idempotent: no-op if already present
+/// or not applicable.
+fn inject_enroll_email_otp_if_needed(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    user: &crate::identity::User,
+    actions: &mut Vec<RequiredAction>,
+) {
+    if user.email_otp_enabled() {
+        return;
+    }
+    if actions.contains(&RequiredAction::EnrollEmailOtp) {
+        return;
+    }
+    let email_otp_required = state
+        .identity
+        .get_realm(realm)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().mfa_methods.clone())
+        .map(|methods| methods.iter().any(|m| m == "email_otp"))
+        .unwrap_or(false);
+
+    if !email_otp_required {
+        return;
+    }
+
+    actions.push(RequiredAction::EnrollEmailOtp);
+
+    let mut persisted = user.required_actions().to_vec();
+    if !persisted.contains(&RequiredAction::EnrollEmailOtp) {
+        persisted.push(RequiredAction::EnrollEmailOtp);
+        if let Err(e) = state.identity.update_user(
+            realm,
+            user_id,
+            &UpdateUserRequest {
+                required_actions: Some(persisted),
+                ..Default::default()
+            },
+        ) {
+            tracing::warn!(
+                error = %e,
+                "inject_enroll_email_otp_if_needed: failed to persist ENROLL_EMAIL_OTP"
             );
         }
     }
@@ -1618,6 +1674,351 @@ fn percent_encode_into(value: &str, out: &mut String) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// GET/POST /required-action/ENROLL_EMAIL_OTP
+// ---------------------------------------------------------------------------
+
+/// Rendered by `GET /required-action/ENROLL_EMAIL_OTP`.
+#[derive(Template)]
+#[template(path = "ui/required_action/enroll_email_otp.html")]
+struct EnrollEmailOtpPageTemplate {
+    /// Masked display of the user's email (e.g. `a***@example.com`).
+    masked_email: String,
+    error: Option<String>,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// Rendered by `POST /required-action/ENROLL_EMAIL_OTP/send` on success.
+#[derive(Template)]
+#[template(path = "ui/required_action/enroll_email_otp_verify.html")]
+struct EnrollEmailOtpVerifyTemplate {
+    /// Masked display of the email.
+    masked_email: String,
+    /// Opaque nonce returned by `issue_email_otp`; `None` in rate-limited renders.
+    nonce: Option<String>,
+    error: Option<String>,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_EMAIL_OTP/verify`.
+#[derive(Debug, Deserialize)]
+pub struct EnrollEmailOtpVerifyForm {
+    #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
+    pub code: String,
+}
+
+/// Renders the landing page for email OTP enrollment. Loads the user's email
+/// from the RA token subject and shows a "Send code to my email" button.
+pub async fn enroll_email_otp_page(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+    let now = Timestamp::from_micros(now_micros());
+    let Ok(claims) = state.identity.validate_ra_token(&realm, &token, now) else {
+        return Redirect::to("/").into_response();
+    };
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let email = state
+        .identity
+        .get_user(&realm, &user_id)
+        .ok()
+        .flatten()
+        .map(|u| u.email().to_string())
+        .unwrap_or_default();
+    render_enroll_email_otp_page(&state, &email, None)
+}
+
+/// Sends an email OTP to the user's registered email address and renders
+/// the code-entry form.
+pub async fn enroll_email_otp_send(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+    let now = Timestamp::from_micros(now_micros());
+    let Ok(claims) = state.identity.validate_ra_token(&realm, &token, now) else {
+        return Redirect::to("/").into_response();
+    };
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+
+    let email = match state.identity.get_user(&realm, &user_id) {
+        Ok(Some(u)) => u.email().to_string(),
+        _ => {
+            return handlers_common::server_error();
+        }
+    };
+
+    let Some(email_service) = state.email.as_ref() else {
+        tracing::warn!("enroll_email_otp_send: email transport not configured");
+        return render_enroll_email_otp_page(
+            &state,
+            &email,
+            Some("Email delivery is not configured. Contact your administrator."),
+        );
+    };
+
+    let hmac_key = email_otp_hmac_key_bytes(&state);
+    let now_ts = now_unix_ts();
+
+    match state
+        .identity
+        .issue_email_otp(&realm, &email, &hmac_key, email_service, None, now_ts)
+    {
+        Ok(nonce) => render_enroll_email_otp_verify(&state, &email, Some(&nonce), None),
+        Err(e) => {
+            tracing::warn!(error = %e, "enroll_email_otp_send: issue_email_otp failed");
+            render_enroll_email_otp_page(
+                &state,
+                &email,
+                Some("Failed to send verification code. Please try again."),
+            )
+        }
+    }
+}
+
+/// Verifies the submitted OTP code, sets `email_otp_enabled = true`, clears
+/// `ENROLL_EMAIL_OTP` from the user's required actions, and advances the flow.
+#[allow(clippy::too_many_lines)]
+pub async fn enroll_email_otp_verify_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<EnrollEmailOtpVerifyForm>,
+) -> Response {
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return Redirect::to("/").into_response();
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let secure = state.is_secure_request(&headers);
+
+    let email = match state.identity.get_user(&realm, &user_id) {
+        Ok(Some(u)) => u.email().to_string(),
+        _ => return handlers_common::server_error(),
+    };
+
+    if form.nonce.is_empty() || form.code.is_empty() {
+        return render_enroll_email_otp_verify(
+            &state,
+            &email,
+            Some(&form.nonce),
+            Some("Invalid submission."),
+        );
+    }
+
+    let hmac_key = email_otp_hmac_key_bytes(&state);
+    let now_ts = now_unix_ts();
+
+    match state
+        .identity
+        .verify_email_otp(&realm, &form.nonce, &form.code, &hmac_key, now_ts)
+    {
+        Ok(()) => {}
+        Err(_) => {
+            return render_enroll_email_otp_verify(
+                &state,
+                &email,
+                Some(&form.nonce),
+                Some("That code is incorrect or has expired. Try again or request a new code."),
+            );
+        }
+    }
+
+    // OTP verified — set email_otp_enabled and clear ENROLL_EMAIL_OTP.
+    let updated_actions: Vec<RequiredAction> = claims
+        .pending_actions
+        .iter()
+        .filter(|&&a| a != RequiredAction::EnrollEmailOtp)
+        .copied()
+        .collect();
+
+    if let Err(e) = state.identity.update_user(
+        &realm,
+        &user_id,
+        &UpdateUserRequest {
+            email_otp_enabled: Some(true),
+            required_actions: Some(updated_actions.clone()),
+            ..Default::default()
+        },
+    ) {
+        tracing::warn!(error = %e, "enroll_email_otp_verify_submit: update_user failed");
+        return handlers_common::server_error();
+    }
+
+    if let Err(e) = state.audit.append(&CreateAuditEvent {
+        realm_id: realm.clone(),
+        actor: user_id.as_uuid().to_string(),
+        action: AuditAction::RequiredActionCompleted,
+        resource_type: "user".to_string(),
+        resource_id: user_id.as_uuid().to_string(),
+        metadata: Some(serde_json::json!({ "action_type": "ENROLL_EMAIL_OTP" })),
+    }) {
+        tracing::warn!(error = %e, "enroll_email_otp_verify_submit: audit append failed");
+    }
+
+    if updated_actions.is_empty() {
+        if claims.browser_return_to.is_some() {
+            resume_browser_flow(
+                &state,
+                &realm,
+                &claims.sub,
+                claims.browser_return_to,
+                secure,
+            )
+        } else if let Some(oidc_params) = claims.oidc_params {
+            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
+        } else {
+            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
+        }
+    } else {
+        next_required_action(
+            &state,
+            &realm,
+            &claims.sub,
+            updated_actions,
+            claims.oidc_params,
+            claims.browser_return_to,
+            secure,
+            now,
+        )
+    }
+}
+
+fn render_enroll_email_otp_page(
+    state: &Arc<WebState>,
+    email: &str,
+    error: Option<&str>,
+) -> Response {
+    let tmpl = EnrollEmailOtpPageTemplate {
+        masked_email: mask_email(email),
+        error: error.map(str::to_string),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    };
+    render(&tmpl)
+}
+
+fn render_enroll_email_otp_verify(
+    state: &Arc<WebState>,
+    email: &str,
+    nonce: Option<&str>,
+    error: Option<&str>,
+) -> Response {
+    let tmpl = EnrollEmailOtpVerifyTemplate {
+        masked_email: mask_email(email),
+        nonce: nonce.map(str::to_string),
+        error: error.map(str::to_string),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    };
+    render(&tmpl)
+}
+
+/// Masks an email address for display: shows the first character, then
+/// `***`, then the domain. E.g. `alice@example.com` → `a***@example.com`.
+fn mask_email(email: &str) -> String {
+    if let Some((local, domain)) = email.split_once('@') {
+        let first = local.chars().next().unwrap_or('*');
+        format!("{first}***@{domain}")
+    } else {
+        "***".to_string()
+    }
+}
+
+/// Returns the HMAC key bytes to use for email OTP operations.
+///
+/// Reuses the SMS OTP HMAC key if configured; falls back to a deterministic
+/// dev key when neither is set (dev mode only — not for production).
+fn email_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
+    state
+        .sms_otp_hmac_key
+        .clone()
+        .unwrap_or_else(|| b"hearth-dev-email-otp-key-not-for-production".to_vec())
 }
 
 // ---------------------------------------------------------------------------

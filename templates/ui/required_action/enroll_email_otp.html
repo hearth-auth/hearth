@@ -1,0 +1,37 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · Verify your email address{% endblock %}
+{% block body %}
+<div class="mx-auto max-w-lg">
+  <div class="rounded-lg bg-ht-surface-elevated p-8 ring-1 ring-divider-subtle">
+    <div class="mb-6 flex flex-col items-center text-center">
+      <div class="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-accent/[0.12]">
+        <svg class="h-6 w-6 text-accent" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+        </svg>
+      </div>
+      <p class="font-mono text-[11px] uppercase tracking-[0.14em] text-ht-content-muted">Required action</p>
+      <h1 class="font-display text-xl font-medium text-ht-content-primary">Set up email verification</h1>
+      <p class="mt-2 text-sm text-ht-content-muted">
+        We'll send a 6-digit code to
+        <span class="font-medium text-ht-content-secondary">{{ masked_email }}</span>
+        to confirm you can receive messages at this address.
+      </p>
+    </div>
+
+    {% match error %}
+      {% when Some with (msg) %}
+        <div class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm text-danger-fg" role="alert">
+          <p class="font-medium">{{ msg }}</p>
+        </div>
+      {% when None %}
+    {% endmatch %}
+
+    <form method="post" action="/required-action/ENROLL_EMAIL_OTP/send" data-testid="enroll-email-otp-send-form">
+      <button type="submit"
+        class="btn-ember w-full rounded-md px-4 py-2.5 text-sm font-medium">
+        Send verification code
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}

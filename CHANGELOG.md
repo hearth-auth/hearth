@@ -9,6 +9,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Email OTP MFA factor** — `email_otp` is now a distinct, configurable MFA method.
+  Users can enroll via the `ENROLL_EMAIL_OTP` required-action flow, which sends a
+  6-digit CSPRNG code to their registered email address (via the existing `EmailService`).
+  Enrollment sets `email_otp_enabled` on the user record. Per-realm expiry and maximum
+  attempt count are configurable via `email_otp_expiry_seconds` / `email_otp_max_attempts`
+  in realm config; defaults match the SMS OTP module (10-minute TTL, 5 attempts). The
+  `mfa_methods: ["email_otp"]` realm setting auto-injects the enrollment required action
+  for users who have not yet enrolled (HEA-1329).
+
 - **Conditional MFA enforcement** — `mfa_required: true` on a client registration
   forces users accessing that client to enroll an MFA factor (TOTP or passkey)
   before an authorization code is issued. `mfa_required_roles: [...]` on realm config

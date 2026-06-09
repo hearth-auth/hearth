@@ -4455,6 +4455,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             user.set_phone_verified(verified);
         }
 
+        // 4e. Apply email_otp_enabled change if requested.
+        if let Some(enabled) = request.email_otp_enabled {
+            user.set_email_otp_enabled(enabled);
+        }
+
         // 5. Update timestamp
         user.set_updated_at(self.clock.now());
 
@@ -11058,6 +11063,113 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     let _ = self.storage.delete(realm_id, &otp_key);
                 }
                 Err(e)
+            }
+        }
+    }
+
+    fn issue_email_otp(
+        &self,
+        realm_id: &RealmId,
+        email: &str,
+        otp_hmac_key_bytes: &[u8],
+        email_service: &crate::identity::email::EmailService,
+        realm_branding: Option<&crate::identity::email::EmailBranding>,
+        now_unix_ts: u64,
+    ) -> Result<String, IdentityError> {
+        use crate::identity::sms::otp::{
+            self as otp_mod, StoredOtp, OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS,
+        };
+
+        let (expiry_secs, max_attempts) = match self.get_realm(realm_id) {
+            Ok(Some(realm)) => {
+                let cfg = realm.config();
+                (
+                    cfg.email_otp_expiry_seconds.unwrap_or(OTP_EXPIRY_SECS),
+                    cfg.email_otp_max_attempts.unwrap_or(OTP_MAX_ATTEMPTS),
+                )
+            }
+            _ => (OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS),
+        };
+
+        let rng = ring::rand::SystemRandom::new();
+        let nonce = otp_mod::generate_otp_nonce(&rng)?;
+        let expiry_unix_ts = now_unix_ts.saturating_add(expiry_secs);
+        let (digits, stored) =
+            StoredOtp::create(&rng, otp_hmac_key_bytes, expiry_unix_ts, max_attempts)?;
+
+        let otp_key = keys::encode_email_pending_otp(&nonce);
+        let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &otp_key, &otp_bytes)
+            .map_err(Self::storage_err)?;
+
+        email_service
+            .send_otp_email(email, digits.as_str(), realm_branding)
+            .map_err(|e| IdentityError::Internal {
+                reason: format!("email OTP delivery failed: {e}"),
+            })?;
+
+        Ok(nonce)
+    }
+
+    fn verify_email_otp(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        candidate_code: &str,
+        otp_hmac_key_bytes: &[u8],
+        now_unix_ts: u64,
+    ) -> Result<(), IdentityError> {
+        use crate::identity::sms::otp::StoredOtp;
+
+        let otp_key = keys::encode_email_pending_otp(nonce);
+
+        let bytes = self
+            .storage
+            .get(realm_id, &otp_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidEmailOtp)?;
+
+        let mut stored: StoredOtp =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        if stored.is_expired(now_unix_ts) {
+            let _ = self.storage.delete(realm_id, &otp_key);
+            return Err(IdentityError::InvalidEmailOtp);
+        }
+
+        if stored.is_exhausted() {
+            let _ = self.storage.delete(realm_id, &otp_key);
+            return Err(IdentityError::InvalidEmailOtp);
+        }
+
+        stored.attempt_count = stored.attempt_count.saturating_add(1);
+        let updated_bytes =
+            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &otp_key, &updated_bytes)
+            .map_err(Self::storage_err)?;
+
+        let result = stored.verify(candidate_code, otp_hmac_key_bytes);
+
+        match result {
+            Ok(()) => {
+                self.storage
+                    .delete(realm_id, &otp_key)
+                    .map_err(Self::storage_err)?;
+                Ok(())
+            }
+            Err(_) => {
+                if stored.is_exhausted() {
+                    let _ = self.storage.delete(realm_id, &otp_key);
+                }
+                Err(IdentityError::InvalidEmailOtp)
             }
         }
     }

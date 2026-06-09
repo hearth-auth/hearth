@@ -2027,6 +2027,41 @@ pub trait IdentityEngine: Send + Sync {
         now_unix_ts: u64,
     ) -> Result<(), IdentityError>;
 
+    // =========================================================================
+    // Email OTP (HEA-1329)
+    // =========================================================================
+
+    /// Issues a 6-digit Email OTP to `email` and returns the opaque nonce.
+    ///
+    /// Generates a CSPRNG nonce and code via rejection sampling, stores
+    /// HMAC-SHA256(key, digits) under `email:pending_otp:{nonce}`, and sends
+    /// the OTP email via `email_service`.
+    fn issue_email_otp(
+        &self,
+        realm_id: &RealmId,
+        email: &str,
+        otp_hmac_key_bytes: &[u8],
+        email_service: &email::EmailService,
+        realm_branding: Option<&email::EmailBranding>,
+        now_unix_ts: u64,
+    ) -> Result<String, IdentityError>;
+
+    /// Verifies an Email OTP previously issued by `issue_email_otp`.
+    ///
+    /// Loads the pending record, checks expiry and attempt count, increments
+    /// attempts, verifies HMAC in constant time via `ring::hmac::verify`.
+    /// On success deletes the record (replay prevention). Returns
+    /// `InvalidEmailOtp` for any failure (not-found, expired, wrong code,
+    /// exhausted).
+    fn verify_email_otp(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        candidate_code: &str,
+        otp_hmac_key_bytes: &[u8],
+        now_unix_ts: u64,
+    ) -> Result<(), IdentityError>;
+
     // ------- Session-version feed -------
 
     /// Returns delta entries with `seq > since` (up to `limit`).

@@ -2026,6 +2026,7 @@ fn identity_error_to_response(
         IdentityError::SmsResendLimitExceeded => {
             (StatusCode::TOO_MANY_REQUESTS, "sms_resend_limit_exceeded")
         }
+        IdentityError::InvalidEmailOtp => (StatusCode::UNAUTHORIZED, "invalid_email_otp"),
         IdentityError::InvalidPushedAuthorizationRequest => {
             (StatusCode::BAD_REQUEST, "invalid_request")
         }
@@ -4451,6 +4452,15 @@ async fn admin_patch_realm_config(
         #[allow(clippy::cast_possible_truncation)]
         {
             config.sms_otp_max_attempts = Some(v as u32);
+        }
+    }
+    if let Some(v) = body["email_otp_expiry_seconds"].as_u64() {
+        config.email_otp_expiry_seconds = Some(v);
+    }
+    if let Some(v) = body["email_otp_max_attempts"].as_u64() {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            config.email_otp_max_attempts = Some(v as u32);
         }
     }
     if let Some(v) = body.get("fapi_profile") {

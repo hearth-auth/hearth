@@ -440,6 +440,11 @@ pub enum IdentityError {
     /// The phone number has exceeded the per-phone SMS resend limit for the
     /// current 15-minute window.
     SmsResendLimitExceeded,
+    /// The Email OTP is invalid, expired, not found, or the maximum number of
+    /// verification attempts has been exceeded.
+    ///
+    /// Intentionally conflates all failure modes for enumeration resistance.
+    InvalidEmailOtp,
     /// The pushed `request_uri` is not found, already used, or expired.
     ///
     /// Intentionally conflates all failure modes (RFC 9126 §2.3 enumeration
@@ -735,6 +740,7 @@ impl fmt::Display for IdentityError {
             Self::SmsResendLimitExceeded => {
                 write!(f, "SMS OTP resend limit exceeded for this phone number")
             }
+            Self::InvalidEmailOtp => write!(f, "invalid or expired email OTP"),
             Self::InvalidPushedAuthorizationRequest => {
                 write!(f, "invalid, expired, or already used request_uri")
             }
@@ -845,6 +851,7 @@ impl IdentityError {
             Self::RequiredActionsBlocking { .. } => Some("HEARTH_REQUIRED_ACTIONS_PENDING"),
             Self::InvalidSmsOtp => Some("HEARTH_INVALID_SMS_OTP"),
             Self::SmsResendLimitExceeded => Some("HEARTH_SMS_RESEND_LIMIT_EXCEEDED"),
+            Self::InvalidEmailOtp => Some("HEARTH_INVALID_EMAIL_OTP"),
 
             Self::RealmNotFound
             | Self::UserNotFound
@@ -1055,6 +1062,7 @@ impl std::error::Error for IdentityError {
             | Self::RequiredActionsBlocking { .. }
             | Self::InvalidSmsOtp
             | Self::SmsResendLimitExceeded
+            | Self::InvalidEmailOtp
             | Self::InvalidPushedAuthorizationRequest
             | Self::InvalidDPopProof { .. }
             | Self::DPopProofReplay

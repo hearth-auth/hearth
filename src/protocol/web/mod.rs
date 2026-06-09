@@ -1569,6 +1569,18 @@ pub fn router(state: WebState) -> Router {
             axum::routing::post(required_action::enroll_phone_otp_verify_submit),
         )
         .route(
+            "/required-action/ENROLL_EMAIL_OTP",
+            axum::routing::get(required_action::enroll_email_otp_page),
+        )
+        .route(
+            "/required-action/ENROLL_EMAIL_OTP/send",
+            axum::routing::post(required_action::enroll_email_otp_send),
+        )
+        .route(
+            "/required-action/ENROLL_EMAIL_OTP/verify",
+            axum::routing::post(required_action::enroll_email_otp_verify_submit),
+        )
+        .route(
             "/required-action/enroll-mfa",
             axum::routing::get(required_action::enroll_mfa_page)
                 .post(required_action::enroll_mfa_submit),
