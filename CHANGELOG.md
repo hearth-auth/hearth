@@ -9,6 +9,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **`hearth migrate auth0` command** — imports an Auth0 Management API export bundle
+  (`hearth migrate auth0 --file export.json --data-dir /var/lib/hearth`). The operator
+  assembles the bundle from Auth0's Management API (users, clients, organizations, roles)
+  using the reference bundler at `examples/auth0-migration-bundler/`. Supported credential
+  formats: bcrypt (`$2a$`/`$2b$`/`$2y$`), Argon2, PBKDF2-SHA256, PHC-scrypt.
+  Unsupported algorithms (MD5, SHA-1) surface a per-user warning and import the user
+  without a credential. `--dry-run` validates without writing. `--realm <uuid>` pins
+  the destination realm ID (HEA-1327).
+
 - **Apple Sign In connector** (`type: apple`) — native Sign In with Apple support
   via `private_key_jwt` client authentication (ES256-signed per-request JWT),
   `response_mode=form_post` callback handling, and first-login-only name extraction
