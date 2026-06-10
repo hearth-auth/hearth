@@ -437,6 +437,8 @@ pub struct EmbeddedIdentityEngine {
     ///
     /// Lazily loaded. Regeneration happens only on first SAML operation in
     /// a realm that has no prior key — not on every startup.
+    ///
+    // INVARIANT: guard is always released inside a scoped block before any I/O or storage call.
     realm_saml_keys: Mutex<HashMap<String, Arc<crate::identity::tokens::RsaSigningKey>>>,
     /// Server-wide RSA-2048 signing key advertised at `/certs` for RS256
     /// (HEA-51 / OIDC M1).
@@ -458,43 +460,59 @@ pub struct EmbeddedIdentityEngine {
     ///
     /// Key is `(RealmId, UserId)` serialized as a string to avoid
     /// requiring `Hash` on the newtype wrappers.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     attempt_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-user failed MFA attempt trackers (separate from password rate limiting).
     ///
     /// Stricter limits: 5 attempts, 5-minute lockout. Key format: `mfa:{realm}:{user}`.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     mfa_attempt_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Used nonces for replay protection (when nonce enforcement is enabled).
     ///
     /// Maps nonce value to the timestamp it was first seen. Entries are swept
     /// on every insertion: any nonce older than `authorization_code_ttl_secs`
     /// is removed, bounding the set to at most one TTL window of activity.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     used_nonces: Mutex<HashMap<String, crate::core::Timestamp>>,
     /// Per-email magic link rate trackers.
     ///
     /// Limits the number of magic link requests per email per hour.
     /// Key format: `magic:{realm}:{email}`.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     magic_link_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-email password reset rate trackers.
     ///
     /// Limits the number of password reset requests per email per hour.
     /// Key format: `reset:{realm}:{email}`.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     password_reset_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-email self-registration rate trackers.
     ///
     /// Limits the number of registration attempts per email per hour.
     /// Key format: `reg-email:{realm}:{email}`.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     registration_email_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-IP self-registration rate trackers.
     ///
     /// Limits the number of registration attempts per source IP per hour,
     /// across all realms and emails.
     /// Key format: raw IP string.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     registration_ip_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-IP login rate trackers for credential-stuffing protection.
     ///
     /// Counts failed login attempts per source IP per realm within a sliding
     /// window. Keyed by `"{realm_uuid}:{ip}"` so attacks on one realm do
     /// not affect legitimate users on another.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     ip_login_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Pending `WebAuthn` challenges awaiting completion.
     webauthn_challenges: WebAuthnChallengeStore,
@@ -503,11 +521,17 @@ pub struct EmbeddedIdentityEngine {
     /// Prevents TOCTOU races when enforcing `max_concurrent_sessions`: the
     /// read (count live sessions) and the write (create or evict + create)
     /// must be atomic per user. Key format: `"{realm_uuid}:{user_uuid}"`.
+    ///
+    // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
+    // INVARIANT: inner (per-user) guard held only across the sync count-check + create window; no .await in scope.
     session_limit_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Per-realm locks for atomic JTI check-and-consume in the JWT Bearer grant.
     ///
     /// Eliminates the TOCTOU window between `storage.get` and `storage.put`
     /// in replay prevention. One lock per realm; created on first use.
+    ///
+    // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc to the caller.
+    // INVARIANT: inner (per-realm) guard held only across the sync JTI check-and-consume window; no .await in scope.
     jti_locks: Mutex<HashMap<RealmId, Arc<Mutex<()>>>>,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
@@ -517,12 +541,16 @@ pub struct EmbeddedIdentityEngine {
     /// guarantee atomicity of the record+key pair under concurrent
     /// callers; a finer-grained per-realm lock could come later if
     /// contention ever becomes measurable.
+    ///
+    // INVARIANT: guard held for the entire sync realm lifecycle operation; released when the method returns.
     realm_ops_lock: Mutex<()>,
     /// Serializes org slug reservation and invitation acceptance.
     ///
     /// Guards the check-then-write sequence in create_organization and
     /// accept_invitation so two concurrent callers cannot both win the
     /// same slug or both accept the same invitation token.
+    ///
+    // INVARIANT: guard held for the entire sync org write operation; released when the method returns.
     org_write_lock: Mutex<()>,
     /// HIBP k-anonymity breach-check client.
     ///
@@ -856,21 +884,34 @@ impl EmbeddedIdentityEngine {
             signing_key,
             realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             oidc_rsa_key: std::sync::OnceLock::new(),
             oidc_ecdsa_key: std::sync::OnceLock::new(),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             password_reset_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             registration_email_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             registration_ip_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
+            // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
+            // INVARIANT: guard held for entire sync org write op; released when method returns.
             org_write_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
@@ -1033,21 +1074,34 @@ impl EmbeddedIdentityEngine {
             signing_key,
             realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             oidc_rsa_key: std::sync::OnceLock::new(),
             oidc_ecdsa_key: std::sync::OnceLock::new(),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             password_reset_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             registration_email_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             registration_ip_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
+            // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
+            // INVARIANT: guard held for entire sync org write op; released when method returns.
             org_write_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
@@ -2865,6 +2919,7 @@ impl EmbeddedIdentityEngine {
         let mut map = self.jti_locks.lock().expect("jti_locks poisoned");
         Arc::clone(
             map.entry(realm_id.clone())
+                // INVARIANT: inner guard held only across the sync JTI check-and-consume window; no .await in scope.
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     }
@@ -4494,7 +4549,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(user)
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn delete_user(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError> {
         // 1. Load user to get email for index cleanup
         let user = self
@@ -4716,7 +4771,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.device_fp.delete_all_for_user(realm_id, user_id)
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn set_password(
         &self,
         realm_id: &RealmId,
@@ -5001,7 +5056,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn create_session(
         &self,
         realm_id: &RealmId,
@@ -5061,6 +5116,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         .expect("session_limit_locks poisoned");
                     locks
                         .entry(lock_key)
+                        // INVARIANT: inner guard held only across the sync session count-check + write window; no .await in scope.
                         .or_insert_with(|| Arc::new(Mutex::new(())))
                         .clone()
                 };
@@ -5523,7 +5579,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn issue_tokens_with_context(
         &self,
         realm_id: &RealmId,
@@ -6966,7 +7022,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
     // ===== Self-service registration =====
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn register_user(
         &self,
         realm_id: &RealmId,
@@ -13356,7 +13412,7 @@ mod tests {
     // ===== Rate-limit durability: in-memory trackers cleared on restart (HEA-1139) =====
 
     #[test]
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn restart_clears_in_memory_rate_trackers() {
         // Per CONFIGURATION.md §security.rate_limiting: magic-link, password-reset,
         // IP-login, and registration rate trackers are in-memory only and do NOT
