@@ -89,24 +89,23 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::WebAuthnRegistrationFailed { .. }
         | IdentityError::WebAuthnAuthenticationFailed { .. }
         | IdentityError::InvalidAttestation { .. }
-        | IdentityError::InvalidAssertion { .. }
-        | IdentityError::SamlParse { .. }
-        | IdentityError::SamlSignature
-        | IdentityError::SamlExpired
-        | IdentityError::SamlReplay
-        | IdentityError::SamlAudienceMismatch
-        | IdentityError::SamlIssuerMismatch
-        | IdentityError::SamlDestinationMismatch
-        | IdentityError::SamlUnsupportedAlgorithm
-        | IdentityError::SamlInvalidAuthnRequest { .. } => (Code::InvalidArgument, err.to_string()),
+        | IdentityError::InvalidAssertion { .. } => (Code::InvalidArgument, err.to_string()),
+        IdentityError::Saml(ref e) => match e {
+            crate::identity::federation::saml::SamlError::UnknownSp
+            | crate::identity::federation::saml::SamlError::UnknownIdp => {
+                (Code::NotFound, err.to_string())
+            }
+            crate::identity::federation::saml::SamlError::MetadataFetch { .. } => {
+                tracing::error!(error = %err, "SAML metadata fetch failed");
+                (Code::Internal, err.to_string())
+            }
+            _ => (Code::InvalidArgument, err.to_string()),
+        },
         IdentityError::QuotaExceeded { .. } => (Code::ResourceExhausted, err.to_string()),
         IdentityError::EmailReserved | IdentityError::EmailChangeTokenInvalid => {
             (Code::InvalidArgument, err.to_string())
         }
         IdentityError::SilentAuthRateLimited => (Code::ResourceExhausted, err.to_string()),
-        IdentityError::SamlUnknownSp | IdentityError::SamlUnknownIdp => {
-            (Code::NotFound, err.to_string())
-        }
         IdentityError::MfaRequired
         | IdentityError::AuthorizationPending
         | IdentityError::SlowDown
@@ -192,7 +191,6 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }
         | IdentityError::FederationUpstreamError { .. }
-        | IdentityError::SamlMetadataFetch { .. }
         | IdentityError::ConfigInvalid { .. }
         | IdentityError::AuditFailure { .. }
         | IdentityError::Internal { .. } => {

@@ -1977,23 +1977,16 @@ fn identity_error_to_response(
         IdentityError::DuplicateScimExternalId => {
             (StatusCode::CONFLICT, "SCIM externalId already in use")
         }
-        IdentityError::SamlParse { .. }
-        | IdentityError::SamlSignature
-        | IdentityError::SamlExpired
-        | IdentityError::SamlReplay
-        | IdentityError::SamlAudienceMismatch
-        | IdentityError::SamlIssuerMismatch
-        | IdentityError::SamlDestinationMismatch
-        | IdentityError::SamlUnsupportedAlgorithm
-        | IdentityError::SamlInvalidAuthnRequest { .. } => {
-            (StatusCode::BAD_REQUEST, "invalid SAML message")
-        }
-        IdentityError::SamlMetadataFetch { .. } => {
-            (StatusCode::BAD_GATEWAY, "SAML metadata fetch failed")
-        }
-        IdentityError::SamlUnknownSp | IdentityError::SamlUnknownIdp => {
-            (StatusCode::NOT_FOUND, "SAML entity not found")
-        }
+        IdentityError::Saml(ref e) => match e {
+            crate::identity::federation::saml::SamlError::MetadataFetch { .. } => {
+                (StatusCode::BAD_GATEWAY, "SAML metadata fetch failed")
+            }
+            crate::identity::federation::saml::SamlError::UnknownSp
+            | crate::identity::federation::saml::SamlError::UnknownIdp => {
+                (StatusCode::NOT_FOUND, "SAML entity not found")
+            }
+            _ => (StatusCode::BAD_REQUEST, "invalid SAML message"),
+        },
         IdentityError::SigningError { .. }
         | IdentityError::Storage(_)
         | IdentityError::Serialization { .. }

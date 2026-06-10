@@ -9,6 +9,7 @@ use super::types::{AttributeMap, SamlIdpConfig};
 use super::xml::ns;
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
+use crate::identity::federation::saml::SamlError;
 use crate::identity::federation::types::ExternalIdentity;
 
 /// Outcome of a completed SP login round-trip.
@@ -75,14 +76,14 @@ impl SamlSpService {
         let primary_cert = idp
             .idp_certificates_pem
             .first()
-            .ok_or(IdentityError::SamlSignature)?;
+            .ok_or(IdentityError::Saml(SamlError::Signature))?;
         let mut sig_ok = false;
         if verify_signed_element(xml, "Assertion", primary_cert).is_ok() {
             sig_ok = true;
         }
         if !sig_ok {
             if idp.want_assertions_signed {
-                return Err(IdentityError::SamlSignature);
+                return Err(IdentityError::Saml(SamlError::Signature));
             }
             // Fall back to Response-level signature.
             verify_signed_element(xml, "Response", primary_cert)?;

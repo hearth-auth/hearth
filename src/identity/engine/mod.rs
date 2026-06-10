@@ -25,6 +25,7 @@ use crate::identity::claims_config::{
 use crate::identity::credentials::{self, CleartextPassword, CredentialConfig, StoredCredential};
 use crate::identity::device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore};
 use crate::identity::error::IdentityError;
+use crate::identity::federation::saml::SamlError;
 use crate::identity::keys;
 use crate::identity::session_version::SessionVersionStore;
 /// Encodes bytes as lowercase hexadecimal.
@@ -10769,7 +10770,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?
             .is_some()
         {
-            return Err(IdentityError::SamlReplay);
+            return Err(IdentityError::Saml(SamlError::Replay));
         }
         self.storage
             .put(realm_id, &key, &[])

@@ -382,20 +382,21 @@ mod tests {
 
     #[test]
     fn saml_variants_map_to_saml_invalid() {
+        use crate::identity::federation::saml::SamlError;
         assert_eq!(
-            for_identity_error(&IdentityError::SamlSignature),
+            for_identity_error(&IdentityError::Saml(SamlError::Signature)),
             Some(SAML_INVALID)
         );
         assert_eq!(
-            for_identity_error(&IdentityError::SamlReplay),
+            for_identity_error(&IdentityError::Saml(SamlError::Replay)),
             Some(SAML_INVALID)
         );
         assert_eq!(
-            for_identity_error(&IdentityError::SamlExpired),
+            for_identity_error(&IdentityError::Saml(SamlError::Expired)),
             Some(SAML_INVALID)
         );
         assert_eq!(
-            for_identity_error(&IdentityError::SamlUnknownSp),
+            for_identity_error(&IdentityError::Saml(SamlError::UnknownSp)),
             Some(SAML_ENTITY_NOT_FOUND)
         );
     }

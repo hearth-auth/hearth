@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 
 use super::xml::{escape_attr, escape_text, ns, parse_err};
 use crate::identity::error::IdentityError;
+use crate::identity::federation::saml::SamlError;
 
 /// Canonicalizes the element subtree contained in `xml`, applying the
 /// exclusive C14N 1.0 rules.
@@ -176,7 +177,7 @@ pub fn canonicalize_with_inherited(
                 // are off per our #WithComments-free variant).
             }
             Ok(Event::DocType(_)) => {
-                return Err(IdentityError::SamlUnsupportedAlgorithm);
+                return Err(IdentityError::Saml(SamlError::UnsupportedAlgorithm));
             }
             Err(e) => return Err(parse_err(format!("c14n parse error: {e}"))),
         }

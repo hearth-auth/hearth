@@ -199,7 +199,9 @@ async fn sp_rejects_audience_mismatch() {
         SamlSpOutcome::Rejected { error } => {
             assert!(matches!(
                 error,
-                hearth::identity::IdentityError::SamlAudienceMismatch
+                hearth::identity::IdentityError::Saml(
+                    hearth::identity::federation::saml::SamlError::AudienceMismatch
+                )
             ));
         }
         _ => panic!("expected rejection"),
@@ -262,7 +264,12 @@ async fn engine_replay_protection_works() {
         .identity()
         .mark_saml_assertion_consumed(realm.id(), &idp, "_a1")
         .expect_err("second should reject");
-    assert!(matches!(err, hearth::identity::IdentityError::SamlReplay));
+    assert!(matches!(
+        err,
+        hearth::identity::IdentityError::Saml(
+            hearth::identity::federation::saml::SamlError::Replay
+        )
+    ));
 }
 
 #[tokio::test]

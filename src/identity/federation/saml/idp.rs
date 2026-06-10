@@ -8,6 +8,7 @@ use super::signature::sign_element;
 use super::types::{SamlNameIdFormat, SamlServiceProvider};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
+use crate::identity::federation::saml::SamlError;
 use crate::identity::tokens::RsaSigningKey;
 
 /// What Hearth-as-IdP decided after receiving an AuthnRequest.
@@ -38,7 +39,7 @@ impl SamlIdpService {
         let sp = sps
             .iter()
             .find(|s| s.entity_id == req.issuer)
-            .ok_or(IdentityError::SamlUnknownSp)?;
+            .ok_or(IdentityError::Saml(SamlError::UnknownSp))?;
         let acs_url = req
             .assertion_consumer_service_url
             .clone()
@@ -46,9 +47,9 @@ impl SamlIdpService {
         // ACS URL must match the registered one (defense against open-redirect
         // via spoofed AssertionConsumerServiceURL).
         if acs_url != sp.acs_url {
-            return Err(IdentityError::SamlInvalidAuthnRequest {
+            return Err(IdentityError::Saml(SamlError::InvalidAuthnRequest {
                 reason: "ACS URL does not match registered SP".into(),
-            });
+            }));
         }
         Ok((
             SamlIdpOutcome {

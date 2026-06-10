@@ -8,6 +8,7 @@ use super::authn_request::{format_xsd_datetime, parse_xsd_datetime};
 use super::xml::{attr, escape_attr, escape_text, is_element, ns, parse_err};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
+use crate::identity::federation::saml::SamlError;
 
 /// Parsed `<Assertion>` contents relevant to the consuming SP.
 #[derive(Debug, Clone)]
@@ -307,9 +308,9 @@ pub fn extract_and_validate_assertion(
 ) -> Result<Assertion, IdentityError> {
     // Status must be Success.
     if !resp.status_code.ends_with("status:Success") {
-        return Err(IdentityError::SamlInvalidAuthnRequest {
+        return Err(IdentityError::Saml(SamlError::InvalidAuthnRequest {
             reason: format!("non-success status: {}", resp.status_code),
-        });
+        }));
     }
 
     if resp.assertions.is_empty() {
@@ -323,19 +324,19 @@ pub fn extract_and_validate_assertion(
     // Destination check (on the Response element).
     if let Some(ref d) = resp.destination {
         if d != p.acs_url {
-            return Err(IdentityError::SamlDestinationMismatch);
+            return Err(IdentityError::Saml(SamlError::DestinationMismatch));
         }
     }
 
     // Issuer check.
     if a.issuer != p.idp_entity_id && resp.issuer != p.idp_entity_id {
-        return Err(IdentityError::SamlIssuerMismatch);
+        return Err(IdentityError::Saml(SamlError::IssuerMismatch));
     }
 
     // Audience check.
     match &a.audience {
         Some(v) if v == p.sp_entity_id => {}
-        _ => return Err(IdentityError::SamlAudienceMismatch),
+        _ => return Err(IdentityError::Saml(SamlError::AudienceMismatch)),
     }
 
     // Timestamps.
@@ -343,12 +344,12 @@ pub fn extract_and_validate_assertion(
     let skew = p.clock_skew_secs * 1_000_000;
     if let Some(nb) = a.not_before {
         if nb.as_micros() > now_micros + skew {
-            return Err(IdentityError::SamlExpired);
+            return Err(IdentityError::Saml(SamlError::Expired));
         }
     }
     if let Some(noa) = a.not_on_or_after {
         if noa.as_micros() <= now_micros - skew {
-            return Err(IdentityError::SamlExpired);
+            return Err(IdentityError::Saml(SamlError::Expired));
         }
     }
 
@@ -357,9 +358,9 @@ pub fn extract_and_validate_assertion(
         match &resp.in_response_to {
             Some(got) if got == expected => {}
             _ => {
-                return Err(IdentityError::SamlInvalidAuthnRequest {
+                return Err(IdentityError::Saml(SamlError::InvalidAuthnRequest {
                     reason: "InResponseTo mismatch".to_string(),
-                })
+                }))
             }
         }
     }
@@ -418,7 +419,10 @@ mod tests {
                 clock_skew_secs: 60,
             },
         );
-        assert!(matches!(res, Err(IdentityError::SamlAudienceMismatch)));
+        assert!(matches!(
+            res,
+            Err(IdentityError::Saml(SamlError::AudienceMismatch))
+        ));
     }
 
     #[test]
@@ -436,6 +440,6 @@ mod tests {
                 clock_skew_secs: 60,
             },
         );
-        assert!(matches!(res, Err(IdentityError::SamlExpired)));
+        assert!(matches!(res, Err(IdentityError::Saml(SamlError::Expired))));
     }
 }
