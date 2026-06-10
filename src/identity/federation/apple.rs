@@ -570,7 +570,7 @@ mod tests {
         let stub = Arc::new(StubFederationTransport::new());
         let conn =
             AppleConnector::new(cfg, stub, "https://hearth.local/cb".to_string()).expect("new");
-        let state = sample_state("nonce-abc");
+        let state = sample_state("nonce-abc"); // lgtm[rust/hard-coded-credentials]
         let url = conn.begin(&state).expect("begin").0;
 
         assert!(url.starts_with("https://appleid.apple.com/auth/authorize?"));
@@ -594,7 +594,7 @@ mod tests {
         let cfg = apple_config();
         let stub = Arc::new(StubFederationTransport::new());
         let conn = AppleConnector::new(cfg, stub, "https://h/cb".to_string()).expect("new");
-        let state = sample_state("n");
+        let state = sample_state("n"); // lgtm[rust/hard-coded-credentials]
         let url = conn.begin(&state).expect("begin").0;
         assert!(
             url.contains("scope=name+email") || url.contains("scope=name%20email"),
@@ -829,16 +829,16 @@ mod tests {
     #[test]
     fn apple_claims_valid() {
         let cfg = sample_apple_config_for_claims();
-        let state = sample_state("nnn");
-        let claims = sample_apple_claims("nnn", 1_700_000_000);
+        let state = sample_state("nnn"); // lgtm[rust/hard-coded-credentials]
+        let claims = sample_apple_claims("nnn", 1_700_000_000); // lgtm[rust/hard-coded-credentials]
         verify_apple_claims(&claims, &cfg, &state, 1_700_000_000).expect("valid");
     }
 
     #[test]
     fn apple_claims_reject_wrong_issuer() {
         let cfg = sample_apple_config_for_claims();
-        let state = sample_state("nnn");
-        let mut claims = sample_apple_claims("nnn", 1_700_000_000);
+        let state = sample_state("nnn"); // lgtm[rust/hard-coded-credentials]
+        let mut claims = sample_apple_claims("nnn", 1_700_000_000); // lgtm[rust/hard-coded-credentials]
         claims.iss = "https://evil.example".to_string();
         assert!(verify_apple_claims(&claims, &cfg, &state, 1_700_000_000).is_err());
     }
@@ -846,8 +846,8 @@ mod tests {
     #[test]
     fn apple_claims_reject_wrong_audience() {
         let cfg = sample_apple_config_for_claims();
-        let state = sample_state("nnn");
-        let mut claims = sample_apple_claims("nnn", 1_700_000_000);
+        let state = sample_state("nnn"); // lgtm[rust/hard-coded-credentials]
+        let mut claims = sample_apple_claims("nnn", 1_700_000_000); // lgtm[rust/hard-coded-credentials]
         claims.aud = Some(serde_json::Value::String("other.app".to_string()));
         assert!(verify_apple_claims(&claims, &cfg, &state, 1_700_000_000).is_err());
     }
@@ -855,8 +855,8 @@ mod tests {
     #[test]
     fn apple_claims_reject_expired() {
         let cfg = sample_apple_config_for_claims();
-        let state = sample_state("nnn");
-        let mut claims = sample_apple_claims("nnn", 1_700_000_000);
+        let state = sample_state("nnn"); // lgtm[rust/hard-coded-credentials]
+        let mut claims = sample_apple_claims("nnn", 1_700_000_000); // lgtm[rust/hard-coded-credentials]
         claims.exp = 1_700_000_000;
         // now = exp + 90 → outside 60s leeway
         assert!(verify_apple_claims(&claims, &cfg, &state, 1_700_000_090).is_err());
@@ -865,8 +865,8 @@ mod tests {
     #[test]
     fn apple_claims_reject_nonce_mismatch() {
         let cfg = sample_apple_config_for_claims();
-        let state = sample_state("expected");
-        let claims = sample_apple_claims("different", 1_700_000_000);
+        let state = sample_state("expected"); // lgtm[rust/hard-coded-credentials]
+        let claims = sample_apple_claims("different", 1_700_000_000); // lgtm[rust/hard-coded-credentials]
         assert!(verify_apple_claims(&claims, &cfg, &state, 1_700_000_000).is_err());
     }
 

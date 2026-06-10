@@ -706,6 +706,9 @@ Every endpoint requires a realm context (bearer-token `tid` for user endpoints, 
 Every fresh realm has these permissions registered:
 
 - `hearth.admin` — realm-level admin authority. Reserved; only granted via seed roles.
+- `hearth.users.admin` — manage users, credentials, sessions, and consents. Sub-admin delegation for user management without full superuser access.
+- `hearth.clients.admin` — manage OAuth clients and application registrations. Sub-admin delegation for application management.
+- `hearth.realm.admin` — manage realm settings, roles, groups, webhooks, and audit logs. Sub-admin delegation for realm configuration.
 - `realm.read`, `realm.write`, `realm.admin` — realm configuration read/write.
 - `org.read`, `org.write`, `org.admin`, `org.billing` — organization-scoped administration.
 - `user.read`, `user.write`, `user.impersonate` — user administration.
@@ -718,11 +721,16 @@ Operator-added realms, groups, and user roles extend this set via config or admi
 |-----------|-------------|-------|
 | `realm.admin` | `hearth.admin`, `realm.*`, `org.*`, `user.*` | Full realm admin. |
 | `realm.member` | — (empty by default) | Default role for authenticated users; app-customizable. |
+| `hearth.users.admin` | `hearth.users.admin` | Sub-admin: user, credential, session, and consent management only. Assign instead of `realm.admin` for user-management service accounts. |
+| `hearth.clients.admin` | `hearth.clients.admin` | Sub-admin: OAuth client and application registration management only. |
+| `hearth.realm.admin` | `hearth.realm.admin` | Sub-admin: realm settings, roles, groups, webhooks, and audit log management only. |
 | `org.owner` | `org.read`, `org.write`, `org.admin`, `org.billing` | Scoped to one org per assignment. |
 | `org.admin` | `org.read`, `org.write`, `org.admin` | Scoped to one org per assignment. |
 | `org.member` | `org.read` | Scoped to one org per assignment. |
 
 `org.owner` includes `org.admin` as a parent, which includes `org.member`. Composition is explicit in seed data so operators can see the full chain.
+
+The three `hearth.*.admin` sub-admin roles enable Keycloak-style sub-admin delegation: assign one of these instead of `realm.admin` to limit a service account or operator to only the endpoints they need (HEA-1328).
 
 ### 9.3 Scope-to-permission mapping (default)
 
