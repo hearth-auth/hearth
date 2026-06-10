@@ -1,9 +1,10 @@
 use super::*;
-use crate::audit::EmbeddedAuditEngine;
+use crate::audit::{AuditEngine, EmbeddedAuditEngine};
 use crate::core::SystemClock;
 use crate::identity::{CredentialConfig, EmbeddedIdentityEngine, IdentityConfig};
-use crate::rbac::EmbeddedRbacEngine;
+use crate::rbac::{EmbeddedRbacEngine, RbacEngine};
 use crate::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+use axum::http::StatusCode;
 use tower::ServiceExt as _;
 
 /// Creates a test app state with all three engines in a temp directory.
@@ -78,11 +79,17 @@ async fn health_returns_ok() {
     let state = test_state(temp_dir.path());
     let app = router(state);
 
-    let resp = axum::serve(TcpListener::bind("127.0.0.1:0").await.expect("bind"), app);
-    // Instead of starting the full server, test the handler directly
-    drop(resp);
-    let result = health().await.into_response();
-    assert_eq!(result.status(), StatusCode::OK);
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[tokio::test]

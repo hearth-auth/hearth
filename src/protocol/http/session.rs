@@ -17,18 +17,9 @@ use super::{
 pub(super) fn routes() -> axum::Router<Arc<AppState>> {
     use axum::routing::get;
     axum::Router::new()
-        .route(
-            "/end_session",
-            get(end_session).post(end_session),
-        )
-        .route(
-            "/oauth/session-versions",
-            get(oauth_sv_delta_feed),
-        )
-        .route(
-            "/oauth/session-versions/snapshot",
-            get(oauth_sv_snapshot),
-        )
+        .route("/end_session", get(end_session).post(end_session))
+        .route("/oauth/session-versions", get(oauth_sv_delta_feed))
+        .route("/oauth/session-versions/snapshot", get(oauth_sv_snapshot))
 }
 
 /// Registers realm-scoped session routes (nested under `/realms/{realm_name}`).

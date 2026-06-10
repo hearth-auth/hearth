@@ -1,17 +1,18 @@
 //! Shared authentication and helper utilities used across HTTP handlers.
 
-use std::sync::Arc;
-
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Serialize;
 
 use crate::core::{ClientId, RealmId, UserId};
-use crate::protocol::admin_auth::{ExportRateLimitOutcome, ExportRateLimiter, RateLimitOutcome, TokenRateLimitOutcome};
+use crate::protocol::admin_auth::{
+    ExportRateLimitOutcome, RateLimitOutcome, TokenRateLimitOutcome,
+};
 use crate::rbac::RbacError;
+use base64::Engine as _;
 
-use super::state::{AdminAuth, AppState};
+use super::state::AppState;
 
 /// Returns the current Unix timestamp in microseconds.
 ///
@@ -19,14 +20,13 @@ use super::state::{AdminAuth, AppState};
 /// helper so the `#[allow(cast_possible_truncation)]` suppression is in one
 /// place.
 #[allow(clippy::cast_possible_truncation)]
-fn now_micros() -> i64 {
+pub(crate) fn now_micros() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_micros() as i64
 }
 
-/// Shared application state passed to all route handlers.
 /// Authenticated admin context extracted from request headers.
 ///
 /// Contains the realm and user that passed both token validation
@@ -34,7 +34,7 @@ fn now_micros() -> i64 {
 /// permission set from the token claims so callers can check capability-level
 /// gates (e.g. `hearth.export`) without re-validating the token.
 #[derive(Debug, Clone)]
-pub(crate) struct AdminAuth {
+pub struct AdminAuth {
     pub(crate) realm_id: RealmId,
     pub(crate) user_id: UserId,
     /// Full permission set from the validated token claims.
@@ -183,7 +183,9 @@ fn check_admin_rate_limit(
 /// Returns `403 Forbidden` when the permission is absent. The check is separate
 /// from the normal `hearth.admin` gate so operators can grant export access to
 /// dedicated service accounts without granting full admin privileges.
-fn check_export_capability(auth: &AdminAuth) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+pub(crate) fn check_export_capability(
+    auth: &AdminAuth,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let has_export = auth.permissions.iter().any(|p| p == "hearth.export");
     if !has_export {
         return Err((
@@ -229,7 +231,7 @@ pub(crate) fn require_admin_permission(
 /// Returns `429 Too Many Requests` when the user has exceeded the export quota
 /// in the current hour. The limit is intentionally low (10/hour by default)
 /// to limit the blast radius of a compromised admin token.
-fn check_export_rate_limit(
+pub(crate) fn check_export_rate_limit(
     state: &AppState,
     user_id: &UserId,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -255,7 +257,7 @@ fn check_export_rate_limit(
 ///
 /// Called at the START of export operations regardless of the outcome so the
 /// watermark exists even when the export is later rate-limited or rejected.
-fn emit_export_watermark(
+pub(crate) fn emit_export_watermark(
     state: &AppState,
     realm_id: &RealmId,
     user_id: &UserId,
@@ -290,7 +292,7 @@ fn emit_export_watermark(
 /// - the signature field is absent
 /// - the signature is not valid base64url
 /// - the Ed25519 verification fails
-fn verify_manifest_signature(
+pub(crate) fn verify_manifest_signature(
     manifest: &crate::backup::BackupManifest,
     public_key_bytes: &[u8; 32],
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
@@ -341,7 +343,7 @@ fn verify_manifest_signature(
 ///
 /// Returns `Ok(())` when the request is allowed; `Err(Response)` with
 /// `429 Too Many Requests` and a `Retry-After` header when exceeded.
-fn check_token_rate_limit(
+pub(crate) fn check_token_rate_limit(
     state: &AppState,
     realm_id: &RealmId,
     client_id: &ClientId,
@@ -375,7 +377,7 @@ fn check_token_rate_limit(
 /// Builds a 429 Too Many Requests response with a `Retry-After` header.
 ///
 /// Used for per-IP login rate limits on the token and magic-link endpoints.
-fn make_ip_rate_limit_response(retry_after_secs: u32) -> Response {
+pub(crate) fn make_ip_rate_limit_response(retry_after_secs: u32) -> Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(
@@ -394,7 +396,9 @@ fn make_ip_rate_limit_response(retry_after_secs: u32) -> Response {
 /// Extracts a `RealmId` from the `X-Realm-ID` header.
 ///
 /// Returns a `(StatusCode, Json)` error if the header is missing or invalid.
-fn extract_realm_id(headers: &HeaderMap) -> Result<RealmId, (StatusCode, Json<serde_json::Value>)> {
+pub(crate) fn extract_realm_id(
+    headers: &HeaderMap,
+) -> Result<RealmId, (StatusCode, Json<serde_json::Value>)> {
     let header_value = headers
         .get("x-realm-id")
         .ok_or_else(|| {
@@ -425,7 +429,7 @@ fn extract_realm_id(headers: &HeaderMap) -> Result<RealmId, (StatusCode, Json<se
 /// Error messages are intentionally vague to prevent information leakage
 /// per the cross-cutting security requirements.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-fn identity_error_to_response(
+pub(crate) fn identity_error_to_response(
     err: &crate::identity::IdentityError,
 ) -> (StatusCode, Json<serde_json::Value>) {
     use crate::identity::IdentityError;
@@ -669,7 +673,7 @@ fn identity_error_to_response(
     )
 }
 /// Maps [`RbacError`] values to HTTP responses.
-fn rbac_error_to_response(err: &RbacError) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn rbac_error_to_response(err: &RbacError) -> (StatusCode, Json<serde_json::Value>) {
     let (status, code) = match err {
         RbacError::RoleNotFound | RbacError::GroupNotFound | RbacError::AssignmentNotFound => {
             (StatusCode::NOT_FOUND, "not_found")
@@ -705,7 +709,7 @@ fn rbac_error_to_response(err: &RbacError) -> (StatusCode, Json<serde_json::Valu
 /// as strings to avoid IEEE 754 precision loss. REST APIs conventionally
 /// use numeric JSON values, so this helper post-processes the serialized
 /// JSON to convert string-encoded integers back to numbers.
-fn proto_to_rest_json<T: Serialize>(value: &T) -> serde_json::Value {
+pub(crate) fn proto_to_rest_json<T: Serialize>(value: &T) -> serde_json::Value {
     match serde_json::to_value(value) {
         Ok(v) => coerce_string_ints(v),
         Err(e) => {
@@ -736,7 +740,7 @@ fn coerce_string_ints(v: serde_json::Value) -> serde_json::Value {
         other => other,
     }
 }
-fn extract_user_auth(
+pub(crate) fn extract_user_auth(
     headers: &HeaderMap,
     state: &AppState,
     realm_id: &RealmId,
@@ -771,14 +775,7 @@ fn extract_user_auth(
             )
         })
 }
-
-/// `GET /oauth/consents` — lists the current user's consents.
-async fn self_list_consents(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-fn extract_bearer_token(
+pub(crate) fn extract_bearer_token(
     headers: &HeaderMap,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     let auth_header = headers
@@ -807,8 +804,8 @@ fn extract_bearer_token(
         })
 }
 
-/// HTML-escapes the five special characters to prevent XSS in inline HTML.
-fn resolve_realm_by_name(
+/// Resolves a realm by URL-path name, returning an error Response if not found.
+pub(crate) fn resolve_realm_by_name(
     state: &AppState,
     name: &str,
 ) -> Result<RealmId, axum::response::Response> {
@@ -829,10 +826,3 @@ fn resolve_realm_by_name(
         }
     }
 }
-
-/// POST /v1/{realm}/auth/magic-link
-///
-/// Requests a magic-link login email. Always returns 202 regardless of whether
-/// the email is registered (enumeration resistance). Returns 429 when the
-/// caller's IP has exceeded the per-IP rate limit.
-#[derive(Deserialize)]

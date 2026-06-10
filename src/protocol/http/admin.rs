@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::audit::CreateAuditEvent;
 use crate::core::{ClientId, RealmId, UserId, WebhookId};
-use crate::identity::{IdentityEngine, UpdateRealmRequest};
+use crate::identity::email::{validate_email_template, EmailBranding, LocalizedEmailTemplate};
+use crate::identity::UpdateRealmRequest;
 use crate::protocol::convert::identity::{
     proto_user_status_to_domain, realm_page_to_proto, user_bulk_result_to_proto,
     user_page_to_proto, void_bulk_result_to_proto,
@@ -21,27 +22,24 @@ use crate::protocol::convert::oauth::client_page_to_proto;
 use crate::protocol::proto::identity::v1 as pb;
 use crate::rbac::{
     AssignRoleRequest, CreateGroupRequest, CreateRoleRequest, GroupId, GroupMember, Permission,
-    RbacEngine, RbacError, RoleId, Scope, Subject, UpdateGroupRequest, UpdateRoleRequest,
+    RbacError, RoleId, Scope, Subject, UpdateGroupRequest, UpdateRoleRequest,
 };
 use crate::webhook::{
     CreateWebhookRequest, DeliveryQuery, UpdateWebhookRequest, WebhookEngine, WebhookQuery,
 };
+use tracing::error;
 
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
-    extract_user_auth, identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
-    require_admin_permission, verify_manifest_signature, AdminAuth, AppState,
-    BACKUP_RESTORE_BODY_LIMIT,
+    identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
+    require_admin_permission, verify_manifest_signature, AppState, BACKUP_RESTORE_BODY_LIMIT,
 };
 
 /// Registers all admin API routes (mounted under `/admin` by the parent router).
 pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
-    use axum::routing::{delete, get, patch, post, put};
+    use axum::routing::{delete, get, patch, post};
     axum::Router::new()
-        .route(
-            "/users",
-            get(admin_list_users).post(admin_create_user),
-        )
+        .route("/users", get(admin_list_users).post(admin_create_user))
         .route("/users/bulk", post(admin_bulk_users))
         .route("/users/import", post(admin_import_users))
         .route("/users/export", get(admin_export_users))
@@ -55,10 +53,7 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
             "/users/{id}/device-fingerprints",
             delete(admin_delete_user_device_fingerprints),
         )
-        .route(
-            "/realms",
-            get(admin_list_realms).post(admin_create_realm),
-        )
+        .route("/realms", get(admin_list_realms).post(admin_create_realm))
         .route(
             "/realms/{id}",
             get(admin_get_realm)
@@ -93,10 +88,7 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
                 .patch(admin_update_client)
                 .delete(admin_delete_client),
         )
-        .route(
-            "/users/{id}/consents",
-            get(admin_list_user_consents),
-        )
+        .route("/users/{id}/consents", get(admin_list_user_consents))
         .route(
             "/users/{id}/consents/{client_id}",
             delete(admin_revoke_user_consent),
@@ -106,20 +98,14 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
             get(admin_get_user_effective_permissions),
         )
         .route("/audit", get(admin_list_audit))
-        .route(
-            "/roles",
-            get(admin_list_roles).post(admin_create_role),
-        )
+        .route("/roles", get(admin_list_roles).post(admin_create_role))
         .route(
             "/roles/{id}",
             get(admin_get_role)
                 .patch(admin_update_role)
                 .delete(admin_delete_role),
         )
-        .route(
-            "/groups",
-            get(admin_list_groups).post(admin_create_group),
-        )
+        .route("/groups", get(admin_list_groups).post(admin_create_group))
         .route(
             "/groups/{id}",
             get(admin_get_group)
@@ -163,18 +149,12 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
             "/realms/{realm_id}/users/{user_id}/required-actions",
             patch(admin_patch_user_required_actions),
         )
-        .route(
-            "/realms/{realm_id}/config",
-            patch(admin_patch_realm_config),
-        )
+        .route("/realms/{realm_id}/config", patch(admin_patch_realm_config))
         .route(
             "/sessions/{session_id}/sv-bump",
             post(admin_sv_bump_session),
         )
-        .route(
-            "/realms/{realm_id}/sv-bump-all",
-            post(admin_sv_bump_all),
-        )
+        .route("/realms/{realm_id}/sv-bump-all", post(admin_sv_bump_all))
         .route(
             "/cluster/bootstrap",
             post(crate::protocol::cluster_admin::admin_cluster_bootstrap),
@@ -214,21 +194,16 @@ impl PaginationParams {
 }
 
 fn parse_realm_id(id: &str) -> Result<RealmId, Response> {
-    id.parse::<uuid::Uuid>()
-        .map(RealmId::new)
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid realm ID"})),
-            )
-                .into_response()
-        })
+    id.parse::<uuid::Uuid>().map(RealmId::new).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid realm ID"})),
+        )
+            .into_response()
+    })
 }
 
-fn require_realm(
-    state: &AppState,
-    realm_id: &RealmId,
-) -> Result<crate::identity::Realm, Response> {
+fn require_realm(state: &AppState, realm_id: &RealmId) -> Result<crate::identity::Realm, Response> {
     match state.identity.get_realm(realm_id) {
         Ok(Some(r)) => Ok(r),
         Ok(None) => Err((
@@ -1500,30 +1475,6 @@ struct RealmBrandingResponse {
     email_branding: Option<EmailBranding>,
 }
 
-/// Parses a realm UUID from a path segment, returning 400 on bad input.
-fn parse_realm_id(id: &str) -> Result<RealmId, Response> {
-    id.parse::<uuid::Uuid>().map(RealmId::new).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "invalid realm ID"})),
-        )
-            .into_response()
-    })
-}
-
-/// Resolves a live realm by ID, returning 404 when absent.
-fn require_realm(state: &AppState, realm_id: &RealmId) -> Result<crate::identity::Realm, Response> {
-    match state.identity.get_realm(realm_id) {
-        Ok(Some(r)) => Ok(r),
-        Ok(None) => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "realm not found"})),
-        )
-            .into_response()),
-        Err(e) => Err(identity_error_to_response(&e).into_response()),
-    }
-}
-
 /// `GET /realms/{id}/branding` — return current per-realm branding settings.
 async fn admin_get_realm_branding(
     State(state): State<Arc<AppState>>,
@@ -2177,44 +2128,6 @@ async fn admin_list_audit(
 
 // === OAuth Consent (self-service + admin) ===
 
-/// Extracts the authenticated user from a Bearer access token. Returns
-/// the user's [`UserId`] on success, or the appropriate error response.
-fn extract_user_auth(
-    headers: &HeaderMap,
-    state: &AppState,
-    realm_id: &RealmId,
-) -> Result<UserId, (StatusCode, Json<serde_json::Value>)> {
-    let Some(token) = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-    else {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "invalid_token"})),
-        ));
-    };
-
-    let claims = state
-        .identity
-        .validate_token(realm_id, token)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid_token"})),
-            )
-        })?;
-
-    uuid::Uuid::parse_str(&claims.sub)
-        .map(UserId::new)
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid_token"})),
-            )
-        })
-}
-
 /// `GET /oauth/consents` — lists the current user's consents.
 async fn admin_list_user_consents(
     State(state): State<Arc<AppState>>,
@@ -2308,6 +2221,14 @@ async fn admin_revoke_user_consent(
         }
         Err(e) => identity_error_to_response(&e).into_response(),
     }
+}
+/// Response body for effective-permissions endpoints.
+#[derive(Debug, serde::Serialize)]
+struct MePermissionsResponse {
+    roles: Vec<String>,
+    groups: Vec<String>,
+    permissions: Vec<String>,
+    scope: Option<String>,
 }
 
 /// `GET /admin/users/{id}/effective-permissions` — resolves the effective
@@ -2483,7 +2404,7 @@ fn dev_seed_system_admin(state: &AppState) {
 /// Only available when `AppState.dev_mode` is `true` (i.e., `--dev` flag).
 /// Returns 404 in production mode.
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(super) async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if !state.dev_mode {
         return (
             StatusCode::NOT_FOUND,
@@ -3365,8 +3286,18 @@ async fn admin_unassign_role(
 // WebAuthn / Passkey REST API
 // ============================================================================
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
+// === Webhook management (admin) ===
+
+/// JSON body for `POST /admin/webhooks`.
+#[derive(Debug, Deserialize)]
+struct CreateWebhookBody {
+    url: String,
+    secret: String,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+    #[serde(default)]
+    event_filters: Vec<String>,
+}
 
 fn default_enabled() -> bool {
     true

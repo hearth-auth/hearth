@@ -6,7 +6,9 @@ use std::sync::Arc;
 use crate::audit::AuditEngine;
 use crate::cluster::ClusterEngine;
 use crate::identity::IdentityEngine;
-use crate::protocol::admin_auth::{AdminRateLimiter, ExportRateLimiter, JwksRateLimiter, TokenRateLimiter};
+use crate::protocol::admin_auth::{
+    AdminRateLimiter, ExportRateLimiter, JwksRateLimiter, TokenRateLimiter,
+};
 use crate::rbac::RbacEngine;
 use crate::webhook::WebhookEngine;
 

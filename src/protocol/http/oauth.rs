@@ -10,32 +10,28 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::audit::CreateAuditEvent;
 use crate::core::{ClientId, RealmId, UserId};
-use crate::identity::{IdentityEngine, JwtBearerRequest, PasswordGrantRequest, StepUpMfaGrantRequest};
+use crate::identity::{JwtBearerRequest, PasswordGrantRequest, StepUpMfaGrantRequest};
 use crate::protocol::client_info::extract_client_ip;
 use crate::protocol::convert::oauth::{
-    client_page_to_proto, proto_authorize_to_domain, proto_client_creds_to_domain,
-    proto_token_exchange_to_domain,
+    proto_authorize_to_domain, proto_client_creds_to_domain, proto_token_exchange_to_domain,
 };
 use crate::protocol::proto::identity::v1 as pb;
-use crate::rbac::{Permission, RbacEngine, RbacError, Scope};
-use crate::audit::CreateAuditEvent;
 
+use super::now_micros;
 use super::{
     check_token_rate_limit, extract_realm_id, extract_user_auth, identity_error_to_response,
-    make_ip_rate_limit_response, proto_to_rest_json, rbac_error_to_response,
-    resolve_realm_by_name, AppState, FALLBACK_PEER,
+    make_ip_rate_limit_response, proto_to_rest_json, rbac_error_to_response, resolve_realm_by_name,
+    AppState, FALLBACK_PEER,
 };
 
 /// Registers global OAuth/OIDC routes.
 pub(super) fn routes() -> axum::Router<Arc<AppState>> {
     use axum::extract::DefaultBodyLimit;
-    use axum::routing::{get, post, options};
+    use axum::routing::{get, post};
     axum::Router::new()
-        .route(
-            "/.well-known/openid-configuration",
-            get(oidc_discovery),
-        )
+        .route("/.well-known/openid-configuration", get(oidc_discovery))
         .route("/jwks", get(jwks))
         .route("/certs", get(jwks))
         .route("/.well-known/jwks.json", get(jwks))
@@ -51,10 +47,7 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
             post(pushed_authorization_request)
                 .route_layer(DefaultBodyLimit::max(super::BODY_LIMIT_SMALL)),
         )
-        .route(
-            "/token",
-            post(token_exchange).options(token_preflight),
-        )
+        .route("/token", post(token_exchange).options(token_preflight))
         .route(
             "/revoke",
             post(token_revocation)
@@ -194,13 +187,6 @@ async fn jwks(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl In
     let doc = state.identity.jwks();
     (StatusCode::OK, Json(doc)).into_response()
 }
-
-// === User management endpoints ===
-
-/// Create a new user.
-///
-/// Requires `X-Realm-ID` header. Returns the created user record.
-// === OIDC / OAuth 2.0 endpoints ===
 
 /// HTTP request body for token exchange.
 ///
@@ -491,285 +477,6 @@ async fn realm_token_preflight(
         Err(_) => return StatusCode::NO_CONTENT.into_response(),
     };
     token_options_preflight(State(state), headers, realm_id).await
-}
-
-/// Extracts a `RealmId` from the `X-Realm-ID` header.
-///
-/// Returns a `(StatusCode, Json)` error if the header is missing or invalid.
-fn extract_realm_id(headers: &HeaderMap) -> Result<RealmId, (StatusCode, Json<serde_json::Value>)> {
-    let header_value = headers
-        .get("x-realm-id")
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "missing X-Realm-ID header"})),
-            )
-        })?
-        .to_str()
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid X-Realm-ID header"})),
-            )
-        })?;
-
-    let uuid: uuid::Uuid = header_value.parse().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "X-Realm-ID must be a valid UUID"})),
-        )
-    })?;
-
-    Ok(RealmId::new(uuid))
-}
-
-/// Maps an `IdentityError` to an HTTP status code and safe error message.
-///
-/// Error messages are intentionally vague to prevent information leakage
-/// per the cross-cutting security requirements.
-#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-fn identity_error_to_response(
-    err: &crate::identity::IdentityError,
-) -> (StatusCode, Json<serde_json::Value>) {
-    use crate::identity::IdentityError;
-
-    // RequiredActionsBlocking carries a structured payload — handle before the
-    // flat (status, message) match so we can embed the actions array.
-    if let IdentityError::RequiredActionsBlocking { actions } = err {
-        let action_strs: Vec<&str> = actions
-            .iter()
-            .map(|a| crate::protocol::convert::identity::required_action_to_wire(*a))
-            .collect();
-        let error_code = crate::protocol::error_codes::for_identity_error(err);
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "required_actions_pending",
-                "error_code": error_code,
-                "actions": action_strs,
-            })),
-        );
-    }
-
-    let (status, message) = match err {
-        IdentityError::RealmNotFound | IdentityError::UserNotFound => {
-            (StatusCode::NOT_FOUND, "not found")
-        }
-        IdentityError::RealmSuspended => (StatusCode::FORBIDDEN, "realm suspended"),
-        IdentityError::DuplicateRealmName => (StatusCode::CONFLICT, "duplicate realm name"),
-        IdentityError::DuplicateEmail => (StatusCode::CONFLICT, "duplicate email"),
-        IdentityError::InvalidInput { .. } => (StatusCode::BAD_REQUEST, "invalid input"),
-        IdentityError::CredentialNotFound => (StatusCode::NOT_FOUND, "credential not found"),
-        IdentityError::InvalidCredential { .. } => (StatusCode::UNAUTHORIZED, "invalid credential"),
-        IdentityError::SessionNotFound => (StatusCode::NOT_FOUND, "session not found"),
-        IdentityError::SessionVersionDisabled => (
-            StatusCode::NOT_FOUND,
-            "session versioning disabled for realm",
-        ),
-        IdentityError::InvalidToken => (StatusCode::UNAUTHORIZED, "invalid token"),
-        IdentityError::TokenExpired => (StatusCode::UNAUTHORIZED, "token expired"),
-        // RFC 6749 §5.2: all client authentication failures MUST return 401 with
-        // "invalid_client" — distinguishable status codes are an enumeration oracle
-        // (OAuth 2.0 Security BCP §2.2).
-        IdentityError::InvalidClient => (StatusCode::UNAUTHORIZED, "invalid_client"),
-        IdentityError::InvalidRedirectUri => (StatusCode::BAD_REQUEST, "invalid redirect URI"),
-        IdentityError::InvalidAuthorizationCode => {
-            (StatusCode::BAD_REQUEST, "invalid authorization code")
-        }
-        IdentityError::InvalidGrant { .. } => (StatusCode::BAD_REQUEST, "invalid grant"),
-        IdentityError::InvalidClientSecret => (StatusCode::UNAUTHORIZED, "invalid_client"),
-        IdentityError::AuthorizationPending => (StatusCode::BAD_REQUEST, "authorization_pending"),
-        IdentityError::SlowDown => (StatusCode::BAD_REQUEST, "slow_down"),
-        IdentityError::DeviceCodeExpired => (StatusCode::BAD_REQUEST, "expired_token"),
-        IdentityError::DeviceCodeDenied => (StatusCode::BAD_REQUEST, "access_denied"),
-        IdentityError::TokenRevoked => (StatusCode::UNAUTHORIZED, "token revoked"),
-        IdentityError::UnsupportedGrantType => (StatusCode::BAD_REQUEST, "unsupported_grant_type"),
-        IdentityError::MfaRequired => (StatusCode::FORBIDDEN, "MFA verification required"),
-        IdentityError::InvalidMfaCode => (StatusCode::UNAUTHORIZED, "invalid MFA code"),
-        IdentityError::MfaNotEnabled => (StatusCode::BAD_REQUEST, "MFA not enabled"),
-        IdentityError::MfaAlreadyEnabled => (StatusCode::CONFLICT, "MFA already enabled"),
-        IdentityError::WebAuthnRegistrationFailed { .. } => {
-            (StatusCode::BAD_REQUEST, "webauthn registration failed")
-        }
-        IdentityError::WebAuthnAuthenticationFailed { .. } => {
-            (StatusCode::UNAUTHORIZED, "webauthn authentication failed")
-        }
-        IdentityError::WebAuthnCredentialNotFound => {
-            (StatusCode::NOT_FOUND, "credential not found")
-        }
-        IdentityError::InvalidAttestation { .. } => {
-            (StatusCode::BAD_REQUEST, "invalid attestation")
-        }
-        IdentityError::InvalidAssertion { .. } => (StatusCode::UNAUTHORIZED, "invalid assertion"),
-        IdentityError::InvalidClientAssertion { .. } => {
-            (StatusCode::UNAUTHORIZED, "invalid_client")
-        }
-        IdentityError::Unauthorized => (StatusCode::FORBIDDEN, "forbidden"),
-        IdentityError::ClientNotFound => (StatusCode::NOT_FOUND, "not found"),
-        IdentityError::MagicLinkTokenInvalid => {
-            (StatusCode::UNAUTHORIZED, "invalid or expired link")
-        }
-        IdentityError::VerificationTokenInvalid => {
-            (StatusCode::GONE, "invalid or expired verification link")
-        }
-        IdentityError::PasswordResetTokenInvalid => {
-            (StatusCode::UNAUTHORIZED, "invalid or expired reset link")
-        }
-        IdentityError::UserNotVerified => (StatusCode::FORBIDDEN, "email not verified"),
-        IdentityError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "too many requests"),
-        IdentityError::OrganizationNotFound => (StatusCode::NOT_FOUND, "organization not found"),
-        IdentityError::DuplicateOrgSlug => (StatusCode::CONFLICT, "duplicate organization slug"),
-        IdentityError::OrganizationSuspended => (StatusCode::FORBIDDEN, "organization suspended"),
-        IdentityError::AlreadyMember => (StatusCode::CONFLICT, "already a member"),
-        IdentityError::NotAMember => (StatusCode::NOT_FOUND, "not a member"),
-        IdentityError::LastOwner => (StatusCode::CONFLICT, "cannot remove last owner"),
-        IdentityError::MemberLimitReached => {
-            (StatusCode::UNPROCESSABLE_ENTITY, "member limit reached")
-        }
-        IdentityError::InvitationInvalid => (StatusCode::BAD_REQUEST, "invalid invitation"),
-        IdentityError::DuplicateInvitation => (StatusCode::CONFLICT, "duplicate invitation"),
-        IdentityError::ReservedSlug { .. } => (StatusCode::CONFLICT, "slug_reserved"),
-        IdentityError::SlugInCooldown { .. } => (StatusCode::CONFLICT, "slug_cooldown"),
-        IdentityError::SystemRealmProtected { .. } => {
-            (StatusCode::FORBIDDEN, "system realm is read-only")
-        }
-        IdentityError::RegistrationDisabled => (StatusCode::FORBIDDEN, "registration disabled"),
-        IdentityError::RegistrationDomainNotAllowed { .. } => {
-            (StatusCode::FORBIDDEN, "email domain not permitted")
-        }
-        IdentityError::RegistrationRequiresInvitation => {
-            (StatusCode::FORBIDDEN, "invitation required")
-        }
-        IdentityError::ConsentRequired => (StatusCode::FORBIDDEN, "consent required"),
-        IdentityError::ConsentTicketNotFound | IdentityError::ConsentTicketExpired => {
-            (StatusCode::BAD_REQUEST, "consent ticket invalid")
-        }
-        IdentityError::ConsentScopeNotRequested => {
-            (StatusCode::BAD_REQUEST, "scope not in original request")
-        }
-        IdentityError::ConsentNotFound => (StatusCode::NOT_FOUND, "consent not found"),
-        IdentityError::FederationUnknownConnector => {
-            (StatusCode::NOT_FOUND, "federation connector not found")
-        }
-        IdentityError::FederationInvalidState => {
-            (StatusCode::BAD_REQUEST, "invalid federation state")
-        }
-        IdentityError::FederationUpstreamError { .. } => {
-            (StatusCode::BAD_GATEWAY, "federation upstream error")
-        }
-        IdentityError::FederationTokenVerificationFailed => (
-            StatusCode::UNAUTHORIZED,
-            "federation token verification failed",
-        ),
-        IdentityError::FederationEmailNotVerified => {
-            (StatusCode::FORBIDDEN, "upstream email not verified")
-        }
-        IdentityError::FederationIdpMixup => (StatusCode::BAD_REQUEST, "federation IdP mismatch"),
-        IdentityError::FederationLinkConfirmationRequired { .. } => {
-            // Browser flows redirect to /ui/federation/confirm-link; JSON
-            // callers (rare for federation) get a terse 409 so they know
-            // a linking decision is required.
-            (
-                StatusCode::CONFLICT,
-                "federation link confirmation required",
-            )
-        }
-        IdentityError::FederationNotLinked => {
-            (StatusCode::NOT_FOUND, "external identity not linked")
-        }
-        IdentityError::FederationAlreadyLinked => {
-            (StatusCode::CONFLICT, "external identity already linked")
-        }
-        IdentityError::DuplicateScimExternalId => {
-            (StatusCode::CONFLICT, "SCIM externalId already in use")
-        }
-        IdentityError::Saml(ref e) => match e {
-            crate::identity::federation::saml::SamlError::MetadataFetch { .. } => {
-                (StatusCode::BAD_GATEWAY, "SAML metadata fetch failed")
-            }
-            crate::identity::federation::saml::SamlError::UnknownSp
-            | crate::identity::federation::saml::SamlError::UnknownIdp => {
-                (StatusCode::NOT_FOUND, "SAML entity not found")
-            }
-            _ => (StatusCode::BAD_REQUEST, "invalid SAML message"),
-        },
-        IdentityError::SigningError { .. }
-        | IdentityError::Storage(_)
-        | IdentityError::Serialization { .. }
-        | IdentityError::Internal { .. }
-        | IdentityError::ConfigInvalid { .. } => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-        }
-        IdentityError::TokenTooLarge { .. } => (StatusCode::PAYLOAD_TOO_LARGE, "token too large"),
-        IdentityError::InvalidAttribute { .. } => (StatusCode::BAD_REQUEST, "invalid attribute"),
-        IdentityError::AuthMethodNotAllowed { .. } => {
-            (StatusCode::FORBIDDEN, "authentication method not permitted")
-        }
-        IdentityError::PasswordExpired => (StatusCode::UNAUTHORIZED, "password expired"),
-        IdentityError::PasswordReused => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "password was recently used",
-        ),
-        IdentityError::PasswordCompromised => {
-            (StatusCode::UNPROCESSABLE_ENTITY, "password_compromised")
-        }
-        IdentityError::AuditFailure { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        IdentityError::WebhookNotFound => (StatusCode::NOT_FOUND, "webhook not found"),
-        IdentityError::StepUpChallengeRequired => (StatusCode::UNAUTHORIZED, "mfa_required"),
-        IdentityError::EnrollMfaRequired => (StatusCode::FORBIDDEN, "mfa_enrollment_required"),
-        // Handled by the early return above; this arm satisfies exhaustiveness.
-        IdentityError::RequiredActionsBlocking { .. } => {
-            (StatusCode::BAD_REQUEST, "required_actions_pending")
-        }
-        IdentityError::InvalidSmsOtp => (StatusCode::UNAUTHORIZED, "invalid_sms_otp"),
-        IdentityError::SmsResendLimitExceeded => {
-            (StatusCode::TOO_MANY_REQUESTS, "sms_resend_limit_exceeded")
-        }
-        IdentityError::InvalidEmailOtp => (StatusCode::UNAUTHORIZED, "invalid_email_otp"),
-        IdentityError::InvalidPushedAuthorizationRequest => {
-            (StatusCode::BAD_REQUEST, "invalid_request")
-        }
-        IdentityError::InvalidDPopProof { .. } => (StatusCode::UNAUTHORIZED, "invalid_dpop_proof"),
-        IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => {
-            (StatusCode::UNAUTHORIZED, "use_dpop_nonce")
-        }
-        IdentityError::DPopBindingMismatch => (StatusCode::UNAUTHORIZED, "invalid_token"),
-        IdentityError::JwtBearerAssertionInvalid { .. } => {
-            (StatusCode::UNAUTHORIZED, "invalid_grant")
-        }
-        IdentityError::InvalidJar { .. } => (StatusCode::BAD_REQUEST, "invalid_request_object"),
-        IdentityError::FapiViolation { .. } => (StatusCode::BAD_REQUEST, "invalid_request"),
-        IdentityError::SessionLimitExceeded { .. } => {
-            (StatusCode::TOO_MANY_REQUESTS, "session_limit_exceeded")
-        }
-        // A-19: email-change flow errors.
-        IdentityError::QuotaExceeded { .. } => (StatusCode::TOO_MANY_REQUESTS, "quota_exceeded"),
-        IdentityError::EmailReserved => (StatusCode::CONFLICT, "email_reserved"),
-        IdentityError::EmailChangeTokenInvalid => (
-            StatusCode::UNAUTHORIZED,
-            "invalid or expired email-change link",
-        ),
-        // A-37: silent-auth rate-limit exceeded (prompt=none).
-        IdentityError::SilentAuthRateLimited => {
-            (StatusCode::TOO_MANY_REQUESTS, "silent_auth_rate_limited")
-        }
-        // A-13: attestation policy violation (AAGUID not in allowlist, "none" rejected, etc.).
-        IdentityError::AttestationPolicyViolation { .. } => {
-            (StatusCode::FORBIDDEN, "attestation_policy_violation")
-        }
-        IdentityError::AgentNotFound => (StatusCode::NOT_FOUND, "agent not found"),
-        IdentityError::AgentRevoked => (StatusCode::FORBIDDEN, "agent revoked"),
-        // HEA-1324: pre-token webhook failed with fail_closed policy.
-        IdentityError::PreTokenWebhookFailed { .. } => {
-            (StatusCode::BAD_GATEWAY, "pre_token_webhook_failed")
-        }
-    };
-
-    let error_code = crate::protocol::error_codes::for_identity_error(err);
-    (
-        status,
-        Json(serde_json::json!({"error": message, "error_code": error_code})),
-    )
 }
 
 /// Register an OAuth 2.0 client.
@@ -1877,19 +1584,6 @@ async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
 
 // === Claims-based permissions endpoint ===
 
-/// Response body for `GET /v1/me/permissions`.
-#[derive(Debug, Serialize)]
-struct MePermissionsResponse {
-    /// The effective role names granted to the caller.
-    roles: Vec<String>,
-    /// The effective group slugs the caller belongs to.
-    groups: Vec<String>,
-    /// The effective permissions (sorted, de-duplicated).
-    permissions: Vec<String>,
-    /// Echoes the scope the caller requested, if any.
-    scope: Option<String>,
-}
-
 /// `GET /v1/me/permissions` — resolves and returns the authenticated user's
 /// effective roles, groups, and permissions FRESHLY (not from the JWT).
 ///
@@ -2741,17 +2435,3 @@ async fn realm_register_client_dynamic(
         Err(e) => identity_error_to_response(&e).into_response(),
     }
 }
-
-// === Webhook management (admin) ===
-
-/// JSON body for `POST /admin/webhooks`.
-#[derive(Debug, Deserialize)]
-struct CreateWebhookBody {
-    url: String,
-    secret: String,
-    #[serde(default = "default_enabled")]
-    enabled: bool,
-    #[serde(default)]
-    event_filters: Vec<String>,
-}
-

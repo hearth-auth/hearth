@@ -419,8 +419,11 @@ async fn magic_link_request(
 
     // Per-IP rate limit. Real IP arrives via X-Forwarded-For in production;
     // FALLBACK_PEER is used when ConnectInfo is unavailable (tests).
-    let client_ip =
-        crate::protocol::client_info::extract_client_ip(&headers, FALLBACK_PEER, &state.trusted_proxies);
+    let client_ip = crate::protocol::client_info::extract_client_ip(
+        &headers,
+        FALLBACK_PEER,
+        &state.trusted_proxies,
+    );
     if state
         .identity
         .check_ip_login_rate_limit(&realm_id, &client_ip)

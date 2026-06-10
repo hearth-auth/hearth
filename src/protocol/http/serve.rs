@@ -3,24 +3,21 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::response::Redirect;
+use axum::http::StatusCode;
 use axum::Router;
 use tokio::net::TcpListener;
 use tracing::info;
+use tracing::{debug, error};
 
 use super::state::AppState;
+use super::{HTTP2_MAX_CONCURRENT_STREAMS, HTTP2_MAX_PENDING_RESET_STREAMS};
 
-
-/// Starts the HTTP server on the given address.
-///
-/// Binds to the specified address and serves requests until the provided
-/// shutdown signal resolves. Returns an error if binding or serving fails.
 pub async fn serve(
     addr: SocketAddr,
     state: Arc<AppState>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), std::io::Error> {
-    serve_router(addr, router(state), shutdown).await
+    serve_router(addr, super::router(state), shutdown).await
 }
 
 /// Starts the HTTP server on the given address with a pre-built router.
@@ -64,7 +61,7 @@ pub async fn serve_tls(
     tls_acceptor: tokio_rustls::TlsAcceptor,
     shutdown: tokio::sync::watch::Receiver<()>,
 ) -> Result<(), std::io::Error> {
-    serve_tls_router(listener, router(state), tls_acceptor, shutdown).await
+    serve_tls_router(listener, super::router(state), tls_acceptor, shutdown).await
 }
 
 /// Starts the HTTPS server with a pre-built router.
@@ -194,54 +191,3 @@ pub async fn serve_redirect(
 
     Ok(())
 }
-
-// === JSON helpers ===
-
-/// Serializes a proto type to a `serde_json::Value` with int64 fields
-/// emitted as JSON numbers instead of strings.
-///
-/// pbjson follows the proto3 JSON mapping spec which encodes int64/uint64
-/// as strings to avoid IEEE 754 precision loss. REST APIs conventionally
-/// use numeric JSON values, so this helper post-processes the serialized
-/// JSON to convert string-encoded integers back to numbers.
-fn proto_to_rest_json<T: Serialize>(value: &T) -> serde_json::Value {
-    match serde_json::to_value(value) {
-        Ok(v) => coerce_string_ints(v),
-        Err(e) => {
-            tracing::error!(error = %e, "proto serialization failed");
-            serde_json::Value::Null
-        }
-    }
-}
-
-/// Recursively converts string values that represent integers to JSON numbers.
-fn coerce_string_ints(v: serde_json::Value) -> serde_json::Value {
-    match v {
-        serde_json::Value::String(ref s) => {
-            if let Ok(n) = s.parse::<i64>() {
-                serde_json::Value::Number(n.into())
-            } else {
-                v
-            }
-        }
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, coerce_string_ints(v)))
-                .collect(),
-        ),
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.into_iter().map(coerce_string_ints).collect())
-        }
-        other => other,
-    }
-}
-
-// === Observability middleware ===
-
-/// Tower middleware that records HTTP request latency into the Prometheus
-/// `hearth_http_request_duration_seconds` histogram.
-///
-/// Must be applied via [`Router::route_layer`] so that [`MatchedPath`] is
-/// already populated by the router before this middleware runs. Routes without
-/// a matched pattern (e.g. 404s) fall back to the raw URI path.
-pub(crate) async fn track_metrics(request: Request, next: Next) -> Response {
