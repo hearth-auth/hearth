@@ -7,6 +7,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **Eliminated `ring 0.16.20` (CVE-2025-4432, MEDIUM) and `rustls-webpki 0.101.7`
+  (GHSA-82j2-j2ch-gfr8, HIGH)** — upgraded `ldap3` from 0.11 to 0.12.
+  The new release uses `ring 0.17` and `rustls 0.23`, removing the only transitive
+  paths to both vulnerable packages. The `tls-rustls-ring` feature flag was adopted
+  to satisfy ldap3 0.12's mandatory Rustls crypto-provider selection (HEA-1344).
+
 ### Added
 
 - **Email OTP MFA factor** — `email_otp` is now a distinct, configurable MFA method.

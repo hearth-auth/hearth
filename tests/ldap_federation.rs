@@ -142,7 +142,7 @@ impl hearth::storage::StorageEngine for MemStorage {
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore = "requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
+#[ignore = "HEA-1344: requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
 async fn search_users_returns_at_least_one_user() {
     let url = require_env!("HEARTH_TEST_LDAP_URL");
     let bind_dn = require_env!("HEARTH_TEST_LDAP_BIND_DN");
@@ -161,7 +161,7 @@ async fn search_users_returns_at_least_one_user() {
 }
 
 #[tokio::test]
-#[ignore = "requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
+#[ignore = "HEA-1344: requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
 async fn search_users_email_and_external_id_are_populated() {
     let url = require_env!("HEARTH_TEST_LDAP_URL");
     let bind_dn = require_env!("HEARTH_TEST_LDAP_BIND_DN");
@@ -184,7 +184,7 @@ async fn search_users_email_and_external_id_are_populated() {
 }
 
 #[tokio::test]
-#[ignore = "requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
+#[ignore = "HEA-1344: requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
 async fn authenticate_user_valid_credentials_returns_true() {
     let url = require_env!("HEARTH_TEST_LDAP_URL");
     let bind_dn = require_env!("HEARTH_TEST_LDAP_BIND_DN");
@@ -208,7 +208,7 @@ async fn authenticate_user_valid_credentials_returns_true() {
 }
 
 #[tokio::test]
-#[ignore = "requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
+#[ignore = "HEA-1344: requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
 async fn authenticate_user_wrong_password_returns_false() {
     let url = require_env!("HEARTH_TEST_LDAP_URL");
     let bind_dn = require_env!("HEARTH_TEST_LDAP_BIND_DN");
@@ -231,7 +231,7 @@ async fn authenticate_user_wrong_password_returns_false() {
 }
 
 #[tokio::test]
-#[ignore = "requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
+#[ignore = "HEA-1344: requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
 async fn delta_sync_initial_run_loads_all_users() {
     let url = require_env!("HEARTH_TEST_LDAP_URL");
     let bind_dn = require_env!("HEARTH_TEST_LDAP_BIND_DN");
@@ -260,7 +260,7 @@ async fn delta_sync_initial_run_loads_all_users() {
 }
 
 #[tokio::test]
-#[ignore = "requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
+#[ignore = "HEA-1344: requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
 async fn delta_sync_second_run_with_same_cursor_returns_no_new_users() {
     let url = require_env!("HEARTH_TEST_LDAP_URL");
     let bind_dn = require_env!("HEARTH_TEST_LDAP_BIND_DN");
@@ -293,7 +293,7 @@ async fn delta_sync_second_run_with_same_cursor_returns_no_new_users() {
 }
 
 #[tokio::test]
-#[ignore = "requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
+#[ignore = "HEA-1344: requires live LDAP server — run via ldap-integration CI job or set HEARTH_TEST_LDAP_* env vars"]
 async fn ldaps_connection_succeeds() {
     let ldaps_url = require_env!("HEARTH_TEST_LDAPS_URL");
     let bind_dn = require_env!("HEARTH_TEST_LDAP_BIND_DN");

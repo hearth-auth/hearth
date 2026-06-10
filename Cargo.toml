@@ -97,7 +97,7 @@ form_urlencoded = "1.2.2"
 prometheus = { version = "0.14", default-features = false, features = ["process"] }
 tar = "0.4"
 zstd = "0.13"
-ldap3 = { version = "0.11", default-features = false, features = ["tls-rustls"] }
+ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
 rpassword = "7"
 secrecy = { version = "0.8", features = ["alloc"] }
 
