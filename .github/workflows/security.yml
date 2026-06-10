@@ -115,13 +115,13 @@ jobs:
           # creds) and would otherwise flood code-scanning with false positives.
           # Production SDKs (sdks/<lang>/src) and root crates remain in scope.
           paths-ignore: |
-            tests/
-            benches/
-            simulation/
-            fuzz/
-            examples/
-            **/tests/
-            **/__tests__/
+            tests/**
+            benches/**
+            simulation/**
+            fuzz/**
+            examples/**
+            **/tests/**
+            **/__tests__/**
             **/*.test.ts
             **/*.test.js
             **/*.test.go
@@ -129,8 +129,8 @@ jobs:
             **/*.test.rs
             **/*.spec.ts
             **/*.spec.js
-            sdks/*/tests/
-            sdks/*/test/
+            sdks/*/tests/**
+            sdks/*/test/**
           queries: security-extended
 
       # Go autobuild calls `go get` to resolve module imports. Without git
