@@ -265,7 +265,7 @@ impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateOrgForm {
 }
 
 /// `POST /ui/admin/organizations/new`.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn admin_org_create_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -465,7 +465,7 @@ pub struct OrgDetailParams {
 }
 
 /// `GET /ui/admin/organizations/:id`.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn admin_org_detail(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -1594,7 +1594,7 @@ pub async fn admin_org_status_toggle(
 /// with a brand-new accept link. Existing tokens are invalidated — only
 /// the fresh link works. The cleartext token is not stored, so a true
 /// "re-send the same link" is not implementable.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn admin_org_resend_invite(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,

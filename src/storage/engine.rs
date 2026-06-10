@@ -195,7 +195,7 @@ impl EmbeddedStorageEngine {
     /// Opens the storage engine with a custom filesystem implementation.
     ///
     /// Used by the simulation crate to inject faults via a `FaultFs`.
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     pub fn open_with_fs(config: StorageConfig, fs: Arc<dyn Fs>) -> Result<Self, StorageError> {
         fs.create_dir_all(&config.data_dir)?;
 
@@ -530,7 +530,7 @@ impl EmbeddedStorageEngine {
         }
         let input_count = sst_readers.len();
 
-        // TODO(compaction): holding flush_lock across full merge blocks writers
+        // TODO: HEA-1358 (compaction): holding flush_lock across full merge blocks writers
         // for O(total-data) time. In Phase 2+, switch to leveled compaction
         // where minor compactions merge subsets of SSTs without blocking.
 

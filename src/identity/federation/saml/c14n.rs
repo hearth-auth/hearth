@@ -57,7 +57,7 @@ pub fn canonicalize(xml: &[u8], strip_signature: bool) -> Result<Vec<u8>, Identi
 /// AND not already emitted on a canonical ancestor". A prefix declared
 /// in source but not on a canonical ancestor of the current
 /// canonicalization IS emitted.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub fn canonicalize_with_inherited(
     xml: &[u8],
     strip_signature: bool,
@@ -186,7 +186,7 @@ pub fn canonicalize_with_inherited(
     Ok(out)
 }
 
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 fn process_start(
     start: &BytesStart<'_>,
     emitted_stack: &mut Vec<BTreeMap<Vec<u8>, Vec<u8>>>,

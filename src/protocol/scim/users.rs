@@ -448,7 +448,7 @@ pub async fn replace_user(
 }
 
 /// `PATCH /scim/v2/Users/{id}`
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn patch_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

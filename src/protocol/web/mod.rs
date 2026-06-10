@@ -1799,7 +1799,7 @@ const HEARTH_ICON_SVG: &[u8] = include_bytes!("assets/hearth-icon.svg");
 /// revalidates on each soft refresh but skips re-downloading unchanged
 /// content (304 Not Modified). Other embedded assets are truly immutable
 /// for the lifetime of a binary, so they keep `immutable` caching.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 async fn serve_static(
     headers: HeaderMap,
     State(state): State<Arc<WebState>>,

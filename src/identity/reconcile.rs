@@ -330,7 +330,7 @@ fn seed_realm_or_log(rbac: &dyn RbacEngine, realm_id: &RealmId, realm_name: &str
 /// by name. Logs (does not raise) on individual failures so one bad block
 /// doesn't abort reconciliation of subsequent realms or other concerns
 /// (organizations, federation, etc.).
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 fn reconcile_rbac_for_realm(
     rbac: &dyn RbacEngine,
     realm_id: &RealmId,
@@ -1081,7 +1081,7 @@ pub(crate) fn reconcile_applications(
 /// The YAML key is used as the slug. Organizations are created if missing or
 /// updated if their name, description, or config have changed. Members and
 /// invitations are runtime-only and not managed by reconciliation.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub(crate) fn reconcile_organizations(
     engine: &dyn IdentityEngine,
     realm_id: &RealmId,
@@ -1557,7 +1557,7 @@ pub fn save_snapshot(
 /// Returns a list of realm names whose `rotate_signing_key` flag was consumed.
 /// The caller should clear those flags in the config snapshot before saving so
 /// subsequent restarts with the flag still in YAML do not re-rotate.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub fn apply_diff(
     diffs: &[ConfigDiff],
     config: &Config,
@@ -1863,7 +1863,7 @@ fn apply_rbac_changes(
 ///
 /// Non-fatal: all I/O errors are logged rather than returned so startup
 /// continues even when the check encounters storage problems.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub fn detect_orphaned_realms(
     engine: &dyn IdentityEngine,
     config: &Config,

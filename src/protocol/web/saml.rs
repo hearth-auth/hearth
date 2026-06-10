@@ -105,7 +105,7 @@ pub struct AcsForm {
     pub relay_state: Option<String>,
 }
 
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn sp_acs(
     State(state): State<Arc<WebState>>,
     AxumPath(realm_name): AxumPath<String>,

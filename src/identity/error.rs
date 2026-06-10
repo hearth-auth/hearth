@@ -544,7 +544,7 @@ pub enum IdentityError {
 }
 
 impl fmt::Display for IdentityError {
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RealmNotFound => write!(f, "realm not found"),
@@ -960,7 +960,7 @@ impl IdentityError {
 }
 
 impl std::error::Error for IdentityError {
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Storage(err) => Some(&**err),

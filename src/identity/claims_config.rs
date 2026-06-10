@@ -187,7 +187,7 @@ fn canonical_field_value(user: &User, field: &CanonicalUserField) -> Option<Valu
 }
 
 /// Default built-in mappings.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub fn default_claim_profile() -> Vec<ClaimMapping> {
     vec![
         ClaimMapping {

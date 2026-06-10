@@ -171,7 +171,7 @@ impl PreTokenWebhookTransport for UreqPreTokenWebhookTransport {
         let url = url.to_string();
         let timeout = Duration::from_millis(timeout_ms);
 
-        let _ = timeout; // TODO: wire timeout via ureq agent config in a follow-up
+        let _ = timeout; // TODO: HEA-1355 wire timeout via ureq agent config in a follow-up
 
         let do_request = move || -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
             let resp = ureq::post(&url)
@@ -253,7 +253,7 @@ impl PreTokenWebhookClient {
         hmac_secret: Option<&str>,
         request: &PreTokenWebhookRequest,
     ) -> Result<BTreeMap<String, serde_json::Value>, PreTokenWebhookError> {
-        let _ = hmac_secret; // TODO: sign body and inject X-Hearth-Signature-256 header
+        let _ = hmac_secret; // TODO: HEA-1356 sign body and inject X-Hearth-Signature-256 header
 
         let resp = self.transport.fire(url, timeout_ms, request)?;
 

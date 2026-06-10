@@ -21,7 +21,7 @@ pub const REALM_ID_META_KEY: &str = "x-realm-id";
 /// higher where appropriate — the produced `Status` message is safe to
 /// surface to untrusted clients (no secrets, no internals).
 #[must_use]
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub fn identity_to_status(err: IdentityError) -> Status {
     let (code, msg) = match &err {
         IdentityError::RealmNotFound

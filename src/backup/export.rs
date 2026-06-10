@@ -116,7 +116,7 @@ impl BackupExporter {
     /// Returns a [`RealmManifest`] with record counts that the caller embeds
     /// into [`BackupManifest::realms`].
     #[instrument(skip(self, writer, opts, signing_key_dek), fields(realm = %realm_id))]
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     pub fn export_realm(
         &self,
         realm_id: &RealmId,

@@ -635,7 +635,7 @@ pub struct AppEditForm {
 }
 
 /// `POST /ui/admin/realms/{realm}/applications/{id}/edit`
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn admin_app_edit_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
