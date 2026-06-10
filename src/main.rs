@@ -2780,7 +2780,7 @@ fn run_config_reload(
 fn run_realm_create() {
     let realm_id = uuid::Uuid::new_v4();
     let output = serde_json::json!({ "realm_id": realm_id.to_string() });
-    tracing::info!("{output}");
+    println!("{output}");
 }
 
 /// Runs the `hearth app create` command.
@@ -2805,7 +2805,7 @@ fn run_app_create(
         .body_mut()
         .read_json()?;
 
-    tracing::info!("{response}");
+    println!("{response}");
     Ok(())
 }
 
@@ -3557,17 +3557,17 @@ fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error:
     }
 
     if issues.is_empty() {
-        tracing::info!("✓ Configuration valid");
-        tracing::info!("");
+        println!("✓ Configuration valid");
+        println!();
         config_validate_print_summary(&config);
         Ok(())
     } else {
-        tracing::error!("✗ Configuration invalid — {} error(s):", issues.len());
-        tracing::error!("");
+        eprintln!("✗ Configuration invalid — {} error(s):", issues.len());
+        eprintln!();
         for issue in &issues {
-            tracing::error!("  {}: {}", issue.field, issue.reason);
+            eprintln!("  {}: {}", issue.field, issue.reason);
             if let Some(hint) = config_validate_hint(&issue.field, &issue.reason) {
-                tracing::error!("    → {hint}");
+                eprintln!("    → {hint}");
             }
         }
         Err("configuration validation failed".into())
@@ -3611,10 +3611,10 @@ fn config_validate_print_summary(config: &Config) {
 
     let email_transport = format!("{:?}", config.email.transport).to_ascii_lowercase();
 
-    tracing::info!("  issuer:           {issuer}");
-    tracing::info!("  storage:          {}", config.storage.data_dir);
-    tracing::info!("  email transport:  {email_transport}");
-    tracing::info!("  TLS:              {tls_mode}");
+    println!("  issuer:           {issuer}");
+    println!("  storage:          {}", config.storage.data_dir);
+    println!("  email transport:  {email_transport}");
+    println!("  TLS:              {tls_mode}");
 }
 
 /// Returns an actionable hint for well-known validation issues.
@@ -3668,9 +3668,9 @@ fn run_config_example(output: Option<&PathBuf>) -> Result<(), Box<dyn std::error
     if let Some(path) = output {
         std::fs::write(path, EXAMPLE_YAML)
             .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-        tracing::info!("wrote example configuration to {}", path.display());
+        println!("wrote example configuration to {}", path.display());
     } else {
-        tracing::info!("{EXAMPLE_YAML}");
+        print!("{EXAMPLE_YAML}");
     }
     Ok(())
 }

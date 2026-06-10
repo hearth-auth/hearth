@@ -2942,6 +2942,7 @@ mod tests {
 /// Used by [`Config::validate_all`] to report all problems at once rather
 /// than short-circuiting on the first error.
 #[derive(Debug, Clone, serde::Serialize)]
+#[allow(dead_code)]
 pub struct ValidationIssue {
     /// Dot-delimited config field path (e.g. `"server.port"`).
     pub field: String,
@@ -2954,6 +2955,7 @@ pub struct ValidationIssue {
 /// All sections use `#[serde(default)]` so a partial or empty YAML file
 /// produces valid configuration with production-safe defaults.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code, clippy::struct_field_names)]
 pub struct Config {
     /// Server network settings.
     #[serde(default)]

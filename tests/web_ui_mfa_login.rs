@@ -676,3 +676,43 @@ async fn mfa_challenge_post_tampered_cookie_rejected() {
         "tampered cookie should be treated as expired: got {body}"
     );
 }
+
+#[tokio::test]
+async fn mfa_challenge_post_rejected_with_mismatched_csrf() {
+    let rig = build_rig();
+    let secret = enroll_mfa(&rig);
+
+    // Login to get the MFA pending cookie.
+    let login_resp = post_login(rig.app.clone(), "alice@acme.test", PASSWORD, None).await;
+    let login_cookies = set_cookies(&login_resp);
+    let pending_value =
+        find_cookie_value(&login_cookies, "hearth_ui_mfa_pending").expect("pending cookie");
+
+    // Use the next time step to avoid replay protection.
+    let code = compute_totp_code(&secret, current_unix_secs() + 30);
+
+    // POST with a CSRF cookie present but a non-matching _csrf form field.
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/mfa-challenge")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(
+                    header::COOKIE,
+                    format!("hearth_ui_mfa_pending={pending_value}; hearth_ui_csrf=real_token"),
+                )
+                .body(Body::from(format!("code={code}&_csrf=wrong_token")))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "mismatched CSRF token must be rejected with 422"
+    );
+}

@@ -228,9 +228,9 @@ mod tests {
 
     #[test]
     fn rejects_invalid_file_size() {
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(&[0u8; 19]).unwrap(); // 19 is not divisible by 20
-        let err = OfflineBreachCorpus::load(f.path(), 0).unwrap_err();
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        f.write_all(&[0u8; 19]).expect("write"); // 19 is not divisible by 20
+        let err = OfflineBreachCorpus::load(f.path(), 0).expect_err("expected InvalidSize error");
         assert!(matches!(err, CorpusError::InvalidSize { .. }), "{err}");
     }
 
@@ -238,14 +238,14 @@ mod tests {
     fn rejects_missing_file() {
         let err =
             OfflineBreachCorpus::load(std::path::Path::new("/nonexistent/breach_corpus.bin"), 0)
-                .unwrap_err();
+                .expect_err("expected Io error");
         assert!(matches!(err, CorpusError::Io { .. }), "{err}");
     }
 
     #[test]
     fn empty_corpus_loads_ok() {
         let f = write_corpus(&[]);
-        let corpus = OfflineBreachCorpus::load(f.path(), 0).unwrap();
+        let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
         assert_eq!(corpus.entry_count(), 0);
     }
 
@@ -255,7 +255,7 @@ mod tests {
     fn is_pwned_detects_known_password() {
         let hash = sha1_of(b"password");
         let f = write_corpus(&[hash]);
-        let corpus = OfflineBreachCorpus::load(f.path(), 0).unwrap();
+        let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
         assert!(corpus.is_pwned(b"password"));
     }
 
@@ -263,14 +263,14 @@ mod tests {
     fn is_pwned_returns_false_for_absent_password() {
         let hash = sha1_of(b"in_corpus");
         let f = write_corpus(&[hash]);
-        let corpus = OfflineBreachCorpus::load(f.path(), 0).unwrap();
+        let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
         assert!(!corpus.is_pwned(b"not_in_corpus"));
     }
 
     #[test]
     fn is_pwned_false_on_empty_corpus() {
         let f = write_corpus(&[]);
-        let corpus = OfflineBreachCorpus::load(f.path(), 0).unwrap();
+        let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
         assert!(!corpus.is_pwned(b"anything"));
     }
 
@@ -280,7 +280,7 @@ mod tests {
         let low_hash = [0x00u8; HASH_LEN];
         let high_hash = [0xFFu8; HASH_LEN];
         let f = write_corpus(&[low_hash, high_hash]);
-        let corpus = OfflineBreachCorpus::load(f.path(), 0).unwrap();
+        let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
         // Create a password whose SHA-1 happens to equal low_hash would be
         // infeasible; instead we test via binary_search directly.
         assert!(corpus.binary_search(&low_hash));
@@ -291,7 +291,7 @@ mod tests {
         let low_hash = [0x00u8; HASH_LEN];
         let high_hash = [0xFFu8; HASH_LEN];
         let f = write_corpus(&[low_hash, high_hash]);
-        let corpus = OfflineBreachCorpus::load(f.path(), 0).unwrap();
+        let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
         assert!(corpus.binary_search(&high_hash));
     }
 
@@ -299,7 +299,7 @@ mod tests {
     fn is_pwned_not_found_in_multi_entry_corpus() {
         let hashes: Vec<[u8; HASH_LEN]> = (0u8..10).map(|i| [i; HASH_LEN]).collect();
         let f = write_corpus(&hashes);
-        let corpus = OfflineBreachCorpus::load(f.path(), 0).unwrap();
+        let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
         // 0x0A (10) is not in 0x00..0x09
         assert!(!corpus.binary_search(&[0x0Au8; HASH_LEN]));
     }
@@ -308,7 +308,7 @@ mod tests {
     fn entry_count_matches_hashes_written() {
         let hashes: Vec<[u8; HASH_LEN]> = (0u8..5).map(|i| [i; HASH_LEN]).collect();
         let f = write_corpus(&hashes);
-        let corpus = OfflineBreachCorpus::load(f.path(), 0).unwrap();
+        let corpus = OfflineBreachCorpus::load(f.path(), 0).expect("load corpus");
         assert_eq!(corpus.entry_count(), 5);
     }
 

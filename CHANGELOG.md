@@ -9,6 +9,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **CSRF protection on TOTP/MFA challenge forms** — the inline TOTP form in
+  `login.html` and the standalone `mfa_challenge.html` form now include a
+  `_csrf` hidden field and the submit handler verifies it against the
+  `hearth_ui_csrf` cookie, closing a CSRF gap on `/ui/mfa-challenge` (HEA-1348).
+
+### Fixed
+
+- **TOTP input placeholder** — corrected `placeholder="000 000"` →
+  `placeholder="000000"` in the login and MFA-challenge forms; the space was
+  causing pattern-validation failures on mobile keyboards with
+  `inputmode="numeric"` and `pattern="[0-9]{6}"` (HEA-1348).
+
 - **Eliminated `ring 0.16.20` (CVE-2025-4432, MEDIUM) and `rustls-webpki 0.101.7`
   (GHSA-82j2-j2ch-gfr8, HIGH)** — upgraded `ldap3` from 0.11 to 0.12.
   The new release uses `ring 0.17` and `rustls 0.23`, removing the only transitive

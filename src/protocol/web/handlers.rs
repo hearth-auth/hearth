@@ -1608,6 +1608,9 @@ fn passkey_complete_for_user(
 pub struct MfaChallengeForm {
     /// TOTP code or recovery code entered by the user.
     pub code: String,
+    /// CSRF token echoed from the hidden `_csrf` field.
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
 }
 
 /// Renders the MFA challenge form.
@@ -1625,13 +1628,29 @@ pub async fn mfa_challenge_form(
         return Redirect::to("/ui/login").into_response();
     };
 
-    let tmpl = MfaChallengeTemplate::new(
+    let secure = state.is_secure_request(&headers);
+    let (csrf_value, fresh_cookie) =
+        match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+            Some(existing) => (existing.to_string(), None),
+            None => {
+                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+                (val, Some(cookie))
+            }
+        };
+
+    let mut tmpl = MfaChallengeTemplate::new(
         None,
         state.product_name.clone(),
         state.logo_url.clone(),
         pending.return_to,
     );
-    render(&tmpl)
+    tmpl.csrf = Some(csrf_value);
+
+    let mut resp = render(&tmpl);
+    if let Some(cookie) = fresh_cookie {
+        append_cookie(&mut resp, &cookie);
+    }
+    resp
 }
 
 /// Handles MFA challenge submission.
@@ -1652,6 +1671,20 @@ pub async fn mfa_challenge_submit(
     let Some(pending) = parse_mfa_pending_cookie(&state.cookie_secret, raw) else {
         return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
     };
+
+    // CSRF double-submit check: if the browser has a hearth_ui_csrf cookie,
+    // the hidden _csrf field must match it.
+    if let Some(cookie_val) = cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+        if !super::auth::csrf_token_eq(cookie_val, &form.csrf) {
+            let tmpl = MfaChallengeTemplate::new(
+                Some("Invalid security token. Please reload the page and try again.".to_string()),
+                state.product_name.clone(),
+                state.logo_url.clone(),
+                pending.return_to.clone(),
+            );
+            return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
 
     let code = form.code.trim();
 
