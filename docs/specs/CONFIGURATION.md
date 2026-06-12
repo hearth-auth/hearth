@@ -849,6 +849,50 @@ realms:
           leeway_seconds: 120   # corp IdP has known 2-minute clock drift
 ```
 
+---
+
+### `realms.<name>.saml_service_providers`
+
+Declarative SAML 2.0 Service Provider (SP) registrations where **Hearth acts as the IdP**. Keyed by an operator-assigned slug that identifies the SP. Reconciled at startup — runtime SPs not present in YAML are removed.
+
+Each entry configures one SP:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `entity_id` | string | *required* | SP entity ID (a URI, e.g. `https://app.example.com/saml/metadata`). Must match the `Issuer` in AuthnRequests from this SP. |
+| `acs_url` | string | *required* | Assertion Consumer Service URL — where Hearth posts the SAML response. |
+| `slo_url` | string | — | Single Logout Service URL. When present, Hearth sends a `<LogoutRequest>` here on user logout. |
+| `sp_certificate_pem` | string | — | PEM-encoded SP certificate for verifying signed AuthnRequests. Required when `want_authn_requests_signed: true`. |
+| `sign_assertions` | bool | `true` | Whether Hearth signs individual `<Assertion>` elements. |
+| `sign_responses` | bool | `false` | Whether Hearth signs the outer `<Response>` envelope in addition to assertions. |
+| `want_authn_requests_signed` | bool | `false` | Require incoming AuthnRequests to carry a valid XML signature. Needs `sp_certificate_pem` to verify. |
+| `nameid_format` | string | `emailAddress` | NameID format to use in assertions: `emailAddress`, `persistent`, `transient`, or `unspecified`. |
+| `attribute_map` | map | `{}` | Custom SAML attribute statements. Keys are attribute names; values are Hearth claim paths (e.g. `user.email`, `user.display_name`, `roles`). |
+
+```yaml
+realms:
+  - name: corp
+    saml_service_providers:
+      salesforce:
+        entity_id: "https://myorg.my.salesforce.com"
+        acs_url: "https://myorg.my.salesforce.com/sso/saml"
+        slo_url: "https://myorg.my.salesforce.com/slo/saml"
+        sign_assertions: true
+        sign_responses: false
+        nameid_format: emailAddress
+        attribute_map:
+          email: user.email
+          displayName: user.display_name
+          groups: roles
+```
+
+The SAML IdP metadata (public signing key, SSO endpoint) for a realm is available at:
+```
+GET /realms/{realm-name}/saml/idp-metadata.xml
+```
+
+---
+
 ### `realms.<name>.rbac`
 
 Declarative role, permission, group, and scope setup for the realm's RBAC model. See [`AUTHORIZATION.md`](./AUTHORIZATION.md) for the semantic model and [`AUTHZ_EXPANSION.md`](./AUTHZ_EXPANSION.md) for the full registry, scope-bundle, and claim-profile surfaces.

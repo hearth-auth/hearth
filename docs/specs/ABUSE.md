@@ -1151,7 +1151,7 @@ verification path.
 
 ## A-18: Session Lifecycle Policy (idle + absolute timeout)
 
-**File**: `src/identity/sessions.rs`, `src/identity/engine/mod.rs`, `src/identity/types.rs`
+**File**: `src/identity/sessions.rs`, `src/identity/engine/mod.rs`, `src/identity/types/realm.rs`
 
 ### YAML configuration
 
