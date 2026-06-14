@@ -111,6 +111,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   from the 1.0 Readiness Audit — minimal Auth0 "Actions" / Keycloak protocol
   mapper escape hatch (HEA-1324).
 
+- **Upgraded `maxminddb` to 0.27.3 (RUSTSEC-2025-0132)** — `maxminddb` 0.24
+  contained a soundness bug where `Reader::open_mmap` unsoundly treated a
+  `memmap2` operation as safe, enabling potential undefined behaviour if the
+  backing file was modified after being mapped. Hearth never called
+  `open_mmap` (only `open_readfile`), so no exploit path existed; the
+  upgrade closes the advisory and removes the suppression in `deny.toml`.
+  A `cargo audit --deny warnings` gate has been added to the CI quality
+  job to catch future RustSec advisories at PR time (HEA-1370).
+
 ### Fixed
 
 - **Realm OIDC discovery now includes `end_session_endpoint`** — the realm-scoped

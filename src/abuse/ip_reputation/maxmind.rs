@@ -135,14 +135,16 @@ impl IpReputationProvider for MaxMindAsnProvider {
             Inner::Live(r) => r,
         };
 
-        match reader.lookup::<Asn>(ip) {
-            Ok(record) => IpReputationVerdict {
+        // maxminddb 0.27+: lookup() returns a LookupResult cursor; decode()
+        // returns Ok(None) for IPs not in the database (was Err in 0.24).
+        match reader.lookup(ip).and_then(|r| r.decode::<Asn>()) {
+            Ok(Some(record)) => IpReputationVerdict {
                 is_blocklisted: false,
                 asn: record.autonomous_system_number,
                 asn_org: record.autonomous_system_organization.map(str::to_owned),
             },
-            Err(_) => {
-                // Lookup failed (IP not in database, or read error) — fail-open.
+            Ok(None) | Err(_) => {
+                // IP not in database, or decode error — fail-open.
                 IpReputationVerdict::default()
             }
         }
