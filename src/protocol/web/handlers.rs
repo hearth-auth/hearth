@@ -1657,6 +1657,7 @@ pub async fn mfa_challenge_form(
 /// numeric) or `verify_recovery_code()` (anything else). On success:
 /// creates a session, issues cookies, clears the pending cookie, and
 /// redirects to the original `return_to` or `/ui`.
+#[allow(clippy::too_many_lines)]
 pub async fn mfa_challenge_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
