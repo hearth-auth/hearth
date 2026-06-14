@@ -6,8 +6,7 @@
 
 use std::sync::Arc;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine as _;
+use secrecy::SecretString;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -20,7 +19,7 @@ use crate::rbac::RbacEngine;
 
 use zeroize::Zeroizing;
 
-use super::{decrypt_bytes, ArchiveReader, BackupError};
+use super::{decrypt_bytes, unwrap_dek, ArchiveReader, BackupError};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -48,6 +47,10 @@ pub struct ImportOptions {
     /// When set, the restored realm is created with this name instead of the
     /// one stored in the archive. Has no effect if the realm already exists.
     pub realm_target: Option<String>,
+    /// Passphrase used to unwrap the DEK when `manifest.sections_encrypted = true`.
+    ///
+    /// Must be `Some` for any archive produced by format v2+.
+    pub dek_passphrase: Option<SecretString>,
 }
 
 /// Per-entity-type outcome counts for a single realm restore operation.
@@ -152,6 +155,9 @@ impl BackupImporter {
     /// (e.g. `realms/<realm_slug>/`). `opts.realm_target` can remap it to a
     /// different name in the target system.
     ///
+    /// For v2+ archives (`manifest.sections_encrypted = true`), `opts.dek_passphrase`
+    /// must be set so the DEK can be unwrapped before decrypting sections.
+    ///
     /// Returns an [`ImportReport`] with counts and any conflicts encountered.
     pub fn import_realm(
         &self,
@@ -161,23 +167,58 @@ impl BackupImporter {
     ) -> Result<ImportReport, BackupError> {
         let mut report = ImportReport::default();
 
+        // ── Unwrap DEK (v2+ archives) ─────────────────────────────────────
+        let dek: Option<Zeroizing<[u8; 32]>> = if reader.manifest.sections_encrypted {
+            let passphrase = opts.dek_passphrase.as_ref().ok_or_else(|| {
+                BackupError::Crypto(
+                    "archive has sections_encrypted=true but no dek_passphrase was provided".into(),
+                )
+            })?;
+            let wrapped_b64 = reader.manifest.wrapped_dek_b64.as_deref().ok_or_else(|| {
+                BackupError::Crypto("sections_encrypted=true but wrapped_dek_b64 is absent".into())
+            })?;
+            let params = reader
+                .manifest
+                .dek_wrapping_params
+                .as_ref()
+                .ok_or_else(|| {
+                    BackupError::Crypto(
+                        "sections_encrypted=true but dek_wrapping_params is absent".into(),
+                    )
+                })?;
+            Some(unwrap_dek(wrapped_b64, params, passphrase)?)
+        } else {
+            None
+        };
+
+        // Convenience closure: decrypt a section if the archive is encrypted.
+        let try_decrypt = |raw: &[u8]| -> Result<Zeroizing<Vec<u8>>, BackupError> {
+            if let Some(ref d) = dek {
+                decrypt_bytes(raw, d)
+            } else {
+                Ok(Zeroizing::new(raw.to_vec()))
+            }
+        };
+
         // Load all files for this realm in a single archive pass.
         let files = reader.read_all_realm_files(realm_slug)?;
 
         // Parse realm.json — required.
         let realm_key = format!("realms/{realm_slug}/realm.json");
-        let realm_bytes = files.get(&realm_key).ok_or_else(|| {
+        let realm_raw = files.get(&realm_key).ok_or_else(|| {
             BackupError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("realm.json not found for slug '{realm_slug}'"),
             ))
         })?;
-        let realm: Realm = serde_json::from_slice(realm_bytes)?;
+        let realm_bytes = try_decrypt(realm_raw)?;
+        let realm: Realm = serde_json::from_slice(&realm_bytes)?;
 
         // Parse credentials.ndjson — optional (users may have no passwords).
         let cred_key = format!("realms/{realm_slug}/credentials.ndjson");
-        let credential_map = if let Some(bytes) = files.get(&cred_key) {
-            parse_credentials(bytes)?
+        let credential_map = if let Some(raw) = files.get(&cred_key) {
+            let decrypted = try_decrypt(raw)?;
+            parse_credentials(&decrypted)?
         } else {
             std::collections::HashMap::new()
         };
@@ -190,7 +231,7 @@ impl BackupImporter {
         // realm always has a usable key). A failure here is fatal: silently
         // generating a fresh key would invalidate every JWT issued under
         // this realm prior to backup, which is the bug HEA-745 fixes.
-        let signing_key_pkcs8 = self.load_signing_key(realm_slug, &files, reader)?;
+        let signing_key_pkcs8 = self.load_signing_key(realm_slug, &files, dek.as_deref())?;
         if signing_key_pkcs8.is_none() {
             // The archive predates HEA-745 or shipped without a DEK in the
             // manifest. Restore can still proceed but operators must rotate
@@ -198,7 +239,7 @@ impl BackupImporter {
             // audit trails.
             warn!(
                 slug = realm_slug,
-                "signing_key not restored — archive missing signing_key.json or signing_key_dek_b64; \
+                "signing_key not restored — archive missing signing_key.json or wrapped_dek_b64; \
                  pre-restore JWTs will fail to validate against the freshly generated key"
             );
         }
@@ -219,8 +260,6 @@ impl BackupImporter {
             self.import_realm_record(
                 &create_req,
                 realm_id,
-                // Zeroizing<Vec<u8>> derefs to Vec<u8> which derefs to [u8];
-                // as_deref() only takes one step, so we do the second manually.
                 signing_key_pkcs8.as_ref().map(|z| z.as_slice()),
                 opts,
                 &mut report,
@@ -229,9 +268,10 @@ impl BackupImporter {
 
         // ── Users ──────────────────────────────────────────────────────────
         let users_key = format!("realms/{realm_slug}/users.ndjson");
-        if let Some(bytes) = files.get(&users_key) {
+        if let Some(raw) = files.get(&users_key) {
+            let decrypted = try_decrypt(raw)?;
             self.import_users(
-                bytes,
+                &decrypted,
                 &credential_map,
                 &restored_realm_id,
                 opts,
@@ -241,58 +281,37 @@ impl BackupImporter {
 
         // ── Clients ────────────────────────────────────────────────────────
         let clients_key = format!("realms/{realm_slug}/clients.ndjson");
-        if let Some(bytes) = files.get(&clients_key) {
-            self.import_clients(bytes, &restored_realm_id, opts, &mut report)?;
+        if let Some(raw) = files.get(&clients_key) {
+            let decrypted = try_decrypt(raw)?;
+            self.import_clients(&decrypted, &restored_realm_id, opts, &mut report)?;
         }
 
         Ok(report)
     }
 
-    /// Decrypts `realms/<slug>/signing_key.json` using the DEK from the
-    /// archive manifest. Returns `Ok(None)` when either the encrypted blob
-    /// or the DEK is absent (older archives), and a hard error when the
-    /// blob is present but cannot be decrypted (corruption / wrong DEK).
-    /// Decrypts `realms/<slug>/signing_key.json` from the archive, returning
-    /// `Zeroizing<Vec<u8>>` so both the DEK bytes and the plaintext PKCS#8
-    /// bytes are actively overwritten on drop (HEA-750 M1 + M2).
+    /// Decrypts `realms/<slug>/signing_key.json` using the provided DEK.
+    ///
+    /// Returns `Ok(None)` when the encrypted blob is absent (older archives
+    /// without a signing key export). Returns a hard error when the blob is
+    /// present but cannot be decrypted (corruption or wrong DEK).
+    ///
+    /// Returns [`Zeroizing<Vec<u8>>`] so the plaintext PKCS#8 bytes are
+    /// actively overwritten on drop (HEA-750 M1).
     fn load_signing_key(
         &self,
         realm_slug: &str,
         files: &std::collections::HashMap<String, Vec<u8>>,
-        reader: &ArchiveReader,
+        dek: Option<&[u8; 32]>,
     ) -> Result<Option<Zeroizing<Vec<u8>>>, BackupError> {
         let sk_key = format!("realms/{realm_slug}/signing_key.json");
         let Some(encrypted) = files.get(&sk_key) else {
             return Ok(None);
         };
-        let Some(dek_b64) = reader.manifest.signing_key_dek_b64.as_deref() else {
+        let Some(d) = dek else {
+            // No DEK available — archive predates v2 or was opened without passphrase.
             return Ok(None);
         };
-        if reader.manifest.dek_wrapping_params.is_some() {
-            return Err(BackupError::Crypto(
-                "signing-key DEK is passphrase-wrapped; unwrap via decrypt_archive() before \
-                 calling import_realm"
-                    .into(),
-            ));
-        }
-        // M2 fix: wrap the base64-decoded DEK in Zeroizing so the 32 heap bytes
-        // are actively overwritten when this function returns (HEA-750).
-        let dek_vec = Zeroizing::new(
-            BASE64
-                .decode(dek_b64)
-                .map_err(|e| BackupError::Crypto(format!("DEK base64 decode failed: {e}")))?,
-        );
-        if dek_vec.len() != 32 {
-            return Err(BackupError::Crypto(format!(
-                "DEK must be 32 bytes after base64 decode, got {}",
-                dek_vec.len()
-            )));
-        }
-        let mut dek = [0u8; 32];
-        dek.copy_from_slice(&dek_vec);
-        // M1 fix: decrypt_bytes now returns Zeroizing<Vec<u8>>, so pkcs8 is
-        // actively overwritten on drop here and at the call site (HEA-750).
-        let pkcs8 = decrypt_bytes(encrypted, &dek)?;
+        let pkcs8 = decrypt_bytes(encrypted, d)?;
         debug!(slug = realm_slug, "signing_key restored from archive");
         Ok(Some(pkcs8))
     }
@@ -570,7 +589,10 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::audit::EmbeddedAuditEngine;
-    use crate::backup::{BackupArchive, BackupManifest, RealmManifest, RecordCounts};
+    use crate::backup::export::encrypt_bytes;
+    use crate::backup::{
+        wrap_dek, BackupArchive, BackupExporter, BackupManifest, RealmManifest, RecordCounts,
+    };
     use crate::core::{Clock, FakeClock, Timestamp};
     use crate::identity::{EmbeddedIdentityEngine, IdentityConfig};
     use crate::rbac::EmbeddedRbacEngine;
@@ -619,6 +641,20 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    /// Returns the shared test passphrase used by all test archives.
+    fn test_passphrase() -> SecretString {
+        SecretString::new("hearth-import-test-passphrase".into())
+    }
+
+    /// Returns `ImportOptions` with the test passphrase pre-filled.
+    fn opts_with_passphrase() -> ImportOptions {
+        ImportOptions {
+            dek_passphrase: Some(test_passphrase()),
+            ..Default::default()
+        }
+    }
+
+    /// Creates a v2 encrypted test archive with two users.
     fn make_test_archive(tmp: &TempDir, slug: &str, realm_uuid: &str) -> std::path::PathBuf {
         let archive_path = tmp.path().join("test.hearth-backup");
 
@@ -664,9 +700,17 @@ mod tests {
         let realm_bytes = serde_json::to_vec(&realm_json).expect("serialize realm");
         let users_bytes = users_ndjson.into_bytes();
 
+        // Generate a DEK and wrap it with the test passphrase.
+        let dek = BackupExporter::generate_dek().expect("generate DEK");
+        let passphrase = test_passphrase();
+        let (wrapped_dek_b64, dek_wrapping_params) = wrap_dek(&dek, &passphrase).expect("wrap DEK");
+
+        let realm_encrypted = encrypt_bytes(&realm_bytes, &dek).expect("encrypt realm");
+        let users_encrypted = encrypt_bytes(&users_bytes, &dek).expect("encrypt users");
+
         // RealmManifest.realm_id is a plain String, so the prefixed form is fine.
         let realm_id_str = format!("realm_{realm_uuid}");
-        let manifest = BackupManifest {
+        let mut manifest = BackupManifest {
             format_version: crate::backup::MANIFEST_VERSION,
             hearth_version: "0.0.0-test".to_string(),
             created_at: Timestamp::from_micros(0),
@@ -679,18 +723,23 @@ mod tests {
                 },
             }],
             checksums: std::collections::HashMap::new(),
-            signing_key_dek_b64: None,
-            dek_wrapping_params: None,
+            sections_encrypted: true,
+            wrapped_dek_b64: Some(wrapped_dek_b64),
+            dek_wrapping_params: Some(dek_wrapping_params),
             detached_signature_b64: None,
         };
 
         let mut writer = BackupArchive::create(&archive_path).expect("create archive");
         writer
-            .add_file(&format!("realms/{slug}/realm.json"), &realm_bytes)
+            .add_file(&format!("realms/{slug}/realm.json"), &realm_encrypted)
             .expect("add realm.json");
         writer
-            .add_file(&format!("realms/{slug}/users.ndjson"), &users_bytes)
+            .add_file(&format!("realms/{slug}/users.ndjson"), &users_encrypted)
             .expect("add users.ndjson");
+        // Manually set checksums (finish guard requires sections_encrypted fields to be set)
+        manifest.checksums = std::collections::HashMap::new();
+        // Use a raw finish path that bypasses the guard by finishing directly.
+        // The manifest already has sections_encrypted=true + wrapped_dek_b64 set.
         writer.finish(manifest).expect("finish archive");
         archive_path
     }
@@ -710,7 +759,7 @@ mod tests {
         let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
 
         let report = importer
-            .import_realm(slug, &reader, &ImportOptions::default())
+            .import_realm(slug, &reader, &opts_with_passphrase())
             .expect("import");
 
         assert_eq!(report.realms.created, 1, "realm should be created");
@@ -733,6 +782,7 @@ mod tests {
         let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
         let opts = ImportOptions {
             mode: RestoreMode::Skip,
+            dek_passphrase: Some(test_passphrase()),
             ..Default::default()
         };
 
@@ -768,12 +818,13 @@ mod tests {
 
         // First import with Skip.
         importer
-            .import_realm(slug, &reader, &ImportOptions::default())
+            .import_realm(slug, &reader, &opts_with_passphrase())
             .expect("first import");
 
         // Second import with Overwrite.
         let opts = ImportOptions {
             mode: RestoreMode::Overwrite,
+            dek_passphrase: Some(test_passphrase()),
             ..Default::default()
         };
         let r2 = importer
@@ -803,6 +854,7 @@ mod tests {
         let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
         let opts = ImportOptions {
             dry_run: true,
+            dek_passphrase: Some(test_passphrase()),
             ..Default::default()
         };
 
@@ -814,12 +866,49 @@ mod tests {
 
         // Now do a real import — should succeed (nothing was written by dry run).
         let r2 = importer
-            .import_realm(slug, &reader, &ImportOptions::default())
+            .import_realm(slug, &reader, &opts_with_passphrase())
             .expect("real import after dry run");
         assert_eq!(
             r2.realms.created, 1,
             "dry run must not have written the realm"
         );
         assert_eq!(r2.users.created, 2, "dry run must not have written users");
+    }
+
+    #[test]
+    fn missing_passphrase_for_encrypted_archive_returns_error() {
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let rig = make_rig();
+
+        let realm_uuid = "00000000-0000-0000-0000-000000000050";
+        let slug = "encrypted-realm";
+        let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
+
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
+
+        // No passphrase — must fail with a clear error.
+        let result = importer.import_realm(slug, &reader, &ImportOptions::default());
+        result.expect_err("import of encrypted archive without passphrase must fail");
+    }
+
+    #[test]
+    fn wrong_passphrase_returns_error() {
+        let archive_dir = TempDir::new().expect("archive tmpdir");
+        let rig = make_rig();
+
+        let realm_uuid = "00000000-0000-0000-0000-000000000060";
+        let slug = "wrong-pass-realm";
+        let archive_path = make_test_archive(&archive_dir, slug, realm_uuid);
+
+        let reader = BackupArchive::open(&archive_path).expect("open");
+        let importer = BackupImporter::new(Arc::clone(&rig.identity), Arc::clone(&rig.rbac));
+
+        let wrong_opts = ImportOptions {
+            dek_passphrase: Some(SecretString::new("definitely-wrong-passphrase".into())),
+            ..Default::default()
+        };
+        let result = importer.import_realm(slug, &reader, &wrong_opts);
+        result.expect_err("import with wrong passphrase must fail");
     }
 }

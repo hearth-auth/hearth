@@ -51,7 +51,7 @@ mod types;
 
 pub use encryption::{decrypt_archive, encrypt_archive};
 pub use error::BackupError;
-pub use export::{decrypt_bytes, BackupExporter, ExportOptions};
+pub use export::{decrypt_bytes, unwrap_dek, wrap_dek, BackupExporter, ExportOptions};
 pub use import::{
     BackupImporter, Conflict, EntityCounts, ImportOptions, ImportReport, RestoreMode,
 };
@@ -308,7 +308,8 @@ mod tests {
                 },
             }],
             checksums: HashMap::new(),
-            signing_key_dek_b64: None,
+            sections_encrypted: false,
+            wrapped_dek_b64: None,
             dek_wrapping_params: None,
             detached_signature_b64: None,
         }

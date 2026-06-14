@@ -3722,7 +3722,6 @@ async fn admin_backup_create(
 
     let result = tokio::task::spawn_blocking(move || {
         use crate::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
-        use base64::Engine as _;
 
         // Resolve optional realm slug to a RealmId.
         let filter_id: Option<crate::core::RealmId> = if let Some(slug) = &realm_filter_slug {
@@ -3793,9 +3792,21 @@ async fn admin_backup_create(
             realm_manifests.push(rm);
         }
 
-        // No passphrase wrapping for the HTTP endpoint.
+        // Wrap the DEK with HEARTH_MASTER_KEY (required for HTTP endpoint).
+        let master_key = std::env::var("HEARTH_MASTER_KEY").map_err(|_| {
+            "HEARTH_MASTER_KEY is not set — backup requires a master key".to_string()
+        })?;
+        if master_key.is_empty() {
+            return Err::<Vec<u8>, String>("HEARTH_MASTER_KEY is empty".to_string());
+        }
+        let passphrase = secrecy::SecretString::from(master_key);
+        let (wrapped_dek_b64, wrapping_params) =
+            crate::backup::BackupExporter::wrap_dek(&dek, &passphrase)
+                .map_err(|e| format!("DEK wrap: {e}"))?;
         let mut manifest = BackupManifest::new(realm_manifests);
-        manifest.signing_key_dek_b64 = Some(base64::engine::general_purpose::STANDARD.encode(dek));
+        manifest.sections_encrypted = true;
+        manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
+        manifest.dek_wrapping_params = Some(wrapping_params);
 
         writer
             .finish(manifest)
@@ -3986,10 +3997,18 @@ async fn admin_backup_restore(
         }
 
         let importer = BackupImporter::new(identity, rbac);
+        let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
+            let mk = std::env::var("HEARTH_MASTER_KEY")
+                .map_err(|_| "HEARTH_MASTER_KEY not set for encrypted restore".to_string())?;
+            Some(secrecy::SecretString::from(mk))
+        } else {
+            None
+        };
         let opts = ImportOptions {
             mode,
             dry_run,
             realm_target: None,
+            dek_passphrase,
         };
 
         let slugs: Vec<String> = if let Some(slug) = &realm_filter {

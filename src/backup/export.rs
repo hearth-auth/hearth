@@ -27,9 +27,8 @@
 //!     let dek = BackupExporter::generate_dek().unwrap();
 //!     let opts = ExportOptions::default();
 //!     let realm_manifest = exporter.export_realm(realm_id, &mut writer, &opts, &dek).unwrap();
-//!     let mut manifest = BackupManifest::new(vec![realm_manifest]);
-//!     manifest.signing_key_dek_b64 = Some(base64::engine::general_purpose::STANDARD.encode(dek));
-//!     writer.finish(manifest).unwrap();
+//!     // Wrap the DEK and set manifest fields before finishing.
+//!     writer.finish(BackupManifest::new(vec![realm_manifest])).unwrap();
 //! }
 //! ```
 
@@ -38,17 +37,22 @@ use std::sync::Arc;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
-use ring::rand::{SecureRandom, SystemRandom};
+use ring::rand::{generate, SecureRandom, SystemRandom};
+use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use tracing::instrument;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::audit::{AuditEngine, AuditQuery};
 use crate::core::RealmId;
 use crate::identity::IdentityEngine;
 use crate::rbac::RbacEngine;
 
-use super::{ArchiveWriter, BackupError, RealmManifest, RecordCounts};
+use super::{ArchiveWriter, BackupError, DekWrappingParams, RealmManifest, RecordCounts};
+
+const DEK_WRAP_M_COST: u32 = 65_536;
+const DEK_WRAP_T_COST: u32 = 3;
+const DEK_WRAP_P_COST: u32 = 4;
 
 /// Options controlling what gets included in a realm export.
 #[derive(Clone, Debug, Default)]
@@ -67,8 +71,8 @@ pub struct ExportOptions {
 ///
 /// Construct with [`new`](Self::new), then call [`export_realm`](Self::export_realm)
 /// once per realm. Generate a single DEK with [`generate_dek`](Self::generate_dek)
-/// and reuse it for all `export_realm` calls in the same archive; store it
-/// (base64-encoded) in [`BackupManifest::signing_key_dek_b64`].
+/// and reuse it for all `export_realm` calls in the same archive; wrap and store
+/// it (via [`wrap_dek`](Self::wrap_dek)) in [`BackupManifest::wrapped_dek_b64`].
 pub struct BackupExporter {
     identity: Arc<dyn IdentityEngine>,
     audit: Arc<dyn AuditEngine>,
@@ -92,8 +96,9 @@ impl BackupExporter {
     /// Generates a fresh random 32-byte Data Encryption Key.
     ///
     /// Generate once per archive and pass the same key to every
-    /// [`export_realm`](Self::export_realm) call. Store the base64-encoded
-    /// result in [`BackupManifest::signing_key_dek_b64`].
+    /// [`export_realm`](Self::export_realm) call. Wrap with
+    /// [`wrap_dek`](Self::wrap_dek) and store in
+    /// [`BackupManifest::wrapped_dek_b64`].
     pub fn generate_dek() -> Result<[u8; 32], BackupError> {
         let mut bytes = [0u8; 32];
         SystemRandom::new()
@@ -102,27 +107,129 @@ impl BackupExporter {
         Ok(bytes)
     }
 
+    /// Wraps `dek` with an Argon2id-derived key from `passphrase`.
+    ///
+    /// Returns the base64-encoded wrapped blob and the [`DekWrappingParams`]
+    /// that must be stored alongside it in the manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if salt or nonce generation or AES-GCM sealing fails.
+    pub fn wrap_dek(
+        dek: &[u8; 32],
+        passphrase: &SecretString,
+    ) -> Result<(String, DekWrappingParams), BackupError> {
+        let rng = SystemRandom::new();
+        let salt = generate::<[u8; 16]>(&rng)
+            .map_err(|_| BackupError::Crypto("salt generation failed".into()))?
+            .expose();
+        let nonce_bytes = generate::<[u8; 12]>(&rng)
+            .map_err(|_| BackupError::Crypto("nonce generation failed".into()))?
+            .expose();
+        let mut wk = derive_dek_wrapping_key(passphrase.expose_secret().as_bytes(), &salt)?;
+        let unbound = UnboundKey::new(&AES_256_GCM, &wk)
+            .map_err(|_| BackupError::Crypto("AES key init failed".into()))?;
+        wk.zeroize();
+        let key = LessSafeKey::new(unbound);
+        let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+        let mut blob = dek.to_vec();
+        key.seal_in_place_append_tag(nonce, Aad::empty(), &mut blob)
+            .map_err(|_| BackupError::Crypto("DEK wrap failed".into()))?;
+        let mut full = Vec::with_capacity(12 + blob.len());
+        full.extend_from_slice(&nonce_bytes);
+        full.extend_from_slice(&blob);
+        Ok((
+            BASE64.encode(full),
+            DekWrappingParams {
+                salt_b64: BASE64.encode(salt),
+                m_cost: DEK_WRAP_M_COST,
+                t_cost: DEK_WRAP_T_COST,
+                p_cost: DEK_WRAP_P_COST,
+            },
+        ))
+    }
+
+    /// Unwraps a DEK previously wrapped by [`wrap_dek`].
+    ///
+    /// Returns the plaintext 32-byte DEK in a [`Zeroizing`] wrapper so the
+    /// key material is actively overwritten when dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the blob is malformed, the passphrase is wrong,
+    /// or the ciphertext is corrupted.
+    pub fn unwrap_dek(
+        wrapped_b64: &str,
+        params: &DekWrappingParams,
+        passphrase: &SecretString,
+    ) -> Result<Zeroizing<[u8; 32]>, BackupError> {
+        let blob = BASE64
+            .decode(wrapped_b64)
+            .map_err(|e| BackupError::Crypto(format!("wrapped DEK decode: {e}")))?;
+        if blob.len() < 60 {
+            return Err(BackupError::Crypto("wrapped DEK blob too short".into()));
+        }
+        let (nonce_bytes, ciphertext_tag) = blob.split_at(12);
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr.copy_from_slice(nonce_bytes);
+        let salt_bytes = BASE64
+            .decode(&params.salt_b64)
+            .map_err(|e| BackupError::Crypto(format!("salt decode: {e}")))?;
+        let salt: [u8; 16] = salt_bytes
+            .try_into()
+            .map_err(|_| BackupError::Crypto("salt must be 16 bytes".into()))?;
+        let mut wk = derive_dek_wrapping_key_with_params(
+            passphrase.expose_secret().as_bytes(),
+            &salt,
+            params.m_cost,
+            params.t_cost,
+            params.p_cost,
+        )?;
+        let unbound = UnboundKey::new(&AES_256_GCM, &wk)
+            .map_err(|_| BackupError::Crypto("AES key init failed".into()))?;
+        wk.zeroize();
+        let key = LessSafeKey::new(unbound);
+        let nonce = Nonce::assume_unique_for_key(nonce_arr);
+        let mut buf = ciphertext_tag.to_vec();
+        let plaintext = key
+            .open_in_place(nonce, Aad::empty(), &mut buf)
+            .map_err(|_| {
+                BackupError::Crypto(
+                    "DEK unwrap failed — wrong passphrase or corrupted archive".into(),
+                )
+            })?;
+        if plaintext.len() != 32 {
+            return Err(BackupError::Crypto(format!(
+                "DEK must be 32 bytes, got {}",
+                plaintext.len()
+            )));
+        }
+        let mut dek = [0u8; 32];
+        dek.copy_from_slice(plaintext);
+        Ok(Zeroizing::new(dek))
+    }
+
     /// Exports all entities for `realm_id` into `writer`.
     ///
-    /// Writes one NDJSON file per entity type (users, credentials, clients,
-    /// roles, groups, permissions, scopes, assignments, organizations) plus an
-    /// AES-256-GCM encrypted `signing_key.json` and, when `opts.include_audit`
-    /// is true, an `audit.ndjson` file.
+    /// Writes one encrypted JSON/NDJSON file per entity type (users, credentials,
+    /// clients, roles, groups, permissions, scopes, assignments, organizations)
+    /// plus an AES-256-GCM encrypted `signing_key.json` and, when
+    /// `opts.include_audit` is true, an encrypted `audit.ndjson` file.
     ///
-    /// `signing_key_dek` is a 32-byte key used to encrypt the realm's PKCS#8
-    /// signing key. Reuse the same key (produced by [`generate_dek`](Self::generate_dek))
-    /// across all realms in one archive.
+    /// ALL sections are encrypted with `dek`. The DEK itself must be wrapped
+    /// (via [`wrap_dek`](Self::wrap_dek)) and stored in the manifest before
+    /// calling [`ArchiveWriter::finish`].
     ///
     /// Returns a [`RealmManifest`] with record counts that the caller embeds
     /// into [`BackupManifest::realms`].
-    #[instrument(skip(self, writer, opts, signing_key_dek), fields(realm = %realm_id))]
+    #[instrument(skip(self, writer, opts, dek), fields(realm = %realm_id))]
     #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     pub fn export_realm(
         &self,
         realm_id: &RealmId,
         writer: &mut ArchiveWriter,
         opts: &ExportOptions,
-        signing_key_dek: &[u8; 32],
+        dek: &[u8; 32],
     ) -> Result<RealmManifest, BackupError> {
         let realm = self
             .identity
@@ -138,7 +245,8 @@ impl BackupExporter {
         // realm.json
         if let Some(ref r) = realm {
             let data = serde_json::to_vec_pretty(r)?;
-            writer.add_file(&format!("{prefix}/realm.json"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/realm.json"), &encrypted)?;
         }
 
         // users.ndjson
@@ -151,7 +259,8 @@ impl BackupExporter {
         counts.users = users.len() as u64;
         if !users.is_empty() {
             let data = to_ndjson(&users)?;
-            writer.add_file(&format!("{prefix}/users.ndjson"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/users.ndjson"), &encrypted)?;
         }
 
         // credentials.ndjson
@@ -162,7 +271,8 @@ impl BackupExporter {
         counts.credentials = credentials.len() as u64;
         if !credentials.is_empty() {
             let data = to_ndjson(&credentials)?;
-            writer.add_file(&format!("{prefix}/credentials.ndjson"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/credentials.ndjson"), &encrypted)?;
         }
 
         // clients.ndjson
@@ -175,7 +285,8 @@ impl BackupExporter {
         counts.clients = clients.len() as u64;
         if !clients.is_empty() {
             let data = to_ndjson(&clients)?;
-            writer.add_file(&format!("{prefix}/clients.ndjson"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/clients.ndjson"), &encrypted)?;
         }
 
         // roles.ndjson
@@ -188,7 +299,8 @@ impl BackupExporter {
         counts.roles = roles.len() as u64;
         if !roles.is_empty() {
             let data = to_ndjson(&roles)?;
-            writer.add_file(&format!("{prefix}/roles.ndjson"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/roles.ndjson"), &encrypted)?;
         }
 
         // permissions.ndjson
@@ -199,7 +311,8 @@ impl BackupExporter {
         counts.permissions = permissions.len() as u64;
         if !permissions.is_empty() {
             let data = to_ndjson(&permissions)?;
-            writer.add_file(&format!("{prefix}/permissions.ndjson"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/permissions.ndjson"), &encrypted)?;
         }
 
         // groups.ndjson
@@ -212,7 +325,8 @@ impl BackupExporter {
         counts.groups = groups.len() as u64;
         if !groups.is_empty() {
             let data = to_ndjson(&groups)?;
-            writer.add_file(&format!("{prefix}/groups.ndjson"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/groups.ndjson"), &encrypted)?;
         }
 
         // assignments.ndjson
@@ -223,7 +337,8 @@ impl BackupExporter {
         counts.assignments = assignments.len() as u64;
         if !assignments.is_empty() {
             let data = to_ndjson(&assignments)?;
-            writer.add_file(&format!("{prefix}/assignments.ndjson"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/assignments.ndjson"), &encrypted)?;
         }
 
         // scopes.ndjson
@@ -234,7 +349,8 @@ impl BackupExporter {
         counts.scopes = scopes.len() as u64;
         if !scopes.is_empty() {
             let data = to_ndjson(&scopes)?;
-            writer.add_file(&format!("{prefix}/scopes.ndjson"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/scopes.ndjson"), &encrypted)?;
         }
 
         // organizations.ndjson
@@ -247,7 +363,8 @@ impl BackupExporter {
         counts.organizations = organizations.len() as u64;
         if !organizations.is_empty() {
             let data = to_ndjson(&organizations)?;
-            writer.add_file(&format!("{prefix}/organizations.ndjson"), &data)?;
+            let encrypted = encrypt_bytes(&data, dek)?;
+            writer.add_file(&format!("{prefix}/organizations.ndjson"), &encrypted)?;
         }
 
         // signing_key.json (AES-256-GCM encrypted PKCS#8 bytes)
@@ -255,7 +372,7 @@ impl BackupExporter {
             .identity
             .export_realm_signing_key_pkcs8(realm_id)
             .map_err(|e| BackupError::Engine(e.to_string()))?;
-        let encrypted = encrypt_bytes(&pkcs8, signing_key_dek)?;
+        let encrypted = encrypt_bytes(&pkcs8, dek)?;
         writer.add_file(&format!("{prefix}/signing_key.json"), &encrypted)?;
 
         // audit.ndjson (optional)
@@ -267,7 +384,8 @@ impl BackupExporter {
             counts.audit_events = events.len() as u64;
             if !events.is_empty() {
                 let data = to_ndjson(&events)?;
-                writer.add_file(&format!("{prefix}/audit.ndjson"), &data)?;
+                let encrypted = encrypt_bytes(&data, dek)?;
+                writer.add_file(&format!("{prefix}/audit.ndjson"), &encrypted)?;
             }
         }
 
@@ -336,7 +454,7 @@ fn to_ndjson<T: Serialize>(items: &[T]) -> Result<Vec<u8>, BackupError> {
 /// ```text
 /// {"nonce_b64":"<12B base64>","ciphertext_b64":"<ciphertext+tag base64>"}
 /// ```
-fn encrypt_bytes(plaintext: &[u8], dek: &[u8; 32]) -> Result<Vec<u8>, BackupError> {
+pub(crate) fn encrypt_bytes(plaintext: &[u8], dek: &[u8; 32]) -> Result<Vec<u8>, BackupError> {
     let mut nonce_bytes = [0u8; 12];
     SystemRandom::new()
         .fill(&mut nonce_bytes)
@@ -395,6 +513,56 @@ pub fn decrypt_bytes(
             BackupError::Crypto("decryption failed — wrong DEK or corrupted data".into())
         })?;
     Ok(Zeroizing::new(plaintext.to_vec()))
+}
+
+/// Derives a 32-byte AES wrapping key using Argon2id with default DEK-wrapping parameters.
+fn derive_dek_wrapping_key(password: &[u8], salt: &[u8; 16]) -> Result<[u8; 32], BackupError> {
+    derive_dek_wrapping_key_with_params(
+        password,
+        salt,
+        DEK_WRAP_M_COST,
+        DEK_WRAP_T_COST,
+        DEK_WRAP_P_COST,
+    )
+}
+
+/// Derives a 32-byte AES wrapping key using Argon2id with explicit parameters.
+fn derive_dek_wrapping_key_with_params(
+    password: &[u8],
+    salt: &[u8; 16],
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<[u8; 32], BackupError> {
+    let params = argon2::Params::new(m_cost, t_cost, p_cost, Some(32))
+        .map_err(|e| BackupError::Crypto(format!("argon2 params: {e}")))?;
+    let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon2
+        .hash_password_into(password, salt, &mut key)
+        .map_err(|e| BackupError::Crypto(format!("argon2 derivation: {e}")))?;
+    Ok(key)
+}
+
+/// Wraps a 32-byte DEK with an Argon2id-derived key from `passphrase`.
+///
+/// Delegates to [`BackupExporter::wrap_dek`].
+pub fn wrap_dek(
+    dek: &[u8; 32],
+    passphrase: &SecretString,
+) -> Result<(String, DekWrappingParams), BackupError> {
+    BackupExporter::wrap_dek(dek, passphrase)
+}
+
+/// Unwraps a DEK previously wrapped by [`wrap_dek`].
+///
+/// Delegates to [`BackupExporter::unwrap_dek`].
+pub fn unwrap_dek(
+    wrapped_b64: &str,
+    params: &DekWrappingParams,
+    passphrase: &SecretString,
+) -> Result<Zeroizing<[u8; 32]>, BackupError> {
+    BackupExporter::unwrap_dek(wrapped_b64, params, passphrase)
 }
 
 #[cfg(test)]
@@ -465,5 +633,52 @@ mod tests {
         let enc = encrypt_bytes(b"pkcs8-key-material", &dek).expect("encrypt");
         let result: Zeroizing<Vec<u8>> = decrypt_bytes(&enc, &dek).expect("decrypt");
         assert_eq!(&*result, b"pkcs8-key-material");
+    }
+
+    #[test]
+    fn wrap_unwrap_dek_roundtrip() {
+        let dek = BackupExporter::generate_dek().expect("generate DEK");
+        let passphrase = secrecy::SecretString::new("test-passphrase-12345".into());
+        let (wrapped_b64, params) = BackupExporter::wrap_dek(&dek, &passphrase).expect("wrap DEK");
+        let recovered =
+            BackupExporter::unwrap_dek(&wrapped_b64, &params, &passphrase).expect("unwrap DEK");
+        assert_eq!(*recovered, dek, "unwrapped DEK must equal the original DEK");
+    }
+
+    #[test]
+    fn unwrap_dek_with_wrong_passphrase_fails() {
+        let dek = BackupExporter::generate_dek().expect("generate DEK");
+        let correct = secrecy::SecretString::new("correct-passphrase".into());
+        let wrong = secrecy::SecretString::new("wrong-passphrase".into());
+        let (wrapped_b64, params) = BackupExporter::wrap_dek(&dek, &correct).expect("wrap DEK");
+        let result = BackupExporter::unwrap_dek(&wrapped_b64, &params, &wrong);
+        result.expect_err("unwrap with wrong passphrase must fail");
+    }
+
+    #[test]
+    fn unwrap_dek_with_truncated_blob_fails() {
+        let passphrase = secrecy::SecretString::new("passphrase".into());
+        let params = DekWrappingParams {
+            salt_b64: base64::engine::general_purpose::STANDARD.encode([0u8; 16]),
+            m_cost: 8,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        // A blob that is too short (< 60 bytes) must be rejected immediately.
+        let short_blob = base64::engine::general_purpose::STANDARD.encode([0u8; 10]);
+        let result = BackupExporter::unwrap_dek(&short_blob, &params, &passphrase);
+        result.expect_err("truncated blob must be rejected");
+    }
+
+    #[test]
+    fn wrap_dek_produces_distinct_outputs() {
+        let dek = BackupExporter::generate_dek().expect("generate DEK");
+        let passphrase = secrecy::SecretString::new("same-passphrase".into());
+        let (b1, _) = BackupExporter::wrap_dek(&dek, &passphrase).expect("wrap 1");
+        let (b2, _) = BackupExporter::wrap_dek(&dek, &passphrase).expect("wrap 2");
+        assert_ne!(
+            b1, b2,
+            "each wrap must produce a distinct ciphertext (random nonce+salt)"
+        );
     }
 }

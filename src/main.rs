@@ -3050,10 +3050,7 @@ fn run_backup_create(
     encrypt: bool,
     data_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use base64::Engine as _;
-    use hearth::backup::{
-        BackupArchive, BackupExporter, BackupManifest, DekWrappingParams, ExportOptions,
-    };
+    use hearth::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
     use hearth::core::RealmId;
     use uuid::Uuid;
 
@@ -3150,74 +3147,34 @@ fn run_backup_create(
         realm_manifests.push(realm_manifest);
     }
 
-    // Optionally wrap the DEK with a passphrase-derived key.
-    let (stored_dek_b64, wrapping_params) = if encrypt {
-        let passphrase = rpassword::prompt_password("Enter backup passphrase: ")?;
-        let confirm = rpassword::prompt_password("Confirm passphrase: ")?;
-        if passphrase != confirm {
+    // Backup encryption is mandatory: use HEARTH_MASTER_KEY env var or prompt.
+    let passphrase_str: String = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
+        if mk.is_empty() {
+            return Err("HEARTH_MASTER_KEY is set but empty".into());
+        }
+        mk
+    } else if encrypt {
+        let p = rpassword::prompt_password("Enter backup passphrase: ")?;
+        let c = rpassword::prompt_password("Confirm passphrase: ")?;
+        if p != c {
             return Err("passphrases do not match".into());
         }
-        if passphrase.is_empty() {
+        if p.is_empty() {
             return Err("passphrase must not be empty".into());
         }
-
-        // Random 16-byte Argon2id salt.
-        let mut salt_bytes = [0u8; 16];
-        {
-            use ring::rand::SecureRandom as _;
-            ring::rand::SystemRandom::new()
-                .fill(&mut salt_bytes)
-                .map_err(|_| "salt generation failed")?;
-        }
-
-        // Derive 32-byte wrapping key (OWASP-recommended Argon2id parameters).
-        const M_COST: u32 = 65536;
-        const T_COST: u32 = 3;
-        const P_COST: u32 = 4;
-        let mut wk = [0u8; 32];
-        let params = argon2::Params::new(M_COST, T_COST, P_COST, Some(32))
-            .map_err(|e| format!("argon2 params: {e}"))?;
-        let argon2 =
-            argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-        argon2
-            .hash_password_into(passphrase.as_bytes(), &salt_bytes, &mut wk)
-            .map_err(|e| format!("argon2 hash: {e}"))?;
-
-        // AES-256-GCM wrap: output is 12-byte nonce || ciphertext+tag.
-        let mut nonce_bytes = [0u8; 12];
-        {
-            use ring::rand::SecureRandom as _;
-            ring::rand::SystemRandom::new()
-                .fill(&mut nonce_bytes)
-                .map_err(|_| "nonce generation failed")?;
-        }
-        let unbound = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &wk)
-            .map_err(|_| "aes-gcm key init")?;
-        let aes_key = ring::aead::LessSafeKey::new(unbound);
-        let aes_nonce = ring::aead::Nonce::assume_unique_for_key(nonce_bytes);
-        let mut wrapped = dek.to_vec();
-        aes_key
-            .seal_in_place_append_tag(aes_nonce, ring::aead::Aad::empty(), &mut wrapped)
-            .map_err(|_| "dek wrap failed")?;
-        let mut blob = nonce_bytes.to_vec();
-        blob.extend(wrapped);
-
-        let blob_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
-        let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt_bytes);
-        let wp = DekWrappingParams {
-            salt_b64,
-            m_cost: M_COST,
-            t_cost: T_COST,
-            p_cost: P_COST,
-        };
-        (blob_b64, Some(wp))
+        p
     } else {
-        (base64::engine::general_purpose::STANDARD.encode(dek), None)
+        return Err(
+            "backup encryption is mandatory — set HEARTH_MASTER_KEY or use --encrypt".into(),
+        );
     };
-
+    let passphrase = secrecy::SecretString::from(passphrase_str);
+    let (wrapped_dek_b64, wrapping_params) =
+        BackupExporter::wrap_dek(&dek, &passphrase).map_err(|e| format!("DEK wrap: {e}"))?;
     let mut manifest = BackupManifest::new(realm_manifests);
-    manifest.signing_key_dek_b64 = Some(stored_dek_b64);
-    manifest.dek_wrapping_params = wrapping_params;
+    manifest.sections_encrypted = true;
+    manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
+    manifest.dek_wrapping_params = Some(wrapping_params);
     writer.finish(manifest)?;
 
     tracing::info!("Backup written to: {}", out_path.display());
@@ -3252,10 +3209,21 @@ fn run_backup_restore(
         build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
 
     let importer = BackupImporter::new(identity, rbac);
+    let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
+        let pp = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
+            mk
+        } else {
+            rpassword::prompt_password("Enter backup passphrase: ")?
+        };
+        Some(secrecy::SecretString::from(pp))
+    } else {
+        None
+    };
     let opts = ImportOptions {
         mode,
         dry_run,
         realm_target: None,
+        dek_passphrase,
     };
 
     let slugs: Vec<String> = if let Some(slug) = realm_slug {
@@ -3305,9 +3273,9 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 
     let reader = BackupArchive::open(input)?;
     let m = &reader.manifest;
-    let dek_status = match (&m.signing_key_dek_b64, &m.dek_wrapping_params) {
+    let dek_status = match (&m.wrapped_dek_b64, &m.dek_wrapping_params) {
         (Some(_), Some(_)) => "present (passphrase-protected)",
-        (Some(_), None) => "present (unprotected)",
+        (Some(_), None) => "present (no wrapping params — malformed)",
         _ => "absent",
     };
     let created_at_display =

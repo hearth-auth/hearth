@@ -9,6 +9,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Backup archives now encrypt all sections; DEK wrapping is mandatory (HEA-1366)** — previously
+  only `signing_key.json` was AES-256-GCM encrypted; credentials and all other sections were
+  plaintext NDJSON with the DEK optionally stored as plain base64. Now all sections are encrypted
+  under a single DEK that is always Argon2id-wrapped before persisting to the manifest
+  (`wrapped_dek_b64` + `dek_wrapping_params`). The `hearth backup create` CLI requires `--encrypt`
+  or `HEARTH_MASTER_KEY`; the HTTP export endpoint requires `HEARTH_MASTER_KEY`. Archive format
+  version bumped to 2.
+
 - **CSRF protection on TOTP/MFA challenge forms** — the inline TOTP form in
   `login.html` and the standalone `mfa_challenge.html` form now include a
   `_csrf` hidden field and the submit handler verifies it against the

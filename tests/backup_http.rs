@@ -162,6 +162,13 @@ async fn backup_create_requires_admin_role() {
 
 #[tokio::test]
 async fn backup_create_returns_archive() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");
@@ -234,6 +241,13 @@ async fn backup_create_returns_archive() {
 
 #[tokio::test]
 async fn backup_create_realm_filter() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
     let h = common::TestHarness::embedded().await.expect("harness");
     let realm = h.create_realm();
     h.rbac().seed_realm(&realm).expect("seed");

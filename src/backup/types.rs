@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 use crate::core::Timestamp;
 
 /// Current archive format version. Increment on incompatible layout changes.
-pub const MANIFEST_VERSION: u32 = 1;
+///
+/// v2: all bulk data sections are AES-256-GCM encrypted under a single DEK
+/// that is always Argon2id-wrapped before being stored in the manifest.
+/// Previously (v1) only `signing_key.json` was encrypted; credentials and
+/// other sections were plaintext NDJSON.
+pub const MANIFEST_VERSION: u32 = 2;
 
 /// Per-entity-type record counts for a single realm in the backup.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +52,7 @@ pub struct RealmManifest {
 
 /// Argon2id parameters used to derive a passphrase-based wrapping key for the DEK.
 ///
-/// When present in [`BackupManifest`], the `signing_key_dek_b64` field stores the
+/// When present in [`BackupManifest`], the `wrapped_dek_b64` field stores the
 /// DEK encrypted (AES-256-GCM) with a key derived from a passphrase using these
 /// parameters. The nonce is prepended to the ciphertext (12 bytes || ciphertext+tag).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,16 +85,16 @@ pub struct BackupManifest {
     pub realms: Vec<RealmManifest>,
     /// Lowercase-hex SHA-256 checksums keyed by archive-relative path.
     pub checksums: HashMap<String, String>,
-    /// Base64-encoded 32-byte DEK used to AES-256-GCM-encrypt the realm signing
-    /// keys stored in this archive. `None` for archives without signing key export.
-    /// When [`dek_wrapping_params`](Self::dek_wrapping_params) is set, this field
-    /// holds the passphrase-wrapped DEK (nonce || ciphertext+tag, base64-encoded).
+    /// When `true`, all bulk data sections are AES-256-GCM encrypted with the DEK in
+    /// [`wrapped_dek_b64`](Self::wrapped_dek_b64). Always `true` for format v2+ archives.
+    #[serde(default)]
+    pub sections_encrypted: bool,
+    /// AES-256-GCM-encrypted 32-byte DEK: `nonce (12B) || ciphertext+tag`, base64-encoded.
+    /// Encrypted under Argon2id-derived wrapping key. Always set when `sections_encrypted=true`.
+    /// Use [`super::unwrap_dek`] to recover the DEK.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub signing_key_dek_b64: Option<String>,
-    /// When set, the DEK in `signing_key_dek_b64` is protected with a passphrase.
-    /// Derive the unwrapping key with Argon2id using these parameters, then
-    /// AES-256-GCM-decrypt `signing_key_dek_b64` (nonce || ciphertext+tag) to
-    /// recover the 32-byte DEK.
+    pub wrapped_dek_b64: Option<String>,
+    /// Argon2id parameters for the wrapping key. Always present with `wrapped_dek_b64`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dek_wrapping_params: Option<DekWrappingParams>,
     /// Detached Ed25519 signature over the canonical manifest bytes (A-30).
@@ -119,7 +124,8 @@ impl BackupManifest {
             created_at: Timestamp::now(),
             realms,
             checksums: HashMap::new(),
-            signing_key_dek_b64: None,
+            sections_encrypted: false,
+            wrapped_dek_b64: None,
             dek_wrapping_params: None,
             detached_signature_b64: None,
         }
@@ -205,7 +211,8 @@ mod tests {
             checksums: [("realms/acme/users.ndjson".to_string(), "abc123".to_string())]
                 .into_iter()
                 .collect(),
-            signing_key_dek_b64: None,
+            sections_encrypted: false,
+            wrapped_dek_b64: None,
             dek_wrapping_params: None,
             detached_signature_b64: None,
         };
