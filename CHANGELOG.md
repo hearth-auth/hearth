@@ -9,6 +9,22 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **CSRF check on device-approval form (F5, HEA-1367)** — `POST /ui/device` now verifies
+  the `csrf_token` field against the session's CSRF cookie before calling `approve_device`.
+  The field was already present in the form but silently discarded; a missing or mismatched
+  token now returns 403, preventing an attacker from CSRFing a logged-in victim into
+  approving the attacker's device.
+
+- **CSRF fail-closed on login/register/MFA challenge (F6, HEA-1367)** — pre-auth form
+  handlers (`/ui/login`, `/ui/register`, `/ui/mfa-challenge`) now require the
+  `hearth_ui_csrf` cookie to be **present** in production mode (`dev_mode = false`); a
+  missing cookie returns 422 "Invalid security token" instead of bypassing the check. The
+  bypass is preserved under `--dev` for direct-POST tooling.
+
+- **CSRF protection added to `/ui/register` form (HEA-1367)** — the registration form
+  now issues and embeds a `hearth_ui_csrf` double-submit token (previously missing
+  entirely); `POST /ui/register` verifies it against the cookie.
+
 - **Backup archives now encrypt all sections; DEK wrapping is mandatory (HEA-1366)** — previously
   only `signing_key.json` was AES-256-GCM encrypted; credentials and all other sections were
   plaintext NDJSON with the DEK optionally stored as plain base64. Now all sections are encrypted

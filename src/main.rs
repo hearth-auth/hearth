@@ -1762,7 +1762,8 @@ async fn run_serve(
     .with_logo_url(web_logo_url)
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
-    .with_sms(sms_sender, sms_hmac_key_bytes);
+    .with_sms(sms_sender, sms_hmac_key_bytes)
+    .with_dev_mode(config.dev_mode);
 
     if !api_trusted_proxies.is_empty() {
         info!(count = api_trusted_proxies.len(), "loaded trusted_proxies");

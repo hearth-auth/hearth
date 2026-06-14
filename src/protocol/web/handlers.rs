@@ -1007,29 +1007,27 @@ fn login_submit_impl(
         }
     };
 
-    // CSRF form-field double-submit check: if the browser has a hearth_ui_csrf
-    // cookie (set when the login page was rendered), the hidden _csrf field must
-    // match it. An absent cookie skips this check so dev/test tooling that POSTs
-    // credentials directly (without going through the GET endpoint) continues to
-    // work. A mismatch means the form was not served by this server — show a
-    // specific error rather than collapsing into the generic credential error.
-    if let Some(cookie_val) =
-        super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE)
-    {
-        if !super::auth::csrf_token_eq(cookie_val, &form.csrf) {
-            let mut tmpl = LoginTemplate::new(
-                Some("Invalid security token. Please reload the page and try again.".to_string()),
-                return_to.clone(),
-                &action_prefix,
-                show_register,
-                locale,
-                product_name.clone(),
-                logo_url.clone(),
-            );
-            tmpl.realm_theme_url.clone_from(&realm_theme);
-            tmpl.inline_theme_css.clone_from(&inline_theme_css_val);
-            return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
-        }
+    // F6: CSRF double-submit check — fail-closed in non-dev mode.
+    // In production (dev_mode = false), an absent hearth_ui_csrf cookie is
+    // treated as a CSRF failure (not a pass-through). In dev mode the bypass
+    // is preserved so direct-POST tooling continues to work.
+    let csrf_ok = match super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
+        None => state.dev_mode, // dev: bypass; prod: fail-closed
+    };
+    if !csrf_ok {
+        let mut tmpl = LoginTemplate::new(
+            Some("Invalid security token. Please reload the page and try again.".to_string()),
+            return_to.clone(),
+            &action_prefix,
+            show_register,
+            locale,
+            product_name.clone(),
+            logo_url.clone(),
+        );
+        tmpl.realm_theme_url.clone_from(&realm_theme);
+        tmpl.inline_theme_css.clone_from(&inline_theme_css_val);
+        return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     // Login CSRF guard: reject cross-origin POSTs.
@@ -1672,18 +1670,19 @@ pub async fn mfa_challenge_submit(
         return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
     };
 
-    // CSRF double-submit check: if the browser has a hearth_ui_csrf cookie,
-    // the hidden _csrf field must match it.
-    if let Some(cookie_val) = cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
-        if !super::auth::csrf_token_eq(cookie_val, &form.csrf) {
-            let tmpl = MfaChallengeTemplate::new(
-                Some("Invalid security token. Please reload the page and try again.".to_string()),
-                state.product_name.clone(),
-                state.logo_url.clone(),
-                pending.return_to.clone(),
-            );
-            return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
-        }
+    // F6: CSRF double-submit check — fail-closed in non-dev mode.
+    let csrf_ok = match cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
+        None => state.dev_mode, // dev: bypass; prod: fail-closed
+    };
+    if !csrf_ok {
+        let tmpl = MfaChallengeTemplate::new(
+            Some("Invalid security token. Please reload the page and try again.".to_string()),
+            state.product_name.clone(),
+            state.logo_url.clone(),
+            pending.return_to.clone(),
+        );
+        return render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     let code = form.code.trim();
@@ -2987,6 +2986,9 @@ pub struct RegisterForm {
     /// Empty string when no CAPTCHA provider is configured (`NoopCaptchaProvider`).
     #[serde(default)]
     pub captcha_token: String,
+    /// CSRF token echoed from the hidden `_csrf` field.
+    #[serde(rename = "_csrf", default)]
+    pub csrf: String,
 }
 
 /// Returns `(disabled, invite_only)` flags derived from the realm's
@@ -3009,20 +3011,25 @@ fn registration_enabled(realm: &Realm) -> bool {
 }
 
 /// Renders the registration form for the bare `/ui/register` URL.
-pub async fn register_form(State(state): State<Arc<WebState>>) -> Response {
-    register_form_impl(state, None)
+pub async fn register_form(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    register_form_impl(state, &headers, None)
 }
 
 /// Renders the registration form under `/ui/realms/<name>/register`.
 pub async fn register_form_scoped(
     State(state): State<Arc<WebState>>,
     axum::extract::Path(realm_name): axum::extract::Path<String>,
+    headers: HeaderMap,
 ) -> Response {
-    register_form_impl(state, Some(realm_name))
+    register_form_impl(state, &headers, Some(realm_name))
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn register_form_impl(state: Arc<WebState>, path_realm: Option<String>) -> Response {
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+fn register_form_impl(
+    state: Arc<WebState>,
+    headers: &HeaderMap,
+    path_realm: Option<String>,
+) -> Response {
     let (realm, action_prefix) = match resolve_pre_auth_realm(&state, path_realm, false) {
         PreAuthRealm::Ok {
             realm,
@@ -3046,7 +3053,23 @@ fn register_form_impl(state: Arc<WebState>, path_realm: Option<String>) -> Respo
     );
     tmpl.realm_theme_url = state.realm_theme_url_for(realm.id());
     tmpl.inline_theme_css = state.inline_theme_css();
-    render(&tmpl)
+
+    // Issue or reuse the CSRF cookie so the register form can double-submit.
+    let secure = state.is_secure_request(headers);
+    let (csrf_value, fresh_cookie) =
+        match super::auth::cookie_value_from_headers(headers, super::auth::CSRF_COOKIE) {
+            Some(existing) => (existing.to_string(), None),
+            None => {
+                let (val, cookie) = super::auth::fresh_csrf_cookie(secure);
+                (val, Some(cookie))
+            }
+        };
+    tmpl.csrf = Some(csrf_value);
+    let mut resp = render(&tmpl);
+    if let Some(cookie) = fresh_cookie {
+        append_cookie(&mut resp, &cookie);
+    }
+    resp
 }
 
 /// Maps `IdentityError` values from `register_user` to user-facing banner text.
@@ -3201,6 +3224,18 @@ fn register_submit_impl(
         tmpl.inline_theme_css.clone_from(&inline_css);
         render_status(&tmpl, StatusCode::BAD_REQUEST)
     };
+
+    // F6: CSRF double-submit check — fail-closed in non-dev mode.
+    let csrf_ok = match super::auth::cookie_value_from_headers(&headers, super::auth::CSRF_COOKIE) {
+        Some(cookie_val) => super::auth::csrf_token_eq(cookie_val, &form.csrf),
+        None => state.dev_mode,
+    };
+    if !csrf_ok {
+        return render_err(
+            "Invalid security token. Please reload the page and try again.".to_string(),
+            form.email.clone(),
+        );
+    }
 
     if !captcha_ok {
         return render_err(
@@ -3703,6 +3738,14 @@ pub async fn device_approve_submit(
     session: super::auth::UiSession,
     Form(form): Form<DeviceApproveForm>,
 ) -> Response {
+    // F5: verify CSRF before mutating. csrf_token is always present in the
+    // template; an absent or mismatched value is a CSRF attack vector.
+    if let Err(resp) =
+        super::auth::verify_csrf_form_field(&session, form.csrf_token.as_deref().unwrap_or(""))
+    {
+        return resp;
+    }
+
     let code = form.user_code.trim().to_uppercase();
 
     if code.is_empty() || code.len() > 8 {

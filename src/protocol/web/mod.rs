@@ -199,6 +199,15 @@ pub struct WebState {
     ///
     /// Defaults to [`crate::abuse::challenge::NoopCaptchaProvider`] (fail-open).
     pub captcha_provider: Arc<dyn crate::abuse::challenge::CaptchaProvider>,
+    /// When `true`, the CSRF cookie check on pre-auth forms (login, register,
+    /// MFA challenge) is bypassed if the cookie is absent — allows direct-POST
+    /// tooling in dev mode. When `false` (production default via
+    /// [`WebState::with_dev_mode`]), a missing cookie returns 422.
+    ///
+    /// Defaults to `true` in [`WebState::new`] so the 30+ test helpers that
+    /// call the embedded constructor keep working unchanged. Production always
+    /// calls `.with_dev_mode(config.dev_mode)` in `main.rs`.
+    pub dev_mode: bool,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -257,6 +266,7 @@ impl WebState {
             sms: None,
             sms_otp_hmac_key: None,
             captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
+            dev_mode: true, // permissive default for tests; production overrides via with_dev_mode
         }
     }
 
@@ -465,6 +475,15 @@ impl WebState {
         provider: Arc<dyn crate::abuse::challenge::CaptchaProvider>,
     ) -> Self {
         self.captcha_provider = provider;
+        self
+    }
+
+    /// Sets dev mode. When `false`, the CSRF cookie MUST be present on
+    /// pre-auth form POSTs (login, register, MFA challenge); when `true`
+    /// an absent cookie is allowed so direct-POST tooling keeps working.
+    #[must_use]
+    pub fn with_dev_mode(mut self, val: bool) -> Self {
+        self.dev_mode = val;
         self
     }
 
