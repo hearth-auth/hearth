@@ -9,6 +9,7 @@ use std::fmt;
 use ring::hmac;
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq as _;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::identity::credentials::{self, CredentialConfig};
@@ -248,7 +249,11 @@ pub(crate) fn validate_totp(
                 continue;
             }
         }
-        if compute_totp(secret, step) == code {
+        if compute_totp(secret, step)
+            .as_bytes()
+            .ct_eq(code.as_bytes())
+            .into()
+        {
             return Some(step);
         }
     }

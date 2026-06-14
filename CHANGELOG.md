@@ -111,6 +111,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   from the 1.0 Readiness Audit — minimal Auth0 "Actions" / Keycloak protocol
   mapper escape hatch (HEA-1324).
 
+- **F10–F17 batched auth/crypto/logging hardening (HEA-1371)**
+
+  - **F10 Magic-link and password-reset tokens are now single-use under concurrent requests** — a per-token mutex eliminates the TOCTOU race between the `get` (reads `used=false`) and `put` (writes `used=true`), matching the existing `jti_locks` pattern.
+  - **F11 TOTP code comparison now constant-time** — `validate_totp` switched from `==` to `subtle::ConstantTimeEq` to eliminate timing side-channels during HMAC-TOTP verification.
+  - **F12 Hardcoded dev OTP HMAC fallback key removed** — the literal `hearth-dev-sms-otp-key-not-for-production` string was replaced with a zeroed 32-byte key in dev/log mode. Startup now also validates that any provided `HEARTH_SMS_OTP_HMAC_KEY` is ≥ 32 bytes.
+  - **F13 `Secure` cookie attribute added to three flow cookies** — `hearth_fed_bind`, `hearth_ui_fed_confirm`, and `hearth_ui_oauth_ticket` now include `; Secure` when the request is served over HTTPS (determined via `is_secure_request`).
+  - **F14 gRPC consent handlers no longer leak internal error text** — `revoke_consent` and `list_consents_by_user` now route errors through `identity_to_status` (opaque error-id mapper) instead of forwarding `e.to_string()` to the caller.
+  - **F15 Browser-login timing parity for nonexistent users** — when `get_user_by_email` returns `None`, the handler now runs a dummy Argon2id hash via `dummy_verify_password` before returning, making the response timing indistinguishable from a real user with the wrong password.
+  - **F16 Setup token and mailcatcher password now gated on `dev_mode`** — the startup panel previously printed these to stdout whenever `log_format != json`; they are now redacted in production mode.
+  - **F17 Unsafe mmap (`OfflineBreachCorpus`) relocated from identity to storage layer** — moved `src/identity/breach_corpus.rs` → `src/storage/breach_corpus.rs`, bringing it into the layer where `unsafe` I/O is permitted.
+
 - **Auto-generated master key now written `0o600`; production refuses auto-gen
   (HEA-1368)** — when `HEARTH_MASTER_KEY` is unset, the auto-generated
   `hearth.host_key` file was previously created via `std::fs::write` honoring

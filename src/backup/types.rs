@@ -110,6 +110,12 @@ pub struct BackupManifest {
     /// Archives produced without operator signing omit this field entirely.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub detached_signature_b64: Option<String>,
+    /// v1 per-realm signing-key DEK, base64-encoded (legacy, present in v1 archives only).
+    ///
+    /// v2+ archives use a global `wrapped_dek_b64` for all sections. This field
+    /// is retained for backward-compatible deserialization of v1 archives.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub signing_key_dek_b64: Option<String>,
 }
 
 impl BackupManifest {
@@ -128,6 +134,7 @@ impl BackupManifest {
             wrapped_dek_b64: None,
             dek_wrapping_params: None,
             detached_signature_b64: None,
+            signing_key_dek_b64: None,
         }
     }
 
@@ -215,6 +222,7 @@ mod tests {
             wrapped_dek_b64: None,
             dek_wrapping_params: None,
             detached_signature_b64: None,
+            signing_key_dek_b64: None,
         };
 
         let json = serde_json::to_string(&manifest).expect("serialize");

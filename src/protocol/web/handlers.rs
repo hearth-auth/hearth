@@ -1068,6 +1068,10 @@ fn login_submit_impl(
 
     // Resolved realm → single targeted lookup. No walk.
     let Ok(Some(user)) = state.identity.get_user_by_email(realm.id(), email) else {
+        // Run dummy hash so timing is indistinguishable from a real user lookup + failed verify.
+        state
+            .identity
+            .dummy_verify_password(&CleartextPassword::from_string(form.password.clone()));
         state
             .identity
             .record_ip_login_attempt(realm.id(), &client_ip);

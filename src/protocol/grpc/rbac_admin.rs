@@ -19,7 +19,7 @@ use crate::rbac::{
 };
 
 use super::auth::authenticate_admin;
-use super::convert::rbac_to_status;
+use super::convert::{identity_to_status, rbac_to_status};
 use super::server::GrpcState;
 use crate::protocol::proto::rbac::v1 as pb;
 use crate::protocol::proto::rbac::v1::rbac_admin_service_server::RbacAdminService;
@@ -978,7 +978,7 @@ impl RbacAdminService for RbacAdminSvc {
         self.state
             .identity
             .revoke_consent(&realm_id, &user_id, &client_id)
-            .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+            .map_err(identity_to_status)?;
         Ok(Response::new(pb::RevokeConsentResponse {}))
     }
 
@@ -995,7 +995,7 @@ impl RbacAdminService for RbacAdminSvc {
             .state
             .identity
             .list_consents_by_user(&realm_id, &user_id)
-            .map_err(|e| Status::new(Code::Internal, e.to_string()))?;
+            .map_err(identity_to_status)?;
         let consents = entries
             .into_iter()
             .map(|e| pb::ConsentEntry {

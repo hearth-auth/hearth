@@ -214,7 +214,7 @@ pub fn sms_mfa_challenge_check(
     let hmac_key: Vec<u8> = state
         .sms_otp_hmac_key
         .clone()
-        .unwrap_or_else(|| b"hearth-dev-sms-otp-key-not-for-production".to_vec());
+        .unwrap_or_else(|| vec![0u8; 32]);
 
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -442,7 +442,7 @@ pub async fn sms_challenge_post(
     let hmac_key: Vec<u8> = state
         .sms_otp_hmac_key
         .clone()
-        .unwrap_or_else(|| b"hearth-dev-sms-otp-key-not-for-production".to_vec());
+        .unwrap_or_else(|| vec![0u8; 32]);
 
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
