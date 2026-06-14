@@ -80,8 +80,6 @@ async fn f10_magic_link_single_use_concurrent() {
 
 #[tokio::test]
 async fn f10_password_reset_token_single_use() {
-    use hearth::identity::IdentityEngine;
-
     let harness = common::TestHarness::embedded()
         .await
         .expect("harness setup");
@@ -148,8 +146,6 @@ async fn f10_password_reset_token_single_use() {
 
 #[tokio::test]
 async fn f11_totp_wrong_code_rejected() {
-    use hearth::identity::IdentityEngine;
-
     let harness = common::TestHarness::embedded()
         .await
         .expect("harness setup");
@@ -193,8 +189,6 @@ async fn f11_totp_wrong_code_rejected() {
 
 #[tokio::test]
 async fn f15_dummy_verify_password_runs_without_error() {
-    use hearth::identity::IdentityEngine;
-
     let harness = common::TestHarness::embedded()
         .await
         .expect("harness setup");

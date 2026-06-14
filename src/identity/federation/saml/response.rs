@@ -245,6 +245,7 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(parse_err(format!("Response parse error: {e}"))),
+            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
             _ => {}
         }
         buf.clear();
@@ -441,5 +442,12 @@ mod tests {
             },
         );
         assert!(matches!(res, Err(IdentityError::Saml(SamlError::Expired))));
+    }
+
+    #[test]
+    fn parse_response_rejects_doctype() {
+        let xml = b"<!DOCTYPE foo [<!ENTITY x \"x\">]><samlp:Response xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" ID=\"_r\" Version=\"2.0\" IssueInstant=\"2024-01-01T00:00:00Z\"></samlp:Response>";
+        let result = parse_response(xml);
+        assert!(result.is_err(), "DOCTYPE in SAML Response must be rejected");
     }
 }

@@ -145,7 +145,22 @@ impl ArchiveWriter {
     /// The `manifest`'s `checksums` field is replaced with the checksums
     /// accumulated from all prior [`add_file`](Self::add_file) calls, so
     /// the caller need not populate it manually.
+    ///
+    /// Returns [`BackupError::Crypto`] when `sections_encrypted=true` but the
+    /// required DEK fields are absent or inconsistent.
     pub fn finish(mut self, mut manifest: BackupManifest) -> Result<(), BackupError> {
+        if manifest.sections_encrypted
+            && (manifest.wrapped_dek_b64.is_none() || manifest.dek_wrapping_params.is_none())
+        {
+            return Err(BackupError::Crypto(
+                "sections_encrypted=true but wrapped_dek_b64 or dek_wrapping_params absent".into(),
+            ));
+        }
+        if manifest.wrapped_dek_b64.is_some() && manifest.dek_wrapping_params.is_none() {
+            return Err(BackupError::Crypto(
+                "wrapped_dek_b64 set but dek_wrapping_params absent".into(),
+            ));
+        }
         manifest.checksums = self.checksums;
 
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -312,6 +327,7 @@ mod tests {
             wrapped_dek_b64: None,
             dek_wrapping_params: None,
             detached_signature_b64: None,
+            signing_key_dek_b64: None,
         }
     }
 

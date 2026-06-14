@@ -51,6 +51,13 @@ pub(crate) fn validate_email(email: &str) -> Result<String, IdentityError> {
         });
     }
 
+    // `:` is the storage key delimiter; reject it to prevent key-injection.
+    if normalized.contains(':') {
+        return Err(IdentityError::InvalidInput {
+            reason: "email must not contain ':'".to_string(),
+        });
+    }
+
     if normalized.len() > MAX_EMAIL_LENGTH {
         return Err(IdentityError::InvalidInput {
             reason: format!("email exceeds maximum length of {MAX_EMAIL_LENGTH} characters"),
@@ -661,6 +668,12 @@ mod tests {
     #[test]
     fn email_multiple_at_rejected() {
         let err = validate_email("alice@bob@example.com").expect_err("should fail");
+        assert!(matches!(err, IdentityError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn email_colon_rejected() {
+        let err = validate_email("alice:tag@example.com").expect_err("should fail");
         assert!(matches!(err, IdentityError::InvalidInput { .. }));
     }
 

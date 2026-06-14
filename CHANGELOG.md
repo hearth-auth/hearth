@@ -139,6 +139,22 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   gzip` decompression (A-22) remains N/A — Hearth does not install an inbound
   decompressor.
 
+- **Parser/validation fail-closed hardening (HEA-1372)** — three low-severity
+  findings from the HEA-1363 audit closed:
+  - **F18 WAL batch decode allocation now capped** — `decode_batch_payload` now
+    bounds `Vec::with_capacity` to `min(count, remaining_bytes / 9)` before
+    the sub-entry loop, preventing a corrupted `count` field from triggering an
+    unbounded allocation. Reachable only after AES-GCM authentication, so no
+    remote exploit path existed.
+  - **F19a SAML `DocType` uniformly rejected** — `parse_response`,
+    `parse_authn_request`, `parse_idp_metadata`, `parse_logout_request`, and
+    `parse_logout_response` now explicitly return an error on `Event::DocType`,
+    matching the existing reject in `xml.rs` and `c14n.rs`.
+  - **F19b Email addresses containing `:` are now rejected** — `validate_email`
+    rejects any address containing the storage key delimiter `:`; the impact is
+    negligible (`:` is not a valid RFC 5321 local-part character) but closes a
+    theoretical key-injection avenue in realm-scoped key lookups.
+
 - **Upgraded `maxminddb` to 0.27.3 (RUSTSEC-2025-0132)** — `maxminddb` 0.24
   contained a soundness bug where `Reader::open_mmap` unsoundly treated a
   `memmap2` operation as safe, enabling potential undefined behaviour if the

@@ -284,6 +284,10 @@ pub fn decode_batch_payload(data: &[u8]) -> Result<Vec<BatchEntry>, StorageError
             })?;
     let count = u32::from_le_bytes(count_bytes) as usize;
     let mut pos = 4usize;
+    // Cap to prevent OOM from a corrupted/malicious count field.
+    // Minimum sub-entry: 1 (op) + 4 (key_len) + 4 (val_len) = 9 bytes.
+    const MIN_BATCH_ENTRY_SIZE: usize = 9;
+    let count = count.min(data.len().saturating_sub(4) / MIN_BATCH_ENTRY_SIZE);
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         if pos + 1 > data.len() {
@@ -1224,6 +1228,19 @@ mod tests {
                     value,
                 }
             })
+    }
+
+    #[test]
+    fn decode_batch_payload_oversized_count_does_not_over_allocate() {
+        // Four bytes: only the count field, no sub-entry data at all.
+        // count = u32::MAX would allocate ~4 GiB without the cap.
+        // With the cap: 0 remaining bytes → 0 / 9 = 0 entries possible.
+        // The function must complete (Ok([])) rather than attempting the
+        // enormous allocation.
+        let mut data = vec![0u8; 4];
+        data[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let result = decode_batch_payload(&data).expect("capped count → empty Ok, not OOM");
+        assert!(result.is_empty(), "no sub-entry bytes → no entries decoded");
     }
 
     proptest! {

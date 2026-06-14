@@ -158,6 +158,7 @@ pub fn parse_idp_metadata(xml: &[u8]) -> Result<ParsedIdpMetadata, IdentityError
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(parse_err(format!("metadata parse error: {e}"))),
+            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
             _ => {}
         }
         buf.clear();
@@ -238,5 +239,12 @@ mod tests {
             Some("https://idp.example/sso")
         );
         assert!(parsed.signing_certs_pem.len() == 1);
+    }
+
+    #[test]
+    fn parse_idp_metadata_rejects_doctype() {
+        let xml = b"<!DOCTYPE foo []><md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"https://idp.example\"></md:EntityDescriptor>";
+        let result = parse_idp_metadata(xml);
+        assert!(result.is_err(), "DOCTYPE in IdP metadata must be rejected");
     }
 }

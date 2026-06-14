@@ -108,6 +108,7 @@ pub fn parse_authn_request(xml: &[u8]) -> Result<AuthnRequest, IdentityError> {
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(parse_err(format!("AuthnRequest parse: {e}"))),
+            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
             _ => {}
         }
         buf.clear();
@@ -168,5 +169,12 @@ mod tests {
             parsed.assertion_consumer_service_url.as_deref(),
             Some("https://sp.example/acs")
         );
+    }
+
+    #[test]
+    fn parse_authn_request_rejects_doctype() {
+        let xml = b"<!DOCTYPE foo []><samlp:AuthnRequest xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" ID=\"_x\" Version=\"2.0\" IssueInstant=\"2024-01-01T00:00:00Z\"></samlp:AuthnRequest>";
+        let result = parse_authn_request(xml);
+        assert!(result.is_err(), "DOCTYPE in AuthnRequest must be rejected");
     }
 }

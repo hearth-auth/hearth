@@ -145,6 +145,7 @@ pub fn parse_logout_request(xml: &[u8]) -> Result<LogoutRequest, IdentityError> 
             Ok(Event::End(_)) => capture = None,
             Ok(Event::Eof) => break,
             Err(e) => return Err(parse_err(format!("LogoutRequest parse: {e}"))),
+            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
             _ => {}
         }
         buf.clear();
@@ -198,6 +199,7 @@ pub fn parse_logout_response(xml: &[u8]) -> Result<LogoutResponse, IdentityError
             Ok(Event::End(_)) => in_issuer = false,
             Ok(Event::Eof) => break,
             Err(e) => return Err(parse_err(format!("LogoutResponse parse: {e}"))),
+            Ok(Event::DocType(_)) => return Err(parse_err("DOCTYPE declarations are rejected")),
             _ => {}
         }
         buf.clear();
@@ -247,5 +249,22 @@ mod tests {
         let parsed = parse_logout_response(xml.as_bytes()).expect("parse");
         assert_eq!(parsed.in_response_to.as_deref(), Some("_lo1"));
         assert!(parsed.status_code.ends_with("Success"));
+    }
+
+    #[test]
+    fn parse_logout_request_rejects_doctype() {
+        let xml = b"<!DOCTYPE foo []><samlp:LogoutRequest xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" ID=\"_x\" Version=\"2.0\" IssueInstant=\"2024-01-01T00:00:00Z\"></samlp:LogoutRequest>";
+        let result = parse_logout_request(xml);
+        assert!(result.is_err(), "DOCTYPE in LogoutRequest must be rejected");
+    }
+
+    #[test]
+    fn parse_logout_response_rejects_doctype() {
+        let xml = b"<!DOCTYPE foo []><samlp:LogoutResponse xmlns:samlp=\"urn:oasis:names:tc:SAML:2.0:protocol\" ID=\"_x\" Version=\"2.0\" IssueInstant=\"2024-01-01T00:00:00Z\" InResponseTo=\"_lo\"></samlp:LogoutResponse>";
+        let result = parse_logout_response(xml);
+        assert!(
+            result.is_err(),
+            "DOCTYPE in LogoutResponse must be rejected"
+        );
     }
 }
