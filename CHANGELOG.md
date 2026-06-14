@@ -111,6 +111,23 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   from the 1.0 Readiness Audit — minimal Auth0 "Actions" / Keycloak protocol
   mapper escape hatch (HEA-1324).
 
+- **Auto-generated master key now written `0o600`; production refuses auto-gen
+  (HEA-1368)** — when `HEARTH_MASTER_KEY` is unset, the auto-generated
+  `hearth.host_key` file was previously created via `std::fs::write` honoring
+  the process umask (commonly `0o644`), making the key world-readable. The file
+  is now created with mode `0o600` via `OpenOptions` + `create_new`. Startup
+  also emits a `WARN` when auto-generating in dev mode and fails closed in
+  production, requiring `HEARTH_MASTER_KEY` to be set explicitly.
+
+- **JSON parse-bomb guard now active on all JSON routes (HEA-1369)** —
+  `POST`/`PUT`/`PATCH` requests with `Content-Type: application/json` are now
+  validated for nesting depth (≤ 128 levels) and array length (< 65 536 items)
+  before reaching any handler. Requests exceeding either limit are rejected with
+  HTTP 400. The guard logic already existed in `src/abuse/guards.rs` but had no
+  callers; it is now wired as a global axum route middleware. `Content-Encoding:
+  gzip` decompression (A-22) remains N/A — Hearth does not install an inbound
+  decompressor.
+
 - **Upgraded `maxminddb` to 0.27.3 (RUSTSEC-2025-0132)** — `maxminddb` 0.24
   contained a soundness bug where `Reader::open_mmap` unsoundly treated a
   `memmap2` operation as safe, enabling potential undefined behaviour if the
