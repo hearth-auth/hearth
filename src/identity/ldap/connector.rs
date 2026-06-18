@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use ldap3::controls::{Control, ControlType, PagedResults, RawControl};
 use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, LdapError as Ldap3Error, Scope, SearchEntry};
+use rustls::crypto::ring::default_provider as ring_provider;
 use tracing::{debug, warn};
 
 use crate::core::RealmId;
@@ -64,6 +65,9 @@ impl EmbeddedLdapConnector {
 
     /// Opens an authenticated LDAP connection using the service-account credentials.
     async fn connect_and_bind(&self) -> Result<Ldap, LdapError> {
+        // Rustls 0.23+ requires an explicit process-level CryptoProvider.
+        // Install ring here so LDAPS works whether called from main() or tests.
+        let _ = ring_provider().install_default();
         let settings = LdapConnSettings::new().set_no_tls_verify(false);
         let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &self.config.url)
             .await
@@ -263,6 +267,7 @@ impl EmbeddedLdapConnector {
         if user_dn.is_empty() || password.is_empty() {
             return Ok(false);
         }
+        let _ = ring_provider().install_default();
         let settings = LdapConnSettings::new().set_no_tls_verify(false);
         let (conn, mut ldap) = LdapConnAsync::with_settings(settings, &self.config.url)
             .await
