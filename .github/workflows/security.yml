@@ -110,10 +110,13 @@ jobs:
         uses: github/codeql-action/init@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
         with:
           languages: ${{ matrix.language }}
-          # HEA-690: scoped to production code only — fixtures, harnesses, and
-          # example apps intentionally exercise unsafe inputs (bad URLs, fake
-          # creds) and would otherwise flood code-scanning with false positives.
-          # Production SDKs (sdks/<lang>/src) and root crates remain in scope.
+          # HEA-690: effective for interpreted legs (JS/TS, Python) only.
+          # CodeQL for compiled languages (Rust, Go) traces the compiler
+          # invocation rather than individual files, so paths-ignore is a no-op
+          # for those legs — Rust test scope is controlled by the build command
+          # below (no --all-targets), and Go autobuild inherits the same limit.
+          # Keeping this block anyway so interpreted legs remain scoped to
+          # production code (fixtures/tests flood false positives for JS/Python).
           paths-ignore: |
             tests/**
             benches/**
@@ -159,7 +162,11 @@ jobs:
       - name: Manual build for CodeQL (Rust)
         if: matrix.language == 'rust'
         shell: bash
-        run: cargo build --workspace --all-targets --all-features --locked
+        # HEA-1381: omit --all-targets so cfg(test) is never enabled and test
+        # code is not compiled into the CodeQL database. Production lib + bins
+        # are still fully in scope; --all-targets was the only reason test
+        # modules (hardcoded fixtures, fake creds) surfaced as findings.
+        run: cargo build --workspace --all-features --locked
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
