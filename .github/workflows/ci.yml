@@ -452,15 +452,16 @@ jobs:
 
   # ── LDAP / Active Directory integration tests (HEA-1331) ────────────────────
   #
-  # Spins up bitnami/openldap with LDAPS enabled. LDAP integration tests must
-  # be marked #[ignore] in source so the `quality` job skips them when no LDAP
-  # server is present. This job runs them via --run-ignored against the real
-  # service container.
+  # Spins up bitnamilegacy/openldap (Bitnami's legacy namespace, same env-var
+  # schema as the retired bitnami/openldap) with LDAPS enabled. LDAP integration
+  # tests must be marked #[ignore] in source so the `quality` job skips them
+  # when no LDAP server is present. This job runs them via --run-ignored against
+  # the real service container.
   #
   # Service credentials are test-only — the OpenLDAP container is ephemeral
   # with no real user data.
   #
-  # TODO(HEA-1331): pin bitnami/openldap to a SHA digest before the 1.1 release.
+  # Image pinned by manifest-list digest (HEA-1331 resolved).
 
   ldap-integration:
     name: ldap-integration (OpenLDAP — HEA-1331)
@@ -471,7 +472,8 @@ jobs:
 
     services:
       openldap:
-        image: bitnami/openldap:2.6
+        # bitnamilegacy/openldap:2.6.10-debian-12-r4 (HEA-1331)
+        image: bitnamilegacy/openldap:2.6.10-debian-12-r4@sha256:966fd39ed25813890e9bd57dac56def163bbcfe64967e0bae59ab018d505bd93
         ports:
           - 1389:1389
           - 1636:1636

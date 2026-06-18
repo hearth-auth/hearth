@@ -1,7 +1,8 @@
 //! Integration tests for LDAP user federation.
 //!
 //! These tests require a live LDAP server and are gated by environment
-//! variables injected by the `ldap-integration` CI job (bitnami/openldap:2.6).
+//! variables injected by the `ldap-integration` CI job
+//! (bitnamilegacy/openldap:2.6.10-debian-12-r4).
 //!
 //! Run locally:
 //! ```sh
