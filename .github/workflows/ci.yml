@@ -470,29 +470,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    services:
-      openldap:
-        # bitnamilegacy/openldap:2.6.10-debian-12-r4 (HEA-1331)
-        image: bitnamilegacy/openldap:2.6.10-debian-12-r4@sha256:966fd39ed25813890e9bd57dac56def163bbcfe64967e0bae59ab018d505bd93
-        ports:
-          - 1389:1389
-          - 1636:1636
-        env:
-          LDAP_ADMIN_USERNAME: admin
-          # Test-only credential for ephemeral CI container — no real data.
-          LDAP_ADMIN_PASSWORD: HearthLdapCI1!
-          LDAP_ROOT: dc=hearth,dc=test
-          LDAP_ENABLE_TLS: "yes"
-          LDAP_TLS_VERIFY_CLIENT: never
-          # Seed one test user so password-bind tests can exercise a non-admin bind.
-          LDAP_USERS: hearthldaptest
-          LDAP_PASSWORDS: HearthLdapUser1!
-        options: >-
-          --health-cmd "ldapsearch -x -H ldap://localhost:1389 -b dc=hearth,dc=test -D cn=admin,dc=hearth,dc=test -w HearthLdapCI1!"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 12
-          --health-start-period 30s
+    # No services: block — OpenLDAP is started in a step so we can mount
+    # ephemeral TLS certificates. bitnami/openldap 2.6.10+ removed auto-cert
+    # generation; explicit certs are required for LDAP_ENABLE_TLS=yes.
 
     env:
       # Consumed by LDAP integration tests (see tests/ldap_*.rs).
@@ -514,6 +494,38 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           df -h
+
+      - name: Generate TLS certs and start OpenLDAP (HEA-1382/HEA-1385)
+        run: |
+          # bitnami/openldap 2.6.10+ requires explicit TLS certs — generate
+          # an ephemeral self-signed CA+server cert for this CI run.
+          mkdir -p /tmp/ldap-tls
+          openssl req -x509 -newkey rsa:2048 -days 1 -nodes \
+            -keyout /tmp/ldap-tls/server.key \
+            -out    /tmp/ldap-tls/server.crt \
+            -subj   "/CN=localhost" \
+            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+          cp /tmp/ldap-tls/server.crt /tmp/ldap-tls/ca.crt
+          chmod 644 /tmp/ldap-tls/*.crt /tmp/ldap-tls/*.key
+          # Trust the CA so rustls-native-certs (used by ldap3 tls-rustls-ring)
+          # can validate the LDAPS connection in ldaps_connection_succeeds test.
+          sudo cp /tmp/ldap-tls/ca.crt /usr/local/share/ca-certificates/hearth-ldap-ci.crt
+          sudo update-ca-certificates
+          # Start OpenLDAP with certs mounted; digest-pinned image (HEA-1382)
+          docker run -d --name openldap \
+            -p 1389:1389 -p 1636:1636 \
+            -e LDAP_ADMIN_USERNAME=admin \
+            -e LDAP_ADMIN_PASSWORD=HearthLdapCI1! \
+            -e LDAP_ROOT=dc=hearth,dc=test \
+            -e LDAP_ENABLE_TLS=yes \
+            -e LDAP_TLS_VERIFY_CLIENT=never \
+            -e LDAP_USERS=hearthldaptest \
+            -e LDAP_PASSWORDS=HearthLdapUser1! \
+            -e LDAP_TLS_CERT_FILE=/tls/server.crt \
+            -e LDAP_TLS_KEY_FILE=/tls/server.key \
+            -e LDAP_TLS_CA_FILE=/tls/ca.crt \
+            -v /tmp/ldap-tls:/tls:ro \
+            bitnamilegacy/openldap:2.6.10-debian-12-r4@sha256:966fd39ed25813890e9bd57dac56def163bbcfe64967e0bae59ab018d505bd93
 
       - name: Setup Rust toolchain (HEA-676 reusable)
         uses: ./.github/actions/setup-rust
