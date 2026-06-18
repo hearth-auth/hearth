@@ -562,15 +562,20 @@ jobs:
 
       - name: Wait for OpenLDAP to be ready
         run: |
-          for i in $(seq 1 30); do
-            if ldapsearch -x -H ldap://localhost:1389 \
-                 -b dc=hearth,dc=test \
-                 -D cn=admin,dc=hearth,dc=test \
-                 -w HearthLdapCI1! > /dev/null 2>&1; then
-              echo "OpenLDAP ready (attempt $i)"
+          # Wait for LDAP port AND user seeding: bitnami seeds LDAP_USERS
+          # asynchronously after the port comes up, so we must verify at least
+          # one inetOrgPerson entry exists before running tests.
+          for i in $(seq 1 40); do
+            USER_COUNT=$(ldapsearch -x -H ldap://localhost:1389 \
+              -b dc=hearth,dc=test \
+              -D cn=admin,dc=hearth,dc=test \
+              -w HearthLdapCI1! \
+              "(objectClass=inetOrgPerson)" 2>/dev/null | grep -c "^dn:" || true)
+            if [ "${USER_COUNT:-0}" -gt 0 ]; then
+              echo "OpenLDAP ready with ${USER_COUNT} user(s) (attempt $i)"
               break
             fi
-            echo "Waiting for OpenLDAP... (attempt $i/30)"
+            echo "Waiting for OpenLDAP users... (attempt $i/40, currently ${USER_COUNT:-0} users)"
             sleep 3
           done
 
