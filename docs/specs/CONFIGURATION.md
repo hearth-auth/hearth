@@ -1061,6 +1061,38 @@ realms:
 
 ---
 
+### `realms.<name>` — Migration Controls
+
+Three fields trigger one-shot realm data migrations during startup reconciliation. **Remove them from YAML after the migration completes** — the reconciler marks the flag consumed, and leaving them in has no effect on subsequent restarts, but keeping them prevents accidental re-migration after future config reloads.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `migrate_from` | string | Slug of the source realm to migrate from. After migration, the source is **archived** (orphan-detection treats the slug as resolved). Use when decommissioning the source realm. |
+| `copy_from` | string | Like `migrate_from` but with copy semantics — the source realm is **left intact** after users are copied to the destination. Use when duplicating a realm for staging or A/B purposes. |
+| `migrate` | object | Fine-grained migration options. Only meaningful when `migrate_from` or `copy_from` is set. All fields have defaults and the block may be omitted entirely. |
+
+#### `realms.<name>.migrate`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `users` | bool | `true` | Whether to copy user records and credentials. |
+| `orgs` | bool | `true` | Whether to copy organization memberships for migrated users. |
+| `applications` | bool | `false` | Whether to copy OAuth 2.0 application (client) registrations. |
+| `on_conflict` | string | `"error"` | Action when a user with the same email already exists in the destination realm: `"error"` (collect all conflicts and abort startup with a full list) or `"skip"` (leave conflicting users in the source realm and continue). |
+
+```yaml
+realms:
+  - name: production
+    migrate_from: staging      # "staging" will be archived after migration
+    migrate:
+      users: true
+      orgs: true
+      applications: false
+      on_conflict: skip        # skip conflicts rather than aborting
+```
+
+---
+
 ## Complete Example
 
 ```yaml
@@ -1196,6 +1228,10 @@ Every field's default value at a glance.
 | `agent_auth` | `enabled` | `false` |
 | `realms.<name>.seed_users[*]` | `email_verified` | `true` |
 | `realms.<name>.seed_users[*]` | `roles` | `[]` |
+| `realms.<name>.migrate` | `users` | `true` |
+| `realms.<name>.migrate` | `orgs` | `true` |
+| `realms.<name>.migrate` | `applications` | `false` |
+| `realms.<name>.migrate` | `on_conflict` | `"error"` |
 | `security` | `dpop_nonce_secret` | `"auto"` (random per startup) |
 | `security` | `jwks_rps_limit` | `60` |
 | `security` | `allowed_hosts` | `[]` (any) |
