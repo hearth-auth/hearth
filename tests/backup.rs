@@ -765,7 +765,9 @@ mod proptests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(32))]
+        // 8 cases: each case creates a full TestHarness::embedded() (tokio runtime + WAL init),
+        // which is expensive. 32 cases exceeded the 60s nextest terminate-after on CI runners.
+        #![proptest_config(ProptestConfig::with_cases(8))]
 
         /// Property: manifest checksums cover every non-manifest file in the archive.
         ///

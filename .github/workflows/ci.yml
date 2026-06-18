@@ -497,20 +497,40 @@ jobs:
 
       - name: Generate TLS certs and start OpenLDAP (HEA-1382/HEA-1385)
         run: |
-          # bitnami/openldap 2.6.10+ requires explicit TLS certs — generate
-          # an ephemeral self-signed CA+server cert for this CI run.
+          # bitnami/openldap 2.6.10+ requires explicit TLS certs. Generate a
+          # proper 2-tier PKI: CA cert (CA:TRUE) + server end-entity cert
+          # (CA:FALSE). Rustls rejects CA-flagged certs as server certs
+          # (CaUsedAsEndEntity), so the server cert must NOT have CA:TRUE.
           mkdir -p /tmp/ldap-tls
-          openssl req -x509 -newkey rsa:2048 -days 1 -nodes \
-            -keyout /tmp/ldap-tls/server.key \
-            -out    /tmp/ldap-tls/server.crt \
-            -subj   "/CN=localhost" \
-            -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-          cp /tmp/ldap-tls/server.crt /tmp/ldap-tls/ca.crt
+
+          # 1. Generate CA key + self-signed CA cert
+          openssl genrsa -out /tmp/ldap-tls/ca.key 2048
+          openssl req -x509 -new -nodes -key /tmp/ldap-tls/ca.key \
+            -sha256 -days 1 -out /tmp/ldap-tls/ca.crt \
+            -subj "/CN=hearth-ldap-ci-ca" \
+            -addext "basicConstraints=critical,CA:TRUE" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign"
+
+          # 2. Generate server key + CSR
+          openssl genrsa -out /tmp/ldap-tls/server.key 2048
+          openssl req -new -key /tmp/ldap-tls/server.key \
+            -out /tmp/ldap-tls/server.csr \
+            -subj "/CN=localhost"
+
+          # 3. Sign server cert with CA — end-entity (CA:FALSE), SAN required by rustls
+          openssl x509 -req \
+            -in /tmp/ldap-tls/server.csr \
+            -CA /tmp/ldap-tls/ca.crt -CAkey /tmp/ldap-tls/ca.key -CAcreateserial \
+            -out /tmp/ldap-tls/server.crt -days 1 -sha256 \
+            -extfile <(printf "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n")
+
           chmod 644 /tmp/ldap-tls/*.crt /tmp/ldap-tls/*.key
+
           # Trust the CA so rustls-native-certs (used by ldap3 tls-rustls-ring)
-          # can validate the LDAPS connection in ldaps_connection_succeeds test.
+          # accepts the LDAPS connection in ldaps_connection_succeeds test.
           sudo cp /tmp/ldap-tls/ca.crt /usr/local/share/ca-certificates/hearth-ldap-ci.crt
           sudo update-ca-certificates
+
           # Start OpenLDAP with certs mounted; digest-pinned image (HEA-1382)
           docker run -d --name openldap \
             -p 1389:1389 -p 1636:1636 \
