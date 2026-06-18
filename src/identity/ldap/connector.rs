@@ -522,7 +522,7 @@ mod tests {
         let conn = EmbeddedLdapConnector::new(cfg, Arc::new(NullStorage))
             .expect("valid ldaps config should construct successfully");
         let result = conn
-            .authenticate_user("", "password") // lgtm[rust/hard-coded-credentials]
+            .authenticate_user("", "password") // lgtm[rust/hard-coded-cryptographic-value]
             .await
             .expect("authenticate_user must not error on empty DN");
         assert!(!result, "empty DN must not authenticate");
@@ -534,7 +534,7 @@ mod tests {
         let conn = EmbeddedLdapConnector::new(cfg, Arc::new(NullStorage))
             .expect("valid ldaps config should construct successfully");
         let result = conn
-            .authenticate_user("uid=user,dc=example,dc=com", "") // lgtm[rust/hard-coded-credentials]
+            .authenticate_user("uid=user,dc=example,dc=com", "") // lgtm[rust/hard-coded-cryptographic-value]
             .await
             .expect("authenticate_user must not error on empty password");
         assert!(!result, "empty password must not authenticate");
