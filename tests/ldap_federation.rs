@@ -302,6 +302,12 @@ async fn ldaps_connection_succeeds() {
     let base_dn = require_env!("HEARTH_TEST_LDAP_BASE_DN");
 
     // LDAPS connection; allow_insecure must be false for a proper ldaps:// URL.
+    // CI uses bitnami/openldap which seeds users with uid/cn/sn but not mail.
+    // Map email -> uid so map_entry can successfully parse the CI user entry.
+    let ci_attr_map = LdapAttributeMap {
+        email: "uid".to_string(),
+        ..LdapAttributeMap::default()
+    };
     let cfg = LdapConfig {
         url: ldaps_url,
         allow_insecure: false,
@@ -310,7 +316,7 @@ async fn ldaps_connection_succeeds() {
         base_dn,
         user_filter: "(objectClass=inetOrgPerson)".to_string(),
         page_size: 100,
-        attribute_map: LdapAttributeMap::default(),
+        attribute_map: ci_attr_map,
         sync_strategy: SyncStrategy::ModifyTimestamp,
         sync_interval_secs: 300,
     };
