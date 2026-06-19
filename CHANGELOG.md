@@ -155,6 +155,31 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
     negligible (`:` is not a valid RFC 5321 local-part character) but closes a
     theoretical key-injection avenue in realm-scoped key lookups.
 
+- **Dependency-hygiene triage: SDK and CI lockfile updates (HEA-1389)** —
+  full audit of all shipped SDK and CI lockfiles; real vulnerabilities fixed,
+  dev-only findings justified-accepted with documented rationale:
+  - **`sdks/node`**: bumped `vitest@3.2.4 → 3.2.6` (GHSA-5xrq-8626-4rwp, critical
+    arbitrary file exec), `vite@7.3.3 → 7.3.5` (GHSA-fx2h-pf6j-xcff high path
+    bypass + GHSA-v6wh-96g9-6wx3 NTLM hash disclosure). Residual: `esbuild@0.27.7`
+    (low, Windows-only dev server, constrained by vite peer-dep) — justified-accept
+    added to `osv-scanner.toml`.
+  - **`sdks/typescript`**: bumped `vitest`, `vite`, and `form-data` (GHSA-hmw2-7cc7-3qxx
+    CRLF injection) to patched versions — now clean.
+  - **`sdks/php`**: bumped `guzzlehttp/guzzle 7.10.5 → 7.12.1`
+    (CVE-2026-55767 cookie domain confusion, CVE-2026-55568 silent HTTPS
+    proxy downgrade), `guzzlehttp/psr7 2.10.3 → 2.12.1` (CVE-2026-55766
+    CRLF injection), `orchestra/testbench v9 → v10`,
+    `laravel/framework v11.54 → v12.62.0` (CVE-2026-48019 CRLF injection in
+    email rule, GHSA-crmm-hgp2-wgrp Signed URL confusion),
+    `phpunit v10.5 → v11.5`. All 77 SDK tests pass.
+  - **`examples/grpc-admin-flow`**: bumped `@grpc/grpc-js → 1.14.4`
+    (GHSA-5375-pq7m-f5r2, GHSA-99f4-grh7-6pcq: malformed request crash) and
+    `protobufjs` (GHSA-wcpc-wj8m-hjx6 DoS). Examples are excluded from
+    osv-scanner scope; fixed as good hygiene.
+  - **CI**: replaced unpinned `pip3 install pyyaml` with
+    `apt-get install python3-yaml` to eliminate the Scorecard
+    pinned-dependencies finding.
+
 - **Upgraded `maxminddb` to 0.27.3 (RUSTSEC-2025-0132)** — `maxminddb` 0.24
   contained a soundness bug where `Reader::open_mmap` unsoundly treated a
   `memmap2` operation as safe, enabling potential undefined behaviour if the
