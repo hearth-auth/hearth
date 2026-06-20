@@ -1,0 +1,32 @@
+meta {
+  name: Import Users
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/admin/users/import
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "users": [
+      {
+        "email": "imported@example.com",
+        "display_name": "Imported User",
+        "external_id": "ext-001"
+      }
+    ]
+  }
+}
