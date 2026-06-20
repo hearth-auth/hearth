@@ -100,6 +100,7 @@ pub struct CallbackForm {
 /// `GET /ui/realms/{realm}/federation/begin?idp=...`
 pub async fn begin_scoped(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Path(realm_name): Path<String>,
     Query(q): Query<BeginQuery>,
 ) -> Response {
@@ -109,21 +110,30 @@ pub async fn begin_scoped(
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
-    begin_impl(state, realm_id, q).await
+    begin_impl(state, &headers, realm_id, q).await
 }
 
 /// `GET /ui/federation/begin?idp=...` (bare — resolves default realm).
-pub async fn begin(State(state): State<Arc<WebState>>, Query(q): Query<BeginQuery>) -> Response {
+pub async fn begin(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Query(q): Query<BeginQuery>,
+) -> Response {
     let realm_id = match realm_resolver::resolve(state.as_ref(), None) {
         Resolved::Realm(r) => r.id().clone(),
         Resolved::NotFound => return handlers_common::not_found("Realm not found"),
         Resolved::MustChoose(_) => return handlers_common::bad_request("Realm not specified"),
         Resolved::Storage => return handlers_common::server_error(),
     };
-    begin_impl(state, realm_id, q).await
+    begin_impl(state, &headers, realm_id, q).await
 }
 
-async fn begin_impl(state: Arc<WebState>, realm_id: RealmId, q: BeginQuery) -> Response {
+async fn begin_impl(
+    state: Arc<WebState>,
+    headers: &HeaderMap,
+    realm_id: RealmId,
+    q: BeginQuery,
+) -> Response {
     let service = match build_service(&state) {
         Some(s) => s,
         None => return handlers_common::server_error(),
@@ -139,8 +149,10 @@ async fn begin_impl(state: Arc<WebState>, realm_id: RealmId, q: BeginQuery) -> R
             // A-48: plant session-binding cookie.  SameSite=Lax is required
             // because the IdP redirect is a top-level cross-origin navigation.
             let bind_mac = compute_federation_state_mac(cookie_secret_32(&state), &state_token);
+            let secure = state.is_secure_request(headers);
+            let secure_flag = if secure { "; Secure" } else { "" };
             let bind_cookie = format!(
-                "{FED_BIND_COOKIE}={bind_mac}; HttpOnly; Path=/; SameSite=Lax; Max-Age=600"
+                "{FED_BIND_COOKIE}={bind_mac}; HttpOnly; Path=/; SameSite=Lax; Max-Age=600{secure_flag}"
             );
             let mut resp = Redirect::to(url.as_str()).into_response();
             resp.headers_mut().insert(
@@ -250,6 +262,8 @@ async fn callback_impl(
         // User denied consent at the upstream — quietly land on login.
         return Redirect::to("/ui/login?error=federation_denied").into_response();
     }
+
+    let secure = state.is_secure_request(&headers);
 
     // A-48: verify session-binding cookie before touching storage.
     // Fail-closed: a missing or invalid cookie rejects the callback.
@@ -402,18 +416,19 @@ async fn callback_impl(
                 &ticket.user_id,
                 &ticket.ticket,
             );
+            let secure_flag = if secure { "; Secure" } else { "" };
             let cookie = format!(
-                "{CONFIRM_LINK_COOKIE}={}.{tag}; HttpOnly; Path=/ui; SameSite=Lax; Max-Age=600",
+                "{CONFIRM_LINK_COOKIE}={}.{tag}; HttpOnly; Path=/ui; SameSite=Lax; Max-Age=600{secure_flag}",
                 ticket.ticket
             );
-            let mut headers = HeaderMap::new();
-            headers.insert(
+            let mut resp_headers = HeaderMap::new();
+            resp_headers.insert(
                 header::SET_COOKIE,
                 header::HeaderValue::from_str(&cookie)
                     .unwrap_or_else(|_| header::HeaderValue::from_static("")),
             );
             (
-                headers,
+                resp_headers,
                 Redirect::to(&format!(
                     "/ui/federation/confirm-link?ticket={}",
                     ticket.ticket

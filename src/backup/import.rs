@@ -725,6 +725,7 @@ mod tests {
             checksums: std::collections::HashMap::new(),
             sections_encrypted: true,
             wrapped_dek_b64: Some(wrapped_dek_b64),
+            signing_key_dek_b64: None,
             dek_wrapping_params: Some(dek_wrapping_params),
             detached_signature_b64: None,
         };

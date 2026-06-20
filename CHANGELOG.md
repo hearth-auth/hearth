@@ -111,6 +111,84 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   from the 1.0 Readiness Audit — minimal Auth0 "Actions" / Keycloak protocol
   mapper escape hatch (HEA-1324).
 
+- **F10–F17 batched auth/crypto/logging hardening (HEA-1371)**
+
+  - **F10 Magic-link and password-reset tokens are now single-use under concurrent requests** — a per-token mutex eliminates the TOCTOU race between the `get` (reads `used=false`) and `put` (writes `used=true`), matching the existing `jti_locks` pattern.
+  - **F11 TOTP code comparison now constant-time** — `validate_totp` switched from `==` to `subtle::ConstantTimeEq` to eliminate timing side-channels during HMAC-TOTP verification.
+  - **F12 Hardcoded dev OTP HMAC fallback key removed** — the literal `hearth-dev-sms-otp-key-not-for-production` string was replaced with a zeroed 32-byte key in dev/log mode. Startup now also validates that any provided `HEARTH_SMS_OTP_HMAC_KEY` is ≥ 32 bytes.
+  - **F13 `Secure` cookie attribute added to three flow cookies** — `hearth_fed_bind`, `hearth_ui_fed_confirm`, and `hearth_ui_oauth_ticket` now include `; Secure` when the request is served over HTTPS (determined via `is_secure_request`).
+  - **F14 gRPC consent handlers no longer leak internal error text** — `revoke_consent` and `list_consents_by_user` now route errors through `identity_to_status` (opaque error-id mapper) instead of forwarding `e.to_string()` to the caller.
+  - **F15 Browser-login timing parity for nonexistent users** — when `get_user_by_email` returns `None`, the handler now runs a dummy Argon2id hash via `dummy_verify_password` before returning, making the response timing indistinguishable from a real user with the wrong password.
+  - **F16 Setup token and mailcatcher password now gated on `dev_mode`** — the startup panel previously printed these to stdout whenever `log_format != json`; they are now redacted in production mode.
+  - **F17 Unsafe mmap (`OfflineBreachCorpus`) relocated from identity to storage layer** — moved `src/identity/breach_corpus.rs` → `src/storage/breach_corpus.rs`, bringing it into the layer where `unsafe` I/O is permitted.
+
+- **Auto-generated master key now written `0o600`; production refuses auto-gen
+  (HEA-1368)** — when `HEARTH_MASTER_KEY` is unset, the auto-generated
+  `hearth.host_key` file was previously created via `std::fs::write` honoring
+  the process umask (commonly `0o644`), making the key world-readable. The file
+  is now created with mode `0o600` via `OpenOptions` + `create_new`. Startup
+  also emits a `WARN` when auto-generating in dev mode and fails closed in
+  production, requiring `HEARTH_MASTER_KEY` to be set explicitly.
+
+- **JSON parse-bomb guard now active on all JSON routes (HEA-1369)** —
+  `POST`/`PUT`/`PATCH` requests with `Content-Type: application/json` are now
+  validated for nesting depth (≤ 128 levels) and array length (< 65 536 items)
+  before reaching any handler. Requests exceeding either limit are rejected with
+  HTTP 400. The guard logic already existed in `src/abuse/guards.rs` but had no
+  callers; it is now wired as a global axum route middleware. `Content-Encoding:
+  gzip` decompression (A-22) remains N/A — Hearth does not install an inbound
+  decompressor.
+
+- **Parser/validation fail-closed hardening (HEA-1372)** — three low-severity
+  findings from the HEA-1363 audit closed:
+  - **F18 WAL batch decode allocation now capped** — `decode_batch_payload` now
+    bounds `Vec::with_capacity` to `min(count, remaining_bytes / 9)` before
+    the sub-entry loop, preventing a corrupted `count` field from triggering an
+    unbounded allocation. Reachable only after AES-GCM authentication, so no
+    remote exploit path existed.
+  - **F19a SAML `DocType` uniformly rejected** — `parse_response`,
+    `parse_authn_request`, `parse_idp_metadata`, `parse_logout_request`, and
+    `parse_logout_response` now explicitly return an error on `Event::DocType`,
+    matching the existing reject in `xml.rs` and `c14n.rs`.
+  - **F19b Email addresses containing `:` are now rejected** — `validate_email`
+    rejects any address containing the storage key delimiter `:`; the impact is
+    negligible (`:` is not a valid RFC 5321 local-part character) but closes a
+    theoretical key-injection avenue in realm-scoped key lookups.
+
+- **Dependency-hygiene triage: SDK and CI lockfile updates (HEA-1389)** —
+  full audit of all shipped SDK and CI lockfiles; real vulnerabilities fixed,
+  dev-only findings justified-accepted with documented rationale:
+  - **`sdks/node`**: bumped `vitest@3.2.4 → 3.2.6` (GHSA-5xrq-8626-4rwp, critical
+    arbitrary file exec), `vite@7.3.3 → 7.3.5` (GHSA-fx2h-pf6j-xcff high path
+    bypass + GHSA-v6wh-96g9-6wx3 NTLM hash disclosure). Residual: `esbuild@0.27.7`
+    (low, Windows-only dev server, constrained by vite peer-dep) — justified-accept
+    added to `osv-scanner.toml`.
+  - **`sdks/typescript`**: bumped `vitest`, `vite`, and `form-data` (GHSA-hmw2-7cc7-3qxx
+    CRLF injection) to patched versions — now clean.
+  - **`sdks/php`**: bumped `guzzlehttp/guzzle 7.10.5 → 7.12.1`
+    (CVE-2026-55767 cookie domain confusion, CVE-2026-55568 silent HTTPS
+    proxy downgrade), `guzzlehttp/psr7 2.10.3 → 2.12.1` (CVE-2026-55766
+    CRLF injection), `orchestra/testbench v9 → v10`,
+    `laravel/framework v11.54 → v12.62.0` (CVE-2026-48019 CRLF injection in
+    email rule, GHSA-crmm-hgp2-wgrp Signed URL confusion),
+    `phpunit v10.5 → v11.5`. All 77 SDK tests pass.
+  - **`examples/grpc-admin-flow`**: bumped `@grpc/grpc-js → 1.14.4`
+    (GHSA-5375-pq7m-f5r2, GHSA-99f4-grh7-6pcq: malformed request crash) and
+    `protobufjs` (GHSA-wcpc-wj8m-hjx6 DoS). Examples are excluded from
+    osv-scanner scope; fixed as good hygiene.
+  - **CI**: replaced unpinned `pip3 install pyyaml` with
+    `apt-get install python3-yaml` to eliminate the Scorecard
+    pinned-dependencies finding.
+
+- **Upgraded `maxminddb` to 0.27.3 (RUSTSEC-2025-0132)** — `maxminddb` 0.24
+  contained a soundness bug where `Reader::open_mmap` unsoundly treated a
+  `memmap2` operation as safe, enabling potential undefined behaviour if the
+  backing file was modified after being mapped. Hearth never called
+  `open_mmap` (only `open_readfile`), so no exploit path existed; the
+  upgrade closes the advisory and removes the suppression in `deny.toml`.
+  A `cargo audit --deny warnings` gate has been added to the CI quality
+  job to catch future RustSec advisories at PR time (HEA-1370).
+
 ### Fixed
 
 - **Realm OIDC discovery now includes `end_session_endpoint`** — the realm-scoped

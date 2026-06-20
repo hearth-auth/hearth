@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::Router;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
@@ -102,6 +102,59 @@ pub(crate) async fn track_metrics(request: Request, next: Next) -> Response {
     response
 }
 
+/// A-21: JSON parse-bomb guard middleware (depth + array length).
+///
+/// Intercepts `POST`, `PUT`, and `PATCH` requests with `Content-Type:
+/// application/json` and validates the body's nesting depth and array
+/// length before the request reaches any handler. Bodies exceeding
+/// [`crate::abuse::guards::MAX_JSON_DEPTH`] levels or
+/// [`crate::abuse::guards::MAX_JSON_ARRAY_LEN`] array items are rejected
+/// with HTTP 400 before any handler logic executes.
+///
+/// Must be applied via [`Router::route_layer`] so it only runs on matched
+/// routes (not on 404 paths) and runs inside the [`DefaultBodyLimit`] layer,
+/// ensuring the body is already capped at [`BODY_LIMIT_DEFAULT`] before we
+/// attempt to collect it.
+async fn json_depth_guard(req: Request, next: Next) -> Response {
+    use axum::http::header::CONTENT_TYPE;
+    use axum::http::Method;
+
+    let is_json_body = matches!(req.method(), &Method::POST | &Method::PUT | &Method::PATCH)
+        && req
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.starts_with("application/json"))
+            .unwrap_or(false);
+
+    if !is_json_body {
+        return next.run(req).await;
+    }
+
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, BODY_LIMIT_DEFAULT).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                axum::Json(serde_json::json!({"error": "request body too large"})),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(e) = crate::abuse::guards::check_json_depth(&bytes) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+
+    let req = Request::from_parts(parts, axum::body::Body::from(bytes));
+    next.run(req).await
+}
+
 /// A-26: removes the `Server:` response header from every response so the
 /// runtime identity is not disclosed to callers.
 async fn strip_server_header(req: Request, next: Next) -> Response {
@@ -140,6 +193,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     }
 
     base.route_layer(axum::middleware::from_fn(track_metrics))
+        // A-21: JSON parse-bomb guard — runs before handler logic on all matched routes.
+        .route_layer(axum::middleware::from_fn(json_depth_guard))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(

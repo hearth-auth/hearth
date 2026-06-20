@@ -30,6 +30,11 @@ Hearth signs every OTP challenge with HMAC-SHA256 so the 6-digit code can be ver
 storing it in the database. This secret **must** be injected as an environment variable — it
 must never appear in `hearth.yaml`.
 
+> **Minimum length (HEA-1371):** The key value must be at least 32 bytes long. Hearth validates
+> this at startup and refuses to start if the key is shorter. The `openssl rand -base64 32`
+> command below produces a 44-character string (44 bytes) and satisfies this requirement.
+> A shorter key such as `openssl rand -base64 16` (24 bytes) will cause a startup error.
+
 ### Generate the key
 
 ```bash

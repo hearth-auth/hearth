@@ -12,4 +12,9 @@ ignore = [
     # available; revisit when rsa 0.10+ lands with tonic/tower ecosystem support
     # (tracked in HEA-116).
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2025-0141: bincode 1.x flagged unmaintained.
+    # bincode is a transitive dependency of madsim (simulation crate only) —
+    # it is NOT present in the production dependency graph. No production code
+    # is affected. Track upstream madsim for an eventual bincode 2.x migration.
+    "RUSTSEC-2025-0141",
 ]

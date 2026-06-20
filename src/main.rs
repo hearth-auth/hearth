@@ -1056,7 +1056,16 @@ async fn run_serve(
     // cryptographically bound to the server; the Log transport in dev mode
     // skips the check to avoid friction during local development.
     let sms_otp_hmac_key: Option<String> = match std::env::var("HEARTH_SMS_OTP_HMAC_KEY") {
-        Ok(key) if !key.is_empty() => Some(key),
+        Ok(key) if !key.is_empty() => {
+            if key.len() < 32 {
+                return Err(
+                    "HEARTH_SMS_OTP_HMAC_KEY must be at least 32 bytes for adequate \
+                     HMAC-SHA256 security; use a 32+ byte random value"
+                        .into(),
+                );
+            }
+            Some(key)
+        }
         Ok(_) | Err(_) => {
             if config.sms.transport != SmsTransport::Log || !config.dev_mode {
                 return Err("HEARTH_SMS_OTP_HMAC_KEY environment variable is required \
@@ -2174,10 +2183,20 @@ fn print_startup_panel(
         tracing::info!("  Issuer:  {issuer}");
     }
     if let Some(token) = setup_token {
-        tracing::info!("  Setup:   {base}/ui/setup?token={token}");
+        if dev_mode {
+            tracing::info!("  Setup:   {base}/ui/setup?token={token}");
+        } else {
+            tracing::info!(
+                "  Setup:   {base}/ui/setup  (token redacted in prod — set HEARTH_SETUP_TOKEN)"
+            );
+        }
     }
     if let Some((inbox_url, password)) = mailcatcher {
-        tracing::info!("  Mail:    {inbox_url}  pw: {password}");
+        if dev_mode {
+            tracing::info!("  Mail:    {inbox_url}  pw: {password}");
+        } else {
+            tracing::info!("  Mail:    {inbox_url}");
+        }
     }
     tracing::info!("  ─────────────────────────────────────────────────");
     // Environment stats

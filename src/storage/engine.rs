@@ -40,6 +40,10 @@ pub struct StorageConfig {
     pub allow_missing_keks: bool,
     /// Background SST compaction configuration.
     pub compaction: CompactionConfig,
+    /// When `true`, auto-generation of the host key is permitted if
+    /// `HEARTH_MASTER_KEY` is unset (dev/test only). When `false` (production),
+    /// startup fails if the env var is absent — preventing a world-readable key.
+    pub dev_mode: bool,
 }
 
 /// Configuration for background SST compaction.
@@ -81,6 +85,7 @@ impl StorageConfig {
             tiered_config: TieredConfig::default(),
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
+            dev_mode: true,
         }
     }
 
@@ -120,6 +125,7 @@ impl StorageConfig {
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
+            dev_mode: false,
         }
     }
 
@@ -146,6 +152,7 @@ impl StorageConfig {
                 interval_secs: 0,
                 min_sst_count: 2,
             },
+            dev_mode: true,
         }
     }
 }
@@ -203,6 +210,7 @@ impl EmbeddedStorageEngine {
         let key_registry = Arc::new(KeyRegistry::load_with_fs(
             &config.data_dir,
             Arc::clone(&fs),
+            config.dev_mode,
         )?);
 
         // System realm: a fixed UUID used for file-level encryption keys.
@@ -1042,6 +1050,7 @@ mod tests {
             },
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
+            dev_mode: true,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1098,6 +1107,7 @@ mod tests {
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
+                dev_mode: true,
             };
             let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1125,6 +1135,7 @@ mod tests {
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
+                dev_mode: true,
             };
             let engine = EmbeddedStorageEngine::open(config).expect("reopen");
 
@@ -1167,6 +1178,7 @@ mod tests {
             tiered_config: TieredConfig::default(),
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
+            dev_mode: true,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open");
 
@@ -1228,6 +1240,7 @@ mod tests {
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
+                dev_mode: true,
             };
             let engine = EmbeddedStorageEngine::open(config).expect("open");
             for i in 0u32..5 {
@@ -1253,6 +1266,7 @@ mod tests {
             tiered_config: TieredConfig::default(),
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
+            dev_mode: true,
         };
         let result = EmbeddedStorageEngine::open(config);
         assert!(
@@ -1283,6 +1297,7 @@ mod tests {
                 },
                 allow_missing_keks: false,
                 compaction: CompactionConfig::default(),
+                dev_mode: true,
             };
             let engine = EmbeddedStorageEngine::open(config).expect("open");
             for i in 0u32..5 {
@@ -1307,6 +1322,7 @@ mod tests {
             tiered_config: TieredConfig::default(),
             allow_missing_keks: true,
             compaction: CompactionConfig::default(),
+            dev_mode: true,
         };
         let engine = EmbeddedStorageEngine::open(config).expect("open with allow_missing_keks");
         // Data that was only in the SST is no longer reachable
@@ -1544,6 +1560,7 @@ mod tests {
             tiered_config: TieredConfig::default(),
             allow_missing_keks: false,
             compaction: CompactionConfig::default(),
+            dev_mode: true,
         };
 
         {

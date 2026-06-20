@@ -58,14 +58,21 @@ pub(crate) struct KeyRegistry {
 
 impl KeyRegistry {
     /// Loads or creates the key registry.
-    pub(crate) fn load(data_dir: &Path) -> Result<Self, StorageError> {
-        Self::load_with_fs(data_dir, Arc::new(RealFs))
+    ///
+    /// `dev_mode: true` permits auto-generating the host key when
+    /// `HEARTH_MASTER_KEY` is unset. `false` fails closed (production).
+    pub(crate) fn load(data_dir: &Path, dev_mode: bool) -> Result<Self, StorageError> {
+        Self::load_with_fs(data_dir, Arc::new(RealFs), dev_mode)
     }
 
     /// Loads the key registry with a custom filesystem.
-    pub(crate) fn load_with_fs(data_dir: &Path, fs: Arc<dyn Fs>) -> Result<Self, StorageError> {
+    pub(crate) fn load_with_fs(
+        data_dir: &Path,
+        fs: Arc<dyn Fs>,
+        dev_mode: bool,
+    ) -> Result<Self, StorageError> {
         fs.create_dir_all(data_dir)?;
-        let host_key = load_or_create_host_key(data_dir, &*fs)?;
+        let host_key = load_or_create_host_key(data_dir, &*fs, dev_mode)?;
         let prev_host_key = load_previous_host_key()?;
         Self::load_with_keys(data_dir, fs, host_key, prev_host_key)
     }
@@ -298,7 +305,11 @@ impl LoadKeksResult {
 /// 1. `HEARTH_MASTER_KEY` environment variable (hex-encoded 32-byte key)
 /// 2. `{data_dir}/hearth.host_key` file (32 raw bytes)
 /// 3. Auto-generate and persist to `{data_dir}/hearth.host_key`
-fn load_or_create_host_key(data_dir: &Path, fs: &dyn Fs) -> Result<HostKey, StorageError> {
+fn load_or_create_host_key(
+    data_dir: &Path,
+    fs: &dyn Fs,
+    dev_mode: bool,
+) -> Result<HostKey, StorageError> {
     // 1. Check environment variable
     if let Ok(env_val) = std::env::var("HEARTH_MASTER_KEY") {
         let env_val = env_val.trim();
@@ -330,11 +341,42 @@ fn load_or_create_host_key(data_dir: &Path, fs: &dyn Fs) -> Result<HostKey, Stor
         return Ok(HostKey::from_bytes(bytes));
     }
 
-    // 3. Auto-generate
+    // 3. Auto-generate — only allowed in dev mode
+    if !dev_mode {
+        return Err(StorageError::Crypto {
+            reason: "HEARTH_MASTER_KEY is not set and auto-generation is disabled in \
+                     production mode; set HEARTH_MASTER_KEY to a 64-hex-char random key \
+                     (e.g. openssl rand -hex 32)"
+                .to_string(),
+        });
+    }
+
+    tracing::warn!(
+        path = %host_key_path.display(),
+        "auto-generating host key and persisting to disk — \
+         set HEARTH_MASTER_KEY for production deployments"
+    );
+
     let host_key = generate_host_key()?;
-    fs.write(&host_key_path, host_key.as_bytes())?;
+    write_host_key_private(&host_key_path, &host_key)?;
 
     Ok(host_key)
+}
+
+/// Writes the host key file with mode `0o600` (owner read/write only).
+///
+/// Uses `create_new` semantics to prevent silently overwriting an existing key.
+fn write_host_key_private(path: &Path, key: &HostKey) -> Result<(), StorageError> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    std::io::Write::write_all(&mut file, key.as_bytes())?;
+    Ok(())
 }
 
 /// Loads the previous host key from `HEARTH_PREVIOUS_MASTER_KEY`, if set.
@@ -565,7 +607,7 @@ mod tests {
     #[test]
     fn key_registry_ensure_kek_creates_and_retrieves() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let registry = KeyRegistry::load(dir.path()).expect("load");
+        let registry = KeyRegistry::load(dir.path(), true).expect("load");
 
         let realm = RealmId::generate();
         let kek = registry.ensure_kek_for_realm(&realm).expect("ensure kek");
@@ -581,7 +623,7 @@ mod tests {
 
         // Create realm KEK
         {
-            let registry = KeyRegistry::load(dir.path()).expect("load");
+            let registry = KeyRegistry::load(dir.path(), true).expect("load");
             let kek = registry.ensure_kek_for_realm(&realm).expect("ensure kek");
             let retrieved = registry.get_kek_for_realm(&realm).expect("get kek");
             assert_eq!(kek.as_bytes(), retrieved.as_bytes());
@@ -589,7 +631,7 @@ mod tests {
 
         // Re-load and verify KEK survives
         {
-            let registry = KeyRegistry::load(dir.path()).expect("reload");
+            let registry = KeyRegistry::load(dir.path(), true).expect("reload");
             let kek = registry
                 .get_kek_for_realm(&realm)
                 .expect("should have kek after reload");
@@ -600,7 +642,7 @@ mod tests {
     #[test]
     fn key_registry_rotate_kek_produces_new_key() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let registry = KeyRegistry::load(dir.path()).expect("load");
+        let registry = KeyRegistry::load(dir.path(), true).expect("load");
         let realm = RealmId::generate();
 
         let kek1 = registry.ensure_kek_for_realm(&realm).expect("ensure");
@@ -619,7 +661,7 @@ mod tests {
     #[test]
     fn key_registry_different_realms_have_different_keks() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let registry = KeyRegistry::load(dir.path()).expect("load");
+        let registry = KeyRegistry::load(dir.path(), true).expect("load");
 
         let realm1 = RealmId::generate();
         let realm2 = RealmId::generate();
@@ -633,7 +675,7 @@ mod tests {
     #[test]
     fn key_registry_kek_id_matches_realm_uuid() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let registry = KeyRegistry::load(dir.path()).expect("load");
+        let registry = KeyRegistry::load(dir.path(), true).expect("load");
         let realm = RealmId::generate();
 
         let expected_kek_id: KekId = {
@@ -653,7 +695,7 @@ mod tests {
 
         // Create a valid KEK
         {
-            let registry = KeyRegistry::load(dir.path()).expect("load");
+            let registry = KeyRegistry::load(dir.path(), true).expect("load");
             registry.ensure_kek_for_realm(&realm).expect("ensure");
         }
 
@@ -670,7 +712,7 @@ mod tests {
 
         // Re-load: corrupted entry should be skipped, realm has no KEK
         {
-            let registry = KeyRegistry::load(dir.path()).expect("reload");
+            let registry = KeyRegistry::load(dir.path(), true).expect("reload");
             assert!(
                 registry.get_kek_for_realm(&realm).is_none(),
                 "corrupted entry should be skipped"
@@ -685,7 +727,7 @@ mod tests {
 
         // Create a valid KEK
         {
-            let registry = KeyRegistry::load(dir.path()).expect("load");
+            let registry = KeyRegistry::load(dir.path(), true).expect("load");
             registry.ensure_kek_for_realm(&realm).expect("ensure");
         }
 
@@ -700,7 +742,7 @@ mod tests {
 
         // Re-load: truncated entry should be skipped (incomplete CRC)
         {
-            let registry = KeyRegistry::load(dir.path()).expect("reload");
+            let registry = KeyRegistry::load(dir.path(), true).expect("reload");
             assert!(
                 registry.get_kek_for_realm(&realm).is_none(),
                 "truncated entry should be skipped"
@@ -898,5 +940,49 @@ mod tests {
             }
             other => panic!("expected HostKeyMismatch, got: {other:?}"),
         }
+    }
+
+    // ── F7 security regression tests ─────────────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn host_key_file_written_with_0o600_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _registry = KeyRegistry::load(dir.path(), true).expect("load in dev mode");
+        let key_path = dir.path().join("hearth.host_key");
+        assert!(
+            key_path.exists(),
+            "hearth.host_key must be created on auto-gen"
+        );
+        let mode = std::fs::metadata(&key_path)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "hearth.host_key must be 0o600, got 0o{mode:o}");
+    }
+
+    #[test]
+    fn production_mode_refuses_autogenerated_host_key() {
+        if std::env::var("HEARTH_MASTER_KEY").is_ok() {
+            return; // skip when env var is already set
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = KeyRegistry::load(dir.path(), false)
+            .expect_err("production mode must refuse without HEARTH_MASTER_KEY");
+        match err {
+            StorageError::Crypto { reason } => {
+                assert!(
+                    reason.contains("HEARTH_MASTER_KEY"),
+                    "error must mention HEARTH_MASTER_KEY, got: {reason}"
+                );
+            }
+            other => panic!("expected StorageError::Crypto, got: {other:?}"),
+        }
+        assert!(
+            !dir.path().join("hearth.host_key").exists(),
+            "host_key file must NOT be written on refused production start-up"
+        );
     }
 }

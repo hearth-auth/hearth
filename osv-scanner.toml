@@ -21,6 +21,14 @@
 id = "RUSTSEC-2025-0141"
 reason = "bincode@1.3.3 is a transitive dependency of madsim (hearth-simulation test crate only). It is never compiled into the production binary. The advisory is maintenance-only — no CVE, no CVSS score, no known exploit. madsim v0.2.34 (latest) still requires it; no upgrade path exists. Suppressed per HEA-700 security audit."
 
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+reason = "Marvin Attack timing side-channel in rsa crate. Hearth uses rsa only for PKCS#8 key generation and serialization — no PKCS#1 v1.5 decryption is performed anywhere, which is the only affected code path. All RSA signing is delegated to ring::signature::RsaKeyPair (unaffected). No patched version of rsa is available; revisit when rsa 0.10+ lands with the tonic/tower ecosystem. Tracked in HEA-116."
+
+[[IgnoredVulns]]
+id = "GHSA-g7r4-m6w7-qqqr"
+reason = "esbuild dev-server file read on Windows. Affects esbuild >=0.27.3 <0.28.1. The sdks/node devDependency is constrained to 0.27.x by vite@7.x's peer-dep; 0.28.1 is not yet reachable without a vite major bump. The vulnerability only triggers when running esbuild's HTTP dev server on Windows — Hearth's Node SDK never runs a dev server in CI or production, and the shipped artifact only contains jose. Low severity; Windows-only; dev-tooling-only surface. Revisit when vite@8 ships with esbuild >=0.28.1."
+
 [[PackageOverrides]]
 name = "*"
 ecosystem = "npm"

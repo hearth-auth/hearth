@@ -1061,6 +1061,81 @@ realms:
 
 ---
 
+### `realms.<name>` — Migration Controls
+
+Three fields trigger one-shot realm data migrations during startup reconciliation. **Remove them from YAML after the migration completes** — the reconciler marks the flag consumed, and leaving them in has no effect on subsequent restarts, but keeping them prevents accidental re-migration after future config reloads.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `migrate_from` | string | Slug of the source realm to migrate from. After migration, the source is **archived** (orphan-detection treats the slug as resolved). Use when decommissioning the source realm. |
+| `copy_from` | string | Like `migrate_from` but with copy semantics — the source realm is **left intact** after users are copied to the destination. Use when duplicating a realm for staging or A/B purposes. |
+| `migrate` | object | Fine-grained migration options. Only meaningful when `migrate_from` or `copy_from` is set. All fields have defaults and the block may be omitted entirely. |
+
+#### `realms.<name>.migrate`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `users` | bool | `true` | Whether to copy user records and credentials. |
+| `orgs` | bool | `true` | Whether to copy organization memberships for migrated users. |
+| `applications` | bool | `false` | Whether to copy OAuth 2.0 application (client) registrations. |
+| `on_conflict` | string | `"error"` | Action when a user with the same email already exists in the destination realm: `"error"` (collect all conflicts and abort startup with a full list) or `"skip"` (leave conflicting users in the source realm and continue). |
+
+```yaml
+realms:
+  - name: production
+    migrate_from: staging      # "staging" will be archived after migration
+    migrate:
+      users: true
+      orgs: true
+      applications: false
+      on_conflict: skip        # skip conflicts rather than aborting
+```
+
+---
+
+### `realms.<name>.attribute_definitions`
+
+Declares a strict attribute schema for users and organizations in a realm. When this block is present, only the declared attribute keys are accepted at create/update time — unknown keys are rejected with a validation error. **When absent (the default), attributes are free-form**: any key-value pair is accepted.
+
+Use `attribute_definitions` when you need to enforce a canonical set of user/org properties for compliance, reporting, or UI consistency.
+
+#### `realms.<name>.attribute_definitions.users` / `.organizations`
+
+Each list entry declares one attribute:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `key` | string | *required* | Machine-readable attribute key. Used as the storage key; must be URL-safe. |
+| `label` | string | same as `key` | Human-readable label shown in the admin UI. |
+| `type` | string | `"string"` | Data type hint for validation and UI rendering: `"string"`, `"number"`, `"boolean"`, or `"enum"`. |
+| `required` | bool | `false` | When `true`, the attribute must be present when creating a record. |
+| `description` | string | — | Short description shown as a placeholder or tooltip in the admin UI. |
+| `enum_values` | list of strings | `[]` | Allowed values when `type: enum`. Ignored for other types. |
+
+```yaml
+realms:
+  - name: corp
+    attribute_definitions:
+      users:
+        - key: employee_id
+          label: "Employee ID"
+          type: string
+          required: true
+          description: "HR system identifier"
+        - key: department
+          type: enum
+          enum_values: [engineering, sales, support, product]
+        - key: is_contractor
+          type: boolean
+      organizations:
+        - key: tier
+          type: enum
+          enum_values: [free, pro, enterprise]
+          required: true
+```
+
+---
+
 ## Complete Example
 
 ```yaml
@@ -1103,6 +1178,32 @@ auth:
 
 onboarding:
   base_url: "https://auth.example.com"
+
+security:
+  bearer_token: "${HEARTH_METRICS_TOKEN}"
+  allowed_hosts:
+    - "auth.example.com"
+  dpop_nonce_secret: "${HEARTH_DPOP_NONCE_SECRET}"
+  jwks_rps_limit: 60
+  http2:
+    max_concurrent_streams: 100
+    max_pending_reset_streams: 10
+  request_shaper:
+    ip_rps: 100
+    realm_rps: 1000
+  ip_reputation:
+    enabled: true
+    action: block
+  rate_limiting:
+    login_per_ip:
+      max_attempts: 10
+      window_seconds: 60
+    login_per_account:
+      max_failures: 5
+      lockout_seconds: 300
+  backup:
+    verify_key: "${HEARTH_BACKUP_VERIFY_KEY}"
+    export_rate_limit: 10
 
 realms:
   customer-portal:
@@ -1196,6 +1297,10 @@ Every field's default value at a glance.
 | `agent_auth` | `enabled` | `false` |
 | `realms.<name>.seed_users[*]` | `email_verified` | `true` |
 | `realms.<name>.seed_users[*]` | `roles` | `[]` |
+| `realms.<name>.migrate` | `users` | `true` |
+| `realms.<name>.migrate` | `orgs` | `true` |
+| `realms.<name>.migrate` | `applications` | `false` |
+| `realms.<name>.migrate` | `on_conflict` | `"error"` |
 | `security` | `dpop_nonce_secret` | `"auto"` (random per startup) |
 | `security` | `jwks_rps_limit` | `60` |
 | `security` | `allowed_hosts` | `[]` (any) |

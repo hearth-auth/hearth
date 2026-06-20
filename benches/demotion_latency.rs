@@ -56,12 +56,14 @@ const P99_CEILING: Duration = Duration::from_micros(500);
 
 fn make_engine() -> (tempfile::TempDir, EmbeddedStorageEngine, RealmId) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let config = StorageConfig::production(
+    let mut config = StorageConfig::production(
         dir.path().to_path_buf(),
         64 * 1024 * 1024, // 64 MiB WAL
         64 * 1024 * 1024, // 64 MiB memtable flush threshold
         HOT_TIER_CAPACITY,
     );
+    // Benchmarks run in CI without HEARTH_MASTER_KEY; dev_mode permits auto-gen.
+    config.dev_mode = true;
     let engine = EmbeddedStorageEngine::open(config).expect("open");
     let realm = RealmId::generate();
     (dir, engine, realm)

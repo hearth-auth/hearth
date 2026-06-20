@@ -534,6 +534,14 @@ pub struct EmbeddedIdentityEngine {
     // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc to the caller.
     // INVARIANT: inner (per-realm) guard held only across the sync JTI check-and-consume window; no .await in scope.
     jti_locks: Mutex<HashMap<RealmId, Arc<Mutex<()>>>>,
+    /// Per-token-hash locks for single-use enforcement of magic-link and
+    /// password-reset tokens.
+    ///
+    /// Eliminates the TOCTOU race between the `get` (reads `used=false`) and
+    /// the `put` (writes `used=true`). Without this lock two concurrent
+    /// requests for the same token can both pass the `used` check before
+    /// either writes back. Key: hex-encoded SHA-256 of the raw token.
+    token_redemption_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
     /// Realm ops are not on the hot path, and a realm record and its
@@ -910,6 +918,7 @@ impl EmbeddedIdentityEngine {
             session_limit_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
+            token_redemption_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -1100,6 +1109,7 @@ impl EmbeddedIdentityEngine {
             session_limit_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
+            token_redemption_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -2921,6 +2931,22 @@ impl EmbeddedIdentityEngine {
         Arc::clone(
             map.entry(realm_id.clone())
                 // INVARIANT: inner guard held only across the sync JTI check-and-consume window; no .await in scope.
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Returns a per-token-hash lock for single-use token redemption.
+    ///
+    /// Callers hold this lock across the get → check-used → mark-used sequence
+    /// to prevent two concurrent requests for the same token from both passing
+    /// the `used` check before either writes back.
+    fn token_redemption_lock(&self, token_hash: &str) -> Arc<Mutex<()>> {
+        let mut map = self
+            .token_redemption_locks
+            .lock()
+            .expect("token_redemption_locks poisoned");
+        Arc::clone(
+            map.entry(token_hash.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     }
@@ -4928,6 +4954,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         Ok(())
+    }
+
+    fn dummy_verify_password(&self, password: &CleartextPassword) {
+        let _ = credentials::verify_hash(password, &self.dummy_hash);
     }
 
     fn verify_password(
@@ -6965,6 +6995,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let token_hash = Self::sha256_hex(token.as_bytes());
         let key = keys::encode_magic_link_token(&token_hash);
 
+        // Acquire per-token lock to prevent TOCTOU: two concurrent requests
+        // for the same token must not both pass the `used` check.
+        let lock = self.token_redemption_lock(&token_hash);
+        let _guard = lock.lock().expect("token_redemption_lock poisoned");
+
         // 2. Look up stored record
         let bytes = self
             .storage
@@ -6992,7 +7027,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::MagicLinkTokenInvalid);
         }
 
-        // 5. Mark as used
+        // 5. Mark as used (write before returning so no second caller can pass step 3)
         stored.used = true;
         let updated_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
@@ -7225,6 +7260,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let token_hash = Self::sha256_hex(token.as_bytes());
         let key = keys::encode_password_reset_token(&token_hash);
 
+        // Acquire per-token lock to prevent TOCTOU: two concurrent reset
+        // requests with the same token must not both pass the `used` check.
+        let lock = self.token_redemption_lock(&token_hash);
+        let _guard = lock.lock().expect("token_redemption_lock poisoned");
+
         // 2. Look up stored record
         let bytes = self
             .storage
@@ -7258,7 +7298,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::PasswordResetTokenInvalid);
         }
 
-        // 5. Mark as used
+        // 5. Mark as used (write before returning so no second caller can pass step 3)
         stored.used = true;
         let updated_bytes =
             serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {

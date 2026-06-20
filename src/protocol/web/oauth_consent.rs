@@ -590,7 +590,8 @@ async fn authorize_get_impl(
             return handlers_common::server_error();
         }
     };
-    let cookie = issue_ticket_cookie(&state.cookie_secret, &session.user_id, &ticket);
+    let secure = state.is_secure_request(headers);
+    let cookie = issue_ticket_cookie(&state.cookie_secret, &session.user_id, &ticket, secure);
     let mut response = Redirect::to("/ui/oauth/consent").into_response();
     append_cookie(&mut response, &cookie);
     response
@@ -925,11 +926,17 @@ fn now_micros() -> i64 {
 /// Builds a signed ticket cookie value: `{ticket}.{mac}` where the MAC
 /// covers `user_id|ticket` with [`CookieSecret`]. Binding to the user id
 /// makes cross-user replay detectable even if the cookie is copied.
-fn issue_ticket_cookie(secret: &CookieSecret, user_id: &UserId, ticket: &str) -> String {
+fn issue_ticket_cookie(
+    secret: &CookieSecret,
+    user_id: &UserId,
+    ticket: &str,
+    secure: bool,
+) -> String {
     let mac = compute_ticket_mac(secret, user_id, ticket);
     let value = format!("{ticket}.{mac}");
+    let secure_flag = if secure { "; Secure" } else { "" };
     format!(
-        "{CONSENT_TICKET_COOKIE}={value}; HttpOnly; Path=/ui; SameSite=Lax; Max-Age={CONSENT_TICKET_TTL_SECS}"
+        "{CONSENT_TICKET_COOKIE}={value}; HttpOnly; Path=/ui; SameSite=Lax; Max-Age={CONSENT_TICKET_TTL_SECS}{secure_flag}"
     )
 }
 
@@ -1238,7 +1245,7 @@ mod tests {
         let u1 = UserId::generate();
         let u2 = UserId::generate();
         let ticket = "abc-123";
-        let cookie_full = issue_ticket_cookie(&secret, &u1, ticket);
+        let cookie_full = issue_ticket_cookie(&secret, &u1, ticket, false);
         // Extract raw value (strip the "name=" prefix and attributes).
         let raw = cookie_full
             .strip_prefix(&format!("{CONSENT_TICKET_COOKIE}="))

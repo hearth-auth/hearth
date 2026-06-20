@@ -615,6 +615,57 @@ Per §6.1 of the abuse-prevention plan:
 
 ---
 
+## A-21 — JSON Parse-Bomb Guard (depth + array length)
+
+**Status:** Shipped (HEA-1369)  
+**Module:** `src/abuse/guards.rs` → `check_json_depth`; wired as `json_depth_guard` route middleware in `src/protocol/http.rs`
+
+### Threat
+
+`serde_json` faithfully traverses arbitrarily deep nesting in a JSON body, consuming thread stack proportional to depth. A 1 MiB body of `{"a":{"a":…` hundreds of levels deep can exhaust the thread stack. A large flat array (`["x","x",…×1_000_000]`) exploits serde_json's linear array allocation.
+
+### Implementation
+
+A `json_depth_guard` axum route middleware intercepts every `POST`, `PUT`, and `PATCH` request with `Content-Type: application/json`. Before any handler logic executes, it:
+
+1. Collects the request body into memory (already capped at `BODY_LIMIT_DEFAULT` by the outer `DefaultBodyLimit` layer).
+2. Calls `check_json_depth(bytes)`, which scans raw bytes counting bracket tokens — O(n), no full deserialization.
+3. Rejects bodies where nesting depth > `MAX_JSON_DEPTH` (128) or any array length ≥ `MAX_JSON_ARRAY_LEN` (65 536) with HTTP **400 Bad Request**.
+4. On success, reconstitutes the request with the collected bytes so downstream handlers receive a normal body.
+
+The scan is O(n) and safe against UTF-8 multi-byte sequences because `{`, `}`, `[`, `]`, and `"` are all ASCII.
+
+### Constants
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `MAX_JSON_DEPTH` | 128 | Maximum combined object/array nesting depth |
+| `MAX_JSON_ARRAY_LEN` | 65 536 | Maximum items in any single JSON array |
+
+### Fail mode
+
+**Fail-closed.** Oversized bodies are rejected with HTTP 400 before handler logic. Non-JSON content types (`Content-Type` not starting with `application/json`) and non-mutating methods (GET, HEAD, DELETE, OPTIONS) bypass the guard entirely.
+
+### Tests
+
+`tests/abuse_json_guard.rs` — 6 tests covering:
+- Deeply nested JSON → 400 with `"depth"` in error body
+- JSON at exactly `MAX_JSON_DEPTH` → passes guard
+- Array with `MAX_JSON_ARRAY_LEN` elements → 400 with `"array"` in error body
+- Normal JSON → passes guard
+- Non-JSON `Content-Type` → guard skipped
+- GET request → unaffected (200 from `/health`)
+
+---
+
+## A-22 — Decompression-Bomb Cap
+
+**Status:** N/A — Hearth does not install an inbound `Content-Encoding: gzip` decompressor.
+
+Compressed request bodies are treated as opaque bytes and passed through to handlers unchanged. No decompression occurs server-side, so a gzip bomb cannot expand in-process. If a future change introduces inbound decompression (e.g. for a bulk-import endpoint), `check_decompressed_size` in `src/abuse/guards.rs` must be wired at that point and this section updated.
+
+---
+
 ## A-33 — Bounded delete_realm Cascade
 
 **What it prevents:** A large realm deletion causing a write storm that degrades the storage layer for all tenants.

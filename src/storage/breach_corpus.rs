@@ -29,6 +29,13 @@
 //!
 //! Binary search on a sorted exact-match file produces **zero false positives**:
 //! a password is flagged only when its SHA-1 appears verbatim in the corpus.
+//!
+//! # SIGBUS caveat
+//!
+//! If the corpus file is truncated while the mmap is live (e.g. via a
+//! concurrent `truncate(1)`), accessing a page past the new end of file will
+//! deliver `SIGBUS` on Linux and macOS. Hearth does not support hot-replacing
+//! corpus files; a full server restart is required to pick up a new corpus.
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -230,7 +237,7 @@ mod tests {
     fn rejects_invalid_file_size() {
         let mut f = tempfile::NamedTempFile::new().expect("tempfile");
         f.write_all(&[0u8; 19]).expect("write"); // 19 is not divisible by 20
-        let err = OfflineBreachCorpus::load(f.path(), 0).expect_err("expected InvalidSize error");
+        let err = OfflineBreachCorpus::load(f.path(), 0).expect_err("should reject invalid size");
         assert!(matches!(err, CorpusError::InvalidSize { .. }), "{err}");
     }
 
@@ -238,7 +245,7 @@ mod tests {
     fn rejects_missing_file() {
         let err =
             OfflineBreachCorpus::load(std::path::Path::new("/nonexistent/breach_corpus.bin"), 0)
-                .expect_err("expected Io error");
+                .expect_err("should reject missing file");
         assert!(matches!(err, CorpusError::Io { .. }), "{err}");
     }
 

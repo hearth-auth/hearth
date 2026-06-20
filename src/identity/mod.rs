@@ -364,6 +364,13 @@ pub trait IdentityEngine: Send + Sync {
         password: &CleartextPassword,
     ) -> Result<bool, IdentityError>;
 
+    /// Runs a dummy Argon2id hash of `password` and discards the result.
+    ///
+    /// Call this when a user is not found during login so the response
+    /// timing is indistinguishable from a real failed verification, preventing
+    /// user enumeration via timing side-channels.
+    fn dummy_verify_password(&self, password: &CleartextPassword);
+
     /// Checks whether the given IP has exceeded the per-IP login rate limit
     /// for a realm. Returns `Err(RateLimited)` when blocked.
     ///
