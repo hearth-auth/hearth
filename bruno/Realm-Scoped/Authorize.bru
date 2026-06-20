@@ -1,0 +1,21 @@
+meta {
+  name: Authorize
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/realms/{{realmName}}/authorize
+  body: none
+  auth: none
+}
+
+query {
+  client_id: {{clientId}}
+  redirect_uri: http://localhost:3000/callback
+  response_type: code
+  scope: openid profile email
+  state: random-state-value
+  code_challenge: code-challenge-value
+  code_challenge_method: S256
+}
