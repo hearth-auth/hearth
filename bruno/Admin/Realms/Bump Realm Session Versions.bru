@@ -1,0 +1,19 @@
+meta {
+  name: Bump Realm Session Versions
+  type: http
+  seq: 15
+}
+
+post {
+  url: {{baseUrl}}/admin/realms/{{realmId}}/sv-bump-all
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

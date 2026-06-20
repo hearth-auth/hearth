@@ -1,0 +1,19 @@
+meta {
+  name: List User Roles
+  type: http
+  seq: 13
+}
+
+get {
+  url: {{baseUrl}}/admin/users/{{userId}}/roles
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

@@ -1,0 +1,19 @@
+meta {
+  name: Get Group
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/admin/groups/{{groupId}}
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

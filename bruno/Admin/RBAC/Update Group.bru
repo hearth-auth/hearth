@@ -1,0 +1,27 @@
+meta {
+  name: Update Group
+  type: http
+  seq: 9
+}
+
+patch {
+  url: {{baseUrl}}/admin/groups/{{groupId}}
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "name": "engineering-updated",
+    "description": "Updated engineering team group"
+  }
+}

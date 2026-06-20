@@ -1,0 +1,17 @@
+meta {
+  name: End Session
+  type: http
+  seq: 11
+}
+
+get {
+  url: {{baseUrl}}/realms/{{realmName}}/end_session
+  body: none
+  auth: none
+}
+
+query {
+  id_token_hint: {{idToken}}
+  post_logout_redirect_uri: http://localhost:3000
+  state: random-state-value
+}

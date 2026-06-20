@@ -1,0 +1,21 @@
+meta {
+  name: Send Magic Link
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/v1/{{realmName}}/auth/magic-link
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "email": "user@example.com"
+  }
+}

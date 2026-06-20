@@ -1,0 +1,19 @@
+meta {
+  name: Delete User Consent
+  type: http
+  seq: 11
+}
+
+delete {
+  url: {{baseUrl}}/admin/users/{{userId}}/consents/{{clientId}}
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

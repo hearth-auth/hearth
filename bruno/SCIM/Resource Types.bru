@@ -1,0 +1,20 @@
+meta {
+  name: Resource Types
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/scim/v2/ResourceTypes
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Accept: application/scim+json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
