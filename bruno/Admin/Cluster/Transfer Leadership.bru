@@ -1,0 +1,26 @@
+meta {
+  name: Transfer Leadership
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/admin/cluster/transfer-leadership
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "target_node_id": ""
+  }
+}
