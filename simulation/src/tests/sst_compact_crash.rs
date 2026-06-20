@@ -29,6 +29,9 @@ fn simulation_compaction_leaked_files_after_crash() {
             interval_secs: 0,
             min_sst_count: 2,
         };
+        // Allow key auto-generation in tests; HEARTH_MASTER_KEY is not set in CI.
+        // This test exercises compaction + crash recovery, not master-key handling.
+        config.dev_mode = true;
         let engine = EmbeddedStorageEngine::open(config).expect("open");
 
         for i in 0u32..30 {
