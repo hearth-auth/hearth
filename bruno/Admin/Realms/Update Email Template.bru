@@ -1,0 +1,28 @@
+meta {
+  name: Update Email Template
+  type: http
+  seq: 11
+}
+
+put {
+  url: {{baseUrl}}/admin/realms/{{realmId}}/email-templates/{{emailTemplateKind}}
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "subject": "Welcome to {{realmName}}",
+    "body_html": "<p>Hello {{name}}, welcome!</p>",
+    "body_text": "Hello {{name}}, welcome!"
+  }
+}

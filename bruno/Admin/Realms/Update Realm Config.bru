@@ -1,0 +1,28 @@
+meta {
+  name: Update Realm Config
+  type: http
+  seq: 14
+}
+
+patch {
+  url: {{baseUrl}}/admin/realms/{{realmId}}/config
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "session_lifetime_seconds": 86400,
+    "refresh_token_lifetime_seconds": 2592000,
+    "allow_registration": true
+  }
+}
