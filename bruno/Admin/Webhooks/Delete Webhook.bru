@@ -1,0 +1,19 @@
+meta {
+  name: Delete Webhook
+  type: http
+  seq: 5
+}
+
+delete {
+  url: {{baseUrl}}/admin/webhooks/{{webhookId}}
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

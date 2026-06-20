@@ -471,7 +471,7 @@ Common remappings:
 | **SAML → NameID format** | Configured at the IdP; Hearth reads `NameID` automatically | |
 | **SAML → Want AuthnRequests Signed** | `sign_authn_requests: true` | |
 | **SAML → Validate Signatures** | `want_assertions_signed: true` | Recommended for production |
-| **LDAP User Federation** | Not supported | Hearth does not support LDAP |
+| **LDAP User Federation** | Connector implemented, wiring in progress | `src/identity/ldap/` ships full `EmbeddedLdapConnector` (user search, password-bind auth, delta sync, AD/OpenLDAP). Not yet operator-configurable via `hearth.yaml` or admin API — pending config wiring. |
 
 ---
 
@@ -495,7 +495,7 @@ Common remappings:
 | **SAML → IdP URL** | `sso_url` | |
 | **SAML → IdP Signing Certificate** | `idp_certificate_pem` | Paste PEM inline or use `${ENV_VAR}` |
 | **SAML → User ID Attribute** | `attribute_map: { email: "<uri>" }` | |
-| **AD/LDAP connector** | Not supported | Hearth does not support LDAP or AD connectors |
+| **AD/LDAP connector** | Connector implemented, wiring in progress | Full LdapConnector with AD `uSNChanged` delta sync is implemented in `src/identity/ldap/`. Not yet exposed via config or API. |
 | **Connections → Passwordless** | Built-in to Hearth (magic link) | Configure under `realms.<name>.onboarding` |
 
 ---

@@ -1,0 +1,19 @@
+meta {
+  name: Get Realm Branding
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{baseUrl}}/admin/realms/{{realmId}}/branding
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
