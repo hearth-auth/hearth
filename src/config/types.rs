@@ -2050,21 +2050,35 @@ impl FederationProviderYaml {
     }
 }
 
+/// Staged capability flags for `agent_auth`.
+///
+/// Each flag activates one phase of the agent feature set independently.
+/// Unimplemented phases refuse to start. Defaults: all `false`.
+///
+/// See `docs/specs/AGENT_AUTH.md` for phase definitions.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct AgentAuthCapabilities {
+    /// Phase A — Agent identity: CRUD, API-key credentials, Agent Card,
+    /// and REST endpoints (`/v1/agents`).
+    ///
+    /// Set to `true` to enable M1 agent features. All other phases remain
+    /// off until their respective capability flags are added and implemented.
+    #[serde(default)]
+    pub identity: bool,
+}
+
 /// Agent authentication / authorization feature gate.
 ///
-/// The Agent entity, delegation chains, MCP/A2A surfaces, approval lifecycle,
-/// and Agent Authorization Tokens (AATs) described in `docs/specs/AGENT_AUTH.md`
-/// are **not yet fully implemented**. Setting `enabled: true` will be refused
-/// at startup until the feature ships to prevent silent misconfiguration.
+/// Uses staged capability flags so each phase can be enabled independently.
+/// Unimplemented phases produce a startup validation error if set to `true`.
 ///
-/// See `docs/specs/AGENT_AUTH.md` for current implementation status.
+/// See `docs/specs/AGENT_AUTH.md` for the normative specification and
+/// current implementation status.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct AgentAuthConfig {
-    /// Whether agent authentication primitives are enabled. Defaults to
-    /// `false`. Setting `true` currently produces a startup error because the
-    /// underlying Agent entity implementation is incomplete.
+    /// Staged capability flags. All default to `false`.
     #[serde(default)]
-    pub enabled: bool,
+    pub capabilities: AgentAuthCapabilities,
 }
 
 /// Parses a human-readable duration string into microseconds.
@@ -3010,10 +3024,11 @@ pub struct Config {
     /// default), Hearth runs in single-node mode with no clustering overhead.
     #[serde(default)]
     pub cluster: Option<ClusterConfig>,
-    /// Agent authentication / authorization feature gate.
+    /// Agent authentication / authorization feature gate (staged capabilities).
     ///
-    /// Setting `agent_auth.enabled = true` while the Agent entity is not fully
-    /// implemented produces a startup error. See `docs/specs/AGENT_AUTH.md`.
+    /// `agent_auth.capabilities.identity = true` enables Phase A (M1): agent
+    /// CRUD, API-key credentials, Agent Card, and REST endpoints.
+    /// See `docs/specs/AGENT_AUTH.md` for the full capability map.
     #[serde(default)]
     pub agent_auth: AgentAuthConfig,
     /// Whether development mode is active. Not serialized — set by [`Config::dev`].

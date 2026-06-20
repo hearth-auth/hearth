@@ -118,6 +118,14 @@ define_id_type!(
 );
 
 define_id_type!(
+    /// Unique identifier for a single agent credential (API key, Ed25519 key, or mTLS cert).
+    ///
+    /// Scoped to a specific agent; the same `AgentCredentialId` does not appear
+    /// across agents.
+    AgentCredentialId, "acred_"
+);
+
+define_id_type!(
     /// Unique identifier for a single webhook delivery attempt.
     WebhookDeliveryId, "whd_"
 );

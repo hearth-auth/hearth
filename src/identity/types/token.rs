@@ -2,7 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{AgentId, ClientId, OrganizationId, RealmId, Timestamp, UserId, WebhookId};
+use zeroize::Zeroize;
+
+use crate::core::{
+    AgentCredentialId, AgentId, ClientId, OrganizationId, RealmId, Timestamp, UserId, WebhookId,
+};
 
 /// A user's persisted consent to share a set of scopes with an OAuth client.
 ///
@@ -458,4 +462,146 @@ pub struct ListAgentsQuery {
     pub status: Option<AgentStatus>,
     /// Filter agents that declare a specific capability URI.
     pub capability: Option<String>,
+}
+
+// ── Agent Credentials (A.3) ──────────────────────────────────────────────────
+
+/// Discriminates the kind of credential stored for an agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCredentialKind {
+    /// A server-generated 256-bit random API key. Only the SHA-256 hash is stored.
+    ApiKey,
+    /// An Ed25519 public key supplied by the agent at registration time.
+    Ed25519PublicKey,
+    /// An mTLS client-certificate fingerprint (SHA-256 of the DER-encoded cert).
+    MtlsCert,
+}
+
+/// A stored agent credential record (no secret material).
+///
+/// API keys are stored as SHA-256 hashes; public keys and cert fingerprints
+/// are stored as-is. Plaintext API keys are never persisted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCredential {
+    id: AgentCredentialId,
+    agent_id: AgentId,
+    kind: AgentCredentialKind,
+    /// Human-readable label chosen at creation time (max 256 chars).
+    label: String,
+    /// SHA-256 hex of the API key, or the raw Ed25519/cert material (no secrets).
+    credential_hash: String,
+    created_at: Timestamp,
+    /// When the credential was revoked, or `None` if still active.
+    revoked_at: Option<Timestamp>,
+}
+
+impl AgentCredential {
+    /// Creates a new credential record. Used internally by the identity engine.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        id: AgentCredentialId,
+        agent_id: AgentId,
+        kind: AgentCredentialKind,
+        label: String,
+        credential_hash: String,
+        created_at: Timestamp,
+    ) -> Self {
+        Self {
+            id,
+            agent_id,
+            kind,
+            label,
+            credential_hash,
+            created_at,
+            revoked_at: None,
+        }
+    }
+
+    /// Returns the credential's unique identifier.
+    pub fn id(&self) -> &AgentCredentialId {
+        &self.id
+    }
+
+    /// Returns the agent this credential belongs to.
+    pub fn agent_id(&self) -> &AgentId {
+        &self.agent_id
+    }
+
+    /// Returns the kind of this credential.
+    pub fn kind(&self) -> AgentCredentialKind {
+        self.kind
+    }
+
+    /// Returns the human-readable label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns the stored hash or public key material.
+    pub fn credential_hash(&self) -> &str {
+        &self.credential_hash
+    }
+
+    /// Returns when this credential was created.
+    pub fn created_at(&self) -> Timestamp {
+        self.created_at
+    }
+
+    /// Returns when this credential was revoked, or `None` if active.
+    pub fn revoked_at(&self) -> Option<Timestamp> {
+        self.revoked_at
+    }
+
+    /// Returns `true` if this credential has been revoked.
+    pub fn is_revoked(&self) -> bool {
+        self.revoked_at.is_some()
+    }
+
+    /// Marks the credential revoked. Used internally by the engine.
+    pub(crate) fn revoke(&mut self, at: Timestamp) {
+        self.revoked_at = Some(at);
+    }
+}
+
+/// Request to issue a new API-key credential for an agent.
+#[derive(Clone, Debug)]
+pub struct CreateAgentApiKeyRequest {
+    /// Human-readable label for the key (max 256 chars).
+    pub label: String,
+}
+
+/// Response from creating an agent API key.
+///
+/// The `plaintext_key` field is the only time the raw key is visible.
+/// It is wrapped in a `Zeroize`-on-drop guard and MUST NOT be logged.
+pub struct CreateAgentApiKeyResponse {
+    /// The stored credential record (no secrets).
+    pub credential: AgentCredential,
+    /// The raw 256-bit API key — show once, never stored.
+    pub plaintext_key: PlaintextApiKey,
+}
+
+/// A 256-bit random API key shown exactly once at creation time.
+///
+/// Wraps the hex-encoded key in a `Zeroize`-on-drop guard.
+/// MUST NOT implement `Debug`, `Display`, `Serialize`, or `Clone`.
+pub struct PlaintextApiKey(String);
+
+impl PlaintextApiKey {
+    /// Creates a new plaintext API key from its hex representation.
+    pub(crate) fn new(hex: String) -> Self {
+        Self(hex)
+    }
+
+    /// Returns the hex-encoded key. Call once and discard.
+    pub fn expose_once(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for PlaintextApiKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
 }

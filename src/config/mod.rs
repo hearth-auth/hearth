@@ -13,7 +13,6 @@ pub use diff::{compute_diff, ConfigDiff, ConfigSnapshot};
 pub use env::{EnvVarWarning, EnvVarWarningKind};
 pub use error::ConfigError;
 pub use types::parse_duration_to_micros;
-pub use types::AgentAuthConfig;
 pub use types::ClusterConfig;
 pub use types::{
     AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, CaptchaProviderKind,
@@ -29,4 +28,5 @@ pub use types::{
     SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection, TokenYamlConfig, TurnstileYaml,
     TwilioConfig,
 };
+pub use types::{AgentAuthCapabilities, AgentAuthConfig};
 pub use types::{Config, ValidationIssue};

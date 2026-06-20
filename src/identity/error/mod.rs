@@ -369,6 +369,8 @@ pub enum IdentityError {
     AgentNotFound,
     /// The agent has been permanently revoked.
     AgentRevoked,
+    /// The requested agent credential was not found.
+    AgentCredentialNotFound,
     /// The pre-token enrichment webhook call failed and the realm's policy is `fail_closed`.
     PreTokenWebhookFailed {
         /// Description of the transport or parse failure.

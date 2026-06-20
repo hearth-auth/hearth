@@ -1,8 +1,10 @@
-//! Integration tests for Agent entity CRUD, lifecycle, and delegation chains.
+//! Integration tests for Agent entity CRUD, lifecycle, credentials, and M1 surfaces.
 //!
-//! Covers HEA-1325 (AGENT_AUTH.md Phase A):
+//! Covers HEA-1325 / HEA-1405 (AGENT_AUTH.md Phase A):
 //! - A.1: AgentId newtype
 //! - A.2: Agent entity CRUD + lifecycle (Active/Suspended/Revoked)
+//! - A.3: Agent credentials (API key create/list/revoke/verify, owner FK, quota)
+//! - A.4: Agent Card at well-known endpoint
 //! - A.7: Agent REST protocol endpoints
 //!
 //! TDD: tests written first; implementation in src/identity/engine/mod.rs.
@@ -11,8 +13,9 @@ mod common;
 
 use hearth::core::{AgentId, RealmId, UserId};
 use hearth::identity::{
-    Agent, AgentOwner, AgentStatus, CreateAgentRequest, CreateRealmRequest, CreateUserRequest,
-    IdentityEngine, IdentityError, ListAgentsQuery, UpdateAgentRequest,
+    Agent, AgentCredentialKind, AgentOwner, AgentStatus, CreateAgentApiKeyRequest,
+    CreateAgentRequest, CreateRealmRequest, CreateUserRequest, IdentityEngine, IdentityError,
+    ListAgentsQuery, UpdateAgentRequest,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -433,4 +436,358 @@ async fn agent_display_name_length_validated() {
         )
         .expect_err("name >256 chars should be invalid");
     assert!(matches!(err2, IdentityError::InvalidInput { .. }));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// M1 A.3 — Owner FK check
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_agent_rejects_nonexistent_user_owner() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+
+    // Use a random user ID that was never created
+    let ghost_user = UserId::new(uuid::Uuid::new_v4());
+    let err = identity
+        .create_agent(
+            &realm_id,
+            &CreateAgentRequest {
+                display_name: "Ghost Owner Agent".to_string(),
+                description: None,
+                owner: AgentOwner::User(ghost_user),
+                capabilities: vec![],
+                max_delegation_depth: 1,
+            },
+        )
+        .expect_err("nonexistent owner should be rejected");
+    assert!(
+        matches!(err, IdentityError::UserNotFound),
+        "expected UserNotFound, got {err:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// M1 A.3 — max_agents quota
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_agent_respects_max_agents_quota() {
+    use hearth::identity::{RealmConfig, RealmQuotaConfig, UpdateRealmRequest};
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+
+    // Set max_agents = 1
+    identity
+        .update_realm(
+            &realm_id,
+            &UpdateRealmRequest {
+                config: Some(RealmConfig {
+                    quotas: Some(RealmQuotaConfig {
+                        max_agents: Some(1),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("update realm quota");
+
+    // First agent — should succeed
+    let _a1 = create_agent(identity, &realm_id, &user_id, "Agent One");
+
+    // Second agent — should fail quota
+    let err = identity
+        .create_agent(
+            &realm_id,
+            &CreateAgentRequest {
+                display_name: "Agent Two".to_string(),
+                description: None,
+                owner: AgentOwner::User(user_id.clone()),
+                capabilities: vec![],
+                max_delegation_depth: 1,
+            },
+        )
+        .expect_err("should exceed max_agents quota");
+    assert!(
+        matches!(
+            err,
+            IdentityError::QuotaExceeded {
+                resource: "agents",
+                ..
+            }
+        ),
+        "expected QuotaExceeded(agents), got {err:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// M1 A.3 — Agent credential API key lifecycle
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn agent_api_key_create_show_once() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Key Holder");
+
+    let resp = identity
+        .create_agent_api_key(
+            &realm_id,
+            agent.id(),
+            &CreateAgentApiKeyRequest {
+                label: "primary".to_string(),
+            },
+        )
+        .expect("create API key");
+
+    // The key must be 64 hex chars (256-bit = 32 bytes)
+    let key_hex = resp.plaintext_key.expose_once();
+    assert_eq!(
+        key_hex.len(),
+        64,
+        "API key must be 64 hex chars (256-bit entropy)"
+    );
+    assert!(
+        key_hex.chars().all(|c| c.is_ascii_hexdigit()),
+        "API key must be hex"
+    );
+
+    // The stored credential must not contain the plaintext key
+    let cred = &resp.credential;
+    assert_eq!(cred.kind(), AgentCredentialKind::ApiKey);
+    assert_ne!(
+        cred.credential_hash(),
+        key_hex,
+        "hash must differ from plaintext"
+    );
+    assert!(!cred.is_revoked());
+
+    // SHA-256(plaintext) == stored hash
+    let expected_hash = {
+        use sha2::{Digest, Sha256};
+        let bytes = hex::decode(key_hex).expect("decode hex");
+        hex::encode(Sha256::digest(&bytes))
+    };
+    assert_eq!(
+        cred.credential_hash(),
+        expected_hash,
+        "stored hash must be SHA-256 of plaintext"
+    );
+}
+
+#[tokio::test]
+async fn agent_api_key_list_and_revoke() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Multi-Key Agent");
+
+    // Create two keys
+    let r1 = identity
+        .create_agent_api_key(
+            &realm_id,
+            agent.id(),
+            &CreateAgentApiKeyRequest { label: "k1".into() },
+        )
+        .expect("key1");
+    let r2 = identity
+        .create_agent_api_key(
+            &realm_id,
+            agent.id(),
+            &CreateAgentApiKeyRequest { label: "k2".into() },
+        )
+        .expect("key2");
+
+    // List: both present, none revoked
+    let creds = identity
+        .list_agent_credentials(&realm_id, agent.id())
+        .expect("list");
+    assert_eq!(creds.len(), 2, "two credentials expected");
+    assert!(creds.iter().all(|c| !c.is_revoked()));
+
+    // Revoke key1
+    identity
+        .revoke_agent_credential(&realm_id, agent.id(), r1.credential.id())
+        .expect("revoke");
+
+    let creds_after = identity
+        .list_agent_credentials(&realm_id, agent.id())
+        .expect("list after revoke");
+    let revoked: Vec<_> = creds_after.iter().filter(|c| c.is_revoked()).collect();
+    let active: Vec<_> = creds_after.iter().filter(|c| !c.is_revoked()).collect();
+    assert_eq!(revoked.len(), 1, "one revoked");
+    assert_eq!(active.len(), 1, "one active");
+    assert_eq!(active[0].id(), r2.credential.id());
+}
+
+#[tokio::test]
+async fn agent_api_key_verify_correct_key() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Verify Agent");
+
+    let resp = identity
+        .create_agent_api_key(
+            &realm_id,
+            agent.id(),
+            &CreateAgentApiKeyRequest { label: "v".into() },
+        )
+        .expect("create key");
+    let key_hex = resp.plaintext_key.expose_once().to_string();
+
+    let verified = identity
+        .verify_agent_api_key(&realm_id, agent.id(), &key_hex)
+        .expect("verify");
+    assert!(verified, "correct key must verify");
+}
+
+#[tokio::test]
+async fn agent_api_key_verify_wrong_key_fails() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Verify Reject Agent");
+
+    identity
+        .create_agent_api_key(
+            &realm_id,
+            agent.id(),
+            &CreateAgentApiKeyRequest { label: "k".into() },
+        )
+        .expect("create key");
+
+    // Wrong key (all zeros)
+    let bad_key = "0".repeat(64);
+    let verified = identity
+        .verify_agent_api_key(&realm_id, agent.id(), &bad_key)
+        .expect("verify call");
+    assert!(!verified, "wrong key must not verify");
+}
+
+#[tokio::test]
+async fn agent_api_key_revoked_key_does_not_verify() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Revoke Verify Agent");
+
+    let resp = identity
+        .create_agent_api_key(
+            &realm_id,
+            agent.id(),
+            &CreateAgentApiKeyRequest { label: "r".into() },
+        )
+        .expect("create key");
+    let key_hex = resp.plaintext_key.expose_once().to_string();
+    let cred_id = resp.credential.id().clone();
+
+    // Revoke it
+    identity
+        .revoke_agent_credential(&realm_id, agent.id(), &cred_id)
+        .expect("revoke");
+
+    // Verify should now fail
+    let verified = identity
+        .verify_agent_api_key(&realm_id, agent.id(), &key_hex)
+        .expect("verify call");
+    assert!(!verified, "revoked key must not verify");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// M1 — delete_agent cascade: credentials purged
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn delete_agent_purges_credentials() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Doomed Agent");
+    let agent_id = agent.id().clone();
+
+    // Issue two API keys
+    identity
+        .create_agent_api_key(
+            &realm_id,
+            &agent_id,
+            &CreateAgentApiKeyRequest { label: "k1".into() },
+        )
+        .expect("k1");
+    identity
+        .create_agent_api_key(
+            &realm_id,
+            &agent_id,
+            &CreateAgentApiKeyRequest { label: "k2".into() },
+        )
+        .expect("k2");
+
+    // Delete agent
+    identity
+        .delete_agent(&realm_id, &agent_id)
+        .expect("delete agent");
+
+    // Agent must be gone
+    let fetched = identity.get_agent(&realm_id, &agent_id).expect("get");
+    assert!(fetched.is_none(), "agent must be deleted");
+
+    // Credentials must be gone (no panic / stale scan)
+    let creds = identity
+        .list_agent_credentials(&realm_id, &agent_id)
+        .expect("list");
+    assert!(
+        creds.is_empty(),
+        "credentials must be purged on agent delete"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// M1 — delete_user sweeps owned agents
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn delete_user_cascades_owned_agents() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+
+    let agent1 = create_agent(identity, &realm_id, &user_id, "Orphan Agent 1");
+    let agent2 = create_agent(identity, &realm_id, &user_id, "Orphan Agent 2");
+    let a1_id = agent1.id().clone();
+    let a2_id = agent2.id().clone();
+
+    // Delete the owning user
+    identity
+        .delete_user(&realm_id, &user_id)
+        .expect("delete user");
+
+    // Both agents must be gone (no orphans)
+    assert!(
+        identity
+            .get_agent(&realm_id, &a1_id)
+            .expect("get a1")
+            .is_none(),
+        "a1 must be gone"
+    );
+    assert!(
+        identity
+            .get_agent(&realm_id, &a2_id)
+            .expect("get a2")
+            .is_none(),
+        "a2 must be gone"
+    );
 }

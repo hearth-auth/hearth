@@ -85,7 +85,9 @@ pub use types::{
     WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
-    Agent, AgentOwner, AgentStatus, CreateAgentRequest, ListAgentsQuery, UpdateAgentRequest,
+    Agent, AgentCredential, AgentCredentialKind, AgentOwner, AgentStatus, CreateAgentApiKeyRequest,
+    CreateAgentApiKeyResponse, CreateAgentRequest, ListAgentsQuery, PlaintextApiKey,
+    UpdateAgentRequest,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -1908,6 +1910,48 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         agent_id: &AgentId,
     ) -> Result<types::Agent, IdentityError>;
+
+    // ── A.3 Agent credentials ────────────────────────────────────────────────
+
+    /// Issues a new API-key credential for an agent.
+    ///
+    /// Generates 256 bits of entropy, returns the hex-encoded plaintext once
+    /// (show-once contract), and stores only the SHA-256 hash.
+    fn create_agent_api_key(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        request: &types::CreateAgentApiKeyRequest,
+    ) -> Result<types::CreateAgentApiKeyResponse, IdentityError>;
+
+    /// Returns all credentials (active and revoked) for the given agent.
+    fn list_agent_credentials(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<Vec<types::AgentCredential>, IdentityError>;
+
+    /// Marks a credential as revoked. Revoked credentials cannot authenticate.
+    ///
+    /// Returns `AgentCredentialNotFound` if the credential does not exist or
+    /// belongs to a different agent.
+    fn revoke_agent_credential(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        cred_id: &crate::core::AgentCredentialId,
+    ) -> Result<(), IdentityError>;
+
+    /// Verifies a plaintext API key against all active credentials for an agent.
+    ///
+    /// Returns `true` if any active credential's hash matches. Uses
+    /// constant-time comparison to prevent timing attacks.
+    fn verify_agent_api_key(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        plaintext_key_hex: &str,
+    ) -> Result<bool, IdentityError>;
 
     /// Sweeps expired entities (authorization codes, device codes,
     /// pending authorization tickets, grant families) from storage.

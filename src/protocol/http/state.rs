@@ -81,6 +81,12 @@ pub struct AppState {
     /// `/realms/{name}/.well-known/openid-configuration`) so a caller
     /// cannot evade the limit by rotating between aliases.
     pub jwks_rate_limiter: Arc<JwksRateLimiter>,
+    /// Whether Phase-A agent identity routes are active.
+    ///
+    /// Controlled by `agent_auth.capabilities.identity` in `hearth.yaml`.
+    /// When `false`, all `/v1/agents` and `/.well-known/agent.json` routes
+    /// are absent from the router (prevents fingerprinting).
+    pub agent_identity_enabled: bool,
 }
 
 impl AppState {
@@ -108,6 +114,7 @@ impl AppState {
             // zero key is overridden in production via with_dpop_nonce_secret
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
             jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
+            agent_identity_enabled: false,
         }
     }
 
@@ -141,6 +148,7 @@ impl AppState {
             // explicit `with_jwks_rate_limiter` call wired from
             // `config.security.jwks_rps_limit`.
             jwks_rate_limiter: Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX)),
+            agent_identity_enabled: false,
         }
     }
 
@@ -171,7 +179,17 @@ impl AppState {
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
             jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
+            agent_identity_enabled: false,
         }
+    }
+
+    /// Enables the Phase-A agent identity routes (`/v1/agents`, `/.well-known/agent.json`).
+    ///
+    /// Call this during server startup when `agent_auth.capabilities.identity = true`
+    /// in the operator config.
+    pub fn with_agent_identity(mut self, enabled: bool) -> Self {
+        self.agent_identity_enabled = enabled;
+        self
     }
 
     /// Configures trusted reverse-proxy IPs for `X-Forwarded-For` extraction.

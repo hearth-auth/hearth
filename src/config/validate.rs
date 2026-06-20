@@ -307,15 +307,9 @@ impl Config {
 
         validate_trusted_proxies(&self.server, &mut issues);
 
-        if self.agent_auth.enabled {
-            issues.push(ValidationIssue {
-                field: "agent_auth.enabled".to_string(),
-                reason: "agent_auth is not yet fully implemented (Agent entity, delegation, \
-                         MCP/A2A surfaces, AATs are incomplete per docs/specs/AGENT_AUTH.md). \
-                         Set agent_auth.enabled = false until the feature ships."
-                    .to_string(),
-            });
-        }
+        // `agent_auth.capabilities.identity` is implemented in M1 — no validation
+        // error for that flag. Future capability flags (delegation, mcp, aat) will
+        // add validation errors here until those phases ship.
 
         issues
     }
@@ -413,14 +407,8 @@ impl Config {
             });
         }
 
-        if self.agent_auth.enabled {
-            return Err(invalid(
-                "agent_auth.enabled",
-                "agent_auth is not yet fully implemented (Agent entity, delegation, \
-                 MCP/A2A surfaces, AATs are incomplete per docs/specs/AGENT_AUTH.md). \
-                 Set agent_auth.enabled = false until the feature ships.",
-            ));
-        }
+        // `agent_auth.capabilities.identity` (M1) is fully implemented.
+        // Add error blocks here when future unimplemented phases are added.
 
         validate_oidc(&self.oidc, self.dev_mode)?;
         validate_token(&self.token)?;

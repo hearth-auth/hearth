@@ -112,6 +112,7 @@ impl std::error::Error for IdentityError {
             | Self::AttestationPolicyViolation { .. }
             | Self::AgentNotFound
             | Self::AgentRevoked
+            | Self::AgentCredentialNotFound
             | Self::PreTokenWebhookFailed { .. } => None,
         }
     }

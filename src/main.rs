@@ -1723,7 +1723,8 @@ async fn run_serve(
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret)
-            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter)),
+            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
+            .with_agent_identity(config.agent_auth.capabilities.identity),
         )
     } else {
         Arc::new(
@@ -1738,7 +1739,8 @@ async fn run_serve(
             .with_signing_key_rotation_grace_period_secs(rotation_grace_period_secs)
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret)
-            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter)),
+            .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
+            .with_agent_identity(config.agent_auth.capabilities.identity),
         )
     };
 

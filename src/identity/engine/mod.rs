@@ -16,8 +16,8 @@ use zeroize::Zeroizing;
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
-    AgentId, ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId,
-    WebhookId,
+    AgentCredentialId, AgentId, ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId,
+    Timestamp, UserId, WebhookId,
 };
 use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
@@ -217,13 +217,15 @@ use crate::identity::tokens::{
 };
 use crate::identity::totp::{self, RecoveryCodes, StoredMfaState, TotpEnrollment, TotpSecret};
 use crate::identity::types::{
-    Agent, AgentStatus, BulkResult, ConsentListEntry, ConsentRecord, CreateAgentRequest,
-    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    ImportClientRequest, ImportUserRequest, InvitationStatus, ListAgentsQuery, Organization,
-    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PendingAuthorizationRequest, Realm, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, Session, SessionContext, SessionLimitPolicy, UpdateAgentRequest,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
+    Agent, AgentCredential, AgentCredentialKind, AgentOwner, AgentStatus, BulkResult,
+    ConsentListEntry, ConsentRecord, CreateAgentApiKeyRequest, CreateAgentApiKeyResponse,
+    CreateAgentRequest, CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest,
+    CreateUserRequest, ImportClientRequest, ImportUserRequest, InvitationStatus, ListAgentsQuery,
+    Organization, OrganizationInvitation, OrganizationMembership, OrganizationRole,
+    OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey, Realm, RealmStatus,
+    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, Session, SessionContext,
+    SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest, UpdateRealmRequest,
+    UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::webauthn::{
@@ -4779,6 +4781,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 reason: format!("rbac cascade failed during delete_user: {e}"),
             })?;
 
+        // 13. Cascade: delete all agents owned by this user to prevent orphans.
+        {
+            let owner = AgentOwner::User(user_id.clone());
+            let prefix = keys::agent_owner_scan_prefix(owner.storage_tag(), &owner.uuid_str());
+            let end = keys::prefix_end(&prefix);
+            if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                for entry in &entries {
+                    if let Ok(key_str) = std::str::from_utf8(&entry.key) {
+                        if let Some(uuid_str) = key_str.rsplit(':').next() {
+                            if let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) {
+                                let aid = AgentId::new(uuid);
+                                let _ =
+                                    <Self as IdentityEngine>::delete_agent(self, realm_id, &aid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         self.record_audit(
             realm_id,
             None,
@@ -8731,7 +8753,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
-        // 5. Delete org record
+        // 5. Cascade: delete all agents owned by this organization
+        {
+            let owner = AgentOwner::Organization(org_id.clone());
+            let prefix = keys::agent_owner_scan_prefix(owner.storage_tag(), &owner.uuid_str());
+            let end = keys::prefix_end(&prefix);
+            if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                for entry in &entries {
+                    if let Ok(key_str) = std::str::from_utf8(&entry.key) {
+                        if let Some(uuid_str) = key_str.rsplit(':').next() {
+                            if let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) {
+                                let aid = AgentId::new(uuid);
+                                let _ =
+                                    <Self as IdentityEngine>::delete_agent(self, realm_id, &aid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 6. Delete org record
         let id_key = keys::encode_org_id(org_id);
         self.storage
             .delete(realm_id, &id_key)
@@ -10175,6 +10217,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
+        // Owner FK: the referenced user or org must exist in this realm.
+        match &request.owner {
+            AgentOwner::User(uid) => {
+                if self.get_user(realm_id, uid)?.is_none() {
+                    return Err(IdentityError::UserNotFound);
+                }
+            }
+            AgentOwner::Organization(oid) => {
+                if self.get_organization(realm_id, oid)?.is_none() {
+                    return Err(IdentityError::OrganizationNotFound);
+                }
+            }
+        }
+
+        // max_agents quota check
+        if let Some(realm) = self.get_realm(realm_id)? {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_agents {
+                    let prefix = keys::agent_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "agents", &prefix, max)?;
+                }
+            }
+        }
+
         let now = self.clock.now();
         let agent_id = AgentId::generate();
         let description = request.description.clone().unwrap_or_default();
@@ -10316,14 +10382,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get_agent(realm_id, agent_id)?
             .ok_or(IdentityError::AgentNotFound)?;
 
+        // 1. Cascade: delete all credentials for this agent
+        let cred_prefix = keys::agent_credential_scan_prefix(agent_id);
+        let cred_end = keys::prefix_end(&cred_prefix);
+        let cred_entries = self
+            .storage
+            .scan(realm_id, &cred_prefix, &cred_end)
+            .map_err(Self::storage_err)?;
+        for entry in &cred_entries {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 2. Cascade: purge RBAC role assignments and group memberships.
+        // Agents share the RBAC subject namespace with users via the same UUID.
+        let agent_subject_id = UserId::new(*agent_id.as_uuid());
+        let _ = self.rbac.purge_user_from_realm(realm_id, &agent_subject_id);
+
+        // 3. Delete primary record and owner index atomically
         let id_key = keys::encode_agent_id(agent_id);
         let owner_index_key = keys::encode_agent_owner_index(
             agent.owner().storage_tag(),
             &agent.owner().uuid_str(),
             agent_id,
         );
-
-        // Remove primary record and owner index atomically
         self.storage
             .delete(realm_id, &id_key)
             .map_err(Self::storage_err)?;
@@ -10528,6 +10611,161 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )?;
 
         Ok(agent)
+    }
+
+    // ── A.3 Agent credentials ────────────────────────────────────────────────
+
+    fn create_agent_api_key(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        request: &CreateAgentApiKeyRequest,
+    ) -> Result<CreateAgentApiKeyResponse, IdentityError> {
+        // Agent must exist and be active
+        let agent = self
+            .get_agent(realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+        if agent.status() == AgentStatus::Revoked {
+            return Err(IdentityError::AgentRevoked);
+        }
+
+        // Validate label
+        let label = request.label.trim();
+        if label.is_empty() || label.len() > 256 {
+            return Err(IdentityError::InvalidInput {
+                reason: "credential label must be 1–256 characters".to_string(),
+            });
+        }
+
+        // Generate 256 bits of entropy → hex-encode as plaintext key
+        let mut raw = [0u8; 32];
+        ring::rand::SystemRandom::new()
+            .fill(&mut raw)
+            .map_err(|_| IdentityError::SigningError {
+                reason: "RNG failure generating agent API key".to_string(),
+            })?;
+        let plaintext_hex = hex::encode(raw);
+
+        // Store only the SHA-256 hash
+        use sha2::{Digest, Sha256};
+        let hash_bytes = Sha256::digest(raw);
+        let hash_hex = hex::encode(hash_bytes);
+
+        let cred_id = AgentCredentialId::generate();
+        let cred = AgentCredential::new(
+            cred_id,
+            agent_id.clone(),
+            AgentCredentialKind::ApiKey,
+            label.to_string(),
+            hash_hex,
+            self.clock.now(),
+        );
+
+        let cred_bytes = serde_json::to_vec(&cred).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        let cred_key = keys::encode_agent_credential(agent_id, cred.id());
+        self.storage
+            .put(realm_id, &cred_key, &cred_bytes)
+            .map_err(Self::storage_err)?;
+
+        Ok(CreateAgentApiKeyResponse {
+            credential: cred,
+            plaintext_key: PlaintextApiKey::new(plaintext_hex),
+        })
+    }
+
+    fn list_agent_credentials(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<Vec<AgentCredential>, IdentityError> {
+        let prefix = keys::agent_credential_scan_prefix(agent_id);
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+
+        let mut creds = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let cred: AgentCredential =
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            creds.push(cred);
+        }
+        Ok(creds)
+    }
+
+    fn revoke_agent_credential(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        cred_id: &AgentCredentialId,
+    ) -> Result<(), IdentityError> {
+        let cred_key = keys::encode_agent_credential(agent_id, cred_id);
+        let bytes = self
+            .storage
+            .get(realm_id, &cred_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::AgentCredentialNotFound)?;
+
+        let mut cred: AgentCredential =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        // Verify the credential belongs to the given agent
+        if cred.agent_id() != agent_id {
+            return Err(IdentityError::AgentCredentialNotFound);
+        }
+
+        if !cred.is_revoked() {
+            cred.revoke(self.clock.now());
+            let updated = serde_json::to_vec(&cred).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+            self.storage
+                .put(realm_id, &cred_key, &updated)
+                .map_err(Self::storage_err)?;
+        }
+
+        Ok(())
+    }
+
+    fn verify_agent_api_key(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        plaintext_key_hex: &str,
+    ) -> Result<bool, IdentityError> {
+        // Compute SHA-256 of the supplied plaintext
+        use sha2::{Digest, Sha256};
+        use subtle::ConstantTimeEq;
+
+        let raw = match hex::decode(plaintext_key_hex) {
+            Ok(b) => b,
+            Err(_) => return Ok(false), // malformed key never matches
+        };
+        let candidate_hash = hex::encode(Sha256::digest(&raw));
+
+        let creds = self.list_agent_credentials(realm_id, agent_id)?;
+        for cred in &creds {
+            if cred.is_revoked() {
+                continue;
+            }
+            if cred.kind() != AgentCredentialKind::ApiKey {
+                continue;
+            }
+            // Constant-time comparison to prevent timing attacks
+            let stored = cred.credential_hash().as_bytes();
+            let candidate = candidate_hash.as_bytes();
+            if stored.len() == candidate.len() && stored.ct_eq(candidate).unwrap_u8() == 1 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     // ===== Periodic cleanup =====

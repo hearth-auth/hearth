@@ -16,7 +16,8 @@
 //! Scan prefix `usr:id:` enables listing all users in a realm.
 
 use crate::core::{
-    AgentId, ClientId, IdpId, InvitationId, OrganizationId, RealmId, SessionId, UserId, WebhookId,
+    AgentCredentialId, AgentId, ClientId, IdpId, InvitationId, OrganizationId, RealmId, SessionId,
+    UserId, WebhookId,
 };
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1470,6 +1471,32 @@ pub(crate) fn agent_owner_scan_prefix(owner_tag: &str, owner_uuid: &str) -> Vec<
 #[allow(dead_code)]
 pub(crate) fn agent_owner_global_scan_prefix() -> Vec<u8> {
     AGENT_OWNER_PREFIX.as_bytes().to_vec()
+}
+
+// ===== Agent credential keys (A.3) =====
+
+/// Prefix for agent credential records.
+///
+/// Format: `agt:cred:{agent_uuid}:{credential_uuid}`
+const AGENT_CRED_PREFIX: &str = "agt:cred:";
+
+/// Encodes the primary key for a single agent credential.
+///
+/// Format: `agt:cred:{agent_uuid}:{credential_uuid}`
+pub(crate) fn encode_agent_credential(agent_id: &AgentId, cred_id: &AgentCredentialId) -> Vec<u8> {
+    format!(
+        "{AGENT_CRED_PREFIX}{}:{}",
+        agent_id.as_uuid(),
+        cred_id.as_uuid()
+    )
+    .into_bytes()
+}
+
+/// Returns the scan prefix for all credentials belonging to one agent.
+///
+/// Format: `agt:cred:{agent_uuid}:`
+pub(crate) fn agent_credential_scan_prefix(agent_id: &AgentId) -> Vec<u8> {
+    format!("{AGENT_CRED_PREFIX}{}:", agent_id.as_uuid()).into_bytes()
 }
 
 // ===== Attempt tracker WAL keys =====

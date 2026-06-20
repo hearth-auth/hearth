@@ -581,6 +581,11 @@ pub struct RealmQuotaConfig {
     /// Maximum number of OAuth/OIDC clients registered in this realm at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_clients: Option<u64>,
+    /// Maximum number of agents registered in this realm at once.
+    ///
+    /// Checked synchronously on `create_agent`. When `None` (default), no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_agents: Option<u64>,
     /// Maximum total number of active sessions across all users in this realm.
     ///
     /// Checked synchronously on `create_session`. Because checking the total

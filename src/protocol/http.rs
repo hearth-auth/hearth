@@ -21,6 +21,7 @@ use tracing::Level;
 // ── Sub-modules ──────────────────────────────────────────────────────────────
 
 mod admin;
+mod agents;
 mod auth;
 mod health;
 mod mfa;
@@ -182,6 +183,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/scim/v2", crate::protocol::scim::router())
         .merge(crate::protocol::web::openapi::openapi_router())
         .nest("/realms/{realm_name}", realm_routes);
+
+    // Register agent routes only when the identity capability is enabled.
+    // This prevents route fingerprinting when the feature is off.
+    if state.agent_identity_enabled {
+        base = base.merge(agents::routes());
+    }
 
     // Registered only in dev mode so the route is absent from the table in
     // production, preventing fingerprinting via port scanners (HEA-1138).

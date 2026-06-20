@@ -9,6 +9,25 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Agent identity (M1, HEA-1405)** — Phase A of `AGENT_AUTH.md` is now reachable:
+  - `POST /v1/agents` — register an agent; owner (user or organization) FK-checked;
+    realm `max_agents` quota enforced when configured.
+  - `GET /v1/agents`, `GET /v1/agents/{id}`, `PATCH /v1/agents/{id}`,
+    `DELETE /v1/agents/{id}` — full CRUD with credential cascade on delete.
+  - `POST /v1/agents/{id}/credentials/keys` — issue a 256-bit API key (show-once;
+    SHA-256 hash stored, plaintext never persisted); constant-time verification.
+  - `GET /v1/agents/{id}/credentials` — list credentials (active and revoked).
+  - `DELETE /v1/agents/{id}/credentials/{cred_id}` — revoke a credential.
+  - `GET /.well-known/agent.json?agent_id={id}` — Agent Card per A2A protocol.
+  - All routes absent from the router unless `agent_auth.capabilities.identity: true`.
+
+- **`agent_auth.capabilities.identity` config flag** — replaces the old A-36 binary
+  guardrail (`agent_auth.enabled`). Setting `capabilities.identity: true` activates M1
+  agent routes. Future phases add their own capability flags.
+
+- **`RealmQuotaConfig.max_agents`** — per-realm limit on registered agents;
+  mirrors `max_clients` / `max_users`.
+
 - **`GET /admin/users/{id}/sessions`** — lists active (non-revoked) sessions for a user.
   Returns a paginated `{"items": [...], "next_cursor": "..."}` response with session ID,
   timestamps, IP address, and device label. Requires `hearth.users.admin`.

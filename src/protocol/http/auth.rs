@@ -660,6 +660,9 @@ pub(crate) fn identity_error_to_response(
         }
         IdentityError::AgentNotFound => (StatusCode::NOT_FOUND, "agent not found"),
         IdentityError::AgentRevoked => (StatusCode::FORBIDDEN, "agent revoked"),
+        IdentityError::AgentCredentialNotFound => {
+            (StatusCode::NOT_FOUND, "agent credential not found")
+        }
         // HEA-1324: pre-token webhook failed with fail_closed policy.
         IdentityError::PreTokenWebhookFailed { .. } => {
             (StatusCode::BAD_GATEWAY, "pre_token_webhook_failed")

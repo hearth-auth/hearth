@@ -25,10 +25,10 @@
 //! - Integration: ticket issued in realm A is accepted in realm A
 //! - Integration: ticket issued in realm A is rejected in realm B (cross-realm guard)
 //!
-//! **A-36 — AGENT_AUTH guardrail**
-//! - Unit: `agent_auth.enabled = false` (default) passes `validate_all`
-//! - Unit: `agent_auth.enabled = true` produces a validation error on `validate_all`
-//! - Unit: `agent_auth.enabled = true` causes `Config::from_yaml_str` to return `Err`
+//! **A-36 — AGENT_AUTH staged capability flag (M1)**
+//! - Unit: default config (no capabilities) passes `validate_all`
+//! - Unit: `capabilities.identity = true` passes `validate_all` (M1 is implemented)
+//! - Unit: `capabilities.identity = true` does NOT block `Config::from_yaml_str`
 //!
 //! Closes: HEA-1213 §A-31, §A-32, §A-34, §A-36.
 
@@ -446,13 +446,12 @@ fn a34_ticket_not_found_in_different_realm() {
 }
 
 // ---------------------------------------------------------------------------
-// A-36: AGENT_AUTH guardrail
+// A-36: AGENT_AUTH capability flag (M1 staged replacement for binary guardrail)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a36_agent_auth_disabled_by_default_passes_validate_all() {
-    // Use from_yaml_str_unchecked + dev_mode so that unrelated
-    // production-only checks (oidc.issuer) don't interfere.
+fn a36_agent_auth_default_no_capabilities_passes_validate_all() {
+    // Default: all capabilities off — no validation errors from agent_auth.
     let yaml = "dev_mode: true\n";
     let cfg = Config::from_yaml_str_unchecked(yaml).expect("parse");
     let issues: Vec<_> = cfg
@@ -462,13 +461,14 @@ fn a36_agent_auth_disabled_by_default_passes_validate_all() {
         .collect();
     assert!(
         issues.is_empty(),
-        "no agent_auth errors when feature is disabled (default)"
+        "no agent_auth errors with default config, got: {issues:?}"
     );
 }
 
 #[test]
-fn a36_agent_auth_enabled_true_fails_validate_all() {
-    let yaml = "dev_mode: true\nagent_auth:\n  enabled: true\n";
+fn a36_agent_auth_capabilities_identity_passes_validate_all() {
+    // M1 identity capability is implemented — enabling it must NOT error.
+    let yaml = "dev_mode: true\nagent_auth:\n  capabilities:\n    identity: true\n";
     let cfg = Config::from_yaml_str_unchecked(yaml).expect("parse unchecked");
     let issues: Vec<_> = cfg
         .validate_all()
@@ -476,25 +476,25 @@ fn a36_agent_auth_enabled_true_fails_validate_all() {
         .filter(|i| i.field.starts_with("agent_auth"))
         .collect();
     assert!(
-        !issues.is_empty(),
-        "agent_auth.enabled=true must produce a validation issue"
+        issues.is_empty(),
+        "capabilities.identity=true must produce NO validation issue (M1 is implemented), got: {issues:?}"
     );
-    assert_eq!(issues[0].field, "agent_auth.enabled");
 }
 
 #[test]
-fn a36_agent_auth_enabled_true_fails_from_yaml_str() {
-    // dev_mode=true relaxes oidc.issuer and storage.data_dir so only
-    // the agent_auth.enabled guard fires.
-    let yaml = "dev_mode: true\nagent_auth:\n  enabled: true\n";
-    let result = Config::from_yaml_str(yaml);
+fn a36_agent_auth_capabilities_identity_passes_from_yaml_str() {
+    // capabilities.identity=true must not block config validation.
+    // Use from_yaml_str_unchecked + validate_all (dev_mode=true) so that
+    // the unrelated oidc.issuer production-mode requirement does not interfere.
+    let yaml = "dev_mode: true\nagent_auth:\n  capabilities:\n    identity: true\n";
+    let cfg = Config::from_yaml_str_unchecked(yaml).expect("parse");
+    let issues: Vec<_> = cfg
+        .validate_all()
+        .into_iter()
+        .filter(|i| i.field.starts_with("agent_auth"))
+        .collect();
     assert!(
-        result.is_err(),
-        "Config::from_yaml_str must fail when agent_auth.enabled=true"
-    );
-    let err = result.expect_err("expected validation failure");
-    assert!(
-        err.to_string().contains("agent_auth"),
-        "error must mention agent_auth, got: {err}"
+        issues.is_empty(),
+        "capabilities.identity=true must produce NO validation error, got: {issues:?}"
     );
 }

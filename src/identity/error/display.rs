@@ -212,6 +212,7 @@ impl fmt::Display for IdentityError {
             }
             Self::AgentNotFound => write!(f, "agent not found"),
             Self::AgentRevoked => write!(f, "agent has been permanently revoked"),
+            Self::AgentCredentialNotFound => write!(f, "agent credential not found"),
             Self::PreTokenWebhookFailed { reason } => {
                 write!(f, "pre-token webhook failed: {reason}")
             }
