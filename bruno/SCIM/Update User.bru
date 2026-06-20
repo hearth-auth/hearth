@@ -1,0 +1,39 @@
+meta {
+  name: Update User
+  type: http
+  seq: 6
+}
+
+patch {
+  url: {{baseUrl}}/scim/v2/Users/{{userId}}
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/scim+json
+  Accept: application/scim+json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+    "Operations": [
+      {
+        "op": "replace",
+        "path": "displayName",
+        "value": "Alice Smith Updated"
+      },
+      {
+        "op": "replace",
+        "path": "active",
+        "value": true
+      }
+    ]
+  }
+}

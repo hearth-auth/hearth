@@ -1,0 +1,29 @@
+meta {
+  name: Create Group
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/scim/v2/Groups
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/scim+json
+  Accept: application/scim+json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+    "displayName": "Engineering",
+    "members": []
+  }
+}

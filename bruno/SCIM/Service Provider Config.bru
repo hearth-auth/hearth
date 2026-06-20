@@ -1,0 +1,20 @@
+meta {
+  name: Service Provider Config
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/scim/v2/ServiceProviderConfig
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Accept: application/scim+json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
