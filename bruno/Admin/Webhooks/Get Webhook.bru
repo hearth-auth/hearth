@@ -1,0 +1,19 @@
+meta {
+  name: Get Webhook
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUrl}}/admin/webhooks/{{webhookId}}
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

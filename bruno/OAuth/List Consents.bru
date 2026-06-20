@@ -1,0 +1,19 @@
+meta {
+  name: List Consents
+  type: http
+  seq: 13
+}
+
+get {
+  url: {{baseUrl}}/oauth/consents
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
