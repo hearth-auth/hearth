@@ -1,0 +1,37 @@
+meta {
+  name: WebAuthn Complete Registration
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/webauthn/register/complete
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiZXhhbXBsZS1jaGFsbGVuZ2UiLCJvcmlnaW4iOiJodHRwOi8vMTI3LjAuMC4xOjg0MjAifQ",
+    "attestation_object": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YVikSZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NFAAAAAK3OAAI1vMYKZIsLJfHwVQMAIBTVHVGKjAoNFkJkGQPHmhHe5wf2OuALuGHR2OQNW-xfpAECAyYgASFYIMqFGcbAFnrGi4yAaKJHfq3BrjqLMRIHHQyJIZhGGQr4IlggwNq4RdnNKh4SaS-Cou3EYK2eSuLJx0Sxn5z3SyUnqcg",
+    "origin": "http://127.0.0.1:8420",
+    "discoverable": true
+  }
+}
+
+script:post-response {
+  const status = res.getStatus();
+  if (status >= 200 && status < 300 && res.getBody()) {
+    const body = res.getBody();
+    if (body.credential_id) bru.setEnvVar("credentialId", body.credential_id);
+  }
+}

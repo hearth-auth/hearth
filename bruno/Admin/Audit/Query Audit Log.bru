@@ -1,0 +1,26 @@
+meta {
+  name: Query Audit Log
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/admin/audit
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+query {
+  realm_id: {{realmId}}
+  actor_id:
+  action:
+  limit: 50
+}

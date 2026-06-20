@@ -1,0 +1,19 @@
+meta {
+  name: Rotate Signing Key
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/admin/realms/{{realmId}}/rotate-signing-key
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

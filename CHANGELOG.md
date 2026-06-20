@@ -7,6 +7,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **`GET /admin/users/{id}/sessions`** — lists active (non-revoked) sessions for a user.
+  Returns a paginated `{"items": [...], "next_cursor": "..."}` response with session ID,
+  timestamps, IP address, and device label. Requires `hearth.users.admin`.
+
+- **`DELETE /admin/sessions/{id}`** — hard-revokes a session by ID, marking the session
+  record as revoked and cascading to any grant families issued under it. Returns `204 No
+  Content`. The existing `sv-bump` endpoint performs a soft-invalidate; this endpoint is a
+  full termination. Emits a `session_revoked` audit event with `via: "admin_api"`. Requires
+  `hearth.users.admin`.
+
 ### Security
 
 - **CSRF check on device-approval form (F5, HEA-1367)** — `POST /ui/device` now verifies

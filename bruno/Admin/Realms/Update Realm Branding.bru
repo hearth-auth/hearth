@@ -1,0 +1,29 @@
+meta {
+  name: Update Realm Branding
+  type: http
+  seq: 8
+}
+
+patch {
+  url: {{baseUrl}}/admin/realms/{{realmId}}/branding
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "logo_url": "https://example.com/logo.png",
+    "primary_color": "#c0392b",
+    "from_name": "Acme Corp",
+    "from_email": "no-reply@acme.example.com"
+  }
+}

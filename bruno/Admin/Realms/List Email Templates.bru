@@ -1,0 +1,19 @@
+meta {
+  name: List Email Templates
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{baseUrl}}/admin/realms/{{realmId}}/email-templates
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

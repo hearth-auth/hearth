@@ -1,0 +1,35 @@
+meta {
+  name: WebAuthn Complete Auth
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/webauthn/auth/complete
+  body: json
+  auth: none
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "credential_id": "{{credentialId}}",
+    "client_data_json": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZXhhbXBsZS1jaGFsbGVuZ2UiLCJvcmlnaW4iOiJodHRwOi8vMTI3LjAuMC4xOjg0MjAifQ",
+    "authenticator_data": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAA",
+    "signature": "MEYCIQDexample-signature-base64url-encoded-hereAiEA",
+    "user_handle": "{{userId}}",
+    "origin": "http://127.0.0.1:8420"
+  }
+}
+
+script:post-response {
+  const status = res.getStatus();
+  if (status >= 200 && status < 300 && res.getBody()) {
+    const body = res.getBody();
+    if (body.user_id) bru.setEnvVar("userId", body.user_id);
+  }
+}

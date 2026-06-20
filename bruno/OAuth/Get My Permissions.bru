@@ -1,0 +1,19 @@
+meta {
+  name: Get My Permissions
+  type: http
+  seq: 12
+}
+
+get {
+  url: {{baseUrl}}/v1/me/permissions
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

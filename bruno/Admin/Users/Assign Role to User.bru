@@ -1,0 +1,26 @@
+meta {
+  name: Assign Role to User
+  type: http
+  seq: 14
+}
+
+post {
+  url: {{baseUrl}}/admin/users/{{userId}}/roles
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "role_id": "{{roleId}}"
+  }
+}

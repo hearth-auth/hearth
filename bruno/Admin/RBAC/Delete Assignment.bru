@@ -1,0 +1,19 @@
+meta {
+  name: Delete Assignment
+  type: http
+  seq: 14
+}
+
+delete {
+  url: {{baseUrl}}/admin/assignments/{{assignmentId}}
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
