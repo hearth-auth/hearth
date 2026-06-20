@@ -2122,7 +2122,7 @@ impl RealmYamlConfig {
     ///
     /// `web_theme_css` is populated by the caller (main.rs) after reading
     /// the optional CSS file from disk; it is `None` here.
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     pub fn to_realm_config(
         &self,
         global: &AuthConfig,
@@ -2609,6 +2609,9 @@ impl RealmYamlConfig {
             // SMS OTP expiry and max-attempt config; `None` uses OTP module defaults.
             sms_otp_expiry_seconds: None,
             sms_otp_max_attempts: None,
+            // Email OTP expiry and max-attempt config; `None` uses OTP module defaults.
+            email_otp_expiry_seconds: None,
+            email_otp_max_attempts: None,
             session_version: crate::identity::SessionVersionConfig::default(),
             max_concurrent_sessions,
             session_over_limit_policy,
@@ -2617,6 +2620,10 @@ impl RealmYamlConfig {
             fapi_profile,
             risk_scorer_config: None,
             quotas: None,
+            // Pre-token webhook is configured via admin API or per-realm YAML.
+            // Defaults to None (disabled) so existing realms are unaffected.
+            pre_token_webhook: None,
+            mfa_required_roles: None,
         })
     }
 }
@@ -2924,4 +2931,97 @@ mod tests {
         let result = yaml.to_realm_config(&AuthConfig::default(), None);
         assert!(result.is_err(), "unknown fapi_profile must fail validation");
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level config and validation types (moved from mod.rs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single validation issue with its field path and human-readable reason.
+///
+/// Used by [`Config::validate_all`] to report all problems at once rather
+/// than short-circuiting on the first error.
+#[derive(Debug, Clone, serde::Serialize)]
+#[allow(dead_code)]
+pub struct ValidationIssue {
+    /// Dot-delimited config field path (e.g. `"server.port"`).
+    pub field: String,
+    /// Human-readable reason this value is invalid.
+    pub reason: String,
+}
+
+/// Top-level Hearth configuration.
+///
+/// All sections use `#[serde(default)]` so a partial or empty YAML file
+/// produces valid configuration with production-safe defaults.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[allow(dead_code, clippy::struct_field_names)]
+pub struct Config {
+    /// Server network settings.
+    #[serde(default)]
+    pub server: ServerConfig,
+    /// Storage engine settings.
+    #[serde(default)]
+    pub storage: StorageSection,
+    /// Logging and tracing settings.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
+    /// Operational limits and timeouts.
+    #[serde(default)]
+    pub operational: OperationalConfig,
+    /// Outbound email delivery settings.
+    #[serde(default)]
+    pub email: EmailConfig,
+    /// Outbound SMS delivery settings.
+    #[serde(default)]
+    pub sms: SmsConfig,
+    /// First-run onboarding settings.
+    #[serde(default)]
+    pub onboarding: OnboardingConfig,
+    /// Global branding settings (logo URL).
+    #[serde(default)]
+    pub branding: BrandingConfig,
+    /// OIDC / OAuth 2.0 settings (issuer URL, authorization code TTL, nonce enforcement).
+    #[serde(default)]
+    pub oidc: OidcYamlConfig,
+    /// Token issuance settings (issuer, audience, access/refresh TTLs).
+    #[serde(default)]
+    pub token: TokenYamlConfig,
+    /// Global authentication defaults (session TTL, password hashing params).
+    #[serde(default)]
+    pub auth: AuthConfig,
+    /// Global security settings (rate-limiting thresholds).
+    #[serde(default)]
+    pub security: SecurityYaml,
+    /// Prometheus metrics endpoint settings.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+    /// Per-realm configuration overrides.
+    ///
+    /// When `Some`, realms are declaratively managed: YAML entries become
+    /// Active realms, storage-only realms get Archived. When `None`,
+    /// realms are managed via API/onboarding (backward compatible).
+    #[serde(default)]
+    pub realms: Option<std::collections::HashMap<String, RealmYamlConfig>>,
+    /// Raft clustering configuration.
+    ///
+    /// When `Some`, Hearth starts a Raft consensus engine and participates in
+    /// peer-to-peer replication over mTLS-secured gRPC. When `None` (the
+    /// default), Hearth runs in single-node mode with no clustering overhead.
+    #[serde(default)]
+    pub cluster: Option<ClusterConfig>,
+    /// Agent authentication / authorization feature gate.
+    ///
+    /// Setting `agent_auth.enabled = true` while the Agent entity is not fully
+    /// implemented produces a startup error. See `docs/specs/AGENT_AUTH.md`.
+    #[serde(default)]
+    pub agent_auth: AgentAuthConfig,
+    /// Whether development mode is active. Not serialized — set by [`Config::dev`].
+    #[serde(skip)]
+    pub dev_mode: bool,
+    /// Env-var substitution warnings from config loading (missing/empty variables).
+    /// Skipped during serde deserialization — populated by [`Config::from_file`]
+    /// and [`Config::from_yaml_str`].
+    #[serde(skip)]
+    pub config_warnings: Vec<super::env::EnvVarWarning>,
 }

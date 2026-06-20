@@ -47,21 +47,32 @@
     var authenticatingText = ds.authenticatingLabel || 'Authenticating\u2026';
     var signInText         = ds.signInLabel         || 'Sign in with a passkey';
 
-    var errorEl   = document.getElementById('passkey-error');
-    var sectionEl = document.getElementById('passkey-section');
-    var btn       = document.getElementById('passkey-btn');
-    var spinner   = document.getElementById('passkey-spinner');
-    var icon      = document.getElementById('passkey-icon');
-    var labelEl   = document.getElementById('passkey-label');
+    var errorEl     = document.getElementById('passkey-error');
+    var errorLiveEl = document.getElementById('passkey-error-live');
+    var sectionEl   = document.getElementById('passkey-section');
+    var btn         = document.getElementById('passkey-btn');
+    var spinner     = document.getElementById('passkey-spinner');
+    var icon        = document.getElementById('passkey-icon');
+    var labelEl     = document.getElementById('passkey-label');
 
     function showError(msg) {
-      if (!errorEl) return;
-      errorEl.textContent = msg;
-      errorEl.hidden = false;
+      // Announce to screen readers via the persistent aria-live region.
+      if (errorLiveEl) errorLiveEl.textContent = msg;
+      // Show the visual banner.
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.hidden = false;
+        errorEl.removeAttribute('aria-hidden');
+      }
     }
 
     function clearError() {
-      if (errorEl) { errorEl.textContent = ''; errorEl.hidden = true; }
+      if (errorLiveEl) errorLiveEl.textContent = '';
+      if (errorEl) {
+        errorEl.textContent = '';
+        errorEl.hidden = true;
+        errorEl.setAttribute('aria-hidden', 'true');
+      }
     }
 
     function setAuthenticating(v) {
@@ -300,12 +311,31 @@
     }
   }
 
+  // ── initLoginFormLoadingState ───────────────────────────────────────
+  //
+  // Disables the submit button and sets aria-busy="true" on first submit
+  // to prevent double-submit and signal in-flight state to assistive tech.
+  // Applies to both the password form and the inline TOTP form.
+
+  function initLoginFormLoadingState() {
+    var root = document.getElementById('passkey-login-root');
+    if (!root) return;
+    root.addEventListener('submit', function (e) {
+      var form = e.target;
+      var btn = form.querySelector('button[type="submit"]');
+      if (!btn || btn.disabled) return;
+      btn.disabled = true;
+      btn.setAttribute('aria-busy', 'true');
+    });
+  }
+
   // ── Boot ────────────────────────────────────────────────────────────
 
   function init() {
     initPasskeyLogin();
     initPasskeyManager();
     initPasskeyRows();
+    initLoginFormLoadingState();
   }
 
   if (document.readyState === 'loading') {

@@ -216,6 +216,30 @@ pub enum AuditAction {
     /// `"backup"`, `"users"`, `"audit"`), `realm_slug` (when filtered), and
     /// `actor_ip` (the request's remote address when available).
     RealmExportWatermarked,
+    /// A new agent was registered in the realm.
+    ///
+    /// Metadata carries `agent_id`, `display_name`, and `owner_id`.
+    AgentCreated,
+    /// An agent's metadata was updated (name, description, capabilities).
+    ///
+    /// Metadata carries `agent_id` and changed fields.
+    AgentUpdated,
+    /// An agent was temporarily suspended.
+    ///
+    /// Metadata carries `agent_id`.
+    AgentSuspended,
+    /// An active or suspended agent was reactivated.
+    ///
+    /// Metadata carries `agent_id`.
+    AgentReactivated,
+    /// An agent was permanently revoked.
+    ///
+    /// Metadata carries `agent_id`.
+    AgentRevoked,
+    /// An agent was deleted (cascading delete of credentials and RBAC assignments).
+    ///
+    /// Metadata carries `agent_id`.
+    AgentDeleted,
     /// A required action was assigned to a user by an admin.
     ///
     /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `admin_id`.
@@ -333,6 +357,7 @@ impl AuditAction {
     /// don't have to remember exact string tags. Keep alphabetised on
     /// the wire format for stable rendering.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn all() -> Vec<Self> {
         let mut v = vec![
             Self::UserCreated,
@@ -426,6 +451,14 @@ impl AuditAction {
             Self::OidcSilentAuthProbed,
             Self::RealmExportWatermarked,
         ];
+        v.extend([
+            Self::AgentCreated,
+            Self::AgentUpdated,
+            Self::AgentSuspended,
+            Self::AgentReactivated,
+            Self::AgentRevoked,
+            Self::AgentDeleted,
+        ]);
         v.sort_by_key(|a| a.as_str());
         v
     }
@@ -523,6 +556,12 @@ impl AuditAction {
             Self::EmailChangeConfirmed => "email_change_confirmed",
             Self::OidcSilentAuthProbed => "oidc_silent_auth_probed",
             Self::RealmExportWatermarked => "realm_export_watermarked",
+            Self::AgentCreated => "agent_created",
+            Self::AgentUpdated => "agent_updated",
+            Self::AgentSuspended => "agent_suspended",
+            Self::AgentReactivated => "agent_reactivated",
+            Self::AgentRevoked => "agent_revoked",
+            Self::AgentDeleted => "agent_deleted",
         }
     }
 }
@@ -622,6 +661,12 @@ impl std::str::FromStr for AuditAction {
             "email_change_confirmed" => Ok(Self::EmailChangeConfirmed),
             "oidc_silent_auth_probed" => Ok(Self::OidcSilentAuthProbed),
             "realm_export_watermarked" => Ok(Self::RealmExportWatermarked),
+            "agent_created" => Ok(Self::AgentCreated),
+            "agent_updated" => Ok(Self::AgentUpdated),
+            "agent_suspended" => Ok(Self::AgentSuspended),
+            "agent_reactivated" => Ok(Self::AgentReactivated),
+            "agent_revoked" => Ok(Self::AgentRevoked),
+            "agent_deleted" => Ok(Self::AgentDeleted),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -722,7 +767,11 @@ impl AuditAction {
             | Self::AbuseDetected
             | Self::EmailChangeInitiated
             | Self::OidcSilentAuthProbed
-            | Self::RealmExportWatermarked => LogOnly,
+            | Self::RealmExportWatermarked
+            | Self::AgentCreated
+            | Self::AgentUpdated
+            | Self::AgentSuspended
+            | Self::AgentReactivated => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
@@ -750,7 +799,10 @@ impl AuditAction {
             | Self::DeviceFingerprintsErased
             | Self::SessionsRevoked
             // Email-change confirmation revokes all sessions — security-sensitive.
-            | Self::EmailChangeConfirmed => FailOperation,
+            | Self::EmailChangeConfirmed
+            // Agent revocation and deletion are terminal/security-sensitive.
+            | Self::AgentRevoked
+            | Self::AgentDeleted => FailOperation,
         }
     }
 }

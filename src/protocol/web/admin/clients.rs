@@ -404,6 +404,7 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         jwks_uri: None,
         authorization_signed_response_alg: None,
         profile: crate::identity::ClientProfile::Standard,
+        mfa_required: None,
     }
 }
 
@@ -634,7 +635,7 @@ pub struct AppEditForm {
 }
 
 /// `POST /ui/admin/realms/{realm}/applications/{id}/edit`
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn admin_app_edit_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -742,6 +743,7 @@ pub async fn admin_app_edit_submit(
         access_token_authorization,
         authorization_signed_response_alg: None,
         profile: None,
+        mfa_required: None,
     };
 
     let realm_name = target.0.name().to_string();

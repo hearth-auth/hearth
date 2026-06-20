@@ -411,6 +411,12 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::SessionLimitEnforced => "Session Limit Enforced",
         A::SessionsRevoked => "All Sessions Revoked",
         A::RealmExportWatermarked => "Realm Export (Watermarked)",
+        A::AgentCreated => "Agent Created",
+        A::AgentUpdated => "Agent Updated",
+        A::AgentSuspended => "Agent Suspended",
+        A::AgentReactivated => "Agent Reactivated",
+        A::AgentRevoked => "Agent Revoked",
+        A::AgentDeleted => "Agent Deleted",
     }
 }
 
@@ -523,7 +529,13 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::BackupRestored
         | A::RealmExportWatermarked
         | A::Cleanup
-        | A::SessionLimitEnforced => "System",
+        | A::SessionLimitEnforced
+        | A::AgentCreated
+        | A::AgentUpdated
+        | A::AgentSuspended
+        | A::AgentReactivated
+        | A::AgentRevoked
+        | A::AgentDeleted => "System",
     }
 }
 
@@ -928,7 +940,7 @@ struct AuditRowsTemplate {
 }
 
 /// `GET /ui/admin/audit`.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn admin_audit_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -2373,6 +2385,12 @@ pub struct PatchRealmConfigBody {
     /// Per-realm SMS OTP maximum verification attempts. `null` clears
     /// the override (reverts to the engine default of 5).
     pub sms_otp_max_attempts: Option<u32>,
+    /// Per-realm Email OTP expiry in seconds. `null` clears the override
+    /// (reverts to the engine default of 600 s).
+    pub email_otp_expiry_seconds: Option<u64>,
+    /// Per-realm Email OTP maximum verification attempts. `null` clears
+    /// the override (reverts to the engine default of 5).
+    pub email_otp_max_attempts: Option<u32>,
 }
 
 /// `PATCH /admin/realms/{realm}/config`
@@ -2428,6 +2446,12 @@ pub async fn admin_api_realm_config_patch(
     }
     if let Some(v) = body.sms_otp_max_attempts {
         config.sms_otp_max_attempts = Some(v);
+    }
+    if let Some(v) = body.email_otp_expiry_seconds {
+        config.email_otp_expiry_seconds = Some(v);
+    }
+    if let Some(v) = body.email_otp_max_attempts {
+        config.email_otp_max_attempts = Some(v);
     }
 
     match state.identity.update_realm(

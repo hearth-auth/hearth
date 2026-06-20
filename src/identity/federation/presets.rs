@@ -71,14 +71,16 @@ const PRESETS: &[Preset] = &[
     },
     Preset {
         name: "apple",
-        kind: IdpKind::Oidc,
+        // Apple requires private_key_jwt + form_post — cannot use generic OIDC.
+        kind: IdpKind::Apple,
         display_name: "Apple",
         issuer: "https://appleid.apple.com",
         authorization_endpoint: "https://appleid.apple.com/auth/authorize",
         token_endpoint: "https://appleid.apple.com/auth/token",
         userinfo_endpoint: None, // Apple inlines claims in the ID token.
         jwks_uri: Some("https://appleid.apple.com/auth/keys"),
-        default_scopes: &["openid", "email", "name"],
+        // "name" and "email" are the two available scopes; "openid" is implicit.
+        default_scopes: &["name", "email"],
     },
     Preset {
         name: "github",
@@ -104,7 +106,7 @@ mod tests {
             lookup("microsoft").expect("microsoft preset").kind,
             IdpKind::Oidc
         );
-        assert_eq!(lookup("apple").expect("apple preset").kind, IdpKind::Oidc);
+        assert_eq!(lookup("apple").expect("apple preset").kind, IdpKind::Apple);
         assert_eq!(
             lookup("github").expect("github preset").kind,
             IdpKind::GitHub
@@ -136,6 +138,19 @@ mod tests {
     fn apple_has_no_userinfo_endpoint() {
         let p = lookup("apple").expect("preset");
         assert!(p.userinfo_endpoint.is_none());
+        assert_eq!(
+            p.kind,
+            IdpKind::Apple,
+            "apple preset must use Apple kind, not generic OIDC"
+        );
+        assert!(
+            p.default_scopes.contains(&"name"),
+            "apple preset must include name scope"
+        );
+        assert!(
+            p.default_scopes.contains(&"email"),
+            "apple preset must include email scope"
+        );
     }
 
     #[test]

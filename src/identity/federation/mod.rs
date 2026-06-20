@@ -23,6 +23,7 @@
 //!
 //! Off the hot path entirely — federation callbacks are infrequent.
 
+pub mod apple;
 pub mod connector;
 pub mod github;
 pub mod http;
@@ -33,6 +34,7 @@ pub mod service;
 pub mod state;
 pub mod types;
 
+pub use apple::AppleConnector;
 pub use connector::{AuthorizeUrl, IdpConnector};
 pub use github::GithubConnector;
 pub use http::{
@@ -51,5 +53,6 @@ pub use state::{
     verify_federation_state_mac,
 };
 pub use types::{
-    ConfirmLinkTicket, ExternalIdentity, FederationSecret, IdpConfig, IdpKind, LinkMode, StateBag,
+    AppleConfig, ConfirmLinkTicket, ExternalIdentity, FederationSecret, IdpConfig, IdpKind,
+    LinkMode, StateBag,
 };

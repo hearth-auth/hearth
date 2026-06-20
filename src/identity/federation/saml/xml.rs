@@ -13,6 +13,7 @@ use quick_xml::Reader;
 use std::io::BufRead;
 
 use crate::identity::error::IdentityError;
+use crate::identity::federation::saml::SamlError;
 
 /// Standard SAML namespace URIs.
 pub mod ns {
@@ -111,9 +112,9 @@ pub fn attr(start: &BytesStart<'_>, name: &str) -> Option<String> {
 
 /// Parse error helper.
 pub fn parse_err(reason: impl Into<String>) -> IdentityError {
-    IdentityError::SamlParse {
+    IdentityError::Saml(SamlError::Parse {
         reason: reason.into(),
-    }
+    })
 }
 
 /// Reads the textual content between the current start and its matching

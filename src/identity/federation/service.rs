@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use crate::core::{IdpId, RealmId, Timestamp, UserId};
+use crate::identity::federation::apple::AppleConnector;
 use crate::identity::federation::connector::{AuthorizeUrl, IdpConnector};
 use crate::identity::federation::github::GithubConnector;
 use crate::identity::federation::http::FederationHttpTransport;
@@ -105,6 +106,7 @@ impl FederationService {
             pkce_verifier: generate_pkce_verifier()?,
             return_to: return_to.to_string(),
             expires_at: Timestamp::from_micros(now.as_micros() + FED_STATE_TTL_MICROS),
+            apple_user_json: None,
         };
         let state_token = bag.state_token.clone();
         self.engine.put_federation_state(&bag)?;
@@ -126,6 +128,11 @@ impl FederationService {
     /// server's redirect.  If `Some`, it MUST match the configured issuer for
     /// the IdP referenced by `state_token`.  If `None`, the check is skipped
     /// (fail-open — not all authorization servers send it).
+    ///
+    /// `user_json` is the Apple Sign In `user` form field from a `form_post`
+    /// callback (e.g. `{"name":{"firstName":"Alice","lastName":"Smith"}}`).
+    /// Only present on the user's very first Apple Sign In; absent on
+    /// subsequent logins. Pass `None` for all non-Apple connectors.
     pub async fn callback(
         &self,
         realm_id: &RealmId,
@@ -134,8 +141,15 @@ impl FederationService {
         iss_hint: Option<&str>,
         link_mode: LinkMode,
         now: Timestamp,
+        user_json: Option<&str>,
     ) -> Result<(StateBag, FederationOutcome), IdentityError> {
-        let bag = self.engine.take_federation_state(realm_id, state_token)?;
+        let mut bag = self.engine.take_federation_state(realm_id, state_token)?;
+        // Thread first-login name data from the form_post body into the bag so
+        // AppleConnector::exchange() can extract first/last name without needing
+        // a separate parameter on the IdpConnector trait.
+        if let Some(uj) = user_json {
+            bag.apple_user_json = Some(uj.to_string());
+        }
         let cfg = self
             .engine
             .get_idp(realm_id, &bag.idp_id)?
@@ -232,6 +246,11 @@ impl FederationService {
                 self.http.clone(),
                 self.redirect_uri.clone(),
             ))),
+            IdpKind::Apple => Ok(Box::new(AppleConnector::new(
+                cfg.clone(),
+                self.http.clone(),
+                self.redirect_uri.clone(),
+            )?)),
             IdpKind::Saml => {
                 // SAML is not driven through the OAuth-shaped IdpConnector
                 // trait; callers must dispatch on kind before reaching here

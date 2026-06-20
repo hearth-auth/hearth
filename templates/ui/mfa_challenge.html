@@ -27,6 +27,11 @@
         <input type="hidden" name="return_to" value="{{ r }}">
       {% when None %}
     {% endmatch %}
+    {% match csrf %}
+      {% when Some with (c) %}
+        <input type="hidden" name="_csrf" value="{{ c }}">
+      {% when None %}
+    {% endmatch %}
 
     <div>
       <label for="code" class="block text-sm font-medium text-ht-content-secondary">
@@ -38,7 +43,7 @@
              inputmode="numeric"
              pattern="[0-9]{6}"
              maxlength="6"
-             placeholder="000 000"
+             placeholder="000000"
              class="mt-1 input py-3 text-center font-mono text-2xl tracking-[0.4em]">
     </div>
 

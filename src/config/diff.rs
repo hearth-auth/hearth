@@ -451,7 +451,7 @@ pub enum ConfigDiff {
 /// Returns an empty `Vec` when the config is identical to the snapshot
 /// (idempotent — no diff means no action needed).
 #[must_use]
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub fn compute_diff(old: &ConfigSnapshot, new: &Config) -> Vec<ConfigDiff> {
     let new_snap = ConfigSnapshot::from_config(new);
     let mut diffs = Vec::new();

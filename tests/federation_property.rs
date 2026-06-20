@@ -34,6 +34,7 @@ fn oidc_config(realm_id: &RealmId, idp_id: &IdpId, name: &str) -> IdpConfig {
         client_secret: FederationSecret::new("s".to_string()),
         claim_mappings: BTreeMap::new(),
         leeway_seconds: IdpConfig::default_leeway_seconds(),
+        apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),
     }
@@ -66,6 +67,7 @@ proptest! {
             pkce_verifier: verifier,
             return_to,
             expires_at: Timestamp::from_micros(exp),
+            apple_user_json: None,
         };
         let json = serde_json::to_string(&bag).unwrap();
         let back: StateBag = serde_json::from_str(&json).unwrap();

@@ -43,6 +43,7 @@ fn sample_cfg() -> IdpConfig {
         client_secret: FederationSecret::new("s".to_string()),
         claim_mappings: BTreeMap::new(),
         leeway_seconds: IdpConfig::default_leeway_seconds(),
+        apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),
     }
@@ -57,6 +58,7 @@ fn bag_with_nonce(nonce: &str) -> StateBag {
         pkce_verifier: "v".to_string(),
         return_to: "/".to_string(),
         expires_at: Timestamp::from_micros(i64::MAX),
+        apple_user_json: None,
     }
 }
 

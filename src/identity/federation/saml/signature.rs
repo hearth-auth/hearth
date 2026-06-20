@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use super::c14n::{canonicalize, canonicalize_with_inherited};
 use super::xml::{alg, escape_attr, find_element_range, ns, parse_err};
 use crate::identity::error::IdentityError;
+use crate::identity::federation::saml::SamlError;
 use crate::identity::tokens::RsaSigningKey;
 
 /// Metadata about a verified signed element.
@@ -145,7 +146,7 @@ pub fn verify_signed_element(
     // Locate the element.
     let range = find_element_range(full_xml, ns::SAMLP, local_name, None)?
         .or(find_element_range(full_xml, ns::SAML, local_name, None)?)
-        .ok_or(IdentityError::SamlSignature)?;
+        .ok_or(IdentityError::Saml(SamlError::Signature))?;
     let element_bytes = &full_xml[range.0..range.1];
 
     // Extract ID and Signature sub-block.
@@ -157,7 +158,7 @@ pub fn verify_signed_element(
     // where `id` equals the enclosing element's ID.
     let expected_uri = format!("#{element_id}");
     if reference_uri != expected_uri {
-        return Err(IdentityError::SamlSignature);
+        return Err(IdentityError::Saml(SamlError::Signature));
     }
 
     // Verify referenced element digest.
@@ -167,19 +168,19 @@ pub fn verify_signed_element(
     let actual_digest = hasher.finalize();
     let expected_digest = B64
         .decode(digest_b64.trim())
-        .map_err(|_| IdentityError::SamlSignature)?;
+        .map_err(|_| IdentityError::Saml(SamlError::Signature))?;
     if actual_digest.as_slice() != expected_digest.as_slice() {
-        return Err(IdentityError::SamlSignature);
+        return Err(IdentityError::Saml(SamlError::Signature));
     }
 
     // Check algorithms inside SignedInfo (reject SHA-1 etc).
     let si_str =
         std::str::from_utf8(&signed_info_bytes).map_err(|_| parse_err("SignedInfo not utf8"))?;
     if si_str.contains(alg::SHA1) || si_str.contains(alg::RSA_SHA1) {
-        return Err(IdentityError::SamlUnsupportedAlgorithm);
+        return Err(IdentityError::Saml(SamlError::UnsupportedAlgorithm));
     }
     if !si_str.contains(alg::RSA_SHA256) || !si_str.contains(alg::SHA256) {
-        return Err(IdentityError::SamlUnsupportedAlgorithm);
+        return Err(IdentityError::Saml(SamlError::UnsupportedAlgorithm));
     }
 
     // Canonicalize SignedInfo with the ds prefix declared-but-not-emitted
@@ -195,12 +196,12 @@ pub fn verify_signed_element(
     // Verify signature over canonicalized SignedInfo.
     let sig_bytes = B64
         .decode(signature_value_b64.trim())
-        .map_err(|_| IdentityError::SamlSignature)?;
+        .map_err(|_| IdentityError::Saml(SamlError::Signature))?;
 
     let public_key = parse_cert_public_key(signing_cert_pem)?;
     public_key
         .verify(&RSA_PKCS1_2048_8192_SHA256, &canonical_si, &sig_bytes)
-        .map_err(|_| IdentityError::SamlSignature)?;
+        .map_err(|_| IdentityError::Saml(SamlError::Signature))?;
 
     Ok(SignedElement {
         local_name: local_name.to_string(),
@@ -235,12 +236,12 @@ fn extract_signature_fields(
     // Find <ds:Signature ... as direct child only (depth 2 from the
     // enclosing root). We use find_element_range with ds namespace.
     let sig_range = find_element_range(element_bytes, ns::DS, "Signature", None)?
-        .ok_or(IdentityError::SamlSignature)?;
+        .ok_or(IdentityError::Saml(SamlError::Signature))?;
     let sig_bytes = &element_bytes[sig_range.0..sig_range.1];
 
     // Find SignedInfo.
     let signed_info_range = find_element_range(sig_bytes, ns::DS, "SignedInfo", None)?
-        .ok_or(IdentityError::SamlSignature)?;
+        .ok_or(IdentityError::Saml(SamlError::Signature))?;
     let signed_info = sig_bytes[signed_info_range.0..signed_info_range.1].to_vec();
 
     // Extract <ds:SignatureValue>…</ds:SignatureValue> textual content.
@@ -463,7 +464,10 @@ mod tests {
             .expect("hello bytes present");
         signed[idx] = b'H';
         let result = verify_signed_element(&signed, "Assertion", &cert_pem);
-        assert!(matches!(result, Err(IdentityError::SamlSignature)));
+        assert!(matches!(
+            result,
+            Err(IdentityError::Saml(SamlError::Signature))
+        ));
     }
 
     fn cert_der_to_pem(der: &[u8]) -> String {

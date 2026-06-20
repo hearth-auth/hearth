@@ -47,10 +47,16 @@
     {% when None %}
   {% endmatch %}
 
-  {# Passkey JS error — shown by passkey.js when a ceremony fails #}
+  {# Passkey JS error — sr-only live region always in DOM (role="alert" fires on insertion,
+     not on hidden-toggle; aria-live fires on textContent change regardless of visibility).
+     The visual banner is separate and toggled by passkey.js. #}
+  <div id="passkey-error-live"
+       class="sr-only"
+       aria-live="assertive"
+       aria-atomic="true"></div>
   <div id="passkey-error" hidden
        class="mb-4 rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg"
-       role="alert"></div>
+       aria-hidden="true"></div>
 
   {# ────────────────────────────────────────────────────────────────────── #}
   {# Phase 1 — Email + password                                            #}
@@ -63,6 +69,11 @@
       {% when None %}
     {% endmatch %}
     <input type="hidden" name="locale" value="{{ locale }}">
+    {% match csrf %}
+      {% when Some with (c) %}
+        <input type="hidden" name="_csrf" value="{{ c }}">
+      {% when None %}
+    {% endmatch %}
 
     <div>
       <label for="email" class="block text-sm font-medium text-ht-content-secondary">{{ email_label }}</label>
@@ -112,6 +123,11 @@
     {% endmatch %}
     <input type="hidden" name="email" value="{{ email }}">
     <input type="hidden" name="locale" value="{{ locale }}">
+    {% match csrf %}
+      {% when Some with (c) %}
+        <input type="hidden" name="_csrf" value="{{ c }}">
+      {% when None %}
+    {% endmatch %}
 
     <div>
       <label for="totp_code" class="block text-sm font-medium text-ht-content-secondary">
@@ -123,7 +139,7 @@
              inputmode="numeric"
              pattern="[0-9]{6}"
              maxlength="6"
-             placeholder="000 000"
+             placeholder="000000"
              class="mt-1 input py-3 text-center font-mono text-2xl tracking-[0.4em]">
     </div>
 

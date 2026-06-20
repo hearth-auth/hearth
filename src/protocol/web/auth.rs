@@ -348,6 +348,30 @@ pub fn issue_auth_cookies(
     }
 }
 
+/// Generates a fresh 32-byte random CSRF value for pre-auth form pages.
+///
+/// Returns `(value, Set-Cookie header)`. Embed `value` as a hidden `_csrf`
+/// form field; the POST handler then calls [`csrf_token_eq`] to verify it
+/// against the cookie that the browser echoes back.
+#[must_use]
+pub fn fresh_csrf_cookie(secure: bool) -> (String, String) {
+    let mut csrf_bytes = [0u8; 32];
+    // INVARIANT: see CookieSecret::random().
+    #[allow(clippy::unwrap_used)]
+    SystemRandom::new().fill(&mut csrf_bytes).unwrap();
+    let csrf_value = BASE64URL_NOPAD.encode(&csrf_bytes);
+    let secure_attr = if secure { "; Secure" } else { "" };
+    let cookie = format!("{CSRF_COOKIE}={csrf_value}; Path=/ui; SameSite=Lax{secure_attr}");
+    (csrf_value, cookie)
+}
+
+/// Constant-time comparison of a CSRF cookie value against a submitted form
+/// field. Returns `true` iff `cookie_val == submitted`.
+#[must_use]
+pub fn csrf_token_eq(cookie_val: &str, submitted: &str) -> bool {
+    ct_eq_str(cookie_val, submitted)
+}
+
 /// Returns the full `Set-Cookie` header values that clear both cookies.
 ///
 /// Pass `secure = true` when on a TLS connection to keep the browser able

@@ -23,6 +23,7 @@
     {% endmatch %}
 
     <form method="post" action="{{ form_action }}" class="space-y-4">
+      {% match csrf %}{% when Some with (c) %}<input type="hidden" name="_csrf" value="{{ c }}">{% when None %}{% endmatch %}
       <div>
         <label for="email" class="block text-sm font-medium text-ht-content-secondary">Email</label>
         <input type="email" id="email" name="email" required autocomplete="email" value="{{ email_prefill }}"

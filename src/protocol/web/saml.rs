@@ -105,7 +105,7 @@ pub struct AcsForm {
     pub relay_state: Option<String>,
 }
 
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn sp_acs(
     State(state): State<Arc<WebState>>,
     AxumPath(realm_name): AxumPath<String>,
@@ -230,13 +230,7 @@ pub async fn sp_acs(
         }
         SamlSpOutcome::Rejected { error } => {
             let reason = match &error {
-                crate::identity::IdentityError::SamlSignature => "signature",
-                crate::identity::IdentityError::SamlExpired => "expired",
-                crate::identity::IdentityError::SamlReplay => "replay",
-                crate::identity::IdentityError::SamlAudienceMismatch => "audience",
-                crate::identity::IdentityError::SamlIssuerMismatch => "issuer",
-                crate::identity::IdentityError::SamlDestinationMismatch => "destination",
-                crate::identity::IdentityError::SamlUnsupportedAlgorithm => "algorithm",
+                crate::identity::IdentityError::Saml(ref e) => e.category(),
                 _ => "parse",
             };
             tracing::warn!(%reason, error = %error, "SAML response rejected");

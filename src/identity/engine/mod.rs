@@ -16,7 +16,8 @@ use zeroize::Zeroizing;
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
-    ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId, WebhookId,
+    AgentId, ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId,
+    WebhookId,
 };
 use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
@@ -24,6 +25,7 @@ use crate::identity::claims_config::{
 use crate::identity::credentials::{self, CleartextPassword, CredentialConfig, StoredCredential};
 use crate::identity::device_fp::{DeviceFingerprintOutcome, DeviceFingerprintStore};
 use crate::identity::error::IdentityError;
+use crate::identity::federation::saml::SamlError;
 use crate::identity::keys;
 use crate::identity::session_version::SessionVersionStore;
 /// Encodes bytes as lowercase hexadecimal.
@@ -215,13 +217,13 @@ use crate::identity::tokens::{
 };
 use crate::identity::totp::{self, RecoveryCodes, StoredMfaState, TotpEnrollment, TotpSecret};
 use crate::identity::types::{
-    BulkResult, ConsentListEntry, ConsentRecord, CreateInvitationRequest,
-    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, ImportClientRequest,
-    ImportUserRequest, InvitationStatus, Organization, OrganizationInvitation,
-    OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
+    Agent, AgentStatus, BulkResult, ConsentListEntry, ConsentRecord, CreateAgentRequest,
+    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
+    ImportClientRequest, ImportUserRequest, InvitationStatus, ListAgentsQuery, Organization,
+    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
     PendingAuthorizationRequest, Realm, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, Session, SessionContext, SessionLimitPolicy, UpdateOrganizationRequest,
-    UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
+    RegistrationPolicy, Session, SessionContext, SessionLimitPolicy, UpdateAgentRequest,
+    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::webauthn::{
@@ -436,6 +438,8 @@ pub struct EmbeddedIdentityEngine {
     ///
     /// Lazily loaded. Regeneration happens only on first SAML operation in
     /// a realm that has no prior key — not on every startup.
+    ///
+    // INVARIANT: guard is always released inside a scoped block before any I/O or storage call.
     realm_saml_keys: Mutex<HashMap<String, Arc<crate::identity::tokens::RsaSigningKey>>>,
     /// Server-wide RSA-2048 signing key advertised at `/certs` for RS256
     /// (HEA-51 / OIDC M1).
@@ -457,43 +461,59 @@ pub struct EmbeddedIdentityEngine {
     ///
     /// Key is `(RealmId, UserId)` serialized as a string to avoid
     /// requiring `Hash` on the newtype wrappers.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     attempt_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-user failed MFA attempt trackers (separate from password rate limiting).
     ///
     /// Stricter limits: 5 attempts, 5-minute lockout. Key format: `mfa:{realm}:{user}`.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     mfa_attempt_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Used nonces for replay protection (when nonce enforcement is enabled).
     ///
     /// Maps nonce value to the timestamp it was first seen. Entries are swept
     /// on every insertion: any nonce older than `authorization_code_ttl_secs`
     /// is removed, bounding the set to at most one TTL window of activity.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     used_nonces: Mutex<HashMap<String, crate::core::Timestamp>>,
     /// Per-email magic link rate trackers.
     ///
     /// Limits the number of magic link requests per email per hour.
     /// Key format: `magic:{realm}:{email}`.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     magic_link_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-email password reset rate trackers.
     ///
     /// Limits the number of password reset requests per email per hour.
     /// Key format: `reset:{realm}:{email}`.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     password_reset_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-email self-registration rate trackers.
     ///
     /// Limits the number of registration attempts per email per hour.
     /// Key format: `reg-email:{realm}:{email}`.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     registration_email_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-IP self-registration rate trackers.
     ///
     /// Limits the number of registration attempts per source IP per hour,
     /// across all realms and emails.
     /// Key format: raw IP string.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     registration_ip_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Per-IP login rate trackers for credential-stuffing protection.
     ///
     /// Counts failed login attempts per source IP per realm within a sliding
     /// window. Keyed by `"{realm_uuid}:{ip}"` so attacks on one realm do
     /// not affect legitimate users on another.
+    ///
+    // INVARIANT: guard released before method returns; all callers are non-async helpers.
     ip_login_rate_trackers: Mutex<HashMap<String, AttemptTracker>>,
     /// Pending `WebAuthn` challenges awaiting completion.
     webauthn_challenges: WebAuthnChallengeStore,
@@ -502,11 +522,17 @@ pub struct EmbeddedIdentityEngine {
     /// Prevents TOCTOU races when enforcing `max_concurrent_sessions`: the
     /// read (count live sessions) and the write (create or evict + create)
     /// must be atomic per user. Key format: `"{realm_uuid}:{user_uuid}"`.
+    ///
+    // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
+    // INVARIANT: inner (per-user) guard held only across the sync count-check + create window; no .await in scope.
     session_limit_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Per-realm locks for atomic JTI check-and-consume in the JWT Bearer grant.
     ///
     /// Eliminates the TOCTOU window between `storage.get` and `storage.put`
     /// in replay prevention. One lock per realm; created on first use.
+    ///
+    // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc to the caller.
+    // INVARIANT: inner (per-realm) guard held only across the sync JTI check-and-consume window; no .await in scope.
     jti_locks: Mutex<HashMap<RealmId, Arc<Mutex<()>>>>,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
@@ -516,18 +542,28 @@ pub struct EmbeddedIdentityEngine {
     /// guarantee atomicity of the record+key pair under concurrent
     /// callers; a finer-grained per-realm lock could come later if
     /// contention ever becomes measurable.
+    ///
+    // INVARIANT: guard held for the entire sync realm lifecycle operation; released when the method returns.
     realm_ops_lock: Mutex<()>,
     /// Serializes org slug reservation and invitation acceptance.
     ///
     /// Guards the check-then-write sequence in create_organization and
     /// accept_invitation so two concurrent callers cannot both win the
     /// same slug or both accept the same invitation token.
+    ///
+    // INVARIANT: guard held for the entire sync org write operation; released when the method returns.
     org_write_lock: Mutex<()>,
     /// HIBP k-anonymity breach-check client.
     ///
     /// Shared across all password-set/-change operations. Uses an injectable
     /// transport so tests can stub out network I/O.
     hibp: Arc<crate::identity::hibp::HibpClient>,
+    /// Pre-token enrichment webhook client (HEA-1324, Gap C-3).
+    ///
+    /// Called before access token issuance when the realm has
+    /// `pre_token_webhook` configured. Uses an injectable transport so tests
+    /// can stub out network I/O without a real HTTP server.
+    pre_token_client: Arc<crate::identity::pre_token_webhook::PreTokenWebhookClient>,
     /// Device fingerprint store for adaptive (risk-based) MFA.
     ///
     /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
@@ -623,6 +659,79 @@ impl EmbeddedIdentityEngine {
         claims.remove("groups");
         claims.remove("permissions");
         (roles, groups, permissions, claims)
+    }
+
+    /// Fires the pre-token enrichment webhook for a realm (if configured) and
+    /// returns extra claims to merge into the access token.
+    ///
+    /// Returns `Ok(extra)` on success (may be empty), respects the realm's
+    /// `on_error` policy on transport failure.
+    pub(super) fn fire_pre_token_webhook(
+        &self,
+        realm_id: &RealmId,
+        user_id: &str,
+        client_id: &str,
+        grant_type: &'static str,
+        scope: Option<&str>,
+        session_id: Option<&str>,
+        existing_roles: &[String],
+        existing_groups: &[String],
+        existing_permissions: &[String],
+        existing_custom: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<BTreeMap<String, serde_json::Value>, IdentityError> {
+        use crate::identity::pre_token_webhook::{ExistingClaims, PreTokenWebhookRequest};
+        use crate::identity::types::PreTokenWebhookErrorPolicy;
+
+        let cfg = match self
+            .get_realm(realm_id)?
+            .as_ref()
+            .and_then(|r| r.config().pre_token_webhook.as_ref())
+            .cloned()
+        {
+            Some(c) => c,
+            None => return Ok(BTreeMap::new()),
+        };
+
+        let request = PreTokenWebhookRequest {
+            event: "pre_token",
+            realm_id: realm_id.to_string(),
+            user_id: user_id.to_string(),
+            client_id: client_id.to_string(),
+            grant_type,
+            scope: scope.map(str::to_string),
+            session_id: session_id.map(str::to_string),
+            existing_claims: ExistingClaims {
+                roles: existing_roles.to_vec(),
+                groups: existing_groups.to_vec(),
+                permissions: existing_permissions.to_vec(),
+                custom: existing_custom.clone(),
+            },
+        };
+
+        match self.pre_token_client.call(
+            &cfg.url,
+            cfg.timeout_ms,
+            cfg.hmac_secret.as_deref(),
+            &request,
+        ) {
+            Ok(extra) => Ok(extra),
+            Err(e) => match cfg.on_error {
+                PreTokenWebhookErrorPolicy::FailOpen => {
+                    tracing::warn!(
+                        realm_id = %realm_id,
+                        url = %cfg.url,
+                        error = %e,
+                        "pre-token webhook failed (fail_open): issuing token without extra claims"
+                    );
+                    Ok(BTreeMap::new())
+                }
+                PreTokenWebhookErrorPolicy::FailClosed => {
+                    Err(IdentityError::PreTokenWebhookFailed {
+                        reason: e.to_string(),
+                    })
+                }
+            },
+        }
     }
 
     fn validate_client_scope_request(
@@ -776,23 +885,39 @@ impl EmbeddedIdentityEngine {
             signing_key,
             realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             oidc_rsa_key: std::sync::OnceLock::new(),
             oidc_ecdsa_key: std::sync::OnceLock::new(),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             password_reset_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             registration_email_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             registration_ip_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
+            // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
+            // INVARIANT: guard held for entire sync org write op; released when method returns.
             org_write_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
+            pre_token_client: Arc::new(
+                crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
+            ),
             device_fp,
             sv_store,
             session_cache: ArcSwap::from_pointee(HashMap::new()),
@@ -950,23 +1075,39 @@ impl EmbeddedIdentityEngine {
             signing_key,
             realm_signing_keys: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             realm_status_cache: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            // INVARIANT: guard released in scoped block before I/O in get_or_create_saml_signing_key.
             realm_saml_keys: Mutex::new(HashMap::new()),
             oidc_rsa_key: std::sync::OnceLock::new(),
             oidc_ecdsa_key: std::sync::OnceLock::new(),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             password_reset_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             registration_email_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             registration_ip_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             ip_login_rate_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; all callers are non-async helpers.
             used_nonces: Mutex::new(HashMap::new()),
             webauthn_challenges: WebAuthnChallengeStore::new(),
+            // INVARIANT: outer guard released in scoped block before inner per-user lock is acquired.
             session_limit_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
+            // INVARIANT: guard held for entire sync org write op; released when method returns.
             org_write_lock: Mutex::new(()),
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
+            pre_token_client: Arc::new(
+                crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
+            ),
             device_fp,
             sv_store,
             session_cache: ArcSwap::from_pointee(HashMap::new()),
@@ -993,6 +1134,20 @@ impl EmbeddedIdentityEngine {
         transport: std::sync::Arc<dyn crate::identity::hibp::HibpTransport>,
     ) -> Self {
         self.hibp = Arc::new(crate::identity::hibp::HibpClient::with_transport(transport));
+        self
+    }
+
+    /// Replaces the pre-token webhook transport.
+    ///
+    /// Used in integration tests to inject a stub without network calls.
+    /// Follows the same pattern as `with_hibp_transport`.
+    pub fn with_pre_token_transport(
+        mut self,
+        transport: std::sync::Arc<dyn crate::identity::pre_token_webhook::PreTokenWebhookTransport>,
+    ) -> Self {
+        self.pre_token_client = Arc::new(
+            crate::identity::pre_token_webhook::PreTokenWebhookClient::with_transport(transport),
+        );
         self
     }
 
@@ -2765,6 +2920,7 @@ impl EmbeddedIdentityEngine {
         let mut map = self.jti_locks.lock().expect("jti_locks poisoned");
         Arc::clone(
             map.entry(realm_id.clone())
+                // INVARIANT: inner guard held only across the sync JTI check-and-consume window; no .await in scope.
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     }
@@ -2961,6 +3117,25 @@ impl EmbeddedIdentityEngine {
             &b"orgi:org:"[..],
             &b"orgi:list:"[..],
         ] {
+            let end = keys::prefix_end(prefix);
+            let entries = self
+                .storage
+                .scan(realm_id, prefix, &end)
+                .map_err(Self::storage_err)?;
+            if !entries.is_empty() {
+                cascade_work_done = true;
+            }
+            for chunk in entries.chunks(chunk_size) {
+                for entry in chunk {
+                    self.storage
+                        .delete(realm_id, &entry.key)
+                        .map_err(Self::storage_err)?;
+                }
+            }
+        }
+
+        // 1c. Unconditional sweep of agent-related prefixes (HEA-1325).
+        for prefix in [&b"agt:id:"[..], &b"agt:owner:"[..]] {
             let end = keys::prefix_end(prefix);
             let entries = self
                 .storage
@@ -4336,6 +4511,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             user.set_phone_verified(verified);
         }
 
+        // 4e. Apply email_otp_enabled change if requested.
+        if let Some(enabled) = request.email_otp_enabled {
+            user.set_email_otp_enabled(enabled);
+        }
+
         // 5. Update timestamp
         user.set_updated_at(self.clock.now());
 
@@ -4370,7 +4550,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(user)
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn delete_user(&self, realm_id: &RealmId, user_id: &UserId) -> Result<(), IdentityError> {
         // 1. Load user to get email for index cleanup
         let user = self
@@ -4592,7 +4772,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.device_fp.delete_all_for_user(realm_id, user_id)
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn set_password(
         &self,
         realm_id: &RealmId,
@@ -4877,7 +5057,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn create_session(
         &self,
         realm_id: &RealmId,
@@ -4937,6 +5117,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         .expect("session_limit_locks poisoned");
                     locks
                         .entry(lock_key)
+                        // INVARIANT: inner guard held only across the sync session count-check + write window; no .await in scope.
                         .or_insert_with(|| Arc::new(Mutex::new(())))
                         .clone()
                 };
@@ -5399,7 +5580,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )
     }
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn issue_tokens_with_context(
         &self,
         realm_id: &RealmId,
@@ -5518,6 +5699,37 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             ClaimTarget::AccessToken,
         );
         validate_claim_payload(ClaimTarget::AccessToken, &roles, &groups, &permissions)?;
+
+        // Pre-token enrichment webhook: fire before signing and merge extra claims.
+        let scope_str: String = ctx
+            .granted_scopes
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let client_id_str = ctx
+            .client_id
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let extra_claims = self.fire_pre_token_webhook(
+            realm_id,
+            &user_id.to_string(),
+            &client_id_str,
+            "password",
+            if scope_str.is_empty() {
+                None
+            } else {
+                Some(scope_str.as_str())
+            },
+            Some(&session_id.as_uuid().to_string()),
+            &roles,
+            &groups,
+            &permissions,
+            &custom,
+        )?;
+        let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
+
         self.record_audit(
             realm_id,
             None,
@@ -6811,7 +7023,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
     // ===== Self-service registration =====
 
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn register_user(
         &self,
         realm_id: &RealmId,
@@ -9875,6 +10087,409 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
     }
 
+    // =========================================================================
+    // Agents (AGENT_AUTH.md Phase A, HEA-1325)
+    // =========================================================================
+
+    fn create_agent(
+        &self,
+        realm_id: &RealmId,
+        request: &CreateAgentRequest,
+    ) -> Result<Agent, IdentityError> {
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "create_agent",
+            });
+        }
+        self.require_active_realm(realm_id)?;
+
+        // Validate display_name: 1–256 chars
+        let name = request.display_name.trim();
+        if name.is_empty() {
+            return Err(IdentityError::InvalidInput {
+                reason: "display_name must not be empty".to_string(),
+            });
+        }
+        if name.len() > 256 {
+            return Err(IdentityError::InvalidInput {
+                reason: "display_name must not exceed 256 characters".to_string(),
+            });
+        }
+
+        // Validate max_delegation_depth: 1–10
+        if request.max_delegation_depth == 0 || request.max_delegation_depth > 10 {
+            return Err(IdentityError::InvalidInput {
+                reason: format!(
+                    "max_delegation_depth must be 1–10, got {}",
+                    request.max_delegation_depth
+                ),
+            });
+        }
+
+        // Validate description length
+        if let Some(desc) = &request.description {
+            if desc.len() > 2048 {
+                return Err(IdentityError::InvalidInput {
+                    reason: "description must not exceed 2048 characters".to_string(),
+                });
+            }
+        }
+
+        let now = self.clock.now();
+        let agent_id = AgentId::generate();
+        let description = request.description.clone().unwrap_or_default();
+
+        let agent = Agent::new(
+            agent_id.clone(),
+            realm_id.clone(),
+            request.owner.clone(),
+            name.to_string(),
+            description,
+            request.capabilities.clone(),
+            AgentStatus::Active,
+            request.max_delegation_depth,
+            now,
+            now,
+        );
+
+        let id_key = keys::encode_agent_id(&agent_id);
+        let agent_bytes = serde_json::to_vec(&agent).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        let owner_index_key = keys::encode_agent_owner_index(
+            request.owner.storage_tag(),
+            &request.owner.uuid_str(),
+            &agent_id,
+        );
+
+        // Atomic: primary record + owner index in one WAL entry
+        self.storage
+            .put_batch(
+                realm_id,
+                &[(id_key, agent_bytes), (owner_index_key, vec![])],
+            )
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::AgentCreated,
+            "agent",
+            &agent_id.as_uuid().to_string(),
+        )?;
+
+        Ok(agent)
+    }
+
+    fn get_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<Option<Agent>, IdentityError> {
+        let key = keys::encode_agent_id(agent_id);
+        match self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+        {
+            Some(bytes) => {
+                let agent: Agent =
+                    serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                        reason: e.to_string(),
+                    })?;
+                Ok(Some(agent))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn update_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        request: &UpdateAgentRequest,
+    ) -> Result<Agent, IdentityError> {
+        let key = keys::encode_agent_id(agent_id);
+        let mut agent = self
+            .get_agent(realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+
+        if let Some(name) = &request.display_name {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                return Err(IdentityError::InvalidInput {
+                    reason: "display_name must not be empty".to_string(),
+                });
+            }
+            if trimmed.len() > 256 {
+                return Err(IdentityError::InvalidInput {
+                    reason: "display_name must not exceed 256 characters".to_string(),
+                });
+            }
+            agent.set_display_name(trimmed.to_string());
+        }
+
+        if let Some(desc) = &request.description {
+            if desc.len() > 2048 {
+                return Err(IdentityError::InvalidInput {
+                    reason: "description must not exceed 2048 characters".to_string(),
+                });
+            }
+            agent.set_description(desc.clone());
+        }
+
+        if let Some(caps) = &request.capabilities {
+            agent.set_capabilities(caps.clone());
+        }
+
+        if let Some(depth) = request.max_delegation_depth {
+            if depth == 0 || depth > 10 {
+                return Err(IdentityError::InvalidInput {
+                    reason: format!("max_delegation_depth must be 1–10, got {depth}"),
+                });
+            }
+            agent.set_max_delegation_depth(depth);
+        }
+
+        agent.set_updated_at(self.clock.now());
+
+        let agent_bytes = serde_json::to_vec(&agent).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &key, &agent_bytes)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::AgentUpdated,
+            "agent",
+            &agent_id.as_uuid().to_string(),
+        )?;
+
+        Ok(agent)
+    }
+
+    fn delete_agent(&self, realm_id: &RealmId, agent_id: &AgentId) -> Result<(), IdentityError> {
+        let agent = self
+            .get_agent(realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+
+        let id_key = keys::encode_agent_id(agent_id);
+        let owner_index_key = keys::encode_agent_owner_index(
+            agent.owner().storage_tag(),
+            &agent.owner().uuid_str(),
+            agent_id,
+        );
+
+        // Remove primary record and owner index atomically
+        self.storage
+            .delete(realm_id, &id_key)
+            .map_err(Self::storage_err)?;
+        // Owner index deletion is best-effort; primary is gone.
+        let _ = self.storage.delete(realm_id, &owner_index_key);
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::AgentDeleted,
+            "agent",
+            &agent_id.as_uuid().to_string(),
+        )?;
+
+        Ok(())
+    }
+
+    fn list_agents(
+        &self,
+        realm_id: &RealmId,
+        query: &ListAgentsQuery,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Page<Agent>, IdentityError> {
+        let limit = crate::identity::cap_page_size(limit)?;
+        let scan_by_owner = query.owner_id.is_some();
+
+        // Choose scan prefix: owner index or primary key space.
+        let prefix = if let Some(owner) = &query.owner_id {
+            keys::agent_owner_scan_prefix(owner.storage_tag(), &owner.uuid_str())
+        } else {
+            keys::agent_id_scan_prefix()
+        };
+
+        let start = if let Some(cursor_str) = cursor {
+            let uuid_str = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor_str).map_err(|e| {
+                IdentityError::InvalidInput {
+                    reason: format!("invalid cursor: {e}"),
+                }
+            })?)
+            .map_err(|e| IdentityError::InvalidInput {
+                reason: format!("invalid cursor: {e}"),
+            })?;
+            let mut cursor_key = prefix.clone();
+            cursor_key.extend_from_slice(uuid_str.as_bytes());
+            cursor_key.push(0xFF);
+            cursor_key
+        } else {
+            prefix.clone()
+        };
+        let end = keys::prefix_end(&prefix);
+
+        let entries = self
+            .storage
+            .scan(realm_id, &start, &end)
+            .map_err(Self::storage_err)?;
+
+        let mut items: Vec<Agent> = Vec::new();
+        for entry in entries.iter().take(limit + 1) {
+            let agent: Agent = if scan_by_owner {
+                // Owner-index: value is empty; agent UUID is the trailing segment.
+                let key_str = String::from_utf8_lossy(&entry.key);
+                let agent_uuid_str = key_str.rsplit(':').next().unwrap_or("");
+                let uuid = uuid::Uuid::parse_str(agent_uuid_str).map_err(|_| {
+                    IdentityError::Serialization {
+                        reason: format!("invalid agent UUID in owner index: {key_str}"),
+                    }
+                })?;
+                match self.get_agent(realm_id, &AgentId::new(uuid))? {
+                    Some(a) => a,
+                    None => continue, // stale index entry
+                }
+            } else {
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?
+            };
+
+            // Optional in-memory filters
+            if let Some(status_filter) = query.status {
+                if agent.status() != status_filter {
+                    continue;
+                }
+            }
+            if let Some(cap_filter) = &query.capability {
+                if !agent.capabilities().contains(cap_filter) {
+                    continue;
+                }
+            }
+
+            items.push(agent);
+        }
+
+        let next_cursor = if items.len() > limit {
+            items.pop();
+            let last_kept = items.last().expect("limit >= 1");
+            Some(URL_SAFE_NO_PAD.encode(last_kept.id().as_uuid().to_string()))
+        } else {
+            None
+        };
+
+        Ok(Page { items, next_cursor })
+    }
+
+    fn suspend_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<Agent, IdentityError> {
+        let mut agent = self
+            .get_agent(realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+
+        if agent.status() == AgentStatus::Revoked {
+            return Err(IdentityError::AgentRevoked);
+        }
+
+        agent.set_status(AgentStatus::Suspended);
+        agent.set_updated_at(self.clock.now());
+
+        let key = keys::encode_agent_id(agent_id);
+        let bytes = serde_json::to_vec(&agent).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::AgentSuspended,
+            "agent",
+            &agent_id.as_uuid().to_string(),
+        )?;
+
+        Ok(agent)
+    }
+
+    fn reactivate_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<Agent, IdentityError> {
+        let mut agent = self
+            .get_agent(realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+
+        if agent.status() == AgentStatus::Revoked {
+            return Err(IdentityError::AgentRevoked);
+        }
+
+        agent.set_status(AgentStatus::Active);
+        agent.set_updated_at(self.clock.now());
+
+        let key = keys::encode_agent_id(agent_id);
+        let bytes = serde_json::to_vec(&agent).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::AgentReactivated,
+            "agent",
+            &agent_id.as_uuid().to_string(),
+        )?;
+
+        Ok(agent)
+    }
+
+    fn revoke_agent(&self, realm_id: &RealmId, agent_id: &AgentId) -> Result<Agent, IdentityError> {
+        let mut agent = self
+            .get_agent(realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+
+        // Revocation is idempotent — revoking an already-revoked agent is a no-op.
+        if agent.status() == AgentStatus::Revoked {
+            return Ok(agent);
+        }
+
+        agent.set_status(AgentStatus::Revoked);
+        agent.set_updated_at(self.clock.now());
+
+        let key = keys::encode_agent_id(agent_id);
+        let bytes = serde_json::to_vec(&agent).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &key, &bytes)
+            .map_err(Self::storage_err)?;
+
+        self.record_audit(
+            realm_id,
+            None,
+            AuditAction::AgentRevoked,
+            "agent",
+            &agent_id.as_uuid().to_string(),
+        )?;
+
+        Ok(agent)
+    }
+
     // ===== Periodic cleanup =====
 
     fn sweep_expired(
@@ -10155,7 +10770,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?
             .is_some()
         {
-            return Err(IdentityError::SamlReplay);
+            return Err(IdentityError::Saml(SamlError::Replay));
         }
         self.storage
             .put(realm_id, &key, &[])
@@ -10505,6 +11120,113 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     let _ = self.storage.delete(realm_id, &otp_key);
                 }
                 Err(e)
+            }
+        }
+    }
+
+    fn issue_email_otp(
+        &self,
+        realm_id: &RealmId,
+        email: &str,
+        otp_hmac_key_bytes: &[u8],
+        email_service: &crate::identity::email::EmailService,
+        realm_branding: Option<&crate::identity::email::EmailBranding>,
+        now_unix_ts: u64,
+    ) -> Result<String, IdentityError> {
+        use crate::identity::sms::otp::{
+            self as otp_mod, StoredOtp, OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS,
+        };
+
+        let (expiry_secs, max_attempts) = match self.get_realm(realm_id) {
+            Ok(Some(realm)) => {
+                let cfg = realm.config();
+                (
+                    cfg.email_otp_expiry_seconds.unwrap_or(OTP_EXPIRY_SECS),
+                    cfg.email_otp_max_attempts.unwrap_or(OTP_MAX_ATTEMPTS),
+                )
+            }
+            _ => (OTP_EXPIRY_SECS, OTP_MAX_ATTEMPTS),
+        };
+
+        let rng = ring::rand::SystemRandom::new();
+        let nonce = otp_mod::generate_otp_nonce(&rng)?;
+        let expiry_unix_ts = now_unix_ts.saturating_add(expiry_secs);
+        let (digits, stored) =
+            StoredOtp::create(&rng, otp_hmac_key_bytes, expiry_unix_ts, max_attempts)?;
+
+        let otp_key = keys::encode_email_pending_otp(&nonce);
+        let otp_bytes = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &otp_key, &otp_bytes)
+            .map_err(Self::storage_err)?;
+
+        email_service
+            .send_otp_email(email, digits.as_str(), realm_branding)
+            .map_err(|e| IdentityError::Internal {
+                reason: format!("email OTP delivery failed: {e}"),
+            })?;
+
+        Ok(nonce)
+    }
+
+    fn verify_email_otp(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        candidate_code: &str,
+        otp_hmac_key_bytes: &[u8],
+        now_unix_ts: u64,
+    ) -> Result<(), IdentityError> {
+        use crate::identity::sms::otp::StoredOtp;
+
+        let otp_key = keys::encode_email_pending_otp(nonce);
+
+        let bytes = self
+            .storage
+            .get(realm_id, &otp_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::InvalidEmailOtp)?;
+
+        let mut stored: StoredOtp =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        if stored.is_expired(now_unix_ts) {
+            let _ = self.storage.delete(realm_id, &otp_key);
+            return Err(IdentityError::InvalidEmailOtp);
+        }
+
+        if stored.is_exhausted() {
+            let _ = self.storage.delete(realm_id, &otp_key);
+            return Err(IdentityError::InvalidEmailOtp);
+        }
+
+        stored.attempt_count = stored.attempt_count.saturating_add(1);
+        let updated_bytes =
+            serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &otp_key, &updated_bytes)
+            .map_err(Self::storage_err)?;
+
+        let result = stored.verify(candidate_code, otp_hmac_key_bytes);
+
+        match result {
+            Ok(()) => {
+                self.storage
+                    .delete(realm_id, &otp_key)
+                    .map_err(Self::storage_err)?;
+                Ok(())
+            }
+            Err(_) => {
+                if stored.is_exhausted() {
+                    let _ = self.storage.delete(realm_id, &otp_key);
+                }
+                Err(IdentityError::InvalidEmailOtp)
             }
         }
     }
@@ -12691,7 +13413,7 @@ mod tests {
     // ===== Rate-limit durability: in-memory trackers cleared on restart (HEA-1139) =====
 
     #[test]
-    #[allow(clippy::too_many_lines)] // TODO: split this function
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn restart_clears_in_memory_rate_trackers() {
         // Per CONFIGURATION.md §security.rate_limiting: magic-link, password-reset,
         // IP-login, and registration rate trackers are in-memory only and do NOT

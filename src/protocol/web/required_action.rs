@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use askama::Template;
 use axum::extract::{Form, Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
@@ -138,9 +138,12 @@ pub fn required_action_check(
 
     let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
 
-    // Dynamic injection: if the realm requires SMS MFA and the user has no
-    // verified phone, ensure ENROLL_PHONE_OTP is in the pending actions list.
+    // Dynamic injection: SMS MFA enrollment if realm requires it.
     inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
+    // Dynamic injection: Email OTP enrollment if realm requires it.
+    inject_enroll_email_otp_if_needed(state, realm, user_id, &user, &mut actions);
+    // Dynamic injection: TOTP/MFA enrollment if client or role requires it.
+    inject_enroll_mfa_if_needed(state, realm, user_id, Some(&q.client_id), &mut actions);
 
     if actions.is_empty() {
         return None;
@@ -213,9 +216,13 @@ pub fn required_action_check_browser(
 
     let mut actions: Vec<RequiredAction> = user.required_actions().to_vec();
 
-    // Dynamic injection: if the realm requires SMS MFA and the user has no
-    // verified phone, ensure ENROLL_PHONE_OTP is in the pending actions list.
+    // Dynamic injection: SMS MFA enrollment if realm requires it.
     inject_enroll_phone_otp_if_needed(state, realm, user_id, &user, &mut actions);
+    // Dynamic injection: Email OTP enrollment if realm requires it.
+    inject_enroll_email_otp_if_needed(state, realm, user_id, &user, &mut actions);
+    // Dynamic injection: TOTP/MFA enrollment if role requires it (no client on
+    // the direct browser login path; client-level enforcement is OIDC-only).
+    inject_enroll_mfa_if_needed(state, realm, user_id, None, &mut actions);
 
     if actions.is_empty() {
         return None;
@@ -602,6 +609,128 @@ fn inject_enroll_phone_otp_if_needed(
     }
 }
 
+/// Dynamically injects `ENROLL_EMAIL_OTP` when a realm requires email OTP MFA
+/// and the user has not yet enrolled email OTP.
+///
+/// Persists the action to the user record. Idempotent: no-op if already present
+/// or not applicable.
+fn inject_enroll_email_otp_if_needed(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    user: &crate::identity::User,
+    actions: &mut Vec<RequiredAction>,
+) {
+    if user.email_otp_enabled() {
+        return;
+    }
+    if actions.contains(&RequiredAction::EnrollEmailOtp) {
+        return;
+    }
+    let email_otp_required = state
+        .identity
+        .get_realm(realm)
+        .ok()
+        .flatten()
+        .and_then(|r| r.config().mfa_methods.clone())
+        .map(|methods| methods.iter().any(|m| m == "email_otp"))
+        .unwrap_or(false);
+
+    if !email_otp_required {
+        return;
+    }
+
+    actions.push(RequiredAction::EnrollEmailOtp);
+
+    let mut persisted = user.required_actions().to_vec();
+    if !persisted.contains(&RequiredAction::EnrollEmailOtp) {
+        persisted.push(RequiredAction::EnrollEmailOtp);
+        if let Err(e) = state.identity.update_user(
+            realm,
+            user_id,
+            &UpdateUserRequest {
+                required_actions: Some(persisted),
+                ..Default::default()
+            },
+        ) {
+            tracing::warn!(
+                error = %e,
+                "inject_enroll_email_otp_if_needed: failed to persist ENROLL_EMAIL_OTP"
+            );
+        }
+    }
+}
+
+/// Dynamically injects `ENROLL_MFA` when a client-level or role-level MFA
+/// requirement is in effect and the user has no enrolled MFA factor.
+///
+/// Idempotent: no-op if the user already has TOTP enabled, a registered
+/// passkey, or if `EnrollMfa` is already in the pending actions list.
+/// Does NOT persist the injected action — it is re-evaluated on every
+/// authorize request because the condition is external (client config / roles).
+fn inject_enroll_mfa_if_needed(
+    state: &Arc<WebState>,
+    realm: &RealmId,
+    user_id: &UserId,
+    client_id_str: Option<&str>,
+    actions: &mut Vec<RequiredAction>,
+) {
+    if actions.contains(&RequiredAction::EnrollMfa) {
+        return;
+    }
+
+    // User with TOTP or passkeys already satisfies any MFA requirement.
+    let has_totp = state.identity.mfa_enabled(realm, user_id).unwrap_or(false);
+    let has_passkeys = !state
+        .identity
+        .list_webauthn_credentials(realm, user_id)
+        .unwrap_or_default()
+        .is_empty();
+    if has_totp || has_passkeys {
+        return;
+    }
+
+    // Per-client requirement.
+    let client_requires_mfa = client_id_str
+        .and_then(|cid| uuid::Uuid::parse_str(cid).ok())
+        .map(ClientId::new)
+        .and_then(|cid| state.identity.get_client(realm, &cid).ok().flatten())
+        .and_then(|c| c.mfa_required())
+        .unwrap_or(false);
+
+    // Per-role requirement: any role the user holds that appears in
+    // `realm.config.mfa_required_roles` triggers enforcement.
+    let role_requires_mfa = (|| -> Option<bool> {
+        let required_roles = state
+            .identity
+            .get_realm(realm)
+            .ok()
+            .flatten()?
+            .config()
+            .mfa_required_roles
+            .clone()?;
+        if required_roles.is_empty() {
+            return Some(false);
+        }
+        let assignments = state.rbac.list_user_assignments(realm, user_id).ok()?;
+        let hit = assignments.iter().any(|a| {
+            state
+                .rbac
+                .get_role(realm, &a.role_id)
+                .ok()
+                .flatten()
+                .map(|r| required_roles.iter().any(|req| req == &r.name))
+                .unwrap_or(false)
+        });
+        Some(hit)
+    })()
+    .unwrap_or(false);
+
+    if client_requires_mfa || role_requires_mfa {
+        actions.push(RequiredAction::EnrollMfa);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -662,7 +791,7 @@ pub struct VerifyEmailConfirmQuery {
 /// verified in storage (auto-clear scenario for migration artifacts). If so,
 /// clears the VERIFY_EMAIL action and advances the OIDC flow without sending
 /// another email (AC-8 / OQ-3 resolution).
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
     let Some(token) = read_ra_cookie(&headers) else {
         return handlers_common::bad_request("No active required-action session");
@@ -822,7 +951,7 @@ pub async fn verify_email_page(State(state): State<Arc<WebState>>, headers: Head
 /// VERIFY_EMAIL from the RA pending list and calls
 /// [`resume_oidc_flow`] or [`next_required_action`]. On failure, renders an
 /// error page with a link to resend the verification email.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn verify_email_confirm(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -993,7 +1122,7 @@ pub async fn update_password_page(
 /// RA cookie is left intact (the token remains valid for the remaining TTL).
 /// On success the password credential is replaced, the action is removed from
 /// the user record, and the OIDC flow resumes.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn update_password_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -1293,7 +1422,7 @@ pub async fn enroll_phone_otp_send(
 
 /// Verifies the submitted OTP code, stores the phone as verified, clears
 /// `ENROLL_PHONE_OTP` from the user's required actions, and advances the flow.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn enroll_phone_otp_verify_submit(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
@@ -1544,6 +1673,603 @@ fn percent_encode_into(value: &str, out: &mut String) {
                 let _ = write!(out, "%{b:02X}");
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET/POST /required-action/ENROLL_EMAIL_OTP
+// ---------------------------------------------------------------------------
+
+/// Rendered by `GET /required-action/ENROLL_EMAIL_OTP`.
+#[derive(Template)]
+#[template(path = "ui/required_action/enroll_email_otp.html")]
+struct EnrollEmailOtpPageTemplate {
+    /// Masked display of the user's email (e.g. `a***@example.com`).
+    masked_email: String,
+    error: Option<String>,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// Rendered by `POST /required-action/ENROLL_EMAIL_OTP/send` on success.
+#[derive(Template)]
+#[template(path = "ui/required_action/enroll_email_otp_verify.html")]
+struct EnrollEmailOtpVerifyTemplate {
+    /// Masked display of the email.
+    masked_email: String,
+    /// Opaque nonce returned by `issue_email_otp`; `None` in rate-limited renders.
+    nonce: Option<String>,
+    error: Option<String>,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// `application/x-www-form-urlencoded` body for `POST /required-action/ENROLL_EMAIL_OTP/verify`.
+#[derive(Debug, Deserialize)]
+pub struct EnrollEmailOtpVerifyForm {
+    #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
+    pub code: String,
+}
+
+/// Renders the landing page for email OTP enrollment. Loads the user's email
+/// from the RA token subject and shows a "Send code to my email" button.
+pub async fn enroll_email_otp_page(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+    let now = Timestamp::from_micros(now_micros());
+    let Ok(claims) = state.identity.validate_ra_token(&realm, &token, now) else {
+        return Redirect::to("/").into_response();
+    };
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let email = state
+        .identity
+        .get_user(&realm, &user_id)
+        .ok()
+        .flatten()
+        .map(|u| u.email().to_string())
+        .unwrap_or_default();
+    render_enroll_email_otp_page(&state, &email, None)
+}
+
+/// Sends an email OTP to the user's registered email address and renders
+/// the code-entry form.
+pub async fn enroll_email_otp_send(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+    let now = Timestamp::from_micros(now_micros());
+    let Ok(claims) = state.identity.validate_ra_token(&realm, &token, now) else {
+        return Redirect::to("/").into_response();
+    };
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+
+    let email = match state.identity.get_user(&realm, &user_id) {
+        Ok(Some(u)) => u.email().to_string(),
+        _ => {
+            return handlers_common::server_error();
+        }
+    };
+
+    let Some(email_service) = state.email.as_ref() else {
+        tracing::warn!("enroll_email_otp_send: email transport not configured");
+        return render_enroll_email_otp_page(
+            &state,
+            &email,
+            Some("Email delivery is not configured. Contact your administrator."),
+        );
+    };
+
+    let hmac_key = email_otp_hmac_key_bytes(&state);
+    let now_ts = now_unix_ts();
+
+    match state
+        .identity
+        .issue_email_otp(&realm, &email, &hmac_key, email_service, None, now_ts)
+    {
+        Ok(nonce) => render_enroll_email_otp_verify(&state, &email, Some(&nonce), None),
+        Err(e) => {
+            tracing::warn!(error = %e, "enroll_email_otp_send: issue_email_otp failed");
+            render_enroll_email_otp_page(
+                &state,
+                &email,
+                Some("Failed to send verification code. Please try again."),
+            )
+        }
+    }
+}
+
+/// Verifies the submitted OTP code, sets `email_otp_enabled = true`, clears
+/// `ENROLL_EMAIL_OTP` from the user's required actions, and advances the flow.
+#[allow(clippy::too_many_lines)]
+pub async fn enroll_email_otp_verify_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<EnrollEmailOtpVerifyForm>,
+) -> Response {
+    let Some(token) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return Redirect::to("/").into_response();
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let secure = state.is_secure_request(&headers);
+
+    let email = match state.identity.get_user(&realm, &user_id) {
+        Ok(Some(u)) => u.email().to_string(),
+        _ => return handlers_common::server_error(),
+    };
+
+    if form.nonce.is_empty() || form.code.is_empty() {
+        return render_enroll_email_otp_verify(
+            &state,
+            &email,
+            Some(&form.nonce),
+            Some("Invalid submission."),
+        );
+    }
+
+    let hmac_key = email_otp_hmac_key_bytes(&state);
+    let now_ts = now_unix_ts();
+
+    match state
+        .identity
+        .verify_email_otp(&realm, &form.nonce, &form.code, &hmac_key, now_ts)
+    {
+        Ok(()) => {}
+        Err(_) => {
+            return render_enroll_email_otp_verify(
+                &state,
+                &email,
+                Some(&form.nonce),
+                Some("That code is incorrect or has expired. Try again or request a new code."),
+            );
+        }
+    }
+
+    // OTP verified — set email_otp_enabled and clear ENROLL_EMAIL_OTP.
+    let updated_actions: Vec<RequiredAction> = claims
+        .pending_actions
+        .iter()
+        .filter(|&&a| a != RequiredAction::EnrollEmailOtp)
+        .copied()
+        .collect();
+
+    if let Err(e) = state.identity.update_user(
+        &realm,
+        &user_id,
+        &UpdateUserRequest {
+            email_otp_enabled: Some(true),
+            required_actions: Some(updated_actions.clone()),
+            ..Default::default()
+        },
+    ) {
+        tracing::warn!(error = %e, "enroll_email_otp_verify_submit: update_user failed");
+        return handlers_common::server_error();
+    }
+
+    if let Err(e) = state.audit.append(&CreateAuditEvent {
+        realm_id: realm.clone(),
+        actor: user_id.as_uuid().to_string(),
+        action: AuditAction::RequiredActionCompleted,
+        resource_type: "user".to_string(),
+        resource_id: user_id.as_uuid().to_string(),
+        metadata: Some(serde_json::json!({ "action_type": "ENROLL_EMAIL_OTP" })),
+    }) {
+        tracing::warn!(error = %e, "enroll_email_otp_verify_submit: audit append failed");
+    }
+
+    if updated_actions.is_empty() {
+        if claims.browser_return_to.is_some() {
+            resume_browser_flow(
+                &state,
+                &realm,
+                &claims.sub,
+                claims.browser_return_to,
+                secure,
+            )
+        } else if let Some(oidc_params) = claims.oidc_params {
+            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
+        } else {
+            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
+        }
+    } else {
+        next_required_action(
+            &state,
+            &realm,
+            &claims.sub,
+            updated_actions,
+            claims.oidc_params,
+            claims.browser_return_to,
+            secure,
+            now,
+        )
+    }
+}
+
+fn render_enroll_email_otp_page(
+    state: &Arc<WebState>,
+    email: &str,
+    error: Option<&str>,
+) -> Response {
+    let tmpl = EnrollEmailOtpPageTemplate {
+        masked_email: mask_email(email),
+        error: error.map(str::to_string),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    };
+    render(&tmpl)
+}
+
+fn render_enroll_email_otp_verify(
+    state: &Arc<WebState>,
+    email: &str,
+    nonce: Option<&str>,
+    error: Option<&str>,
+) -> Response {
+    let tmpl = EnrollEmailOtpVerifyTemplate {
+        masked_email: mask_email(email),
+        nonce: nonce.map(str::to_string),
+        error: error.map(str::to_string),
+        chrome: false,
+        active: "",
+        user_email: None,
+        is_admin: false,
+        narrow: true,
+        flash: None,
+        csrf: None,
+        product_name: state.product_name.clone(),
+        logo_url: state.logo_url.clone(),
+        realm_theme_url: state.realm_theme_url(),
+        inline_theme_css: state.inline_theme_css(),
+    };
+    render(&tmpl)
+}
+
+/// Masks an email address for display: shows the first character, then
+/// `***`, then the domain. E.g. `alice@example.com` → `a***@example.com`.
+fn mask_email(email: &str) -> String {
+    if let Some((local, domain)) = email.split_once('@') {
+        let first = local.chars().next().unwrap_or('*');
+        format!("{first}***@{domain}")
+    } else {
+        "***".to_string()
+    }
+}
+
+/// Returns the HMAC key bytes to use for email OTP operations.
+///
+/// Reuses the SMS OTP HMAC key if configured; falls back to a deterministic
+/// dev key when neither is set (dev mode only — not for production).
+fn email_otp_hmac_key_bytes(state: &Arc<WebState>) -> Vec<u8> {
+    state
+        .sms_otp_hmac_key
+        .clone()
+        .unwrap_or_else(|| b"hearth-dev-email-otp-key-not-for-production".to_vec())
+}
+
+// ---------------------------------------------------------------------------
+// GET + POST /required-action/enroll-mfa
+// ---------------------------------------------------------------------------
+
+/// Rendered by `GET /required-action/enroll-mfa`.
+#[derive(Template)]
+#[template(path = "ui/required_action/enroll_mfa.html")]
+struct EnrollMfaPageTemplate {
+    error: Option<String>,
+    secret_base32: String,
+    provisioning_uri: String,
+    qr_svg: String,
+    recovery_codes: Vec<String>,
+    chrome: bool,
+    active: &'static str,
+    user_email: Option<String>,
+    is_admin: bool,
+    narrow: bool,
+    flash: Option<super::templates::Flash>,
+    csrf: Option<String>,
+    product_name: String,
+    logo_url: String,
+    realm_theme_url: Option<String>,
+    inline_theme_css: Option<String>,
+}
+
+/// `application/x-www-form-urlencoded` body for `POST /required-action/enroll-mfa`.
+#[derive(Debug, Deserialize)]
+pub struct EnrollMfaForm {
+    #[serde(default)]
+    pub code: String,
+}
+
+/// Initiates TOTP enrollment for the `EnrollMfa` required action.
+///
+/// Reads the RA session cookie to identify the user, calls `enroll_totp` to
+/// generate a fresh TOTP secret, and renders the QR code + recovery codes.
+/// Each GET generates a new pending enrollment (idempotent from the user's
+/// perspective; the previous pending secret is overwritten).
+pub async fn enroll_mfa_page(State(state): State<Arc<WebState>>, headers: HeaderMap) -> Response {
+    let Some(token_str) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token_str) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token_str, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return handlers_common::bad_request("Required-action session has expired");
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let identity = state.identity.clone();
+
+    let enroll_result = tokio::task::spawn_blocking(move || identity.enroll_totp(&realm, &user_id))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "enroll_mfa_page: enroll_totp panicked");
+            Err(IdentityError::Storage(Box::new(e)))
+        });
+
+    match enroll_result {
+        Ok(enrollment) => {
+            let qr_svg = super::account::generate_qr_svg(&enrollment.provisioning_uri);
+            let tmpl = EnrollMfaPageTemplate {
+                error: None,
+                secret_base32: enrollment.secret_base32,
+                provisioning_uri: enrollment.provisioning_uri,
+                qr_svg,
+                recovery_codes: enrollment.recovery_codes.as_slice().to_vec(),
+                chrome: false,
+                active: "",
+                user_email: None,
+                is_admin: false,
+                narrow: true,
+                flash: None,
+                csrf: None,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            };
+            super::templates::render(&tmpl)
+        }
+        Err(IdentityError::MfaAlreadyEnabled) => {
+            // Already enrolled — skip this action automatically by redirecting
+            // to the generic action_complete path.
+            Redirect::to("/required-action/enroll-mfa").into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "enroll_mfa_page: enroll_totp failed");
+            let tmpl = EnrollMfaPageTemplate {
+                error: Some("Unable to start MFA enrollment. Please try again.".to_string()),
+                secret_base32: String::new(),
+                provisioning_uri: String::new(),
+                qr_svg: String::new(),
+                recovery_codes: Vec::new(),
+                chrome: false,
+                active: "",
+                user_email: None,
+                is_admin: false,
+                narrow: true,
+                flash: None,
+                csrf: None,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            };
+            super::templates::render_status(&tmpl, StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// Verifies the TOTP code from the enrollment form and advances the RA flow.
+///
+/// On success the `EnrollMfa` action is removed from the RA token and the flow
+/// either advances to the next action or resumes OIDC / browser flow.
+#[allow(clippy::too_many_lines)]
+pub async fn enroll_mfa_submit(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Form(form): Form<EnrollMfaForm>,
+) -> Response {
+    let Some(token_str) = read_ra_cookie(&headers) else {
+        return handlers_common::bad_request("No active required-action session");
+    };
+
+    let Some(realm_str) = ra_token::extract_realm_unchecked(&token_str) else {
+        return handlers_common::bad_request("Malformed RA session token");
+    };
+    let Ok(realm_uuid) = uuid::Uuid::parse_str(&realm_str) else {
+        return handlers_common::bad_request("Malformed realm in RA session token");
+    };
+    let realm = RealmId::new(realm_uuid);
+
+    let now = Timestamp::from_micros(now_micros());
+    let claims = match state.identity.validate_ra_token(&realm, &token_str, now) {
+        Ok(c) => c,
+        Err(ra_token::RaTokenError::Expired) => {
+            return handlers_common::bad_request("Required-action session has expired");
+        }
+        Err(_) => {
+            return handlers_common::bad_request("Invalid required-action session token");
+        }
+    };
+
+    let Ok(user_uuid) = uuid::Uuid::parse_str(&claims.sub) else {
+        return handlers_common::server_error();
+    };
+    let user_id = UserId::new(user_uuid);
+    let realm_clone = realm.clone();
+    let user_id_clone = user_id.clone();
+    let code = form.code.trim().to_string();
+    let identity = state.identity.clone();
+
+    let verify_result = tokio::task::spawn_blocking(move || {
+        identity.verify_totp_enrollment(&realm_clone, &user_id_clone, &code)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "enroll_mfa_submit: verify_totp_enrollment panicked");
+        Err(IdentityError::Storage(Box::new(e)))
+    });
+
+    let render_error = |msg: &str| {
+        let tmpl = EnrollMfaPageTemplate {
+            error: Some(msg.to_string()),
+            secret_base32: String::new(),
+            provisioning_uri: String::new(),
+            qr_svg: String::new(),
+            recovery_codes: Vec::new(),
+            chrome: false,
+            active: "",
+            user_email: None,
+            is_admin: false,
+            narrow: true,
+            flash: None,
+            csrf: None,
+            product_name: state.product_name.clone(),
+            logo_url: state.logo_url.clone(),
+            realm_theme_url: state.realm_theme_url(),
+            inline_theme_css: state.inline_theme_css(),
+        };
+        super::templates::render_status(&tmpl, StatusCode::UNPROCESSABLE_ENTITY)
+    };
+
+    match verify_result {
+        Err(IdentityError::InvalidMfaCode) => {
+            return render_error("Invalid code. Please re-scan the QR code and try again.");
+        }
+        Err(IdentityError::MfaNotEnabled) => {
+            return Redirect::to("/required-action/enroll-mfa").into_response();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "enroll_mfa_submit: verify_totp_enrollment failed");
+            return render_error("Unable to verify the code. Please try again.");
+        }
+        Ok(()) => {}
+    }
+
+    // Enrollment confirmed — advance the RA flow (remove EnrollMfa from pending).
+    let secure = state.is_secure_request(&headers);
+    let remaining: Vec<RequiredAction> = claims
+        .pending_actions
+        .into_iter()
+        .filter(|a| *a != RequiredAction::EnrollMfa)
+        .collect();
+
+    if remaining.is_empty() {
+        if claims.browser_return_to.is_some() {
+            resume_browser_flow(
+                &state,
+                &realm,
+                &claims.sub,
+                claims.browser_return_to,
+                secure,
+            )
+        } else if let Some(oidc_params) = claims.oidc_params {
+            resume_oidc_flow(&state, &realm, &claims.sub, oidc_params, secure)
+        } else {
+            resume_browser_flow(&state, &realm, &claims.sub, None, secure)
+        }
+    } else {
+        next_required_action(
+            &state,
+            &realm,
+            &claims.sub,
+            remaining,
+            claims.oidc_params,
+            claims.browser_return_to,
+            secure,
+            now,
+        )
     }
 }
 

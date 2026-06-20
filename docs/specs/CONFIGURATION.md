@@ -377,6 +377,10 @@ Global security hardening options.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `dpop_nonce_secret` | string | `"auto"` | 32-byte HMAC secret for stateless DPoP nonce generation (RFC 9449). Absent or `"auto"`: a fresh random key is generated at each startup — safe for single-node deployments but invalidates all outstanding DPoP proofs on restart. A 64-character lowercase hex string is decoded to 32 bytes and used verbatim; use a stable hex key to keep nonces valid across rolling restarts or in multi-node deployments where all nodes must share the same secret. **Never use the all-zero key (`0000…`) in production** — the server rejects it at startup. Set via `HEARTH_DPOP_NONCE_SECRET` env var to avoid storing secrets in the YAML file. |
+| `bearer_token` | string | — | Bearer token required to access the `/metrics` scrape endpoint (A-26). Requests without a matching `Authorization: Bearer <token>` header receive HTTP 401. Comparison is constant-time. When absent, the endpoint is unauthenticated — firewall it at the network layer instead. |
+| `allowed_hosts` | list of strings | `[]` (any) | Allowlist of `Host` header values the server will accept (A-40). Requests with a `Host` not in this list are rejected with `400 Bad Request`. Include the port for non-standard ports (e.g. `"localhost:8420"`). Empty list = accept any host (backward-compatible default). |
+| `allowed_return_to_origins` | list of strings | `[]` | Absolute origins permitted as `return_to` redirect targets (A-52). Relative paths (`/ui/…`) are always accepted. Absolute URLs are only accepted when their `scheme://host[:port]` matches an entry here. |
+| `jwks_rps_limit` | integer | `60` | Maximum JWKS / discovery requests per source IP per second (A-10). Applies to all unauthenticated key-discovery endpoints. Requests beyond this limit receive `429 Too Many Requests`. |
 | `reserved_slugs` | list of strings | 26-item built-in list | Slug names that may never be used as a realm or organization slug (case-insensitive). Setting this key **replaces** the built-in list entirely — include all names you still want reserved. The built-in default includes: `admin`, `api`, `support`, `www`, `mail`, `help`, `status`, `blog`, `app`, `auth`, `login`, `logout`, `signup`, `register`, `account`, `profile`, `settings`, `dashboard`, `billing`, `security`, `webhook`, `callback`, `oauth`, `oidc`, `saml`, `scim`. |
 | `slug_cooldown_days` | integer | `30` | Days a slug is held in reserve after its realm or organization is deleted, before it may be reused. |
 
@@ -480,6 +484,113 @@ Not all rate limiters survive a server restart:
 > **Future work:** WAL-persisted magic-link, password-reset, and IP rate trackers are tracked in
 > [HEA-1139](/HEA/issues/HEA-1139). Contributions welcome.
 
+#### `security.http2`
+
+HTTP/2 rapid-reset defense parameters (A-39). These cap the number of concurrent streams and RST_STREAM frames per connection, mitigating CVE-2023-44487 (HTTP/2 Rapid Reset Attack).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_concurrent_streams` | integer | `100` | Maximum concurrent HTTP/2 streams per connection. |
+| `max_pending_reset_streams` | integer | `10` | Maximum number of pending RST_STREAM frames (rapid-reset budget). Connections exceeding this are closed. |
+
+```yaml
+security:
+  http2:
+    max_concurrent_streams: 100
+    max_pending_reset_streams: 10
+```
+
+---
+
+#### `security.request_shaper`
+
+Global per-IP and per-realm token-bucket request limiter (A-2). When absent, no global shaping is applied; operator is responsible for upstream rate limiting.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ip_rps` | integer | `100` | Maximum requests per second from a single source IP across all endpoints. |
+| `realm_rps` | integer | `1000` | Maximum requests per second across all clients within a single realm. |
+
+```yaml
+security:
+  request_shaper:
+    ip_rps: 100
+    realm_rps: 1000
+```
+
+---
+
+#### `security.ip_reputation`
+
+IP reputation integration (P-2). Checks incoming IPs against blocklists and optionally a MaxMind ASN database before processing requests.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Whether IP reputation checks are active. |
+| `action` | string | `"log"` | Action taken when an IP is flagged: `"block"` (HTTP 403), `"challenge"` (CAPTCHA), or `"log"` (metric + log only). |
+| `maxmind_db_path` | string | — | Path to a MaxMind GeoLite2-ASN or GeoIP2-ASN `.mmdb` file. When absent, MaxMind ASN lookup is disabled. |
+
+```yaml
+security:
+  ip_reputation:
+    enabled: true
+    action: block
+    maxmind_db_path: "/var/lib/hearth/GeoLite2-ASN.mmdb"
+```
+
+##### `security.ip_reputation.spamhaus`
+
+Spamhaus DROP / EDROP IPv4/IPv6 blocklist settings. Lists are fetched at startup and refreshed on the configured interval.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `drop_url` | string | Spamhaus DROP URL | URL for the Spamhaus DROP (IPv4) list. |
+| `dropv6_url` | string | Spamhaus EDROP URL | URL for the Spamhaus EDROP (IPv6) list. |
+| `refresh_interval_secs` | integer | `86400` (24 h) | How often (seconds) the blocklists are re-fetched. |
+
+```yaml
+security:
+  ip_reputation:
+    enabled: true
+    spamhaus:
+      refresh_interval_secs: 86400  # 24 hours
+```
+
+---
+
+#### `security.grpc`
+
+gRPC-specific security settings (A-43).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `reflection_enabled` | bool | `false` (prod), `true` (dev) | Whether the gRPC server reflection service is exposed. Reflection reveals the full API schema to unauthenticated callers — keep disabled in production. Enabling in production also requires the `--allow-reflection-in-prod` CLI flag; the server refuses to start without it. |
+
+```yaml
+security:
+  grpc:
+    reflection_enabled: false
+```
+
+---
+
+#### `security.tls`
+
+TLS-specific security settings (A-44).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `crl_paths` | list of strings | `[]` | Paths to PEM-encoded Certificate Revocation List (CRL) files for mTLS. When non-empty, client certificates are checked against every CRL on each TLS handshake. Revoked certificates are rejected. Paths are reloaded on `SIGHUP` alongside the server certificate. Empty list = no revocation check (existing mTLS behaviour preserved). |
+
+```yaml
+security:
+  tls:
+    crl_paths:
+      - "/etc/hearth/crl/ca.crl"
+```
+
+---
+
 ### `agent_auth`
 
 Agent authentication feature gate. The Agent entity, delegation chains, MCP/A2A surfaces, approval lifecycle, and Agent Authorization Tokens (AATs) described in `docs/specs/AGENT_AUTH.md` are **not yet fully implemented**.
@@ -551,7 +662,7 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 |-------|------|---------|-------------|
 | `mfa_required` | bool | `false` | Whether MFA is required for all users in this realm. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey (WebAuthn) login still requires a TOTP challenge. Passkeys are inherently multi-factor, but regulated environments (healthcare, finance) may require an additional TOTP step. When `true` and the user has TOTP enrolled, passkey login redirects to the MFA challenge page. When `true` but the user has no TOTP enrolled, login proceeds normally. |
-| `mfa_methods` | list | — | Allowed MFA methods: `"totp"`, `"webauthn"`. |
+| `mfa_methods` | list | — | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`. When set, only the listed methods are offered for enrollment and challenge; methods not in the list are rejected. Absent = all methods allowed. |
 | `allowed_auth_methods` | list | — | Allowed login methods: `"password"`, `"magic_link"`, `"passkey"`. |
 | `password_policy` | object | — | Password complexity requirements (see below). |
 | `token` | object | — | Per-realm token TTL overrides. |
@@ -737,6 +848,50 @@ realms:
           client_secret: "${CORP_SSO_CLIENT_SECRET}"
           leeway_seconds: 120   # corp IdP has known 2-minute clock drift
 ```
+
+---
+
+### `realms.<name>.saml_service_providers`
+
+Declarative SAML 2.0 Service Provider (SP) registrations where **Hearth acts as the IdP**. Keyed by an operator-assigned slug that identifies the SP. Reconciled at startup — runtime SPs not present in YAML are removed.
+
+Each entry configures one SP:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `entity_id` | string | *required* | SP entity ID (a URI, e.g. `https://app.example.com/saml/metadata`). Must match the `Issuer` in AuthnRequests from this SP. |
+| `acs_url` | string | *required* | Assertion Consumer Service URL — where Hearth posts the SAML response. |
+| `slo_url` | string | — | Single Logout Service URL. When present, Hearth sends a `<LogoutRequest>` here on user logout. |
+| `sp_certificate_pem` | string | — | PEM-encoded SP certificate for verifying signed AuthnRequests. Required when `want_authn_requests_signed: true`. |
+| `sign_assertions` | bool | `true` | Whether Hearth signs individual `<Assertion>` elements. |
+| `sign_responses` | bool | `false` | Whether Hearth signs the outer `<Response>` envelope in addition to assertions. |
+| `want_authn_requests_signed` | bool | `false` | Require incoming AuthnRequests to carry a valid XML signature. Needs `sp_certificate_pem` to verify. |
+| `nameid_format` | string | `emailAddress` | NameID format to use in assertions: `emailAddress`, `persistent`, `transient`, or `unspecified`. |
+| `attribute_map` | map | `{}` | Custom SAML attribute statements. Keys are attribute names; values are Hearth claim paths (e.g. `user.email`, `user.display_name`, `roles`). |
+
+```yaml
+realms:
+  - name: corp
+    saml_service_providers:
+      salesforce:
+        entity_id: "https://myorg.my.salesforce.com"
+        acs_url: "https://myorg.my.salesforce.com/sso/saml"
+        slo_url: "https://myorg.my.salesforce.com/slo/saml"
+        sign_assertions: true
+        sign_responses: false
+        nameid_format: emailAddress
+        attribute_map:
+          email: user.email
+          displayName: user.display_name
+          groups: roles
+```
+
+The SAML IdP metadata (public signing key, SSO endpoint) for a realm is available at:
+```
+GET /realms/{realm-name}/saml/idp-metadata.xml
+```
+
+---
 
 ### `realms.<name>.rbac`
 
@@ -1042,10 +1197,19 @@ Every field's default value at a glance.
 | `realms.<name>.seed_users[*]` | `email_verified` | `true` |
 | `realms.<name>.seed_users[*]` | `roles` | `[]` |
 | `security` | `dpop_nonce_secret` | `"auto"` (random per startup) |
+| `security` | `jwks_rps_limit` | `60` |
+| `security` | `allowed_hosts` | `[]` (any) |
+| `security` | `allowed_return_to_origins` | `[]` |
 | `security` | `reserved_slugs` | 26-item built-in list |
 | `security` | `slug_cooldown_days` | `30` |
 | `security.backup` | `export_rate_limit` | `10` |
 | `security.captcha.turnstile` | `verify_url` | Cloudflare default |
+| `security.http2` | `max_concurrent_streams` | `100` |
+| `security.http2` | `max_pending_reset_streams` | `10` |
+| `security.ip_reputation` | `enabled` | `false` |
+| `security.ip_reputation` | `action` | `"log"` |
+| `security.ip_reputation.spamhaus` | `refresh_interval_secs` | `86400` (24 h) |
+| `security.grpc` | `reflection_enabled` | `false` (prod), `true` (--dev) |
 | `security.rate_limiting.login_per_ip` | `max_attempts` | `10` |
 | `security.rate_limiting.login_per_ip` | `window_seconds` | `60` |
 | `security.rate_limiting.login_per_account` | `max_failures` | `5` |

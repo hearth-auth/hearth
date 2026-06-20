@@ -380,7 +380,7 @@ enum AppAction {
 }
 
 #[tokio::main]
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 async fn main() {
     let cli = Cli::parse();
 
@@ -415,7 +415,7 @@ async fn main() {
                         } = *storage_err
                         {
                             let realms = affected_realms.join(", ");
-                            eprintln!(
+                            tracing::error!(
                                 "FATAL: Realm KEKs could not be decrypted with the current \
                                  HEARTH_MASTER_KEY.\nIf you recently rotated the master key, \
                                  set HEARTH_PREVIOUS_MASTER_KEY to the previous value. If the \
@@ -424,10 +424,10 @@ async fn main() {
                             );
                             std::process::exit(2);
                         }
-                        eprintln!("error: {storage_err}");
+                        tracing::error!("error: {storage_err}");
                     }
                     Err(other) => {
-                        eprintln!("error: {other}");
+                        tracing::error!("error: {other}");
                     }
                 }
                 std::process::exit(1);
@@ -498,7 +498,7 @@ async fn main() {
         Commands::Config { action } => match action {
             ConfigAction::Reload { url, pid_file } => {
                 if let Err(e) = run_config_reload(url.as_deref(), pid_file.as_deref()) {
-                    eprintln!("error: {e}");
+                    tracing::error!("error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -511,7 +511,7 @@ async fn main() {
             }
             ConfigAction::Example { output } => {
                 if let Err(e) = run_config_example(output.as_ref()) {
-                    eprintln!("error: {e}");
+                    tracing::error!("error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -534,7 +534,7 @@ async fn main() {
                     ) {
                         Ok(()) => 0,
                         Err(e) => {
-                            eprintln!("error: {e}");
+                            tracing::error!("error: {e}");
                             2
                         }
                     }
@@ -549,7 +549,7 @@ async fn main() {
                     match run_backup_restore(&input, realm.as_deref(), &mode, dry_run, &data_dir) {
                         Ok(had_errors) => i32::from(had_errors),
                         Err(e) => {
-                            eprintln!("error: {e}");
+                            tracing::error!("error: {e}");
                             2
                         }
                     }
@@ -557,14 +557,14 @@ async fn main() {
                 BackupAction::Verify { input } => match run_backup_verify(&input) {
                     Ok(()) => 0,
                     Err(e) => {
-                        eprintln!("integrity failure: {e}");
+                        tracing::error!("integrity failure: {e}");
                         3
                     }
                 },
                 BackupAction::Inspect { input } => match run_backup_inspect(&input) {
                     Ok(()) => 0,
                     Err(e) => {
-                        eprintln!("error: {e}");
+                        tracing::error!("error: {e}");
                         2
                     }
                 },
@@ -580,7 +580,7 @@ async fn main() {
             RbacAction::Orphans { action } => match action {
                 OrphansAction::List { realm, data_dir } => {
                     if let Err(e) = run_rbac_orphans_list(realm.as_deref(), &data_dir) {
-                        eprintln!("error: {e}");
+                        tracing::error!("error: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -590,7 +590,7 @@ async fn main() {
                     dry_run,
                 } => {
                     if let Err(e) = run_rbac_orphans_purge(realm.as_deref(), &data_dir, dry_run) {
-                        eprintln!("error: {e}");
+                        tracing::error!("error: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -636,7 +636,7 @@ async fn run_serve(
                 .map(|w| w.var_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            eprintln!(
+            tracing::error!(
                 "[hearth] {n} env-var config warnings; vars: {preview} and {} more",
                 n - 3
             );
@@ -647,7 +647,7 @@ async fn run_serve(
                 .map(|w| format!("{} ({})", w.var_name, w.kind_label()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            eprintln!("[hearth] config warnings: {inline}");
+            tracing::error!("[hearth] config warnings: {inline}");
         }
     }
 
@@ -1762,7 +1762,8 @@ async fn run_serve(
     .with_logo_url(web_logo_url)
     .with_default_realm(config.server.default_realm.clone())
     .with_config(Arc::new(config.clone()))
-    .with_sms(sms_sender, sms_hmac_key_bytes);
+    .with_sms(sms_sender, sms_hmac_key_bytes)
+    .with_dev_mode(config.dev_mode);
 
     if !api_trusted_proxies.is_empty() {
         info!(count = api_trusted_proxies.len(), "loaded trusted_proxies");
@@ -2157,28 +2158,28 @@ fn print_startup_panel(
 ) {
     let base = format!("http://{addr}");
     let dev_badge = if dev_mode { "  [dev]" } else { "" };
-    println!();
-    println!("{HEARTH_LOGO}");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!(
+    tracing::info!("");
+    tracing::info!("{HEARTH_LOGO}");
+    tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    tracing::info!(
         "  Identity · Auth · RBAC   v{}{}",
         env!("CARGO_PKG_VERSION"),
         dev_badge
     );
-    println!("  ─────────────────────────────────────────────────");
+    tracing::info!("  ─────────────────────────────────────────────────");
     // URL links — labels padded to 7 chars so values align at column 11.
-    println!("  API:     {base}");
-    println!("  Admin:   {base}/ui");
+    tracing::info!("  API:     {base}");
+    tracing::info!("  Admin:   {base}/ui");
     if let Some(issuer) = &stats.oidc_issuer {
-        println!("  Issuer:  {issuer}");
+        tracing::info!("  Issuer:  {issuer}");
     }
     if let Some(token) = setup_token {
-        println!("  Setup:   {base}/ui/setup?token={token}");
+        tracing::info!("  Setup:   {base}/ui/setup?token={token}");
     }
     if let Some((inbox_url, password)) = mailcatcher {
-        println!("  Mail:    {inbox_url}  pw: {password}");
+        tracing::info!("  Mail:    {inbox_url}  pw: {password}");
     }
-    println!("  ─────────────────────────────────────────────────");
+    tracing::info!("  ─────────────────────────────────────────────────");
     // Environment stats
     let mut env_line = format!(
         "  Realms: {}   ·   Email: {}   ·   TLS: {}",
@@ -2196,7 +2197,7 @@ fn print_startup_panel(
             if peers == 1 { "" } else { "s" }
         ));
     }
-    println!("{env_line}");
+    tracing::info!("{env_line}");
     // Storage stats
     let mut storage_parts: Vec<String> = Vec::new();
     if let Some(wal) = stats.wal_size {
@@ -2210,9 +2211,9 @@ fn print_startup_panel(
     if stats.data_dir_bytes > 0 {
         storage_parts.push(fmt_bytes(stats.data_dir_bytes));
     }
-    println!("  Storage: {}", storage_parts.join("  ·  "));
-    println!("  Startup: {} ms", stats.startup_ms);
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    tracing::info!("  Storage: {}", storage_parts.join("  ·  "));
+    tracing::info!("  Startup: {} ms", stats.startup_ms);
+    tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 }
 
 fn collect_storage_stats(data_dir: &std::path::Path) -> (Option<u64>, usize, u64) {
@@ -2740,7 +2741,7 @@ fn run_config_reload(
         let status = resp.status();
         let body: String = resp.body_mut().read_to_string()?;
         if status == 200 {
-            println!("reload successful: {body}");
+            tracing::info!("reload successful: {body}");
         } else {
             return Err(format!("reload failed (HTTP {status}): {body}").into());
         }
@@ -2763,7 +2764,7 @@ fn run_config_reload(
             if !status.success() {
                 return Err(format!("failed to send SIGHUP to PID {pid}").into());
             }
-            println!("sent SIGHUP to PID {pid}");
+            tracing::info!("sent SIGHUP to PID {pid}");
         }
         #[cfg(not(unix))]
         {
@@ -3009,23 +3010,27 @@ fn run_migrate_rotate_pepper(
         }
 
         if !summary_only && realm_total > 0 {
-            println!("realm {suffix}: {realm_total} credential(s), {realm_pending} without pepper");
+            tracing::info!(
+                "realm {suffix}: {realm_total} credential(s), {realm_pending} without pepper"
+            );
         }
     }
 
-    println!("\nTotal: {total_credentials} credential(s), {needs_rotation} without pepper version");
+    tracing::info!(
+        "\nTotal: {total_credentials} credential(s), {needs_rotation} without pepper version"
+    );
 
     if needs_rotation > 0 {
-        println!("\nPending rotation (credentials without pepper_version):");
+        tracing::info!("\nPending rotation (credentials without pepper_version):");
         for entry in &realms_with_pending {
-            println!("  {entry}");
+            tracing::info!("  {entry}");
         }
-        println!(
+        tracing::info!(
             "\nNext step: ensure `security.password.pepper` is set in hearth.yaml, then\n\
              restart the server. Credentials are re-hashed lazily on the next login."
         );
     } else {
-        println!("\nAll credentials carry a pepper_version. Rotation complete.");
+        tracing::info!("\nAll credentials carry a pepper_version. Rotation complete.");
     }
 
     Ok(needs_rotation == 0)
@@ -3038,7 +3043,7 @@ fn run_migrate_rotate_pepper(
 /// Opens the storage engine, exports all (or a filtered) set of realms into a
 /// zstd-compressed `.hearth-backup` archive, and prints a per-realm entity count
 /// summary.  Exit code 0 on full success, 2 on any fatal error.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 fn run_backup_create(
     output: Option<&std::path::Path>,
     realm_filter: Option<&str>,
@@ -3046,10 +3051,7 @@ fn run_backup_create(
     encrypt: bool,
     data_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use base64::Engine as _;
-    use hearth::backup::{
-        BackupArchive, BackupExporter, BackupManifest, DekWrappingParams, ExportOptions,
-    };
+    use hearth::backup::{BackupArchive, BackupExporter, BackupManifest, ExportOptions};
     use hearth::core::RealmId;
     use uuid::Uuid;
 
@@ -3132,12 +3134,12 @@ fn run_backup_create(
     };
 
     if realms_to_export.is_empty() {
-        eprintln!("warning: no realms found to export");
+        tracing::error!("warning: no realms found to export");
     }
 
     for realm_id in &realms_to_export {
         let realm_manifest = exporter.export_realm(realm_id, &mut writer, &opts, &dek)?;
-        eprintln!(
+        tracing::info!(
             "  exported '{}': {} users, {} clients",
             realm_manifest.slug,
             realm_manifest.record_counts.users,
@@ -3146,77 +3148,37 @@ fn run_backup_create(
         realm_manifests.push(realm_manifest);
     }
 
-    // Optionally wrap the DEK with a passphrase-derived key.
-    let (stored_dek_b64, wrapping_params) = if encrypt {
-        let passphrase = rpassword::prompt_password("Enter backup passphrase: ")?;
-        let confirm = rpassword::prompt_password("Confirm passphrase: ")?;
-        if passphrase != confirm {
+    // Backup encryption is mandatory: use HEARTH_MASTER_KEY env var or prompt.
+    let passphrase_str: String = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
+        if mk.is_empty() {
+            return Err("HEARTH_MASTER_KEY is set but empty".into());
+        }
+        mk
+    } else if encrypt {
+        let p = rpassword::prompt_password("Enter backup passphrase: ")?;
+        let c = rpassword::prompt_password("Confirm passphrase: ")?;
+        if p != c {
             return Err("passphrases do not match".into());
         }
-        if passphrase.is_empty() {
+        if p.is_empty() {
             return Err("passphrase must not be empty".into());
         }
-
-        // Random 16-byte Argon2id salt.
-        let mut salt_bytes = [0u8; 16];
-        {
-            use ring::rand::SecureRandom as _;
-            ring::rand::SystemRandom::new()
-                .fill(&mut salt_bytes)
-                .map_err(|_| "salt generation failed")?;
-        }
-
-        // Derive 32-byte wrapping key (OWASP-recommended Argon2id parameters).
-        const M_COST: u32 = 65536;
-        const T_COST: u32 = 3;
-        const P_COST: u32 = 4;
-        let mut wk = [0u8; 32];
-        let params = argon2::Params::new(M_COST, T_COST, P_COST, Some(32))
-            .map_err(|e| format!("argon2 params: {e}"))?;
-        let argon2 =
-            argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-        argon2
-            .hash_password_into(passphrase.as_bytes(), &salt_bytes, &mut wk)
-            .map_err(|e| format!("argon2 hash: {e}"))?;
-
-        // AES-256-GCM wrap: output is 12-byte nonce || ciphertext+tag.
-        let mut nonce_bytes = [0u8; 12];
-        {
-            use ring::rand::SecureRandom as _;
-            ring::rand::SystemRandom::new()
-                .fill(&mut nonce_bytes)
-                .map_err(|_| "nonce generation failed")?;
-        }
-        let unbound = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &wk)
-            .map_err(|_| "aes-gcm key init")?;
-        let aes_key = ring::aead::LessSafeKey::new(unbound);
-        let aes_nonce = ring::aead::Nonce::assume_unique_for_key(nonce_bytes);
-        let mut wrapped = dek.to_vec();
-        aes_key
-            .seal_in_place_append_tag(aes_nonce, ring::aead::Aad::empty(), &mut wrapped)
-            .map_err(|_| "dek wrap failed")?;
-        let mut blob = nonce_bytes.to_vec();
-        blob.extend(wrapped);
-
-        let blob_b64 = base64::engine::general_purpose::STANDARD.encode(&blob);
-        let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt_bytes);
-        let wp = DekWrappingParams {
-            salt_b64,
-            m_cost: M_COST,
-            t_cost: T_COST,
-            p_cost: P_COST,
-        };
-        (blob_b64, Some(wp))
+        p
     } else {
-        (base64::engine::general_purpose::STANDARD.encode(dek), None)
+        return Err(
+            "backup encryption is mandatory — set HEARTH_MASTER_KEY or use --encrypt".into(),
+        );
     };
-
+    let passphrase = secrecy::SecretString::from(passphrase_str);
+    let (wrapped_dek_b64, wrapping_params) =
+        BackupExporter::wrap_dek(&dek, &passphrase).map_err(|e| format!("DEK wrap: {e}"))?;
     let mut manifest = BackupManifest::new(realm_manifests);
-    manifest.signing_key_dek_b64 = Some(stored_dek_b64);
-    manifest.dek_wrapping_params = wrapping_params;
+    manifest.sections_encrypted = true;
+    manifest.wrapped_dek_b64 = Some(wrapped_dek_b64);
+    manifest.dek_wrapping_params = Some(wrapping_params);
     writer.finish(manifest)?;
 
-    eprintln!("Backup written to: {}", out_path.display());
+    tracing::info!("Backup written to: {}", out_path.display());
     Ok(())
 }
 
@@ -3248,10 +3210,21 @@ fn run_backup_restore(
         build_all_engines(Arc::clone(&storage) as Arc<dyn StorageEngine>)?;
 
     let importer = BackupImporter::new(identity, rbac);
+    let dek_passphrase: Option<secrecy::SecretString> = if reader.manifest.sections_encrypted {
+        let pp = if let Ok(mk) = std::env::var("HEARTH_MASTER_KEY") {
+            mk
+        } else {
+            rpassword::prompt_password("Enter backup passphrase: ")?
+        };
+        Some(secrecy::SecretString::from(pp))
+    } else {
+        None
+    };
     let opts = ImportOptions {
         mode,
         dry_run,
         realm_target: None,
+        dek_passphrase,
     };
 
     let slugs: Vec<String> = if let Some(slug) = realm_slug {
@@ -3261,7 +3234,7 @@ fn run_backup_restore(
     };
 
     if dry_run {
-        eprintln!("(dry-run: no data will be written)");
+        tracing::info!("(dry-run: no data will be written)");
     }
 
     let mut had_errors = false;
@@ -3285,7 +3258,7 @@ fn run_backup_verify(input: &std::path::Path) -> Result<(), Box<dyn std::error::
 
     let reader = BackupArchive::open(input)?;
     reader.verify_checksums()?;
-    println!(
+    tracing::info!(
         "OK — all checksums match ({} files verified)",
         reader.manifest.checksums.len()
     );
@@ -3301,9 +3274,9 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 
     let reader = BackupArchive::open(input)?;
     let m = &reader.manifest;
-    let dek_status = match (&m.signing_key_dek_b64, &m.dek_wrapping_params) {
+    let dek_status = match (&m.wrapped_dek_b64, &m.dek_wrapping_params) {
         (Some(_), Some(_)) => "present (passphrase-protected)",
-        (Some(_), None) => "present (unprotected)",
+        (Some(_), None) => "present (no wrapping params — malformed)",
         _ => "absent",
     };
     let created_at_display =
@@ -3314,17 +3287,17 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
                     .ok()
             })
             .unwrap_or_else(|| format!("{}µs (unix)", m.created_at.as_micros()));
-    println!("Archive:           {}", input.display());
-    println!("  format version : {}", m.format_version);
-    println!("  hearth version : {}", m.hearth_version);
-    println!("  created at     : {created_at_display}");
-    println!("  signing key DEK: {dek_status}");
-    println!("  checksummed files: {}", m.checksums.len());
-    println!("  realms ({}):", m.realms.len());
+    tracing::info!("Archive:           {}", input.display());
+    tracing::info!("  format version : {}", m.format_version);
+    tracing::info!("  hearth version : {}", m.hearth_version);
+    tracing::info!("  created at     : {created_at_display}");
+    tracing::info!("  signing key DEK: {dek_status}");
+    tracing::info!("  checksummed files: {}", m.checksums.len());
+    tracing::info!("  realms ({}):", m.realms.len());
     for r in &m.realms {
         let rc = &r.record_counts;
-        println!("    {slug:<24}  id={id}", slug = r.slug, id = r.realm_id);
-        println!(
+        tracing::info!("    {slug:<24}  id={id}", slug = r.slug, id = r.realm_id);
+        tracing::info!(
             "      users={u}  credentials={c}  clients={cl}  roles={ro}  groups={g}  orgs={o}  audit={a}",
             u = rc.users,
             c = rc.credentials,
@@ -3340,19 +3313,22 @@ fn run_backup_inspect(input: &std::path::Path) -> Result<(), Box<dyn std::error:
 
 /// Prints an [`ImportReport`](hearth::backup::ImportReport) as a human-readable summary.
 fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
-    println!("Realm '{slug}':");
-    println!(
+    tracing::info!("Realm '{slug}':");
+    tracing::info!(
         "  realms   — created: {}, skipped: {}, overwritten: {}, errored: {}",
         report.realms.created,
         report.realms.skipped,
         report.realms.overwritten,
         report.realms.errored
     );
-    println!(
+    tracing::info!(
         "  users    — created: {}, skipped: {}, overwritten: {}, errored: {}",
-        report.users.created, report.users.skipped, report.users.overwritten, report.users.errored
+        report.users.created,
+        report.users.skipped,
+        report.users.overwritten,
+        report.users.errored
     );
-    println!(
+    tracing::info!(
         "  clients  — created: {}, skipped: {}, overwritten: {}, errored: {}",
         report.clients.created,
         report.clients.skipped,
@@ -3360,11 +3336,13 @@ fn print_import_report(slug: &str, report: &hearth::backup::ImportReport) {
         report.clients.errored
     );
     if !report.conflicts.is_empty() {
-        println!("  conflicts ({}):", report.conflicts.len());
+        tracing::info!("  conflicts ({}):", report.conflicts.len());
         for c in &report.conflicts {
-            println!(
+            tracing::info!(
                 "    [{:?}] {:?} — {}",
-                c.entity_type, c.identifier, c.reason
+                c.entity_type,
+                c.identifier,
+                c.reason
             );
         }
     }
@@ -3518,9 +3496,9 @@ fn run_config_validate(file: &std::path::Path) -> Result<(), Box<dyn std::error:
     let config = match Config::from_file_unchecked(file) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("✗ Configuration invalid");
-            eprintln!();
-            eprintln!("  parse error: {e}");
+            tracing::error!("✗ Configuration invalid");
+            tracing::error!("");
+            tracing::error!("  parse error: {e}");
             return Err("configuration validation failed".into());
         }
     };
@@ -3691,15 +3669,15 @@ fn run_rbac_orphans_list(
     let entries = storage.scan(&system_realm, scan_start, &scan_end)?;
 
     if entries.is_empty() {
-        println!("No user permission grant records found.");
+        tracing::info!("No user permission grant records found.");
         return Ok(());
     }
 
     for entry in &entries {
         let key_str = String::from_utf8_lossy(&entry.key);
-        println!("{key_str}");
+        tracing::info!("{key_str}");
     }
-    println!("{} user permission grant record(s) found.", entries.len());
+    tracing::info!("{} user permission grant record(s) found.", entries.len());
     Ok(())
 }
 
@@ -3724,7 +3702,7 @@ fn run_rbac_orphans_purge(
     let entries = storage.scan(&system_realm, scan_start, &scan_end)?;
 
     if entries.is_empty() {
-        println!("No user permission grant records found.");
+        tracing::info!("No user permission grant records found.");
         return Ok(());
     }
 
@@ -3732,18 +3710,18 @@ fn run_rbac_orphans_purge(
     for entry in &entries {
         let key_str = String::from_utf8_lossy(&entry.key);
         if dry_run {
-            println!("[dry-run] would delete: {key_str}");
+            tracing::info!("[dry-run] would delete: {key_str}");
         } else {
             storage.delete(&system_realm, &entry.key)?;
-            println!("deleted: {key_str}");
+            tracing::info!("deleted: {key_str}");
         }
         count += 1;
     }
 
     if dry_run {
-        println!("[dry-run] {count} record(s) would be purged.");
+        tracing::info!("[dry-run] {count} record(s) would be purged.");
     } else {
-        println!("{count} record(s) purged.");
+        tracing::info!("{count} record(s) purged.");
     }
     Ok(())
 }
@@ -3827,26 +3805,26 @@ fn rbac_prefix_end(prefix: &[u8]) -> Vec<u8> {
 
 /// Prints a `MigrationReport` as a human-readable summary.
 fn print_migration_report(report: &hearth::identity::MigrationReport) {
-    println!("Migration summary:");
+    tracing::info!("Migration summary:");
     if let Some(tid) = &report.realm_id {
-        println!("  realm:                {tid}");
+        tracing::info!("  realm:                {tid}");
     } else {
-        println!("  realm:                <none>");
+        tracing::info!("  realm:                <none>");
     }
-    println!("  users imported:        {}", report.users_imported);
-    println!(
+    tracing::info!("  users imported:        {}", report.users_imported);
+    tracing::info!(
         "  users w/ skipped cred: {}",
         report.users_with_skipped_credentials
     );
-    println!("  clients imported:      {}", report.clients_imported);
-    println!(
+    tracing::info!("  clients imported:      {}", report.clients_imported);
+    tracing::info!(
         "  role assignments:      {}",
         report.role_assignments_written
     );
     if !report.warnings.is_empty() {
-        println!("Warnings:");
+        tracing::info!("Warnings:");
         for w in &report.warnings {
-            println!("  - {w}");
+            tracing::info!("  - {w}");
         }
     }
 }

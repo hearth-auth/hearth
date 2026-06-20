@@ -6,6 +6,7 @@ use crate::protocol::proto::events::v1 as pb;
 // ==================== AuditAction ====================
 
 /// Converts domain `AuditAction` to proto enum value.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::AuditAction {
     match a {
         domain::AuditAction::UserCreated => pb::AuditAction::UserCreated,
@@ -106,7 +107,13 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         | domain::AuditAction::OidcSilentAuthProbed
         | domain::AuditAction::AbuseDetected
         | domain::AuditAction::EmailChangeInitiated
-        | domain::AuditAction::RealmExportWatermarked => pb::AuditAction::Unspecified,
+        | domain::AuditAction::RealmExportWatermarked
+        | domain::AuditAction::AgentCreated
+        | domain::AuditAction::AgentUpdated
+        | domain::AuditAction::AgentSuspended
+        | domain::AuditAction::AgentReactivated
+        | domain::AuditAction::AgentRevoked
+        | domain::AuditAction::AgentDeleted => pb::AuditAction::Unspecified,
     }
 }
 

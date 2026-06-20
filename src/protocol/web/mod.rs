@@ -199,6 +199,15 @@ pub struct WebState {
     ///
     /// Defaults to [`crate::abuse::challenge::NoopCaptchaProvider`] (fail-open).
     pub captcha_provider: Arc<dyn crate::abuse::challenge::CaptchaProvider>,
+    /// When `true`, the CSRF cookie check on pre-auth forms (login, register,
+    /// MFA challenge) is bypassed if the cookie is absent — allows direct-POST
+    /// tooling in dev mode. When `false` (production default via
+    /// [`WebState::with_dev_mode`]), a missing cookie returns 422.
+    ///
+    /// Defaults to `true` in [`WebState::new`] so the 30+ test helpers that
+    /// call the embedded constructor keep working unchanged. Production always
+    /// calls `.with_dev_mode(config.dev_mode)` in `main.rs`.
+    pub dev_mode: bool,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -257,6 +266,7 @@ impl WebState {
             sms: None,
             sms_otp_hmac_key: None,
             captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
+            dev_mode: true, // permissive default for tests; production overrides via with_dev_mode
         }
     }
 
@@ -468,6 +478,15 @@ impl WebState {
         self
     }
 
+    /// Sets dev mode. When `false`, the CSRF cookie MUST be present on
+    /// pre-auth form POSTs (login, register, MFA challenge); when `true`
+    /// an absent cookie is allowed so direct-POST tooling keeps working.
+    #[must_use]
+    pub fn with_dev_mode(mut self, val: bool) -> Self {
+        self.dev_mode = val;
+        self
+    }
+
     /// Returns `true` when cookies issued for this request should carry the
     /// `Secure` attribute.
     ///
@@ -488,6 +507,39 @@ impl WebState {
                 .unwrap_or(false);
         }
         false
+    }
+
+    /// Returns the expected `Origin` header value for same-origin login
+    /// requests, used by `login_submit_impl` as a CSRF guard.
+    ///
+    /// Prefers the canonical OIDC issuer origin when configured (strips the
+    /// path, e.g. `"https://auth.example.com/foo"` → `"https://auth.example.com"`).
+    /// Falls back to the `Host` header + TLS-derived scheme for dev and test
+    /// environments where `oidc.issuer` is not set.
+    #[must_use]
+    pub fn public_origin_str(&self, headers: &axum::http::HeaderMap) -> String {
+        if let Some(issuer) = self.config.as_ref().and_then(|c| c.oidc.issuer.as_deref()) {
+            // Extract bare origin: strip path at the first "/" after the authority.
+            if let Some(after_scheme) = issuer.find("://").map(|i| i + 3) {
+                let authority_end = issuer[after_scheme..]
+                    .find('/')
+                    .map(|i| i + after_scheme)
+                    .unwrap_or(issuer.len());
+                return issuer[..authority_end].to_string();
+            }
+            return issuer.to_string();
+        }
+        // Dev/test fallback: build origin from Host header + TLS scheme.
+        let scheme = if self.is_secure_request(headers) {
+            "https"
+        } else {
+            "http"
+        };
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("localhost");
+        format!("{}://{}", scheme, host)
     }
 
     /// Looks up the per-realm theme CSS for a specific realm, bypassing
@@ -922,7 +974,7 @@ pub fn router(state: WebState) -> Router {
         .route("/federation/begin", axum::routing::get(federation::begin))
         .route(
             "/federation/callback",
-            axum::routing::get(federation::callback),
+            axum::routing::get(federation::callback).post(federation::callback_post),
         )
         .route(
             "/federation/confirm-link",
@@ -934,7 +986,7 @@ pub fn router(state: WebState) -> Router {
         )
         .route(
             "/realms/{realm}/federation/callback",
-            axum::routing::get(federation::callback_scoped),
+            axum::routing::get(federation::callback_scoped).post(federation::callback_scoped_post),
         )
         // --- SAML 2.0 SP + IdP endpoints ---
         .route(
@@ -1536,6 +1588,23 @@ pub fn router(state: WebState) -> Router {
             axum::routing::post(required_action::enroll_phone_otp_verify_submit),
         )
         .route(
+            "/required-action/ENROLL_EMAIL_OTP",
+            axum::routing::get(required_action::enroll_email_otp_page),
+        )
+        .route(
+            "/required-action/ENROLL_EMAIL_OTP/send",
+            axum::routing::post(required_action::enroll_email_otp_send),
+        )
+        .route(
+            "/required-action/ENROLL_EMAIL_OTP/verify",
+            axum::routing::post(required_action::enroll_email_otp_verify_submit),
+        )
+        .route(
+            "/required-action/enroll-mfa",
+            axum::routing::get(required_action::enroll_mfa_page)
+                .post(required_action::enroll_mfa_submit),
+        )
+        .route(
             "/required-action/{action}",
             axum::routing::get(required_action::action_page).post(required_action::action_complete),
         )
@@ -1749,7 +1818,7 @@ const HEARTH_ICON_SVG: &[u8] = include_bytes!("assets/hearth-icon.svg");
 /// revalidates on each soft refresh but skips re-downloading unchanged
 /// content (304 Not Modified). Other embedded assets are truly immutable
 /// for the lifetime of a binary, so they keep `immutable` caching.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 async fn serve_static(
     headers: HeaderMap,
     State(state): State<Arc<WebState>>,

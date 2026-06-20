@@ -3,7 +3,7 @@
 //! Mirrors the `extract_admin_auth` flow from `src/protocol/http.rs`: the
 //! caller must supply a bearer token in the `authorization` metadata header
 //! and a realm id in the `x-realm-id` metadata header. The token is validated,
-//! the caller's `hearth.admin` permission claim is checked, and the shared
+//! the caller holds `hearth.admin` or a granular sub-permission, and the shared
 //! [`AdminRateLimiter`] is consulted.
 //!
 //! The helper runs per-RPC (inside each handler) rather than as a tonic
@@ -50,7 +50,16 @@ pub fn authenticate_admin(md: &MetadataMap, state: &GrpcState) -> Result<AdminAu
         .map_err(|_| Status::new(Code::Unauthenticated, "invalid token"))?;
     let user_id = UserId::new(user_uuid);
 
-    let is_admin = claims.permissions.iter().any(|p| p == "hearth.admin");
+    // Accepts hearth.admin (full superuser) or any granular sub-permission.
+    // gRPC services are RBAC/identity admin operations; callers may refine
+    // per-RPC with require_admin_permission on the HTTP side or by inspecting
+    // claims.permissions in the gRPC handler.
+    let is_admin = claims.permissions.iter().any(|p| {
+        matches!(
+            p.as_str(),
+            "hearth.admin" | "hearth.users.admin" | "hearth.clients.admin" | "hearth.realm.admin"
+        )
+    });
     if !is_admin {
         return Err(Status::new(Code::PermissionDenied, "forbidden"));
     }

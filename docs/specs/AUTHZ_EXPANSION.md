@@ -361,7 +361,7 @@ pub struct UserPermissionGrant {
     pub granted_by: Option<UserId>,
 }
 
-/// Existing organization membership row (`src/identity/types.rs`) gains an
+/// Existing organization membership row (`src/identity/types/org.rs`) gains an
 /// `additional_roles` field. The canonical tier remains `OrganizationRole`
 /// (Member|Admin|Owner) for shipped-API compatibility; `additional_roles` is
 /// the layered RBAC extension introduced by this spec.
@@ -398,7 +398,7 @@ pub struct OrganizationMembership {
 //   - OrgMemberAdditionalRoleAdded   { actor, org_id, user_id, role_name }
 //   - OrgMemberAdditionalRoleRemoved { actor, org_id, user_id, role_name }
 
-// src/identity/types.rs — add attributes map to User
+// src/identity/types/user.rs — add attributes map to User
 
 pub struct User {
     // ... existing fields ...
@@ -790,7 +790,7 @@ All templates under `templates/ui/admin/rbac/` + `templates/ui/admin/realms/clai
 
 ### Reconciliation with `OrganizationRole`
 
-The current identity layer has a first-class `OrganizationRole { Member, Admin, Owner }` enum (`src/identity/types.rs:704`) attached to organization memberships. This spec does NOT delete that enum — doing so would invalidate every existing org membership row in shipped Hearth. Instead, the enum becomes the **canonical membership-tier shortcut** and maps deterministically to seeded RBAC roles:
+The current identity layer has a first-class `OrganizationRole { Member, Admin, Owner }` enum (`src/identity/types/org.rs`) attached to organization memberships. This spec does NOT delete that enum — doing so would invalidate every existing org membership row in shipped Hearth. Instead, the enum becomes the **canonical membership-tier shortcut** and maps deterministically to seeded RBAC roles:
 
 - A `hearth-defaults.yaml` ships three `scope_kind: organization` RBAC roles named `org_member`, `org_admin`, `org_owner` with empty permission lists by default. Realms can extend these in their own YAML by adding permissions to the same names.
 - An organization membership row continues to carry an `OrganizationRole` enum value as its primary tier marker. At token-issue time, the enum value is mapped 1:1 to the seeded RBAC role of the corresponding name, and the role's permissions flow into the resolution rule like any other org-scoped role assignment.
@@ -888,7 +888,7 @@ Mapping to Hearth's eight layers (per `docs/specs/TESTING.md`):
 - [x] `src/identity/claims_config.rs` — full claim profile: `default_claim_profile()`, `resolve_claims_for_target()`, layered fallback, gate evaluation.
 - [x] `src/identity/engine.rs` — `issue_tokens_with_context`, digest re-check on `/authorize`, `User.attributes` validation at `update_user`.
 - [x] `src/identity/tokens.rs` — `TokenClaims` with `#[serde(flatten)] custom: BTreeMap<String, Value>` + `skip_serializing_if` on existing fields.
-- [x] `src/identity/types.rs` — `User.attributes` field, `OauthClient.trust_level` + `declared_scopes` + `consent_spans_orgs` + `slug`, `OrganizationMembership.additional_roles`, `scope_digest` on consent, `ProtectedResource`, `RealmConfig.protected_resources` + `scopes`.
+- [x] `src/identity/types/` — `User.attributes` field (`user.rs`), `OauthClient.trust_level` + `declared_scopes` + `consent_spans_orgs` + `slug` (`credential.rs`), `OrganizationMembership.additional_roles` (`org.rs`), `scope_digest` on consent, `ProtectedResource`, `RealmConfig.protected_resources` + `scopes` (`realm.rs`).
 - [x] `src/protocol/web/admin.rs` — read-only handlers for permissions/roles/scopes, user detail Access card, Token preview tab, consent revocation admin surface.
 - [x] `src/protocol/web/account.rs` — account self-service handlers + connected-applications page.
 - [x] `templates/ui/admin/rbac/**` — read-only templates: permissions.html, roles.html, scopes.html, debug.html (Token preview tab).

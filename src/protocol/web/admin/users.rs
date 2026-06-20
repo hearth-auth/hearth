@@ -356,7 +356,7 @@ impl<S: Send + Sync> axum::extract::FromRequest<S> for CreateUserForm {
 }
 
 /// `POST /ui/admin/users/new`.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn admin_user_create_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -1405,6 +1405,7 @@ pub async fn admin_user_edit_submit(
         required_actions: None,
         phone_number: None,
         phone_verified: None,
+        email_otp_enabled: None,
     };
 
     match state.identity.update_user(target.id(), &uid, &req) {
@@ -2582,6 +2583,7 @@ pub async fn admin_users_bulk_action(
                 required_actions: None,
                 phone_number: None,
                 phone_verified: None,
+                email_otp_enabled: None,
             };
             for uid in &user_ids {
                 if let Err(e) = state.identity.update_user(target.id(), uid, &req) {
@@ -2724,7 +2726,7 @@ struct ImportSummary {
 }
 
 /// `POST /ui/admin/realms/{realm}/users/import` — process uploaded CSV.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn admin_users_import_submit(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
@@ -2843,7 +2845,7 @@ pub async fn admin_users_import_submit(
 }
 
 /// Parses the CSV text and creates/updates users, returning a summary.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 fn process_csv_import(
     state: &Arc<WebState>,
     realm_id: &crate::core::RealmId,
@@ -2937,6 +2939,7 @@ fn process_csv_import(
                     required_actions: None,
                     phone_number: None,
                     phone_verified: None,
+                    email_otp_enabled: None,
                 };
                 if let Err(e) = state.identity.update_user(realm_id, user.id(), &req) {
                     tracing::warn!(error = %e, email = %email, "import update failed");
@@ -3135,7 +3138,7 @@ pub struct PatchRequiredActionsBody {
 /// strings receive 400.
 ///
 /// Returns 200 with the updated [`User`] JSON.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub async fn admin_api_user_required_actions_patch(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,

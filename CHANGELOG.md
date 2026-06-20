@@ -7,6 +7,110 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **CSRF check on device-approval form (F5, HEA-1367)** — `POST /ui/device` now verifies
+  the `csrf_token` field against the session's CSRF cookie before calling `approve_device`.
+  The field was already present in the form but silently discarded; a missing or mismatched
+  token now returns 403, preventing an attacker from CSRFing a logged-in victim into
+  approving the attacker's device.
+
+- **CSRF fail-closed on login/register/MFA challenge (F6, HEA-1367)** — pre-auth form
+  handlers (`/ui/login`, `/ui/register`, `/ui/mfa-challenge`) now require the
+  `hearth_ui_csrf` cookie to be **present** in production mode (`dev_mode = false`); a
+  missing cookie returns 422 "Invalid security token" instead of bypassing the check. The
+  bypass is preserved under `--dev` for direct-POST tooling.
+
+- **CSRF protection added to `/ui/register` form (HEA-1367)** — the registration form
+  now issues and embeds a `hearth_ui_csrf` double-submit token (previously missing
+  entirely); `POST /ui/register` verifies it against the cookie.
+
+- **Backup archives now encrypt all sections; DEK wrapping is mandatory (HEA-1366)** — previously
+  only `signing_key.json` was AES-256-GCM encrypted; credentials and all other sections were
+  plaintext NDJSON with the DEK optionally stored as plain base64. Now all sections are encrypted
+  under a single DEK that is always Argon2id-wrapped before persisting to the manifest
+  (`wrapped_dek_b64` + `dek_wrapping_params`). The `hearth backup create` CLI requires `--encrypt`
+  or `HEARTH_MASTER_KEY`; the HTTP export endpoint requires `HEARTH_MASTER_KEY`. Archive format
+  version bumped to 2.
+
+- **CSRF protection on TOTP/MFA challenge forms** — the inline TOTP form in
+  `login.html` and the standalone `mfa_challenge.html` form now include a
+  `_csrf` hidden field and the submit handler verifies it against the
+  `hearth_ui_csrf` cookie, closing a CSRF gap on `/ui/mfa-challenge` (HEA-1348).
+
+### Fixed
+
+- **TOTP input placeholder** — corrected `placeholder="000 000"` →
+  `placeholder="000000"` in the login and MFA-challenge forms; the space was
+  causing pattern-validation failures on mobile keyboards with
+  `inputmode="numeric"` and `pattern="[0-9]{6}"` (HEA-1348).
+
+- **Eliminated `ring 0.16.20` (CVE-2025-4432, MEDIUM) and `rustls-webpki 0.101.7`
+  (GHSA-82j2-j2ch-gfr8, HIGH)** — upgraded `ldap3` from 0.11 to 0.12.
+  The new release uses `ring 0.17` and `rustls 0.23`, removing the only transitive
+  paths to both vulnerable packages. The `tls-rustls-ring` feature flag was adopted
+  to satisfy ldap3 0.12's mandatory Rustls crypto-provider selection (HEA-1344).
+
+### Added
+
+- **Email OTP MFA factor** — `email_otp` is now a distinct, configurable MFA method.
+  Users can enroll via the `ENROLL_EMAIL_OTP` required-action flow, which sends a
+  6-digit CSPRNG code to their registered email address (via the existing `EmailService`).
+  Enrollment sets `email_otp_enabled` on the user record. Per-realm expiry and maximum
+  attempt count are configurable via `email_otp_expiry_seconds` / `email_otp_max_attempts`
+  in realm config; defaults match the SMS OTP module (10-minute TTL, 5 attempts). The
+  `mfa_methods: ["email_otp"]` realm setting auto-injects the enrollment required action
+  for users who have not yet enrolled (HEA-1329).
+
+- **Conditional MFA enforcement** — `mfa_required: true` on a client registration
+  forces users accessing that client to enroll an MFA factor (TOTP or passkey)
+  before an authorization code is issued. `mfa_required_roles: [...]` on realm config
+  enforces MFA for users assigned any of the named roles, regardless of which client
+  they are authenticating against. Both gates inject the `EnrollMfa` required action
+  which redirects to a dedicated enrollment page (`/required-action/enroll-mfa`) within
+  the existing required-action flow (HEA-1330).
+
+- **Granular admin sub-permissions** — `hearth.admin` is now complemented by three
+  fine-grained sub-permissions that enable Keycloak-style sub-admin delegation without
+  granting full superuser access (HEA-1328):
+  - `hearth.users.admin` — user CRUD, sessions, credentials, consents, effective-permissions
+  - `hearth.clients.admin` — OAuth client/application registration and management
+  - `hearth.realm.admin` — realm settings, roles, groups, assignments, webhooks, audit logs
+
+  Three matching seed roles (`hearth.users.admin`, `hearth.clients.admin`,
+  `hearth.realm.admin`) are now seeded alongside `realm.admin` on every new realm,
+  ready to assign to service accounts or restricted operators. The `realm.admin` role
+  is unchanged and still carries all three sub-permissions plus `hearth.admin`.
+  The `hearth.admin` permission continues to grant unrestricted access to all admin
+  endpoints. Existing integrations require no changes.
+
+- **`hearth migrate auth0` command** — imports an Auth0 Management API export bundle
+  (`hearth migrate auth0 --file export.json --data-dir /var/lib/hearth`). The operator
+  assembles the bundle from Auth0's Management API (users, clients, organizations, roles)
+  using the reference bundler at `examples/auth0-migration-bundler/`. Supported credential
+  formats: bcrypt (`$2a$`/`$2b$`/`$2y$`), Argon2, PBKDF2-SHA256, PHC-scrypt.
+  Unsupported algorithms (MD5, SHA-1) surface a per-user warning and import the user
+  without a credential. `--dry-run` validates without writing. `--realm <uuid>` pins
+  the destination realm ID (HEA-1327).
+
+- **Apple Sign In connector** (`type: apple`) — native Sign In with Apple support
+  via `private_key_jwt` client authentication (ES256-signed per-request JWT),
+  `response_mode=form_post` callback handling, and first-login-only name extraction
+  from the `user` form field. Cannot be covered by the generic OIDC connector.
+  Configure via `realms.<name>.federation` with `type: apple`, `team_id`, `key_id`,
+  and `private_key_pem` (HEA-1326).
+
+- **Pre-token enrichment webhook** (`realms.<name>.pre_token_webhook`) — before
+  issuing an access token, Hearth POSTs a JSON context payload (user ID, client
+  ID, grant type, scope, resolved roles/groups/permissions) to a configured URL.
+  The endpoint may return `extra_claims` that are merged into the token's
+  top-level claims. Reserved JWT claims (`sub`, `iss`, `exp`, etc.) cannot be
+  overridden. Supports `on_error: fail_open` (default — token issued without
+  extra claims on failure) or `fail_closed` (token rejected). Optional
+  `hmac_secret` for `X-Hearth-Signature-256` request signing. Covers Gap C-3
+  from the 1.0 Readiness Audit — minimal Auth0 "Actions" / Keycloak protocol
+  mapper escape hatch (HEA-1324).
+
 ### Fixed
 
 - **Realm OIDC discovery now includes `end_session_endpoint`** — the realm-scoped

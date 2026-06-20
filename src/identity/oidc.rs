@@ -163,6 +163,9 @@ pub struct RegisterClientRequest {
     pub authorization_signed_response_alg: Option<String>,
     /// Security profile for this client. Defaults to `Standard`.
     pub profile: ClientProfile,
+    /// When `Some(true)`, users must have an enrolled MFA factor to complete
+    /// the authorization code flow for this client.
+    pub mfa_required: Option<bool>,
 }
 
 impl Default for RegisterClientRequest {
@@ -188,6 +191,7 @@ impl Default for RegisterClientRequest {
             jwks_uri: None,
             authorization_signed_response_alg: None,
             profile: ClientProfile::Standard,
+            mfa_required: None,
         }
     }
 }
@@ -308,6 +312,11 @@ pub struct OAuthClient {
     /// profile field was introduced.
     #[serde(default, skip_serializing_if = "ClientProfile::is_standard")]
     profile: ClientProfile,
+    /// When `Some(true)`, users accessing this client via the OIDC flow must
+    /// have at least one MFA factor enrolled. Triggers the `EnrollMfa`
+    /// required-action intercept when no factor is found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mfa_required: Option<bool>,
 }
 
 fn default_require_consent() -> bool {
@@ -345,6 +354,7 @@ impl OAuthClient {
             jwks_uri: None,
             authorization_signed_response_alg: None,
             profile: ClientProfile::Standard,
+            mfa_required: None,
         }
     }
 
@@ -380,6 +390,7 @@ impl OAuthClient {
             jwks_uri: None,
             authorization_signed_response_alg: None,
             profile: ClientProfile::Standard,
+            mfa_required: None,
         }
     }
 
@@ -601,6 +612,19 @@ impl OAuthClient {
         self.profile = profile;
     }
 
+    /// Returns whether MFA is required for users accessing this client.
+    ///
+    /// When `Some(true)`, users without an enrolled MFA factor are intercepted
+    /// by the `EnrollMfa` required action before an authorization code is issued.
+    pub fn mfa_required(&self) -> Option<bool> {
+        self.mfa_required
+    }
+
+    /// Sets the per-client MFA requirement. `None` clears the override.
+    pub(crate) fn set_mfa_required(&mut self, value: Option<bool>) {
+        self.mfa_required = value;
+    }
+
     /// Returns `true` if this client was provisioned from YAML configuration.
     ///
     /// YAML-managed clients have deterministic UUID v5 identifiers (derived
@@ -656,6 +680,11 @@ pub struct UpdateClientRequest {
     pub authorization_signed_response_alg: Option<Option<String>>,
     /// Updated security profile. `None` leaves unchanged.
     pub profile: Option<ClientProfile>,
+    /// Per-client MFA requirement.
+    ///
+    /// `None` leaves unchanged; `Some(Some(true))` enables; `Some(Some(false))`
+    /// disables; `Some(None)` clears the override (reverts to no requirement).
+    pub mfa_required: Option<Option<bool>>,
 }
 
 // ===== RP-Initiated Logout =====

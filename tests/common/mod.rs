@@ -145,6 +145,54 @@ impl TestHarness {
         })
     }
 
+    /// Creates a test harness in embedded mode with an injected pre-token
+    /// webhook transport (for HEA-1324 tests).
+    #[allow(clippy::unused_async)]
+    pub async fn embedded_with_pre_token_transport(
+        transport: std::sync::Arc<
+            dyn hearth::identity::pre_token_webhook::PreTokenWebhookTransport,
+        >,
+    ) -> Result<Self, TestHarnessError> {
+        let temp_dir = tempfile::tempdir().map_err(hearth::storage::StorageError::Io)?;
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let engine = Arc::new(EmbeddedStorageEngine::open(config)?);
+        let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
+        let rbac_engine = Arc::new(EmbeddedRbacEngine::new(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        ));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let audit_engine = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        ));
+        let identity_engine = EmbeddedIdentityEngine::with_rbac(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+            identity_config,
+            Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
+            Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
+        )
+        .expect("identity engine creation")
+        .with_pre_token_transport(transport);
+        let identity_engine = Arc::new(identity_engine);
+        rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
+
+        Ok(Self {
+            mode: HarnessMode::Embedded,
+            engine,
+            rbac_engine,
+            identity_engine,
+            audit_engine,
+            base_url: None,
+            _server_handle: None,
+            _temp_dir: temp_dir,
+        })
+    }
+
     /// Creates a test harness in server mode.
     ///
     /// Starts an HTTP server on a random OS-assigned port backed by the same

@@ -167,6 +167,13 @@ fn canonical_bytes_is_stable_across_signature_values() {
 /// The backup endpoint should succeed (200) when both are present.
 #[tokio::test]
 async fn backup_endpoint_allows_admin_with_export_capability() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
     let h = common::TestHarness::server().await.expect("server harness");
     let base = h.base_url().expect("base_url");
     let (token, realm_id) = bootstrap(base).await;
@@ -211,6 +218,13 @@ fn permission_set_without_hearth_export_fails_capability_check() {
 /// asserts the last call returns 429 Too Many Requests.
 #[tokio::test]
 async fn backup_endpoint_rate_limits_after_quota() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
     let h = common::TestHarness::server().await.expect("server harness");
     let base = h.base_url().expect("base_url");
     let (token, realm_id) = bootstrap(base).await;
@@ -236,6 +250,13 @@ async fn backup_endpoint_rate_limits_after_quota() {
 /// Every call to the backup endpoint emits a `RealmExportWatermarked` audit event.
 #[tokio::test]
 async fn backup_endpoint_emits_watermark_audit_event() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
     let h = common::TestHarness::server().await.expect("server harness");
     let base = h.base_url().expect("base_url");
     let (token, realm_id) = bootstrap(base).await;

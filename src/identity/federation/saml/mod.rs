@@ -33,6 +33,7 @@
 pub mod authn_request;
 pub mod binding;
 pub mod c14n;
+pub mod error;
 pub mod idp;
 pub mod logout;
 pub mod metadata;
@@ -46,6 +47,7 @@ pub use authn_request::{build_authn_request_xml, parse_authn_request, AuthnReque
 pub use binding::{
     build_post_form_html, build_redirect_url, decode_redirect_request, parse_post_form_saml,
 };
+pub use error::SamlError;
 pub use idp::{SamlIdpOutcome, SamlIdpService};
 pub use logout::{
     build_logout_request_xml, build_logout_response_xml, parse_logout_request,

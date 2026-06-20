@@ -21,7 +21,7 @@ pub const REALM_ID_META_KEY: &str = "x-realm-id";
 /// higher where appropriate — the produced `Status` message is safe to
 /// surface to untrusted clients (no secrets, no internals).
 #[must_use]
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub fn identity_to_status(err: IdentityError) -> Status {
     let (code, msg) = match &err {
         IdentityError::RealmNotFound
@@ -89,24 +89,23 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         | IdentityError::WebAuthnRegistrationFailed { .. }
         | IdentityError::WebAuthnAuthenticationFailed { .. }
         | IdentityError::InvalidAttestation { .. }
-        | IdentityError::InvalidAssertion { .. }
-        | IdentityError::SamlParse { .. }
-        | IdentityError::SamlSignature
-        | IdentityError::SamlExpired
-        | IdentityError::SamlReplay
-        | IdentityError::SamlAudienceMismatch
-        | IdentityError::SamlIssuerMismatch
-        | IdentityError::SamlDestinationMismatch
-        | IdentityError::SamlUnsupportedAlgorithm
-        | IdentityError::SamlInvalidAuthnRequest { .. } => (Code::InvalidArgument, err.to_string()),
+        | IdentityError::InvalidAssertion { .. } => (Code::InvalidArgument, err.to_string()),
+        IdentityError::Saml(ref e) => match e {
+            crate::identity::federation::saml::SamlError::UnknownSp
+            | crate::identity::federation::saml::SamlError::UnknownIdp => {
+                (Code::NotFound, err.to_string())
+            }
+            crate::identity::federation::saml::SamlError::MetadataFetch { .. } => {
+                tracing::error!(error = %err, "SAML metadata fetch failed");
+                (Code::Internal, err.to_string())
+            }
+            _ => (Code::InvalidArgument, err.to_string()),
+        },
         IdentityError::QuotaExceeded { .. } => (Code::ResourceExhausted, err.to_string()),
         IdentityError::EmailReserved | IdentityError::EmailChangeTokenInvalid => {
             (Code::InvalidArgument, err.to_string())
         }
         IdentityError::SilentAuthRateLimited => (Code::ResourceExhausted, err.to_string()),
-        IdentityError::SamlUnknownSp | IdentityError::SamlUnknownIdp => {
-            (Code::NotFound, err.to_string())
-        }
         IdentityError::MfaRequired
         | IdentityError::AuthorizationPending
         | IdentityError::SlowDown
@@ -154,6 +153,10 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             Code::ResourceExhausted,
             "SMS OTP resend limit exceeded".to_string(),
         ),
+        IdentityError::InvalidEmailOtp => (
+            Code::InvalidArgument,
+            "invalid or expired email OTP".to_string(),
+        ),
         IdentityError::InvalidPushedAuthorizationRequest => (
             Code::InvalidArgument,
             "invalid, expired, or already used request_uri".to_string(),
@@ -181,11 +184,13 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::AttestationPolicyViolation { .. } => {
             (Code::PermissionDenied, err.to_string())
         }
+        IdentityError::AgentNotFound => (Code::NotFound, err.to_string()),
+        IdentityError::AgentRevoked => (Code::PermissionDenied, err.to_string()),
+        IdentityError::PreTokenWebhookFailed { .. } => (Code::PermissionDenied, err.to_string()),
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }
         | IdentityError::FederationUpstreamError { .. }
-        | IdentityError::SamlMetadataFetch { .. }
         | IdentityError::ConfigInvalid { .. }
         | IdentityError::AuditFailure { .. }
         | IdentityError::Internal { .. } => {

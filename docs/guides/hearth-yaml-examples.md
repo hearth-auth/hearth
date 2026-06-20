@@ -1949,4 +1949,4 @@ realms:
 ---
 
 *Re-check this file when `src/config/types.rs`, `src/identity/federation/`, or
-`src/identity/types.rs` change public API surface (new YAML keys, renamed variants).*
+`src/identity/types/` change public API surface (new YAML keys, renamed variants).*

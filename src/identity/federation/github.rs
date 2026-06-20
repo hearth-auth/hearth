@@ -249,6 +249,7 @@ mod tests {
             client_secret: FederationSecret::new("gh-secret".to_string()),
             claim_mappings: BTreeMap::new(),
             leeway_seconds: IdpConfig::default_leeway_seconds(),
+            apple: None,
             created_at: Timestamp::from_micros(0),
             updated_at: Timestamp::from_micros(0),
         }
@@ -263,6 +264,7 @@ mod tests {
             pkce_verifier: "vvvvvv".to_string(),
             return_to: "/".to_string(),
             expires_at: Timestamp::from_micros(0),
+            apple_user_json: None,
         }
     }
 

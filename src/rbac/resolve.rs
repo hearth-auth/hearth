@@ -168,7 +168,7 @@ pub(crate) trait Resolver {
 }
 
 /// Core algorithm: resolve `(user, realm, org?, scope?)` → `ResolvedPermissions`.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
     resolver: &R,
     user_id: &UserId,
@@ -309,7 +309,7 @@ pub(crate) fn resolve_permissions<R: Resolver + ?Sized>(
 /// - Empty `requested_scopes` + `ThirdParty`: `RbacError::InvalidScope`.
 /// - Empty `requested_scopes` + `FirstParty`: full effective permissions,
 ///   `granted_scopes` is empty.
-#[allow(clippy::too_many_lines)] // TODO: split this function
+#[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
 pub(crate) fn resolve_with_scopes<R: Resolver + ?Sized>(
     resolver: &R,
     user_id: &UserId,

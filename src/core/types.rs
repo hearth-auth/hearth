@@ -109,6 +109,15 @@ define_id_type!(
 );
 
 define_id_type!(
+    /// Unique identifier for an autonomous agent registered within a realm.
+    ///
+    /// Agents are distinct from users and OAuth clients — they are autonomous
+    /// actors with their own identity lifecycle, credential set, and delegation
+    /// chain support. See `AGENT_AUTH.md` for the full specification.
+    AgentId, "agt_"
+);
+
+define_id_type!(
     /// Unique identifier for a single webhook delivery attempt.
     WebhookDeliveryId, "whd_"
 );

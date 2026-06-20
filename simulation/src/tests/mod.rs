@@ -1,4 +1,5 @@
 mod audit_crash;
+mod cluster_chaos;
 mod cluster_failover;
 mod migration_crash;
 mod rbac_concurrent_assignments;
