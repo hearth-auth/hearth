@@ -2186,7 +2186,9 @@ fn print_startup_panel(
         if dev_mode {
             tracing::info!("  Setup:   {base}/ui/setup?token={token}");
         } else {
-            tracing::info!("  Setup:   {base}/ui/setup  (token redacted in prod — set HEARTH_SETUP_TOKEN)");
+            tracing::info!(
+                "  Setup:   {base}/ui/setup  (token redacted in prod — set HEARTH_SETUP_TOKEN)"
+            );
         }
     }
     if let Some((inbox_url, password)) = mailcatcher {
