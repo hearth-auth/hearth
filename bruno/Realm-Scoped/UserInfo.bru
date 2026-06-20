@@ -1,0 +1,15 @@
+meta {
+  name: UserInfo
+  type: http
+  seq: 9
+}
+
+get {
+  url: {{baseUrl}}/realms/{{realmName}}/userinfo
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

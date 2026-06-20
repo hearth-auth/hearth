@@ -1,0 +1,26 @@
+meta {
+  name: Add Group Member
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{baseUrl}}/admin/groups/{{groupId}}/members
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "user_id": "{{userId}}"
+  }
+}

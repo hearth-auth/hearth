@@ -1,0 +1,20 @@
+meta {
+  name: Get Group
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/scim/v2/Groups/{{groupId}}
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Accept: application/scim+json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}

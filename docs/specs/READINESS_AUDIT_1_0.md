@@ -150,7 +150,11 @@ However, it is **not yet a drop-in replacement** for Keycloak in enterprise LDAP
 
 **Severity:** Critical for enterprise Keycloak replacement
 
-**Evidence:** No `ldap` module anywhere in `src/`. No LDAP sync adapter, no AD/Kerberos support.
+> **Status update (2026-06-19, PR #161):** The LDAP connector module is **implemented** — `src/identity/ldap/` ships a full `EmbeddedLdapConnector` with user search, attribute mapping, password-bind auth, delta sync (`ModifyTimestamp` and `uSNChanged`/AD strategies), RFC 4515 filter injection prevention, and LDAPS enforcement. The implementation is complete at the domain layer.
+
+> **Remaining gap:** The connector is not yet wired to the operator-facing configuration or HTTP API. `LdapConfig` is not exposed in `src/config/types.rs` / `FederationProviderYaml`, and the connector has no admin API surface. The estimated effort to complete wiring is 1–2 days; the hard implementation work is done.
+
+**Evidence (original, now stale):** No `ldap` module anywhere in `src/`. No LDAP sync adapter, no AD/Kerberos support.
 
 **Impact:** The majority of enterprise Keycloak customers use Keycloak as a front-door for corporate Active Directory or OpenLDAP. Without LDAP federation, these customers cannot migrate to Hearth — users would need to be manually migrated or re-registered.
 
@@ -159,12 +163,13 @@ However, it is **not yet a drop-in replacement** for Keycloak in enterprise LDAP
 - University/government deployments where LDAP is the source of truth
 - Any "sync from HR system" pipeline using LDAP as the interface
 
-**Path to resolution:**
-1. Implement `src/identity/federation/ldap.rs` — an `LdapConnector` implementing the `FederationConnector` trait.
-2. Support: LDAP user search, attribute mapping (cn → name, mail → email, memberOf → groups), password bind for authentication.
-3. Support scheduled sync (delta poll) + on-demand bind-and-check for password auth.
-4. Config: `realms.<name>.ldap.url`, `.bind_dn`, `.bind_password`, `.user_base_dn`, `.group_base_dn`, `.attribute_map`.
-5. LDAPS (LDAP over TLS) required for production; STARTTLS optional.
+**Remaining path to production:**
+1. Wire `LdapConfig` into `FederationProviderYaml` (`src/config/types.rs`) as a new `kind: ldap` federation provider.
+2. Add admin API endpoints for creating/updating LDAP connector config per realm.
+3. Start the sync background task at server init when a realm has an LDAP connector configured.
+4. Expose `GET /admin/realms/{id}/ldap/status` for sync health checks.
+
+*(Original estimated effort was 4–6 weeks; connector implementation is done, leaving ~1–2 days for wiring.)*
 
 **Estimated effort:** 4–6 weeks (substantial — LDAP parsing, attribute mapping, sync engine).
 

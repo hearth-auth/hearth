@@ -154,6 +154,8 @@ pub(super) fn admin_api_routes() -> axum::Router<Arc<AppState>> {
             "/sessions/{session_id}/sv-bump",
             post(admin_sv_bump_session),
         )
+        .route("/sessions/{id}", delete(admin_revoke_session))
+        .route("/users/{id}/sessions", get(admin_list_user_sessions))
         .route("/realms/{realm_id}/sv-bump-all", post(admin_sv_bump_all))
         .route(
             "/cluster/bootstrap",
@@ -4211,5 +4213,104 @@ async fn admin_sv_bump_all(
             Json(serde_json::json!({"error": "internal error"})),
         )
             .into_response(),
+    }
+}
+
+/// `GET /admin/users/{id}/sessions` — lists active sessions for a user.
+///
+/// Returns `{"items": [...], "next_cursor": null|"..."}`.
+/// Requires `hearth.users.admin`.
+async fn admin_list_user_sessions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(user_id_str): Path<String>,
+    Query(params): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
+    let Ok(uuid) = user_id_str.parse::<uuid::Uuid>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid user_id"})),
+        )
+            .into_response();
+    };
+    let user_id = crate::core::UserId::new(uuid);
+    match state.identity.list_sessions_by_user(
+        &auth.realm_id,
+        &user_id,
+        params.cursor.as_deref(),
+        params.effective_limit(),
+    ) {
+        Ok(page) => {
+            let items: Vec<serde_json::Value> = page
+                .items
+                .iter()
+                .filter(|s| !s.is_revoked())
+                .map(|s| {
+                    serde_json::json!({
+                        "id": s.id().as_uuid().to_string(),
+                        "user_id": s.user_id().as_uuid().to_string(),
+                        "created_at": s.created_at().as_micros(),
+                        "expires_at": s.expires_at().as_micros(),
+                        "last_refreshed_at": s.last_refreshed_at().as_micros(),
+                        "ip_address": s.ip_address(),
+                        "device_label": s.device_label(),
+                    })
+                })
+                .collect();
+            let body = serde_json::json!({
+                "items": items,
+                "next_cursor": page.next_cursor,
+            });
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(e) => identity_error_to_response(&e).into_response(),
+    }
+}
+
+/// `DELETE /admin/sessions/{id}` — hard-revokes a session by ID.
+///
+/// Marks the session record as revoked and cascades to any grant families
+/// issued under it. Returns `204 No Content` on success.
+/// Requires `hearth.users.admin`.
+async fn admin_revoke_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(session_id_str): Path<String>,
+) -> impl IntoResponse {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.users.admin") {
+        return e.into_response();
+    }
+    let Ok(uuid) = session_id_str.parse::<uuid::Uuid>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid session_id"})),
+        )
+            .into_response();
+    };
+    let session_id = crate::core::SessionId::new(uuid);
+    match state.identity.revoke_session(&auth.realm_id, &session_id) {
+        Ok(()) => {
+            let _ = state.audit.append(&crate::audit::CreateAuditEvent {
+                realm_id: auth.realm_id.clone(),
+                actor: auth.user_id.as_uuid().to_string(),
+                action: crate::audit::AuditAction::SessionRevoked,
+                resource_type: "session".to_string(),
+                resource_id: session_id.as_uuid().to_string(),
+                metadata: Some(serde_json::json!({"via": "admin_api"})),
+            });
+            (StatusCode::NO_CONTENT, ()).into_response()
+        }
+        Err(e) => identity_error_to_response(&e).into_response(),
     }
 }

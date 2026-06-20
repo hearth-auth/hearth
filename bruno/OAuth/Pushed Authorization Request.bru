@@ -1,0 +1,36 @@
+meta {
+  name: Pushed Authorization Request
+  type: http
+  seq: 11
+}
+
+post {
+  url: {{baseUrl}}/as/par
+  body: json
+  auth: none
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "response_type": "code",
+    "client_id": "{{clientId}}",
+    "redirect_uri": "http://localhost:3000/callback",
+    "scope": "openid profile email",
+    "state": "random-state-value",
+    "code_challenge": "code-challenge-value",
+    "code_challenge_method": "S256"
+  }
+}
+
+script:post-response {
+  const status = res.getStatus();
+  if (status >= 200 && status < 300 && res.getBody()) {
+    const body = res.getBody();
+    if (body.request_uri) bru.setEnvVar("requestUri", body.request_uri);
+  }
+}

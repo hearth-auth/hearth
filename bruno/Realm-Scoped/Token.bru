@@ -1,0 +1,34 @@
+meta {
+  name: Token
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/realms/{{realmName}}/token
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "grant_type": "authorization_code",
+    "client_id": "{{clientId}}",
+    "code": "{{authCode}}",
+    "redirect_uri": "http://localhost:3000/callback",
+    "code_verifier": "code-verifier-value"
+  }
+}
+
+script:post-response {
+  const status = res.getStatus();
+  if (status >= 200 && status < 300 && res.getBody()) {
+    const body = res.getBody();
+    if (body.access_token)  bru.setEnvVar("accessToken",  body.access_token);
+    if (body.refresh_token) bru.setEnvVar("refreshToken", body.refresh_token);
+  }
+}

@@ -1,0 +1,23 @@
+meta {
+  name: Export Users
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/admin/users/export
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+query {
+  format: json
+}

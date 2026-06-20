@@ -1,0 +1,39 @@
+meta {
+  name: Create User
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/scim/v2/Users
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/scim+json
+  Accept: application/scim+json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+    "userName": "alice@example.com",
+    "name": {
+      "givenName": "Alice",
+      "familyName": "Smith"
+    },
+    "emails": [
+      {
+        "value": "alice@example.com",
+        "primary": true
+      }
+    ],
+    "active": true
+  }
+}
