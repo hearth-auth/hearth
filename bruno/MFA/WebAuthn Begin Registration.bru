@@ -1,0 +1,35 @@
+meta {
+  name: WebAuthn Begin Registration
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/webauthn/register/begin
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "rp_id": "127.0.0.1",
+    "discoverable": true
+  }
+}
+
+script:post-response {
+  const status = res.getStatus();
+  if (status >= 200 && status < 300 && res.getBody()) {
+    const body = res.getBody();
+    if (body.challenge) bru.setEnvVar("webauthnChallenge", body.challenge);
+  }
+}

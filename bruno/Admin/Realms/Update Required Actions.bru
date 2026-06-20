@@ -1,0 +1,26 @@
+meta {
+  name: Update Required Actions
+  type: http
+  seq: 13
+}
+
+patch {
+  url: {{baseUrl}}/admin/realms/{{realmId}}/users/{{userId}}/required-actions
+  body: json
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+  Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "required_actions": ["verify_email", "update_password"]
+  }
+}

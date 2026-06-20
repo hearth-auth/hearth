@@ -1,0 +1,24 @@
+meta {
+  name: List Group Members
+  type: http
+  seq: 11
+}
+
+get {
+  url: {{baseUrl}}/admin/groups/{{groupId}}/members
+  body: none
+  auth: bearer
+}
+
+headers {
+  X-Realm-ID: {{realmId}}
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+query {
+  page: 1
+  per_page: 20
+}
