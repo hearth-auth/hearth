@@ -1093,6 +1093,49 @@ realms:
 
 ---
 
+### `realms.<name>.attribute_definitions`
+
+Declares a strict attribute schema for users and organizations in a realm. When this block is present, only the declared attribute keys are accepted at create/update time — unknown keys are rejected with a validation error. **When absent (the default), attributes are free-form**: any key-value pair is accepted.
+
+Use `attribute_definitions` when you need to enforce a canonical set of user/org properties for compliance, reporting, or UI consistency.
+
+#### `realms.<name>.attribute_definitions.users` / `.organizations`
+
+Each list entry declares one attribute:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `key` | string | *required* | Machine-readable attribute key. Used as the storage key; must be URL-safe. |
+| `label` | string | same as `key` | Human-readable label shown in the admin UI. |
+| `type` | string | `"string"` | Data type hint for validation and UI rendering: `"string"`, `"number"`, `"boolean"`, or `"enum"`. |
+| `required` | bool | `false` | When `true`, the attribute must be present when creating a record. |
+| `description` | string | — | Short description shown as a placeholder or tooltip in the admin UI. |
+| `enum_values` | list of strings | `[]` | Allowed values when `type: enum`. Ignored for other types. |
+
+```yaml
+realms:
+  - name: corp
+    attribute_definitions:
+      users:
+        - key: employee_id
+          label: "Employee ID"
+          type: string
+          required: true
+          description: "HR system identifier"
+        - key: department
+          type: enum
+          enum_values: [engineering, sales, support, product]
+        - key: is_contractor
+          type: boolean
+      organizations:
+        - key: tier
+          type: enum
+          enum_values: [free, pro, enterprise]
+          required: true
+```
+
+---
+
 ## Complete Example
 
 ```yaml
@@ -1135,6 +1178,32 @@ auth:
 
 onboarding:
   base_url: "https://auth.example.com"
+
+security:
+  bearer_token: "${HEARTH_METRICS_TOKEN}"
+  allowed_hosts:
+    - "auth.example.com"
+  dpop_nonce_secret: "${HEARTH_DPOP_NONCE_SECRET}"
+  jwks_rps_limit: 60
+  http2:
+    max_concurrent_streams: 100
+    max_pending_reset_streams: 10
+  request_shaper:
+    ip_rps: 100
+    realm_rps: 1000
+  ip_reputation:
+    enabled: true
+    action: block
+  rate_limiting:
+    login_per_ip:
+      max_attempts: 10
+      window_seconds: 60
+    login_per_account:
+      max_failures: 5
+      lockout_seconds: 300
+  backup:
+    verify_key: "${HEARTH_BACKUP_VERIFY_KEY}"
+    export_rate_limit: 10
 
 realms:
   customer-portal:
