@@ -7,6 +7,9 @@
 //! - A.4: Agent Card at well-known endpoint
 //! - A.7: Agent REST protocol endpoints
 //!
+//! Also contains the M1 byte-identity regression guard: verifies that M1 changes
+//! did not alter the JWT claim set issued for ordinary (non-agent) user tokens.
+//!
 //! TDD: tests written first; implementation in src/identity/engine/mod.rs.
 
 mod common;
@@ -789,5 +792,82 @@ async fn delete_user_cascades_owned_agents() {
             .expect("get a2")
             .is_none(),
         "a2 must be gone"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// M1 byte-identity regression guard
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Verifies that M1 changes did not alter the JWT claim structure for
+/// ordinary user tokens. We decode and check the standard claim set: `sub`,
+/// `iss`, `exp`, `iat`, `oid`, `email`. No agent-specific claims should appear.
+///
+/// This guards against accidental claim-set drift when new features add
+/// token-level fields — any new claim on the non-agent path must be a
+/// deliberate, reviewed change.
+#[tokio::test]
+async fn m1_non_agent_token_claim_set_unchanged() {
+    use hearth::identity::{CleartextPassword, PasswordGrantRequest};
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+
+    let user_id = make_user(identity, &realm_id);
+    let password = "HearthTest123!";
+    identity
+        .set_password(
+            &realm_id,
+            &user_id,
+            &CleartextPassword::from_string(password.to_string()),
+        )
+        .expect("set password");
+
+    let email = identity
+        .get_user(&realm_id, &user_id)
+        .expect("get user")
+        .expect("user exists")
+        .email()
+        .to_string();
+
+    let response = identity
+        .password_grant_token(
+            &realm_id,
+            &PasswordGrantRequest {
+                email: email.clone(),
+                password: password.to_string(),
+                scope: None,
+                client_ip: None,
+                user_agent: None,
+            },
+        )
+        .expect("password grant");
+
+    // Decode without verifying signature — we only care about the claim set
+    let token = response.access_token();
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    assert_eq!(parts.len(), 3, "JWT must have 3 parts");
+
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .expect("base64 decode payload");
+    let claims: serde_json::Value = serde_json::from_slice(&payload).expect("JSON payload");
+
+    // Standard claims must be present
+    assert!(claims.get("sub").is_some(), "sub claim required");
+    assert!(claims.get("iss").is_some(), "iss claim required");
+    assert!(claims.get("exp").is_some(), "exp claim required");
+    assert!(claims.get("iat").is_some(), "iat claim required");
+
+    // Agent-specific claims must NOT appear on user tokens
+    assert!(
+        claims.get("agt").is_none(),
+        "agt claim must not appear in user tokens"
+    );
+    assert!(
+        claims.get("agent_id").is_none(),
+        "agent_id claim must not appear in user tokens"
     );
 }

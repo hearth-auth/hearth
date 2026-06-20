@@ -2144,4 +2144,33 @@ pub trait IdentityEngine: Send + Sync {
     /// Returns `IdentityError::SessionVersionDisabled` when the feature is
     /// off for the realm.
     fn sv_bump_all(&self, realm_id: &RealmId) -> Result<usize, IdentityError>;
+
+    // ===== DPoP storage operations (AGENT_AUTH.md §13.2) =====
+
+    /// Checks a DPoP proof `jti` for replay and records it in persistent storage.
+    ///
+    /// Stores `jti` under `agt:dpop:jti:{jti}` in the realm's storage namespace
+    /// with an 8-byte little-endian i64 expiry of `now_secs + DPOP_MAX_AGE_SECS`.
+    /// Returns `Err(DPopProofReplay)` if the key already exists. The background
+    /// cleanup sweeper evicts expired entries on each tick.
+    ///
+    /// Unlike the in-memory `DPopJtiCache`, this survives server restarts and
+    /// is consistent across Raft nodes (both read from the same storage).
+    fn check_and_record_dpop_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        now_secs: i64,
+    ) -> Result<(), IdentityError>;
+
+    /// Returns the per-realm DPoP nonce HMAC secret, creating it if absent.
+    ///
+    /// On first call for a realm, generates a 32-byte CSPRNG secret, persists
+    /// it under `agt:dpop:nonce-secret` in the realm's storage namespace, and
+    /// caches it in memory. Subsequent calls return the cached value without
+    /// touching storage. The stored value survives server restarts.
+    ///
+    /// The returned secret is used with `current_dpop_nonce` / `is_valid_dpop_nonce`
+    /// to generate and validate per-realm DPoP nonces.
+    fn get_realm_dpop_nonce_secret(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError>;
 }

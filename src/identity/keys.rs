@@ -12,6 +12,8 @@
 //! - **OAuth code**: `oauth:code:{sha256_hex}` → JSON-serialized code
 //! - **Realm primary**: `realm:id:{uuid}` → JSON-serialized `Realm` (system realm scope)
 //! - **Realm signing key**: `realm:key:{uuid}` → PKCS#8 DER bytes (system realm scope)
+//! - **DPoP JTI replay cache**: `agt:dpop:jti:{jti}` → 8-byte LE i64 expiry (Unix seconds)
+//! - **DPoP nonce secret**: `agt:dpop:nonce-secret` → 32 raw bytes (HMAC-SHA256 key, per realm)
 //!
 //! Scan prefix `usr:id:` enables listing all users in a realm.
 
@@ -1497,6 +1499,45 @@ pub(crate) fn encode_agent_credential(agent_id: &AgentId, cred_id: &AgentCredent
 /// Format: `agt:cred:{agent_uuid}:`
 pub(crate) fn agent_credential_scan_prefix(agent_id: &AgentId) -> Vec<u8> {
     format!("{AGENT_CRED_PREFIX}{}:", agent_id.as_uuid()).into_bytes()
+}
+
+// ===== DPoP storage keys (AGENT_AUTH.md §13.2) =====
+
+/// Prefix for DPoP proof JTI replay-prevention entries.
+///
+/// Format: `agt:dpop:jti:{jti}`
+///
+/// Value: 8 bytes, little-endian `i64` Unix-seconds expiry.
+/// Realm-scoped by the storage engine — no realm segment in the key itself.
+const DPOP_JTI_PREFIX: &str = "agt:dpop:jti:";
+
+/// Storage key for the per-realm DPoP nonce HMAC secret.
+///
+/// Format: `agt:dpop:nonce-secret`
+///
+/// Value: 32 raw bytes — the HMAC-SHA256 key used for stateless nonce
+/// generation (`HMAC-SHA256(secret, window_id)`). Generated once per realm,
+/// persisted so nonces survive server restarts. Realm-scoped by the storage
+/// engine.
+const DPOP_NONCE_SECRET_KEY: &str = "agt:dpop:nonce-secret";
+
+/// Encodes the storage key for a DPoP proof JTI replay-cache entry.
+///
+/// Format: `agt:dpop:jti:{jti}`
+pub(crate) fn encode_dpop_jti(jti: &str) -> Vec<u8> {
+    format!("{DPOP_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all DPoP JTI entries in a realm.
+///
+/// Used by the cleanup sweeper to evict expired entries.
+pub(crate) fn dpop_jti_scan_prefix() -> Vec<u8> {
+    DPOP_JTI_PREFIX.as_bytes().to_vec()
+}
+
+/// Returns the storage key for the per-realm DPoP nonce HMAC secret.
+pub(crate) fn dpop_nonce_secret_key() -> Vec<u8> {
+    DPOP_NONCE_SECRET_KEY.as_bytes().to_vec()
 }
 
 // ===== Attempt tracker WAL keys =====

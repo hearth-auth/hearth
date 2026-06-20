@@ -66,6 +66,8 @@ pub struct CleanupStats {
     pub par_requests_deleted: u64,
     /// JAR (RFC 9101) JTI replay-store entries swept.
     pub jar_jtis_deleted: u64,
+    /// DPoP proof JTI replay-cache entries swept.
+    pub dpop_jtis_deleted: u64,
     /// In-memory rate-tracker entries pruned across all five maps.
     ///
     /// Rate tracker `HashMap`s are not backed by storage; they are pruned
@@ -84,6 +86,7 @@ impl CleanupStats {
             + self.grant_families_deleted
             + self.par_requests_deleted
             + self.jar_jtis_deleted
+            + self.dpop_jtis_deleted
             + self.rate_trackers_pruned
     }
 }
@@ -171,6 +174,18 @@ pub(crate) fn sweep_expired(
                 realm = %realm_id,
                 error = %e,
                 "cleanup: JAR JTI sweep failed"
+            );
+        }
+    }
+
+    match sweep_dpop_jtis(realm_id, storage, now_secs) {
+        Ok(n) => stats.dpop_jtis_deleted = n,
+        Err(e) => {
+            stats.errors += 1;
+            tracing::warn!(
+                realm = %realm_id,
+                error = %e,
+                "cleanup: DPoP JTI sweep failed"
             );
         }
     }
@@ -410,6 +425,35 @@ pub(crate) fn sweep_jar_jtis(
     for entry in &entries {
         // Legacy b"1" entries and genuinely malformed entries both fail this conversion;
         // legacy entries are left for cascade realm deletion and do not warrant a warning.
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
+            continue;
+        };
+        let expires_at = i64::from_le_bytes(bytes);
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Scans all `agt:dpop:jti:*` keys in `realm_id` and deletes entries whose
+/// 8-byte little-endian i64 expiry (Unix seconds) is <= `now_secs`.
+///
+/// Returns the number of evicted entries. Partial sweeps are safe because
+/// replay prevention fires on the storage read path for any entry still
+/// present.
+pub(crate) fn sweep_dpop_jtis(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::dpop_jti_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
         let Ok(bytes) = entry.value.as_slice().try_into() else {
             continue;
         };
@@ -1038,6 +1082,92 @@ mod tests {
         assert!(
             s.get(&realm, &bad_key).expect("get").is_some(),
             "malformed entry must be skipped, not deleted"
+        );
+    }
+
+    // --- DPoP JTI sweep ---
+
+    fn seed_dpop_jti(s: &EmbeddedStorageEngine, realm: &RealmId, jti: &str, expires_at: i64) {
+        let key = keys::encode_dpop_jti(jti);
+        s.put(realm, &key, &expires_at.to_le_bytes())
+            .expect("put dpop jti");
+    }
+
+    #[test]
+    fn sweep_dpop_jtis_deletes_expired_keeps_active() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        seed_dpop_jti(&s, &realm, "dpop-expired-1", NOW_SECS - 1);
+        seed_dpop_jti(&s, &realm, "dpop-expired-2", NOW_SECS - 3600);
+        seed_dpop_jti(&s, &realm, "dpop-active-1", NOW_SECS + 120);
+
+        let deleted = sweep_dpop_jtis(&realm, &s, NOW_SECS).expect("sweep");
+        assert_eq!(deleted, 2, "both expired entries must be removed");
+
+        assert!(
+            s.get(&realm, &keys::encode_dpop_jti("dpop-expired-1"))
+                .expect("get")
+                .is_none(),
+            "dpop-expired-1 must be gone"
+        );
+        assert!(
+            s.get(&realm, &keys::encode_dpop_jti("dpop-active-1"))
+                .expect("get")
+                .is_some(),
+            "dpop-active-1 must survive"
+        );
+    }
+
+    #[test]
+    fn sweep_dpop_jtis_boundary_at_exactly_now_is_expired() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+
+        seed_dpop_jti(&s, &realm, "dpop-boundary", NOW_SECS);
+
+        let deleted = sweep_dpop_jtis(&realm, &s, NOW_SECS).expect("sweep boundary");
+        assert_eq!(deleted, 1, "entry expiring exactly at now must be evicted");
+    }
+
+    #[test]
+    fn sweep_dpop_jtis_empty_realm_is_ok() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let deleted = sweep_dpop_jtis(&realm, &s, NOW_SECS).expect("sweep empty");
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn sweep_dpop_jtis_isolated_across_realms() {
+        let (s, _dir) = storage();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+
+        seed_dpop_jti(&s, &realm_a, "jti-expired", NOW_SECS - 1);
+        seed_dpop_jti(&s, &realm_b, "jti-active", NOW_SECS + 86400);
+
+        let deleted_a = sweep_dpop_jtis(&realm_a, &s, NOW_SECS).expect("sweep realm_a");
+        assert_eq!(deleted_a, 1);
+
+        let deleted_b = sweep_dpop_jtis(&realm_b, &s, NOW_SECS).expect("sweep realm_b");
+        assert_eq!(deleted_b, 0, "realm_b entry must be untouched");
+    }
+
+    #[test]
+    fn sweep_expired_includes_dpop_jtis() {
+        let (s, _dir) = storage();
+        let realm = RealmId::generate();
+        let clock = fake_clock(T0 + ONE_HOUR);
+
+        let expires_at_secs = (T0 + ONE_HOUR) / 1_000_000 - 60;
+        seed_dpop_jti(&s, &realm, "dpop-expired", expires_at_secs);
+
+        let config = CleanupConfig::default();
+        let stats = sweep_expired(&realm, &s, &clock, &config);
+        assert_eq!(
+            stats.dpop_jtis_deleted, 1,
+            "sweep_expired must include DPoP JTI sweep"
         );
     }
 

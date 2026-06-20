@@ -76,6 +76,22 @@ All 148 Phase 0 scenarios must be passing. Steps 1–18 are complete.
 
 ---
 
+## Phase 2 — Agent Authentication (AGENT_AUTH.md)
+
+Agent auth is developed in parallel with Phase 2 features. Steps follow `AGENT_AUTH.md` Phase A → B → C → D dependency order. Each step adds to `tests/agents.rs` and `tests/agent_credentials.rs` (new file when A.7 gRPC surface grows large enough to warrant splitting).
+
+| # | What | Why this order |
+|---|------|----------------|
+| A.1–A.2 | AgentId + entity CRUD | Foundational — completed in HEA-1325 |
+| A.3–A.7 | Credentials + REST + Agent Card | **M1 (HEA-1405) — complete**. API key (256-bit, SHA-256 stored), Agent Card at `/.well-known/agent.json`, REST CRUD at `/v1/agents`, gRPC stubs. |
+| A.4–A.5 | DPoP proof validation | Depends on storage TTL (HEA-1410). See `docs/specs/AGENT_AUTH.md §6`. |
+| A.6 | DPoP-bound token issuance | Depends on A.5 |
+| B.1–B.5 | Protected resource / MCP auth | Depends on A.6; enables tool servers |
+| C.1–C.3 | Delegation + AATs | Depends on B.1–B.5 |
+| D.1–D.7 | Discovery, workload identity, cross-realm | Depends on C |
+
+---
+
 ## Verification
 
 After each step: `cargo nextest run` passes, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --check` clean.

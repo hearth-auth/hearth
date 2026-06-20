@@ -760,3 +760,21 @@ onboarding:
 #   tls_ca_cert_path: "/etc/hearth/certs/ca.crt"   # required — CA shared by all nodes
 #   read_lag_threshold_ms: 500           # optional — redirect reads when follower
 #                                        # is lagging more than this (default: 500)
+
+
+# =============================================================================
+# Agent Authentication (AGENT_AUTH.md)
+# =============================================================================
+#
+# Staged capability flags for the agent identity feature set.
+# Each flag activates one phase independently. All default to false.
+#
+# Phase A (M1) — agent CRUD, API-key credentials, Agent Card, REST endpoints:
+#
+# agent_auth:
+#   capabilities:
+#     identity: true   # enables /v1/agents, /.well-known/agent.json, gRPC stubs
+#
+# Future phases (not yet implemented — setting these is a startup error):
+#   delegation: false  # Phase C: act-as delegation + AATs
+#   mcp: false         # Phase B: MCP authorization server + protected resources

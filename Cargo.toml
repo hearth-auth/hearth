@@ -166,6 +166,10 @@ harness = false
 name = "validate_token"
 harness = false
 
+[[bench]]
+name = "agent_credentials"
+harness = false
+
 [profile.release]
 overflow-checks = true
 panic = "abort"

@@ -9,6 +9,19 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **DPoP storage infrastructure (HEA-1410)** — lays the persistence foundation for M2
+  DPoP-bound agent tokens:
+  - Per-realm DPoP nonce HMAC secret generated once and persisted under
+    `agt:dpop:nonce-secret`; reloaded on restart so nonces survive server restarts.
+    Previously a global ephemeral key caused all nonces to expire on every restart.
+  - DPoP proof JTI replay cache persisted to storage under `agt:dpop:jti:{jti}` with
+    8-byte little-endian i64 TTL expiry; survives restarts and is consistent across
+    Raft nodes. Previously an in-memory `HashMap` was bypassed on restart.
+  - Background cleanup sweeper extended to evict expired `agt:dpop:jti:*` entries
+    on every tick (same pattern as JAR JTI and fingerprint sweepers).
+  - New `IdentityEngine` methods: `check_and_record_dpop_jti` and
+    `get_realm_dpop_nonce_secret`.
+
 - **Agent identity (M1, HEA-1405)** — Phase A of `AGENT_AUTH.md` is now reachable:
   - `POST /v1/agents` — register an agent; owner (user or organization) FK-checked;
     realm `max_agents` quota enforced when configured.

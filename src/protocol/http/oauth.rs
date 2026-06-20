@@ -900,7 +900,11 @@ async fn token_exchange(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let nonce = state.dpop.current_nonce(now_secs);
+    let nonce = maybe_realm_id
+        .as_ref()
+        .and_then(|rid| state.identity.get_realm_dpop_nonce_secret(rid).ok())
+        .map(|s| crate::identity::dpop::current_dpop_nonce(&s, now_secs))
+        .unwrap_or_else(|| state.dpop.current_nonce(now_secs));
     if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
         resp.headers_mut().insert("DPoP-Nonce", val);
     }
@@ -955,35 +959,46 @@ async fn token_exchange_impl(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let dpop_jkt: Option<String> =
-        if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
-            let expected_htu = state.identity.oidc_discovery().token_endpoint.clone();
-            match crate::identity::dpop::validate_dpop_proof(
-                proof,
-                "POST",
-                &expected_htu,
-                now_secs,
-                None,
-            ) {
-                Ok(validated) => {
-                    if let Some(ref nonce) = validated.nonce {
-                        if !state.dpop.is_valid_nonce(nonce, now_secs) {
-                            return identity_error_to_response(
-                                &crate::identity::error::IdentityError::DPopNonceInvalid,
-                            )
-                            .into_response();
-                        }
+    let dpop_jkt: Option<String> = if let Some(proof) =
+        headers.get("DPoP").and_then(|v| v.to_str().ok())
+    {
+        let expected_htu = state.identity.oidc_discovery().token_endpoint.clone();
+        match crate::identity::dpop::validate_dpop_proof(
+            proof,
+            "POST",
+            &expected_htu,
+            now_secs,
+            None,
+        ) {
+            Ok(validated) => {
+                if let Some(ref nonce) = validated.nonce {
+                    let valid = state
+                        .identity
+                        .get_realm_dpop_nonce_secret(&realm_id)
+                        .ok()
+                        .map(|s| crate::identity::dpop::is_valid_dpop_nonce(&s, nonce, now_secs))
+                        .unwrap_or(false);
+                    if !valid {
+                        return identity_error_to_response(
+                            &crate::identity::error::IdentityError::DPopNonceInvalid,
+                        )
+                        .into_response();
                     }
-                    if let Err(e) = state.dpop.check_and_insert_jti(&validated.jti, now_secs) {
-                        return identity_error_to_response(&e).into_response();
-                    }
-                    Some(validated.jkt)
                 }
-                Err(e) => return identity_error_to_response(&e).into_response(),
+                if let Err(e) =
+                    state
+                        .identity
+                        .check_and_record_dpop_jti(&realm_id, &validated.jti, now_secs)
+                {
+                    return identity_error_to_response(&e).into_response();
+                }
+                Some(validated.jkt)
             }
-        } else {
-            None
-        };
+            Err(e) => return identity_error_to_response(&e).into_response(),
+        }
+    } else {
+        None
+    };
 
     match grant_type {
         "authorization_code" => {
@@ -1873,36 +1888,47 @@ async fn realm_token_exchange(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let dpop_jkt: Option<String> =
-        if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
-            let base_issuer = state.identity.oidc_discovery().issuer;
-            let expected_htu = format!("{base_issuer}/realms/{realm_name}/token");
-            match crate::identity::dpop::validate_dpop_proof(
-                proof,
-                "POST",
-                &expected_htu,
-                now_secs,
-                None,
-            ) {
-                Ok(validated) => {
-                    if let Some(ref nonce) = validated.nonce {
-                        if !state.dpop.is_valid_nonce(nonce, now_secs) {
-                            return identity_error_to_response(
-                                &crate::identity::error::IdentityError::DPopNonceInvalid,
-                            )
-                            .into_response();
-                        }
+    let dpop_jkt: Option<String> = if let Some(proof) =
+        headers.get("DPoP").and_then(|v| v.to_str().ok())
+    {
+        let base_issuer = state.identity.oidc_discovery().issuer;
+        let expected_htu = format!("{base_issuer}/realms/{realm_name}/token");
+        match crate::identity::dpop::validate_dpop_proof(
+            proof,
+            "POST",
+            &expected_htu,
+            now_secs,
+            None,
+        ) {
+            Ok(validated) => {
+                if let Some(ref nonce) = validated.nonce {
+                    let valid = state
+                        .identity
+                        .get_realm_dpop_nonce_secret(&realm_id)
+                        .ok()
+                        .map(|s| crate::identity::dpop::is_valid_dpop_nonce(&s, nonce, now_secs))
+                        .unwrap_or(false);
+                    if !valid {
+                        return identity_error_to_response(
+                            &crate::identity::error::IdentityError::DPopNonceInvalid,
+                        )
+                        .into_response();
                     }
-                    if let Err(e) = state.dpop.check_and_insert_jti(&validated.jti, now_secs) {
-                        return identity_error_to_response(&e).into_response();
-                    }
-                    Some(validated.jkt)
                 }
-                Err(e) => return identity_error_to_response(&e).into_response(),
+                if let Err(e) =
+                    state
+                        .identity
+                        .check_and_record_dpop_jti(&realm_id, &validated.jti, now_secs)
+                {
+                    return identity_error_to_response(&e).into_response();
+                }
+                Some(validated.jkt)
             }
-        } else {
-            None
-        };
+            Err(e) => return identity_error_to_response(&e).into_response(),
+        }
+    } else {
+        None
+    };
 
     let mut resp = match grant_type {
         "authorization_code" => {
@@ -2198,7 +2224,12 @@ async fn realm_token_exchange(
     };
 
     // RFC 9449 §9: always return DPoP-Nonce so clients can use it in the next proof.
-    let nonce = state.dpop.current_nonce(now_secs);
+    let nonce = state
+        .identity
+        .get_realm_dpop_nonce_secret(&realm_id)
+        .ok()
+        .map(|s| crate::identity::dpop::current_dpop_nonce(&s, now_secs))
+        .unwrap_or_else(|| state.dpop.current_nonce(now_secs));
     if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
         resp.headers_mut().insert("DPoP-Nonce", val);
     }

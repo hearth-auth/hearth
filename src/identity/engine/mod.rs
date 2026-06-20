@@ -598,6 +598,14 @@ pub struct EmbeddedIdentityEngine {
     /// access token. Hot-path readers call `load()`. Bounded to
     /// [`TOKEN_CLAIMS_CACHE_MAX`].
     token_claims_cache: ArcSwap<HashMap<[u8; 32], Arc<TokenClaims>>>,
+    /// Per-realm DPoP nonce HMAC secrets (AGENT_AUTH.md §13.2).
+    ///
+    /// Lazily populated: first call for a realm loads or generates the secret
+    /// from storage, subsequent calls return the cached value. The underlying
+    /// storage key is `agt:dpop:nonce-secret` in the realm's namespace.
+    ///
+    // INVARIANT: guard released before any I/O or storage call.
+    dpop_nonce_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -933,6 +941,7 @@ impl EmbeddedIdentityEngine {
             sv_store,
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
+            dpop_nonce_cache: Mutex::new(HashMap::new()),
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
@@ -1124,6 +1133,7 @@ impl EmbeddedIdentityEngine {
             sv_store,
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
+            dpop_nonce_cache: Mutex::new(HashMap::new()),
         };
         // Best-effort: log but do not propagate initialization errors so
         // existing test harnesses that pre-seed storage don't break on a
@@ -11556,6 +11566,86 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         self.sv_store.bump_all(realm_id, retention)
     }
+
+    fn check_and_record_dpop_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        now_secs: i64,
+    ) -> Result<(), IdentityError> {
+        use crate::identity::dpop::DPOP_MAX_AGE_SECS;
+
+        let jti_key = keys::encode_dpop_jti(jti);
+        // Reuse the per-realm JTI lock to close the TOCTOU window between
+        // the storage get (replay check) and the storage put (recording).
+        let lock = self.jwt_bearer_jti_lock(realm_id);
+        let _guard = lock.lock().expect("jti lock poisoned");
+
+        if self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DPopProofReplay);
+        }
+
+        let expires_at = now_secs.saturating_add(DPOP_MAX_AGE_SECS);
+        self.storage
+            .put(realm_id, &jti_key, &expires_at.to_le_bytes())
+            .map_err(Self::storage_err)
+    }
+
+    fn get_realm_dpop_nonce_secret(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError> {
+        // Fast path: return cached secret without touching storage.
+        {
+            let cache = self
+                .dpop_nonce_cache
+                .lock()
+                .expect("dpop_nonce_cache poisoned");
+            if let Some(secret) = cache.get(realm_id) {
+                return Ok(*secret);
+            }
+        }
+
+        // Slow path: load from storage or generate a fresh secret.
+        let secret_key = keys::dpop_nonce_secret_key();
+
+        let secret: [u8; 32] = if let Some(stored) = self
+            .storage
+            .get(realm_id, &secret_key)
+            .map_err(Self::storage_err)?
+        {
+            stored
+                .as_slice()
+                .try_into()
+                .map_err(|_| IdentityError::Internal {
+                    reason: format!(
+                        "dpop nonce secret has wrong length {} (expected 32)",
+                        stored.len()
+                    ),
+                })?
+        } else {
+            use ring::rand::SecureRandom as _;
+            let rng = ring::rand::SystemRandom::new();
+            let mut bytes = [0u8; 32];
+            rng.fill(&mut bytes).map_err(|_| IdentityError::Internal {
+                reason: "dpop nonce secret: ring CSPRNG error".to_string(),
+            })?;
+            self.storage
+                .put(realm_id, &secret_key, &bytes)
+                .map_err(Self::storage_err)?;
+            bytes
+        };
+
+        // Cache the loaded/generated secret.
+        let mut cache = self
+            .dpop_nonce_cache
+            .lock()
+            .expect("dpop_nonce_cache poisoned");
+        cache.insert(realm_id.clone(), secret);
+        Ok(secret)
+    }
 }
 
 /// Generates and stores a new OTP then dispatches the SMS.
@@ -16872,5 +16962,141 @@ mod tests {
         let depth = EmbeddedIdentityEngine::act_chain_depth(&root);
         assert_eq!(depth, crate::abuse::MAX_ACT_CHAIN_DEPTH + 1);
         assert!(depth > crate::abuse::MAX_ACT_CHAIN_DEPTH);
+    }
+
+    // ===== DPoP storage tests (HEA-1410) =====
+
+    #[test]
+    fn check_and_record_dpop_jti_rejects_replay() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let now_secs = 1_700_000_000_i64;
+
+        assert!(
+            engine
+                .check_and_record_dpop_jti(&realm, "jti-abc", now_secs)
+                .is_ok(),
+            "first use must succeed"
+        );
+        assert!(
+            matches!(
+                engine.check_and_record_dpop_jti(&realm, "jti-abc", now_secs),
+                Err(crate::identity::error::IdentityError::DPopProofReplay)
+            ),
+            "second use of same jti must be rejected"
+        );
+    }
+
+    #[test]
+    fn check_and_record_dpop_jti_allows_different_jtis() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let now_secs = 1_700_000_000_i64;
+
+        assert!(engine
+            .check_and_record_dpop_jti(&realm, "jti-1", now_secs)
+            .is_ok());
+        assert!(engine
+            .check_and_record_dpop_jti(&realm, "jti-2", now_secs)
+            .is_ok());
+    }
+
+    #[test]
+    fn check_and_record_dpop_jti_isolated_across_realms() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_a = create_test_realm(&engine);
+        let realm_b = create_test_realm(&engine);
+        let now_secs = 1_700_000_000_i64;
+
+        assert!(engine
+            .check_and_record_dpop_jti(&realm_a, "shared-jti", now_secs)
+            .is_ok());
+        assert!(
+            engine
+                .check_and_record_dpop_jti(&realm_b, "shared-jti", now_secs)
+                .is_ok(),
+            "same jti in different realm must be independent"
+        );
+    }
+
+    #[test]
+    fn get_realm_dpop_nonce_secret_is_stable_across_calls() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        let secret1 = engine
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("first call");
+        let secret2 = engine
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("second call");
+        assert_eq!(
+            secret1, secret2,
+            "same realm must always return the same secret"
+        );
+        assert_ne!(secret1, [0u8; 32], "secret must not be the zero key");
+    }
+
+    #[test]
+    fn get_realm_dpop_nonce_secret_differs_across_realms() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_a = create_test_realm(&engine);
+        let realm_b = create_test_realm(&engine);
+
+        let s_a = engine
+            .get_realm_dpop_nonce_secret(&realm_a)
+            .expect("realm_a");
+        let s_b = engine
+            .get_realm_dpop_nonce_secret(&realm_b)
+            .expect("realm_b");
+        assert_ne!(s_a, s_b, "each realm must get an independent nonce secret");
+    }
+
+    #[test]
+    fn get_realm_dpop_nonce_secret_survives_restart() {
+        // Simulate persistence across restarts by rebuilding the engine from
+        // the same storage directory. The second engine instance must load the
+        // same secret that the first one generated.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_cfg = StorageConfig::dev(dir.path().to_path_buf());
+
+        let make_engine = |cfg: StorageConfig, ts: i64| {
+            let storage = Arc::new(EmbeddedStorageEngine::open(cfg).expect("open storage"))
+                as Arc<dyn StorageEngine>;
+            let clock = Arc::new(FakeClock::new(Timestamp::from_micros(ts))) as Arc<dyn Clock>;
+            let audit = Arc::new(EmbeddedAuditEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock),
+            ));
+            EmbeddedIdentityEngine::new(
+                storage,
+                clock,
+                IdentityConfig {
+                    credential: CredentialConfig::fast_for_testing(),
+                    ..IdentityConfig::default()
+                },
+                audit as Arc<dyn AuditEngine>,
+            )
+            .expect("engine")
+        };
+
+        let engine1 = make_engine(storage_cfg.clone(), 1_000_000);
+        let realm = create_test_realm(&engine1);
+        let secret1 = engine1
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("engine1 secret");
+        assert_ne!(secret1, [0u8; 32], "secret must not be zero key");
+        drop(engine1);
+
+        // Re-open the same storage — equivalent to a server restart.
+        let engine2 = make_engine(storage_cfg, 2_000_000);
+        let secret2 = engine2
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("engine2 secret");
+
+        assert_eq!(
+            secret1, secret2,
+            "nonce secret must survive a server restart"
+        );
     }
 }
