@@ -377,3 +377,34 @@ For use in PR reviews and automated CI checks (see `.github/workflows/sdk-confor
 - [ ] `access_token_authorization` mode handling: `Introspection` and `Decision` modes enforce introspect/authorize call before accepting claims; JWKS-only verification is not used for authorization in those modes (Section 3.5)
 - [ ] Ed25519/OKP JWKS key parsing: SDK correctly parses OKP keys (`kty: "OKP"`, `crv: "Ed25519"`) from the JWKS endpoint; does not require a `y` coordinate; does not error on unrecognized `kty` values (Section 2)
 - [ ] Admin SDK entry-point pattern: `AdminClient` is a separate type from `HearthClient`; takes `(base_url, realm_id, access_token)` directly (no OIDC discovery); sends `X-Realm-ID` header on every request; implements minimum CRUD + list for users, realms, clients, roles, groups, and org memberships (Section 12)
+- [ ] Agent auth section present in README: covers agent CRUD (`/v1/agents`), API-key issuance, DPoP proof construction (RFC 9449), RFC 8693 token exchange, AAT issuance/derivation (`/v1/aats`), transaction token lifecycle (`/v1/transaction-tokens`), and draft-tracking owner reference (Section 13)
+
+---
+
+## Section 13 — Agent Authentication Surface (M5)
+
+This section is informational for SDK authors. The agent-auth surface is exposed entirely as REST endpoints; no new SDK type is strictly required beyond the existing `AdminClient` HTTP methods. SDK READMEs MUST document the surface below.
+
+### Required README coverage
+
+Every SDK README MUST include an "Agent Authentication" section covering:
+
+1. **Prerequisites** — `agent_auth.capabilities.identity = true` (plus `advanced = true` for AATs/txn tokens)
+2. **Agent CRUD** — `POST /v1/agents`, `POST /v1/agents/{id}/credentials/keys`
+3. **DPoP-bound tokens (RFC 9449)** — EC P-256 key pair generation, JWK thumbprint (RFC 7638), proof JWT construction (`typ: dpop+jwt`, `cnf.jkt` binding), nonce flow
+4. **RFC 8693 token exchange** — `urn:ietf:params:oauth:grant-type:token-exchange`, `act` claim chain, `on_behalf_of` extension
+5. **AATs** — `POST /v1/aats` (root issuance), `POST /v1/aats/derive` (scope narrowing, child ⊆ parent)
+6. **Transaction tokens** — `POST /v1/transaction-tokens` + `/consume` (single-use, 60s TTL, replay prevention)
+7. **Draft-tracking owner** — name the owner responsible for re-checking IETF draft advancement
+
+### Draft standards (as of 2026-06-21)
+
+| Draft | Pinned version | Hearth feature |
+|-------|---------------|----------------|
+| On-Behalf-Of for Agents | draft-oauth-ai-agents-on-behalf-of-user-02 | `on_behalf_of` claim in RFC 8693 exchange |
+| Attenuating Agent Tokens | draft-niyikiza-oauth-attenuating-agent-tokens | `/v1/aats` AAT engine |
+| Transaction Tokens for Agents | draft-oauth-transaction-tokens-for-agents | `/v1/transaction-tokens` |
+| Agent Identity Protocol | draft-prakash-aip | Agent CRUD, Agent Card |
+| OpenID SSF/CAEP | CAEP draft | DPoP JKT blocklist, risk signals |
+
+**Draft-tracking owner:** @therecluse26 (CTO). When any draft advances to a new revision or RFC, open a follow-up issue on [HEA-1409](/HEA/issues/HEA-1409).

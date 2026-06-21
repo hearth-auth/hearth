@@ -189,6 +189,28 @@ if resp.active {
 
 This SDK is audited against the [Hearth SDK Common Specification](../../docs/specs/SDK.md). CI enforces conformance on every PR via `scripts/check-sdk-conformance.sh`.
 
+---
+
+## Agent Authentication (M5)
+
+Enable `agent_auth.capabilities.identity = true` (and `advanced = true` for AATs + transaction tokens) in `hearth.yaml`. The Rust SDK surfaces the agent-auth REST endpoints via the same `HearthClient` low-level methods.
+
+Key endpoints (all require an admin bearer token):
+
+| Operation | Method | Path |
+|-----------|--------|------|
+| Create agent | `POST` | `/v1/agents` |
+| Issue API key | `POST` | `/v1/agents/{id}/credentials/keys` |
+| Agent Card | `GET` | `/.well-known/agent.json?agent_id=…` |
+| Issue AAT | `POST` | `/v1/aats` |
+| Derive child AAT | `POST` | `/v1/aats/derive` |
+| Issue txn token | `POST` | `/v1/transaction-tokens` |
+| Consume txn token | `POST` | `/v1/transaction-tokens/consume` |
+
+For DPoP proof construction in Rust, use the `ring` crate (`ECDSA_P256_SHA256_FIXED_SIGNING`). The proof JWT header must set `typ: "dpop+jwt"` and include the public key as a JWK. See `tests/dpop.rs` in the main crate for a working example.
+
+For the full surface (DPoP flow, RFC 8693 exchange, AAT lifecycle, draft-tracking owner), see the [TypeScript SDK README](../typescript/README.md#agent-authentication-m5).
+
 ## License
 
 MIT

@@ -503,3 +503,118 @@ mw := hearth.RequirePermission(client, "api.write", hearth.MiddlewareConfig{
 **`TokenAudienceError`** — the token's `aud` claim does not contain the configured audience. Verify `ClientID` matches the audience your authorization server issues.
 
 See [docs/specs/SDK.md](../../docs/specs/SDK.md) Section 5 for the full error taxonomy.
+
+---
+
+## Agent Authentication (M5)
+
+Enable in `hearth.yaml`:
+```yaml
+agent_auth:
+  capabilities:
+    identity: true   # /v1/agents, /.well-known/agent.json
+    advanced: true   # /v1/aats, /v1/transaction-tokens, /v1/spiffe-mappings
+```
+
+### Agent CRUD + API keys
+
+```go
+// Create an agent
+agentBody := map[string]interface{}{
+    "realm_id":     realmID,
+    "display_name": "my-agent",
+    "capabilities": []string{"urn:hearth:capability:docs:read"},
+}
+// POST /v1/agents with admin bearer token
+agent, err := hearthClient.Post(ctx, "/v1/agents", agentBody)
+
+// Issue an API key
+key, err := hearthClient.Post(ctx, fmt.Sprintf("/v1/agents/%s/credentials/keys", agentID),
+    map[string]string{"description": "prod key"})
+// key["api_key"] is the long-lived bearer credential
+```
+
+### DPoP-bound tokens (RFC 9449)
+
+Go's `crypto/ecdsa` and `crypto/elliptic` packages support EC P-256:
+
+```go
+import (
+    "crypto/ecdsa"
+    "crypto/elliptic"
+    "crypto/rand"
+    "crypto/sha256"
+    "encoding/base64"
+    "encoding/json"
+    "math/big"
+)
+
+priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+pub := priv.Public().(*ecdsa.PublicKey)
+
+x := base64.RawURLEncoding.EncodeToString(pub.X.FillBytes(make([]byte, 32)))
+y := base64.RawURLEncoding.EncodeToString(pub.Y.FillBytes(make([]byte, 32)))
+
+// JWK thumbprint (RFC 7638): SHA-256 of canonical JSON with lex-sorted required members
+canonical, _ := json.Marshal(map[string]string{"crv": "P-256", "kty": "EC", "x": x, "y": y})
+sum := sha256.Sum256(canonical)
+thumbprint := base64.RawURLEncoding.EncodeToString(sum[:])
+
+// Build and sign DPoP proof JWT — r||s raw signature (not DER)
+func makeDPopProof(priv *ecdsa.PrivateKey, htm, htu, nonce string) string { ... }
+
+// Use as:  req.Header.Set("DPoP", makeDPopProof(...))
+// Issued AT will contain: cnf: { jkt: "<thumbprint>" }
+```
+
+### RFC 8693 Token Exchange
+
+```go
+vals := url.Values{
+    "grant_type":            {"urn:ietf:params:oauth:grant-type:token-exchange"},
+    "subject_token":         {subjectToken},
+    "subject_token_type":    {"urn:ietf:params:oauth:token-type:access_token"},
+    "requested_token_type":  {"urn:ietf:params:oauth:token-type:access_token"},
+    "scope":                 {"openid"},
+}
+resp, _ := http.PostForm(baseURL+"/token", vals)
+// Exchanged token contains: act.sub = actorClientID (RFC 8693 §4.1)
+```
+
+### AATs and Transaction Tokens (Phase D)
+
+```go
+// Issue root AAT
+rootAat, _ := hearthClient.Post(ctx, "/v1/aats", map[string]interface{}{
+    "realm_id": realmID,
+    "agent_id": agentID,
+    "tools":    []map[string]interface{}{{"tool_name": "read_docs", "constraints": nil}},
+    "expires_in_secs": 3600,
+})
+
+// Derive child AAT (narrowed scope)
+childAat, _ := hearthClient.Post(ctx, "/v1/aats/derive", map[string]interface{}{
+    "realm_id":      realmID,
+    "parent_token":  rootAat["token"],
+    "tools":         []map[string]interface{}{{"tool_name": "read_docs", "constraints": nil}},
+    "expires_in_secs": 300,
+})
+
+// Issue transaction token (agent-a → agent-b, single-use, 60s TTL)
+txn, _ := hearthClient.Post(ctx, "/v1/transaction-tokens", map[string]interface{}{
+    "realm_id":             realmID,
+    "requesting_agent_id":  agentAID,
+    "target_agent_id":      agentBID,
+    "txn_id":               "txn-" + uuid.New().String(),
+})
+
+// Consume (second call returns 409 — replay prevention)
+_, _ = hearthClient.Post(ctx, "/v1/transaction-tokens/consume", map[string]interface{}{
+    "realm_id": realmID,
+    "token":    txn["token"],
+})
+```
+
+### Draft-standard tracking
+
+See the TypeScript SDK README for the full draft tracking table. Draft owner: **@therecluse26** (CTO). Open a follow-up on [HEA-1409](/HEA/issues/HEA-1409) when any draft advances.

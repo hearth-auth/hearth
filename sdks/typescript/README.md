@@ -550,3 +550,131 @@ const allowed = await check(accessToken);
 > whether `permissions` is present in the JWT. The `mode` must always be set explicitly.
 > Absence of a `permissions` claim in `embedded` mode means the user has no permissions, not
 > that the SDK should try a network call.
+
+---
+
+## Agent Authentication (M5)
+
+Hearth supports AI agent identity and authorization via a set of REST endpoints and OAuth extensions. Enable with `agent_auth.capabilities.identity = true` (plus `advanced = true` for AATs and transaction tokens) in your `hearth.yaml`.
+
+### Agent CRUD + API keys
+
+```typescript
+const client = new HearthClient({ baseUrl, realmId });
+
+// Create an agent
+const agent = await client.post("/v1/agents", {
+  realm_id: realmId,
+  display_name: "my-agent",
+  capabilities: ["urn:hearth:capability:docs:read"],
+});
+
+// Issue an API key (long-lived bearer token for the agent)
+const { api_key } = await client.post(`/v1/agents/${agent.agent_id}/credentials/keys`, {
+  description: "production key",
+});
+```
+
+### DPoP-bound tokens (RFC 9449)
+
+Bind an access token to an EC key pair so it cannot be replayed by a token thief:
+
+```typescript
+import { generateKeyPairSync, sign, createHash, randomUUID } from "node:crypto";
+
+const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+const pub = publicKey.export({ format: "jwk" });
+
+// JWK thumbprint per RFC 7638 (lex-sorted required members)
+const canonical = JSON.stringify({ crv: pub.crv, kty: pub.kty, x: pub.x, y: pub.y });
+const thumbprint = createHash("sha256").update(canonical).digest("base64url");
+
+function makeDPopProof(htm: string, htu: string, nonce?: string): string {
+  const header = { alg: "ES256", jwk: { crv: "EC", kty: "EC", x: pub.x, y: pub.y }, typ: "dpop+jwt" };
+  const claims: Record<string, unknown> = {
+    htm, htu, iat: Math.floor(Date.now() / 1000), jti: randomUUID(),
+  };
+  if (nonce) claims.nonce = nonce;
+  const b64u = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+  const input = `${b64u(header)}.${b64u(claims)}`;
+  const sig = sign("SHA256", Buffer.from(input), { key: privateKey, dsaEncoding: "ieee-p1363" });
+  return `${input}.${sig.toString("base64url")}`;
+}
+
+// 1st request — server always returns DPoP-Nonce
+const resp1 = await fetch(tokenUrl, { method: "POST", headers: { DPoP: makeDPopProof("POST", tokenUrl) }, body });
+const nonce = resp1.headers.get("dpop-nonce")!;
+
+// 2nd request — include nonce; receive AT with cnf.jkt binding
+const resp2 = await fetch(tokenUrl, { method: "POST", headers: { DPoP: makeDPopProof("POST", tokenUrl, nonce) }, body });
+const { access_token } = await resp2.json();
+// Decoded AT claims will contain: cnf: { jkt: "<thumbprint>" }
+```
+
+### RFC 8693 Token Exchange (OBO / act chain)
+
+```typescript
+const body = new URLSearchParams({
+  grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+  subject_token: subjectToken,
+  subject_token_type: "urn:ietf:params:oauth:token-type:access_token",
+  requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+  scope: "openid",
+});
+const resp = await fetch(`${baseUrl}/token`, { method: "POST", body, headers: { Authorization: `Basic ${creds}` } });
+const { access_token } = await resp.json();
+// Exchanged token contains: act: { sub: "<actor-client-id>" }  (RFC 8693 §4.1)
+```
+
+### Attenuating Authorization Tokens — AATs (Phase D)
+
+```typescript
+// Issue a root AAT for an agent
+const rootAat = await client.post("/v1/aats", {
+  realm_id: realmId,
+  agent_id: agentId,
+  tools: [
+    { tool_name: "read_docs", constraints: null },
+    { tool_name: "search_files", constraints: null },
+  ],
+  expires_in_secs: 3600,
+});
+
+// Derive a child AAT with narrowed scope (child tools ⊆ parent tools)
+const childAat = await client.post("/v1/aats/derive", {
+  realm_id: realmId,
+  parent_token: rootAat.token,
+  tools: [{ tool_name: "read_docs", constraints: null }],
+  expires_in_secs: 300,
+});
+```
+
+### Transaction tokens (single-use A2A, 60s TTL)
+
+```typescript
+// Issue a single-use transaction token binding agent-a → agent-b
+const txn = await client.post("/v1/transaction-tokens", {
+  realm_id: realmId,
+  requesting_agent_id: agentAId,
+  target_agent_id: agentBId,
+  txn_id: `txn-${crypto.randomUUID()}`,
+});
+
+// Consume (single-use — second call returns 409)
+await client.post("/v1/transaction-tokens/consume", {
+  realm_id: realmId,
+  token: txn.token,
+});
+```
+
+### Draft-standard tracking
+
+The following IETF drafts underpin the agent-auth surface. The designated owner for re-checking draft advancement is **[@therecluse26](https://github.com/therecluse26)** (CTO). When a draft advances to RFC or a new revision ships, open a follow-up issue on [HEA-1409](/HEA/issues/HEA-1409).
+
+| Draft | Hearth feature | Check when |
+|-------|----------------|-----------|
+| `draft-oauth-ai-agents-on-behalf-of-user-02` | OBO `on_behalf_of` claim | New revision or RFC publication |
+| `draft-niyikiza-oauth-attenuating-agent-tokens` | AAT engine (`/v1/aats`) | New revision or RFC publication |
+| `draft-oauth-transaction-tokens-for-agents` | Transaction tokens (`/v1/transaction-tokens`) | New revision or RFC publication |
+| `draft-prakash-aip` | Agent identity model, Agent Card | New revision or RFC publication |
+| OpenID SSF/CAEP | DPoP JKT blocklist + risk signals | When CAEP SSF spec stabilizes |
