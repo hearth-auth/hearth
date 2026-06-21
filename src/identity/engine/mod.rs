@@ -258,6 +258,11 @@ use crate::storage::StorageEngine;
 
 pub(super) mod approval;
 pub(super) mod oauth;
+// Phase D engine modules
+pub(super) mod aat;
+pub(super) mod cross_realm;
+pub(super) mod spiffe;
+pub(super) mod txn;
 
 /// Context supplied to [`IdentityEngine::issue_tokens_with_context`] to
 /// influence which claims are embedded in the issued token pair.
@@ -11990,7 +11995,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let subject_remaining = subject_claims.exp - now_secs;
 
         // 3. Validate actor_token if present (B.5 OBO).
-        let actor_sub = if let Some(ref actor_jwt) = request.actor_token {
+        // Returns (actor_sub, actor_scope_owned) where actor_scope_owned is the space-separated
+        // scope string the actor is permitted to hold (RFC 8693 §4.4).
+        let (actor_sub, actor_scope_owned) = if let Some(ref actor_jwt) = request.actor_token {
             // Lightweight header+payload decode; jti replay prevents token reuse.
             let actor_json = jwt_payload_json(actor_jwt).map_err(|reason| {
                 IdentityError::TokenExchangeRejected {
@@ -12021,16 +12028,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 });
             }
             self.check_and_record_actor_jti(realm_id, actor_jti, now_secs, actor_exp)?;
-            actor_json
+            let sub = actor_json
                 .get("sub")
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
                 .ok_or_else(|| IdentityError::TokenExchangeRejected {
                     reason: "actor_token missing sub".to_string(),
                     oauth_error: "invalid_grant",
-                })?
+                })?;
+            // Extract scope from the actor's JWT — this is the ceiling the actor may delegate.
+            let scope = actor_json
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            (sub, scope)
         } else {
-            request.client_id.as_uuid().to_string()
+            // No actor_token: the client is acting on its own behalf (no delegation chain).
+            // Preserve the original behavior — actor ceiling matches the subject's own scope
+            // so this path doesn't further restrict scope beyond subject ∩ requested.
+            let actor_sub = request.client_id.as_uuid().to_string();
+            let actor_scope = subject_claims.scope.clone().unwrap_or_default();
+            (actor_sub, actor_scope)
         };
 
         // 4. Delegation depth check.
@@ -12049,11 +12068,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
-        // 5. Scope intersection.
+        // 5. Scope intersection (RFC 8693 §4.4: effective ⊆ actor_scope ∩ subject_scope).
         let subject_scope = subject_claims.scope.as_deref().unwrap_or("");
-        // actor_permitted defaults to subject_scope (full RBAC lookup is Phase B enhancement).
         let effective_scope =
-            intersect_three(subject_scope, subject_scope, request.scope.as_deref());
+            intersect_three(subject_scope, &actor_scope_owned, request.scope.as_deref());
         if effective_scope.is_empty() {
             return Err(IdentityError::EmptyScopeIntersection);
         }
@@ -12207,7 +12225,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &crate::identity::types::CreateApprovalRequestInput,
     ) -> Result<crate::identity::types::ApprovalRequest, IdentityError> {
-        self.create_approval_request_inner(realm_id, request)
+        let approval = self.create_approval_request_inner(realm_id, request)?;
+        // C.5: attempt immediate webhook delivery; outbox entry is already
+        // WAL-durable so failures are safe (recovery scan will retry).
+        self.notify_approval_webhook_inner(realm_id, &approval);
+        Ok(approval)
     }
     fn get_approval_request(
         &self,
@@ -12241,6 +12263,140 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     ) -> Result<crate::identity::types::Page<crate::identity::types::ApprovalRequest>, IdentityError>
     {
         self.list_approval_requests_inner(realm_id, status_filter, cursor, limit)
+    }
+
+    fn validate_capability_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        tool_name: &str,
+        action: &str,
+    ) -> Result<crate::core::AgentId, IdentityError> {
+        self.validate_capability_token_inner(realm_id, token, tool_name, action)
+    }
+
+    // ── Phase D.1: AATs ─────────────────────────────────────────────────────
+
+    fn issue_aat(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::IssueAatRequest,
+    ) -> Result<crate::identity::types::AatResponse, IdentityError> {
+        self.issue_aat_inner(realm_id, request)
+    }
+
+    fn derive_aat(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::DeriveAatRequest,
+    ) -> Result<crate::identity::types::AatResponse, IdentityError> {
+        self.derive_aat_inner(realm_id, request)
+    }
+
+    fn validate_aat(
+        &self,
+        realm_id: &RealmId,
+        aat: &str,
+    ) -> Result<crate::identity::types::AatClaims, IdentityError> {
+        self.parse_and_validate_aat(realm_id, aat)
+    }
+
+    fn revoke_aat(&self, realm_id: &RealmId, jti: &str) -> Result<(), IdentityError> {
+        self.revoke_aat_inner(realm_id, jti)
+    }
+
+    // ── Phase D.3: Transaction Tokens ───────────────────────────────────────
+
+    fn issue_transaction_token(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::CreateTransactionTokenRequest,
+    ) -> Result<crate::identity::types::TransactionTokenResponse, IdentityError> {
+        self.issue_transaction_token_inner(realm_id, request)
+    }
+
+    fn consume_transaction_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+    ) -> Result<crate::identity::types::TransactionTokenClaims, IdentityError> {
+        self.consume_transaction_token_inner(realm_id, token)
+    }
+
+    // ── Phase D.4: Cross-Realm Trust Policies ───────────────────────────────
+
+    fn create_cross_realm_policy(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::CreateCrossRealmPolicyRequest,
+    ) -> Result<crate::identity::types::CrossRealmTrustPolicy, IdentityError> {
+        self.create_cross_realm_policy_inner(realm_id, request)
+    }
+
+    fn get_cross_realm_policy(
+        &self,
+        realm_id: &RealmId,
+        policy_id: &str,
+    ) -> Result<Option<crate::identity::types::CrossRealmTrustPolicy>, IdentityError> {
+        self.get_cross_realm_policy_inner(realm_id, policy_id)
+    }
+
+    fn list_cross_realm_policies(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::types::CrossRealmTrustPolicy>, IdentityError> {
+        self.list_cross_realm_policies_inner(realm_id)
+    }
+
+    fn delete_cross_realm_policy(
+        &self,
+        realm_id: &RealmId,
+        policy_id: &str,
+    ) -> Result<(), IdentityError> {
+        self.delete_cross_realm_policy_inner(realm_id, policy_id)
+    }
+
+    fn check_cross_realm_policy(
+        &self,
+        target_realm: &RealmId,
+        source_realm: &RealmId,
+        capability: &str,
+    ) -> Result<bool, IdentityError> {
+        self.check_cross_realm_policy_inner(target_realm, source_realm, capability)
+    }
+
+    // ── Phase D.7: SPIFFE / Workload Identity ───────────────────────────────
+
+    fn register_spiffe_mapping(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::RegisterSpiffeIdRequest,
+    ) -> Result<crate::identity::types::SpiffeIdentityMapping, IdentityError> {
+        self.register_spiffe_mapping_inner(realm_id, request)
+    }
+
+    fn lookup_agent_by_spiffe_id(
+        &self,
+        realm_id: &RealmId,
+        spiffe_id: &str,
+    ) -> Result<Option<AgentId>, IdentityError> {
+        self.lookup_agent_by_spiffe_id_inner(realm_id, spiffe_id)
+    }
+
+    fn delete_spiffe_mapping(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<(), IdentityError> {
+        self.delete_spiffe_mapping_inner(realm_id, agent_id)
+    }
+
+    fn validate_spiffe_svid(
+        &self,
+        realm_id: &RealmId,
+        der_cert: &[u8],
+    ) -> Result<AgentId, IdentityError> {
+        self.validate_spiffe_svid_inner(realm_id, der_cert)
     }
 }
 

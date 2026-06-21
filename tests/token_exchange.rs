@@ -104,7 +104,10 @@ fn build_mock_jwt(sub: &str, aud: &str, scope: &str, exp: i64, iat: i64) -> Stri
 }
 
 /// Build a mock actor-token JWT (agent assertion).
-fn build_actor_jwt(sub: &str, aud: &str, exp: i64, iat: i64, jti: &str) -> String {
+///
+/// `scope` is included as the `scope` claim when provided. RFC 8693 §4.4 enforcement
+/// requires actors to carry a scope claim — the token exchange engine uses it as the ceiling.
+fn build_actor_jwt(sub: &str, aud: &str, exp: i64, iat: i64, jti: &str, scope: &str) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
 
@@ -116,6 +119,7 @@ fn build_actor_jwt(sub: &str, aud: &str, exp: i64, iat: i64, jti: &str) -> Strin
         "exp": exp,
         "iat": iat,
         "jti": jti,
+        "scope": scope,
     });
     let payload = URL_SAFE_NO_PAD.encode(payload_json.to_string());
     let sig = URL_SAFE_NO_PAD.encode("fakesig");
@@ -427,7 +431,14 @@ async fn token_exchange_produces_act_claim() {
 
     let actor_jti = uuid::Uuid::new_v4().to_string();
     let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let actor_token = build_actor_jwt(&actor_sub, "hearth", now + 60, now, &actor_jti);
+    let actor_token = build_actor_jwt(
+        &actor_sub,
+        "hearth",
+        now + 60,
+        now,
+        &actor_jti,
+        "mcp:tools:invoke mcp:resources:read",
+    );
 
     let request = Rfc8693Request {
         client_id,
@@ -489,6 +500,7 @@ async fn token_exchange_actor_jti_replay_rejected() {
             now + 60,
             now,
             &actor_jti,
+            "mcp:tools:invoke",
         )),
         actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
         requested_token_type: None,
@@ -586,6 +598,7 @@ async fn token_exchange_delegation_depth_enforced() {
             now + 60,
             now,
             &uuid::Uuid::new_v4().to_string(),
+            "mcp:tools:invoke",
         )),
         actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
         requested_token_type: None,
@@ -710,6 +723,7 @@ async fn token_exchange_nested_act_chain_two_hops() {
             now + 60,
             now,
             &uuid::Uuid::new_v4().to_string(),
+            "mcp:tools:invoke",
         )),
         actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
         requested_token_type: None,
@@ -759,4 +773,142 @@ fn property_scope_only_narrows() {
             );
         }
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § RFC 8693 §4.4 Actor scope enforcement (HEA-1429)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Actor with a narrow scope must not obtain broader scope from the subject.
+///
+/// Subject has `mcp:tools:invoke mcp:tools:list`; actor only holds `mcp:tools:list`.
+/// The resulting token MUST contain only `mcp:tools:list`.
+#[tokio::test]
+async fn token_exchange_actor_scope_limits_result() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("test setup failed");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let owner_id = make_user(identity, &realm_id);
+    let agent_id = make_agent(identity, &realm_id, &owner_id, 3);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("test setup failed")
+        .as_secs() as i64;
+
+    // Subject holds two scopes; actor only holds the narrower one.
+    let subject_token = build_mock_jwt(
+        &user_id.as_uuid().to_string(),
+        "hearth",
+        "mcp:tools:invoke mcp:tools:list",
+        now + 900,
+        now,
+    );
+
+    let actor_sub = format!("agt_{}", agent_id.as_uuid());
+    let actor_token = build_actor_jwt(
+        &actor_sub,
+        "hearth",
+        now + 60,
+        now,
+        &uuid::Uuid::new_v4().to_string(),
+        "mcp:tools:list", // actor only has list, not invoke
+    );
+
+    let request = Rfc8693Request {
+        client_id,
+        subject_token,
+        subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+        actor_token: Some(actor_token),
+        actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+        requested_token_type: None,
+        scope: None, // no narrowing requested — actor scope is the only constraint
+        resource: None,
+        audience: None,
+        dpop_jkt: None,
+    };
+
+    let response = identity
+        .rfc8693_token_exchange(&realm_id, &request)
+        .expect("exchange should succeed — actor and subject share mcp:tools:list");
+
+    assert_eq!(
+        response.scope, "mcp:tools:list",
+        "result scope must be limited to actor's scope (mcp:tools:list), not subject's full scope"
+    );
+
+    let claims = decode_claims_unverified(&response.access_token).expect("decode token");
+    let scope_claim = claims.scope.expect("issued token must carry scope claim");
+    assert!(
+        !scope_claim.contains("mcp:tools:invoke"),
+        "issued token must NOT contain mcp:tools:invoke — actor never held that scope"
+    );
+}
+
+/// Zero-scope actor cannot escalate to subject's high-privilege scopes.
+///
+/// An actor presenting a token with an empty scope must be rejected with
+/// `EmptyScopeIntersection` even if the subject holds highly privileged scopes.
+#[tokio::test]
+async fn token_exchange_zero_scope_actor_rejected() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("test setup failed");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let owner_id = make_user(identity, &realm_id);
+    let agent_id = make_agent(identity, &realm_id, &owner_id, 3);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("test setup failed")
+        .as_secs() as i64;
+
+    // Subject holds a highly privileged scope.
+    let subject_token = build_mock_jwt(
+        &user_id.as_uuid().to_string(),
+        "hearth",
+        "tool:delete-db:invoke",
+        now + 900,
+        now,
+    );
+
+    // Actor presents itself with an empty scope — zero permissions.
+    let actor_sub = format!("agt_{}", agent_id.as_uuid());
+    let actor_token = build_actor_jwt(
+        &actor_sub,
+        "hearth",
+        now + 60,
+        now,
+        &uuid::Uuid::new_v4().to_string(),
+        "", // zero scope
+    );
+
+    let request = Rfc8693Request {
+        client_id,
+        subject_token,
+        subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+        actor_token: Some(actor_token),
+        actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+        requested_token_type: None,
+        scope: Some("tool:delete-db:invoke".to_string()),
+        resource: None,
+        audience: None,
+        dpop_jkt: None,
+    };
+
+    let err = identity
+        .rfc8693_token_exchange(&realm_id, &request)
+        .expect_err("zero-scope actor must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::EmptyScopeIntersection),
+        "expected EmptyScopeIntersection for zero-scope actor, got: {err}"
+    );
 }

@@ -229,3 +229,111 @@ fn scope_intersection_empty_actor_yields_empty() {
         "empty actor must produce empty intersection"
     );
 }
+
+// ─── C. Adversarial: server-side enforcement (HEA-1428) ──────────────────────
+
+/// An agent with `tool.delete_file.invoke_with_approval` permission that calls
+/// `POST /v1/tools/invoke` WITHOUT a capability token must receive 403.
+///
+/// This is the regression test for the "zero production callers" bypass:
+/// the server must evaluate access and demand a capability token — it cannot
+/// rely on the MCP client to self-enforce.
+#[tokio::test]
+async fn agent_skips_approval_flow_direct_invoke_returns_403() {
+    use hearth::identity::{CreateRealmRequest, CreateUserRequest, SessionContext};
+    use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
+
+    let h = common::TestHarness::server_with_agent_approval()
+        .await
+        .expect("harness");
+    let base = h.base_url().expect("server mode").to_string();
+
+    // 1. Set up realm + RBAC.
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("tool-adv-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm")
+        .id()
+        .clone();
+    h.rbac().seed_realm(&realm).expect("seed realm");
+
+    // 2. Create a user and a role with invoke_with_approval permission.
+    let user = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: format!("agent-adversarial-{}@test.example", uuid::Uuid::new_v4()),
+                display_name: "Adversarial Agent".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create user");
+
+    let perm = Permission::new("tool.delete_file.invoke_with_approval").expect("valid permission");
+    let role = h
+        .rbac()
+        .create_role(
+            &realm,
+            &CreateRoleRequest {
+                name: format!("tool-perm-{}", uuid::Uuid::new_v4()),
+                permissions: vec![perm],
+                ..Default::default()
+            },
+        )
+        .expect("create role");
+
+    h.rbac()
+        .assign_role(
+            &realm,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign role");
+
+    // 3. Issue a bearer token for the user.
+    let session = h
+        .identity()
+        .create_session(&realm, user.id(), &SessionContext::default())
+        .expect("create session");
+    let tokens = h
+        .identity()
+        .issue_tokens(&realm, user.id(), session.id())
+        .expect("issue tokens");
+    let bearer_token = tokens.access_token().to_string();
+    let realm_id_str = realm.as_uuid().to_string();
+
+    // 4. Call POST /v1/tools/invoke WITHOUT a capability token — must return 403.
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/tools/invoke"))
+        .header("Authorization", format!("Bearer {bearer_token}"))
+        .header("X-Realm-ID", &realm_id_str)
+        .json(&serde_json::json!({"tool": "delete_file", "action": "invoke"}))
+        .send()
+        .await
+        .expect("request");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "agent without capability token must receive 403 — capability bypass not allowed"
+    );
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    // Error code must indicate approval is required, not just a generic deny.
+    let error = body
+        .get("error")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(
+        error.contains("HEARTH_TOOL_APPROVAL_REQUIRED") || error.contains("tool_approval_required"),
+        "error must signal approval required, got: {error}"
+    );
+}

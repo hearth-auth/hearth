@@ -7,6 +7,15 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **RFC 8693 actor scope enforcement** — token exchange now enforces RFC 8693 §4.4:
+  `effective_scope ⊆ actor_scope ∩ subject_scope`. Previously, `actor_scope` defaulted to
+  `subject_scope`, allowing a zero-permission actor to obtain the subject's full privilege set
+  via a delegated token. The actor's scope ceiling is now taken from the `scope` claim in the
+  actor's JWT; actors with no scope claim or empty scope produce an `EmptyScopeIntersection`
+  rejection. (HEA-1429 / HEA-1427 F-2)
+
 ### Added
 
 - **Tool-level permission grammar (agent-auth Phase C)** — RBAC roles can now include
