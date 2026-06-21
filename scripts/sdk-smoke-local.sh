@@ -34,10 +34,12 @@ HEARTH_BASE_URL="http://127.0.0.1:${HEARTH_PORT}"
 echo "==> Building hearth (debug)"
 cd "$REPO_ROOT"
 PROTOC="${PROTOC:-protoc}" cargo build 2>&1
+HEARTH_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+HEARTH_BIN="$HEARTH_TARGET_DIR/debug/hearth"
 
 # ── 2. Start hearth --dev ─────────────────────────────────────────────────────
 echo "==> Starting hearth serve --dev on port ${HEARTH_PORT}"
-"$REPO_ROOT/target/debug/hearth" serve --dev --port "$HEARTH_PORT" &
+"$HEARTH_BIN" serve --dev --port "$HEARTH_PORT" &
 HEARTH_PID=$!
 
 echo "==> Waiting for /health"
