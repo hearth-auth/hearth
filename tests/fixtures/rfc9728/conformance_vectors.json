@@ -1,0 +1,55 @@
+{
+  "description": "RFC 9728 OAuth 2.0 Protected Resource Metadata — conformance test vectors.",
+  "spec_refs": [
+    "RFC 9728 (OAuth 2.0 Protected Resource Metadata)"
+  ],
+  "discovery_path": "/.well-known/oauth-protected-resource",
+  "required_fields": [
+    {
+      "field": "resource",
+      "type": "string",
+      "description": "The protected resource's resource server URI. MUST be an HTTPS URI in production.",
+      "spec": "RFC 9728 §3"
+    },
+    {
+      "field": "authorization_servers",
+      "type": "array",
+      "description": "Array of absolute URIs of the authorization servers protecting this resource.",
+      "spec": "RFC 9728 §3"
+    }
+  ],
+  "recommended_fields": [
+    {
+      "field": "jwks_uri",
+      "type": "string",
+      "description": "URL of the resource server's JSON Web Key Set (RFC 7517) for token verification.",
+      "spec": "RFC 9728 §3"
+    },
+    {
+      "field": "scopes_supported",
+      "type": "array",
+      "description": "Array of scope strings the resource server understands.",
+      "spec": "RFC 9728 §3"
+    },
+    {
+      "field": "bearer_methods_supported",
+      "type": "array",
+      "description": "Bearer token delivery methods supported. Valid values: header, form, query.",
+      "spec": "RFC 9728 §3"
+    },
+    {
+      "field": "resource_signing_alg_values_supported",
+      "type": "array",
+      "description": "JWS signing algorithms supported by the resource server for token validation.",
+      "spec": "RFC 9728 §3"
+    }
+  ],
+  "mcp_scopes_required_in_response": [
+    "mcp:tools:invoke",
+    "mcp:tools:list",
+    "mcp:resources:read",
+    "mcp:resources:write",
+    "mcp:prompts:read"
+  ],
+  "bearer_methods_valid_values": ["header", "form", "query"]
+}

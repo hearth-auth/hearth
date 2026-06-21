@@ -30,6 +30,7 @@ pub mod session_version;
 pub mod sessions;
 pub mod sms;
 pub mod tokens;
+pub mod tool_permissions;
 pub(crate) mod totp;
 mod types;
 mod validation;
@@ -86,9 +87,11 @@ pub use types::{
     WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
-    Agent, AgentCredential, AgentCredentialKind, AgentOwner, AgentStatus, CreateAgentApiKeyRequest,
-    CreateAgentApiKeyResponse, CreateAgentRequest, ListAgentsQuery, PlaintextApiKey,
-    ProtectedResource, RegisterProtectedResourceRequest, Rfc8693Request, Rfc8693Response,
+    Agent, AgentCredential, AgentCredentialKind, AgentOwner, AgentStatus, ApprovalRequest,
+    ApprovalRequestResponse, ApprovalRequestStatus, CapabilityTokenInfo, CreateAgentApiKeyRequest,
+    CreateAgentApiKeyResponse, CreateAgentRequest, CreateApprovalRequestInput,
+    DelegationGrantEntry, ListAgentsQuery, PlaintextApiKey, ProtectedResource,
+    RegisterProtectedResourceRequest, Rfc8693Request, Rfc8693Response, StoredDelegationGrant,
     UpdateAgentRequest, UpdateProtectedResourceRequest,
 };
 pub use validation::fuzz_validate_redirect_uri;
@@ -2269,4 +2272,52 @@ pub trait IdentityEngine: Send + Sync {
         now_secs: i64,
         exp_secs: i64,
     ) -> Result<(), IdentityError>;
+
+    /// Lists active (non-revoked, non-expired) RFC 8693 delegation grants for
+    /// the given subject user. Used by `GET /ui/consent/delegations`.
+    fn list_delegation_grants(
+        &self,
+        realm_id: &RealmId,
+        user_sub: &str,
+    ) -> Result<Vec<types::DelegationGrantEntry>, IdentityError>;
+
+    /// Revokes the delegation grant with the given `delegation_id`, if it
+    /// belongs to `user_sub`. Immediately adds the bound JTI to the revoked-JTI
+    /// blocklist so the issued access token becomes invalid.
+    fn revoke_delegation_grant(
+        &self,
+        realm_id: &RealmId,
+        delegation_id: &str,
+        user_sub: &str,
+    ) -> Result<(), IdentityError>;
+
+    fn create_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request: &types::CreateApprovalRequestInput,
+    ) -> Result<types::ApprovalRequest, IdentityError>;
+    fn get_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+    ) -> Result<types::ApprovalRequest, IdentityError>;
+    fn approve_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+        capability_ttl_secs: Option<i64>,
+    ) -> Result<types::ApprovalRequestResponse, IdentityError>;
+    fn deny_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+        reason: Option<String>,
+    ) -> Result<types::ApprovalRequestResponse, IdentityError>;
+    fn list_approval_requests(
+        &self,
+        realm_id: &RealmId,
+        status_filter: Option<types::ApprovalRequestStatus>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<types::Page<types::ApprovalRequest>, IdentityError>;
 }

@@ -678,7 +678,17 @@ pub(crate) fn identity_error_to_response(
         IdentityError::DelegationDepthExceeded { .. } => (StatusCode::BAD_REQUEST, "invalid_grant"),
         IdentityError::EmptyScopeIntersection => (StatusCode::BAD_REQUEST, "invalid_scope"),
         IdentityError::ActorTokenReplayed => (StatusCode::BAD_REQUEST, "invalid_grant"),
-        IdentityError::DelegationGrantNotFound => (StatusCode::BAD_REQUEST, "invalid_grant"),
+        IdentityError::DelegationGrantNotFound => (StatusCode::NOT_FOUND, "not_found"),
+        // Phase C
+        IdentityError::ToolAccessDenied { .. } => (StatusCode::FORBIDDEN, "tool_access_denied"),
+        IdentityError::ToolApprovalRequired { .. } => {
+            (StatusCode::FORBIDDEN, "tool_approval_required")
+        }
+        IdentityError::ApprovalRequestNotFound => (StatusCode::NOT_FOUND, "not_found"),
+        IdentityError::ApprovalRequestNotPending { .. } => {
+            (StatusCode::CONFLICT, "approval_request_not_pending")
+        }
+        IdentityError::ApprovalRequestExpired => (StatusCode::GONE, "approval_request_expired"),
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);

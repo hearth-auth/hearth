@@ -53,6 +53,7 @@ pub mod account_consents;
 pub mod account_linked;
 pub mod admin;
 pub mod auth;
+pub mod consent_delegations;
 pub mod federation;
 pub mod handlers;
 pub(crate) mod handlers_common;
@@ -960,6 +961,15 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/account/applications/{client_id}/revoke",
             axum::routing::post(account_consents::revoke_consent),
+        )
+        // --- Self-service agent-delegation consent management ---
+        .route(
+            "/consent/delegations",
+            axum::routing::get(consent_delegations::delegations_index),
+        )
+        .route(
+            "/consent/delegations/{delegation_id}/revoke",
+            axum::routing::post(consent_delegations::revoke_delegation),
         )
         // --- Self-service federation management ---
         .route(

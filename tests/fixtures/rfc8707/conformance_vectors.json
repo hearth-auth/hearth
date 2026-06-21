@@ -1,0 +1,39 @@
+{
+  "description": "RFC 8707 Resource Indicators for OAuth 2.0 — conformance test vectors.",
+  "spec_refs": [
+    "RFC 8707 (Resource Indicators for OAuth 2.0)"
+  ],
+  "resource_parameter": {
+    "name": "resource",
+    "format": "absolute URI without fragment component",
+    "repeatable": true,
+    "note": "If present, the aud claim in the issued token MUST include the resource URI"
+  },
+  "aud_binding_vectors": [
+    {
+      "id": "RES-01",
+      "description": "Authorization with resource indicator → aud is [base_audience, resource_uri]",
+      "spec": "RFC 8707 §2",
+      "input": { "resource": "https://api.example.com" },
+      "expected_aud_type": "multi",
+      "expected_aud_contains": ["https://api.example.com"]
+    },
+    {
+      "id": "RES-02",
+      "description": "Authorization without resource indicator → aud is a single base string",
+      "spec": "RFC 8707 §2",
+      "input": { "resource": null },
+      "expected_aud_type": "single",
+      "expected_aud_contains": []
+    },
+    {
+      "id": "RES-03",
+      "description": "Resource indicator preserved through token refresh rotation",
+      "spec": "RFC 8707 §2 — resource binding MUST persist across token refresh",
+      "input": { "resource": "https://mcp.example.com" },
+      "expected_aud_type": "multi",
+      "expected_aud_contains": ["https://mcp.example.com"],
+      "verify_after_refresh": true
+    }
+  ]
+}

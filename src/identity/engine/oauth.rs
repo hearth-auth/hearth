@@ -25,8 +25,9 @@ use crate::identity::oidc::{
 };
 use crate::identity::tokens::{self, Audience, LogoutTokenClaims, TokenClaims};
 use crate::identity::types::{
-    BulkResult, ConsentListEntry, ConsentRecord, CreateUserRequest, Page,
-    PendingAuthorizationRequest, SessionContext, UpdateUserRequest, User, UserStatus,
+    BulkResult, ConsentListEntry, ConsentRecord, CreateUserRequest, DelegationGrantEntry, Page,
+    PendingAuthorizationRequest, SessionContext, StoredDelegationGrant, UpdateUserRequest, User,
+    UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::IdentityEngine;
@@ -3799,5 +3800,128 @@ impl EmbeddedIdentityEngine {
             post_logout_redirect_uri,
             state: request.state.clone(),
         })
+    }
+
+    pub(super) fn store_delegation_grant_inner(
+        &self,
+        realm_id: &RealmId,
+        grant: &StoredDelegationGrant,
+    ) -> Result<(), IdentityError> {
+        let primary_key = keys::encode_delegation_grant(&grant.delegation_id);
+        let index_key =
+            keys::encode_delegation_grant_user_index(&grant.user_sub, &grant.delegation_id);
+        let bytes = serde_json::to_vec(grant).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(realm_id, &primary_key, &bytes)
+            .map_err(Self::storage_err)?;
+        self.storage
+            .put(realm_id, &index_key, b"1")
+            .map_err(Self::storage_err)?;
+        Ok(())
+    }
+
+    pub(super) fn list_delegation_grants_inner(
+        &self,
+        realm_id: &RealmId,
+        user_sub: &str,
+    ) -> Result<Vec<DelegationGrantEntry>, IdentityError> {
+        let prefix = keys::delegation_grant_user_prefix(user_sub);
+        let end = keys::prefix_end(&prefix);
+        let index_entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let now_micros = self.clock.now().as_micros();
+        let mut out = Vec::with_capacity(index_entries.len());
+        for entry in &index_entries {
+            let key_str = String::from_utf8_lossy(&entry.key);
+            let delegation_id = match key_str.rsplit(':').next() {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+            let primary_key = keys::encode_delegation_grant(&delegation_id);
+            let Some(bytes) = self
+                .storage
+                .get(realm_id, &primary_key)
+                .map_err(Self::storage_err)?
+            else {
+                continue;
+            };
+            let grant: StoredDelegationGrant =
+                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if grant.revoked || grant.expires_at.as_micros() <= now_micros {
+                continue;
+            }
+            out.push(DelegationGrantEntry {
+                delegation_id: grant.delegation_id,
+                actor_sub: grant.actor_sub,
+                granted_scopes: grant
+                    .granted_scope
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect(),
+                created_at: grant.created_at,
+                expires_at: grant.expires_at,
+            });
+        }
+        Ok(out)
+    }
+
+    pub(super) fn revoke_delegation_grant_inner(
+        &self,
+        realm_id: &RealmId,
+        delegation_id: &str,
+        user_sub: &str,
+    ) -> Result<(), IdentityError> {
+        let primary_key = keys::encode_delegation_grant(delegation_id);
+        let Some(bytes) = self
+            .storage
+            .get(realm_id, &primary_key)
+            .map_err(Self::storage_err)?
+        else {
+            return Err(IdentityError::DelegationGrantNotFound);
+        };
+        let mut grant: StoredDelegationGrant =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        if grant.user_sub != user_sub {
+            return Err(IdentityError::DelegationGrantNotFound);
+        }
+        if grant.revoked {
+            return Ok(());
+        }
+        grant.revoked = true;
+        let updated_bytes =
+            serde_json::to_vec(&grant).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &primary_key, &updated_bytes)
+            .map_err(Self::storage_err)?;
+        let jti_key = keys::encode_revoked_jti(&grant.token_jti);
+        let exp_secs = grant.expires_at.as_micros() / 1_000_000;
+        self.storage
+            .put(realm_id, &jti_key, &exp_secs.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        let _ = self.record_audit(
+            realm_id,
+            Some(&AuditContext {
+                actor: Actor::System,
+                metadata: Some(serde_json::json!({
+                    "delegation_id": delegation_id,
+                    "actor_sub": grant.actor_sub,
+                    "via": "self",
+                })),
+            }),
+            AuditAction::AgentTokenRevoked,
+            "delegation",
+            delegation_id,
+        );
+        Ok(())
     }
 }

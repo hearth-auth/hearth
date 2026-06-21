@@ -215,6 +215,8 @@ pub enum IdentityError {
     ConsentScopeNotRequested,
     /// No consent record exists for the requested `(user, client)` pair.
     ConsentNotFound,
+    /// No delegation grant record exists for the given `delegation_id` and user.
+    DelegationGrantNotFound,
     /// The referenced external IdP connector is not registered in this realm.
     FederationUnknownConnector,
     /// The federation `state` parameter returned by the upstream IdP does not
@@ -405,6 +407,19 @@ pub enum IdentityError {
     EmptyScopeIntersection,
     /// An actor token `jti` was replayed (B.5 replay prevention).
     ActorTokenReplayed,
+
+    // Phase C
+    ToolAccessDenied {
+        tool: String,
+    },
+    ToolApprovalRequired {
+        tool: String,
+    },
+    ApprovalRequestNotFound,
+    ApprovalRequestNotPending {
+        current_status: String,
+    },
+    ApprovalRequestExpired,
 }
 
 impl From<SamlError> for IdentityError {

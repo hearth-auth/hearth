@@ -707,3 +707,98 @@ pub struct Rfc8693Response {
     /// Effective scopes in the issued token (may be narrower than requested).
     pub scope: String,
 }
+
+/// Persisted record of an RFC 8693 token-exchange delegation.
+///
+/// Created when `rfc8693_token_exchange` issues a delegated access token.
+/// Stored so the user can list active delegations and revoke them via
+/// `GET /ui/consent/delegations`. Revoking adds `token_jti` to the
+/// JTI blocklist, immediately invalidating the issued access token.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredDelegationGrant {
+    /// Unique ID for this delegation record (UUID string).
+    pub delegation_id: String,
+    /// `sub` claim of the actor (agent identifier, e.g. `"agt_xxxx"`).
+    pub actor_sub: String,
+    /// `sub` claim of the subject (the user who authorized the delegation).
+    pub user_sub: String,
+    /// Effective scope string as issued.
+    pub granted_scope: String,
+    /// When this delegation was created.
+    pub created_at: Timestamp,
+    /// When the issued access token expires.
+    pub expires_at: Timestamp,
+    /// Whether the user has explicitly revoked this delegation.
+    pub revoked: bool,
+    /// JTI of the issued delegated access token, for immediate revocation.
+    pub token_jti: String,
+}
+
+/// Listing entry returned from [`IdentityEngine::list_delegation_grants`].
+#[derive(Clone, Debug)]
+pub struct DelegationGrantEntry {
+    /// Unique ID of this delegation record.
+    pub delegation_id: String,
+    /// Actor identifier (agent or client).
+    pub actor_sub: String,
+    /// Granted scopes as individual tokens.
+    pub granted_scopes: Vec<String>,
+    /// When this delegation was created.
+    pub created_at: Timestamp,
+    /// When the delegation expires.
+    pub expires_at: Timestamp,
+}
+
+// Approval Request Lifecycle (AGENT_AUTH.md §9 / Phase C.4)
+
+/// Status of a human-in-the-loop approval request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRequestStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+/// Input for creating a new approval request.
+#[derive(Clone, Debug)]
+pub struct CreateApprovalRequestInput {
+    pub agent_id: AgentId,
+    pub tool: String,
+    pub action: String,
+    pub context: serde_json::Value,
+    pub delegation_chain: Vec<String>,
+    pub expires_in_secs: Option<i64>,
+}
+
+/// A persisted approval request record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub request_id: String,
+    pub agent_id: AgentId,
+    pub tool: String,
+    pub action: String,
+    pub context: serde_json::Value,
+    pub delegation_chain: Vec<String>,
+    pub status: ApprovalRequestStatus,
+    pub requested_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub resolved_at: Option<Timestamp>,
+    pub denial_reason: Option<String>,
+}
+
+/// A short-lived capability token issued after approval.
+#[derive(Clone, Debug)]
+pub struct CapabilityTokenInfo {
+    pub token: String,
+    pub expires_in_secs: i64,
+}
+
+/// Response from approving or denying an approval request.
+#[derive(Clone, Debug)]
+pub struct ApprovalRequestResponse {
+    pub request_id: String,
+    pub status: ApprovalRequestStatus,
+    pub capability_token: Option<CapabilityTokenInfo>,
+}

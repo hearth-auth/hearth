@@ -9,6 +9,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Consent UI: agent delegation view/revoke** — users can list and revoke active RFC 8693
+  agent delegations at `GET /ui/consent/delegations`. Revoking immediately invalidates the
+  bound access token via the JTI blocklist. Delegation grants are persisted on every
+  successful token exchange and indexed by user subject. (HEA-1418)
 - **gRPC `AuditAction` enum fully synced** — the proto enum now covers all 109 domain variants
   (previously 59 variants mapped to `UNSPECIFIED`, losing information on the wire). Includes
   RBAC group events, login/lockout events, backup/export watermarking, required-action lifecycle,

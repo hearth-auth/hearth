@@ -99,6 +99,7 @@ impl fmt::Display for IdentityError {
                 write!(f, "approved scope was not in the original request")
             }
             Self::ConsentNotFound => write!(f, "no consent record for this client"),
+            Self::DelegationGrantNotFound => write!(f, "no delegation grant record found"),
             Self::FederationUnknownConnector => write!(f, "unknown federation connector"),
             Self::FederationInvalidState => write!(f, "invalid federation state"),
             Self::FederationUpstreamError { provider, reason } => {
@@ -236,6 +237,19 @@ impl fmt::Display for IdentityError {
                 write!(f, "scope intersection is empty — exchange rejected")
             }
             Self::ActorTokenReplayed => write!(f, "actor token jti has already been used"),
+            // Phase C
+            Self::ToolAccessDenied { tool } => {
+                write!(f, "access to tool `{tool}` is explicitly denied")
+            }
+            Self::ToolApprovalRequired { tool } => {
+                write!(f, "tool `{tool}` requires human approval")
+            }
+            Self::ApprovalRequestNotFound => write!(f, "approval request not found"),
+            Self::ApprovalRequestNotPending { current_status } => write!(
+                f,
+                "approval request is not pending (current status: {current_status})"
+            ),
+            Self::ApprovalRequestExpired => write!(f, "approval request has expired"),
         }
     }
 }

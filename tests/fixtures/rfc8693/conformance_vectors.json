@@ -1,0 +1,83 @@
+{
+  "description": "RFC 8693 OAuth 2.0 Token Exchange — conformance test vectors.",
+  "spec_refs": [
+    "RFC 8693 (OAuth 2.0 Token Exchange)",
+    "RFC 9449 (DPoP sender-constrained tokens)"
+  ],
+  "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+  "token_type_uris": {
+    "access_token": "urn:ietf:params:oauth:token-type:access_token",
+    "jwt": "urn:ietf:params:oauth:token-type:jwt",
+    "id_token": "urn:ietf:params:oauth:token-type:id_token",
+    "refresh_token": "urn:ietf:params:oauth:token-type:refresh_token"
+  },
+  "request_parameters": {
+    "required": ["grant_type", "subject_token", "subject_token_type"],
+    "optional": [
+      "actor_token",
+      "actor_token_type",
+      "requested_token_type",
+      "scope",
+      "resource",
+      "audience"
+    ]
+  },
+  "response_required_fields": ["access_token", "issued_token_type", "token_type"],
+  "response_optional_fields": ["expires_in", "scope"],
+  "issued_token_type_value": "urn:ietf:params:oauth:token-type:access_token",
+  "act_chain_vectors": [
+    {
+      "id": "ACT-01",
+      "description": "Depth-1 act claim: single actor, direct delegation",
+      "spec": "RFC 8693 §4.1",
+      "json": { "sub": "agt_agent-a" },
+      "expected_depth": 1
+    },
+    {
+      "id": "ACT-02",
+      "description": "Depth-2 act chain: agent-B acting on behalf of agent-A",
+      "spec": "RFC 8693 §4.1",
+      "json": {
+        "sub": "agt_agent-b",
+        "act": { "sub": "agt_agent-a" }
+      },
+      "expected_depth": 2
+    },
+    {
+      "id": "ACT-03",
+      "description": "Depth-3 act chain: three-hop delegation (agent-C → agent-B → agent-A)",
+      "spec": "RFC 8693 §4.1",
+      "json": {
+        "sub": "agt_agent-c",
+        "act": {
+          "sub": "agt_agent-b",
+          "act": { "sub": "agt_agent-a" }
+        }
+      },
+      "expected_depth": 3
+    }
+  ],
+  "error_vectors": [
+    {
+      "id": "ERR-01",
+      "error": "invalid_request",
+      "description": "Wrong subject_token_type — must be urn:ietf:params:oauth:token-type:access_token",
+      "spec": "RFC 8693 §2.2.2, RFC 6749 §5.2",
+      "trigger": "subject_token_type set to urn:ietf:params:oauth:token-type:jwt"
+    },
+    {
+      "id": "ERR-02",
+      "error": "invalid_grant",
+      "description": "Expired subject token",
+      "spec": "RFC 8693 §2.2.2",
+      "trigger": "subject token exp claim in the past"
+    },
+    {
+      "id": "ERR-03",
+      "error": "invalid_scope",
+      "description": "Requested scope exceeds subject token scope (scope-widening rejected)",
+      "spec": "RFC 8693 §2.2.2, RFC 6749 §5.2",
+      "trigger": "scope param requests scopes not present in subject token"
+    }
+  ]
+}

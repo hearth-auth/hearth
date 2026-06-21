@@ -1794,6 +1794,45 @@ pub(crate) fn actor_jti_scan_prefix() -> Vec<u8> {
     ACTOR_JTI_PREFIX.as_bytes().to_vec()
 }
 
+const DELEGATION_GRANT_PREFIX: &str = "dgrant:id:";
+const DELEGATION_GRANT_USER_PREFIX: &str = "dgrant:user:";
+
+/// Encodes the primary storage key for a delegation grant.
+pub(crate) fn encode_delegation_grant(delegation_id: &str) -> Vec<u8> {
+    format!("{DELEGATION_GRANT_PREFIX}{delegation_id}").into_bytes()
+}
+
+/// Encodes the user-index key for a delegation grant.
+pub(crate) fn encode_delegation_grant_user_index(user_sub: &str, delegation_id: &str) -> Vec<u8> {
+    format!("{DELEGATION_GRANT_USER_PREFIX}{user_sub}:{delegation_id}").into_bytes()
+}
+
+/// Returns the scan prefix for all delegation grants belonging to a user.
+pub(crate) fn delegation_grant_user_prefix(user_sub: &str) -> Vec<u8> {
+    format!("{DELEGATION_GRANT_USER_PREFIX}{user_sub}:").into_bytes()
+}
+
+// Approval Request keys (Phase C.4)
+const APPROVAL_REQUEST_ID_PREFIX: &str = "appreq:id:";
+const APPROVAL_REQUEST_LIST_PREFIX: &str = "appreq:list:";
+const APPROVAL_REQUEST_PENDING_PREFIX: &str = "appreq:pending:";
+
+pub(crate) fn encode_approval_request_id(request_id: &str) -> Vec<u8> {
+    format!("{APPROVAL_REQUEST_ID_PREFIX}{request_id}").into_bytes()
+}
+pub(crate) fn encode_approval_request_list(request_id: &str) -> Vec<u8> {
+    format!("{APPROVAL_REQUEST_LIST_PREFIX}{request_id}").into_bytes()
+}
+pub(crate) fn approval_request_list_scan_prefix() -> Vec<u8> {
+    APPROVAL_REQUEST_LIST_PREFIX.as_bytes().to_vec()
+}
+pub(crate) fn encode_approval_request_pending(request_id: &str) -> Vec<u8> {
+    format!("{APPROVAL_REQUEST_PENDING_PREFIX}{request_id}").into_bytes()
+}
+pub(crate) fn approval_request_pending_scan_prefix() -> Vec<u8> {
+    APPROVAL_REQUEST_PENDING_PREFIX.as_bytes().to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

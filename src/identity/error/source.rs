@@ -67,6 +67,7 @@ impl std::error::Error for IdentityError {
             | Self::ConsentTicketExpired
             | Self::ConsentScopeNotRequested
             | Self::ConsentNotFound
+            | Self::DelegationGrantNotFound
             | Self::FederationUnknownConnector
             | Self::FederationInvalidState
             | Self::FederationUpstreamError { .. }
@@ -120,7 +121,13 @@ impl std::error::Error for IdentityError {
             | Self::TokenExchangeRejected { .. }
             | Self::DelegationDepthExceeded { .. }
             | Self::EmptyScopeIntersection
-            | Self::ActorTokenReplayed => None,
+            | Self::ActorTokenReplayed
+            // Phase C
+            | Self::ToolAccessDenied { .. }
+            | Self::ToolApprovalRequired { .. }
+            | Self::ApprovalRequestNotFound
+            | Self::ApprovalRequestNotPending { .. }
+            | Self::ApprovalRequestExpired => None,
         }
     }
 }

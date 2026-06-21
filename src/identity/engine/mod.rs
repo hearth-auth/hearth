@@ -256,6 +256,7 @@ use crate::rbac::error::RbacError;
 use crate::rbac::registry::{classify_scope_string, ScopeKind};
 use crate::storage::StorageEngine;
 
+pub(super) mod approval;
 pub(super) mod oauth;
 
 /// Context supplied to [`IdentityEngine::issue_tokens_with_context`] to
@@ -12132,6 +12133,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &jti,
         );
 
+        // 11. Persist delegation grant for self-service consent management (§3.5).
+        let delegation_id = uuid::Uuid::new_v4().to_string();
+        let now_ts = self.clock.now();
+        let expires_ts = crate::core::Timestamp::from_micros(exp * 1_000_000);
+        let grant = crate::identity::types::StoredDelegationGrant {
+            delegation_id,
+            actor_sub: actor_sub.clone(),
+            user_sub: subject_claims.sub.clone(),
+            granted_scope: effective_scope.clone(),
+            created_at: now_ts,
+            expires_at: expires_ts,
+            revoked: false,
+            token_jti: jti.clone(),
+        };
+        let _ = self.store_delegation_grant_inner(realm_id, &grant);
+
         Ok(Rfc8693Response {
             access_token,
             issued_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
@@ -12166,6 +12183,64 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &exp_secs.to_le_bytes())
             .map_err(Self::storage_err)?;
         Ok(())
+    }
+
+    fn list_delegation_grants(
+        &self,
+        realm_id: &RealmId,
+        user_sub: &str,
+    ) -> Result<Vec<crate::identity::types::DelegationGrantEntry>, IdentityError> {
+        self.list_delegation_grants_inner(realm_id, user_sub)
+    }
+
+    fn revoke_delegation_grant(
+        &self,
+        realm_id: &RealmId,
+        delegation_id: &str,
+        user_sub: &str,
+    ) -> Result<(), IdentityError> {
+        self.revoke_delegation_grant_inner(realm_id, delegation_id, user_sub)
+    }
+
+    fn create_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::CreateApprovalRequestInput,
+    ) -> Result<crate::identity::types::ApprovalRequest, IdentityError> {
+        self.create_approval_request_inner(realm_id, request)
+    }
+    fn get_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+    ) -> Result<crate::identity::types::ApprovalRequest, IdentityError> {
+        self.get_approval_request_inner(realm_id, request_id)
+    }
+    fn approve_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+        capability_ttl_secs: Option<i64>,
+    ) -> Result<crate::identity::types::ApprovalRequestResponse, IdentityError> {
+        self.approve_approval_request_inner(realm_id, request_id, capability_ttl_secs)
+    }
+    fn deny_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+        reason: Option<String>,
+    ) -> Result<crate::identity::types::ApprovalRequestResponse, IdentityError> {
+        self.deny_approval_request_inner(realm_id, request_id, reason)
+    }
+    fn list_approval_requests(
+        &self,
+        realm_id: &RealmId,
+        status_filter: Option<crate::identity::types::ApprovalRequestStatus>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::identity::types::Page<crate::identity::types::ApprovalRequest>, IdentityError>
+    {
+        self.list_approval_requests_inner(realm_id, status_filter, cursor, limit)
     }
 }
 

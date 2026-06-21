@@ -67,7 +67,8 @@ impl IdentityError {
             | Self::UserNotFound
             | Self::ClientNotFound
             | Self::WebhookNotFound
-            | Self::ConsentNotFound => Some("HEARTH_NOT_FOUND"),
+            | Self::ConsentNotFound
+            | Self::DelegationGrantNotFound => Some("HEARTH_NOT_FOUND"),
             Self::SessionNotFound => Some("HEARTH_SESSION_NOT_FOUND"),
             Self::SessionVersionDisabled => Some("HEARTH_SESSION_VERSION_DISABLED"),
 
@@ -156,6 +157,12 @@ impl IdentityError {
             Self::DelegationDepthExceeded { .. } => Some("invalid_grant"),
             Self::EmptyScopeIntersection => Some("invalid_scope"),
             Self::ActorTokenReplayed => Some("invalid_grant"),
+            // Phase C
+            Self::ToolAccessDenied { .. } => Some("HEARTH_TOOL_ACCESS_DENIED"),
+            Self::ToolApprovalRequired { .. } => Some("HEARTH_TOOL_APPROVAL_REQUIRED"),
+            Self::ApprovalRequestNotFound => Some("HEARTH_APPROVAL_REQUEST_NOT_FOUND"),
+            Self::ApprovalRequestNotPending { .. } => Some("HEARTH_APPROVAL_REQUEST_NOT_PENDING"),
+            Self::ApprovalRequestExpired => Some("HEARTH_APPROVAL_REQUEST_EXPIRED"),
 
             // 5xx — do not leak internal detail
             Self::SigningError { .. }
