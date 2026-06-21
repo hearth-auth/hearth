@@ -655,6 +655,14 @@ pub struct EmbeddedIdentityEngine {
     ///
     // INVARIANT: guard released before any I/O or storage call.
     dpop_nonce_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
+    /// Hot-path DPoP JKT blocklist projection (§10.4).
+    ///
+    /// Key: JWK thumbprint string. Present = blocked; absent = allowed.
+    ///
+    /// Populated at startup by scanning `agt:dpop:block:jkt:*` across all realms.
+    /// Updated via `rcu()` by `block_dpop_jkt` / `unblock_dpop_jkt`.
+    /// Hot-path readers call `load()` — one atomic fence, no lock, no syscall.
+    blocked_dpop_jkt_cache: ArcSwap<std::collections::HashSet<String>>,
     /// Hot-path JTI revocation projection (§10.5).
     ///
     /// Key: `"{realm_uuid}:{jti}"`. Value: expiry (Unix seconds); `i64::MAX`
@@ -1007,12 +1015,14 @@ impl EmbeddedIdentityEngine {
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
+            blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
             revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
         engine.populate_realm_status_cache()?;
         engine.populate_revoked_jti_cache()?;
+        engine.populate_blocked_dpop_jkt_cache()?;
         Ok(engine)
     }
 
@@ -1195,7 +1205,54 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Adds a single `(realm, jti, exp)` entry to `revoked_jti_cache` via RCU.
+    /// Scans all realm namespaces for `agt:dpop:block:jkt:*` keys and loads
+    /// their thumbprints into `blocked_dpop_jkt_cache`.
+    ///
+    /// Called once at startup. The blocklist has no expiry — entries are
+    /// admin-managed via `block_dpop_jkt` / `unblock_dpop_jkt`.
+    fn populate_blocked_dpop_jkt_cache(&self) -> Result<(), IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let realm_prefix = keys::realm_id_scan_prefix();
+        let realm_end = keys::prefix_end(&realm_prefix);
+        let realm_entries = self
+            .storage
+            .scan(&sys_realm, &realm_prefix, &realm_end)
+            .map_err(Self::storage_err)?;
+
+        let jkt_prefix = keys::blocked_dpop_jkt_scan_prefix();
+        let jkt_end = keys::prefix_end(&jkt_prefix);
+
+        let mut set = std::collections::HashSet::new();
+
+        for realm_entry in &realm_entries {
+            let Ok(realm) =
+                serde_json::from_slice::<crate::identity::types::Realm>(&realm_entry.value)
+            else {
+                continue;
+            };
+            if keys::is_system_realm(realm.id()) {
+                continue;
+            }
+            let entries = self
+                .storage
+                .scan(realm.id(), &jkt_prefix, &jkt_end)
+                .map_err(Self::storage_err)?;
+
+            for entry in entries {
+                let raw = String::from_utf8_lossy(&entry.key);
+                let jkt = raw
+                    .strip_prefix("agt:dpop:block:jkt:")
+                    .unwrap_or(&raw)
+                    .to_string();
+                set.insert(jkt);
+            }
+        }
+
+        self.blocked_dpop_jkt_cache.store(Arc::new(set));
+        Ok(())
+    }
+
+    /// Adds `(realm, jti, exp)` entry to `revoked_jti_cache` via RCU.
     ///
     /// Also evicts any entries whose expiry has already passed to bound
     /// cache memory.  Called from every revocation write site.
@@ -1212,6 +1269,52 @@ impl EmbeddedIdentityEngine {
             next.insert(cache_key.clone(), exp_secs);
             next
         });
+    }
+
+    /// Adds a DPoP JWK thumbprint to the server-side blocklist (§10.4).
+    ///
+    /// Writes the thumbprint to persistent storage and updates the hot-path
+    /// in-memory projection via `rcu()`. After this call, every access token
+    /// whose `cnf.jkt` matches `jkt` will be rejected at `validate_token` time.
+    pub(super) fn block_dpop_jkt_inner(
+        &self,
+        realm_id: &RealmId,
+        jkt: &str,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_blocked_dpop_jkt(jkt);
+        self.storage
+            .put(realm_id, &key, b"")
+            .map_err(Self::storage_err)?;
+        let jkt_owned = jkt.to_string();
+        self.blocked_dpop_jkt_cache.rcu(|old| {
+            let mut next = (**old).clone();
+            next.insert(jkt_owned.clone());
+            next
+        });
+        Ok(())
+    }
+
+    /// Removes a DPoP JWK thumbprint from the server-side blocklist (§10.4).
+    ///
+    /// Deletes the thumbprint from persistent storage and updates the hot-path
+    /// in-memory projection. After this call, tokens bound to `jkt` are
+    /// accepted again (subject to normal validation rules).
+    pub(super) fn unblock_dpop_jkt_inner(
+        &self,
+        realm_id: &RealmId,
+        jkt: &str,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_blocked_dpop_jkt(jkt);
+        self.storage
+            .delete(realm_id, &key)
+            .map_err(Self::storage_err)?;
+        let jkt_owned = jkt.to_string();
+        self.blocked_dpop_jkt_cache.rcu(|old| {
+            let mut next = (**old).clone();
+            next.remove(&jkt_owned);
+            next
+        });
+        Ok(())
     }
 
     /// Creates a new identity engine with a pre-existing signing key.
@@ -1283,6 +1386,7 @@ impl EmbeddedIdentityEngine {
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
+            blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
             revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
         };
         // Best-effort: log but do not propagate initialization errors so
@@ -1296,6 +1400,9 @@ impl EmbeddedIdentityEngine {
         }
         if let Err(e) = engine.populate_revoked_jti_cache() {
             tracing::warn!(error = %e, "with_signing_key: populate_revoked_jti_cache failed");
+        }
+        if let Err(e) = engine.populate_blocked_dpop_jkt_cache() {
+            tracing::warn!(error = %e, "with_signing_key: populate_blocked_dpop_jkt_cache failed");
         }
         engine
     }
@@ -6128,6 +6235,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // RFC 7519 §4.1.3 — audience must include the configured value.
         if !claims.aud.contains(&self.config.token.audience) {
             return Err(IdentityError::InvalidToken);
+        }
+
+        // §10.4 — DPoP JKT blocklist: reject tokens whose `cnf.jkt` thumbprint
+        // is server-blocked. Hot-path safe: single atomic `load()`, no syscall.
+        if let Some(ref cnf) = claims.cnf {
+            if self.blocked_dpop_jkt_cache.load().contains(&cnf.jkt) {
+                return Err(IdentityError::DPopJktBlocked);
+            }
         }
 
         // Parse session ID from claims. Sessionless tokens (client_credentials,
@@ -12477,6 +12592,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         token: &str,
     ) -> Result<crate::identity::types::TransactionTokenClaims, IdentityError> {
         self.consume_transaction_token_inner(realm_id, token)
+    }
+
+    // ── Phase D: DPoP JKT blocklist (§10.4) ─────────────────────────────────
+
+    fn block_dpop_jkt(&self, realm_id: &RealmId, jkt: &str) -> Result<(), IdentityError> {
+        self.block_dpop_jkt_inner(realm_id, jkt)
+    }
+
+    fn unblock_dpop_jkt(&self, realm_id: &RealmId, jkt: &str) -> Result<(), IdentityError> {
+        self.unblock_dpop_jkt_inner(realm_id, jkt)
     }
 
     // ── Phase D.4: Cross-Realm Trust Policies ───────────────────────────────

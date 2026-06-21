@@ -180,6 +180,10 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             Code::Unauthenticated,
             "DPoP key binding mismatch".to_string(),
         ),
+        IdentityError::DPopJktBlocked => (
+            Code::Unauthenticated,
+            "DPoP JWK thumbprint is server-blocked".to_string(),
+        ),
         // A-13: attestation policy violation.
         IdentityError::AttestationPolicyViolation { .. } => {
             (Code::PermissionDenied, err.to_string())

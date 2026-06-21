@@ -1548,6 +1548,31 @@ pub(crate) fn dpop_nonce_secret_key() -> Vec<u8> {
     DPOP_NONCE_SECRET_KEY.as_bytes().to_vec()
 }
 
+// ===== DPoP JKT blocklist keys (§10.4) =====
+
+/// Storage key prefix for the server-side DPoP JWK thumbprint (jkt) blocklist.
+///
+/// Format: `agt:dpop:block:jkt:{thumbprint}`
+///
+/// Value: empty (`b""`). Presence of the key means the thumbprint is blocked.
+/// All tokens carrying `cnf.jkt` equal to this thumbprint will be rejected at
+/// validate_token time via the hot-path in-memory projection.
+const DPOP_BLOCKED_JKT_PREFIX: &str = "agt:dpop:block:jkt:";
+
+/// Encodes the storage key for a blocked DPoP JWK thumbprint.
+///
+/// Format: `agt:dpop:block:jkt:{jkt}`
+pub(crate) fn encode_blocked_dpop_jkt(jkt: &str) -> Vec<u8> {
+    format!("{DPOP_BLOCKED_JKT_PREFIX}{jkt}").into_bytes()
+}
+
+/// Returns the scan prefix for all blocked DPoP JKT entries in a realm.
+///
+/// Used at startup to populate the hot-path blocklist projection.
+pub(crate) fn blocked_dpop_jkt_scan_prefix() -> Vec<u8> {
+    DPOP_BLOCKED_JKT_PREFIX.as_bytes().to_vec()
+}
+
 // ===== Attempt tracker WAL keys =====
 
 /// Encodes the WAL storage key for a per-user login-failure attempt tracker.

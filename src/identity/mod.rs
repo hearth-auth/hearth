@@ -2399,6 +2399,17 @@ pub trait IdentityEngine: Send + Sync {
         token: &str,
     ) -> Result<types::TransactionTokenClaims, IdentityError>;
 
+    // ── Phase D: DPoP JKT blocklist (§10.4) ──────────────────────────────────
+
+    /// Adds a DPoP JWK thumbprint to the server-side blocklist (§10.4).
+    ///
+    /// After this call, every access token whose `cnf.jkt` matches `jkt`
+    /// will be rejected at `validate_token` time without a storage lookup.
+    fn block_dpop_jkt(&self, realm_id: &RealmId, jkt: &str) -> Result<(), IdentityError>;
+
+    /// Removes a DPoP JWK thumbprint from the server-side blocklist (§10.4).
+    fn unblock_dpop_jkt(&self, realm_id: &RealmId, jkt: &str) -> Result<(), IdentityError>;
+
     // ── Phase D.4: Cross-Realm Trust Policies ────────────────────────────────
 
     /// Creates a cross-realm trust policy in the given realm.

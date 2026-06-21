@@ -634,7 +634,9 @@ pub(crate) fn identity_error_to_response(
         IdentityError::DPopProofReplay | IdentityError::DPopNonceInvalid => {
             (StatusCode::UNAUTHORIZED, "use_dpop_nonce")
         }
-        IdentityError::DPopBindingMismatch => (StatusCode::UNAUTHORIZED, "invalid_token"),
+        IdentityError::DPopBindingMismatch | IdentityError::DPopJktBlocked => {
+            (StatusCode::UNAUTHORIZED, "invalid_token")
+        }
         IdentityError::JwtBearerAssertionInvalid { .. } => {
             (StatusCode::UNAUTHORIZED, "invalid_grant")
         }

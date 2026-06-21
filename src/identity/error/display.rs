@@ -182,6 +182,7 @@ impl fmt::Display for IdentityError {
                 write!(f, "DPoP proof key does not match token cnf.jkt binding")
             }
             Self::DPopNonceInvalid => write!(f, "DPoP proof nonce invalid or expired"),
+            Self::DPopJktBlocked => write!(f, "DPoP JWK thumbprint is server-blocked (§10.4)"),
             Self::JwtBearerAssertionInvalid { reason } => {
                 write!(f, "invalid JWT bearer assertion: {reason}")
             }

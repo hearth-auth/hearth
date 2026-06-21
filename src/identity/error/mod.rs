@@ -337,6 +337,9 @@ pub enum IdentityError {
     DPopBindingMismatch,
     /// The `nonce` in the DPoP proof does not match the server-issued nonce.
     DPopNonceInvalid,
+    /// The `cnf.jkt` thumbprint in the access token is in the server-side
+    /// blocklist (§10.4). The key has been revoked by an administrator.
+    DPopJktBlocked,
     /// A JWT bearer assertion (RFC 7523) is invalid.
     JwtBearerAssertionInvalid {
         /// Machine-readable reason string.

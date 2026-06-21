@@ -101,6 +101,7 @@ impl std::error::Error for IdentityError {
             | Self::DPopProofReplay
             | Self::DPopBindingMismatch
             | Self::DPopNonceInvalid
+            | Self::DPopJktBlocked
             | Self::JwtBearerAssertionInvalid { .. }
             | Self::InvalidJar { .. }
             | Self::SessionVersionDisabled

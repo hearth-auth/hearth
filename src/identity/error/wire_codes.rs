@@ -139,6 +139,7 @@ impl IdentityError {
             Self::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
             Self::DPopProofReplay | Self::DPopNonceInvalid => Some("use_dpop_nonce"),
             Self::DPopBindingMismatch => Some("invalid_token"),
+            Self::DPopJktBlocked => Some("invalid_token"),
 
             Self::AttestationPolicyViolation { .. } => Some("HEARTH_ATTESTATION_POLICY_VIOLATION"),
 
