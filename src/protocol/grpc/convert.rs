@@ -195,6 +195,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::DelegationDepthExceeded { .. } => (Code::PermissionDenied, err.to_string()),
         IdentityError::EmptyScopeIntersection => (Code::PermissionDenied, err.to_string()),
         IdentityError::ActorTokenReplayed => (Code::Unauthenticated, err.to_string()),
+        IdentityError::DelegationGrantNotFound => (Code::NotFound, err.to_string()),
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }

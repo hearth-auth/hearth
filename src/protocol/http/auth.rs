@@ -678,6 +678,7 @@ pub(crate) fn identity_error_to_response(
         IdentityError::DelegationDepthExceeded { .. } => (StatusCode::BAD_REQUEST, "invalid_grant"),
         IdentityError::EmptyScopeIntersection => (StatusCode::BAD_REQUEST, "invalid_scope"),
         IdentityError::ActorTokenReplayed => (StatusCode::BAD_REQUEST, "invalid_grant"),
+        IdentityError::DelegationGrantNotFound => (StatusCode::BAD_REQUEST, "invalid_grant"),
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);
