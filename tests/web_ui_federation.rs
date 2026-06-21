@@ -327,6 +327,8 @@ fn begin_known_connector_302s_to_upstream_and_persists_state() {
             start_time: None,
             end_time: None,
             limit: Some(10),
+            agent_id: None,
+            tool: None,
         })
         .expect("audit query");
     assert!(!events.is_empty(), "expected audit event");

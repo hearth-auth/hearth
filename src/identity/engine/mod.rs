@@ -655,6 +655,19 @@ pub struct EmbeddedIdentityEngine {
     ///
     // INVARIANT: guard released before any I/O or storage call.
     dpop_nonce_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
+    /// Hot-path JTI revocation projection (§10.5).
+    ///
+    /// Key: `"{realm_uuid}:{jti}"`. Value: expiry (Unix seconds); `i64::MAX`
+    /// for entries written before this projection existed (stored as `b"1"`).
+    ///
+    /// Populated at startup by scanning `oauth:revjti:*` across all realms.
+    /// Updated (via `rcu()`) whenever a sessionless token is revoked.
+    /// Hot-path readers call `load()` — one atomic fence, no lock, no syscall.
+    ///
+    /// Expired entries remain until the next `rcu()` eviction sweep; an expired
+    /// token is rejected by the `exp` claim check before we reach this cache,
+    /// so stale entries are harmless.
+    revoked_jti_cache: ArcSwap<HashMap<String, i64>>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -994,10 +1007,12 @@ impl EmbeddedIdentityEngine {
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
+            revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
         engine.populate_realm_status_cache()?;
+        engine.populate_revoked_jti_cache()?;
         Ok(engine)
     }
 
@@ -1120,6 +1135,85 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Scans all realm namespaces for `oauth:revjti:*` keys and loads
+    /// non-expired entries into `revoked_jti_cache`.
+    ///
+    /// Called once at startup.  Handles two storage-value formats:
+    /// - 8-byte little-endian `i64` expiry (current format)
+    /// - Any other length (legacy `b"1"` format): mapped to `i64::MAX`
+    ///   so the entry is never self-evicted (the `exp` claim check catches it).
+    fn populate_revoked_jti_cache(&self) -> Result<(), IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let realm_prefix = keys::realm_id_scan_prefix();
+        let realm_end = keys::prefix_end(&realm_prefix);
+        let realm_entries = self
+            .storage
+            .scan(&sys_realm, &realm_prefix, &realm_end)
+            .map_err(Self::storage_err)?;
+
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        let jti_prefix = keys::revoked_jti_scan_prefix();
+        let jti_end = keys::prefix_end(&jti_prefix);
+
+        let mut map: HashMap<String, i64> = HashMap::new();
+
+        for realm_entry in &realm_entries {
+            let Ok(realm) =
+                serde_json::from_slice::<crate::identity::types::Realm>(&realm_entry.value)
+            else {
+                continue;
+            };
+            if keys::is_system_realm(realm.id()) {
+                continue;
+            }
+            let jti_entries = self
+                .storage
+                .scan(realm.id(), &jti_prefix, &jti_end)
+                .map_err(Self::storage_err)?;
+
+            for entry in jti_entries {
+                let exp: i64 = if entry.value.len() == 8 {
+                    // Current format: LE i64 expiry.
+                    i64::from_le_bytes(entry.value[..8].try_into().unwrap_or([0xff_u8; 8]))
+                } else {
+                    // Legacy b"1" format: no expiry stored; never self-evict.
+                    i64::MAX
+                };
+                // Skip entries that are already expired.
+                if exp != i64::MAX && now_secs >= exp {
+                    continue;
+                }
+                let jti_key = String::from_utf8_lossy(&entry.key);
+                // Strip the `oauth:revjti:` prefix to get the raw JTI string.
+                let jti = jti_key.strip_prefix("oauth:revjti:").unwrap_or(&jti_key);
+                let cache_key = format!("{}:{}", realm.id().as_uuid(), jti);
+                map.insert(cache_key, exp);
+            }
+        }
+
+        self.revoked_jti_cache.store(Arc::new(map));
+        Ok(())
+    }
+
+    /// Adds a single `(realm, jti, exp)` entry to `revoked_jti_cache` via RCU.
+    ///
+    /// Also evicts any entries whose expiry has already passed to bound
+    /// cache memory.  Called from every revocation write site.
+    fn insert_revoked_jti_cache(&self, realm_id: &RealmId, jti: &str, exp_secs: i64) {
+        let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        self.revoked_jti_cache.rcu(|old| {
+            let mut next: HashMap<String, i64> = old
+                .iter()
+                // Evict expired entries while we hold the clone.
+                .filter(|(_, &exp)| exp == i64::MAX || now_secs < exp)
+                .map(|(k, &v)| (k.clone(), v))
+                .collect();
+            next.insert(cache_key.clone(), exp_secs);
+            next
+        });
+    }
+
     /// Creates a new identity engine with a pre-existing signing key.
     ///
     /// Used for testing with a known key or for key restoration from storage.
@@ -1189,6 +1283,7 @@ impl EmbeddedIdentityEngine {
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
             dpop_nonce_cache: Mutex::new(HashMap::new()),
+            revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
         };
         // Best-effort: log but do not propagate initialization errors so
         // existing test harnesses that pre-seed storage don't break on a
@@ -1198,6 +1293,9 @@ impl EmbeddedIdentityEngine {
         }
         if let Err(e) = engine.populate_realm_status_cache() {
             tracing::warn!(error = %e, "with_signing_key: populate_realm_status_cache failed");
+        }
+        if let Err(e) = engine.populate_revoked_jti_cache() {
+            tracing::warn!(error = %e, "with_signing_key: populate_revoked_jti_cache failed");
         }
         engine
     }
@@ -2938,20 +3036,19 @@ impl EmbeddedIdentityEngine {
     }
 
     /// Verifies a client_credentials (sessionless) token by checking the JTI
-    /// blocklist. Returns `Ok(())` if the token is not revoked.
+    /// revocation projection. Returns `Ok(())` if the token is not revoked.
+    ///
+    /// Hot-path safe: reads `revoked_jti_cache` via a single atomic `load()` —
+    /// no lock, no syscall (§10.5).
     fn verify_client_credentials_token(
         &self,
         realm_id: &RealmId,
         claims: &TokenClaims,
     ) -> Result<(), IdentityError> {
         if let Some(ref jti) = claims.jti {
-            let jti_key = keys::encode_revoked_jti(jti);
-            if self
-                .storage
-                .get(realm_id, &jti_key)
-                .map_err(Self::storage_err)?
-                .is_some()
-            {
+            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
+            let cache = self.revoked_jti_cache.load();
+            if cache.contains_key(cache_key.as_str()) {
                 return Err(IdentityError::InvalidToken);
             }
         }

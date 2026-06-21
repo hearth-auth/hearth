@@ -174,10 +174,14 @@ impl AuditEngine for EmbeddedAuditEngine {
     fn query(&self, query: &AuditQuery) -> Result<Vec<AuditEvent>, AuditError> {
         // Determine if we're scanning by actor, action, or just time range
         if let Some(ref actor) = query.actor {
-            return self.query_by_actor(query, actor);
+            let mut events = self.query_by_actor(query, actor)?;
+            events = Self::apply_metadata_filters(events, query);
+            return Ok(events);
         }
         if let Some(ref action) = query.action {
-            return self.query_by_action(query, action);
+            let mut events = self.query_by_action(query, action)?;
+            events = Self::apply_metadata_filters(events, query);
+            return Ok(events);
         }
 
         // Default: scan primary event keys by time range
@@ -198,6 +202,12 @@ impl AuditEngine for EmbeddedAuditEngine {
                 serde_json::from_slice(&entry.value).map_err(|e| AuditError::Serialization {
                     reason: e.to_string(),
                 })?;
+
+            // Apply agent_id / tool metadata filters before counting toward limit.
+            if !Self::event_matches_metadata_filters(&event, query) {
+                continue;
+            }
+
             events.push(event);
 
             if let Some(limit) = query.limit {
@@ -348,6 +358,49 @@ impl AuditEngine for EmbeddedAuditEngine {
 }
 
 impl EmbeddedAuditEngine {
+    /// Applies `agent_id` and `tool` post-scan filters (§12.4 MUST).
+    ///
+    /// These filters match against the JSON `metadata` object attached to
+    /// each audit event, which is cheaper to scan post-hoc than maintaining
+    /// additional secondary indexes for every metadata key.
+    fn apply_metadata_filters(events: Vec<AuditEvent>, query: &AuditQuery) -> Vec<AuditEvent> {
+        if query.agent_id.is_none() && query.tool.is_none() {
+            return events;
+        }
+        events
+            .into_iter()
+            .filter(|e| Self::event_matches_metadata_filters(e, query))
+            .collect()
+    }
+
+    fn event_matches_metadata_filters(event: &AuditEvent, query: &AuditQuery) -> bool {
+        if let Some(ref agent_id) = query.agent_id {
+            let found = event
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("agent_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s == agent_id)
+                .unwrap_or(false);
+            if !found {
+                return false;
+            }
+        }
+        if let Some(ref tool) = query.tool {
+            let found = event
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("tool"))
+                .and_then(|v| v.as_str())
+                .map(|s| s == tool)
+                .unwrap_or(false);
+            if !found {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Queries events by actor using the actor index.
     fn query_by_actor(
         &self,

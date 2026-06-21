@@ -352,6 +352,8 @@ async fn sms_mfa_challenge_succeeded_audit_event() {
             start_time: None,
             end_time: None,
             limit: Some(10),
+            agent_id: None,
+            tool: None,
         })
         .expect("audit query");
 
@@ -390,6 +392,8 @@ async fn sms_mfa_challenge_failed_audit_event() {
             start_time: None,
             end_time: None,
             limit: Some(10),
+            agent_id: None,
+            tool: None,
         })
         .expect("audit query");
 

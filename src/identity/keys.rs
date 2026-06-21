@@ -704,6 +704,14 @@ pub(crate) fn encode_revoked_jti(jti: &str) -> Vec<u8> {
     format!("{REVOKED_JTI_PREFIX}{jti}").into_bytes()
 }
 
+/// Returns the scan prefix for all revoked OAuth JTIs in a realm.
+///
+/// Used at startup to populate the hot-path revocation projection and during
+/// cascade realm deletion to purge the blocklist.
+pub(crate) fn revoked_jti_scan_prefix() -> Vec<u8> {
+    REVOKED_JTI_PREFIX.as_bytes().to_vec()
+}
+
 /// Encodes the storage key for a consumed JWT bearer assertion JTI.
 ///
 /// Format: `oauth:jb-jti:{jti}`

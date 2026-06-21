@@ -1004,6 +1004,8 @@ async fn consent_granted_emits_audit_with_scope_list() {
             actor: None,
             action: Some(AuditAction::ConsentGranted),
             limit: Some(10),
+            agent_id: None,
+            tool: None,
         })
         .expect("query");
     assert_eq!(events.len(), 1, "expected 1 ConsentGranted event");
@@ -1058,6 +1060,8 @@ async fn consent_denied_emits_audit_even_when_no_record_exists() {
             actor: None,
             action: Some(AuditAction::ConsentDenied),
             limit: Some(10),
+            agent_id: None,
+            tool: None,
         })
         .expect("query");
     assert_eq!(events.len(), 1);
@@ -1211,6 +1215,8 @@ async fn self_revoke_consent_emits_audit_with_via_self() {
             actor: None,
             action: Some(AuditAction::ConsentRevoked),
             limit: Some(10),
+            agent_id: None,
+            tool: None,
         })
         .expect("query");
     assert_eq!(events.len(), 1);
@@ -1545,6 +1551,8 @@ async fn admin_revoke_on_behalf_emits_audit_with_via_admin() {
             actor: None,
             action: Some(AuditAction::ConsentRevoked),
             limit: Some(10),
+            agent_id: None,
+            tool: None,
         })
         .expect("query");
     assert_eq!(events.len(), 1);

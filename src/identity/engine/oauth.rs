@@ -2462,9 +2462,13 @@ impl EmbeddedIdentityEngine {
                         let _ = self.revoke_session(realm_id, &session_id);
                     }
                 } else if let Some(ref jti) = claims.jti {
-                    // Sessionless token (e.g., client_credentials): revoke via JTI blocklist
+                    // Sessionless token (e.g., client_credentials): revoke via JTI blocklist.
+                    // Store the token's exp so the hot-path projection can self-evict expired entries.
                     let jti_key = keys::encode_revoked_jti(jti);
-                    let _ = self.storage.put(realm_id, &jti_key, b"1");
+                    let _ = self
+                        .storage
+                        .put(realm_id, &jti_key, &claims.exp.to_le_bytes());
+                    self.insert_revoked_jti_cache(realm_id, jti, claims.exp);
                 }
             }
             "refresh" => {
@@ -2563,13 +2567,12 @@ impl EmbeddedIdentityEngine {
                 }
             }
         } else if let Some(ref jti) = claims.jti {
-            // Sessionless token — check JTI revocation blocklist
-            let jti_key = keys::encode_revoked_jti(jti);
+            // Sessionless token — check JTI revocation projection (hot-path safe).
+            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
             if self
-                .storage
-                .get(realm_id, &jti_key)
-                .map_err(Self::storage_err)?
-                .is_some()
+                .revoked_jti_cache
+                .load()
+                .contains_key(cache_key.as_str())
             {
                 return Ok(IntrospectionResponse::inactive());
             }
@@ -2691,12 +2694,12 @@ impl EmbeddedIdentityEngine {
                 }
             }
         } else if let Some(ref jti) = claims.jti {
-            let jti_key = keys::encode_revoked_jti(jti);
+            // Check JTI revocation projection (hot-path safe).
+            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
             if self
-                .storage
-                .get(realm_id, &jti_key)
-                .map_err(Self::storage_err)?
-                .is_some()
+                .revoked_jti_cache
+                .load()
+                .contains_key(cache_key.as_str())
             {
                 return Ok(DecidePermissionResponse { allowed: false });
             }
@@ -3908,6 +3911,7 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put(realm_id, &jti_key, &exp_secs.to_le_bytes())
             .map_err(Self::storage_err)?;
+        self.insert_revoked_jti_cache(realm_id, &grant.token_jti, exp_secs);
         let _ = self.record_audit(
             realm_id,
             Some(&AuditContext {
