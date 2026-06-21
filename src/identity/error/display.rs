@@ -250,6 +250,34 @@ impl fmt::Display for IdentityError {
                 "approval request is not pending (current status: {current_status})"
             ),
             Self::ApprovalRequestExpired => write!(f, "approval request has expired"),
+            // Phase D
+            Self::AatScopeEscalation => {
+                write!(f, "AAT derivation rejected: child scope exceeds parent")
+            }
+            Self::AatChainBroken { reason } => write!(f, "AAT chain invalid: {reason}"),
+            Self::AatRevoked => write!(f, "AAT or an ancestor in the chain has been revoked"),
+            Self::AatExpired => write!(f, "AAT has expired"),
+            Self::TransactionTokenReplayed => {
+                write!(f, "transaction token has already been consumed")
+            }
+            Self::CrossRealmPolicyNotFound => write!(f, "cross-realm trust policy not found"),
+            Self::CrossRealmPolicyConflict => {
+                write!(f, "a cross-realm trust policy already exists for this pair")
+            }
+            Self::CrossRealmCapabilityNotAllowed { capability } => {
+                write!(
+                    f,
+                    "capability `{capability}` is not permitted by the cross-realm trust policy"
+                )
+            }
+            Self::SpiffeIdInvalid { reason } => write!(f, "SPIFFE ID invalid: {reason}"),
+            Self::SpiffeMappingNotFound => write!(f, "SPIFFE identity mapping not found"),
+            Self::SpiffeMappingConflict => {
+                write!(f, "a SPIFFE mapping already exists for this agent")
+            }
+            Self::SpiffeCertInvalid { reason } => {
+                write!(f, "SPIFFE X.509 certificate invalid: {reason}")
+            }
         }
     }
 }

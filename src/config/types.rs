@@ -2065,6 +2065,16 @@ pub struct AgentAuthCapabilities {
     /// off until their respective capability flags are added and implemented.
     #[serde(default)]
     pub identity: bool,
+    /// Phase B + C — MCP authorization server, RFC 8693 token exchange,
+    /// tool-level permissions, and human-in-the-loop approvals.
+    ///
+    /// Requires `identity = true`. When enabled, adds:
+    /// - Tool-permission grammar (`tool.*`/`toolgroup.*`, deny-wins)
+    /// - Approval request lifecycle (create/approve/deny/capability-token)
+    /// - Approval webhook notification (per-realm `approval_webhook` config)
+    /// - REST endpoints (`/v1/approval-requests`)
+    #[serde(default)]
+    pub approval: bool,
 }
 
 /// Agent authentication / authorization feature gate.
@@ -2637,6 +2647,7 @@ impl RealmYamlConfig {
             // Pre-token webhook is configured via admin API or per-realm YAML.
             // Defaults to None (disabled) so existing realms are unaffected.
             pre_token_webhook: None,
+            approval_webhook: None,
             mfa_required_roles: None,
         })
     }

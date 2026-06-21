@@ -307,9 +307,9 @@ impl Config {
 
         validate_trusted_proxies(&self.server, &mut issues);
 
-        // `agent_auth.capabilities.identity` is implemented in M1 — no validation
-        // error for that flag. Future capability flags (delegation, mcp, aat) will
-        // add validation errors here until those phases ship.
+        // `agent_auth.capabilities.identity` (M1) and `approval` (Phase C) are
+        // implemented. Future capability flags (delegation, mcp, aat) will add
+        // validation errors here until those phases ship.
 
         issues
     }
@@ -407,8 +407,16 @@ impl Config {
             });
         }
 
-        // `agent_auth.capabilities.identity` (M1) is fully implemented.
-        // Add error blocks here when future unimplemented phases are added.
+        // `agent_auth.capabilities.identity` (M1) and `approval` (Phase C) are
+        // fully implemented. Unimplemented phases add validation errors here.
+
+        // `approval` requires `identity` — Phase C builds on Phase A.
+        if self.agent_auth.capabilities.approval && !self.agent_auth.capabilities.identity {
+            return Err(invalid(
+                "agent_auth.capabilities.approval",
+                "requires agent_auth.capabilities.identity = true (Phase A must be enabled first)",
+            ));
+        }
 
         validate_oidc(&self.oidc, self.dev_mode)?;
         validate_token(&self.token)?;

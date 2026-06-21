@@ -51,15 +51,11 @@ impl CaptureServer {
         let app = Router::new().route(
             "/webhook",
             post(
-                move |raw_headers: axum::http::HeaderMap,
-                      Json(body): Json<CapturedPayload>| {
+                move |raw_headers: axum::http::HeaderMap, Json(body): Json<CapturedPayload>| {
                     let payloads = Arc::clone(&payloads_clone);
                     let headers = Arc::clone(&headers_clone);
                     async move {
-                        payloads
-                            .lock()
-                            .expect("payloads lock")
-                            .push(body);
+                        payloads.lock().expect("payloads lock").push(body);
                         let h: std::collections::HashMap<String, String> = raw_headers
                             .iter()
                             .map(|(k, v)| {
@@ -101,6 +97,7 @@ impl CaptureServer {
                     return p.clone();
                 }
             }
+            // AUDIT: justified-sleep: polling for real HTTP delivery from a local test server
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("webhook delivery not received within 1 second");
@@ -195,8 +192,8 @@ async fn approval_webhook_delivers_payload_on_create() {
     );
     assert_eq!(
         payload.agent_id,
-        agent_id.to_string(),
-        "agent_id must match"
+        agent_id.as_uuid().to_string(),
+        "agent_id must be the raw UUID (no agt_ prefix) in the webhook payload"
     );
     assert_eq!(payload.tool, "delete_file", "tool must match");
     assert!(
@@ -343,6 +340,7 @@ async fn approval_webhook_not_delivered_when_not_configured() {
         .expect("create");
 
     // Wait briefly — no delivery expected
+    // AUDIT: justified-sleep: negative test confirming no delivery within a grace window
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         server.payloads.lock().expect("payloads lock").is_empty(),

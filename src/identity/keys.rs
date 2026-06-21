@@ -1833,6 +1833,131 @@ pub(crate) fn approval_request_pending_scan_prefix() -> Vec<u8> {
     APPROVAL_REQUEST_PENDING_PREFIX.as_bytes().to_vec()
 }
 
+// Capability token single-use JTI blocklist (Phase C — enforce complete mediation)
+//
+// Written on first use; subsequent uses of the same JTI are rejected.
+// Separate namespace from `oauth:revjti:` to avoid key collisions.
+const CAPABILITY_JTI_PREFIX: &str = "appreq:cap-jti:";
+
+/// Encodes the blocklist key for a spent capability token JTI.
+///
+/// Presence means the token has already been used; further use is rejected
+/// with `ToolApprovalRequired`.
+pub(crate) fn encode_capability_jti(jti: &str) -> Vec<u8> {
+    format!("{CAPABILITY_JTI_PREFIX}{jti}").into_bytes()
+}
+
+// Approval webhook outbox (Phase C.5 — durable at-least-once delivery)
+const APPROVAL_WEBHOOK_OUTBOX_PREFIX: &str = "appreq:outbox:";
+
+/// Outbox key for a pending approval webhook delivery.
+///
+/// Written atomically with the approval request record. Deleted on
+/// successful delivery. The background scanner uses the prefix to find
+/// undelivered entries on startup.
+pub(crate) fn encode_approval_webhook_outbox(request_id: &str) -> Vec<u8> {
+    format!("{APPROVAL_WEBHOOK_OUTBOX_PREFIX}{request_id}").into_bytes()
+}
+
+#[allow(dead_code)]
+pub(crate) fn approval_webhook_outbox_scan_prefix() -> Vec<u8> {
+    APPROVAL_WEBHOOK_OUTBOX_PREFIX.as_bytes().to_vec()
+}
+
+// ── Phase D.1: AAT (Attenuating Authorization Token) revocation ───────────────
+
+/// Prefix for AAT revocation entries.
+///
+/// Format: `aat:rev:{jti}`
+const AAT_REVOKED_JTI_PREFIX: &str = "aat:rev:";
+
+/// Storage key for a revoked AAT JTI.
+pub(crate) fn encode_aat_revoked_jti(jti: &str) -> Vec<u8> {
+    format!("{AAT_REVOKED_JTI_PREFIX}{jti}").into_bytes()
+}
+
+// ── Phase D.3: Transaction token replay prevention ───────────────────────────
+
+/// Prefix for consumed transaction token entries.
+///
+/// Format: `txn:used:{txn_id}` — value is the expiry timestamp (Unix seconds).
+const TXN_TOKEN_USED_PREFIX: &str = "txn:used:";
+
+/// Storage key marking a transaction token ID as consumed.
+pub(crate) fn encode_txn_token_used(txn_id: &str) -> Vec<u8> {
+    format!("{TXN_TOKEN_USED_PREFIX}{txn_id}").into_bytes()
+}
+
+// ── Phase D.4: Cross-realm trust policies ────────────────────────────────────
+
+/// Prefix for cross-realm trust policy records.
+///
+/// Format: `xrealm:pol:{policy_id}`
+const CROSS_REALM_POLICY_PREFIX: &str = "xrealm:pol:";
+
+/// Prefix for the source-realm → policy index.
+///
+/// Format: `xrealm:from:{source_realm_uuid}:{policy_id}` — empty value.
+const CROSS_REALM_FROM_INDEX_PREFIX: &str = "xrealm:from:";
+
+/// Primary key for a cross-realm trust policy record.
+pub(crate) fn encode_cross_realm_policy(policy_id: &str) -> Vec<u8> {
+    format!("{CROSS_REALM_POLICY_PREFIX}{policy_id}").into_bytes()
+}
+
+/// Source-realm index key for a cross-realm trust policy.
+pub(crate) fn encode_cross_realm_from_index(
+    source_realm_id: &crate::core::RealmId,
+    policy_id: &str,
+) -> Vec<u8> {
+    format!(
+        "{CROSS_REALM_FROM_INDEX_PREFIX}{}:{policy_id}",
+        source_realm_id.as_uuid()
+    )
+    .into_bytes()
+}
+
+/// Scan prefix for all policies trusting a specific source realm.
+pub(crate) fn cross_realm_from_scan_prefix(source_realm_id: &crate::core::RealmId) -> Vec<u8> {
+    format!(
+        "{CROSS_REALM_FROM_INDEX_PREFIX}{}:",
+        source_realm_id.as_uuid()
+    )
+    .into_bytes()
+}
+
+/// Scan prefix for all cross-realm policy records (within a realm).
+pub(crate) fn cross_realm_policy_scan_prefix() -> Vec<u8> {
+    CROSS_REALM_POLICY_PREFIX.as_bytes().to_vec()
+}
+
+// ── Phase D.7: SPIFFE identity mapping ───────────────────────────────────────
+
+/// Prefix for SPIFFE ID → AgentId mapping records.
+///
+/// Format: `spiffe:map:{spiffe_id_sha256}` — value is the `SpiffeIdentityMapping` JSON.
+const SPIFFE_MAPPING_PREFIX: &str = "spiffe:map:";
+
+/// Prefix for the agent → SPIFFE ID reverse index.
+///
+/// Format: `spiffe:agt:{agent_uuid}` — value is the SPIFFE ID string.
+const SPIFFE_AGENT_INDEX_PREFIX: &str = "spiffe:agt:";
+
+/// Primary key for a SPIFFE ID mapping.
+///
+/// The SPIFFE ID is SHA-256 hashed to produce a fixed-length key.
+pub(crate) fn encode_spiffe_mapping(spiffe_id: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(spiffe_id.as_bytes());
+    let hex = hex::encode(hash);
+    format!("{SPIFFE_MAPPING_PREFIX}{hex}").into_bytes()
+}
+
+/// Reverse-index key: agent UUID → SPIFFE ID.
+pub(crate) fn encode_spiffe_agent_index(agent_id: &crate::core::AgentId) -> Vec<u8> {
+    format!("{SPIFFE_AGENT_INDEX_PREFIX}{}", agent_id.as_uuid()).into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

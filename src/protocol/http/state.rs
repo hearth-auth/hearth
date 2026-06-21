@@ -87,6 +87,11 @@ pub struct AppState {
     /// When `false`, all `/v1/agents` and `/.well-known/agent.json` routes
     /// are absent from the router (prevents fingerprinting).
     pub agent_identity_enabled: bool,
+    /// Whether Phase-C approval routes are active.
+    ///
+    /// Controlled by `agent_auth.capabilities.approval` in `hearth.yaml`.
+    /// When `false`, all `/v1/approval-requests` routes are absent.
+    pub agent_approval_enabled: bool,
 }
 
 impl AppState {
@@ -115,6 +120,7 @@ impl AppState {
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
             jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
             agent_identity_enabled: false,
+            agent_approval_enabled: false,
         }
     }
 
@@ -149,6 +155,7 @@ impl AppState {
             // `config.security.jwks_rps_limit`.
             jwks_rate_limiter: Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX)),
             agent_identity_enabled: false,
+            agent_approval_enabled: false,
         }
     }
 
@@ -180,6 +187,7 @@ impl AppState {
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
             jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
             agent_identity_enabled: false,
+            agent_approval_enabled: false,
         }
     }
 
@@ -189,6 +197,15 @@ impl AppState {
     /// in the operator config.
     pub fn with_agent_identity(mut self, enabled: bool) -> Self {
         self.agent_identity_enabled = enabled;
+        self
+    }
+
+    /// Enables the Phase-C approval routes (`/v1/approval-requests`).
+    ///
+    /// Call this during server startup when `agent_auth.capabilities.approval = true`
+    /// in the operator config.
+    pub fn with_agent_approval(mut self, enabled: bool) -> Self {
+        self.agent_approval_enabled = enabled;
         self
     }
 

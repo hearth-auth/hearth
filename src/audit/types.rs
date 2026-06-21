@@ -407,6 +407,32 @@ pub enum AuditAction {
     ///
     /// Metadata carries `resource_id` and `resource_uri`.
     ProtectedResourceDeleted,
+
+    // Phase D audit actions
+    /// An Attenuating Authorization Token (AAT) was issued for an agent.
+    ///
+    /// Metadata carries `agent_id`, `jti`, `scope`, and `tools`.
+    AatIssued,
+    /// An AAT was revoked (by JTI).
+    ///
+    /// Metadata carries `jti` and `revoked_by`.
+    AatRevoked,
+    /// A transaction token was issued for an agent-to-agent call.
+    ///
+    /// Metadata carries `requesting_agent_id`, `target_agent_id`, and `txn_id`.
+    TransactionTokenIssued,
+    /// A cross-realm token exchange was authorized.
+    ///
+    /// Metadata carries `source_realm_id`, `target_realm_id`, and `capability`.
+    CrossRealmTokenIssued,
+    /// A SPIFFE ID was mapped to an agent.
+    ///
+    /// Metadata carries `agent_id` and `spiffe_id`.
+    SpiffeIdMapped,
+    /// An agent authenticated via SPIFFE mTLS.
+    ///
+    /// Metadata carries `agent_id` and `spiffe_id`.
+    SpiffeAuthSuccess,
 }
 
 impl AuditAction {
@@ -530,6 +556,13 @@ impl AuditAction {
             Self::ProtectedResourceRegistered,
             Self::ProtectedResourceUpdated,
             Self::ProtectedResourceDeleted,
+            // Phase D
+            Self::AatIssued,
+            Self::AatRevoked,
+            Self::TransactionTokenIssued,
+            Self::CrossRealmTokenIssued,
+            Self::SpiffeIdMapped,
+            Self::SpiffeAuthSuccess,
         ]);
         v.sort_by_key(|a| a.as_str());
         v
@@ -649,6 +682,13 @@ impl AuditAction {
             Self::ProtectedResourceRegistered => "protected_resource_registered",
             Self::ProtectedResourceUpdated => "protected_resource_updated",
             Self::ProtectedResourceDeleted => "protected_resource_deleted",
+            // Phase D
+            Self::AatIssued => "aat_issued",
+            Self::AatRevoked => "aat_revoked",
+            Self::TransactionTokenIssued => "transaction_token_issued",
+            Self::CrossRealmTokenIssued => "cross_realm_token_issued",
+            Self::SpiffeIdMapped => "spiffe_id_mapped",
+            Self::SpiffeAuthSuccess => "spiffe_auth_success",
         }
     }
 }
@@ -769,6 +809,13 @@ impl std::str::FromStr for AuditAction {
             "protected_resource_registered" => Ok(Self::ProtectedResourceRegistered),
             "protected_resource_updated" => Ok(Self::ProtectedResourceUpdated),
             "protected_resource_deleted" => Ok(Self::ProtectedResourceDeleted),
+            // Phase D
+            "aat_issued" => Ok(Self::AatIssued),
+            "aat_revoked" => Ok(Self::AatRevoked),
+            "transaction_token_issued" => Ok(Self::TransactionTokenIssued),
+            "cross_realm_token_issued" => Ok(Self::CrossRealmTokenIssued),
+            "spiffe_id_mapped" => Ok(Self::SpiffeIdMapped),
+            "spiffe_auth_success" => Ok(Self::SpiffeAuthSuccess),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -884,7 +931,13 @@ impl AuditAction {
             | Self::ApprovalDenied
             | Self::CrossRealmTrustCreated
             | Self::ProtectedResourceRegistered
-            | Self::ProtectedResourceUpdated => LogOnly,
+            | Self::ProtectedResourceUpdated
+            // Phase D — non-destructive issuance events
+            | Self::AatIssued
+            | Self::TransactionTokenIssued
+            | Self::CrossRealmTokenIssued
+            | Self::SpiffeIdMapped
+            | Self::SpiffeAuthSuccess => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
@@ -921,7 +974,9 @@ impl AuditAction {
             // Token revocation and cross-realm trust teardown are security-sensitive.
             | Self::AgentTokenRevoked
             | Self::CrossRealmTrustRevoked
-            | Self::ProtectedResourceDeleted => FailOperation,
+            | Self::ProtectedResourceDeleted
+            // Phase D — AAT revocation is security-sensitive.
+            | Self::AatRevoked => FailOperation,
         }
     }
 }

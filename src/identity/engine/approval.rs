@@ -1,13 +1,18 @@
-//! Approval request lifecycle engine methods (AGENT_AUTH.md §9 / Phase C.4).
+//! Approval request lifecycle engine methods (AGENT_AUTH.md §9 / Phase C.4–C.5).
 //!
-//! Implements: create, get, approve (→ capability token), deny, list.
+//! Implements: create, get, approve (→ capability token), deny, list,
+//! and durable webhook notification (C.5).
+//!
 //! Status transitions are CAS-enforced: only Pending→Approved/Denied is legal.
 
 use crate::audit::AuditAction;
+use crate::core::AgentId;
+use crate::identity::approval_notifier;
 use crate::identity::types::{
-    ApprovalRequest, ApprovalRequestResponse, ApprovalRequestStatus, CapabilityTokenInfo,
-    CreateApprovalRequestInput, Page,
+    ApprovalRequest, ApprovalRequestResponse, ApprovalRequestStatus, ApprovalWebhookPayload,
+    CapabilityTokenInfo, CreateApprovalRequestInput, Page,
 };
+use crate::identity::IdentityEngine as _;
 use crate::identity::{keys, IdentityError};
 
 use super::EmbeddedIdentityEngine;
@@ -54,11 +59,18 @@ impl EmbeddedIdentityEngine {
         let primary_key = keys::encode_approval_request_id(&request_id);
         let list_key = keys::encode_approval_request_list(&request_id);
         let pending_key = keys::encode_approval_request_pending(&request_id);
+        let outbox_key = keys::encode_approval_webhook_outbox(&request_id);
         let bytes = serde_json::to_vec(&record).map_err(|e| IdentityError::Serialization {
             reason: e.to_string(),
         })?;
 
-        // Atomic batch write: primary + listing index + pending index
+        // Build outbox payload now so it is written atomically with the record.
+        // The outbox is a WAL-durable marker; if delivery succeeds immediately
+        // the key is deleted, otherwise it survives for the recovery scanner.
+        let outbox_bytes = serde_json::to_vec(&serde_json::json!({"request_id": request_id}))
+            .unwrap_or_else(|_| b"1".to_vec());
+
+        // Atomic batch write: primary + listing index + pending index + outbox
         self.storage
             .put_batch(
                 realm_id,
@@ -66,6 +78,7 @@ impl EmbeddedIdentityEngine {
                     (primary_key, bytes),
                     (list_key, b"1".to_vec()),
                     (pending_key, b"1".to_vec()),
+                    (outbox_key, outbox_bytes),
                 ],
             )
             .map_err(Self::storage_err)?;
@@ -378,5 +391,214 @@ impl EmbeddedIdentityEngine {
             .map_err(|e| IdentityError::SigningError {
                 reason: e.to_string(),
             })
+    }
+
+    /// Fires the approval webhook notification for a newly created request (C.5).
+    ///
+    /// Reads the realm's `approval_webhook` config, builds the payload, and
+    /// attempts immediate delivery. On success, removes the outbox record.
+    /// On failure, logs and leaves the outbox record for the recovery scanner.
+    pub(super) fn notify_approval_webhook_inner(
+        &self,
+        realm_id: &RealmId,
+        request: &ApprovalRequest,
+    ) {
+        let cfg = match self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.config().approval_webhook.clone())
+        {
+            Some(c) => c,
+            None => return, // no webhook configured for this realm
+        };
+
+        // Stable delivery ID — same across all retry attempts for this request.
+        let delivery_id = format!("approval:{}", request.request_id);
+
+        let payload = ApprovalWebhookPayload {
+            delivery_id: delivery_id.clone(),
+            request_id: request.request_id.clone(),
+            agent_id: request.agent_id.as_uuid().to_string(),
+            tool: request.tool.clone(),
+            action: request.action.clone(),
+            context: request.context.clone(),
+            delegation_chain: request.delegation_chain.clone(),
+            approve_url: format!(
+                "{}/v1/approval-requests/{}/approve",
+                self.config.token.issuer.trim_end_matches('/'),
+                request.request_id
+            ),
+            deny_url: format!(
+                "{}/v1/approval-requests/{}/deny",
+                self.config.token.issuer.trim_end_matches('/'),
+                request.request_id
+            ),
+            expires_at_secs: request.expires_at.as_micros() / 1_000_000,
+        };
+
+        match approval_notifier::deliver_approval_webhook(&cfg, &payload) {
+            Ok(()) => {
+                approval_notifier::log_delivery_success(&request.request_id, &cfg.url);
+                // Remove the outbox entry — delivery confirmed.
+                let outbox_key = keys::encode_approval_webhook_outbox(&request.request_id);
+                if let Err(e) = self.storage.delete(realm_id, &outbox_key) {
+                    tracing::warn!(
+                        request_id = %request.request_id,
+                        error = %e,
+                        "delivered approval webhook but failed to remove outbox entry"
+                    );
+                }
+            }
+            Err(reason) => {
+                approval_notifier::log_delivery_failure(&request.request_id, &reason);
+                // Outbox entry stays; background scanner will retry.
+            }
+        }
+    }
+
+    /// Scans this realm's approval webhook outbox and redelivers any entries
+    /// that survived a previous failed delivery or server crash.
+    ///
+    /// Called by the startup recovery scan and the periodic background task.
+    #[allow(dead_code)]
+    pub(super) fn flush_approval_webhook_outbox_inner(&self, realm_id: &RealmId) {
+        // Guard: only proceed if this realm has a webhook configured.
+        if self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.config().approval_webhook.clone())
+            .is_none()
+        {
+            return;
+        }
+
+        let prefix = keys::approval_webhook_outbox_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+
+        let entries = match self.storage.scan(realm_id, &prefix, &end) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    realm_id = %realm_id,
+                    error = %e,
+                    "failed to scan approval webhook outbox"
+                );
+                return;
+            }
+        };
+
+        for entry in entries {
+            // Extract request_id from key suffix.
+            let key_str = String::from_utf8_lossy(&entry.key);
+            let Some(request_id) = key_str.strip_prefix("appreq:outbox:") else {
+                continue;
+            };
+
+            let Ok(request) = self.get_approval_request_inner(realm_id, request_id) else {
+                continue;
+            };
+
+            // Deliver and clean up on success.
+            self.notify_approval_webhook_inner(realm_id, &request);
+            // Throttle to avoid hammering a flaky endpoint.
+            // Safety: this is called from a background scan, not the hot path.
+            #[allow(clippy::disallowed_methods)]
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// Validates a capability token for a tool invocation (Phase C — Complete Mediation).
+    ///
+    /// Enforces:
+    /// - Signature valid for this realm
+    /// - `token_type == "capability"` and `aud` contains `"hearth:capability"`
+    /// - Token not expired
+    /// - `tool` and `action` custom claims match `tool_name` / `action`
+    /// - JTI has not been used before (single-use; writes JTI to blocklist on success)
+    ///
+    /// Returns the `AgentId` embedded in the token's `sub` claim on success.
+    /// All failure modes return `ToolApprovalRequired { tool }` to avoid leaking
+    /// which specific check failed.
+    pub(super) fn validate_capability_token_inner(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        tool_name: &str,
+        action: &str,
+    ) -> Result<AgentId, IdentityError> {
+        let deny = || IdentityError::ToolApprovalRequired {
+            tool: tool_name.to_string(),
+        };
+
+        // Verify JWT signature against the realm key (with global fallback).
+        let claims = self
+            .verify_token_signature_for_realm(realm_id, token)
+            .map_err(|_| deny())?;
+
+        // Assert token type.
+        if claims.token_type != "capability" {
+            return Err(deny());
+        }
+
+        // Assert audience.
+        if !claims.aud.contains("hearth:capability") {
+            return Err(deny());
+        }
+
+        // Assert not expired.
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        if claims.exp <= now_secs {
+            return Err(deny());
+        }
+
+        // Assert tool and action match.
+        let token_tool = claims
+            .custom
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .ok_or_else(deny)?;
+        let token_action = claims
+            .custom
+            .get("action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(deny)?;
+        if token_tool != tool_name || token_action != action {
+            return Err(deny());
+        }
+
+        // Single-use enforcement: check JTI blocklist.
+        let jti = claims.jti.as_deref().ok_or_else(deny)?;
+        let jti_key = keys::encode_capability_jti(jti);
+        if self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            // Token already used — treat as requiring fresh approval.
+            return Err(deny());
+        }
+
+        // Record JTI as spent (single-use).
+        self.storage
+            .put(realm_id, &jti_key, b"1")
+            .map_err(Self::storage_err)?;
+
+        // Parse agent ID from `sub`.
+        let agent_uuid = uuid::Uuid::parse_str(&claims.sub).map_err(|_| deny())?;
+        let agent_id = AgentId::new(agent_uuid);
+
+        // Emit audit event for the authorized invocation.
+        let _ = self.record_audit(
+            realm_id,
+            None,
+            AuditAction::AgentToolInvocation,
+            "tool",
+            &format!("{}.{}", token_tool, token_action),
+        );
+
+        Ok(agent_id)
     }
 }

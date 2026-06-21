@@ -163,6 +163,21 @@ impl IdentityError {
             Self::ApprovalRequestNotFound => Some("HEARTH_APPROVAL_REQUEST_NOT_FOUND"),
             Self::ApprovalRequestNotPending { .. } => Some("HEARTH_APPROVAL_REQUEST_NOT_PENDING"),
             Self::ApprovalRequestExpired => Some("HEARTH_APPROVAL_REQUEST_EXPIRED"),
+            // Phase D
+            Self::AatScopeEscalation => Some("HEARTH_AAT_SCOPE_ESCALATION"),
+            Self::AatChainBroken { .. } => Some("HEARTH_AAT_CHAIN_BROKEN"),
+            Self::AatRevoked => Some("HEARTH_AAT_REVOKED"),
+            Self::AatExpired => Some("HEARTH_AAT_EXPIRED"),
+            Self::TransactionTokenReplayed => Some("HEARTH_TXN_TOKEN_REPLAYED"),
+            Self::CrossRealmPolicyNotFound => Some("HEARTH_CROSS_REALM_POLICY_NOT_FOUND"),
+            Self::CrossRealmPolicyConflict => Some("HEARTH_CROSS_REALM_POLICY_CONFLICT"),
+            Self::CrossRealmCapabilityNotAllowed { .. } => {
+                Some("HEARTH_CROSS_REALM_CAPABILITY_NOT_ALLOWED")
+            }
+            Self::SpiffeIdInvalid { .. } => Some("HEARTH_SPIFFE_ID_INVALID"),
+            Self::SpiffeMappingNotFound => Some("HEARTH_SPIFFE_MAPPING_NOT_FOUND"),
+            Self::SpiffeMappingConflict => Some("HEARTH_SPIFFE_MAPPING_CONFLICT"),
+            Self::SpiffeCertInvalid { .. } => Some("HEARTH_SPIFFE_CERT_INVALID"),
 
             // 5xx — do not leak internal detail
             Self::SigningError { .. }

@@ -146,6 +146,13 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         }
         domain::AuditAction::ProtectedResourceUpdated => pb::AuditAction::ProtectedResourceUpdated,
         domain::AuditAction::ProtectedResourceDeleted => pb::AuditAction::ProtectedResourceDeleted,
+        // Phase D actions — no proto variants yet; fall back to Unspecified until proto backfill.
+        domain::AuditAction::AatIssued
+        | domain::AuditAction::AatRevoked
+        | domain::AuditAction::TransactionTokenIssued
+        | domain::AuditAction::CrossRealmTokenIssued
+        | domain::AuditAction::SpiffeIdMapped
+        | domain::AuditAction::SpiffeAuthSuccess => pb::AuditAction::Unspecified,
     }
 }
 

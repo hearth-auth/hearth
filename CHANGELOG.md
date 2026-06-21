@@ -31,6 +31,19 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   token scoped to the approved tool, default TTL 5 min, max 1 h) or `Pending → Denied`.
   Transitions from non-`Pending` states are rejected. Requests expire after a configurable
   window (default 1 hour); expired requests are treated as denied. (HEA-1423)
+- **Approval webhook notifications (agent-auth Phase C.5)** — realms can configure
+  `approval_webhook.url` (plus optional `secret` and `timeout_ms`) to receive durable
+  at-least-once HTTP POST notifications when an approval request is created. The payload
+  carries `request_id`, `agent_id`, `tool`, `delegation_chain`, `approve_url`, and `deny_url`.
+  Delivery is HMAC-SHA256 signed when a secret is configured (same `X-Hearth-Signature-256`
+  convention as the audit webhook engine). The outbox record is written to WAL atomically with
+  the approval record, guaranteeing delivery survives server crashes. (HEA-1407)
+- **Approval REST API (agent-auth Phase C)** — `POST /v1/approval-requests`,
+  `GET /v1/approval-requests`, `GET /v1/approval-requests/{id}`,
+  `POST /v1/approval-requests/{id}/approve`, `POST /v1/approval-requests/{id}/deny`.
+  Gated by `agent_auth.capabilities.approval = true`. (HEA-1407)
+- **`agent_auth.capabilities.approval` flag** — enables Phase C approval routes and webhook
+  delivery. Requires `agent_auth.capabilities.identity = true`. (HEA-1407)
 
 - **Consent UI: agent delegation view/revoke** — users can list and revoke active RFC 8693
   agent delegations at `GET /ui/consent/delegations`. Revoking immediately invalidates the

@@ -127,7 +127,20 @@ impl std::error::Error for IdentityError {
             | Self::ToolApprovalRequired { .. }
             | Self::ApprovalRequestNotFound
             | Self::ApprovalRequestNotPending { .. }
-            | Self::ApprovalRequestExpired => None,
+            | Self::ApprovalRequestExpired
+            // Phase D
+            | Self::AatScopeEscalation
+            | Self::AatChainBroken { .. }
+            | Self::AatRevoked
+            | Self::AatExpired
+            | Self::TransactionTokenReplayed
+            | Self::CrossRealmPolicyNotFound
+            | Self::CrossRealmPolicyConflict
+            | Self::CrossRealmCapabilityNotAllowed { .. }
+            | Self::SpiffeIdInvalid { .. }
+            | Self::SpiffeMappingNotFound
+            | Self::SpiffeMappingConflict
+            | Self::SpiffeCertInvalid { .. } => None,
         }
     }
 }

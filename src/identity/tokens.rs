@@ -139,10 +139,54 @@ impl Default for TokenConfig {
 
 /// JWT header.
 #[derive(Debug, Serialize, Deserialize)]
-struct JwtHeader {
-    alg: String,
-    typ: String,
-    kid: String,
+pub(crate) struct JwtHeader {
+    pub(crate) alg: String,
+    pub(crate) typ: String,
+    pub(crate) kid: String,
+}
+
+/// Parses a JWT and verifies its Ed25519 signature, returning typed claims.
+///
+/// The `expected_typ` parameter is checked against the JWT header; pass `None`
+/// to skip the `typ` check (e.g. for assertions that omit it).
+///
+/// # Errors
+/// Returns `IdentityError::InvalidToken` if the JWT is malformed, the algorithm
+/// is not `EdDSA`, the `typ` does not match (when `expected_typ` is `Some`),
+/// or the signature fails to verify.
+pub(crate) fn verify_jwt_typed<T: serde::de::DeserializeOwned>(
+    token: &str,
+    public_key_bytes: &[u8],
+    expected_typ: Option<&str>,
+) -> Result<T, IdentityError> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(IdentityError::InvalidToken);
+    }
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let header: JwtHeader =
+        serde_json::from_slice(&header_bytes).map_err(|_| IdentityError::InvalidToken)?;
+    if header.alg != JWT_ALGORITHM {
+        return Err(IdentityError::InvalidToken);
+    }
+    if let Some(exp_typ) = expected_typ {
+        if header.typ != exp_typ {
+            return Err(IdentityError::InvalidToken);
+        }
+    }
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let pk = signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
+    pk.verify(signing_input.as_bytes(), &sig_bytes)
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let claims_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    serde_json::from_slice(&claims_bytes).map_err(|_| IdentityError::InvalidToken)
 }
 
 /// Confirmation claim (RFC 7800 §3.1) — carries the JWK thumbprint for DPoP binding.

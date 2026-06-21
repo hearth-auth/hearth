@@ -689,6 +689,24 @@ pub(crate) fn identity_error_to_response(
             (StatusCode::CONFLICT, "approval_request_not_pending")
         }
         IdentityError::ApprovalRequestExpired => (StatusCode::GONE, "approval_request_expired"),
+        // Phase D
+        IdentityError::AatScopeEscalation
+        | IdentityError::AatChainBroken { .. }
+        | IdentityError::AatRevoked
+        | IdentityError::AatExpired => (StatusCode::FORBIDDEN, "aat_validation_failed"),
+        IdentityError::TransactionTokenReplayed => (StatusCode::CONFLICT, "txn_token_replayed"),
+        IdentityError::CrossRealmPolicyNotFound | IdentityError::SpiffeMappingNotFound => {
+            (StatusCode::NOT_FOUND, "not_found")
+        }
+        IdentityError::CrossRealmPolicyConflict | IdentityError::SpiffeMappingConflict => {
+            (StatusCode::CONFLICT, "already_exists")
+        }
+        IdentityError::CrossRealmCapabilityNotAllowed { .. } => {
+            (StatusCode::FORBIDDEN, "cross_realm_capability_not_allowed")
+        }
+        IdentityError::SpiffeIdInvalid { .. } | IdentityError::SpiffeCertInvalid { .. } => {
+            (StatusCode::BAD_REQUEST, "spiffe_invalid")
+        }
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);

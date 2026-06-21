@@ -355,3 +355,129 @@ async fn list_approval_requests_returns_pending() {
         .iter()
         .all(|r| r.status == ApprovalRequestStatus::Pending));
 }
+
+// ─── C.4.7: validate_capability_token — server-side enforcement ──────────────
+
+/// A tool with `invoke_with_approval` permission must be rejected when the
+/// capability token is missing or invalid. Regression test for the
+/// zero-callers gap in evaluate_tool_access (HEA-1428).
+#[tokio::test]
+async fn missing_capability_token_returns_tool_approval_required() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    // Create and approve a request to get a real capability token.
+    let req = CreateApprovalRequestInput {
+        agent_id,
+        tool: "delete_file".to_string(),
+        action: "invoke".to_string(),
+        context: serde_json::json!({}),
+        delegation_chain: vec![],
+        expires_in_secs: None,
+    };
+    h.identity()
+        .create_approval_request(&realm_id, &req)
+        .expect("create");
+
+    // Call validate_capability_token with a garbage/missing token — must fail
+    // with ToolApprovalRequired (not a panic or Ok).
+    let result = h.identity().validate_capability_token(
+        &realm_id,
+        "not-a-real-token",
+        "delete_file",
+        "invoke",
+    );
+    assert!(
+        matches!(
+            result,
+            Err(IdentityError::ToolApprovalRequired { ref tool }) if tool == "delete_file"
+        ),
+        "missing/invalid token must return ToolApprovalRequired, got: {result:?}"
+    );
+}
+
+/// A valid capability token allows exactly one invocation; the second attempt
+/// with the same token must be rejected (single-use JTI enforcement).
+#[tokio::test]
+async fn capability_token_single_use_enforcement() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    // Obtain a real capability token through the approval flow.
+    let req = CreateApprovalRequestInput {
+        agent_id,
+        tool: "send_email".to_string(),
+        action: "invoke".to_string(),
+        context: serde_json::json!({}),
+        delegation_chain: vec![],
+        expires_in_secs: None,
+    };
+    let created = h
+        .identity()
+        .create_approval_request(&realm_id, &req)
+        .expect("create");
+    let response = h
+        .identity()
+        .approve_approval_request(&realm_id, &created.request_id, None)
+        .expect("approve");
+    let cap = response.capability_token.expect("capability token present");
+
+    // First use: must succeed.
+    let first =
+        h.identity()
+            .validate_capability_token(&realm_id, &cap.token, "send_email", "invoke");
+    assert!(
+        first.is_ok(),
+        "first use of valid capability token must succeed, got: {first:?}"
+    );
+
+    // Second use of the same token: must be rejected (JTI blocklist).
+    let second =
+        h.identity()
+            .validate_capability_token(&realm_id, &cap.token, "send_email", "invoke");
+    assert!(
+        matches!(
+            second,
+            Err(IdentityError::ToolApprovalRequired { ref tool }) if tool == "send_email"
+        ),
+        "replayed capability token must return ToolApprovalRequired, got: {second:?}"
+    );
+}
+
+/// A capability token scoped to one tool/action must NOT authorize a different
+/// tool invocation.
+#[tokio::test]
+async fn capability_token_tool_mismatch_rejected() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let req = CreateApprovalRequestInput {
+        agent_id,
+        tool: "send_email".to_string(),
+        action: "invoke".to_string(),
+        context: serde_json::json!({}),
+        delegation_chain: vec![],
+        expires_in_secs: None,
+    };
+    let created = h
+        .identity()
+        .create_approval_request(&realm_id, &req)
+        .expect("create");
+    let response = h
+        .identity()
+        .approve_approval_request(&realm_id, &created.request_id, None)
+        .expect("approve");
+    let cap = response.capability_token.expect("capability token");
+
+    // Use the send_email token to try to invoke delete_file — must be rejected.
+    let result =
+        h.identity()
+            .validate_capability_token(&realm_id, &cap.token, "delete_file", "invoke");
+    assert!(
+        matches!(result, Err(IdentityError::ToolApprovalRequired { .. })),
+        "token for send_email must not authorize delete_file: {result:?}"
+    );
+}

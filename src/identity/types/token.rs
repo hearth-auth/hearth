@@ -802,3 +802,246 @@ pub struct ApprovalRequestResponse {
     pub status: ApprovalRequestStatus,
     pub capability_token: Option<CapabilityTokenInfo>,
 }
+
+// ── Phase D.1: Attenuating Authorization Tokens (AATs) ───────────────────────
+
+/// A permission entry inside an AAT, scoped to a single tool.
+///
+/// Each entry allows the token holder to invoke the named tool with
+/// the specified `actions` and optional argument-level `constraints`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AatToolPermission {
+    /// Tool URI (e.g. `"send_email"` or `"urn:example:tools:search"`).
+    pub tool: String,
+    /// Allowed action names (e.g. `"invoke"`, `"list"`, `"describe"`).
+    pub actions: Vec<String>,
+    /// Argument-level constraints. `null` means unconstrained.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub constraints: serde_json::Value,
+}
+
+/// JWT payload for an Attenuating Authorization Token.
+///
+/// Issued by Hearth (typ: `"aat+jwt"`, signed with the realm key).
+/// Each derived child includes a reference back to its parent via
+/// `aat_parent` and the full ordered `aat_chain`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AatClaims {
+    /// Token ID (UUID string). Used for revocation and chain references.
+    pub jti: String,
+    /// Issuer — realm issuer URL.
+    pub iss: String,
+    /// Subject — agent identifier (e.g. `"agt_xxxx"`).
+    pub sub: String,
+    /// Optional audience restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
+    /// Expiry (Unix seconds).
+    pub exp: i64,
+    /// Issued-at (Unix seconds).
+    pub iat: i64,
+    /// Tool permissions granted to this token.
+    #[serde(default)]
+    pub tools: Vec<AatToolPermission>,
+    /// OAuth scopes carried by this token.
+    #[serde(default)]
+    pub scope: Vec<String>,
+    /// JTI of the immediate parent in the attenuation chain; absent for root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aat_parent: Option<String>,
+    /// Full ordered chain of JTIs from root to this token (inclusive).
+    #[serde(default)]
+    pub aat_chain: Vec<String>,
+}
+
+/// Request to issue a root AAT for an agent acting under delegated scope.
+///
+/// Used by realm admins or trusted systems. For agent-to-agent delegation
+/// the agent calls `derive_aat` with its existing parent AAT.
+#[derive(Clone, Debug)]
+pub struct IssueAatRequest {
+    /// Agent the AAT is issued for.
+    pub agent_id: AgentId,
+    /// Tool permissions to include in the AAT.
+    pub tools: Vec<AatToolPermission>,
+    /// OAuth scopes to include in the AAT.
+    pub scope: Vec<String>,
+    /// Optional audience restriction.
+    pub aud: Option<String>,
+    /// Token lifetime in seconds (capped at 3 600 s / 1 hour).
+    pub expires_in_secs: Option<i64>,
+}
+
+/// Request to derive a child AAT from an existing parent AAT.
+///
+/// The child's permissions MUST be a subset of the parent's.
+#[derive(Clone, Debug)]
+pub struct DeriveAatRequest {
+    /// The parent AAT JWT string.
+    pub parent_aat: String,
+    /// Tool permissions for the child — must be a subset of the parent's.
+    pub tools: Vec<AatToolPermission>,
+    /// OAuth scopes for the child — must be a subset of the parent's.
+    pub scope: Vec<String>,
+    /// Optional audience restriction (must equal or be absent when parent has none).
+    pub aud: Option<String>,
+    /// Lifetime in seconds — capped at the parent's remaining lifetime.
+    pub expires_in_secs: Option<i64>,
+}
+
+/// Successful AAT issuance or derivation response.
+#[derive(Clone, Debug)]
+pub struct AatResponse {
+    /// The signed AAT JWT.
+    pub aat: String,
+    /// Token lifetime in seconds.
+    pub expires_in_secs: i64,
+}
+
+// ── Phase D.3: Transaction Tokens ────────────────────────────────────────────
+
+/// JWT payload for a single-use transaction token (typ: `"txn+jwt"`).
+///
+/// Transaction tokens are bound to a specific `txn` ID (UUID), expire in 60 s,
+/// and are tracked for replay prevention.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionTokenClaims {
+    /// Token ID. Used in the JTI blocklist for replay prevention.
+    pub jti: String,
+    /// Issuer — realm issuer URL.
+    pub iss: String,
+    /// Subject — requesting agent identifier.
+    pub sub: String,
+    /// Audience — target agent identifier or endpoint.
+    pub aud: String,
+    /// Expiry (Unix seconds).
+    pub exp: i64,
+    /// Issued-at (Unix seconds).
+    pub iat: i64,
+    /// Unique transaction identifier binding this token to one operation.
+    pub txn: String,
+    /// Delegation context (`act` chain) if the agent acts on behalf of a user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<serde_json::Value>,
+}
+
+/// Request to issue a single-use transaction token.
+#[derive(Clone, Debug)]
+pub struct CreateTransactionTokenRequest {
+    /// The agent issuing the request (must be authenticated).
+    pub requesting_agent_id: AgentId,
+    /// The target agent (audience).
+    pub target_agent_id: AgentId,
+    /// Caller-supplied unique transaction ID. Used for replay prevention.
+    pub txn_id: String,
+    /// Optional delegation context if acting on behalf of a user.
+    pub delegation_context: Option<serde_json::Value>,
+}
+
+/// Successful transaction token response.
+#[derive(Clone, Debug)]
+pub struct TransactionTokenResponse {
+    /// The signed transaction token JWT.
+    pub token: String,
+    /// The transaction ID echoed back.
+    pub txn_id: String,
+    /// Token lifetime in seconds (always 60).
+    pub expires_in_secs: i64,
+}
+
+// ── Phase D.4: Cross-Realm Trust Policies ────────────────────────────────────
+
+/// A persisted cross-realm trust policy.
+///
+/// Allows agents from `source_realm_id` to present tokens to resources in
+/// the owning realm, restricted to `allowed_capabilities`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CrossRealmTrustPolicy {
+    /// Unique policy identifier.
+    pub policy_id: String,
+    /// Realm that owns this policy (the trusting realm).
+    pub target_realm_id: RealmId,
+    /// The realm being trusted (the source of agents).
+    pub source_realm_id: RealmId,
+    /// Capability URIs that agents from `source_realm_id` may present.
+    pub allowed_capabilities: Vec<String>,
+    /// When this policy expires. `None` means no expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+    /// When the policy was created.
+    pub created_at: Timestamp,
+}
+
+/// Request to create a cross-realm trust policy.
+#[derive(Clone, Debug)]
+pub struct CreateCrossRealmPolicyRequest {
+    /// The realm to trust (agents originate there).
+    pub source_realm_id: RealmId,
+    /// Capabilities agents from that realm are allowed to present.
+    pub allowed_capabilities: Vec<String>,
+    /// Optional policy lifetime in seconds. `None` means never expires.
+    pub expires_in_secs: Option<i64>,
+}
+
+// ── Phase D.7: SPIFFE / Workload Identity ────────────────────────────────────
+
+/// Persisted mapping from a SPIFFE ID to an `AgentId`.
+///
+/// The SPIFFE ID format is `spiffe://{trust_domain}/agent/{agent_uuid}`.
+/// Hearth uses this mapping when a workload authenticates via mTLS with
+/// an X.509 SVID.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpiffeIdentityMapping {
+    /// The full SPIFFE ID URI.
+    pub spiffe_id: String,
+    /// Agent this SPIFFE ID is mapped to.
+    pub agent_id: AgentId,
+    /// SPIFFE trust domain extracted from the URI.
+    pub trust_domain: String,
+    /// When this mapping was created.
+    pub created_at: Timestamp,
+}
+
+/// Request to register a SPIFFE ID → `AgentId` mapping.
+#[derive(Clone, Debug)]
+pub struct RegisterSpiffeIdRequest {
+    /// Agent to map.
+    pub agent_id: AgentId,
+    /// The SPIFFE ID to map (must follow `spiffe://{domain}/agent/{uuid}` format).
+    pub spiffe_id: String,
+    /// Optional PEM-encoded trust bundle for an external SPIRE server.
+    /// If absent, Hearth's own CA is used for validation.
+    pub trust_bundle_pem: Option<String>,
+}
+
+/// Payload delivered to the approval webhook endpoint (Phase C.5).
+///
+/// Sent as a JSON POST body when a realm has `approval_webhook` configured.
+/// The approver resolves the request by POSTing to `approve_url` or
+/// `deny_url` (each requires an admin bearer token).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ApprovalWebhookPayload {
+    /// Stable delivery ID — `"approval:{request_id}"`.
+    ///
+    /// Identical across retry attempts; receivers should use this for
+    /// idempotency (ignore duplicates).
+    pub delivery_id: String,
+    /// ID of the approval request.
+    pub request_id: String,
+    /// UUID string of the agent requesting tool invocation.
+    pub agent_id: String,
+    /// Tool name that triggered the approval flow.
+    pub tool: String,
+    /// Action being requested (typically `"invoke"`).
+    pub action: String,
+    /// Caller-supplied context object.
+    pub context: serde_json::Value,
+    /// Delegation chain from the token exchange (act-chain entries).
+    pub delegation_chain: Vec<String>,
+    /// URL to approve the request.
+    pub approve_url: String,
+    /// URL to deny the request.
+    pub deny_url: String,
+    /// Unix timestamp (seconds) when this approval request expires.
+    pub expires_at_secs: i64,
+}

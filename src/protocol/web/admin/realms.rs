@@ -432,6 +432,13 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::ProtectedResourceRegistered => "Protected Resource Registered",
         A::ProtectedResourceUpdated => "Protected Resource Updated",
         A::ProtectedResourceDeleted => "Protected Resource Deleted",
+        // Phase D
+        A::AatIssued => "AAT Issued",
+        A::AatRevoked => "AAT Revoked",
+        A::TransactionTokenIssued => "Transaction Token Issued",
+        A::CrossRealmTokenIssued => "Cross-Realm Token Issued",
+        A::SpiffeIdMapped => "SPIFFE ID Mapped",
+        A::SpiffeAuthSuccess => "SPIFFE Auth Success",
     }
 }
 
@@ -565,7 +572,14 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::CrossRealmTrustRevoked
         | A::ProtectedResourceRegistered
         | A::ProtectedResourceUpdated
-        | A::ProtectedResourceDeleted => "System",
+        | A::ProtectedResourceDeleted
+        // Phase D — agent infrastructure events
+        | A::AatIssued
+        | A::AatRevoked
+        | A::TransactionTokenIssued
+        | A::CrossRealmTokenIssued
+        | A::SpiffeIdMapped
+        | A::SpiffeAuthSuccess => "System",
     }
 }
 

@@ -420,6 +420,50 @@ pub enum IdentityError {
         current_status: String,
     },
     ApprovalRequestExpired,
+
+    // Phase D.1 — Attenuating Authorization Tokens
+    /// A crafted AAT attempts to widen scope beyond its parent's permissions.
+    AatScopeEscalation,
+    /// The AAT attenuation chain is structurally invalid (missing link, wrong parent JTI).
+    AatChainBroken {
+        /// Human-readable description of the broken invariant.
+        reason: String,
+    },
+    /// An AAT or one of its ancestors has been explicitly revoked.
+    AatRevoked,
+    /// The presented AAT has expired.
+    AatExpired,
+
+    // Phase D.3 — Transaction Tokens
+    /// A transaction token with this `txn_id` has already been consumed.
+    TransactionTokenReplayed,
+
+    // Phase D.4 — Cross-Realm Trust Policies
+    /// No cross-realm trust policy was found for the given (source, target) pair.
+    CrossRealmPolicyNotFound,
+    /// A cross-realm trust policy already exists for this (source, target) pair.
+    CrossRealmPolicyConflict,
+    /// The requested capability is not permitted under the applicable cross-realm policy.
+    CrossRealmCapabilityNotAllowed {
+        /// The capability that was denied.
+        capability: String,
+    },
+
+    // Phase D.7 — SPIFFE / Workload Identity
+    /// The SPIFFE ID string does not match the expected `spiffe://{domain}/agent/{uuid}` format.
+    SpiffeIdInvalid {
+        /// Human-readable reason for the rejection.
+        reason: String,
+    },
+    /// No SPIFFE ID mapping was found for this agent or SPIFFE ID.
+    SpiffeMappingNotFound,
+    /// A SPIFFE ID mapping already exists for this agent.
+    SpiffeMappingConflict,
+    /// The X.509 certificate presented for SPIFFE authentication is invalid.
+    SpiffeCertInvalid {
+        /// Reason the certificate was rejected.
+        reason: String,
+    },
 }
 
 impl From<SamlError> for IdentityError {

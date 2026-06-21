@@ -204,6 +204,24 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             (Code::FailedPrecondition, err.to_string())
         }
         IdentityError::ApprovalRequestExpired => (Code::DeadlineExceeded, err.to_string()),
+        // Phase D
+        IdentityError::AatScopeEscalation
+        | IdentityError::AatChainBroken { .. }
+        | IdentityError::AatRevoked
+        | IdentityError::AatExpired => (Code::PermissionDenied, err.to_string()),
+        IdentityError::TransactionTokenReplayed => (Code::AlreadyExists, err.to_string()),
+        IdentityError::CrossRealmPolicyNotFound | IdentityError::SpiffeMappingNotFound => {
+            (Code::NotFound, err.to_string())
+        }
+        IdentityError::CrossRealmPolicyConflict | IdentityError::SpiffeMappingConflict => {
+            (Code::AlreadyExists, err.to_string())
+        }
+        IdentityError::CrossRealmCapabilityNotAllowed { .. } => {
+            (Code::PermissionDenied, err.to_string())
+        }
+        IdentityError::SpiffeIdInvalid { .. } | IdentityError::SpiffeCertInvalid { .. } => {
+            (Code::InvalidArgument, err.to_string())
+        }
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }

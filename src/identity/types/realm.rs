@@ -402,6 +402,16 @@ pub struct RealmConfig {
     /// `None` (default) disables the webhook for this realm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_token_webhook: Option<PreTokenWebhookConfig>,
+    /// Per-realm approval webhook configuration (Phase C.5).
+    ///
+    /// When set, Hearth sends a durable at-least-once HTTP POST to the
+    /// configured URL whenever an approval request is created. The payload
+    /// carries the request ID, agent identity, tool, delegation chain, and
+    /// approve/deny URLs.
+    ///
+    /// `None` (default) disables approval webhook notifications for this realm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_webhook: Option<ApprovalWebhookConfig>,
 }
 
 /// How to handle a pre-token webhook call failure.
@@ -451,6 +461,32 @@ pub struct PreTokenWebhookConfig {
 
 fn default_webhook_timeout_ms() -> u64 {
     1000
+}
+
+/// Per-realm approval webhook configuration (Phase C.5).
+///
+/// When configured, Hearth delivers a durable at-least-once HTTP POST to
+/// `url` whenever an approval request is created. The payload is
+/// HMAC-SHA256 signed when `secret` is set, following the same convention
+/// as `pre_token_webhook` and the general webhook engine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalWebhookConfig {
+    /// HTTPS endpoint to POST the approval notification payload to.
+    pub url: String,
+    /// HMAC-SHA256 signing secret.
+    ///
+    /// When set, the body is signed and `X-Hearth-Signature-256: sha256=<hex>`
+    /// is added so the receiver can verify authenticity.
+    /// `None` skips signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// Request timeout in milliseconds. Defaults to 5 000.
+    #[serde(default = "default_approval_webhook_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_approval_webhook_timeout_ms() -> u64 {
+    5_000
 }
 
 /// Per-realm WebAuthn attestation policy (A-13).

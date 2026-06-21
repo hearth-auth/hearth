@@ -22,6 +22,7 @@ use tracing::Level;
 
 mod admin;
 mod agents;
+mod approval;
 mod auth;
 mod health;
 mod mfa;
@@ -31,6 +32,7 @@ mod session;
 mod state;
 #[cfg(test)]
 mod tests;
+mod tool_invocation;
 mod users;
 
 // ── Public API (preserve existing import paths for external crates) ───────────
@@ -188,6 +190,13 @@ pub fn router(state: Arc<AppState>) -> Router {
     // This prevents route fingerprinting when the feature is off.
     if state.agent_identity_enabled {
         base = base.merge(agents::routes());
+    }
+
+    // Register approval + tool-invocation check routes only when Phase C is enabled.
+    // Tool invocation enforcement requires approval to be available (Phase C complete mediation).
+    if state.agent_approval_enabled {
+        base = base.merge(approval::routes());
+        base = base.merge(tool_invocation::routes());
     }
 
     // Registered only in dev mode so the route is absent from the table in
