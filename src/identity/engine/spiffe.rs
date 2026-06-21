@@ -8,6 +8,9 @@
 //!   `spiffe:map:{sha256(spiffe_id)}` — JSON-serialized `SpiffeIdentityMapping`
 //!   `spiffe:agt:{agent_uuid}` — SPIFFE ID string (reverse index)
 
+use x509_parser::extensions::{GeneralName, ParsedExtension};
+use x509_parser::parse_x509_certificate;
+
 use crate::audit::AuditAction;
 use crate::core::{AgentId, RealmId};
 use crate::identity::types::{RegisterSpiffeIdRequest, SpiffeIdentityMapping};
@@ -37,7 +40,14 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::AgentRevoked);
         }
 
-        // Check for existing mapping (conflict).
+        // Guard 1 — primary-key conflict: SPIFFE ID already mapped to a different agent.
+        // Without this check a second agent could overwrite the primary mapping (BOLA/squatting).
+        let primary_key = keys::encode_spiffe_mapping(&request.spiffe_id);
+        if let Ok(Some(_)) = self.storage.get(realm_id, &primary_key) {
+            return Err(IdentityError::SpiffeMappingConflict);
+        }
+
+        // Guard 2 — reverse-index conflict: this agent already owns a SPIFFE mapping.
         let agent_index_key = keys::encode_spiffe_agent_index(&request.agent_id);
         if let Ok(Some(_)) = self.storage.get(realm_id, &agent_index_key) {
             return Err(IdentityError::SpiffeMappingConflict);
@@ -50,8 +60,6 @@ impl EmbeddedIdentityEngine {
             trust_domain: trust_domain.to_string(),
             created_at: now,
         };
-
-        let primary_key = keys::encode_spiffe_mapping(&request.spiffe_id);
         let mapping_bytes =
             serde_json::to_vec(&mapping).map_err(|e| IdentityError::Serialization {
                 reason: e.to_string(),
@@ -204,50 +212,71 @@ pub(super) fn parse_spiffe_id(spiffe_id: &str) -> Result<(&str, &str), IdentityE
 
 /// Extracts the SPIFFE URI SAN from a DER-encoded X.509 certificate.
 ///
-/// This is a minimal implementation that scans the DER bytes for the
-/// `spiffe://` marker. A production implementation would use a full X.509
-/// parser (e.g. `x509-parser` or the `rustls` WebPKI verifier), but for
-/// Phase D we target structural correctness over full ASN.1 parsing.
+/// Uses `x509-parser` for proper ASN.1-aware SAN extraction so that
+/// `spiffe://` appearing in Subject CN, Issuer, or any non-SAN extension
+/// cannot be mistaken for a legitimate SPIFFE identity.
+///
+/// Rejects:
+/// - Certificates with no URI SAN that starts with `spiffe://`
+/// - Certificates where `spiffe://` appears outside a URI-type SAN
+/// - Certificates with multiple SPIFFE URI SANs (ambiguous identity)
 fn extract_spiffe_id_from_der(der: &[u8]) -> Result<String, IdentityError> {
-    // Search for the SPIFFE URI marker in the DER bytes.
-    let marker = b"spiffe://";
-    let pos = der
-        .windows(marker.len())
-        .position(|w| w == marker)
-        .ok_or_else(|| IdentityError::SpiffeCertInvalid {
+    let (_, cert) = parse_x509_certificate(der).map_err(|_| IdentityError::SpiffeCertInvalid {
+        reason: "failed to parse DER certificate".to_string(),
+    })?;
+
+    // Collect all URI-type SANs that start with `spiffe://`.
+    // Only GeneralName::URI entries are considered — CN, Issuer, and other
+    // extension types are explicitly excluded, preventing parser-differential
+    // identity spoofing.
+    let mut spiffe_uris: Vec<String> = Vec::new();
+
+    for ext in cert.extensions() {
+        if let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() {
+            for name in &san.general_names {
+                if let GeneralName::URI(uri) = name {
+                    if uri.starts_with(SPIFFE_SCHEME) {
+                        spiffe_uris.push((*uri).to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    match spiffe_uris.len() {
+        0 => Err(IdentityError::SpiffeCertInvalid {
             reason: "no SPIFFE URI SAN found in certificate".to_string(),
-        })?;
-
-    // The SAN URI length is encoded in the preceding ASN.1 IA5String TLV.
-    // We walk forward until we find a non-printable byte or reasonable boundary.
-    let uri_start = pos;
-    let uri_end = der[pos..]
-        .iter()
-        .position(|&b| !b.is_ascii_graphic() && b != b'/')
-        .map(|len| pos + len)
-        .unwrap_or(der.len());
-
-    let uri = std::str::from_utf8(&der[uri_start..uri_end])
-        .map_err(|_| IdentityError::SpiffeCertInvalid {
-            reason: "SPIFFE URI is not valid UTF-8".to_string(),
-        })?
-        .to_string();
-
-    Ok(uri)
+        }),
+        // Ambiguous: RFC 8693 / SPIFFE spec requires exactly one SPIFFE ID per SVID.
+        n if n > 1 => Err(IdentityError::SpiffeCertInvalid {
+            reason: format!("certificate contains {n} SPIFFE URI SANs; exactly one is required"),
+        }),
+        _ => {
+            #[allow(clippy::unwrap_used)]
+            // INVARIANT: len == 1 checked in the arm above.
+            Ok(spiffe_uris.into_iter().next().unwrap())
+        }
+    }
 }
 
 /// Checks that a DER-encoded certificate has not expired.
 ///
-/// Minimal implementation: looks for the ASN.1 UTCTime or GeneralizedTime
-/// encoding of the `notAfter` field. A full X.509 parser would be more
-/// robust; this is sufficient for Phase D correctness testing.
-fn check_cert_not_expired(_der: &[u8], _now: crate::core::Timestamp) -> Result<(), IdentityError> {
-    // For Phase D, certificate expiry is validated at the TLS termination
-    // layer (rustls). The engine trusts that mTLS has already verified the
-    // certificate chain and expiry; this hook is a placeholder for the case
-    // where DER bytes are passed directly (e.g. in tests or API-level validation).
-    //
-    // In a production SPIFFE stack this would invoke a full X.509 validation
-    // chain. Full implementation deferred to the infrastructure layer.
+/// Parses the certificate's `validity.not_after` field via `x509-parser`
+/// and compares it against `now`.
+fn check_cert_not_expired(der: &[u8], now: crate::core::Timestamp) -> Result<(), IdentityError> {
+    let (_, cert) = parse_x509_certificate(der).map_err(|_| IdentityError::SpiffeCertInvalid {
+        reason: "failed to parse DER certificate for expiry check".to_string(),
+    })?;
+
+    // x509-parser exposes not_after as an ASN1Time; timestamp() returns i64 seconds since epoch.
+    let not_after_unix = cert.validity().not_after.timestamp();
+
+    // `now` stores Unix microseconds; convert to seconds for comparison.
+    let now_unix = now.as_micros() / 1_000_000;
+
+    if now_unix > not_after_unix {
+        return Err(IdentityError::SpiffeCertExpired);
+    }
+
     Ok(())
 }

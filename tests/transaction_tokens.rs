@@ -8,6 +8,8 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use common::TestHarness;
 use hearth::core::RealmId;
 use hearth::identity::{
@@ -202,4 +204,64 @@ async fn different_txn_ids_are_independent() {
             )
             .expect("each unique txn_id must succeed");
     }
+}
+
+// ── D.3.5: Concurrent issuance — exactly one winner ──────────────────────────
+
+/// N concurrent `issue_transaction_token` calls with the same `txn_id` must
+/// result in exactly one success and N-1 `TransactionTokenReplayed` errors.
+///
+/// Regression test for the TOCTOU race fixed in HEA-1439: before the advisory
+/// lock was added, two racing callers could both pass the guard read before
+/// either wrote the used marker, yielding two valid tokens from one txn_id.
+#[tokio::test]
+async fn concurrent_issue_same_txn_id_exactly_one_wins() {
+    let h = Arc::new(TestHarness::embedded().await.expect("harness init"));
+    let realm_id = make_realm(&h);
+    let agent_a = make_agent(&h, &realm_id);
+    let agent_b = make_agent(&h, &realm_id);
+    let txn_id = uuid::Uuid::new_v4().to_string();
+
+    const N: usize = 8;
+
+    let handles: Vec<_> = (0..N)
+        .map(|_| {
+            let identity = h.identity_arc();
+            let realm_id = realm_id.clone();
+            let agent_a = agent_a.clone();
+            let agent_b = agent_b.clone();
+            let txn_id = txn_id.clone();
+            tokio::task::spawn_blocking(move || {
+                identity.issue_transaction_token(
+                    &realm_id,
+                    &CreateTransactionTokenRequest {
+                        requesting_agent_id: agent_a,
+                        target_agent_id: agent_b,
+                        txn_id,
+                        delegation_context: None,
+                    },
+                )
+            })
+        })
+        .collect();
+
+    let mut successes = 0u32;
+    let mut replayed = 0u32;
+    for handle in handles {
+        match handle.await.expect("task did not panic") {
+            Ok(_) => successes += 1,
+            Err(IdentityError::TransactionTokenReplayed) => replayed += 1,
+            Err(e) => panic!("unexpected error from concurrent issue: {e:?}"),
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent issue_transaction_token must succeed"
+    );
+    assert_eq!(
+        replayed,
+        (N as u32) - 1,
+        "the remaining {N} - 1 must return TransactionTokenReplayed"
+    );
 }

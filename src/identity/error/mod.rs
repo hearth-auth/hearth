@@ -464,6 +464,8 @@ pub enum IdentityError {
         /// Reason the certificate was rejected.
         reason: String,
     },
+    /// The X.509 SVID presented for SPIFFE authentication has expired.
+    SpiffeCertExpired,
 }
 
 impl From<SamlError> for IdentityError {

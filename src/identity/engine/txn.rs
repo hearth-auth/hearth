@@ -27,6 +27,14 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateTransactionTokenRequest,
     ) -> Result<TransactionTokenResponse, IdentityError> {
+        // Serialize concurrent issuance for this (realm_id, txn_id) pair to
+        // eliminate the TOCTOU race between the guard read and the guard write
+        // below. Without this lock, two concurrent callers with the same
+        // txn_id both pass the `get` check before either writes the used
+        // marker, yielding two independently valid tokens from one txn_id.
+        let lock = self.txn_advisory_lock(realm_id, &request.txn_id);
+        let _guard = lock.lock().expect("txn_locks per-request mutex poisoned");
+
         // Guard: `txn_id` must not have been used before.
         let used_key = keys::encode_txn_token_used(&request.txn_id);
         if let Ok(Some(_)) = self.storage.get(realm_id, &used_key) {
@@ -107,6 +115,14 @@ impl EmbeddedIdentityEngine {
         if now_secs >= claims.exp {
             return Err(IdentityError::TokenExpired);
         }
+
+        // Serialize concurrent consumption for this (realm_id, txn_id) pair to
+        // eliminate the TOCTOU race between the consumed-key read and write below.
+        // Without this lock, two concurrent callers presenting the same token can
+        // both pass the `get(consumed_key)` check before either writes the
+        // consumed marker, allowing double-consumption of a single-use token.
+        let lock = self.txn_advisory_lock(realm_id, &claims.txn);
+        let _guard = lock.lock().expect("txn_locks per-request mutex poisoned");
 
         // Check that txn_id has not been consumed by a *different* token.
         // (It was written at issuance — so if it's present now, the token was already consumed.)

@@ -140,7 +140,8 @@ impl std::error::Error for IdentityError {
             | Self::SpiffeIdInvalid { .. }
             | Self::SpiffeMappingNotFound
             | Self::SpiffeMappingConflict
-            | Self::SpiffeCertInvalid { .. } => None,
+            | Self::SpiffeCertInvalid { .. }
+            | Self::SpiffeCertExpired => None,
         }
     }
 }

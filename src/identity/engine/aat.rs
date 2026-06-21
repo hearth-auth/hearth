@@ -39,6 +39,11 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::AgentRevoked);
         }
 
+        // Reject non-null, non-object constraint types at issuance.
+        for tool_perm in &request.tools {
+            validate_constraint_type(&tool_perm.constraints)?;
+        }
+
         let now = self.clock.now();
         let now_secs = now.as_micros() / 1_000_000;
         let ttl = request
@@ -191,6 +196,18 @@ impl EmbeddedIdentityEngine {
     }
 }
 
+/// Returns `AatScopeEscalation` if `v` is neither `null` nor a JSON object.
+///
+/// Only `null` (unconstrained) and `{...}` (structured key/value bounds) carry
+/// defined narrowing semantics.  Accepting arbitrary JSON types would create a
+/// type-confusion bypass path in `validate_tools_subset`.
+fn validate_constraint_type(v: &serde_json::Value) -> Result<(), IdentityError> {
+    if !v.is_null() && !v.is_object() {
+        return Err(IdentityError::AatScopeEscalation);
+    }
+    Ok(())
+}
+
 /// Returns `AatScopeEscalation` if `child_tools` is not a subset of `parent_tools`.
 fn validate_tools_subset(
     child_tools: &[AatToolPermission],
@@ -209,6 +226,12 @@ fn validate_tools_subset(
                 return Err(IdentityError::AatScopeEscalation);
             }
         }
+
+        // Reject non-null, non-object constraint types on both sides.  Strings,
+        // arrays, booleans, and numbers have no defined narrowing semantics, so
+        // accepting them would allow a type-confusion bypass (D.1-SECURITY).
+        validate_constraint_type(&child_perm.constraints)?;
+        validate_constraint_type(&parent_perm.constraints)?;
 
         // Child constraints must not introduce keys absent in the parent.
         // For numeric values, child value must be ≤ parent value.

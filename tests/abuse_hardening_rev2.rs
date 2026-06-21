@@ -498,3 +498,38 @@ fn a36_agent_auth_capabilities_identity_passes_from_yaml_str() {
         "capabilities.identity=true must produce NO validation error, got: {issues:?}"
     );
 }
+
+#[test]
+fn a36_agent_auth_capabilities_advanced_passes_with_identity() {
+    // M4 advanced capability is implemented — enabling it with identity must NOT error.
+    let yaml =
+        "dev_mode: true\nagent_auth:\n  capabilities:\n    identity: true\n    advanced: true\n";
+    let cfg = Config::from_yaml_str_unchecked(yaml).expect("parse");
+    let issues: Vec<_> = cfg
+        .validate_all()
+        .into_iter()
+        .filter(|i| i.field.starts_with("agent_auth"))
+        .collect();
+    assert!(
+        issues.is_empty(),
+        "capabilities.advanced=true with identity=true must produce NO validation error, got: {issues:?}"
+    );
+}
+
+#[test]
+fn a36_agent_auth_capabilities_advanced_requires_identity() {
+    // advanced without identity must produce a validation error.
+    let yaml =
+        "dev_mode: true\nagent_auth:\n  capabilities:\n    identity: false\n    advanced: true\n";
+    let cfg = Config::from_yaml_str_unchecked(yaml).expect("parse");
+    let result = cfg.validate();
+    assert!(
+        result.is_err(),
+        "advanced=true without identity=true must produce a validation error"
+    );
+    let err_msg = result.expect_err("validate must fail").to_string();
+    assert!(
+        err_msg.contains("agent_auth.capabilities.advanced"),
+        "error must name the offending field, got: {err_msg}"
+    );
+}

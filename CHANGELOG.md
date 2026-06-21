@@ -7,7 +7,29 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **SPIFFE SVID validation hardened** — `extract_spiffe_id_from_der` now uses `x509-parser` to
+  extract the SPIFFE identity exclusively from the URI-type SubjectAlternativeName extension;
+  a `spiffe://` string in Subject CN, Issuer, or any non-SAN field is no longer accepted as a
+  valid identity. `check_cert_not_expired` validates the `notAfter` field and returns the new
+  `SpiffeCertExpired` error variant (wire code `HEARTH_SPIFFE_CERT_EXPIRED`) instead of silently
+  accepting expired SVIDs (HEA-1444).
+
+### Fixed
+
+- **Transaction token double-consumption** — `consume_transaction_token` now holds the
+  per-`txn_id` advisory lock across the consumed-key check and write, closing a TOCTOU
+  window where two concurrent callers presenting the same token could both pass the
+  `get(consumed_key)` guard before either wrote the consumed marker (HEA-1445).
+
 ### Added
+
+- **`agent_auth.capabilities.advanced` flag** — enables Phase D agent features: Attenuating
+  Authorization Tokens (AATs), transaction tokens, cross-realm trust policies, and SPIFFE/mTLS
+  workload identity. Requires `agent_auth.capabilities.identity = true`. (HEA-1425)
+- **Agent-Auth M5 close-out** — all five implementation milestones complete. AGENT_AUTH.md
+  banner updated to final status; end-to-end conformance tests pass for M1–M4. (HEA-1425)
 
 - **Attenuating Authorization Tokens (AATs) — Phase D.1** — agents can request root AATs
   (signed with the realm's Ed25519 key, `typ: "aat+jwt"`) and derive child AATs that narrow

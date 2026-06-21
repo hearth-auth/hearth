@@ -580,6 +580,19 @@ pub struct EmbeddedIdentityEngine {
     // INVARIANT: outer guard released in scoped block before inner per-request lock is acquired.
     // INVARIANT: inner (per-request) guard held only across the sync read-check-mint-write window; no .await in scope.
     approval_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-`(realm_id, txn_id)` advisory lock for single-use enforcement in
+    /// `issue_transaction_token_inner`.
+    ///
+    /// Eliminates the TOCTOU race between the guard read (`storage.get`) and
+    /// the guard write (`storage.put`) in that function: two concurrent
+    /// requests with the same `txn_id` could both pass the `get` check before
+    /// either writes the used marker, resulting in two independently valid
+    /// transaction tokens from one authorization. Key format:
+    /// `"{realm_uuid}:{txn_id}"` so locks are realm-scoped.
+    ///
+    // INVARIANT: outer guard released in scoped block before inner per-txn lock is acquired.
+    // INVARIANT: inner (per-txn) guard held only across the sync guard-read + sign + guard-write; no .await in scope.
+    txn_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
     /// Realm ops are not on the hot path, and a realm record and its
@@ -966,6 +979,8 @@ impl EmbeddedIdentityEngine {
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
             approval_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released in scoped block before inner per-txn lock is acquired.
+            txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -1159,6 +1174,8 @@ impl EmbeddedIdentityEngine {
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
             approval_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released in scoped block before inner per-txn lock is acquired.
+            txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -3016,6 +3033,17 @@ impl EmbeddedIdentityEngine {
             map.entry(request_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
+    }
+
+    /// Returns the per-`(realm_id, txn_id)` advisory lock for serializing
+    /// concurrent calls to `issue_transaction_token_inner`.
+    ///
+    /// The outer `txn_locks` map guard is released before returning so that
+    /// callers for different `txn_id` values never contend with each other.
+    fn txn_advisory_lock(&self, realm_id: &RealmId, txn_id: &str) -> Arc<Mutex<()>> {
+        let key = format!("{}:{}", realm_id.as_uuid(), txn_id);
+        let mut map = self.txn_locks.lock().expect("txn_locks poisoned");
+        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
     }
 
     /// Atomically checks and consumes a JWT Bearer assertion JTI for replay prevention.

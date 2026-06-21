@@ -10,5 +10,6 @@ mod session_crash;
 mod sst_compact_crash;
 mod sst_crash;
 mod tiered_crash;
+mod txn_concurrent;
 mod wal_crash;
 mod wal_rotation_crash;

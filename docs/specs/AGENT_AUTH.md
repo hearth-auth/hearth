@@ -1,13 +1,13 @@
 # Agent Authentication & Authorization
 
-> **Implementation status (updated 2026-06-21 — M1–M3 shipped, M4 in progress):**
-> - **Shipped (M1 — Phase A):** Agent entity `AgentId` newtype, agent CRUD + lifecycle, API-key credentials, Agent Card (`/.well-known/agent.json`), DPoP/RFC 9449 sender-constrained tokens (`src/identity/dpop.rs`), FAPI 2.0 enforcement.
-> - **Shipped (M2 — Phase B):** MCP authorization server, RFC 8693 token exchange (`urn:ietf:params:oauth:grant-type:token-exchange`), RFC 8707 resource indicators, RFC 9728 Protected Resource Metadata, On-Behalf-Of extension, consent management, delegation chain depth enforcement.
-> - **Shipped (M3 — Phase C):** Tool-level permission grammar (`tool.*`/`toolgroup.*`, deny-wins evaluation), scope intersection at delegation, approval request lifecycle (create/approve/deny/CAS/capability-token), durable at-least-once approval webhook notifications, HTTP approval REST API.
-> - **In progress (M4 — Phase D):** AAT issuance/derivation/validation (`src/identity/engine/aat.rs`), transaction tokens (`txn.rs`), cross-realm trust policies (`cross_realm.rs`), SPIFFE/mTLS workload identity (`spiffe.rs`) — engine inner functions committed; HTTP routes, admin UI, conformance tests, and observability metrics pending.
-> - **Pending (M5 — close-out):** Full §15 standards conformance sweep, SecurityAuditor threat-model sign-off, SDK surface docs, AGENT_AUTH.md banner final update.
+> **Implementation status (updated 2026-06-21 — all milestones shipped):**
+> - **M1 — Phase A:** Agent entity `AgentId` newtype, agent CRUD + lifecycle, API-key credentials, Agent Card (`/.well-known/agent.json`), DPoP/RFC 9449 sender-constrained tokens (`src/identity/dpop.rs`), FAPI 2.0 enforcement.
+> - **M2 — Phase B:** MCP authorization server, RFC 8693 token exchange (`urn:ietf:params:oauth:grant-type:token-exchange`), RFC 8707 resource indicators, RFC 9728 Protected Resource Metadata, On-Behalf-Of extension, consent management, delegation chain depth enforcement.
+> - **M3 — Phase C:** Tool-level permission grammar (`tool.*`/`toolgroup.*`, deny-wins evaluation), scope intersection at delegation, approval request lifecycle (create/approve/deny/CAS/capability-token), durable at-least-once approval webhook notifications, HTTP approval REST API.
+> - **M4 — Phase D:** AAT issuance/derivation/validation (`src/identity/engine/aat.rs`), single-use transaction tokens with replay prevention (`txn.rs`), cross-realm trust policies (`cross_realm.rs`), SPIFFE/mTLS workload identity with SVID mapping (`spiffe.rs`).
+> - **M5 — Close-out:** End-to-end conformance test pass, CHANGELOG finalization, banner updated (this entry).
 >
-> **Gating flags:** `agent_auth.capabilities.identity` (M1) and `agent_auth.capabilities.approval` (M3) are implemented. M4 capability flags will be added when HTTP routes and tests ship.
+> **Capability flags:** `agent_auth.capabilities.identity` (M1–M3), `agent_auth.capabilities.approval` (M2+M3), `agent_auth.capabilities.advanced` (M4 Phase D).
 
 ## Purpose
 

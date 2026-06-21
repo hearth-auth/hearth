@@ -320,7 +320,7 @@ impl Config {
     /// Called automatically by [`from_yaml_str`] and [`from_file`].
     /// Dev-mode configs skip certain checks (e.g., empty `data_dir`).
     #[allow(clippy::too_many_lines)]
-    fn validate(&self) -> Result<(), ConfigError> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         if self.server.port == 0 {
             return Err(ConfigError::ValidationError {
                 field: "server.port".to_string(),
@@ -408,13 +408,21 @@ impl Config {
             });
         }
 
-        // `agent_auth.capabilities.identity` (M1) and `approval` (Phase C) are
-        // fully implemented. Unimplemented phases add validation errors here.
+        // All agent_auth capability phases (M1 identity, M2+M3 approval, M4 advanced)
+        // are fully implemented. Validate prerequisite ordering only.
 
-        // `approval` requires `identity` — Phase C builds on Phase A.
+        // `approval` requires `identity` — Phase B+C builds on Phase A.
         if self.agent_auth.capabilities.approval && !self.agent_auth.capabilities.identity {
             return Err(invalid(
                 "agent_auth.capabilities.approval",
+                "requires agent_auth.capabilities.identity = true (Phase A must be enabled first)",
+            ));
+        }
+
+        // `advanced` requires `identity` — Phase D builds on Phase A.
+        if self.agent_auth.capabilities.advanced && !self.agent_auth.capabilities.identity {
+            return Err(invalid(
+                "agent_auth.capabilities.advanced",
                 "requires agent_auth.capabilities.identity = true (Phase A must be enabled first)",
             ));
         }

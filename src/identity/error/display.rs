@@ -278,6 +278,7 @@ impl fmt::Display for IdentityError {
             Self::SpiffeCertInvalid { reason } => {
                 write!(f, "SPIFFE X.509 certificate invalid: {reason}")
             }
+            Self::SpiffeCertExpired => write!(f, "SPIFFE X.509 certificate has expired"),
         }
     }
 }

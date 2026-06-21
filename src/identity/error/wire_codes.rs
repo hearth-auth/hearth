@@ -178,6 +178,7 @@ impl IdentityError {
             Self::SpiffeMappingNotFound => Some("HEARTH_SPIFFE_MAPPING_NOT_FOUND"),
             Self::SpiffeMappingConflict => Some("HEARTH_SPIFFE_MAPPING_CONFLICT"),
             Self::SpiffeCertInvalid { .. } => Some("HEARTH_SPIFFE_CERT_INVALID"),
+            Self::SpiffeCertExpired => Some("HEARTH_SPIFFE_CERT_EXPIRED"),
 
             // 5xx — do not leak internal detail
             Self::SigningError { .. }

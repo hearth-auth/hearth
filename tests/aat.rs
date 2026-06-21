@@ -402,6 +402,165 @@ async fn revocation_invalidates_child_aats() {
     );
 }
 
+// ── D.1-SECURITY: non-Object constraint type bypass (HEA-1440) ───────────────
+
+/// Issuing a root AAT with a string constraint must be rejected.
+/// PoC: previously a root could be issued with `constraints: "basic"`, after
+/// which deriving with `constraints: "admin"` bypassed narrowing validation.
+#[tokio::test]
+async fn string_constraint_rejected_at_issuance() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let err = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool_with_constraints(
+                    "fs",
+                    &["invoke"],
+                    serde_json::Value::String("basic".to_string()),
+                )],
+                scope: vec!["fs:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect_err("string constraint must be rejected at issuance");
+
+    assert!(
+        matches!(err, IdentityError::AatScopeEscalation),
+        "expected AatScopeEscalation for string constraint at issuance, got {err:?}"
+    );
+}
+
+/// Issuing a root AAT with an array constraint must be rejected.
+#[tokio::test]
+async fn array_constraint_rejected_at_issuance() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let err = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool_with_constraints(
+                    "fs",
+                    &["invoke"],
+                    serde_json::json!(["read", "write"]),
+                )],
+                scope: vec!["fs:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect_err("array constraint must be rejected at issuance");
+
+    assert!(
+        matches!(err, IdentityError::AatScopeEscalation),
+        "expected AatScopeEscalation for array constraint at issuance, got {err:?}"
+    );
+}
+
+/// Derivation with a string child constraint must be rejected even when the
+/// parent's constraint is null.  Previously the `if let (Object, Object)` guard
+/// fell through and the `else if` only caught the null-parent case.
+#[tokio::test]
+async fn derive_aat_string_child_constraint_rejected() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let root = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool("fs", &["invoke"])], // null constraints — valid
+                scope: vec!["fs:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue root AAT with null constraints");
+
+    let err = h
+        .identity()
+        .derive_aat(
+            &realm_id,
+            &DeriveAatRequest {
+                parent_aat: root.aat,
+                tools: vec![tool_with_constraints(
+                    "fs",
+                    &["invoke"],
+                    serde_json::Value::String("admin".to_string()), // escalation via type confusion
+                )],
+                scope: vec!["fs:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(60),
+            },
+        )
+        .expect_err("string child constraint must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::AatScopeEscalation),
+        "expected AatScopeEscalation for string child constraint, got {err:?}"
+    );
+}
+
+/// Same-value string constraints are also rejected: semantics of narrowing
+/// for non-object types are undefined regardless of whether child == parent.
+#[tokio::test]
+async fn derive_aat_same_string_child_constraint_rejected() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let root = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool("fs", &["invoke"])], // null constraints — valid
+                scope: vec!["fs:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue root AAT with null constraints");
+
+    let err = h
+        .identity()
+        .derive_aat(
+            &realm_id,
+            &DeriveAatRequest {
+                parent_aat: root.aat,
+                tools: vec![tool_with_constraints(
+                    "fs",
+                    &["invoke"],
+                    serde_json::Value::String("basic".to_string()), // even same-string is rejected
+                )],
+                scope: vec!["fs:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(60),
+            },
+        )
+        .expect_err("same string child constraint must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::AatScopeEscalation),
+        "expected AatScopeEscalation for same-string child constraint, got {err:?}"
+    );
+}
+
 // ── D.1.8: Forged signature is rejected ──────────────────────────────────────
 
 #[tokio::test]

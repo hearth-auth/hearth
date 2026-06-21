@@ -222,6 +222,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::SpiffeIdInvalid { .. } | IdentityError::SpiffeCertInvalid { .. } => {
             (Code::InvalidArgument, err.to_string())
         }
+        IdentityError::SpiffeCertExpired => (Code::Unauthenticated, err.to_string()),
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }

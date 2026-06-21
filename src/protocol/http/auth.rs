@@ -707,6 +707,7 @@ pub(crate) fn identity_error_to_response(
         IdentityError::SpiffeIdInvalid { .. } | IdentityError::SpiffeCertInvalid { .. } => {
             (StatusCode::BAD_REQUEST, "spiffe_invalid")
         }
+        IdentityError::SpiffeCertExpired => (StatusCode::UNAUTHORIZED, "spiffe_cert_expired"),
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);

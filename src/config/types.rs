@@ -2053,16 +2053,14 @@ impl FederationProviderYaml {
 /// Staged capability flags for `agent_auth`.
 ///
 /// Each flag activates one phase of the agent feature set independently.
-/// Unimplemented phases refuse to start. Defaults: all `false`.
+/// Flags must be enabled in order; enabling a phase without its predecessor
+/// is rejected at startup. Defaults: all `false`.
 ///
 /// See `docs/specs/AGENT_AUTH.md` for phase definitions.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct AgentAuthCapabilities {
     /// Phase A — Agent identity: CRUD, API-key credentials, Agent Card,
     /// and REST endpoints (`/v1/agents`).
-    ///
-    /// Set to `true` to enable M1 agent features. All other phases remain
-    /// off until their respective capability flags are added and implemented.
     #[serde(default)]
     pub identity: bool,
     /// Phase B + C — MCP authorization server, RFC 8693 token exchange,
@@ -2075,15 +2073,25 @@ pub struct AgentAuthCapabilities {
     /// - REST endpoints (`/v1/approval-requests`)
     #[serde(default)]
     pub approval: bool,
+    /// Phase D — Advanced delegation: Attenuating Authorization Tokens (AATs),
+    /// transaction tokens, cross-realm trust policies, and SPIFFE/mTLS workload
+    /// identity.
+    ///
+    /// Requires `identity = true`. When enabled, adds:
+    /// - AAT issuance, derivation, validation, and revocation
+    /// - Single-use transaction tokens with replay prevention
+    /// - Cross-realm trust policy management
+    /// - SPIFFE SVID mapping and mTLS workload authentication
+    #[serde(default)]
+    pub advanced: bool,
 }
 
 /// Agent authentication / authorization feature gate.
 ///
 /// Uses staged capability flags so each phase can be enabled independently.
-/// Unimplemented phases produce a startup validation error if set to `true`.
+/// Enabling a phase without its required predecessor is rejected at startup.
 ///
-/// See `docs/specs/AGENT_AUTH.md` for the normative specification and
-/// current implementation status.
+/// See `docs/specs/AGENT_AUTH.md` for the normative specification.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct AgentAuthConfig {
     /// Staged capability flags. All default to `false`.
