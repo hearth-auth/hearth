@@ -145,6 +145,7 @@ impl IdentityError {
 
             Self::AgentNotFound => Some("agent_not_found"),
             Self::AgentRevoked => Some("agent_revoked"),
+            Self::AgentRateLimitExceeded => Some("agent_rate_limit_exceeded"),
             Self::AgentCredentialNotFound => Some("agent_credential_not_found"),
 
             Self::PreTokenWebhookFailed { .. } => Some("HEARTH_PRE_TOKEN_WEBHOOK_FAILED"),

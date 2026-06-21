@@ -1794,13 +1794,16 @@ async fn me_permissions(
 
 async fn self_list_consents(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    let user_id = match extract_user_auth(&headers, &state, &realm_id) {
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -1826,6 +1829,8 @@ async fn self_list_consents(
 /// consent for a specific client.
 async fn self_revoke_consent(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     axum::extract::Path(client_id_str): axum::extract::Path<String>,
 ) -> impl IntoResponse {
@@ -1833,7 +1838,8 @@ async fn self_revoke_consent(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    let user_id = match extract_user_auth(&headers, &state, &realm_id) {
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };

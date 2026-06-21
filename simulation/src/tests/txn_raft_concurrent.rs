@@ -17,13 +17,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use openraft::{
-    Config as RaftConfig, SnapshotPolicy,
     error::{InstallSnapshotError, NetworkError, RPCError, RaftError, RemoteError},
     network::{RPCOption, RaftNetwork, RaftNetworkFactory},
     raft::{
         AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
         InstallSnapshotResponse, VoteRequest, VoteResponse,
     },
+    Config as RaftConfig, SnapshotPolicy,
 };
 use uuid::Uuid;
 
@@ -154,7 +154,12 @@ async fn build_cluster(n: usize) -> (Vec<TestNode>, RealmId) {
     let mut members: BTreeMap<u64, HearthNode> = BTreeMap::new();
     for i in 0..n {
         let id = (i + 1) as u64;
-        members.insert(id, HearthNode { addr: format!("mem-{id}") });
+        members.insert(
+            id,
+            HearthNode {
+                addr: format!("mem-{id}"),
+            },
+        );
     }
 
     let mut nodes: Vec<TestNode> = Vec::new();
@@ -171,7 +176,9 @@ async fn build_cluster(n: usize) -> (Vec<TestNode>, RealmId) {
             Arc::clone(&storage) as Arc<dyn StorageEngine>,
             storage_config,
         );
-        let factory = InMemFactory { nodes: Arc::clone(&registry) };
+        let factory = InMemFactory {
+            nodes: Arc::clone(&registry),
+        };
         let raft = openraft::Raft::<HearthRaftConfig>::new(
             id,
             Arc::clone(&raft_config),
@@ -183,7 +190,12 @@ async fn build_cluster(n: usize) -> (Vec<TestNode>, RealmId) {
         .unwrap();
 
         registry.lock().unwrap().insert(id, raft.clone());
-        nodes.push(TestNode { id, raft, storage, _dir: dir });
+        nodes.push(TestNode {
+            id,
+            raft,
+            storage,
+            _dir: dir,
+        });
     }
 
     nodes[0].raft.initialize(members).await.unwrap();
@@ -253,11 +265,20 @@ async fn simulation_raft_put_if_absent_exactly_one_winner() {
         raft_put_if_absent(&nodes, &realm, key, b"expiry-b"),
     );
 
-    let wins = [resp_a.success, resp_b.success].iter().filter(|&&s| s).count();
-    let losses = [resp_a.success, resp_b.success].iter().filter(|&&s| !s).count();
+    let wins = [resp_a.success, resp_b.success]
+        .iter()
+        .filter(|&&s| s)
+        .count();
+    let losses = [resp_a.success, resp_b.success]
+        .iter()
+        .filter(|&&s| !s)
+        .count();
 
     assert_eq!(wins, 1, "exactly one PutIfAbsent must win");
-    assert_eq!(losses, 1, "the losing PutIfAbsent must return success=false");
+    assert_eq!(
+        losses, 1,
+        "the losing PutIfAbsent must return success=false"
+    );
 
     // Key must be present in the leader's storage after both commits.
     let stored = nodes[leader_idx(&nodes)].storage.get(&realm, key).unwrap();
@@ -279,11 +300,17 @@ async fn simulation_raft_put_if_absent_durable_guard() {
     assert!(first.success, "first PutIfAbsent must succeed");
 
     let second = raft_put_if_absent(&nodes, &realm, key, b"1720000060").await;
-    assert!(!second.success, "second PutIfAbsent for same key must return false");
+    assert!(
+        !second.success,
+        "second PutIfAbsent for same key must return false"
+    );
 
     // A distinct key must still succeed.
     let other = raft_put_if_absent(&nodes, &realm, b"txn:used:guard-test-002", b"v").await;
-    assert!(other.success, "PutIfAbsent for a different key must succeed");
+    assert!(
+        other.success,
+        "PutIfAbsent for a different key must succeed"
+    );
 
     for node in &nodes {
         node.raft.shutdown().await.unwrap();

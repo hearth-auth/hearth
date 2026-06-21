@@ -379,7 +379,9 @@ impl HearthStateMachine {
                 // apply can interleave between the get and the put here, so the
                 // check-and-write is atomically serialised by Raft ordering.
                 let success = spawn_blocking(move || {
-                    engine.put_if_absent(&realm, &key, &value).map_err(to_write_err)
+                    engine
+                        .put_if_absent(&realm, &key, &value)
+                        .map_err(to_write_err)
                 })
                 .await
                 .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;

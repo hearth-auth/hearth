@@ -676,6 +676,8 @@ pub struct EmbeddedIdentityEngine {
     /// token is rejected by the `exp` claim check before we reach this cache,
     /// so stale entries are harmless.
     revoked_jti_cache: ArcSwap<HashMap<String, i64>>,
+    // INVARIANT: guard released before method returns; no .await in scope.
+    agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -1017,6 +1019,10 @@ impl EmbeddedIdentityEngine {
             dpop_nonce_cache: Mutex::new(HashMap::new()),
             blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
             revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
+            // INVARIANT: guard released before method returns; no .await in scope.
+            agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
+                crate::abuse::agent_monitor::AgentRateConfig::default(),
+            ),
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
@@ -1388,6 +1394,10 @@ impl EmbeddedIdentityEngine {
             dpop_nonce_cache: Mutex::new(HashMap::new()),
             blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
             revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
+            // INVARIANT: guard released before method returns; no .await in scope.
+            agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
+                crate::abuse::agent_monitor::AgentRateConfig::default(),
+            ),
         };
         // Best-effort: log but do not propagate initialization errors so
         // existing test harnesses that pre-seed storage don't break on a
@@ -11139,6 +11149,24 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         agent_id: &AgentId,
         plaintext_key_hex: &str,
     ) -> Result<bool, IdentityError> {
+        // D.6: Record every attempt (correct key or not) against the rate monitor.
+        use crate::abuse::agent_monitor::RateDecision;
+        match self.agent_rate_monitor.check_and_record(
+            realm_id,
+            agent_id,
+            std::time::Instant::now(),
+        ) {
+            RateDecision::Deny {
+                triggered_suspension,
+            } => {
+                if triggered_suspension {
+                    let _ = self.suspend_agent(realm_id, agent_id, None);
+                }
+                return Err(IdentityError::AgentRateLimitExceeded);
+            }
+            RateDecision::Allow => {}
+        }
+
         // Compute SHA-256 of the supplied plaintext
         use sha2::{Digest, Sha256};
         use subtle::ConstantTimeEq;
@@ -11220,6 +11248,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .expect("ip login tracker lock"),
             now - self.config.rate_limit.ip_window_micros * 2,
         );
+
+        // D.6: evict idle agent-rate windows to bound memory.
+        self.agent_rate_monitor
+            .prune_idle(std::time::Instant::now());
 
         if stats.total_deleted() > 0 {
             let metadata = Some(serde_json::json!({

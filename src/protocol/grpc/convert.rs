@@ -190,6 +190,7 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         }
         IdentityError::AgentNotFound => (Code::NotFound, err.to_string()),
         IdentityError::AgentRevoked => (Code::PermissionDenied, err.to_string()),
+        IdentityError::AgentRateLimitExceeded => (Code::ResourceExhausted, err.to_string()),
         IdentityError::AgentCredentialNotFound => (Code::NotFound, err.to_string()),
         IdentityError::PreTokenWebhookFailed { .. } => (Code::PermissionDenied, err.to_string()),
         // M2: protected resource + token exchange

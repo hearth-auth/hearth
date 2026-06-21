@@ -662,6 +662,9 @@ pub(crate) fn identity_error_to_response(
         }
         IdentityError::AgentNotFound => (StatusCode::NOT_FOUND, "agent not found"),
         IdentityError::AgentRevoked => (StatusCode::FORBIDDEN, "agent revoked"),
+        IdentityError::AgentRateLimitExceeded => {
+            (StatusCode::TOO_MANY_REQUESTS, "agent_rate_limit_exceeded")
+        }
         IdentityError::AgentCredentialNotFound => {
             (StatusCode::NOT_FOUND, "agent credential not found")
         }
@@ -786,10 +789,78 @@ fn coerce_string_ints(v: serde_json::Value) -> serde_json::Value {
         other => other,
     }
 }
+/// Enforces DPoP proof validation for `cnf`-bound tokens at resource endpoints
+/// (RFC 9449 §7.2). Called from [`extract_user_auth`] when the validated token
+/// carries a `cnf.jkt` claim.
+fn enforce_dpop_binding(
+    headers: &HeaderMap,
+    state: &AppState,
+    realm_id: &RealmId,
+    token: &str,
+    expected_jkt: &str,
+    htm: &str,
+    htu: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let proof = headers
+        .get("dpop")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": "invalid_token",
+                    "error_description": "DPoP proof required for cnf-bound access token"
+                })),
+            )
+        })?;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let validated = crate::identity::dpop::validate_dpop_proof(
+        proof,
+        htm,
+        htu,
+        now_secs,
+        None,        // nonce not required at resource server
+        Some(token), // ath = SHA-256(access_token) required at resource endpoints
+    )
+    .map_err(|e| identity_error_to_response(&e))?;
+
+    // JKT must match what was bound at token issuance (RFC 9449 §7.1).
+    if validated.jkt != expected_jkt {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "invalid_token",
+                "error_description": "DPoP proof key does not match token cnf.jkt binding"
+            })),
+        ));
+    }
+
+    // Record JTI to prevent proof replay (RFC 9449 §11.1).
+    state
+        .identity
+        .check_and_record_dpop_jti(realm_id, &validated.jti, now_secs)
+        .map_err(|e| identity_error_to_response(&e))?;
+
+    Ok(())
+}
+
+/// Extracts and validates user authentication, enforcing DPoP binding for
+/// `cnf`-bound tokens (RFC 9449 §7.2).
+///
+/// `htm` is the HTTP method (e.g. `"GET"`). `htu` is the full request URI
+/// including scheme and authority (e.g. `"https://auth.example.com/oauth/consents"`).
 pub(crate) fn extract_user_auth(
     headers: &HeaderMap,
     state: &AppState,
     realm_id: &RealmId,
+    htm: &str,
+    htu: &str,
 ) -> Result<UserId, (StatusCode, Json<serde_json::Value>)> {
     let Some(token) = headers
         .get("authorization")
@@ -811,6 +882,13 @@ pub(crate) fn extract_user_auth(
                 Json(serde_json::json!({"error": "invalid_token"})),
             )
         })?;
+
+    // Resource servers MUST verify the DPoP proof for cnf-bound tokens
+    // (RFC 9449 §7.2). Plain Bearer use of a DPoP-bound token is rejected
+    // before any user lookup.
+    if let Some(ref cnf) = claims.cnf {
+        enforce_dpop_binding(headers, state, realm_id, token, &cnf.jkt, htm, htu)?;
+    }
 
     uuid::Uuid::parse_str(&claims.sub)
         .map(UserId::new)

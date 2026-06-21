@@ -374,6 +374,11 @@ pub enum IdentityError {
     AgentNotFound,
     /// The agent has been permanently revoked.
     AgentRevoked,
+    /// The agent's per-minute request rate exceeded the configured threshold (D.6).
+    ///
+    /// The engine has already triggered auto-suspension via `suspend_agent()`.
+    /// Callers should surface this as HTTP 429 / gRPC `RESOURCE_EXHAUSTED`.
+    AgentRateLimitExceeded,
     /// The requested agent credential was not found.
     AgentCredentialNotFound,
     /// The pre-token enrichment webhook call failed and the realm's policy is `fail_closed`.

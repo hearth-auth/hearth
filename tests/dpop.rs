@@ -425,6 +425,186 @@ fn dpop_nonce_secret_hex_decodes_correctly() {
     assert_eq!(bytes, expected);
 }
 
+/// Builds a DPoP proof for a resource server request — includes the `ath` claim
+/// (`BASE64URL(SHA-256(access_token))`) required by RFC 9449 §4.2 when the
+/// proof accompanies an access token at a resource endpoint.
+#[allow(clippy::similar_names)]
+fn make_resource_dpop_proof(key: &DPopKey, htm: &str, htu: &str, access_token: &str) -> String {
+    use ring::digest;
+    let jwk = key.public_jwk_json();
+    let header = serde_json::json!({"alg": "ES256", "jwk": jwk, "typ": "dpop+jwt"});
+    let iat = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let jti = uuid::Uuid::new_v4().to_string();
+    let ath_bytes = digest::digest(&digest::SHA256, access_token.as_bytes());
+    let ath = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ath_bytes.as_ref());
+    let claims = serde_json::json!({"htm": htm, "htu": htu, "iat": iat, "jti": jti, "ath": ath});
+
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header_b64 = b64.encode(serde_json::to_string(&header).unwrap().as_bytes());
+    let claims_b64 = b64.encode(serde_json::to_string(&claims).unwrap().as_bytes());
+    let msg = format!("{header_b64}.{claims_b64}");
+    let sig = key.sign(msg.as_bytes());
+    format!("{header_b64}.{claims_b64}.{}", b64.encode(&sig))
+}
+
+// ===== Scenario DP-7: cnf-bound token without DPoP proof at resource endpoint → 401 =====
+
+/// Regression test for HEA-1465 / HEA-1462 F2.
+///
+/// A DPoP-bound access token presented as a plain Bearer token at a resource
+/// endpoint MUST be rejected with 401 — not silently accepted.
+#[tokio::test]
+async fn dpop_cnf_bound_token_without_proof_at_resource_endpoint_is_401() {
+    let h = common::TestHarness::embedded().await.unwrap();
+    let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
+    // Share AppState so the JTI cache is consistent across both legs.
+    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
+    let token_app = router(Arc::clone(&state));
+    let resource_app = router(Arc::clone(&state));
+
+    // Issue a DPoP-bound access token.
+    let dpop_key = DPopKey::generate();
+    let token_proof = make_dpop_proof(&dpop_key, "POST", "https://hearth.local/token", None);
+    let body = serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": &client_id,
+        "client_secret": &client_secret
+    });
+    let token_resp = token_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", &realm_id)
+                .header("Content-Type", "application/json")
+                .header("DPoP", token_proof)
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        token_resp.status(),
+        StatusCode::OK,
+        "token issuance must succeed"
+    );
+    let bytes = to_bytes(token_resp.into_body(), 1024 * 1024).await.unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let access_token = token_json["access_token"].as_str().unwrap().to_string();
+    assert_eq!(token_json["token_type"].as_str().unwrap(), "DPoP");
+
+    // Present the DPoP-bound token WITHOUT a DPoP proof header — must be rejected.
+    let resp = resource_app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/oauth/consents")
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "cnf-bound token without DPoP proof must be rejected with 401"
+    );
+    let bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        json["error"].as_str().unwrap(),
+        "invalid_token",
+        "error body must be invalid_token"
+    );
+    // error_description confirms this is DPoP rejection, not sub-parsing failure.
+    assert!(
+        json["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("DPoP")),
+        "error_description must indicate DPoP proof was required; got: {json}"
+    );
+}
+
+// ===== Scenario DP-8: cnf-bound token with valid DPoP proof at resource endpoint → auth passes =====
+
+/// Positive case for HEA-1465: valid DPoP proof with `ath` at a resource
+/// endpoint must NOT be rejected by DPoP enforcement. Any remaining failure
+/// (e.g. sub parsing for a client-credentials token) is unrelated to DPoP.
+#[tokio::test]
+async fn dpop_cnf_bound_token_with_valid_proof_at_resource_endpoint_passes_auth() {
+    let h = common::TestHarness::embedded().await.unwrap();
+    let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
+    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
+    let token_app = router(Arc::clone(&state));
+    let resource_app = router(Arc::clone(&state));
+
+    // Issue a DPoP-bound access token.
+    let dpop_key = DPopKey::generate();
+    let token_proof = make_dpop_proof(&dpop_key, "POST", "https://hearth.local/token", None);
+    let body = serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": &client_id,
+        "client_secret": &client_secret
+    });
+    let token_resp = token_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", &realm_id)
+                .header("Content-Type", "application/json")
+                .header("DPoP", token_proof)
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(token_resp.status(), StatusCode::OK);
+    let bytes = to_bytes(token_resp.into_body(), 1024 * 1024).await.unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let access_token = token_json["access_token"].as_str().unwrap().to_string();
+
+    // Present the token WITH a valid DPoP proof including the ath claim.
+    let resource_proof = make_resource_dpop_proof(
+        &dpop_key,
+        "GET",
+        "https://hearth.local/oauth/consents",
+        &access_token,
+    );
+    let resp = resource_app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/oauth/consents")
+                .header("X-Realm-ID", &realm_id)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .header("DPoP", resource_proof)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // DPoP enforcement must not reject the request. If 401, it must NOT have
+    // an error_description (which would indicate DPoP rejection). Sub-parsing
+    // failure for client_credentials tokens is a separate, expected limitation.
+    let status = resp.status();
+    let body_bytes = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    if status == StatusCode::UNAUTHORIZED {
+        let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert!(
+            json.get("error_description").is_none(),
+            "valid DPoP proof must not be rejected by DPoP enforcement; got: {json}"
+        );
+    }
+}
+
 // ===== Scenario DP-6: htm mismatch rejected =====
 
 #[tokio::test]

@@ -140,6 +140,8 @@ struct WbCredEntry {
 
 async fn webauthn_register_begin(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     Json(body): Json<WbrBeginReq>,
 ) -> impl IntoResponse {
@@ -147,7 +149,8 @@ async fn webauthn_register_begin(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let user_id = match extract_user_auth(&headers, &state, &realm_id) {
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -179,6 +182,8 @@ async fn webauthn_register_begin(
 
 async fn webauthn_register_complete(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     Json(body): Json<WbrCompleteReq>,
 ) -> impl IntoResponse {
@@ -186,7 +191,8 @@ async fn webauthn_register_complete(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let user_id = match extract_user_auth(&headers, &state, &realm_id) {
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -337,13 +343,16 @@ async fn webauthn_auth_complete(
 
 async fn webauthn_list_credentials(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let user_id = match extract_user_auth(&headers, &state, &realm_id) {
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -371,6 +380,8 @@ async fn webauthn_list_credentials(
 
 async fn webauthn_delete_credential(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     Path(credential_id_b64): Path<String>,
 ) -> impl IntoResponse {
@@ -378,7 +389,8 @@ async fn webauthn_delete_credential(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let user_id = match extract_user_auth(&headers, &state, &realm_id) {
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };

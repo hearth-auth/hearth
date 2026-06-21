@@ -17,6 +17,7 @@
 //! | A-24 | Per-realm resource quotas                | `src/identity/engine`    |
 //! | A-25 | Audit auto-retention + max_rows backstop | `src/audit/engine` + `src/main` |
 //! | A-38 | ACT actor-chain depth cap                | (constant here)          |
+//! | D-6  | Per-agent rate monitor + auto-suspend    | [`agent_monitor`]        |
 //! | A-39 | HTTP/2 rapid-reset defense               | `src/protocol/http`      |
 //! | A-40 | Host allowlist + COOP/COEP + cookies     | `src/protocol/web`       |
 //! | A-44 | SAML XML parse-event cap                 | (constant here)          |
@@ -31,6 +32,7 @@
 //! | P-5  | Email-reputation trait + disposable list | [`email_reputation`]     |
 //! | P-8  | Pluggable SecretsBackend (HSM/KMS/file)  | [`secrets_backend`]      |
 
+pub mod agent_monitor;
 pub mod backoff;
 pub mod bot_signal;
 pub mod captcha;
