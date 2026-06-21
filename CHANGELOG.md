@@ -9,6 +9,12 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **gRPC `AuditAction` enum fully synced** — the proto enum now covers all 109 domain variants
+  (previously 59 variants mapped to `UNSPECIFIED`, losing information on the wire). Includes
+  RBAC group events, login/lockout events, backup/export watermarking, required-action lifecycle,
+  SMS MFA, adaptive step-up, device fingerprints, email-change, agent lifecycle, and M2
+  delegation/MCP events (`AgentDelegation` through `ProtectedResourceDeleted`). Go and TypeScript
+  SDK types regenerated; reverse mapping (`proto → domain`) added for gRPC filter queries. (HEA-1417)
 - **RFC 8693 token exchange** (`urn:ietf:params:oauth:grant-type:token-exchange`) — agents
   can exchange a user's access token for a delegated token via `POST /token` with the new
   grant type. Resulting tokens carry an `act` (actor) claim per RFC 8693 §4.1. The exchange
