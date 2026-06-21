@@ -325,17 +325,19 @@ async fn delete_nonexistent_spiffe_mapping_returns_error() {
 /// Generates a self-signed DER cert with `spiffe_id` as a URI-type SAN but
 /// with a validity window entirely in the past (1970-01-01 to 1971-01-01).
 fn cert_der_expired_spiffe_uri_san(spiffe_id: &str) -> Vec<u8> {
-    let mut params =
-        rcgen::CertificateParams::new(Vec::<String>::new()).expect("cert params");
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("cert params");
     params.subject_alt_names = vec![rcgen::SanType::URI(
         rcgen::Ia5String::try_from(spiffe_id).expect("valid IA5 SPIFFE URI"),
     )];
     // Validity window entirely in the past so the cert is always expired.
     params.not_before = time::OffsetDateTime::UNIX_EPOCH;
-    params.not_after =
-        time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(365);
+    params.not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(365);
     let key = rcgen::KeyPair::generate().expect("keygen");
-    params.self_signed(&key).expect("self-signed").der().to_vec()
+    params
+        .self_signed(&key)
+        .expect("self-signed")
+        .der()
+        .to_vec()
 }
 
 /// An expired SVID must return `SpiffeCertExpired`, not be silently accepted.

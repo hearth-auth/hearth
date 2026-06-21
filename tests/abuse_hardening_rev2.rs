@@ -523,11 +523,10 @@ fn a36_agent_auth_capabilities_advanced_requires_identity() {
         "dev_mode: true\nagent_auth:\n  capabilities:\n    identity: false\n    advanced: true\n";
     let cfg = Config::from_yaml_str_unchecked(yaml).expect("parse");
     let result = cfg.validate();
-    assert!(
-        result.is_err(),
-        "advanced=true without identity=true must produce a validation error"
-    );
-    let err_msg = result.expect_err("validate must fail").to_string();
+    let Err(validation_err) = result else {
+        panic!("advanced=true without identity=true must produce a validation error")
+    };
+    let err_msg = validation_err.to_string();
     assert!(
         err_msg.contains("agent_auth.capabilities.advanced"),
         "error must name the offending field, got: {err_msg}"
