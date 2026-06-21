@@ -67,7 +67,13 @@ fn make_agent(identity: &dyn IdentityEngine, realm_id: &RealmId, owner_id: &User
 ///
 /// Uses `user_id.to_string()` (prefixed) for the `sub` claim, matching what
 /// the real token issuance path produces.
-fn build_subject_jwt(user_id: &UserId, scope: &str, exp: i64, iat: i64) -> String {
+fn build_subject_jwt(
+    user_id: &UserId,
+    realm_id: &RealmId,
+    scope: &str,
+    exp: i64,
+    iat: i64,
+) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
 
@@ -79,7 +85,7 @@ fn build_subject_jwt(user_id: &UserId, scope: &str, exp: i64, iat: i64) -> Strin
         "exp": exp,
         "iat": iat,
         "sid": "sid-test",
-        "tid": "00000000-0000-0000-0000-000000000000",
+        "tid": realm_id.to_string(),
         "token_type": "access",
         "jti": uuid::Uuid::new_v4().to_string(),
         "scope": scope,
@@ -137,7 +143,7 @@ async fn delegation_grant_persisted_after_exchange() {
 
     let now = now_secs();
     let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let subject_token = build_subject_jwt(&user_id, "mcp:tools:invoke", now + 900, now);
+    let subject_token = build_subject_jwt(&user_id, &realm_id, "mcp:tools:invoke", now + 900, now);
     let actor_jti = uuid::Uuid::new_v4().to_string();
     let actor_token = build_actor_jwt(&actor_sub, now + 60, now, &actor_jti);
 
@@ -191,7 +197,7 @@ async fn revoked_delegation_not_in_listing() {
 
     let now = now_secs();
     let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let subject_token = build_subject_jwt(&user_id, "mcp:tools:invoke", now + 900, now);
+    let subject_token = build_subject_jwt(&user_id, &realm_id, "mcp:tools:invoke", now + 900, now);
     let actor_jti = uuid::Uuid::new_v4().to_string();
     let actor_token = build_actor_jwt(&actor_sub, now + 60, now, &actor_jti);
 
@@ -249,7 +255,7 @@ async fn revoke_other_users_delegation_is_not_found() {
 
     let now = now_secs();
     let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let subject_token = build_subject_jwt(&user_a, "mcp:tools:invoke", now + 900, now);
+    let subject_token = build_subject_jwt(&user_a, &realm_id, "mcp:tools:invoke", now + 900, now);
     let actor_jti = uuid::Uuid::new_v4().to_string();
     let actor_token = build_actor_jwt(&actor_sub, now + 60, now, &actor_jti);
 
@@ -305,7 +311,7 @@ async fn revoke_delegation_is_idempotent() {
 
     let now = now_secs();
     let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let subject_token = build_subject_jwt(&user_id, "mcp:tools:invoke", now + 900, now);
+    let subject_token = build_subject_jwt(&user_id, &realm_id, "mcp:tools:invoke", now + 900, now);
     let actor_jti = uuid::Uuid::new_v4().to_string();
     let actor_token = build_actor_jwt(&actor_sub, now + 60, now, &actor_jti);
 
