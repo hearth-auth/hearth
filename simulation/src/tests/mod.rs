@@ -1,3 +1,4 @@
+mod approval_cas;
 mod audit_crash;
 mod cluster_chaos;
 mod cluster_failover;
