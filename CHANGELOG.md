@@ -9,6 +9,17 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **Agent REST endpoints now require admin auth — BFLA remediation (HEA-1412)** — All 8 agent
+  management endpoints (`GET/POST /v1/agents`, `GET/PATCH/DELETE /v1/agents/{id}`,
+  `POST /v1/agents/{id}/credentials/keys`, `GET /v1/agents/{id}/credentials`,
+  `DELETE /v1/agents/{id}/credentials/{cred_id}`) previously accepted unauthenticated requests.
+  Every handler now calls `extract_admin_auth` + `require_admin_permission("hearth.agents.admin")`.
+  A fail-closed `route_layer` guard is also applied at the router level so future handlers in this
+  router return `401` by default even if per-handler auth is accidentally omitted. Regression tests
+  assert `401` for all endpoints without a token (HEA-1412).
+- **Agent API key entropy zeroed after use (HEA-1412)** — `create_agent_api_key` now calls
+  `raw.zeroize()` on the 32-byte entropy buffer after the SHA-256 hash is computed, preventing
+  key material from lingering on the stack (HEA-1412).
 - **actor_token signature verified and sub-bound to client_id (HEA-1466 F3)** — RFC 8693 token
   exchange now verifies the `actor_token` Ed25519 signature against the realm key before reading
   any claims. Previously, `actor_token` was only base64-decoded without signature verification;

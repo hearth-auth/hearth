@@ -167,6 +167,31 @@ async fn strip_server_header(req: Request, next: Next) -> Response {
     resp
 }
 
+/// Fail-closed bearer-token presence guard for the agent router (HEA-1412).
+///
+/// Checks that an `Authorization: Bearer …` header is present before the
+/// request reaches any handler. Full token validation and permission checks
+/// still happen per-handler — this layer ensures future handlers added to the
+/// agent router return `401` even when a developer forgets the per-handler
+/// auth call.
+async fn require_bearer_token(req: Request, next: Next) -> Response {
+    use axum::http::StatusCode;
+    let has_bearer = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("Bearer "))
+        .unwrap_or(false);
+    if !has_bearer {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "missing authorization header"})),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 /// Builds the HTTP router with all configured routes.
@@ -189,8 +214,12 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     // Register agent routes only when the identity capability is enabled.
     // This prevents route fingerprinting when the feature is off.
+    // route_layer wraps all agent routes with a fail-closed bearer-token guard
+    // (HEA-1412) so future handlers are protected by default even without
+    // per-handler auth calls.
     if state.agent_identity_enabled {
-        base = base.merge(agents::routes());
+        base = base
+            .merge(agents::routes().route_layer(axum::middleware::from_fn(require_bearer_token)));
     }
 
     // Register approval + tool-invocation check routes only when Phase C is enabled.
