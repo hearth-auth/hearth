@@ -37,6 +37,13 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Changed
 
+- **A-36 startup guardrail removed** — the startup check that rejected
+  `agent_auth.capabilities.approval = true` without `identity = true`, and
+  `agent_auth.capabilities.advanced = true` without `identity = true`, has been removed.
+  All agent-auth capability phases (M1–M4) are fully implemented; the prerequisite-ordering
+  enforcement is no longer needed. Operators can now enable any combination of capability
+  flags without a startup error. (HEA-1409)
+
 - **`--dev` auto-enables all agent-auth capabilities** — running `hearth serve --dev` now
   unconditionally enables `agent_auth.capabilities.{identity,approval,advanced}`, so Phase D
   routes (AATs, transaction tokens, SPIFFE, cross-realm) are available out of the box in
