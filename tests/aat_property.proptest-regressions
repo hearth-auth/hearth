@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc fe91d2121ff33c24d49ee818c7fe4011f94fe88f029f82fdd7f7513444c0c447 # shrinks to (parent_scope, attenuated_scope) = (["aa:aa"], [])
+cc 2504391b2a15d1bfb7134be798c86b9ff69f2e80b63845e6cc0ffaa3e2e5804a # shrinks to (parent_scope, escalated_scope) = (["aa:aa"], ["aa:aa", "aa:gz"])
