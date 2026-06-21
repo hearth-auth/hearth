@@ -1848,6 +1848,7 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         request: &types::CreateAgentRequest,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
 
     /// Retrieves an agent by ID. Returns `None` if not found.
@@ -1866,11 +1867,17 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         agent_id: &AgentId,
         request: &types::UpdateAgentRequest,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
 
     /// Permanently deletes an agent and cascades: removes all credentials,
     /// RBAC role assignments, and the owner index entry. Emits `AgentDeleted` audit.
-    fn delete_agent(&self, realm_id: &RealmId, agent_id: &AgentId) -> Result<(), IdentityError>;
+    fn delete_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<(), IdentityError>;
 
     /// Lists agents in a realm with optional filtering and cursor-based pagination.
     ///
@@ -1890,6 +1897,7 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
 
     /// Transitions an agent from `Suspended` back to `Active`.
@@ -1899,6 +1907,7 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
 
     /// Permanently revokes an agent (`Active | Suspended → Revoked`).
@@ -1909,6 +1918,7 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
 
     // ── A.3 Agent credentials ────────────────────────────────────────────────
@@ -1922,6 +1932,7 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         agent_id: &AgentId,
         request: &types::CreateAgentApiKeyRequest,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::CreateAgentApiKeyResponse, IdentityError>;
 
     /// Returns all credentials (active and revoked) for the given agent.
@@ -1940,6 +1951,7 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         agent_id: &AgentId,
         cred_id: &crate::core::AgentCredentialId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<(), IdentityError>;
 
     /// Verifies a plaintext API key against all active credentials for an agent.

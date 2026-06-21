@@ -39,6 +39,23 @@ fn hex_encode(bytes: &[u8]) -> String {
         })
 }
 
+/// Validates capability list bounds: max 50 entries, max 256 chars each.
+fn validate_agent_capabilities(caps: &[String]) -> Result<(), crate::identity::IdentityError> {
+    if caps.len() > 50 {
+        return Err(crate::identity::IdentityError::InvalidInput {
+            reason: format!("too many capabilities: max 50 allowed, got {}", caps.len()),
+        });
+    }
+    for cap in caps {
+        if cap.len() > 256 {
+            return Err(crate::identity::IdentityError::InvalidInput {
+                reason: "each capability string must not exceed 256 characters".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 use crate::identity::magic_link::{
     self, MagicLinkResponse, StoredMagicLink, StoredPasswordReset, MAGIC_LINK_EXPIRY_MICROS,
     PASSWORD_RESET_EXPIRY_MICROS,
@@ -4802,8 +4819,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         if let Some(uuid_str) = key_str.rsplit(':').next() {
                             if let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) {
                                 let aid = AgentId::new(uuid);
-                                let _ =
-                                    <Self as IdentityEngine>::delete_agent(self, realm_id, &aid);
+                                let _ = <Self as IdentityEngine>::delete_agent(
+                                    self, realm_id, &aid, None,
+                                );
                             }
                         }
                     }
@@ -8774,8 +8792,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         if let Some(uuid_str) = key_str.rsplit(':').next() {
                             if let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) {
                                 let aid = AgentId::new(uuid);
-                                let _ =
-                                    <Self as IdentityEngine>::delete_agent(self, realm_id, &aid);
+                                let _ = <Self as IdentityEngine>::delete_agent(
+                                    self, realm_id, &aid, None,
+                                );
                             }
                         }
                     }
@@ -10187,6 +10206,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         request: &CreateAgentRequest,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
         if keys::is_system_realm(realm_id) {
             return Err(IdentityError::SystemRealmProtected {
@@ -10226,6 +10246,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 });
             }
         }
+
+        validate_agent_capabilities(&request.capabilities)?;
 
         // Owner FK: the referenced user or org must exist in this realm.
         match &request.owner {
@@ -10286,9 +10308,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             )
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentCreated,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10324,6 +10350,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         agent_id: &AgentId,
         request: &UpdateAgentRequest,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
         let key = keys::encode_agent_id(agent_id);
         let mut agent = self
@@ -10355,6 +10382,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         if let Some(caps) = &request.capabilities {
+            validate_agent_capabilities(caps)?;
             agent.set_capabilities(caps.clone());
         }
 
@@ -10376,9 +10404,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &agent_bytes)
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentUpdated,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10387,7 +10419,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(agent)
     }
 
-    fn delete_agent(&self, realm_id: &RealmId, agent_id: &AgentId) -> Result<(), IdentityError> {
+    fn delete_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<(), IdentityError> {
         let agent = self
             .get_agent(realm_id, agent_id)?
             .ok_or(IdentityError::AgentNotFound)?;
@@ -10423,9 +10460,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Owner index deletion is best-effort; primary is gone.
         let _ = self.storage.delete(realm_id, &owner_index_key);
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentDeleted,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10525,6 +10566,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
         let mut agent = self
             .get_agent(realm_id, agent_id)?
@@ -10545,9 +10587,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentSuspended,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10560,6 +10606,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
         let mut agent = self
             .get_agent(realm_id, agent_id)?
@@ -10580,9 +10627,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentReactivated,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10591,7 +10642,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(agent)
     }
 
-    fn revoke_agent(&self, realm_id: &RealmId, agent_id: &AgentId) -> Result<Agent, IdentityError> {
+    fn revoke_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<Agent, IdentityError> {
         let mut agent = self
             .get_agent(realm_id, agent_id)?
             .ok_or(IdentityError::AgentNotFound)?;
@@ -10612,9 +10668,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentRevoked,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10630,6 +10690,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         agent_id: &AgentId,
         request: &CreateAgentApiKeyRequest,
+        _caller: Option<&crate::core::UserId>,
     ) -> Result<CreateAgentApiKeyResponse, IdentityError> {
         // Agent must exist and be active
         let agent = self
@@ -10644,6 +10705,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         if label.is_empty() || label.len() > 256 {
             return Err(IdentityError::InvalidInput {
                 reason: "credential label must be 1–256 characters".to_string(),
+            });
+        }
+
+        // Enforce max_credentials_per_agent quota (default 25, active only)
+        const MAX_CREDENTIALS_PER_AGENT: usize = 25;
+        let cred_prefix = keys::agent_credential_scan_prefix(agent_id);
+        let cred_end = keys::prefix_end(&cred_prefix);
+        let existing = self
+            .storage
+            .scan(realm_id, &cred_prefix, &cred_end)
+            .map_err(Self::storage_err)?;
+        let active_count = existing
+            .iter()
+            .filter(|e| {
+                serde_json::from_slice::<AgentCredential>(&e.value)
+                    .map(|c| !c.is_revoked())
+                    .unwrap_or(false)
+            })
+            .count();
+        if active_count >= MAX_CREDENTIALS_PER_AGENT {
+            return Err(IdentityError::QuotaExceeded {
+                resource: "agent_credentials",
+                limit: MAX_CREDENTIALS_PER_AGENT as u64,
+                current: active_count as u64,
             });
         }
 
@@ -10713,6 +10798,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         agent_id: &AgentId,
         cred_id: &AgentCredentialId,
+        _caller: Option<&crate::core::UserId>,
     ) -> Result<(), IdentityError> {
         let cred_key = keys::encode_agent_credential(agent_id, cred_id);
         let bytes = self

@@ -458,7 +458,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         let agent = self
             .state
             .identity
-            .create_agent(&auth.realm_id, &request)
+            .create_agent(&auth.realm_id, &request, Some(&auth.user_id))
             .map_err(identity_to_status)?;
         Ok(Response::new(agent_to_proto(&agent)))
     }
@@ -487,7 +487,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         let agent = self
             .state
             .identity
-            .update_agent(&auth.realm_id, &agent_id, &update)
+            .update_agent(&auth.realm_id, &agent_id, &update, Some(&auth.user_id))
             .map_err(identity_to_status)?;
         Ok(Response::new(agent_to_proto(&agent)))
     }
@@ -501,7 +501,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         let agent_id = parse_agent_id(&body.id)?;
         self.state
             .identity
-            .delete_agent(&auth.realm_id, &agent_id)
+            .delete_agent(&auth.realm_id, &agent_id, Some(&auth.user_id))
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::Empty {}))
     }
@@ -520,6 +520,7 @@ impl IdentityAdminService for IdentityAdminSvc {
                 &auth.realm_id,
                 &agent_id,
                 &CreateAgentApiKeyRequest { label: body.label },
+                Some(&auth.user_id),
             )
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::CreateAgentApiKeyResponse {
@@ -555,7 +556,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         let cred_id = parse_cred_id(&body.credential_id)?;
         self.state
             .identity
-            .revoke_agent_credential(&auth.realm_id, &agent_id, &cred_id)
+            .revoke_agent_credential(&auth.realm_id, &agent_id, &cred_id, Some(&auth.user_id))
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::Empty {}))
     }

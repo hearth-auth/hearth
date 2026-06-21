@@ -68,6 +68,7 @@ fn create_agent(
                 capabilities: vec!["urn:hearth:capability:email:send".to_string()],
                 max_delegation_depth: 1,
             },
+            None,
         )
         .expect("create agent")
 }
@@ -150,6 +151,7 @@ async fn agent_update_metadata() {
                 capabilities: None,
                 max_delegation_depth: Some(3),
             },
+            None,
         )
         .expect("update agent");
 
@@ -216,7 +218,7 @@ async fn agent_delete() {
     let agent_id = agent.id().clone();
 
     identity
-        .delete_agent(&realm_id, &agent_id)
+        .delete_agent(&realm_id, &agent_id, None)
         .expect("delete agent");
 
     let result = identity
@@ -241,13 +243,13 @@ async fn agent_suspend_and_reactivate() {
 
     // Active → Suspended
     let suspended = identity
-        .suspend_agent(&realm_id, agent.id())
+        .suspend_agent(&realm_id, agent.id(), None)
         .expect("suspend agent");
     assert_eq!(suspended.status(), AgentStatus::Suspended);
 
     // Suspended → Active
     let reactivated = identity
-        .reactivate_agent(&realm_id, agent.id())
+        .reactivate_agent(&realm_id, agent.id(), None)
         .expect("reactivate agent");
     assert_eq!(reactivated.status(), AgentStatus::Active);
 }
@@ -263,13 +265,13 @@ async fn agent_revoke_is_terminal() {
 
     // Active → Revoked
     let revoked = identity
-        .revoke_agent(&realm_id, agent.id())
+        .revoke_agent(&realm_id, agent.id(), None)
         .expect("revoke agent");
     assert_eq!(revoked.status(), AgentStatus::Revoked);
 
     // Revoked → Active must fail
     let err = identity
-        .reactivate_agent(&realm_id, agent.id())
+        .reactivate_agent(&realm_id, agent.id(), None)
         .expect_err("should not reactivate revoked agent");
     assert!(
         matches!(err, IdentityError::AgentRevoked),
@@ -278,7 +280,7 @@ async fn agent_revoke_is_terminal() {
 
     // Revoked → Suspended must fail
     let err2 = identity
-        .suspend_agent(&realm_id, agent.id())
+        .suspend_agent(&realm_id, agent.id(), None)
         .expect_err("should not suspend revoked agent");
     assert!(
         matches!(err2, IdentityError::AgentRevoked),
@@ -376,6 +378,7 @@ async fn agent_max_delegation_depth_must_be_1_to_10() {
                 capabilities: vec![],
                 max_delegation_depth: 0,
             },
+            None,
         )
         .expect_err("depth=0 should be invalid");
     assert!(
@@ -394,6 +397,7 @@ async fn agent_max_delegation_depth_must_be_1_to_10() {
                 capabilities: vec![],
                 max_delegation_depth: 11,
             },
+            None,
         )
         .expect_err("depth=11 should be invalid");
     assert!(
@@ -420,6 +424,7 @@ async fn agent_display_name_length_validated() {
                 capabilities: vec![],
                 max_delegation_depth: 1,
             },
+            None,
         )
         .expect_err("empty name should be invalid");
     assert!(matches!(err, IdentityError::InvalidInput { .. }));
@@ -436,6 +441,7 @@ async fn agent_display_name_length_validated() {
                 capabilities: vec![],
                 max_delegation_depth: 1,
             },
+            None,
         )
         .expect_err("name >256 chars should be invalid");
     assert!(matches!(err2, IdentityError::InvalidInput { .. }));
@@ -463,6 +469,7 @@ async fn create_agent_rejects_nonexistent_user_owner() {
                 capabilities: vec![],
                 max_delegation_depth: 1,
             },
+            None,
         )
         .expect_err("nonexistent owner should be rejected");
     assert!(
@@ -515,6 +522,7 @@ async fn create_agent_respects_max_agents_quota() {
                 capabilities: vec![],
                 max_delegation_depth: 1,
             },
+            None,
         )
         .expect_err("should exceed max_agents quota");
     assert!(
@@ -548,6 +556,7 @@ async fn agent_api_key_create_show_once() {
             &CreateAgentApiKeyRequest {
                 label: "primary".to_string(),
             },
+            None,
         )
         .expect("create API key");
 
@@ -600,6 +609,7 @@ async fn agent_api_key_list_and_revoke() {
             &realm_id,
             agent.id(),
             &CreateAgentApiKeyRequest { label: "k1".into() },
+            None,
         )
         .expect("key1");
     let r2 = identity
@@ -607,6 +617,7 @@ async fn agent_api_key_list_and_revoke() {
             &realm_id,
             agent.id(),
             &CreateAgentApiKeyRequest { label: "k2".into() },
+            None,
         )
         .expect("key2");
 
@@ -619,7 +630,7 @@ async fn agent_api_key_list_and_revoke() {
 
     // Revoke key1
     identity
-        .revoke_agent_credential(&realm_id, agent.id(), r1.credential.id())
+        .revoke_agent_credential(&realm_id, agent.id(), r1.credential.id(), None)
         .expect("revoke");
 
     let creds_after = identity
@@ -645,6 +656,7 @@ async fn agent_api_key_verify_correct_key() {
             &realm_id,
             agent.id(),
             &CreateAgentApiKeyRequest { label: "v".into() },
+            None,
         )
         .expect("create key");
     let key_hex = resp.plaintext_key.expose_once().to_string();
@@ -668,6 +680,7 @@ async fn agent_api_key_verify_wrong_key_fails() {
             &realm_id,
             agent.id(),
             &CreateAgentApiKeyRequest { label: "k".into() },
+            None,
         )
         .expect("create key");
 
@@ -692,6 +705,7 @@ async fn agent_api_key_revoked_key_does_not_verify() {
             &realm_id,
             agent.id(),
             &CreateAgentApiKeyRequest { label: "r".into() },
+            None,
         )
         .expect("create key");
     let key_hex = resp.plaintext_key.expose_once().to_string();
@@ -699,7 +713,7 @@ async fn agent_api_key_revoked_key_does_not_verify() {
 
     // Revoke it
     identity
-        .revoke_agent_credential(&realm_id, agent.id(), &cred_id)
+        .revoke_agent_credential(&realm_id, agent.id(), &cred_id, None)
         .expect("revoke");
 
     // Verify should now fail
@@ -728,6 +742,7 @@ async fn delete_agent_purges_credentials() {
             &realm_id,
             &agent_id,
             &CreateAgentApiKeyRequest { label: "k1".into() },
+            None,
         )
         .expect("k1");
     identity
@@ -735,12 +750,13 @@ async fn delete_agent_purges_credentials() {
             &realm_id,
             &agent_id,
             &CreateAgentApiKeyRequest { label: "k2".into() },
+            None,
         )
         .expect("k2");
 
     // Delete agent
     identity
-        .delete_agent(&realm_id, &agent_id)
+        .delete_agent(&realm_id, &agent_id, None)
         .expect("delete agent");
 
     // Agent must be gone
@@ -792,6 +808,332 @@ async fn delete_user_cascades_owned_agents() {
             .expect("get a2")
             .is_none(),
         "a2 must be gone"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HEA-1414: Capability bounds (max 50, max 256 chars)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn agent_capability_count_bounded_on_create() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+
+    // 51 capabilities — must be rejected
+    let caps: Vec<String> = (0..51).map(|i| format!("urn:hearth:cap:{i}")).collect();
+    let err = identity
+        .create_agent(
+            &realm_id,
+            &CreateAgentRequest {
+                display_name: "Cap Overflow".to_string(),
+                description: None,
+                owner: AgentOwner::User(user_id.clone()),
+                capabilities: caps,
+                max_delegation_depth: 1,
+            },
+            None,
+        )
+        .expect_err("51 capabilities should be rejected");
+    assert!(
+        matches!(err, IdentityError::InvalidInput { .. }),
+        "expected InvalidInput for >50 capabilities, got {err:?}"
+    );
+
+    // Exactly 50 — must be accepted
+    let caps_ok: Vec<String> = (0..50).map(|i| format!("urn:hearth:cap:{i}")).collect();
+    identity
+        .create_agent(
+            &realm_id,
+            &CreateAgentRequest {
+                display_name: "Cap Max OK".to_string(),
+                description: None,
+                owner: AgentOwner::User(user_id.clone()),
+                capabilities: caps_ok,
+                max_delegation_depth: 1,
+            },
+            None,
+        )
+        .expect("exactly 50 capabilities should be accepted");
+}
+
+#[tokio::test]
+async fn agent_capability_string_length_bounded_on_create() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+
+    // Capability string > 256 chars — must be rejected
+    let long_cap = "x".repeat(257);
+    let err = identity
+        .create_agent(
+            &realm_id,
+            &CreateAgentRequest {
+                display_name: "Long Cap".to_string(),
+                description: None,
+                owner: AgentOwner::User(user_id.clone()),
+                capabilities: vec![long_cap],
+                max_delegation_depth: 1,
+            },
+            None,
+        )
+        .expect_err("capability >256 chars should be rejected");
+    assert!(
+        matches!(err, IdentityError::InvalidInput { .. }),
+        "expected InvalidInput for capability >256 chars, got {err:?}"
+    );
+
+    // Exactly 256 chars — must be accepted
+    let cap_ok = "u".repeat(256);
+    identity
+        .create_agent(
+            &realm_id,
+            &CreateAgentRequest {
+                display_name: "Cap 256 OK".to_string(),
+                description: None,
+                owner: AgentOwner::User(user_id.clone()),
+                capabilities: vec![cap_ok],
+                max_delegation_depth: 1,
+            },
+            None,
+        )
+        .expect("capability of exactly 256 chars should be accepted");
+}
+
+#[tokio::test]
+async fn agent_capability_bounds_enforced_on_update() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Update Bounds Agent");
+
+    // > 50 capabilities on update
+    let too_many: Vec<String> = (0..51).map(|i| format!("urn:hearth:cap:{i}")).collect();
+    let err = identity
+        .update_agent(
+            &realm_id,
+            agent.id(),
+            &UpdateAgentRequest {
+                capabilities: Some(too_many),
+                ..Default::default()
+            },
+            None,
+        )
+        .expect_err("51 capabilities on update should be rejected");
+    assert!(
+        matches!(err, IdentityError::InvalidInput { .. }),
+        "expected InvalidInput on update >50 caps, got {err:?}"
+    );
+
+    // Capability > 256 chars on update
+    let long_cap = "y".repeat(257);
+    let err2 = identity
+        .update_agent(
+            &realm_id,
+            agent.id(),
+            &UpdateAgentRequest {
+                capabilities: Some(vec![long_cap]),
+                ..Default::default()
+            },
+            None,
+        )
+        .expect_err("capability >256 chars on update should be rejected");
+    assert!(
+        matches!(err2, IdentityError::InvalidInput { .. }),
+        "expected InvalidInput on update cap >256 chars, got {err2:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HEA-1414: Credential quota (max 25 per agent)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn agent_credential_quota_enforced() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &user_id, "Quota Agent");
+
+    // Create 25 credentials — all must succeed
+    for i in 0..25u32 {
+        identity
+            .create_agent_api_key(
+                &realm_id,
+                agent.id(),
+                &CreateAgentApiKeyRequest {
+                    label: format!("key-{i}"),
+                },
+                None,
+            )
+            .unwrap_or_else(|e| panic!("key {i} should succeed: {e:?}"));
+    }
+
+    // 26th must be rejected
+    match identity.create_agent_api_key(
+        &realm_id,
+        agent.id(),
+        &CreateAgentApiKeyRequest {
+            label: "key-overflow".to_string(),
+        },
+        None,
+    ) {
+        Err(IdentityError::QuotaExceeded {
+            resource: "agent_credentials",
+            ..
+        }) => {
+            // expected
+        }
+        Err(e) => panic!("expected QuotaExceeded(agent_credentials), got {e:?}"),
+        Ok(_) => panic!("26th credential should have been rejected by quota"),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HEA-1414: HTTP endpoint authentication (adversarial — server mode)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// All 9 agent HTTP endpoints must return 401 when called without
+/// an Authorization header. Regression guard against unauthenticated access.
+#[tokio::test]
+async fn agent_endpoints_require_auth() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
+    let h = common::TestHarness::server_with_agent_auth()
+        .await
+        .expect("server harness");
+    let base = h.base_url().expect("base_url");
+    let client = reqwest::Client::new();
+
+    // We need a valid realm_id header (using a fake UUID is fine — 401 fires before realm lookup)
+    let realm_hdr = uuid::Uuid::nil().to_string();
+    let fake_agent_id = "agt_00000000000000000000000000000000";
+    let fake_cred_id = "agcr_00000000000000000000000000000000";
+
+    // Pre-allocate paths with owned Strings to avoid temporary-drop lifetime issues
+    let agent_get = format!("/v1/agents/{fake_agent_id}");
+    let agent_patch = format!("/v1/agents/{fake_agent_id}");
+    let agent_delete = format!("/v1/agents/{fake_agent_id}");
+    let cred_keys = format!("/v1/agents/{fake_agent_id}/credentials/keys");
+    let cred_list = format!("/v1/agents/{fake_agent_id}/credentials");
+    let cred_revoke = format!("/v1/agents/{fake_agent_id}/credentials/{fake_cred_id}");
+
+    let endpoints: Vec<(&str, reqwest::Method, Option<serde_json::Value>)> = vec![
+        (
+            "/.well-known/agent.json?agent_id=agt_00000000000000000000000000000000",
+            reqwest::Method::GET,
+            None,
+        ),
+        ("/v1/agents", reqwest::Method::GET, None),
+        (
+            "/v1/agents",
+            reqwest::Method::POST,
+            Some(serde_json::json!({
+                "display_name": "x", "owner_type": "user", "owner_id": uuid::Uuid::nil().to_string()
+            })),
+        ),
+        (&agent_get, reqwest::Method::GET, None),
+        (
+            &agent_patch,
+            reqwest::Method::PATCH,
+            Some(serde_json::json!({})),
+        ),
+        (&agent_delete, reqwest::Method::DELETE, None),
+        (
+            &cred_keys,
+            reqwest::Method::POST,
+            Some(serde_json::json!({"label": "x"})),
+        ),
+        (&cred_list, reqwest::Method::GET, None),
+        (&cred_revoke, reqwest::Method::DELETE, None),
+    ];
+
+    for (path, method, body) in &endpoints {
+        let url = format!("{base}{path}");
+        let mut req = client
+            .request(method.clone(), &url)
+            .header("X-Realm-ID", &realm_hdr);
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let resp = req
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("request to {url} failed: {e}"));
+        let status = resp.status().as_u16();
+        assert_eq!(
+            status, 401,
+            "expected 401 Unauthorized for unauthenticated {method} {url}, got {status}"
+        );
+    }
+}
+
+/// An admin token valid for realm A must not grant access to realm B's agents.
+/// The BOLA protection is architectural: tokens are signed with per-realm keys,
+/// so presenting realm A's token with X-Realm-ID: realm_B fails token validation.
+#[tokio::test]
+async fn agent_endpoint_cross_realm_bola() {
+    #[allow(unused_unsafe)]
+    unsafe {
+        std::env::set_var(
+            "HEARTH_MASTER_KEY",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
+    }
+    // Use server_with_agent_auth so /v1/agents routes are registered
+    let h = common::TestHarness::server_with_agent_auth()
+        .await
+        .expect("server harness");
+    let base = h.base_url().expect("base_url");
+    let client = reqwest::Client::new();
+
+    // Bootstrap gets a system-realm admin token
+    let resp = client
+        .post(format!("{base}/admin/bootstrap"))
+        .send()
+        .await
+        .expect("bootstrap");
+    assert!(resp.status().is_success(), "bootstrap must succeed");
+    let body: serde_json::Value = resp.json().await.expect("bootstrap JSON");
+    let system_token = body["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Create realm B directly via the embedded engine (HTTP realm creation is disabled)
+    let realm_b = h
+        .identity()
+        .create_realm(&hearth::identity::CreateRealmRequest {
+            name: format!("realm-b-bola-{}", uuid::Uuid::new_v4()),
+            config: None,
+        })
+        .expect("create realm B");
+    let realm_b_id = realm_b.id().as_uuid().to_string();
+
+    // Presenting the system-realm token with realm B's ID must fail — tokens are
+    // signed with per-realm Ed25519 keys, so validate_token(&realm_b, system_token) rejects it.
+    let status = client
+        .get(format!("{base}/v1/agents"))
+        .header("Authorization", format!("Bearer {system_token}"))
+        .header("X-Realm-ID", &realm_b_id)
+        .send()
+        .await
+        .expect("cross-realm request")
+        .status()
+        .as_u16();
+    assert!(
+        status == 401 || status == 403,
+        "cross-realm BOLA: system token must not grant access to realm B (got {status})"
     );
 }
 

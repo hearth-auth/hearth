@@ -969,6 +969,7 @@ async fn token_exchange_impl(
             &expected_htu,
             now_secs,
             None,
+            None, // token endpoint: no access_token to bind yet
         ) {
             Ok(validated) => {
                 if let Some(ref nonce) = validated.nonce {
@@ -1899,6 +1900,7 @@ async fn realm_token_exchange(
             &expected_htu,
             now_secs,
             None,
+            None, // token endpoint: no access_token to bind yet
         ) {
             Ok(validated) => {
                 if let Some(ref nonce) = validated.nonce {

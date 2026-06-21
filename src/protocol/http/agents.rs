@@ -25,7 +25,10 @@ use crate::identity::{
     ListAgentsQuery, UpdateAgentRequest,
 };
 
-use super::{extract_realm_id, identity_error_to_response, AppState};
+use super::{
+    auth::{extract_admin_auth, require_admin_permission},
+    identity_error_to_response, AppState,
+};
 
 /// Registers all agent routes (Phase A).
 ///
@@ -145,15 +148,17 @@ struct AgentCardQuery {
 /// `GET /.well-known/agent.json?agent_id={id}`
 ///
 /// Returns the Agent Card for the specified agent. No secret material.
+/// Requires authentication per HEA-1414 security remediation.
 async fn agent_card(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<AgentCardQuery>,
 ) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(r) => r,
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    let realm_id = auth.realm_id;
 
     let agent_id_str = match query.agent_id {
         Some(s) => s,
@@ -233,10 +238,14 @@ async fn create_agent(
     headers: HeaderMap,
     Json(body): Json<CreateAgentBody>,
 ) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(r) => r,
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
+    let realm_id = auth.realm_id;
 
     let owner = match parse_owner(&body.owner_type, &body.owner_id) {
         Ok(o) => o,
@@ -257,13 +266,16 @@ async fn create_agent(
         max_delegation_depth: body.max_delegation_depth,
     };
 
+    let caller = Some(auth.user_id.clone());
     let identity = Arc::clone(&state.identity);
-    let result = tokio::task::spawn_blocking(move || identity.create_agent(&realm_id, &request))
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "create_agent spawn_blocking panicked");
-            Err(crate::identity::IdentityError::Storage(Box::new(e)))
-        });
+    let result = tokio::task::spawn_blocking(move || {
+        identity.create_agent(&realm_id, &request, caller.as_ref())
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "create_agent spawn_blocking panicked");
+        Err(crate::identity::IdentityError::Storage(Box::new(e)))
+    });
 
     match result {
         Ok(agent) => (
@@ -277,10 +289,14 @@ async fn create_agent(
 
 /// `GET /v1/agents`
 async fn list_agents(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(r) => r,
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
+    let realm_id = auth.realm_id;
 
     let identity = Arc::clone(&state.identity);
     let result = tokio::task::spawn_blocking(move || {
@@ -311,10 +327,14 @@ async fn get_agent(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(r) => r,
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
+    let realm_id = auth.realm_id;
     let agent_id = match id.parse::<AgentId>() {
         Ok(id) => id,
         Err(_) => {
@@ -364,10 +384,14 @@ async fn update_agent(
     Path(id): Path<String>,
     Json(body): Json<UpdateAgentBody>,
 ) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(r) => r,
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
+    let realm_id = auth.realm_id;
     let agent_id = match id.parse::<AgentId>() {
         Ok(id) => id,
         Err(_) => {
@@ -386,14 +410,16 @@ async fn update_agent(
         max_delegation_depth: body.max_delegation_depth,
     };
 
+    let caller = Some(auth.user_id.clone());
     let identity = Arc::clone(&state.identity);
-    let result =
-        tokio::task::spawn_blocking(move || identity.update_agent(&realm_id, &agent_id, &request))
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "update_agent spawn_blocking panicked");
-                Err(crate::identity::IdentityError::Storage(Box::new(e)))
-            });
+    let result = tokio::task::spawn_blocking(move || {
+        identity.update_agent(&realm_id, &agent_id, &request, caller.as_ref())
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "update_agent spawn_blocking panicked");
+        Err(crate::identity::IdentityError::Storage(Box::new(e)))
+    });
 
     match result {
         Ok(agent) => (
@@ -411,10 +437,14 @@ async fn delete_agent(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(r) => r,
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
+    let realm_id = auth.realm_id;
     let agent_id = match id.parse::<AgentId>() {
         Ok(id) => id,
         Err(_) => {
@@ -426,13 +456,16 @@ async fn delete_agent(
         }
     };
 
+    let caller = Some(auth.user_id.clone());
     let identity = Arc::clone(&state.identity);
-    let result = tokio::task::spawn_blocking(move || identity.delete_agent(&realm_id, &agent_id))
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, "delete_agent spawn_blocking panicked");
-            Err(crate::identity::IdentityError::Storage(Box::new(e)))
-        });
+    let result = tokio::task::spawn_blocking(move || {
+        identity.delete_agent(&realm_id, &agent_id, caller.as_ref())
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!(error = %e, "delete_agent spawn_blocking panicked");
+        Err(crate::identity::IdentityError::Storage(Box::new(e)))
+    });
 
     match result {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -452,10 +485,14 @@ async fn create_api_key(
     Path(id): Path<String>,
     Json(body): Json<CreateApiKeyBody>,
 ) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(r) => r,
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
+    let realm_id = auth.realm_id;
     let agent_id = match id.parse::<AgentId>() {
         Ok(id) => id,
         Err(_) => {
@@ -469,9 +506,10 @@ async fn create_api_key(
 
     let request = CreateAgentApiKeyRequest { label: body.label };
 
+    let caller = Some(auth.user_id.clone());
     let identity = Arc::clone(&state.identity);
     let result = tokio::task::spawn_blocking(move || {
-        identity.create_agent_api_key(&realm_id, &agent_id, &request)
+        identity.create_agent_api_key(&realm_id, &agent_id, &request, caller.as_ref())
     })
     .await
     .unwrap_or_else(|e| {
@@ -498,10 +536,14 @@ async fn list_credentials(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(r) => r,
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
+    let realm_id = auth.realm_id;
     let agent_id = match id.parse::<AgentId>() {
         Ok(id) => id,
         Err(_) => {
@@ -537,10 +579,14 @@ async fn revoke_credential(
     headers: HeaderMap,
     Path((id, cred_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let realm_id = match extract_realm_id(&headers) {
-        Ok(r) => r,
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.agents.admin") {
+        return e.into_response();
+    }
+    let realm_id = auth.realm_id;
     let agent_id = match id.parse::<AgentId>() {
         Ok(id) => id,
         Err(_) => {
@@ -562,9 +608,10 @@ async fn revoke_credential(
         }
     };
 
+    let caller = Some(auth.user_id.clone());
     let identity = Arc::clone(&state.identity);
     let result = tokio::task::spawn_blocking(move || {
-        identity.revoke_agent_credential(&realm_id, &agent_id, &cred_id)
+        identity.revoke_agent_credential(&realm_id, &agent_id, &cred_id, caller.as_ref())
     })
     .await
     .unwrap_or_else(|e| {

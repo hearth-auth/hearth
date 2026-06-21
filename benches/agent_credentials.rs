@@ -87,6 +87,7 @@ fn setup() -> Fixture {
                 capabilities: vec![],
                 max_delegation_depth: 1,
             },
+            None,
         )
         .expect("agent");
 
@@ -97,6 +98,7 @@ fn setup() -> Fixture {
             &CreateAgentApiKeyRequest {
                 label: "bench-key".to_string(),
             },
+            None,
         )
         .expect("api key");
     let key_hex = resp.plaintext_key.expose_once().to_string();
