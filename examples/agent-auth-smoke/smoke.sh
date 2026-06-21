@@ -21,6 +21,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 BIN="${REPO_ROOT}/target/debug/hearth"
 HEARTH_PID=""
+CFG_FILE=""
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -44,8 +45,9 @@ cleanup() {
     [[ -n "${HEARTH_PID:-}" ]] && kill "$HEARTH_PID" 2>/dev/null || true
     [[ -n "${HEARTH_PID:-}" ]] && wait "$HEARTH_PID" 2>/dev/null || true
     [[ -n "${DATA_DIR:-}" ]] && rm -rf "$DATA_DIR"
-    [[ -n "${CFG_FILE:-}" ]] && rm -f "$CFG_FILE"
 }
+
+# CFG_FILE is unused: --dev auto-enables all agent_auth capabilities.
 trap cleanup EXIT
 
 # ── sanity checks ─────────────────────────────────────────────────────────────
@@ -63,25 +65,16 @@ echo "==> agent-auth smoke — building hearth (debug)"
 cd "$REPO_ROOT"
 PROTOC="${PROTOC:-protoc}" cargo build --bin hearth -q 2>&1
 
-# ── 2. Write agent-auth config ────────────────────────────────────────────────
-
-CFG_FILE="$(mktemp -t hearth-agent-auth-cfg-XXXXXX.yaml)"
-cat >"$CFG_FILE" <<'YAML'
-dev_mode: true
-agent_auth:
-  capabilities:
-    identity: true   # /v1/agents, /.well-known/agent.json
-    advanced: true   # /v1/aats, /v1/transaction-tokens, /v1/spiffe-mappings
-YAML
-
-# ── 3. Start hearth --dev ─────────────────────────────────────────────────────
+# ── 2. Start hearth --dev ────────────────────────────────────────────────────
+# --dev auto-enables agent_auth.capabilities.{identity,approval,advanced},
+# so no config file is needed for the smoke test.
 
 PORT=$(free_port)
 DATA_DIR="$(mktemp -d -t hearth-agent-auth-XXXXXX)"
 BASE="http://127.0.0.1:${PORT}"
 
 echo "==> Starting hearth serve --dev (port ${PORT})"
-"$BIN" serve --dev --config "$CFG_FILE" --port "$PORT" >"$DATA_DIR/hearth.log" 2>&1 &
+"$BIN" serve --dev --port "$PORT" >"$DATA_DIR/hearth.log" 2>&1 &
 HEARTH_PID=$!
 
 for _ in $(seq 1 60); do

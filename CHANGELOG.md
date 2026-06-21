@@ -52,6 +52,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Agent Auth end-to-end smoke example** — `examples/agent-auth-smoke/smoke.sh` demonstrates
+  the full M5 surface against a live `hearth --dev` server: DPoP-bound token issuance (RFC 9449,
+  Node.js native crypto), RFC 8693 token exchange with `act` chain and `on_behalf_of`, AAT
+  issuance + child derivation, and transaction token lifecycle including replay prevention.
+  Runs as part of `make sdk-smoke-local`. (HEA-1463)
+
+- **Agent auth surface documented in all 7 SDK READMEs** — TypeScript and Go READMEs include
+  full DPoP proof construction, RFC 8693 exchange, AAT, and transaction token code samples. Rust,
+  Python, PHP, and Kotlin READMEs include language-specific idioms and cross-references.
+  `docs/specs/SDK.md` gains Section 13 (agent-auth SDK contract) and a conformance checklist item.
+  Draft-tracking owner: CTO (@therecluse26). (HEA-1463)
+
 - **`agent_auth.capabilities.advanced` flag** — enables Phase D agent features: Attenuating
   Authorization Tokens (AATs), transaction tokens, cross-realm trust policies, and SPIFFE/mTLS
   workload identity. Requires `agent_auth.capabilities.identity = true`. (HEA-1425)

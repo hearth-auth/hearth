@@ -32,15 +32,14 @@ make sdk-smoke-local
 
 ## Config
 
-The script writes a temporary `hearth.yaml` enabling:
+The script starts hearth with `--dev` only. Development mode automatically enables all agent-auth capabilities (`identity`, `approval`, `advanced`), so no `hearth.yaml` is needed. In production, set these explicitly:
+
 ```yaml
 agent_auth:
   capabilities:
     identity: true   # /v1/agents, /.well-known/agent.json
     advanced: true   # /v1/aats, /v1/transaction-tokens
 ```
-
-The server starts in `--dev` mode (ephemeral storage, no TLS, bootstrap endpoint active).
 
 ## DPoP proof construction
 
