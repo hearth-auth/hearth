@@ -307,9 +307,10 @@ impl Config {
 
         validate_trusted_proxies(&self.server, &mut issues);
 
-        // `agent_auth.capabilities.identity` (M1) and `approval` (Phase C) are
-        // implemented. Future capability flags (delegation, mcp, aat) will add
-        // validation errors here until those phases ship.
+        // M1 (`identity`) and Phase C (`approval`) capability flags are
+        // implemented and need no warning gate. When M4 Phase D flags are
+        // added (aat, spiffe, transaction_tokens, cross_realm), add a warning
+        // here until each flag's HTTP routes and conformance tests ship.
 
         issues
     }
