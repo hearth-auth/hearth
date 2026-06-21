@@ -698,7 +698,8 @@ pub(crate) fn identity_error_to_response(
         IdentityError::AatScopeEscalation
         | IdentityError::AatChainBroken { .. }
         | IdentityError::AatRevoked
-        | IdentityError::AatExpired => (StatusCode::FORBIDDEN, "aat_validation_failed"),
+        | IdentityError::AatExpired
+        | IdentityError::AatAudienceMismatch => (StatusCode::FORBIDDEN, "aat_validation_failed"),
         IdentityError::TransactionTokenReplayed => (StatusCode::CONFLICT, "txn_token_replayed"),
         IdentityError::CrossRealmPolicyNotFound | IdentityError::SpiffeMappingNotFound => {
             (StatusCode::NOT_FOUND, "not_found")

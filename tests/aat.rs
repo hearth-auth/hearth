@@ -323,7 +323,7 @@ async fn validate_aat_succeeds_for_valid_token() {
 
     let claims = h
         .identity()
-        .validate_aat(&realm_id, &resp.aat)
+        .validate_aat(&realm_id, &resp.aat, None)
         .expect("validate_aat must succeed for a freshly issued token");
 
     assert!(!claims.jti.is_empty(), "jti must be present");
@@ -362,7 +362,7 @@ async fn revocation_invalidates_child_aats() {
 
     let root_claims = h
         .identity()
-        .validate_aat(&realm_id, &root.aat)
+        .validate_aat(&realm_id, &root.aat, None)
         .expect("root validates before revocation");
 
     let child = h
@@ -387,7 +387,7 @@ async fn revocation_invalidates_child_aats() {
     // Both root and child should now fail validation.
     let root_err = h
         .identity()
-        .validate_aat(&realm_id, &root.aat)
+        .validate_aat(&realm_id, &root.aat, None)
         .expect_err("root must be invalid after revocation");
     assert!(
         matches!(root_err, IdentityError::AatRevoked),
@@ -396,7 +396,7 @@ async fn revocation_invalidates_child_aats() {
 
     let child_err = h
         .identity()
-        .validate_aat(&realm_id, &child.aat)
+        .validate_aat(&realm_id, &child.aat, None)
         .expect_err("child must be invalid after parent revocation");
     assert!(
         matches!(child_err, IdentityError::AatRevoked),
@@ -563,6 +563,100 @@ async fn derive_aat_same_string_child_constraint_rejected() {
     );
 }
 
+/// Child AAT widening a string constraint key inside an object must be rejected
+/// (HEA-1468: previously only present-checked, not equality-checked).
+#[tokio::test]
+async fn derive_aat_widened_string_object_constraint_rejected() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let root = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool_with_constraints(
+                    "http",
+                    &["invoke"],
+                    serde_json::json!({"allowed_domain": "safe.example.com"}),
+                )],
+                scope: vec!["http:invoke".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue root AAT with object string constraint");
+
+    let err = h
+        .identity()
+        .derive_aat(
+            &realm_id,
+            &DeriveAatRequest {
+                parent_aat: root.aat,
+                tools: vec![tool_with_constraints(
+                    "http",
+                    &["invoke"],
+                    serde_json::json!({"allowed_domain": "attacker.example.com"}),
+                )],
+                scope: vec!["http:invoke".to_string()],
+                aud: None,
+                expires_in_secs: Some(60),
+            },
+        )
+        .expect_err("widened string constraint in object must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::AatScopeEscalation),
+        "expected AatScopeEscalation for widened string object constraint, got {err:?}"
+    );
+}
+
+/// Child AAT with identical string constraint value in object must be allowed
+/// (same value is not a widening).
+#[tokio::test]
+async fn derive_aat_equal_string_object_constraint_allowed() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let root = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool_with_constraints(
+                    "http",
+                    &["invoke"],
+                    serde_json::json!({"allowed_domain": "safe.example.com"}),
+                )],
+                scope: vec!["http:invoke".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue root AAT with object string constraint");
+
+    h.identity()
+        .derive_aat(
+            &realm_id,
+            &DeriveAatRequest {
+                parent_aat: root.aat,
+                tools: vec![tool_with_constraints(
+                    "http",
+                    &["invoke"],
+                    serde_json::json!({"allowed_domain": "safe.example.com"}),
+                )],
+                scope: vec!["http:invoke".to_string()],
+                aud: None,
+                expires_in_secs: Some(60),
+            },
+        )
+        .expect("derive AAT with same string constraint must succeed");
+}
+
 // ── D.1.9: Adversarial — tampered payload without re-signing rejected ─────────
 
 /// Decode the AAT payload, inject a wider scope, re-encode *without* re-signing.
@@ -608,7 +702,7 @@ async fn crafted_aat_tampered_scope_payload_rejected() {
 
     let err = h
         .identity()
-        .validate_aat(&realm_id, &forged)
+        .validate_aat(&realm_id, &forged, None)
         .expect_err("tampered-payload AAT must be rejected");
 
     assert!(
@@ -657,7 +751,7 @@ async fn crafted_aat_forged_chain_depth_rejected() {
 
     let err = h
         .identity()
-        .validate_aat(&realm_id, &forged)
+        .validate_aat(&realm_id, &forged, None)
         .expect_err("forged chain must be rejected");
 
     assert!(
@@ -710,7 +804,7 @@ async fn crafted_aat_cross_signed_rejected() {
 
     let err = h
         .identity()
-        .validate_aat(&realm_id, &forged)
+        .validate_aat(&realm_id, &forged, None)
         .expect_err("cross-signed AAT must be rejected");
 
     assert!(
@@ -840,7 +934,7 @@ async fn crafted_aat_jti_reuse_derive_from_revoked_rejected() {
     // Extract the JTI via validate_aat (returns AatClaims with the jti field).
     let claims = h
         .identity()
-        .validate_aat(&realm_id, &root.aat)
+        .validate_aat(&realm_id, &root.aat, None)
         .expect("validate root AAT to extract JTI");
     let jti = claims.jti.clone();
 
@@ -918,7 +1012,7 @@ async fn crafted_aat_forged_act_chain_rejected() {
 
     let err = h
         .identity()
-        .validate_aat(&realm_id, &forged)
+        .validate_aat(&realm_id, &forged, None)
         .expect_err("forged act-chain AAT must be rejected");
 
     assert!(
@@ -957,11 +1051,91 @@ async fn forged_aat_signature_rejected() {
 
     let err = h
         .identity()
-        .validate_aat(&realm_id, &forged)
+        .validate_aat(&realm_id, &forged, None)
         .expect_err("forged AAT must be rejected");
 
     assert!(
         matches!(err, IdentityError::InvalidToken),
         "expected InvalidToken for forged AAT, got {err:?}"
     );
+}
+
+// ── HEA-1469: Audience claim validation ──────────────────────────────────────
+
+/// AAT issued for `service-A` must be rejected when presented to `service-B`.
+/// Regression: previously `expected_aud` was not checked and the token was
+/// accepted regardless of audience.
+#[tokio::test]
+async fn aat_audience_mismatch_rejected() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let resp = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool("send_email", &["invoke"])],
+                scope: vec!["email:send".to_string()],
+                aud: Some("service-A".to_string()),
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue AAT for service-A");
+
+    // Presenting to service-B must be rejected.
+    let err = h
+        .identity()
+        .validate_aat(&realm_id, &resp.aat, Some("service-B"))
+        .expect_err("AAT for service-A must be rejected by service-B");
+
+    assert!(
+        matches!(err, IdentityError::AatAudienceMismatch),
+        "expected AatAudienceMismatch, got {err:?}"
+    );
+
+    // Presenting to the correct service must succeed.
+    h.identity()
+        .validate_aat(&realm_id, &resp.aat, Some("service-A"))
+        .expect("AAT must be accepted by its intended audience");
+}
+
+/// AAT with no `aud` claim must be rejected when caller specifies an audience.
+#[tokio::test]
+async fn aat_no_audience_rejects_expected_audience() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let resp = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![],
+                scope: vec![],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue unconstrained AAT");
+
+    // An audience-less token must not satisfy an expected_aud check.
+    let err = h
+        .identity()
+        .validate_aat(&realm_id, &resp.aat, Some("service-A"))
+        .expect_err("unconstrained AAT must not satisfy expected_aud check");
+
+    assert!(
+        matches!(err, IdentityError::AatAudienceMismatch),
+        "expected AatAudienceMismatch for audience-less token, got {err:?}"
+    );
+
+    // Without an audience expectation it must still be valid.
+    h.identity()
+        .validate_aat(&realm_id, &resp.aat, None)
+        .expect("unconstrained AAT must still validate without expected_aud");
 }

@@ -12,7 +12,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::SecureRandom;
 use secrecy::ExposeSecret;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
@@ -6147,6 +6147,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             resource: ctx.resource.as_ref(),
             dpop_jkt: None,
             sv: sv_claim,
+            scope: if scope_str.is_empty() {
+                None
+            } else {
+                Some(scope_str)
+            },
         })
     }
 
@@ -11034,6 +11039,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         use sha2::{Digest, Sha256};
         let hash_bytes = Sha256::digest(raw);
         let hash_hex = hex::encode(hash_bytes);
+        // Zeroize raw entropy from the stack to prevent key material lingering in memory.
+        // sha2::Digest::digest() takes raw by copy ([u8;32]: Copy) so raw remains here.
+        raw.zeroize();
 
         let cred_id = AgentCredentialId::generate();
         let cred = AgentCredential::new(
@@ -12270,7 +12278,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         request: &Rfc8693Request,
     ) -> Result<Rfc8693Response, IdentityError> {
         use crate::identity::mcp::intersect_three;
-        use crate::identity::tokens::{decode_claims_unverified, ActClaim};
+        use crate::identity::tokens::ActClaim;
 
         let now_micros = self.clock.now().as_micros();
         let now_secs = now_micros / 1_000_000;
@@ -12287,73 +12295,84 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             });
         }
 
-        // 2. Decode and validate the subject token.
-        let subject_claims = decode_claims_unverified(&request.subject_token)?;
-        if subject_claims.exp <= now_secs {
-            return Err(IdentityError::TokenExpired);
-        }
-        let subject_remaining = subject_claims.exp - now_secs;
+        // 2. Cryptographically verify and validate the subject token.
+        // validate_token checks Ed25519 signature against the realm's key, expiry,
+        // and realm binding — a token signed by a different realm's key is rejected
+        // here, making a separate tid guard unnecessary.
+        let subject_claims = self
+            .validate_token(realm_id, &request.subject_token)
+            .map_err(|_| IdentityError::TokenExchangeRejected {
+                reason: "invalid or expired subject_token".into(),
+                oauth_error: "invalid_grant",
+            })?;
+        let subject_remaining = subject_claims.exp.saturating_sub(now_secs);
 
         // 3. Validate actor_token if present (B.5 OBO).
         // Returns (actor_sub, actor_scope_owned) where actor_scope_owned is the space-separated
         // scope string the actor is permitted to hold (RFC 8693 §4.4).
-        let (actor_sub, actor_scope_owned) = if let Some(ref actor_jwt) = request.actor_token {
-            // Lightweight header+payload decode; jti replay prevents token reuse.
-            let actor_json = jwt_payload_json(actor_jwt).map_err(|reason| {
-                IdentityError::TokenExchangeRejected {
-                    reason,
-                    oauth_error: "invalid_grant",
+        let (actor_sub, actor_scope_owned) =
+            if let Some(ref actor_jwt) = request.actor_token {
+                // F3 (HEA-1466): verify actor_token signature with the realm key before reading any
+                // claims. The prior jwt_payload_json path was unverified — fresh forgeries with
+                // arbitrary sub claims bypassed the JTI replay guard (confused-deputy attack).
+                let actor_claims = self
+                    .verify_token_signature_for_realm(realm_id, actor_jwt)
+                    .map_err(|_| IdentityError::TokenExchangeRejected {
+                        reason: "actor_token signature verification failed".to_string(),
+                        oauth_error: "invalid_grant",
+                    })?;
+
+                // Only access tokens are valid actor assertions; refresh tokens must be rejected.
+                if actor_claims.token_type != "access" {
+                    return Err(IdentityError::TokenExchangeRejected {
+                        reason: "actor_token must be an access token".to_string(),
+                        oauth_error: "invalid_grant",
+                    });
                 }
-            })?;
-            let actor_jti = actor_json
-                .get("jti")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| IdentityError::TokenExchangeRejected {
-                    reason: "actor_token missing jti".to_string(),
-                    oauth_error: "invalid_grant",
+
+                // Reject expired actor tokens (verify_token_signature_for_realm does not check exp).
+                if actor_claims.exp <= now_secs {
+                    return Err(IdentityError::TokenExchangeRejected {
+                        reason: "actor_token has expired".to_string(),
+                        oauth_error: "invalid_grant",
+                    });
+                }
+
+                // F3: assert actor_token.sub == client_id — the entity presenting the delegation
+                // must own the actor_token. Without this check, any holder of a valid Hearth token
+                // for principal A could impersonate principal B in the act chain.
+                if actor_claims.sub != request.client_id.to_string() {
+                    return Err(IdentityError::TokenExchangeRejected {
+                        reason: "actor_token.sub does not match client_id".to_string(),
+                        oauth_error: "invalid_grant",
+                    });
+                }
+
+                let actor_jti = actor_claims.jti.clone().ok_or_else(|| {
+                    IdentityError::TokenExchangeRejected {
+                        reason: "actor_token missing jti".to_string(),
+                        oauth_error: "invalid_grant",
+                    }
                 })?;
-            let actor_exp = actor_json
-                .get("exp")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(now_secs + 300);
-            // Actor tokens MUST expire within 5 minutes of issue.
-            let actor_iat = actor_json
-                .get("iat")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(now_secs);
-            if actor_exp.saturating_sub(actor_iat) > 300 {
-                return Err(IdentityError::TokenExchangeRejected {
-                    reason: "actor_token lifetime exceeds 5-minute maximum".to_string(),
-                    oauth_error: "invalid_grant",
-                });
-            }
-            self.check_and_record_actor_jti(realm_id, actor_jti, now_secs, actor_exp)?;
-            let sub = actor_json
-                .get("sub")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .ok_or_else(|| IdentityError::TokenExchangeRejected {
-                    reason: "actor_token missing sub".to_string(),
-                    oauth_error: "invalid_grant",
-                })?;
-            // Extract scope from the actor's JWT — this is the ceiling the actor may delegate.
-            // Distinguish two cases:
-            // - Absent claim (no "scope" key): actor doesn't restrict scope → use subject scope.
-            // - Explicit empty string ("scope": ""): actor claims zero permissions → empty string
-            //   propagates and causes EmptyScopeIntersection downstream.
-            let scope = match actor_json.get("scope") {
-                None => subject_claims.scope.clone().unwrap_or_default(),
-                Some(v) => v.as_str().unwrap_or("").to_string(),
+                let actor_exp = actor_claims.exp;
+                self.check_and_record_actor_jti(realm_id, &actor_jti, now_secs, actor_exp)?;
+
+                // Scope ceiling: actor's token scope narrows delegation per RFC 8693 §4.4.
+                // - Absent claim → actor doesn't restrict beyond the subject's own scope.
+                // - Explicit empty string → zero permissions → EmptyScopeIntersection downstream.
+                let scope = actor_claims
+                    .scope
+                    .unwrap_or_else(|| subject_claims.scope.clone().unwrap_or_default());
+
+                (actor_claims.sub, scope)
+            } else {
+                // No actor_token: the client is acting on its own behalf (no delegation chain).
+                // Preserve the original behavior — actor ceiling matches the subject's own scope
+                // so this path doesn't further restrict scope beyond subject ∩ requested.
+                let actor_sub = request.client_id.as_uuid().to_string();
+                let actor_scope = subject_claims.scope.clone().unwrap_or_default();
+                (actor_sub, actor_scope)
             };
-            (sub, scope)
-        } else {
-            // No actor_token: the client is acting on its own behalf (no delegation chain).
-            // Preserve the original behavior — actor ceiling matches the subject's own scope
-            // so this path doesn't further restrict scope beyond subject ∩ requested.
-            let actor_sub = request.client_id.as_uuid().to_string();
-            let actor_scope = subject_claims.scope.clone().unwrap_or_default();
-            (actor_sub, actor_scope)
-        };
 
         // 4. Delegation depth check.
         let existing_depth = subject_claims.act.as_ref().map_or(0, |a| a.depth());
@@ -12406,12 +12425,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let jti = uuid::Uuid::new_v4().to_string();
         let issued_claims = crate::identity::tokens::TokenClaims {
             sub: subject_claims.sub.clone(),
-            iss: subject_claims.iss.clone(),
+            iss: self.config.token.issuer.clone(),
             aud,
             exp,
             iat: now_secs,
             sid: subject_claims.sid.clone(),
-            tid: subject_claims.tid.clone(),
+            tid: realm_id.to_string(),
             oid: subject_claims.oid.clone(),
             token_type: "access".to_string(),
             jti: Some(jti.clone()),
@@ -12600,8 +12619,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         aat: &str,
+        expected_aud: Option<&str>,
     ) -> Result<crate::identity::types::AatClaims, IdentityError> {
-        self.parse_and_validate_aat(realm_id, aat)
+        self.parse_and_validate_aat(realm_id, aat, expected_aud)
     }
 
     fn revoke_aat(&self, realm_id: &RealmId, jti: &str) -> Result<(), IdentityError> {
@@ -12733,28 +12753,6 @@ impl EmbeddedIdentityEngine {
         }
         Some(agent.max_delegation_depth())
     }
-}
-
-/// Decodes the payload section of a JWT as a raw JSON object.
-///
-/// Does NOT verify the signature — callers MUST enforce replay prevention
-/// and other security properties separately.
-fn jwt_payload_json(token: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
-    let parts: Vec<&str> = token.splitn(3, '.').collect();
-    if parts.len() < 2 {
-        return Err("actor_token is not a valid JWT (expected header.payload.sig)".to_string());
-    }
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .map_err(|e| format!("actor_token base64 decode failed: {e}"))?;
-    let value: serde_json::Value = serde_json::from_slice(&payload_bytes)
-        .map_err(|e| format!("actor_token JSON parse failed: {e}"))?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| "actor_token payload is not a JSON object".to_string())
 }
 
 /// Generates and stores a new OTP then dispatches the SMS.

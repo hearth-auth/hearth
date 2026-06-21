@@ -691,7 +691,7 @@ impl SigningKey {
             token_type: "access".to_string(),
             jti: None,
             fid: None,
-            scope: None,
+            scope: request.scope.clone(),
             nonce: None,
             cnf: request.dpop_jkt.as_deref().map(|jkt| CnfClaim {
                 jkt: jkt.to_string(),
@@ -788,6 +788,12 @@ pub struct IssueTokenRequest<'a> {
     /// `Some(n)` when `session_version.enabled = true` for the realm and
     /// this is an access token bound to a session. `None` otherwise.
     pub sv: Option<u64>,
+    /// Optional OAuth scope to embed in the access token (space-delimited).
+    ///
+    /// `None` → the `scope` claim is omitted from the issued token.
+    /// Set to `Some(scope_str)` when the token is issued within an explicit
+    /// OAuth grant so that token-exchange can enforce scope intersection.
+    pub scope: Option<String>,
 }
 
 /// Validates a JWT's signature and returns the decoded claims.
@@ -1516,6 +1522,7 @@ mod tests {
                 resource: None,
                 dpop_jkt: None,
                 sv: None,
+                scope: None,
             })
             .expect("issue pair");
 
@@ -1557,6 +1564,7 @@ mod tests {
                 resource: None,
                 dpop_jkt: None,
                 sv: None,
+                scope: None,
             })
             .expect("reissue pair");
 

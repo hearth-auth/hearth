@@ -264,6 +264,12 @@ impl fmt::Display for IdentityError {
             Self::AatChainBroken { reason } => write!(f, "AAT chain invalid: {reason}"),
             Self::AatRevoked => write!(f, "AAT or an ancestor in the chain has been revoked"),
             Self::AatExpired => write!(f, "AAT has expired"),
+            Self::AatAudienceMismatch => {
+                write!(
+                    f,
+                    "AAT audience claim does not match the expected service identity"
+                )
+            }
             Self::TransactionTokenReplayed => {
                 write!(f, "transaction token has already been consumed")
             }

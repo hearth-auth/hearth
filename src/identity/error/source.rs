@@ -135,6 +135,7 @@ impl std::error::Error for IdentityError {
             | Self::AatChainBroken { .. }
             | Self::AatRevoked
             | Self::AatExpired
+            | Self::AatAudienceMismatch
             | Self::TransactionTokenReplayed
             | Self::CrossRealmPolicyNotFound
             | Self::CrossRealmPolicyConflict

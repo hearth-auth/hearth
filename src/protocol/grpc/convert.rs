@@ -213,7 +213,8 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::AatScopeEscalation
         | IdentityError::AatChainBroken { .. }
         | IdentityError::AatRevoked
-        | IdentityError::AatExpired => (Code::PermissionDenied, err.to_string()),
+        | IdentityError::AatExpired
+        | IdentityError::AatAudienceMismatch => (Code::PermissionDenied, err.to_string()),
         IdentityError::TransactionTokenReplayed => (Code::AlreadyExists, err.to_string()),
         IdentityError::CrossRealmPolicyNotFound | IdentityError::SpiffeMappingNotFound => {
             (Code::NotFound, err.to_string())

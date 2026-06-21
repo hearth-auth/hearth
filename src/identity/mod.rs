@@ -2367,11 +2367,15 @@ pub trait IdentityEngine: Send + Sync {
     /// Validates the full attenuation chain of a presented AAT.
     ///
     /// Returns the decoded `AatClaims` on success.
-    /// Returns `AatChainBroken` / `AatRevoked` / `AatExpired` on failure.
+    /// Returns `AatChainBroken` / `AatRevoked` / `AatExpired` / `AatAudienceMismatch` on failure.
+    ///
+    /// When `expected_aud` is `Some`, the `aud` claim must exactly match; otherwise
+    /// `AatAudienceMismatch` is returned. Pass `None` to skip audience checking.
     fn validate_aat(
         &self,
         realm_id: &RealmId,
         aat: &str,
+        expected_aud: Option<&str>,
     ) -> Result<types::AatClaims, IdentityError>;
 
     /// Revokes an AAT by JTI. Any descendant chain validation will also fail.

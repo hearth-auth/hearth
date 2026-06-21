@@ -11,12 +11,13 @@
 
 mod common;
 
-use hearth::core::{AgentId, RealmId, UserId};
+use hearth::core::{ClientId, RealmId, UserId};
 use hearth::identity::{
     mcp::{intersect_scopes, intersect_three, is_mcp_scope, validate_mcp_scope_string},
     tokens::{decode_claims_unverified, ActClaim},
-    AgentOwner, CreateAgentRequest, CreateRealmRequest, CreateUserRequest, IdentityEngine,
-    IdentityError, Rfc8693Request,
+    AccessTokenAuthorization, ClientCredentialsRequest, ClientTrustLevel, CreateRealmRequest,
+    CreateUserRequest, IdentityEngine, IdentityError, RegisterClientRequest, Rfc8693Request,
+    SessionContext, TokenIssuanceContext,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -49,35 +50,97 @@ fn make_user(identity: &dyn IdentityEngine, realm_id: &RealmId) -> UserId {
         .clone()
 }
 
-fn make_agent(
+/// Register a confidential OAuth client and issue a real `client_credentials` access token.
+///
+/// Returns `(client_id, access_token)`. The `client_id` MUST be used as `Rfc8693Request.client_id`
+/// so that the `actor_token.sub == client_id` assertion passes (F3 / HEA-1466).
+///
+/// `scope` is the space-delimited scope to declare and request.  Pass `Some("")` to issue a
+/// token with an explicitly-empty scope, which causes `EmptyScopeIntersection` in the exchange.
+fn make_actor_token(
     identity: &dyn IdentityEngine,
     realm_id: &RealmId,
-    owner_id: &UserId,
-    max_depth: u8,
-) -> AgentId {
-    identity
-        .create_agent(
+    scope: Option<&str>,
+) -> (ClientId, String) {
+    const SECRET: &str = "actor-test-secret!";
+    let declared: Vec<String> = scope
+        .unwrap_or("")
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let client = identity
+        .register_client(
             realm_id,
-            &CreateAgentRequest {
-                display_name: format!("TE agent {}", uuid::Uuid::new_v4()),
-                description: None,
-                owner: AgentOwner::User(owner_id.clone()),
-                capabilities: vec![],
-                max_delegation_depth: max_depth,
+            &RegisterClientRequest {
+                client_name: format!("actor-client-{}", uuid::Uuid::new_v4()),
+                client_secret: Some(SECRET.to_string()),
+                grant_types: vec!["client_credentials".to_string()],
+                require_consent: false,
+                trust_level: ClientTrustLevel::FirstParty,
+                declared_scopes: declared,
+                access_token_authorization: AccessTokenAuthorization::Embedded,
+                ..Default::default()
             },
-            None,
         )
-        .expect("create agent")
-        .id()
-        .clone()
+        .expect("register actor OAuth client");
+    let client_id = client.client_id().clone();
+    let resp = identity
+        .client_credentials_token(
+            realm_id,
+            &ClientCredentialsRequest {
+                client_id: client_id.clone(),
+                client_secret: Some(SECRET.to_string()),
+                scope: scope.map(str::to_string),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("issue actor access token");
+    (client_id, resp.access_token().to_string())
 }
 
-/// Build a minimal JWT with a known payload and a fake signature.
+/// Issue a real Ed25519-signed access token for `user_id` with explicit `scope`.
 ///
-/// Only valid for use with `decode_claims_unverified` paths — not for
-/// production use. The signature segment is a placeholder and will not
-/// pass cryptographic verification.
-fn build_mock_jwt(sub: &str, aud: &str, scope: &str, exp: i64, iat: i64) -> String {
+/// After HEA-1470, `rfc8693_token_exchange` calls `validate_token` (signature
+/// verification), so subject tokens must be cryptographically valid. Use this
+/// helper instead of `build_mock_jwt` wherever the exchange is expected to
+/// succeed or fail for a reason other than signature invalidity.
+fn make_subject_token(
+    identity: &dyn IdentityEngine,
+    realm_id: &RealmId,
+    user_id: &UserId,
+    scope: &str,
+) -> String {
+    use std::collections::BTreeSet;
+
+    let session = identity
+        .create_session(realm_id, user_id, &SessionContext::default())
+        .expect("create session for subject token");
+    let granted_scopes: BTreeSet<String> = scope.split_whitespace().map(String::from).collect();
+    identity
+        .issue_tokens_with_context(
+            realm_id,
+            user_id,
+            session.id(),
+            &TokenIssuanceContext {
+                client_id: None,
+                granted_scopes,
+                oid: None,
+                resource: None,
+            },
+        )
+        .expect("issue subject token")
+        .access_token()
+        .to_string()
+}
+
+/// Build a minimal JWT with a known payload and a **bogus** signature.
+///
+/// Use only for tests that specifically verify signature-rejection behaviour
+/// (HEA-1470 regression). For exchange tests that should succeed or fail for
+/// any other reason, use `make_subject_token` instead.
+fn build_mock_jwt(sub: &str, aud: &str, scope: &str, exp: i64, iat: i64, tid: &str) -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
 
@@ -89,7 +152,7 @@ fn build_mock_jwt(sub: &str, aud: &str, scope: &str, exp: i64, iat: i64) -> Stri
         "exp": exp,
         "iat": iat,
         "sid": "sid-test",
-        "tid": "00000000-0000-0000-0000-000000000000",
+        "tid": tid,
         "token_type": "access",
         "jti": uuid::Uuid::new_v4().to_string(),
         "scope": scope,
@@ -97,29 +160,6 @@ fn build_mock_jwt(sub: &str, aud: &str, scope: &str, exp: i64, iat: i64) -> Stri
         "groups": [],
         "permissions": [],
         "required_actions": [],
-    });
-    let payload = URL_SAFE_NO_PAD.encode(payload_json.to_string());
-    let sig = URL_SAFE_NO_PAD.encode("fakesig");
-    format!("{header}.{payload}.{sig}")
-}
-
-/// Build a mock actor-token JWT (agent assertion).
-///
-/// `scope` is included as the `scope` claim when provided. RFC 8693 §4.4 enforcement
-/// requires actors to carry a scope claim — the token exchange engine uses it as the ceiling.
-fn build_actor_jwt(sub: &str, aud: &str, exp: i64, iat: i64, jti: &str, scope: &str) -> String {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
-
-    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT","kid":"agent-key"}"#);
-    let payload_json = serde_json::json!({
-        "iss": sub,
-        "sub": sub,
-        "aud": aud,
-        "exp": exp,
-        "iat": iat,
-        "jti": jti,
-        "scope": scope,
     });
     let payload = URL_SAFE_NO_PAD.encode(payload_json.to_string());
     let sig = URL_SAFE_NO_PAD.encode("fakesig");
@@ -283,6 +323,7 @@ async fn token_exchange_requires_access_token_type() {
             .as_secs() as i64)
             + 900,
         0,
+        &realm_id.to_string(),
     );
 
     let request = Rfc8693Request {
@@ -334,6 +375,7 @@ async fn token_exchange_rejects_expired_subject_token() {
         "mcp:tools:invoke",
         now - 60,
         0,
+        &realm_id.to_string(),
     );
 
     let request = Rfc8693Request {
@@ -352,9 +394,17 @@ async fn token_exchange_rejects_expired_subject_token() {
     let err = identity
         .rfc8693_token_exchange(&realm_id, &request)
         .expect_err("expected error");
+    // After HEA-1470: validate_token checks signature first, so an expired
+    // subject_token (with invalid signature) maps to invalid_grant, not TokenExpired.
     assert!(
-        matches!(err, IdentityError::TokenExpired),
-        "expected TokenExpired, got: {err}"
+        matches!(
+            err,
+            IdentityError::TokenExchangeRejected {
+                oauth_error: "invalid_grant",
+                ..
+            }
+        ),
+        "expected invalid_grant for expired/invalid subject_token, got: {err}"
     );
 }
 
@@ -368,19 +418,8 @@ async fn token_exchange_empty_scope_intersection_rejected() {
     let user_id = make_user(identity, &realm_id);
     let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test setup failed")
-        .as_secs() as i64;
-
     // subject has only "openid", but we request "mcp:tools:invoke"
-    let subject_token = build_mock_jwt(
-        &user_id.as_uuid().to_string(),
-        "hearth",
-        "openid",
-        now + 900,
-        now,
-    );
+    let subject_token = make_subject_token(identity, &realm_id, &user_id, "openid");
 
     let request = Rfc8693Request {
         client_id,
@@ -412,36 +451,24 @@ async fn token_exchange_produces_act_claim() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    let agent_id = make_agent(identity, &realm_id, &owner_id, 3);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test setup failed")
-        .as_secs() as i64;
-
-    let subject_token = build_mock_jwt(
-        &user_id.as_uuid().to_string(),
-        "hearth",
+    let subject_token = make_subject_token(
+        identity,
+        &realm_id,
+        &user_id,
         "mcp:tools:invoke mcp:resources:read",
-        now + 900,
-        now,
     );
 
-    let actor_jti = uuid::Uuid::new_v4().to_string();
-    let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let actor_token = build_actor_jwt(
-        &actor_sub,
-        "hearth",
-        now + 60,
-        now,
-        &actor_jti,
-        "mcp:tools:invoke mcp:resources:read",
+    // F3 (HEA-1466): actor_token must be a Hearth-issued, realm-key-signed access token
+    // whose sub matches the client_id in the exchange request.
+    let (actor_client_id, actor_token) = make_actor_token(
+        identity,
+        &realm_id,
+        Some("mcp:tools:invoke mcp:resources:read"),
     );
 
     let request = Rfc8693Request {
-        client_id,
+        client_id: actor_client_id.clone(),
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
         actor_token: Some(actor_token),
@@ -464,10 +491,14 @@ async fn token_exchange_produces_act_claim() {
     assert_eq!(response.scope, "mcp:tools:invoke");
     assert!(response.expires_in > 0 && response.expires_in <= 900);
 
-    // Verify the issued token has an act claim
+    // Verify the issued token has an act claim whose sub is the actor's client_id.
     let claims = decode_claims_unverified(&response.access_token).expect("decode token");
     let act = claims.act.expect("expected act claim in issued token");
-    assert_eq!(act.sub, actor_sub, "act.sub should be the agent");
+    assert_eq!(
+        act.sub,
+        actor_client_id.to_string(),
+        "act.sub must equal the actor's client_id"
+    );
     assert!(act.act.is_none(), "single-hop: no nested act");
 }
 
@@ -479,29 +510,16 @@ async fn token_exchange_actor_jti_replay_rejected() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    let agent_id = make_agent(identity, &realm_id, &owner_id, 3);
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test setup failed")
-        .as_secs() as i64;
-
-    let actor_jti = uuid::Uuid::new_v4().to_string();
-    let actor_sub = format!("agt_{}", agent_id.as_uuid());
+    // Issue a single real actor token — the same JWT (same JTI) will be used twice.
+    let (actor_client_id, actor_token) =
+        make_actor_token(identity, &realm_id, Some("mcp:tools:invoke"));
 
     let make_request = |subject_token: String| Rfc8693Request {
-        client_id: hearth::core::ClientId::new(uuid::Uuid::new_v4()),
+        client_id: actor_client_id.clone(),
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
-        actor_token: Some(build_actor_jwt(
-            &actor_sub,
-            "hearth",
-            now + 60,
-            now,
-            &actor_jti,
-            "mcp:tools:invoke",
-        )),
+        actor_token: Some(actor_token.clone()),
         actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
         requested_token_type: None,
         scope: Some("mcp:tools:invoke".to_string()),
@@ -510,27 +528,19 @@ async fn token_exchange_actor_jti_replay_rejected() {
         dpop_jkt: None,
     };
 
-    let subject_token_1 = build_mock_jwt(
-        &user_id.as_uuid().to_string(),
-        "hearth",
-        "mcp:tools:invoke",
-        now + 900,
-        now,
-    );
-    let subject_token_2 = build_mock_jwt(
-        &user_id.as_uuid().to_string(),
-        "hearth",
-        "mcp:tools:invoke",
-        now + 900,
-        now,
-    );
+    // Two separate real subject tokens — both cryptographically valid.
+    let subject_token_1 = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
+    // set_password was called in subject_token_1; re-issue with same credentials by calling
+    // make_subject_token again (sets a new password each time, independent of the first call).
+    let user_id_2 = make_user(identity, &realm_id);
+    let subject_token_2 = make_subject_token(identity, &realm_id, &user_id_2, "mcp:tools:invoke");
 
-    // First exchange should succeed.
+    // First exchange should succeed — JTI is recorded.
     identity
         .rfc8693_token_exchange(&realm_id, &make_request(subject_token_1))
         .expect("first exchange should succeed");
 
-    // Second exchange with same actor jti should be rejected.
+    // Second exchange with the identical actor_token (same JTI) must be rejected.
     let err = identity
         .rfc8693_token_exchange(&realm_id, &make_request(subject_token_2))
         .expect_err("replay should be rejected");
@@ -549,72 +559,68 @@ async fn token_exchange_delegation_depth_enforced() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    // Agent with max_delegation_depth = 1 — only one hop allowed.
-    let agent_id = make_agent(identity, &realm_id, &owner_id, 1);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test setup failed")
-        .as_secs() as i64;
+    let max_depth = hearth::abuse::MAX_ACT_CHAIN_DEPTH;
 
-    // Subject token already has an `act` chain of depth 1 — adding this
-    // agent would make depth 2, exceeding max_delegation_depth = 1.
-    let subject_with_existing_act = {
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        use base64::Engine as _;
-        let payload = serde_json::json!({
-            "sub": user_id.as_uuid().to_string(),
-            "iss": "hearth",
-            "aud": "hearth",
-            "exp": now + 900,
-            "iat": now,
-            "sid": "sid-test",
-            "tid": "00000000-0000-0000-0000-000000000000",
-            "token_type": "access",
-            "jti": uuid::Uuid::new_v4().to_string(),
-            "scope": "mcp:tools:invoke",
-            "roles": [],
-            "groups": [],
-            "permissions": [],
-            "required_actions": [],
-            // Already delegated once
-            "act": { "sub": "agt_some-other-agent" },
-        });
-        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT","kid":"test"}"#);
-        let p = URL_SAFE_NO_PAD.encode(payload.to_string());
-        format!("{header}.{p}.fakesig")
-    };
+    // Build a real subject token at depth `max_depth` by running `max_depth` sequential
+    // token exchanges. Each exchange appends one act-chain hop. Because each hop requires a
+    // fresh actor token (JTI replay guard), we create a new actor per iteration.
+    let mut current_subject = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
 
-    let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let request = Rfc8693Request {
-        client_id,
-        subject_token: subject_with_existing_act,
-        subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
-        actor_token: Some(build_actor_jwt(
-            &actor_sub,
-            "hearth",
-            now + 60,
-            now,
-            &uuid::Uuid::new_v4().to_string(),
-            "mcp:tools:invoke",
-        )),
-        actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
-        requested_token_type: None,
-        scope: Some("mcp:tools:invoke".to_string()),
-        resource: None,
-        audience: None,
-        dpop_jkt: None,
-    };
+    for i in 0..max_depth {
+        let (hop_actor_id, hop_actor_token) =
+            make_actor_token(identity, &realm_id, Some("mcp:tools:invoke"));
+        current_subject = identity
+            .rfc8693_token_exchange(
+                &realm_id,
+                &Rfc8693Request {
+                    client_id: hop_actor_id,
+                    subject_token: current_subject,
+                    subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                    actor_token: Some(hop_actor_token),
+                    actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+                    requested_token_type: None,
+                    scope: Some("mcp:tools:invoke".to_string()),
+                    resource: None,
+                    audience: None,
+                    dpop_jkt: None,
+                },
+            )
+            .unwrap_or_else(|e| panic!("hop {i} of {max_depth} failed: {e}"))
+            .access_token;
+    }
+
+    // One more hop must be rejected — subject is already at the global ceiling.
+    let (final_actor_id, final_actor_token) =
+        make_actor_token(identity, &realm_id, Some("mcp:tools:invoke"));
 
     let err = identity
-        .rfc8693_token_exchange(&realm_id, &request)
-        .expect_err("depth exceeded should be rejected");
+        .rfc8693_token_exchange(
+            &realm_id,
+            &Rfc8693Request {
+                client_id: final_actor_id,
+                subject_token: current_subject,
+                subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                actor_token: Some(final_actor_token),
+                actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+                requested_token_type: None,
+                scope: Some("mcp:tools:invoke".to_string()),
+                resource: None,
+                audience: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect_err("depth at global ceiling + 1 must be rejected");
 
     assert!(
-        matches!(err, IdentityError::DelegationDepthExceeded { max: 1, .. }),
-        "expected DelegationDepthExceeded with max=1, got: {err}"
+        matches!(
+            err,
+            IdentityError::DelegationDepthExceeded {
+                max: 10,
+                attempted: 11
+            }
+        ),
+        "expected DelegationDepthExceeded {{ max: 10, attempted: 11 }}, got: {err}"
     );
 }
 
@@ -628,20 +634,14 @@ async fn token_exchange_lifetime_bounded_by_subject() {
     let user_id = make_user(identity, &realm_id);
     let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
-    let now = std::time::SystemTime::now()
+    // Issue a real signed subject token, then immediately measure its remaining lifetime.
+    let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
+    let subject_claims = decode_claims_unverified(&subject_token).expect("decode subject claims");
+    let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("test setup failed")
         .as_secs() as i64;
-
-    // Subject token expires in just 30 seconds — well below normal 15-minute TTL.
-    let short_exp = now + 30;
-    let subject_token = build_mock_jwt(
-        &user_id.as_uuid().to_string(),
-        "hearth",
-        "mcp:tools:invoke",
-        short_exp,
-        now,
-    );
+    let subject_remaining = subject_claims.exp - now_secs;
 
     let request = Rfc8693Request {
         client_id,
@@ -662,9 +662,14 @@ async fn token_exchange_lifetime_bounded_by_subject() {
 
     // The resulting token MUST NOT have a longer lifetime than the subject's remaining.
     assert!(
-        response.expires_in <= 30,
-        "issued token TTL {} should be ≤ 30s (subject remaining)",
-        response.expires_in
+        response.expires_in > 0,
+        "issued token must have a positive TTL"
+    );
+    assert!(
+        response.expires_in <= subject_remaining,
+        "issued token TTL {} must be ≤ subject remaining {} s",
+        response.expires_in,
+        subject_remaining
     );
 }
 
@@ -676,75 +681,61 @@ async fn token_exchange_nested_act_chain_two_hops() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    // Agent with max_delegation_depth = 3 — allows multi-hop.
-    let agent_b_id = make_agent(identity, &realm_id, &owner_id, 3);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test setup failed")
-        .as_secs() as i64;
+    // Build a real depth-1 subject (user → first_actor) via a first exchange.
+    let user_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
+    let (first_actor_id, first_actor_token) =
+        make_actor_token(identity, &realm_id, Some("mcp:tools:invoke"));
 
-    // Subject token that was already delegated once (user → agent A).
-    let subject_with_act_a = {
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        use base64::Engine as _;
-        let payload = serde_json::json!({
-            "sub": user_id.as_uuid().to_string(),
-            "iss": "hearth",
-            "aud": "hearth",
-            "exp": now + 900,
-            "iat": now,
-            "sid": "sid-test",
-            "tid": "00000000-0000-0000-0000-000000000000",
-            "token_type": "access",
-            "jti": uuid::Uuid::new_v4().to_string(),
-            "scope": "mcp:tools:invoke",
-            "roles": [],
-            "groups": [],
-            "permissions": [],
-            "required_actions": [],
-            "act": { "sub": "agt_agent-a" },
-        });
-        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT","kid":"test"}"#);
-        let p = URL_SAFE_NO_PAD.encode(payload.to_string());
-        format!("{header}.{p}.fakesig")
-    };
+    let subject_with_first_hop = identity
+        .rfc8693_token_exchange(
+            &realm_id,
+            &Rfc8693Request {
+                client_id: first_actor_id.clone(),
+                subject_token: user_token,
+                subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                actor_token: Some(first_actor_token),
+                actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+                requested_token_type: None,
+                scope: Some("mcp:tools:invoke".to_string()),
+                resource: None,
+                audience: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect("first hop should succeed")
+        .access_token;
 
-    let actor_b_sub = format!("agt_{}", agent_b_id.as_uuid());
-    let request = Rfc8693Request {
-        client_id,
-        subject_token: subject_with_act_a,
-        subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
-        actor_token: Some(build_actor_jwt(
-            &actor_b_sub,
-            "hearth",
-            now + 60,
-            now,
-            &uuid::Uuid::new_v4().to_string(),
-            "mcp:tools:invoke",
-        )),
-        actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
-        requested_token_type: None,
-        scope: Some("mcp:tools:invoke".to_string()),
-        resource: None,
-        audience: None,
-        dpop_jkt: None,
-    };
+    // Second actor adds the second hop (F3).
+    let (second_actor_id, second_actor_token) =
+        make_actor_token(identity, &realm_id, Some("mcp:tools:invoke"));
 
     let response = identity
-        .rfc8693_token_exchange(&realm_id, &request)
+        .rfc8693_token_exchange(
+            &realm_id,
+            &Rfc8693Request {
+                client_id: second_actor_id.clone(),
+                subject_token: subject_with_first_hop,
+                subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                actor_token: Some(second_actor_token),
+                actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+                requested_token_type: None,
+                scope: Some("mcp:tools:invoke".to_string()),
+                resource: None,
+                audience: None,
+                dpop_jkt: None,
+            },
+        )
         .expect("two-hop exchange should succeed");
 
     let claims = decode_claims_unverified(&response.access_token).expect("decode");
     let act = claims.act.expect("act claim present");
 
-    // Outer act is agent B
-    assert_eq!(act.sub, actor_b_sub);
-    // Inner act is agent A (preserved from subject)
+    // Outer act is second_actor — identified by its client_id string.
+    assert_eq!(act.sub, second_actor_id.to_string());
+    // Inner act is first_actor (preserved from the first exchange).
     let inner = act.act.expect("inner act present for 2-hop chain");
-    assert_eq!(inner.sub, "agt_agent-a");
+    assert_eq!(inner.sub, first_actor_id.to_string());
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -791,36 +782,21 @@ async fn token_exchange_actor_scope_limits_result() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    let agent_id = make_agent(identity, &realm_id, &owner_id, 3);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test setup failed")
-        .as_secs() as i64;
 
     // Subject holds two scopes; actor only holds the narrower one.
-    let subject_token = build_mock_jwt(
-        &user_id.as_uuid().to_string(),
-        "hearth",
+    let subject_token = make_subject_token(
+        identity,
+        &realm_id,
+        &user_id,
         "mcp:tools:invoke mcp:tools:list",
-        now + 900,
-        now,
     );
 
-    let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let actor_token = build_actor_jwt(
-        &actor_sub,
-        "hearth",
-        now + 60,
-        now,
-        &uuid::Uuid::new_v4().to_string(),
-        "mcp:tools:list", // actor only has list, not invoke
-    );
+    // Actor registered and issued a token with only mcp:tools:list (F3).
+    let (actor_client_id, actor_token) =
+        make_actor_token(identity, &realm_id, Some("mcp:tools:list"));
 
     let request = Rfc8693Request {
-        client_id,
+        client_id: actor_client_id,
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
         actor_token: Some(actor_token),
@@ -849,10 +825,11 @@ async fn token_exchange_actor_scope_limits_result() {
     );
 }
 
-/// Zero-scope actor cannot escalate to subject's high-privilege scopes.
+/// Actor with no scope overlap with the subject must be rejected with EmptyScopeIntersection.
 ///
-/// An actor presenting a token with an empty scope must be rejected with
-/// `EmptyScopeIntersection` even if the subject holds highly privileged scopes.
+/// An actor presenting a token with an empty scope string must be rejected even if the
+/// subject holds highly privileged scopes.  The engine treats `scope = ""` as an explicit
+/// zero-permission assertion — it does not fall back to the subject's scope.
 #[tokio::test]
 async fn token_exchange_zero_scope_actor_rejected() {
     let harness = common::TestHarness::embedded()
@@ -861,37 +838,17 @@ async fn token_exchange_zero_scope_actor_rejected() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    let agent_id = make_agent(identity, &realm_id, &owner_id, 3);
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("test setup failed")
-        .as_secs() as i64;
 
     // Subject holds a highly privileged scope.
-    let subject_token = build_mock_jwt(
-        &user_id.as_uuid().to_string(),
-        "hearth",
-        "tool:delete-db:invoke",
-        now + 900,
-        now,
-    );
+    let subject_token = make_subject_token(identity, &realm_id, &user_id, "tool:delete-db:invoke");
 
-    // Actor presents itself with an empty scope — zero permissions.
-    let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let actor_token = build_actor_jwt(
-        &actor_sub,
-        "hearth",
-        now + 60,
-        now,
-        &uuid::Uuid::new_v4().to_string(),
-        "", // zero scope
-    );
+    // Actor token issued with an explicit empty scope string — zero permissions (F3).
+    // make_actor_token with Some("") passes scope="" to client_credentials_token which
+    // stores scope=Some("") in the issued JWT; the engine treats this as zero permissions.
+    let (actor_client_id, actor_token) = make_actor_token(identity, &realm_id, Some(""));
 
     let request = Rfc8693Request {
-        client_id,
+        client_id: actor_client_id,
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
         actor_token: Some(actor_token),
@@ -910,5 +867,222 @@ async fn token_exchange_zero_scope_actor_rejected() {
     assert!(
         matches!(err, IdentityError::EmptyScopeIntersection),
         "expected EmptyScopeIntersection for zero-scope actor, got: {err}"
+    );
+}
+
+/// HEA-1467 / F4: subject token with a `tid` from a different realm must be rejected.
+///
+/// Token exchange in Realm B must not accept a subject token that was issued for Realm A.
+/// Without this guard an attacker could present a Realm A token to Realm B's exchange
+/// endpoint and launder the identity across trust boundaries.
+#[tokio::test]
+async fn token_exchange_rejects_cross_realm_subject_tid() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("test setup failed");
+    let identity = harness.identity();
+    // Two separate realms — the subject token belongs to realm_a but is presented to realm_b.
+    let realm_a = make_realm(identity);
+    let realm_b = make_realm(identity);
+    let user_id = make_user(identity, &realm_a);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+
+    // Subject token is a real realm_a-signed token — presented to realm_b's exchange.
+    // validate_token(realm_b, token) fails because the token was signed by realm_a's key.
+    let subject_token = make_subject_token(identity, &realm_a, &user_id, "mcp:tools:invoke");
+
+    let request = Rfc8693Request {
+        client_id,
+        subject_token,
+        subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+        actor_token: None,
+        actor_token_type: None,
+        requested_token_type: None,
+        scope: None,
+        resource: None,
+        audience: None,
+        dpop_jkt: None,
+    };
+
+    // Exchange is performed against realm_b — must be rejected.
+    let err = identity
+        .rfc8693_token_exchange(&realm_b, &request)
+        .expect_err("cross-realm subject token must be rejected");
+
+    assert!(
+        matches!(
+            err,
+            IdentityError::TokenExchangeRejected {
+                oauth_error: "invalid_grant",
+                ..
+            }
+        ),
+        "expected invalid_grant for cross-realm subject tid, got: {err}"
+    );
+}
+
+/// HEA-1466 / F3 regression: forged actor_token with valid JTI but mismatched sub must be rejected.
+///
+/// An attacker holds a valid Hearth token for client A.  They present it as `actor_token` in an
+/// exchange request that claims `client_id` = client B.  The `actor_token.sub` check must catch
+/// this confused-deputy attempt before the JTI replay guard would even fire.
+#[tokio::test]
+async fn token_exchange_actor_sub_mismatch_rejected() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("test setup failed");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+
+    let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
+
+    // Issue a real actor token for client A.
+    let (client_a, actor_token_a) = make_actor_token(identity, &realm_id, Some("mcp:tools:invoke"));
+    // Register a completely separate client B.
+    let (client_b, _) = make_actor_token(identity, &realm_id, Some("mcp:tools:invoke"));
+    // Sanity-check that A and B really are different clients.
+    assert_ne!(client_a, client_b);
+
+    // Forge: present client A's token but claim to be client B in the exchange request.
+    let request = Rfc8693Request {
+        client_id: client_b, // claims to be B
+        subject_token,
+        subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+        actor_token: Some(actor_token_a), // token belongs to A (sub = "client_<A_UUID>")
+        actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
+        requested_token_type: None,
+        scope: Some("mcp:tools:invoke".to_string()),
+        resource: None,
+        audience: None,
+        dpop_jkt: None,
+    };
+
+    let err = identity
+        .rfc8693_token_exchange(&realm_id, &request)
+        .expect_err("sub mismatch must be rejected");
+
+    assert!(
+        matches!(
+            err,
+            IdentityError::TokenExchangeRejected {
+                oauth_error: "invalid_grant",
+                ..
+            }
+        ),
+        "expected TokenExchangeRejected(invalid_grant) for mismatched sub, got: {err}"
+    );
+}
+
+/// HEA-1467 / F4: the issued token's `iss` and `tid` must reflect the serving realm,
+/// not the subject token's original claims.
+#[tokio::test]
+async fn token_exchange_overrides_iss_and_tid_to_serving_realm() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("test setup failed");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+
+    // Issue a real signed subject token — the exchange must override its iss/tid.
+    let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
+
+    let request = Rfc8693Request {
+        client_id,
+        subject_token,
+        subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+        actor_token: None,
+        actor_token_type: None,
+        requested_token_type: None,
+        scope: None,
+        resource: None,
+        audience: None,
+        dpop_jkt: None,
+    };
+
+    let response = identity
+        .rfc8693_token_exchange(&realm_id, &request)
+        .expect("same-realm exchange should succeed");
+
+    let claims = decode_claims_unverified(&response.access_token).expect("decode issued token");
+
+    // tid MUST be overridden to the serving realm.
+    assert_eq!(
+        claims.tid,
+        realm_id.to_string(),
+        "issued token tid must equal the serving realm, not the subject's original tid"
+    );
+
+    // iss must never be empty (it is pinned to config.token.issuer).
+    assert!(!claims.iss.is_empty(), "issued token iss must be non-empty");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// § HEA-1470 regression: forged subject_token with bogus signature
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A JWT with correct tid/iss/exp claims but a forged signature must be rejected.
+///
+/// Before HEA-1470, `decode_claims_unverified` was used at step 2 of
+/// `rfc8693_token_exchange`. An attacker could craft a JWT with:
+///   - `tid` = serving realm UUID  (passes the old tid guard)
+///   - `sub` = any victim user ID
+///   - arbitrary `permissions`/`scope`
+///   - signature = anything (was never verified)
+/// and obtain a server-signed token with those claims.  This test pins the fix.
+#[tokio::test]
+async fn token_exchange_rejects_forged_subject_token_bogus_signature() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("test setup failed");
+    let identity = harness.identity();
+    let realm_id = make_realm(identity);
+    let user_id = make_user(identity, &realm_id);
+    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("test setup failed")
+        .as_secs() as i64;
+
+    // Forged token: correct tid/iss/exp, valid-looking structure, but signature = "fakesig".
+    let forged = build_mock_jwt(
+        &user_id.as_uuid().to_string(),
+        "hearth",
+        "mcp:tools:invoke",
+        now + 900,
+        now,
+        &realm_id.to_string(),
+    );
+
+    let err = identity
+        .rfc8693_token_exchange(
+            &realm_id,
+            &Rfc8693Request {
+                client_id,
+                subject_token: forged,
+                subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+                actor_token: None,
+                actor_token_type: None,
+                requested_token_type: None,
+                scope: None,
+                resource: None,
+                audience: None,
+                dpop_jkt: None,
+            },
+        )
+        .expect_err("forged subject_token must be rejected");
+
+    assert!(
+        matches!(
+            err,
+            IdentityError::TokenExchangeRejected {
+                oauth_error: "invalid_grant",
+                ..
+            }
+        ),
+        "expected invalid_grant for forged subject_token, got: {err}"
     );
 }

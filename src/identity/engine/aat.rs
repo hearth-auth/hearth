@@ -89,8 +89,8 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &DeriveAatRequest,
     ) -> Result<AatResponse, IdentityError> {
-        // Parse and validate the parent AAT.
-        let parent = self.parse_and_validate_aat(realm_id, &request.parent_aat)?;
+        // Parse and validate the parent AAT. No audience check during chain derivation.
+        let parent = self.parse_and_validate_aat(realm_id, &request.parent_aat, None)?;
 
         // Enforce chain depth cap.
         if parent.aat_chain.len() >= MAX_AAT_CHAIN_DEPTH {
@@ -153,10 +153,14 @@ impl EmbeddedIdentityEngine {
     }
 
     /// Parses and validates an AAT JWT, checking signature, expiry, and revocation.
+    ///
+    /// If `expected_aud` is `Some`, the `aud` claim must exactly match or
+    /// `AatAudienceMismatch` is returned.
     pub(super) fn parse_and_validate_aat(
         &self,
         realm_id: &RealmId,
         aat: &str,
+        expected_aud: Option<&str>,
     ) -> Result<AatClaims, IdentityError> {
         let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
         let public_key_bytes = signing_key.public_key_bytes().to_vec();
@@ -167,6 +171,13 @@ impl EmbeddedIdentityEngine {
         let now_secs = self.clock.now().as_micros() / 1_000_000;
         if now_secs >= claims.exp {
             return Err(IdentityError::AatExpired);
+        }
+
+        // Validate audience when the caller specifies one.
+        if let Some(aud) = expected_aud {
+            if claims.aud.as_deref() != Some(aud) {
+                return Err(IdentityError::AatAudienceMismatch);
+            }
         }
 
         // Check revocation of this JTI and all ancestors in the chain.
@@ -241,10 +252,14 @@ fn validate_tools_subset(
             for (k, child_val) in child_obj {
                 let parent_val = parent_obj.get(k).ok_or(IdentityError::AatScopeEscalation)?;
                 // If both are numbers, child must be ≤ parent.
+                // For all other types (strings, booleans, nested objects), the
+                // child value must equal the parent value exactly — no widening.
                 if let (Some(cv), Some(pv)) = (child_val.as_f64(), parent_val.as_f64()) {
                     if cv > pv {
                         return Err(IdentityError::AatScopeEscalation);
                     }
+                } else if child_val != parent_val {
+                    return Err(IdentityError::AatScopeEscalation);
                 }
             }
         } else if !child_perm.constraints.is_null() && parent_perm.constraints.is_null() {

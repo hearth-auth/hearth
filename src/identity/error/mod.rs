@@ -441,6 +441,8 @@ pub enum IdentityError {
     AatRevoked,
     /// The presented AAT has expired.
     AatExpired,
+    /// The AAT `aud` claim does not match the expected audience.
+    AatAudienceMismatch,
 
     // Phase D.3 — Transaction Tokens
     /// A transaction token with this `txn_id` has already been consumed.

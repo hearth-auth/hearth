@@ -9,10 +9,11 @@
 
 mod common;
 
-use hearth::core::{AgentId, RealmId, UserId};
+use hearth::core::{ClientId, RealmId, UserId};
 use hearth::identity::{
-    AgentOwner, CreateAgentRequest, CreateRealmRequest, CreateUserRequest, IdentityEngine,
-    IdentityError, Rfc8693Request,
+    AccessTokenAuthorization, ClientCredentialsRequest, ClientTrustLevel, CreateRealmRequest,
+    CreateUserRequest, IdentityEngine, IdentityError, RegisterClientRequest, Rfc8693Request,
+    SessionContext, TokenIssuanceContext,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -45,84 +46,85 @@ fn make_user(identity: &dyn IdentityEngine, realm_id: &RealmId) -> UserId {
         .clone()
 }
 
-fn make_agent(identity: &dyn IdentityEngine, realm_id: &RealmId, owner_id: &UserId) -> AgentId {
-    identity
-        .create_agent(
+/// Register an OAuth client and issue a real `client_credentials` access token.
+///
+/// Returns `(client_id, access_token)`. The `client_id` MUST be used as
+/// `Rfc8693Request.client_id` so that the `actor_token.sub == client_id` assertion passes
+/// (F3 / HEA-1466).
+fn make_actor_token(
+    identity: &dyn IdentityEngine,
+    realm_id: &RealmId,
+    scope: &str,
+) -> (ClientId, String) {
+    const SECRET: &str = "actor-test-secret!";
+    let declared: Vec<String> = scope.split_whitespace().map(String::from).collect();
+    let client = identity
+        .register_client(
             realm_id,
-            &CreateAgentRequest {
-                display_name: format!("CD agent {}", uuid::Uuid::new_v4()),
-                description: None,
-                owner: AgentOwner::User(owner_id.clone()),
-                capabilities: vec![],
-                max_delegation_depth: 3,
+            &RegisterClientRequest {
+                client_name: format!("cd-actor-{}", uuid::Uuid::new_v4()),
+                client_secret: Some(SECRET.to_string()),
+                grant_types: vec!["client_credentials".to_string()],
+                require_consent: false,
+                trust_level: ClientTrustLevel::FirstParty,
+                declared_scopes: declared,
+                access_token_authorization: AccessTokenAuthorization::Embedded,
+                ..Default::default()
             },
-            None,
         )
-        .expect("create agent")
-        .id()
-        .clone()
+        .expect("register actor client");
+    let client_id = client.client_id().clone();
+    let resp = identity
+        .client_credentials_token(
+            realm_id,
+            &ClientCredentialsRequest {
+                client_id: client_id.clone(),
+                client_secret: Some(SECRET.to_string()),
+                scope: if scope.is_empty() {
+                    None
+                } else {
+                    Some(scope.to_string())
+                },
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("issue actor access token");
+    (client_id, resp.access_token().to_string())
 }
 
-/// Build a mock subject token JWT (user access token).
+/// Issue a real Ed25519-signed access token for `user_id` with explicit `scope`.
 ///
-/// Uses `user_id.to_string()` (prefixed) for the `sub` claim, matching what
-/// the real token issuance path produces.
+/// After HEA-1470, `rfc8693_token_exchange` calls `validate_token`, so subject
+/// tokens must be cryptographically valid.
 fn build_subject_jwt(
+    identity: &dyn IdentityEngine,
     user_id: &UserId,
     realm_id: &RealmId,
     scope: &str,
-    exp: i64,
-    iat: i64,
 ) -> String {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
+    use std::collections::BTreeSet;
 
-    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT","kid":"test"}"#);
-    let payload_json = serde_json::json!({
-        "sub": user_id.to_string(),
-        "iss": "hearth",
-        "aud": "hearth",
-        "exp": exp,
-        "iat": iat,
-        "sid": "sid-test",
-        "tid": realm_id.to_string(),
-        "token_type": "access",
-        "jti": uuid::Uuid::new_v4().to_string(),
-        "scope": scope,
-        "roles": [],
-        "groups": [],
-        "permissions": [],
-        "required_actions": [],
-    });
-    let payload = URL_SAFE_NO_PAD.encode(payload_json.to_string());
-    let sig = URL_SAFE_NO_PAD.encode("fakesig");
-    format!("{header}.{payload}.{sig}")
-}
-
-/// Build a mock actor-token JWT (agent assertion).
-fn build_actor_jwt(actor_sub: &str, exp: i64, iat: i64, jti: &str) -> String {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
-
-    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT","kid":"agent-key"}"#);
-    let payload_json = serde_json::json!({
-        "iss": actor_sub,
-        "sub": actor_sub,
-        "aud": "hearth",
-        "exp": exp,
-        "iat": iat,
-        "jti": jti,
-    });
-    let payload = URL_SAFE_NO_PAD.encode(payload_json.to_string());
-    let sig = URL_SAFE_NO_PAD.encode("fakesig");
-    format!("{header}.{payload}.{sig}")
-}
-
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time")
-        .as_secs() as i64
+    let session = identity
+        .create_session(realm_id, user_id, &SessionContext::default())
+        .expect("create session for subject token");
+    let granted_scopes: BTreeSet<String> = scope.split_whitespace().map(String::from).collect();
+    identity
+        .issue_tokens_with_context(
+            realm_id,
+            user_id,
+            session.id(),
+            &TokenIssuanceContext {
+                client_id: None,
+                granted_scopes,
+                oid: None,
+                resource: None,
+            },
+        )
+        .expect("issue subject token")
+        .access_token()
+        .to_string()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -138,18 +140,14 @@ async fn delegation_grant_persisted_after_exchange() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    let agent_id = make_agent(identity, &realm_id, &owner_id);
 
-    let now = now_secs();
-    let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let subject_token = build_subject_jwt(&user_id, &realm_id, "mcp:tools:invoke", now + 900, now);
-    let actor_jti = uuid::Uuid::new_v4().to_string();
-    let actor_token = build_actor_jwt(&actor_sub, now + 60, now, &actor_jti);
+    let subject_token = build_subject_jwt(identity, &user_id, &realm_id, "mcp:tools:invoke");
 
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
+    // F3 (HEA-1466): use a Hearth-signed actor token; client_id must match actor_token.sub.
+    let (actor_client_id, actor_token) = make_actor_token(identity, &realm_id, "mcp:tools:invoke");
+
     let request = Rfc8693Request {
-        client_id,
+        client_id: actor_client_id.clone(),
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
         actor_token: Some(actor_token),
@@ -173,8 +171,9 @@ async fn delegation_grant_persisted_after_exchange() {
     assert_eq!(grants.len(), 1, "exactly one delegation grant expected");
     let g = &grants[0];
     assert_eq!(
-        g.actor_sub, actor_sub,
-        "actor_sub should match agent identifier"
+        g.actor_sub,
+        actor_client_id.to_string(),
+        "actor_sub must equal the actor's client_id"
     );
     assert!(
         g.granted_scopes.contains(&"mcp:tools:invoke".to_string()),
@@ -192,18 +191,12 @@ async fn revoked_delegation_not_in_listing() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    let agent_id = make_agent(identity, &realm_id, &owner_id);
 
-    let now = now_secs();
-    let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let subject_token = build_subject_jwt(&user_id, &realm_id, "mcp:tools:invoke", now + 900, now);
-    let actor_jti = uuid::Uuid::new_v4().to_string();
-    let actor_token = build_actor_jwt(&actor_sub, now + 60, now, &actor_jti);
+    let subject_token = build_subject_jwt(identity, &user_id, &realm_id, "mcp:tools:invoke");
+    let (actor_client_id, actor_token) = make_actor_token(identity, &realm_id, "mcp:tools:invoke");
 
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
     let request = Rfc8693Request {
-        client_id,
+        client_id: actor_client_id,
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
         actor_token: Some(actor_token),
@@ -250,18 +243,12 @@ async fn revoke_other_users_delegation_is_not_found() {
     let realm_id = make_realm(identity);
     let user_a = make_user(identity, &realm_id);
     let user_b = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    let agent_id = make_agent(identity, &realm_id, &owner_id);
 
-    let now = now_secs();
-    let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let subject_token = build_subject_jwt(&user_a, &realm_id, "mcp:tools:invoke", now + 900, now);
-    let actor_jti = uuid::Uuid::new_v4().to_string();
-    let actor_token = build_actor_jwt(&actor_sub, now + 60, now, &actor_jti);
+    let subject_token = build_subject_jwt(identity, &user_a, &realm_id, "mcp:tools:invoke");
+    let (actor_client_id, actor_token) = make_actor_token(identity, &realm_id, "mcp:tools:invoke");
 
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
     let request = Rfc8693Request {
-        client_id,
+        client_id: actor_client_id,
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
         actor_token: Some(actor_token),
@@ -306,24 +293,18 @@ async fn revoke_delegation_is_idempotent() {
     let identity = harness.identity();
     let realm_id = make_realm(identity);
     let user_id = make_user(identity, &realm_id);
-    let owner_id = make_user(identity, &realm_id);
-    let agent_id = make_agent(identity, &realm_id, &owner_id);
 
-    let now = now_secs();
-    let actor_sub = format!("agt_{}", agent_id.as_uuid());
-    let subject_token = build_subject_jwt(&user_id, &realm_id, "mcp:tools:invoke", now + 900, now);
-    let actor_jti = uuid::Uuid::new_v4().to_string();
-    let actor_token = build_actor_jwt(&actor_sub, now + 60, now, &actor_jti);
+    let subject_token = build_subject_jwt(identity, &user_id, &realm_id, "mcp:tools:invoke");
+    let (actor_client_id, actor_token) = make_actor_token(identity, &realm_id, "mcp:tools:invoke");
 
-    let client_id = hearth::core::ClientId::new(uuid::Uuid::new_v4());
     let request = Rfc8693Request {
-        client_id,
+        client_id: actor_client_id,
         subject_token,
         subject_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
         actor_token: Some(actor_token),
         actor_token_type: Some("urn:ietf:params:oauth:token-type:jwt".to_string()),
         requested_token_type: None,
-        scope: None,
+        scope: Some("mcp:tools:invoke".to_string()),
         resource: None,
         audience: None,
         dpop_jkt: None,

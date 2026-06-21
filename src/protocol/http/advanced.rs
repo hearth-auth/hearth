@@ -139,8 +139,16 @@ async fn validate_aat(
                 .into_response()
         }
     };
+    let expected_aud = body
+        .get("expected_aud")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let identity = Arc::clone(&state.identity);
-    match tokio::task::spawn_blocking(move || identity.validate_aat(&realm_id, &aat)).await {
+    match tokio::task::spawn_blocking(move || {
+        identity.validate_aat(&realm_id, &aat, expected_aud.as_deref())
+    })
+    .await
+    {
         Ok(Ok(claims)) => Json(claims).into_response(),
         Ok(Err(IdentityError::AatChainBroken { .. } | IdentityError::AatExpired)) => (
             StatusCode::UNAUTHORIZED,
@@ -150,6 +158,11 @@ async fn validate_aat(
         Ok(Err(IdentityError::AatRevoked)) => (
             StatusCode::GONE,
             Json(serde_json::json!({"error": "aat_revoked"})),
+        )
+            .into_response(),
+        Ok(Err(IdentityError::AatAudienceMismatch)) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "aat_audience_mismatch"})),
         )
             .into_response(),
         Ok(Err(e)) => identity_error_to_response(&e).into_response(),

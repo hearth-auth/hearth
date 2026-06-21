@@ -20,7 +20,7 @@ mod common;
 use hearth::core::RealmId;
 use hearth::identity::{
     tokens::ActClaim, CreateRealmRequest, CreateUserRequest, IdentityEngine, IdentityError,
-    Rfc8693Request,
+    Rfc8693Request, SessionContext, TokenIssuanceContext,
 };
 use serde_json::Value;
 
@@ -44,8 +44,39 @@ fn make_realm(identity: &dyn IdentityEngine) -> RealmId {
         .clone()
 }
 
-/// Build a minimal mock subject-token JWT for use with `decode_claims_unverified`.
-fn mock_subject_jwt(sub: &str, aud: &str, scope: &str, exp: i64) -> String {
+/// Issue a real Ed25519-signed access token for `user_id` with explicit `scope`.
+fn make_subject_token(
+    identity: &dyn IdentityEngine,
+    realm_id: &RealmId,
+    user_id: &hearth::core::UserId,
+    scope: &str,
+) -> String {
+    use std::collections::BTreeSet;
+
+    let session = identity
+        .create_session(realm_id, user_id, &SessionContext::default())
+        .expect("create session");
+    let granted_scopes: BTreeSet<String> = scope.split_whitespace().map(String::from).collect();
+    identity
+        .issue_tokens_with_context(
+            realm_id,
+            user_id,
+            session.id(),
+            &TokenIssuanceContext {
+                client_id: None,
+                granted_scopes,
+                oid: None,
+                resource: None,
+            },
+        )
+        .expect("issue subject token")
+        .access_token()
+        .to_string()
+}
+
+/// Build a minimal mock subject-token JWT for use in tests that verify
+/// signature-rejection behaviour. Signature is always "fakesig".
+fn mock_subject_jwt(sub: &str, aud: &str, scope: &str, exp: i64, tid: &str) -> String {
     use base64::Engine as _;
     let hdr = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(r#"{"alg":"EdDSA","typ":"JWT","kid":"test"}"#);
@@ -53,7 +84,7 @@ fn mock_subject_jwt(sub: &str, aud: &str, scope: &str, exp: i64) -> String {
     let payload = serde_json::json!({
         "sub": sub, "iss": "hearth", "aud": aud,
         "exp": exp, "iat": now, "sid": "sid-test",
-        "tid": "00000000-0000-0000-0000-000000000000",
+        "tid": tid,
         "token_type": "access",
         "jti": uuid::Uuid::new_v4().to_string(),
         "scope": scope, "roles": [], "groups": [],
@@ -164,12 +195,7 @@ async fn rfc8693_response_required_fields() {
         .id()
         .clone();
 
-    let subject_token = mock_subject_jwt(
-        &user_id.as_uuid().to_string(),
-        "hearth",
-        "mcp:tools:invoke",
-        now_secs() + 900,
-    );
+    let subject_token = make_subject_token(identity, &realm_id, &user_id, "mcp:tools:invoke");
 
     let response = identity
         .rfc8693_token_exchange(
@@ -240,6 +266,7 @@ async fn rfc8693_err01_wrong_subject_token_type() {
         "hearth",
         "mcp:tools:invoke",
         now_secs() + 900,
+        &realm_id.to_string(),
     );
 
     let err = identity
@@ -298,6 +325,7 @@ async fn rfc8693_err02_expired_subject_token() {
         "hearth",
         "mcp:tools:invoke",
         now_secs() - 60,
+        &realm_id.to_string(),
     );
 
     let err = identity
@@ -318,9 +346,17 @@ async fn rfc8693_err02_expired_subject_token() {
         )
         .expect_err("must reject expired subject token");
 
+    // After HEA-1470, validate_token verifies the signature first, so an expired
+    // subject_token (with invalid signature) is rejected as invalid_grant.
     assert!(
-        matches!(err, IdentityError::TokenExpired),
-        "ERR-02: expected TokenExpired, got: {err}"
+        matches!(
+            err,
+            IdentityError::TokenExchangeRejected {
+                oauth_error: "invalid_grant",
+                ..
+            }
+        ),
+        "ERR-02: expected invalid_grant for expired/invalid subject_token, got: {err}"
     );
 }
 
@@ -345,12 +381,7 @@ async fn rfc8693_err03_scope_wider_than_subject() {
         .clone();
 
     // Subject has only "openid"; we request "mcp:tools:invoke" which is wider.
-    let subject_token = mock_subject_jwt(
-        &user_id.as_uuid().to_string(),
-        "hearth",
-        "openid",
-        now_secs() + 900,
-    );
+    let subject_token = make_subject_token(identity, &realm_id, &user_id, "openid");
 
     let err = identity
         .rfc8693_token_exchange(

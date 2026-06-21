@@ -170,6 +170,7 @@ impl IdentityError {
             Self::AatChainBroken { .. } => Some("HEARTH_AAT_CHAIN_BROKEN"),
             Self::AatRevoked => Some("HEARTH_AAT_REVOKED"),
             Self::AatExpired => Some("HEARTH_AAT_EXPIRED"),
+            Self::AatAudienceMismatch => Some("HEARTH_AAT_AUDIENCE_MISMATCH"),
             Self::TransactionTokenReplayed => Some("HEARTH_TXN_TOKEN_REPLAYED"),
             Self::CrossRealmPolicyNotFound => Some("HEARTH_CROSS_REALM_POLICY_NOT_FOUND"),
             Self::CrossRealmPolicyConflict => Some("HEARTH_CROSS_REALM_POLICY_CONFLICT"),
