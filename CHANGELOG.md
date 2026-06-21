@@ -3,9 +3,10 @@
 All notable changes to Hearth will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Hearth has not yet cut a versioned release; all shipped work appears under `[Unreleased]`.
 
 ## [Unreleased]
+
+## [1.0.0] — 2026-06-21
 
 ### Security
 
