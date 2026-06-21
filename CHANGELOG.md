@@ -7,6 +7,25 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Security
+
+- **Agent endpoint authentication (HEA-1414)** — all 9 `/v1/agents` HTTP handlers
+  now require a valid Bearer token with `hearth.admin` permission; unauthenticated
+  requests return `401 Unauthorized`. Cross-realm BOLA is blocked at the
+  token-validation layer (per-realm Ed25519 signing keys).
+- **DPoP `ath` claim validation (HEA-1414)** — `validate_dpop_proof` now accepts
+  an `access_token` parameter; when provided, the proof's `ath` claim is required
+  and validated with constant-time comparison (`subtle::ConstantTimeEq`).
+- **Capability string bounds (HEA-1414)** — `create_agent` and `update_agent`
+  reject requests with more than 50 capability URIs or any URI exceeding 256
+  characters.
+- **Agent credential quota (HEA-1414)** — `create_agent_api_key` enforces a
+  per-agent cap of 25 active (non-revoked) credentials; further attempts return
+  `QuotaExceeded { resource: "agent_credentials" }`.
+- **Audit actor attribution (HEA-1414)** — all 8 agent-mutating engine methods now
+  accept `caller: Option<&UserId>`; HTTP and gRPC handlers pass the authenticated
+  user so audit events record who performed the action.
+
 ### Added
 
 - **DPoP storage infrastructure (HEA-1410)** — lays the persistence foundation for M2
