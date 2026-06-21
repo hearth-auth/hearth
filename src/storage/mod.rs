@@ -88,6 +88,32 @@ pub trait StorageEngine: Send + Sync {
         Ok(())
     }
 
+    /// Inserts a key-value pair only if the key is currently absent.
+    ///
+    /// Returns `true` if the write was performed (key was absent), or `false`
+    /// if the key already existed (write was skipped).
+    ///
+    /// In cluster mode this call is routed through Raft as a `PutIfAbsent`
+    /// command via [`ClusterStorageAdapter`], making the check-and-write
+    /// atomic across all nodes — there is no TOCTOU window between the
+    /// existence check and the write.
+    ///
+    /// The default implementation falls back to a non-atomic `get` + `put`
+    /// and is only correct for single-node usage where callers already hold
+    /// an external advisory lock serialising concurrent access to the key.
+    fn put_if_absent(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, StorageError> {
+        if self.get(realm_id, key)?.is_some() {
+            return Ok(false);
+        }
+        self.put(realm_id, key, value)?;
+        Ok(true)
+    }
+
     /// Atomically writes a batch of puts and deletes for a single realm.
     ///
     /// All mutations (inserts/updates and removals) land durably together

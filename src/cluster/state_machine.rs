@@ -213,21 +213,20 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
         for entry in entries {
             self.last_applied = Some(entry.log_id);
 
-            match &entry.payload {
-                EntryPayload::Blank => {}
+            let response = match &entry.payload {
+                EntryPayload::Blank => HearthLogResponse::default(),
 
-                EntryPayload::Normal(cmd) => {
-                    self.apply_command(cmd.clone()).await?;
-                }
+                EntryPayload::Normal(cmd) => self.apply_command(cmd.clone()).await?,
 
                 EntryPayload::Membership(membership) => {
                     self.last_membership =
                         StoredMembership::new(Some(entry.log_id), membership.clone());
                     debug!(log_id = ?entry.log_id, "membership change applied");
+                    HearthLogResponse::default()
                 }
-            }
+            };
 
-            responses.push(HearthLogResponse::default());
+            responses.push(response);
         }
 
         let elapsed = start.elapsed();
@@ -324,7 +323,14 @@ impl RaftStateMachine<HearthRaftConfig> for HearthStateMachine {
 
 impl HearthStateMachine {
     /// Apply a single [`RaftCommand`] to the storage engine via `spawn_blocking`.
-    async fn apply_command(&mut self, cmd: RaftCommand) -> Result<(), StorageError<u64>> {
+    ///
+    /// Returns the [`HearthLogResponse`] to propagate back to `client_write` callers.
+    /// Unconditional commands always return `success: true`; `PutIfAbsent` returns
+    /// `success: false` when the key was already present.
+    async fn apply_command(
+        &mut self,
+        cmd: RaftCommand,
+    ) -> Result<HearthLogResponse, StorageError<u64>> {
         let engine = Arc::clone(&self.engine);
 
         match cmd {
@@ -361,9 +367,30 @@ impl HearthStateMachine {
                     .await
                     .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
             }
+
+            RaftCommand::PutIfAbsent {
+                leader_timestamp: _,
+                realm,
+                key,
+                value,
+            } => {
+                self.known_realms.insert(realm.clone());
+                // State machine entries are applied sequentially — no concurrent
+                // apply can interleave between the get and the put here, so the
+                // check-and-write is atomically serialised by Raft ordering.
+                let success = spawn_blocking(move || {
+                    engine.put_if_absent(&realm, &key, &value).map_err(to_write_err)
+                })
+                .await
+                .map_err(|e| io_write_err(std::io::Error::other(e.to_string())))??;
+                return Ok(HearthLogResponse {
+                    success,
+                    payload: Vec::new(),
+                });
+            }
         }
 
-        Ok(())
+        Ok(HearthLogResponse::default())
     }
 }
 

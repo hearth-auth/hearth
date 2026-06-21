@@ -27,19 +27,15 @@ impl EmbeddedIdentityEngine {
         realm_id: &RealmId,
         request: &CreateTransactionTokenRequest,
     ) -> Result<TransactionTokenResponse, IdentityError> {
-        // Serialize concurrent issuance for this (realm_id, txn_id) pair to
-        // eliminate the TOCTOU race between the guard read and the guard write
-        // below. Without this lock, two concurrent callers with the same
-        // txn_id both pass the `get` check before either writes the used
-        // marker, yielding two independently valid tokens from one txn_id.
+        // Advisory lock: serialises same-node concurrent callers with the same
+        // txn_id so only one reaches the Raft proposal below, avoiding a
+        // redundant network round-trip from the losing thread.
+        // Cross-node races are closed by the `put_if_absent` write below, which
+        // is atomic at the Raft state-machine layer.
         let lock = self.txn_advisory_lock(realm_id, &request.txn_id);
         let _guard = lock.lock().expect("txn_locks per-request mutex poisoned");
 
-        // Guard: `txn_id` must not have been used before.
         let used_key = keys::encode_txn_token_used(&request.txn_id);
-        if let Ok(Some(_)) = self.storage.get(realm_id, &used_key) {
-            return Err(IdentityError::TransactionTokenReplayed);
-        }
 
         // Verify both agents exist and are Active.
         let req_agent = IdentityEngine::get_agent(self, realm_id, &request.requesting_agent_id)?
@@ -79,10 +75,17 @@ impl EmbeddedIdentityEngine {
         let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
         let token = signing_key.sign_jwt(&claims, TXN_TYP)?;
 
-        // Immediately mark the txn_id as used (single-use enforcement).
-        self.storage
-            .put(realm_id, &used_key, exp.to_string().as_bytes())
+        // Atomically mark the txn_id as used — only if no prior issuance exists.
+        // In cluster mode this routes through Raft as `PutIfAbsent`, closing the
+        // cross-node TOCTOU window: two nodes racing with the same txn_id will
+        // both propose PutIfAbsent but only the first to commit succeeds.
+        let written = self
+            .storage
+            .put_if_absent(realm_id, &used_key, exp.to_string().as_bytes())
             .map_err(Self::storage_err)?;
+        if !written {
+            return Err(IdentityError::TransactionTokenReplayed);
+        }
 
         let _ = self.record_audit(
             realm_id,
