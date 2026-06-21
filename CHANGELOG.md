@@ -9,6 +9,29 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **actor_token signature verified and sub-bound to client_id (HEA-1466 F3)** — RFC 8693 token
+  exchange now verifies the `actor_token` Ed25519 signature against the realm key before reading
+  any claims. Previously, `actor_token` was only base64-decoded without signature verification;
+  a fresh forged JWT with an arbitrary `sub` claim bypassed the JTI replay guard and allowed
+  impersonation of any agent in the `act` delegation chain (confused-deputy). The exchange also
+  now asserts `actor_token.sub == client_id` — a token belonging to principal A cannot be used
+  to impersonate principal B. Rejects with `invalid_grant` (HEA-1466).
+- **AAT audience claim validated at parse time (HEA-1469 F6)** — `parse_and_validate_aat` (and
+  the public `validate_aat` trait method) now accept an `expected_aud: Option<&str>` parameter.
+  When supplied, the `aud` JWT claim must exactly match; otherwise `AatAudienceMismatch`
+  (`HEARTH_AAT_AUDIENCE_MISMATCH`) is returned. Previously a token issued for `service-A` was
+  silently accepted by `service-B`. The `/v1/aats/validate` HTTP endpoint accepts the new
+  optional `expected_aud` body field (HEA-1469).
+- **AAT string constraint widening blocked (HEA-1468 F5)** — `validate_tools_subset` now enforces
+  equality for non-numeric constraint values (strings, booleans, nested objects). Previously a child
+  AAT could set an arbitrary string for any constraint key the parent held (e.g. swapping
+  `allowed_domain` from `safe.example.com` to `attacker.example.com`) without triggering
+  `AatScopeEscalation`. Numeric constraints (≤ parent) are unchanged (HEA-1468).
+- **Cross-realm token exchange rejection (HEA-1467 F4)** — RFC 8693 token exchange now rejects
+  subject tokens whose `tid` claim does not match the serving realm, preventing identity laundering
+  across realm trust boundaries. The issued token's `iss` and `tid` are always pinned to the
+  serving realm's configured issuer URL and realm ID, regardless of what the subject token carried.
+  Rejects with `invalid_grant` (HEA-1467).
 - **DPoP JKT thumbprint blocklist (§10.4)** — operators can block a DPoP JWK thumbprint via the
   admin API (`POST /v1/dpop/block-jkt`). Blocked thumbprints are maintained in an in-memory
   projection loaded at startup and updated on each block/unblock call. Tokens whose `cnf.jkt`
@@ -27,6 +50,22 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   valid identity. `check_cert_not_expired` validates the `notAfter` field and returns the new
   `SpiffeCertExpired` error variant (wire code `HEARTH_SPIFFE_CERT_EXPIRED`) instead of silently
   accepting expired SVIDs (HEA-1444).
+
+- **DPoP binding enforced at resource endpoints (RFC 9449 §7.2)** — `extract_user_auth` now
+  calls `enforce_dpop_binding` for tokens carrying a `cnf.jkt` claim. The DPoP proof presented
+  in the `DPoP` header is validated against the token's bound key thumbprint, the `htm` HTTP
+  method, and the `htu` URI (issuer + request path). A DPoP-bound access token presented as a
+  plain Bearer token (no `DPoP` header) is rejected with `invalid_token`. JTI replay prevention
+  applies via `check_and_record_dpop_jti`. Callers on MFA and OAuth resource endpoints
+  automatically supply `method` and `uri` for `htm`/`htu` computation. (HEA-1409 M5)
+
+- **Per-agent request rate monitor with fail-closed auto-suspend (D.6)** — Hearth now maintains
+  a per-agent in-memory rolling-window rate counter (`AgentRateMonitor`). The default threshold
+  is 1 000 requests per 60-second window. When an agent exceeds its threshold, `verify_agent_api_key`
+  auto-suspends the agent (status → `Suspended`), emits an audit event, and returns
+  `AgentRateLimitExceeded` (HTTP 429 / gRPC `RESOURCE_EXHAUSTED`, wire code
+  `HEARTH_AGENT_RATE_LIMIT_EXCEEDED`). Counters reset on server restart; the threshold is not
+  yet configurable via `hearth.yaml`. (HEA-1409 M5 D.6)
 
 ### Fixed
 
