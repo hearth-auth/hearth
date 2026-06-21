@@ -1,0 +1,133 @@
+{% extends "ui/_layout.html" %}
+{% block title %}{{ product_name }} · Agent Approvals{% endblock %}
+{% block breadcrumb %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <a href="/ui/admin/realms" class="text-ht-content-muted hover:text-ht-content-primary">Realms</a>
+  <span class="text-ht-content-muted">›</span>
+  <a href="/ui/admin/realms/{{ realm_name }}" class="text-ht-content-secondary hover:text-ht-content-primary">{{ realm_name }}</a>
+  <span class="text-ht-content-muted">›</span>
+  <span class="font-medium text-ht-content-secondary" aria-current="page">Agent Approvals</span>
+</nav>
+{% endblock %}
+{% block body %}
+{% include "ui/admin/realms/_workspace_tabs.html" %}
+
+<div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+  <div>
+    <h1 class="font-display text-2xl font-medium text-ht-content-primary">Agent Approval Queue</h1>
+    <p class="mt-1 text-sm text-ht-content-muted">Review and act on agent tool invocation requests pending human approval.</p>
+  </div>
+</div>
+
+{% match flash %}
+  {% when Some with (f) %}
+    <div class="mb-4 rounded-lg px-4 py-3 text-sm font-medium {% if f.kind == "error" %}bg-danger/[0.12] text-danger-fg{% else %}bg-success/[0.12] text-success-fg{% endif %}" role="alert">{{ f.message }}</div>
+  {% when None %}
+{% endmatch %}
+
+{# Status filter tabs #}
+<div class="mb-4 flex border-b border-divider-subtle" role="tablist" aria-label="Filter by status">
+  <a href="?status=pending"
+     role="tab"
+     aria-selected="{% if status_filter == "pending" %}true{% else %}false{% endif %}"
+     class="px-4 py-2 text-sm font-medium -mb-px {% if status_filter == "pending" %}border-b-2 border-ht-content-brand text-ht-content-primary{% else %}text-ht-content-muted hover:text-ht-content-secondary{% endif %}">
+    Pending
+  </a>
+  <a href="?status=approved"
+     role="tab"
+     aria-selected="{% if status_filter == "approved" %}true{% else %}false{% endif %}"
+     class="px-4 py-2 text-sm font-medium -mb-px {% if status_filter == "approved" %}border-b-2 border-ht-content-brand text-ht-content-primary{% else %}text-ht-content-muted hover:text-ht-content-secondary{% endif %}">
+    Approved
+  </a>
+  <a href="?status=denied"
+     role="tab"
+     aria-selected="{% if status_filter == "denied" %}true{% else %}false{% endif %}"
+     class="px-4 py-2 text-sm font-medium -mb-px {% if status_filter == "denied" %}border-b-2 border-ht-content-brand text-ht-content-primary{% else %}text-ht-content-muted hover:text-ht-content-secondary{% endif %}">
+    Denied
+  </a>
+  <a href="?status=expired"
+     role="tab"
+     aria-selected="{% if status_filter == "expired" %}true{% else %}false{% endif %}"
+     class="px-4 py-2 text-sm font-medium -mb-px {% if status_filter == "expired" %}border-b-2 border-ht-content-brand text-ht-content-primary{% else %}text-ht-content-muted hover:text-ht-content-secondary{% endif %}">
+    Expired
+  </a>
+</div>
+
+{% if rows.is_empty() %}
+  <div class="rounded-lg border border-divider-subtle bg-ht-surface-elevated px-6 py-12 text-center">
+    <svg class="mx-auto h-10 w-10 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+    </svg>
+    <h2 class="mt-4 font-display text-lg font-medium text-ht-content-primary">
+      No {{ status_filter }} requests
+    </h2>
+    <p class="mx-auto mt-2 max-w-md text-sm text-ht-content-secondary">
+      {% if status_filter == "pending" %}
+        No agent tool requests are waiting for human approval in this realm.
+      {% else %}
+        No {{ status_filter }} agent tool requests in this realm.
+      {% endif %}
+    </p>
+  </div>
+{% else %}
+  <div class="overflow-hidden rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
+    <table class="w-full">
+      <thead>
+        <tr class="border-b border-divider bg-ht-surface-elevated">
+          <th scope="col" class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Tool / Action</th>
+          <th scope="col" class="hidden px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted sm:table-cell">Agent</th>
+          <th scope="col" class="hidden px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted lg:table-cell">Context</th>
+          <th scope="col" class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Requested</th>
+          <th scope="col" class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
+          <th scope="col" class="px-4 py-3" aria-label="Actions"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="border-b border-divider-subtle hover-bg-divider">
+          <td class="px-4 py-3">
+            <div class="flex flex-col gap-0.5">
+              <span class="font-mono text-sm font-medium text-ht-content-primary">{{ row.tool }}</span>
+              <span class="font-mono text-xs text-ht-content-muted">{{ row.action }}</span>
+            </div>
+          </td>
+          <td class="hidden px-4 py-3 sm:table-cell">
+            <span class="font-mono text-xs text-ht-content-secondary break-all">{{ row.agent_id }}</span>
+            {% if row.delegation_depth > 0 %}
+              <span class="ml-1 rounded-sm bg-ht-surface-base px-1 py-0.5 font-mono text-[10px] text-ht-content-muted ring-1 ring-divider-subtle" title="Delegation chain depth">+{{ row.delegation_depth }}</span>
+            {% endif %}
+          </td>
+          <td class="hidden px-4 py-3 lg:table-cell">
+            <span class="font-mono text-xs text-ht-content-muted" title="{{ row.context_preview }}">{{ row.context_preview }}</span>
+          </td>
+          <td class="px-4 py-3">
+            <span class="text-sm text-ht-content-secondary" title="{{ row.requested_display }} UTC">{{ row.requested_ago }}</span>
+          </td>
+          <td class="px-4 py-3">
+            <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium {{ row.status_badge_class }}">{{ row.status }}</span>
+          </td>
+          <td class="px-4 py-3 text-right">
+            <a href="/ui/admin/realms/{{ realm_name }}/approvals/{{ row.request_id }}"
+               class="inline-flex items-center gap-1 rounded border border-strong bg-ht-surface-elevated px-2.5 py-1 text-xs font-medium text-ht-content-secondary hover-bg-divider">
+              {% if row.is_pending %}Review{% else %}View{% endif %}
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {% match next_cursor %}
+      {% when Some with (cursor) %}
+        <div class="border-t border-divider px-4 py-3 text-center">
+          <a href="?status={{ status_filter }}&cursor={{ cursor }}"
+             class="text-sm font-medium text-ht-content-brand hover:underline">
+            Load more
+          </a>
+        </div>
+      {% when None %}
+    {% endmatch %}
+  </div>
+{% endif %}
+{% endblock %}

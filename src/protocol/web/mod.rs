@@ -1555,6 +1555,23 @@ pub fn router(state: WebState) -> Router {
             "/admin/realms/{realm}/webhooks/{id}/test",
             axum::routing::post(admin::admin_webhook_test),
         )
+        // --- Realm-scoped: agent approval queue (Phase C.6) ---
+        .route(
+            "/admin/realms/{realm}/approvals",
+            axum::routing::get(admin::admin_approvals_queue),
+        )
+        .route(
+            "/admin/realms/{realm}/approvals/{id}",
+            axum::routing::get(admin::admin_approval_detail),
+        )
+        .route(
+            "/admin/realms/{realm}/approvals/{id}/approve",
+            axum::routing::post(admin::admin_approval_approve),
+        )
+        .route(
+            "/admin/realms/{realm}/approvals/{id}/deny",
+            axum::routing::post(admin::admin_approval_deny),
+        )
         .route("/static/{*file}", axum::routing::get(serve_static))
         .with_state(Arc::clone(&shared));
 
