@@ -7,6 +7,45 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **RFC 8693 token exchange** (`urn:ietf:params:oauth:grant-type:token-exchange`) — agents
+  can exchange a user's access token for a delegated token via `POST /token` with the new
+  grant type. Resulting tokens carry an `act` (actor) claim per RFC 8693 §4.1. The exchange
+  enforces scope intersection (`subject ∩ actor_permitted ∩ requested`), lifetime ≤ subject
+  remaining, per-agent `max_delegation_depth` cap, and actor-token JTI replay prevention
+  (5-minute window, persisted). (HEA-1406)
+- **Protected resource registration** — realms can register MCP tool servers as protected
+  resources via `POST /v1/resource-servers`. Resources have a canonical `resource_uri`, scope
+  list, and required-claims list. URI uniqueness is enforced per realm. (HEA-1406)
+- **Protected Resource Metadata endpoint** (RFC 9728) — `GET /.well-known/oauth-protected-resource`
+  returns Hearth's PRM document advertising itself as an OAuth AS, its JWKS URI, and supported
+  MCP scopes. (HEA-1406)
+- **MCP scope strings** (§2.6) — Hearth accepts and validates `{namespace}:{category}:{action}`
+  scope format. Standard scopes: `mcp:tools:invoke`, `mcp:tools:list`, `mcp:resources:read`,
+  `mcp:resources:write`, `mcp:prompts:read`. (HEA-1406)
+- **`act` chain on `TokenClaims`** — all issued JWTs now include an optional `act` field
+  (RFC 8693 §4.1) encoding the full delegation chain. Existing non-delegated tokens omit it
+  (`skip_serializing_if = None`). (HEA-1406)
+- **`ResourceServerId` newtype** (prefix `rs_`) added to `hearth::core`. (HEA-1406)
+- **Delegation audit actions** — `AuditAction` extended with `AgentDelegation`,
+  `AgentToolInvocation`, `ApprovalRequested`, `ApprovalGranted`, `ApprovalDenied`,
+  `AgentTokenRevoked`, `CrossRealmTrustCreated`, `CrossRealmTrustRevoked`,
+  `ProtectedResourceRegistered`, `ProtectedResourceUpdated`, `ProtectedResourceDeleted`. (HEA-1406)
+- **Actor JTI cleanup sweeper** — `sweep_actor_jtis` evicts expired actor-token JTI entries
+  during the periodic cleanup sweep. (HEA-1406)
+
+### Changed
+
+- **`MAX_ACT_CHAIN_DEPTH` raised 3 → 10** (A-38 global ceiling, `src/abuse/mod.rs`). The
+  per-agent `max_delegation_depth` field (1–10) gates individual agents; the global constant
+  is the hard ceiling when validating inbound tokens from external parties. (HEA-1406)
+- **`resource_indicators_supported` set to `true`** in both the test `OidcDiscoveryDocument`
+  default and the live discovery document. RFC 8707 `resource` parameter support was already
+  implemented; the discovery field now reflects reality. (HEA-1406)
+- **`grant_types_supported`** in the OIDC discovery document now includes
+  `urn:ietf:params:oauth:grant-type:token-exchange`. (HEA-1406)
+
 ### Security
 
 - **Agent endpoint authentication (HEA-1414)** — all 9 `/v1/agents` HTTP handlers
@@ -25,6 +64,10 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 - **Audit actor attribution (HEA-1414)** — all 8 agent-mutating engine methods now
   accept `caller: Option<&UserId>`; HTTP and gRPC handlers pass the authenticated
   user so audit events record who performed the action.
+- **Credential audit events (HEA-1416)** — `create_agent_api_key` and
+  `revoke_agent_credential` now emit `AgentCredentialCreated` / `AgentCredentialRevoked`
+  audit events with the caller's `UserId` as actor; previously these two operations
+  emitted no audit event and the `_caller` parameter was unused.
 
 ### Added
 

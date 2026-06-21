@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use crate::core::{
-    AgentCredentialId, AgentId, ClientId, OrganizationId, RealmId, Timestamp, UserId, WebhookId,
+    AgentCredentialId, AgentId, ClientId, OrganizationId, RealmId, ResourceServerId, Timestamp,
+    UserId, WebhookId,
 };
 
 /// A user's persisted consent to share a set of scopes with an OAuth client.
@@ -604,4 +605,105 @@ impl Drop for PlaintextApiKey {
     fn drop(&mut self) {
         self.0.zeroize();
     }
+}
+
+// ── Protected Resource / MCP Authorization Server (AGENT_AUTH.md §2.5) ───────
+
+/// A protected resource (MCP tool server) registered within a realm.
+///
+/// MCP clients discover these via PRM (`.well-known/oauth-protected-resource`)
+/// and request tokens scoped to a specific resource URI per RFC 8707.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedResource {
+    /// Unique identifier.
+    pub id: ResourceServerId,
+    /// The owning realm.
+    pub realm_id: RealmId,
+    /// Canonical URI of the MCP server (used as `aud` in access tokens).
+    pub resource_uri: String,
+    /// Human-readable name for admin display.
+    pub display_name: String,
+    /// Scopes this resource accepts. Empty means all realm-level scopes apply.
+    pub scopes: Vec<String>,
+    /// JWT claims the resource requires in tokens presented to it.
+    pub required_claims: Vec<String>,
+    /// When the resource was registered.
+    pub created_at: Timestamp,
+    /// When the resource record was last updated.
+    pub updated_at: Timestamp,
+}
+
+/// Request to register a new protected resource.
+#[derive(Clone, Debug)]
+pub struct RegisterProtectedResourceRequest {
+    /// Canonical URI of the MCP server.
+    pub resource_uri: String,
+    /// Human-readable name.
+    pub display_name: String,
+    /// Scopes this resource supports.
+    #[allow(clippy::struct_field_names)]
+    pub scopes: Vec<String>,
+    /// Claims required in tokens.
+    pub required_claims: Vec<String>,
+}
+
+/// Request to update an existing protected resource.
+#[derive(Clone, Debug, Default)]
+pub struct UpdateProtectedResourceRequest {
+    /// New human-readable name, if changing.
+    pub display_name: Option<String>,
+    /// New scope list, if replacing.
+    pub scopes: Option<Vec<String>>,
+    /// New required-claims list, if replacing.
+    pub required_claims: Option<Vec<String>>,
+}
+
+// ── RFC 8693 Token Exchange ───────────────────────────────────────────────────
+
+/// RFC 8693 `urn:ietf:params:oauth:grant-type:token-exchange` request.
+///
+/// Distinct from the (misnamed) `TokenExchangeRequest` which handles
+/// authorization-code exchange. This struct maps to the actual RFC 8693
+/// token exchange grant type.
+#[derive(Clone, Debug)]
+pub struct Rfc8693Request {
+    /// Authenticating client_id.
+    pub client_id: ClientId,
+    /// The subject token (user's access token whose authority is being delegated).
+    pub subject_token: String,
+    /// Token type of `subject_token`. MUST be
+    /// `urn:ietf:params:oauth:token-type:access_token`.
+    pub subject_token_type: String,
+    /// Actor token (agent's JWT assertion proving the agent's identity).
+    pub actor_token: Option<String>,
+    /// Token type of `actor_token`. MUST be
+    /// `urn:ietf:params:oauth:token-type:jwt` when present.
+    pub actor_token_type: Option<String>,
+    /// Requested token type. Defaults to
+    /// `urn:ietf:params:oauth:token-type:access_token`.
+    pub requested_token_type: Option<String>,
+    /// Requested scope — intersected with subject token's scope and agent's
+    /// permitted scope. Optional; if absent, defaults to subject token's scope.
+    pub scope: Option<String>,
+    /// Optional RFC 8707 resource indicator.
+    pub resource: Option<String>,
+    /// Optional target audience claim override.
+    pub audience: Option<String>,
+    /// DPoP key thumbprint, if the caller provided a DPoP proof header.
+    pub dpop_jkt: Option<String>,
+}
+
+/// Successful RFC 8693 token exchange response.
+#[derive(Clone, Debug)]
+pub struct Rfc8693Response {
+    /// The issued access token.
+    pub access_token: String,
+    /// Always `urn:ietf:params:oauth:token-type:access_token`.
+    pub issued_token_type: String,
+    /// `"Bearer"` or `"DPoP"` depending on DPoP binding.
+    pub token_type: String,
+    /// Seconds until access token expiry.
+    pub expires_in: i64,
+    /// Effective scopes in the issued token (may be narrower than requested).
+    pub scope: String,
 }

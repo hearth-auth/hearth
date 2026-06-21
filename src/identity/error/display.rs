@@ -217,6 +217,25 @@ impl fmt::Display for IdentityError {
                 write!(f, "pre-token webhook failed: {reason}")
             }
             Self::Saml(e) => write!(f, "{e}"),
+            // M2
+            Self::ProtectedResourceNotFound => write!(f, "protected resource not found"),
+            Self::DuplicateResourceUri => {
+                write!(
+                    f,
+                    "a protected resource with this URI already exists in this realm"
+                )
+            }
+            Self::TokenExchangeRejected { oauth_error, .. } => {
+                write!(f, "token exchange rejected: {oauth_error}")
+            }
+            Self::DelegationDepthExceeded { max, attempted } => write!(
+                f,
+                "delegation depth {attempted} exceeds agent maximum {max}"
+            ),
+            Self::EmptyScopeIntersection => {
+                write!(f, "scope intersection is empty — exchange rejected")
+            }
+            Self::ActorTokenReplayed => write!(f, "actor token jti has already been used"),
         }
     }
 }

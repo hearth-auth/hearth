@@ -113,7 +113,21 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         | domain::AuditAction::AgentSuspended
         | domain::AuditAction::AgentReactivated
         | domain::AuditAction::AgentRevoked
-        | domain::AuditAction::AgentDeleted => pb::AuditAction::Unspecified,
+        | domain::AuditAction::AgentDeleted
+        | domain::AuditAction::AgentCredentialCreated
+        | domain::AuditAction::AgentCredentialRevoked
+        // M2 variants — proto backfill deferred to Q2 (HEA-1406)
+        | domain::AuditAction::AgentDelegation
+        | domain::AuditAction::AgentToolInvocation
+        | domain::AuditAction::ApprovalRequested
+        | domain::AuditAction::ApprovalGranted
+        | domain::AuditAction::ApprovalDenied
+        | domain::AuditAction::AgentTokenRevoked
+        | domain::AuditAction::CrossRealmTrustCreated
+        | domain::AuditAction::CrossRealmTrustRevoked
+        | domain::AuditAction::ProtectedResourceRegistered
+        | domain::AuditAction::ProtectedResourceUpdated
+        | domain::AuditAction::ProtectedResourceDeleted => pb::AuditAction::Unspecified,
     }
 }
 

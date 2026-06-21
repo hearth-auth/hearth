@@ -1850,6 +1850,7 @@ mod tests {
             grant_types_supported: vec![
                 "authorization_code".to_string(),
                 "client_credentials".to_string(),
+                "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
             ],
             registration_endpoint: Some("https://hearth.local/register".to_string()),
             device_authorization_endpoint: Some(
@@ -1857,7 +1858,7 @@ mod tests {
             ),
             revocation_endpoint: Some("https://hearth.local/revoke".to_string()),
             introspection_endpoint: Some("https://hearth.local/introspect".to_string()),
-            resource_indicators_supported: false,
+            resource_indicators_supported: true,
             authorization_response_iss_parameter_supported: true,
             end_session_endpoint: Some("https://hearth.local/end_session".to_string()),
             backchannel_logout_supported: false,

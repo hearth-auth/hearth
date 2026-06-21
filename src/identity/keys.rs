@@ -18,8 +18,8 @@
 //! Scan prefix `usr:id:` enables listing all users in a realm.
 
 use crate::core::{
-    AgentCredentialId, AgentId, ClientId, IdpId, InvitationId, OrganizationId, RealmId, SessionId,
-    UserId, WebhookId,
+    AgentCredentialId, AgentId, ClientId, IdpId, InvitationId, OrganizationId, RealmId,
+    ResourceServerId, SessionId, UserId, WebhookId,
 };
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1742,6 +1742,56 @@ pub(crate) fn encode_org_slug_reservation(realm_id: &RealmId, slug: &str) -> Vec
     k.push(b':');
     k.extend_from_slice(slug.as_bytes());
     k
+}
+
+// ── Protected Resource keys (AGENT_AUTH.md §2.5 / RFC 9728) ──────────────────
+
+/// Prefix for protected resource primary records.
+///
+/// Format: `rs:id:{resource_server_uuid}` → JSON-serialized `ProtectedResource`
+const RESOURCE_SERVER_ID_PREFIX: &str = "rs:id:";
+
+/// Prefix for the resource-URI uniqueness index.
+///
+/// Format: `rs:uri:{uri_sha256_hex}` → `ResourceServerId` UUID bytes
+const RESOURCE_SERVER_URI_PREFIX: &str = "rs:uri:";
+
+/// Encodes the primary key for a protected resource.
+pub(crate) fn encode_resource_server_id(id: &ResourceServerId) -> Vec<u8> {
+    format!("{RESOURCE_SERVER_ID_PREFIX}{}", id.as_uuid()).into_bytes()
+}
+
+/// Returns the realm-level scan prefix for all protected resources.
+pub(crate) fn resource_server_scan_prefix() -> Vec<u8> {
+    RESOURCE_SERVER_ID_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the URI index key for a protected resource.
+///
+/// The URI is SHA-256 hashed to avoid putting potentially long URIs in storage
+/// keys. The hex digest is 64 chars and is safe in a key.
+pub(crate) fn encode_resource_server_uri_index(uri: &str) -> Vec<u8> {
+    use ring::digest;
+    let hash = digest::digest(&digest::SHA256, uri.as_bytes());
+    let hex: String = hash.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    format!("{RESOURCE_SERVER_URI_PREFIX}{hex}").into_bytes()
+}
+
+// ── Actor JTI replay cache (RFC 8693 §4 / AGENT_AUTH.md §3.3) ────────────────
+
+/// Prefix for actor-token JTI replay entries.
+///
+/// Format: `agt:actor:jti:{jti}` → 8-byte LE i64 expiry
+const ACTOR_JTI_PREFIX: &str = "agt:actor:jti:";
+
+/// Encodes the storage key for an actor-token JTI replay-cache entry.
+pub(crate) fn encode_actor_jti(jti: &str) -> Vec<u8> {
+    format!("{ACTOR_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all actor JTI entries (used by cleanup sweeper).
+pub(crate) fn actor_jti_scan_prefix() -> Vec<u8> {
+    ACTOR_JTI_PREFIX.as_bytes().to_vec()
 }
 
 #[cfg(test)]

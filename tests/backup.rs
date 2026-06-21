@@ -261,6 +261,7 @@ async fn test_restore_preserves_signing_keys() {
         permissions: Vec::new(),
         custom: BTreeMap::new(),
         required_actions: Vec::new(),
+        act: None,
         amr: Vec::new(),
         sv: None,
     };

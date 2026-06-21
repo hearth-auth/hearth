@@ -1213,3 +1213,78 @@ async fn m1_non_agent_token_claim_set_unchanged() {
         "agent_id claim must not appear in user tokens"
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HEA-1416 — Audit actor attribution for credential operations
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Regression guard: create_agent_api_key and revoke_agent_credential must record
+/// the caller's user ID as the audit actor, not fall back to "system".
+#[tokio::test]
+async fn agent_credential_audit_actor_attributed() {
+    use hearth::audit::{AuditAction, AuditQuery};
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+    let audit = harness.audit();
+    let realm_id = make_realm(identity);
+    let caller_id = make_user(identity, &realm_id);
+    let agent = create_agent(identity, &realm_id, &caller_id, "Audit-Test Agent");
+
+    // Create a credential, passing the caller so it should be attributed.
+    let resp = identity
+        .create_agent_api_key(
+            &realm_id,
+            agent.id(),
+            &CreateAgentApiKeyRequest {
+                label: "audit-test-key".to_string(),
+            },
+            Some(&caller_id),
+        )
+        .expect("create API key");
+    let cred_id = resp.credential.id().clone();
+
+    // The AgentCredentialCreated event must carry the caller's UUID as actor.
+    let events = audit
+        .query(&AuditQuery::for_realm(realm_id.clone()))
+        .expect("audit query");
+    let create_event = events
+        .iter()
+        .find(|e| e.action == AuditAction::AgentCredentialCreated)
+        .expect("AgentCredentialCreated event must be present");
+    assert_eq!(
+        create_event.actor,
+        caller_id.as_uuid().to_string(),
+        "credential-created actor must be the caller's user UUID"
+    );
+    assert_eq!(create_event.resource_type, "agent_credential");
+    assert_eq!(
+        create_event.resource_id,
+        cred_id.as_uuid().to_string(),
+        "credential-created resource_id must match the new credential"
+    );
+
+    // Revoke the credential with the same caller.
+    identity
+        .revoke_agent_credential(&realm_id, agent.id(), &cred_id, Some(&caller_id))
+        .expect("revoke credential");
+
+    let events_after = audit
+        .query(&AuditQuery::for_realm(realm_id.clone()))
+        .expect("audit query after revoke");
+    let revoke_event = events_after
+        .iter()
+        .find(|e| e.action == AuditAction::AgentCredentialRevoked)
+        .expect("AgentCredentialRevoked event must be present");
+    assert_eq!(
+        revoke_event.actor,
+        caller_id.as_uuid().to_string(),
+        "credential-revoked actor must be the caller's user UUID"
+    );
+    assert_eq!(revoke_event.resource_type, "agent_credential");
+    assert_eq!(
+        revoke_event.resource_id,
+        cred_id.as_uuid().to_string(),
+        "credential-revoked resource_id must match the revoked credential"
+    );
+}

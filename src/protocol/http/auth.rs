@@ -667,6 +667,17 @@ pub(crate) fn identity_error_to_response(
         IdentityError::PreTokenWebhookFailed { .. } => {
             (StatusCode::BAD_GATEWAY, "pre_token_webhook_failed")
         }
+        // M2: protected resource + RFC 8693 token exchange
+        IdentityError::ProtectedResourceNotFound => {
+            (StatusCode::NOT_FOUND, "protected_resource_not_found")
+        }
+        IdentityError::DuplicateResourceUri => (StatusCode::CONFLICT, "duplicate_resource_uri"),
+        IdentityError::TokenExchangeRejected { oauth_error, .. } => {
+            (StatusCode::BAD_REQUEST, *oauth_error)
+        }
+        IdentityError::DelegationDepthExceeded { .. } => (StatusCode::BAD_REQUEST, "invalid_grant"),
+        IdentityError::EmptyScopeIntersection => (StatusCode::BAD_REQUEST, "invalid_scope"),
+        IdentityError::ActorTokenReplayed => (StatusCode::BAD_REQUEST, "invalid_grant"),
     };
 
     let error_code = crate::protocol::error_codes::for_identity_error(err);

@@ -68,6 +68,8 @@ pub struct CleanupStats {
     pub jar_jtis_deleted: u64,
     /// DPoP proof JTI replay-cache entries swept.
     pub dpop_jtis_deleted: u64,
+    /// Actor token JTI replay-cache entries swept (RFC 8693 B.5).
+    pub actor_jtis_deleted: u64,
     /// In-memory rate-tracker entries pruned across all five maps.
     ///
     /// Rate tracker `HashMap`s are not backed by storage; they are pruned
@@ -87,6 +89,7 @@ impl CleanupStats {
             + self.par_requests_deleted
             + self.jar_jtis_deleted
             + self.dpop_jtis_deleted
+            + self.actor_jtis_deleted
             + self.rate_trackers_pruned
     }
 }
@@ -186,6 +189,18 @@ pub(crate) fn sweep_expired(
                 realm = %realm_id,
                 error = %e,
                 "cleanup: DPoP JTI sweep failed"
+            );
+        }
+    }
+
+    match sweep_actor_jtis(realm_id, storage, now_secs) {
+        Ok(n) => stats.actor_jtis_deleted = n,
+        Err(e) => {
+            stats.errors += 1;
+            tracing::warn!(
+                realm = %realm_id,
+                error = %e,
+                "cleanup: actor JTI sweep failed"
             );
         }
     }
@@ -449,6 +464,33 @@ pub(crate) fn sweep_dpop_jtis(
     now_secs: i64,
 ) -> Result<u64, crate::storage::StorageError> {
     let prefix = keys::dpop_jti_scan_prefix();
+    let end = keys::prefix_end(&prefix);
+    let entries = storage.scan(realm_id, &prefix, &end)?;
+
+    let mut deleted: u64 = 0;
+    for entry in &entries {
+        let Ok(bytes) = entry.value.as_slice().try_into() else {
+            continue;
+        };
+        let expires_at = i64::from_le_bytes(bytes);
+        if expires_at <= now_secs {
+            storage.delete(realm_id, &entry.key)?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
+/// Evicts expired actor-token JTI entries (RFC 8693 §3.3 replay prevention).
+///
+/// Each entry stores an 8-byte little-endian `i64` Unix-seconds expiry.
+/// Entries are deleted once `expires_at <= now_secs`.
+pub(crate) fn sweep_actor_jtis(
+    realm_id: &RealmId,
+    storage: &dyn StorageEngine,
+    now_secs: i64,
+) -> Result<u64, crate::storage::StorageError> {
+    let prefix = keys::actor_jti_scan_prefix();
     let end = keys::prefix_end(&prefix);
     let entries = storage.scan(realm_id, &prefix, &end)?;
 

@@ -51,7 +51,11 @@ pub mod tarpit;
 pub const MAX_PAGE_SIZE: usize = 1_000;
 
 /// Maximum RFC 8693 `act` actor-chain depth accepted in inbound access tokens (A-38).
-pub const MAX_ACT_CHAIN_DEPTH: usize = 3;
+///
+/// This is the hard global ceiling. Per-agent `max_delegation_depth` (1–10) further
+/// constrains chains at token-exchange time; this constant is the safety net when
+/// validating inbound tokens from external parties.
+pub const MAX_ACT_CHAIN_DEPTH: usize = 10;
 
 /// Maximum number of SCIM `Operations` in a single PATCH body (A-35a).
 pub const MAX_SCIM_OPERATIONS: usize = 1_000;

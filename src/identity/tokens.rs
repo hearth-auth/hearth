@@ -32,6 +32,33 @@ const JWT_TYPE: &str = "JWT";
 /// Microseconds per second, for timestamp conversion.
 const MICROS_PER_SEC: i64 = 1_000_000;
 
+/// RFC 8693 §4.1 `act` (actor) claim.
+///
+/// Encodes the delegation chain. The outermost `act.sub` is the immediate actor;
+/// nested `act.act` entries record the delegation history. Example (2-hop chain):
+///
+/// ```text
+/// { "sub": "agent:B", "act": { "sub": "agent:A" } }
+/// ```
+///
+/// The depth of nesting equals the delegation depth minus one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActClaim {
+    /// Identifier of the actor (e.g., `"agent:agt_00000000..."`).
+    pub sub: String,
+    /// Inner delegation chain, present when this actor was itself delegated to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<Box<ActClaim>>,
+}
+
+impl ActClaim {
+    /// Counts the depth of the `act` chain (1 for a single actor, 2 for A→B, etc.).
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        1 + self.act.as_ref().map_or(0, |inner| inner.depth())
+    }
+}
+
 /// JWT `aud` claim — either a single StringOrURI or a JSON array.
 ///
 /// Per RFC 7519 §4.1.3. Serializes as a plain string when the audience
@@ -226,6 +253,13 @@ pub struct TokenClaims {
     /// where `session_version.enabled = false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sv: Option<u64>,
+    /// RFC 8693 §4.1 actor claim — present only on delegated tokens.
+    ///
+    /// When set, `sub` remains the delegating principal (user or agent) and
+    /// `act.sub` identifies the immediate actor performing the request.
+    /// Nested `act.act` entries record the full delegation history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<ActClaim>,
     /// Declaratively-mapped custom claims emitted at the top level.
     #[serde(default, flatten)]
     pub custom: BTreeMap<String, serde_json::Value>,
@@ -623,6 +657,7 @@ impl SigningKey {
             org_groups: org_groups.clone(),
             permissions: request.permissions.to_vec(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             sv: request.sv,
             custom: request.custom.clone(),
@@ -648,6 +683,7 @@ impl SigningKey {
             org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             sv: None, // sv is never present on refresh tokens
             custom: BTreeMap::new(),
@@ -1281,6 +1317,7 @@ mod tests {
             permissions: Vec::new(),
             custom: BTreeMap::new(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             sv: None,
         }

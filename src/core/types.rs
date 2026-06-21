@@ -130,6 +130,14 @@ define_id_type!(
     WebhookDeliveryId, "whd_"
 );
 
+define_id_type!(
+    /// Unique identifier for a protected resource (MCP server) registered in a realm.
+    ///
+    /// Used as the primary key for protected resource records. See AGENT_AUTH.md §2.5
+    /// and RFC 9728 for the Protected Resource Metadata discovery specification.
+    ResourceServerId, "rs_"
+);
+
 /// Validated RFC 8707 resource URI.
 ///
 /// Must be absolute (scheme present), non-empty, and MUST NOT contain a

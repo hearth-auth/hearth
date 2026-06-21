@@ -378,6 +378,33 @@ pub enum IdentityError {
     },
     /// An error from the SAML federation flow.
     Saml(SamlError),
+    // ── M2: Protected Resource + RFC 8693 Token Exchange ─────────────────────
+    /// The requested protected resource was not found in this realm.
+    ProtectedResourceNotFound,
+    /// A protected resource with this URI already exists in the realm.
+    DuplicateResourceUri,
+    /// RFC 8693 token exchange was rejected.
+    ///
+    /// Wraps a human-readable reason for the rejection. Error responses
+    /// use `error: "invalid_grant"` or `error: "invalid_scope"` as
+    /// appropriate; the `reason` is logged but NOT exposed to callers.
+    TokenExchangeRejected {
+        /// Internal reason (not sent to client).
+        reason: String,
+        /// OAuth 2.0 error code to return to the caller.
+        oauth_error: &'static str,
+    },
+    /// The delegation chain depth would exceed the agent's `max_delegation_depth`.
+    DelegationDepthExceeded {
+        /// The agent's configured maximum.
+        max: u8,
+        /// The depth the exchange would produce.
+        attempted: u8,
+    },
+    /// The scope intersection of subject, actor, and requested is empty.
+    EmptyScopeIntersection,
+    /// An actor token `jti` was replayed (B.5 replay prevention).
+    ActorTokenReplayed,
 }
 
 impl From<SamlError> for IdentityError {

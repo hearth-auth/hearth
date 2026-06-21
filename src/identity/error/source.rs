@@ -113,7 +113,14 @@ impl std::error::Error for IdentityError {
             | Self::AgentNotFound
             | Self::AgentRevoked
             | Self::AgentCredentialNotFound
-            | Self::PreTokenWebhookFailed { .. } => None,
+            | Self::PreTokenWebhookFailed { .. }
+            // M2
+            | Self::ProtectedResourceNotFound
+            | Self::DuplicateResourceUri
+            | Self::TokenExchangeRejected { .. }
+            | Self::DelegationDepthExceeded { .. }
+            | Self::EmptyScopeIntersection
+            | Self::ActorTokenReplayed => None,
         }
     }
 }

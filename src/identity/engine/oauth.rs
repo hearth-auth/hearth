@@ -910,6 +910,7 @@ impl EmbeddedIdentityEngine {
             org_groups: Vec::new(),
             permissions: access_permissions,
             required_actions: Vec::new(),
+            act: None,
             amr: stored_code.amr_values.clone(),
             cnf: request
                 .dpop_jkt
@@ -939,6 +940,7 @@ impl EmbeddedIdentityEngine {
             org_groups: Vec::new(),
             permissions: access_claims.permissions.clone(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             cnf: None,
             custom: access_claims.custom.clone(),
@@ -1012,6 +1014,7 @@ impl EmbeddedIdentityEngine {
             org_groups: Vec::new(),
             permissions: id_permissions,
             required_actions: Vec::new(),
+            act: None,
             amr: stored_code.amr_values.clone(),
             cnf: None,
             custom: id_custom,
@@ -1340,6 +1343,7 @@ impl EmbeddedIdentityEngine {
             org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             cnf: request
                 .dpop_jkt
@@ -1497,6 +1501,7 @@ impl EmbeddedIdentityEngine {
             org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
+            act: None,
             amr: vec!["jwtbearer".to_string()],
             cnf: request
                 .dpop_jkt
@@ -2182,6 +2187,7 @@ impl EmbeddedIdentityEngine {
                     org_groups: Vec::new(),
                     permissions: Vec::new(),
                     required_actions: Vec::new(),
+                    act: None,
                     amr: Vec::new(),
                     cnf: None,
                     custom: std::collections::BTreeMap::new(),

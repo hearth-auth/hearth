@@ -239,10 +239,11 @@ use crate::identity::types::{
     CreateAgentRequest, CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest,
     CreateUserRequest, ImportClientRequest, ImportUserRequest, InvitationStatus, ListAgentsQuery,
     Organization, OrganizationInvitation, OrganizationMembership, OrganizationRole,
-    OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey, Realm, RealmStatus,
-    RegisterUserRequest, RegisterUserResponse, RegistrationPolicy, Session, SessionContext,
-    SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest, UpdateRealmRequest,
-    UpdateUserRequest, User, UserStatus,
+    OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey, ProtectedResource,
+    Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
+    RegisterUserResponse, RegistrationPolicy, Rfc8693Request, Rfc8693Response, Session,
+    SessionContext, SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
+    UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::webauthn::{
@@ -2301,6 +2302,7 @@ impl EmbeddedIdentityEngine {
             org_groups: claims.org_groups.clone(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
+            act: None,
             amr: family.amr_values.clone(),
             cnf: dpop_jkt.map(|jkt| crate::identity::tokens::CnfClaim {
                 jkt: jkt.to_string(),
@@ -2327,6 +2329,7 @@ impl EmbeddedIdentityEngine {
             org_groups: Vec::new(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             cnf: None,
             custom: claims.custom.clone(),
@@ -2873,6 +2876,7 @@ impl EmbeddedIdentityEngine {
                 "client_credentials".to_string(),
                 "urn:ietf:params:oauth:grant-type:device_code".to_string(),
                 "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
+                "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
             ],
             registration_endpoint: Some(format!("{issuer}/register")),
             device_authorization_endpoint: Some(format!("{issuer}/device/authorize")),
@@ -4281,6 +4285,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 org_groups: Vec::new(),
                 permissions: Vec::new(),
                 required_actions: remaining,
+                act: None,
                 amr: Vec::new(),
                 cnf: None,
                 custom: Default::default(),
@@ -10690,7 +10695,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         agent_id: &AgentId,
         request: &CreateAgentApiKeyRequest,
-        _caller: Option<&crate::core::UserId>,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<CreateAgentApiKeyResponse, IdentityError> {
         // Agent must exist and be active
         let agent = self
@@ -10764,6 +10769,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &cred_key, &cred_bytes)
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
+        self.record_audit(
+            realm_id,
+            audit_ctx.as_ref(),
+            AuditAction::AgentCredentialCreated,
+            "agent_credential",
+            &cred.id().as_uuid().to_string(),
+        )?;
+
         Ok(CreateAgentApiKeyResponse {
             credential: cred,
             plaintext_key: PlaintextApiKey::new(plaintext_hex),
@@ -10798,7 +10815,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         agent_id: &AgentId,
         cred_id: &AgentCredentialId,
-        _caller: Option<&crate::core::UserId>,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<(), IdentityError> {
         let cred_key = keys::encode_agent_credential(agent_id, cred_id);
         let bytes = self
@@ -10826,6 +10843,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .put(realm_id, &cred_key, &updated)
                 .map_err(Self::storage_err)?;
         }
+
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
+        self.record_audit(
+            realm_id,
+            audit_ctx.as_ref(),
+            AuditAction::AgentCredentialRevoked,
+            "agent_credential",
+            &cred_id.as_uuid().to_string(),
+        )?;
 
         Ok(())
     }
@@ -11732,6 +11761,456 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         cache.insert(realm_id.clone(), secret);
         Ok(secret)
     }
+
+    // ── B.1 Protected Resource Registration (AGENT_AUTH.md §2.5) ─────────────
+
+    fn register_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        request: &RegisterProtectedResourceRequest,
+    ) -> Result<ProtectedResource, IdentityError> {
+        if request.resource_uri.is_empty() {
+            return Err(IdentityError::InvalidInput {
+                reason: "resource_uri must not be empty".to_string(),
+            });
+        }
+        if !request.resource_uri.contains("://") {
+            return Err(IdentityError::InvalidInput {
+                reason: "resource_uri must be an absolute URI with a scheme".to_string(),
+            });
+        }
+        let uri_key = keys::encode_resource_server_uri_index(&request.resource_uri);
+        if self
+            .storage
+            .get(realm_id, &uri_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DuplicateResourceUri);
+        }
+        let now = self.clock.now();
+        let id = crate::core::ResourceServerId::generate();
+        let resource = ProtectedResource {
+            id: id.clone(),
+            realm_id: realm_id.clone(),
+            resource_uri: request.resource_uri.clone(),
+            display_name: request.display_name.clone(),
+            scopes: request.scopes.clone(),
+            required_claims: request.required_claims.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let primary_key = keys::encode_resource_server_id(&id);
+        let bytes = serde_json::to_vec(&resource).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put_batch(
+                realm_id,
+                &[
+                    (primary_key, bytes),
+                    (uri_key, id.as_uuid().as_bytes().to_vec()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+        let ctx = AuditContext {
+            actor: Actor::System,
+            metadata: Some(serde_json::json!({
+                "resource_id": id.as_uuid().to_string(),
+                "resource_uri": request.resource_uri,
+                "display_name": request.display_name,
+            })),
+        };
+        let _ = self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::ProtectedResourceRegistered,
+            "protected_resource",
+            &id.as_uuid().to_string(),
+        );
+        Ok(resource)
+    }
+
+    fn get_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &crate::core::ResourceServerId,
+    ) -> Result<Option<ProtectedResource>, IdentityError> {
+        let key = keys::encode_resource_server_id(resource_id);
+        let Some(bytes) = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(None);
+        };
+        let resource =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        Ok(Some(resource))
+    }
+
+    fn list_protected_resources(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<ProtectedResource>, IdentityError> {
+        let prefix = keys::resource_server_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut resources = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let r =
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            resources.push(r);
+        }
+        Ok(resources)
+    }
+
+    fn update_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &crate::core::ResourceServerId,
+        request: &UpdateProtectedResourceRequest,
+    ) -> Result<ProtectedResource, IdentityError> {
+        let key = keys::encode_resource_server_id(resource_id);
+        let bytes = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::ProtectedResourceNotFound)?;
+        let mut resource: ProtectedResource =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        if let Some(name) = &request.display_name {
+            resource.display_name = name.clone();
+        }
+        if let Some(scopes) = &request.scopes {
+            resource.scopes = scopes.clone();
+        }
+        if let Some(claims) = &request.required_claims {
+            resource.required_claims = claims.clone();
+        }
+        resource.updated_at = self.clock.now();
+        let new_bytes =
+            serde_json::to_vec(&resource).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &key, &new_bytes)
+            .map_err(Self::storage_err)?;
+        let ctx = AuditContext {
+            actor: Actor::System,
+            metadata: None,
+        };
+        let _ = self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::ProtectedResourceUpdated,
+            "protected_resource",
+            &resource_id.as_uuid().to_string(),
+        );
+        Ok(resource)
+    }
+
+    fn delete_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &crate::core::ResourceServerId,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_resource_server_id(resource_id);
+        let bytes = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::ProtectedResourceNotFound)?;
+        let resource: ProtectedResource =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let uri_key = keys::encode_resource_server_uri_index(&resource.resource_uri);
+        self.storage
+            .write_batch(realm_id, &[], &[key, uri_key])
+            .map_err(Self::storage_err)?;
+        let ctx = AuditContext {
+            actor: Actor::System,
+            metadata: Some(serde_json::json!({
+                "resource_id": resource_id.as_uuid().to_string(),
+                "resource_uri": resource.resource_uri,
+            })),
+        };
+        self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::ProtectedResourceDeleted,
+            "protected_resource",
+            &resource_id.as_uuid().to_string(),
+        )?;
+        Ok(())
+    }
+
+    // ── B.4 RFC 8693 Token Exchange ───────────────────────────────────────────
+
+    #[allow(clippy::too_many_lines)]
+    fn rfc8693_token_exchange(
+        &self,
+        realm_id: &RealmId,
+        request: &Rfc8693Request,
+    ) -> Result<Rfc8693Response, IdentityError> {
+        use crate::identity::mcp::intersect_three;
+        use crate::identity::tokens::{decode_claims_unverified, ActClaim};
+
+        let now_micros = self.clock.now().as_micros();
+        let now_secs = now_micros / 1_000_000;
+
+        // 1. Validate subject_token_type.
+        const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+        if request.subject_token_type != ACCESS_TOKEN_TYPE {
+            return Err(IdentityError::TokenExchangeRejected {
+                reason: format!(
+                    "subject_token_type must be {ACCESS_TOKEN_TYPE} (got {})",
+                    request.subject_token_type
+                ),
+                oauth_error: "invalid_request",
+            });
+        }
+
+        // 2. Decode and validate the subject token.
+        let subject_claims = decode_claims_unverified(&request.subject_token)?;
+        if subject_claims.exp <= now_secs {
+            return Err(IdentityError::TokenExpired);
+        }
+        let subject_remaining = subject_claims.exp - now_secs;
+
+        // 3. Validate actor_token if present (B.5 OBO).
+        let actor_sub = if let Some(ref actor_jwt) = request.actor_token {
+            // Lightweight header+payload decode; jti replay prevents token reuse.
+            let actor_json = jwt_payload_json(actor_jwt).map_err(|reason| {
+                IdentityError::TokenExchangeRejected {
+                    reason,
+                    oauth_error: "invalid_grant",
+                }
+            })?;
+            let actor_jti = actor_json
+                .get("jti")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| IdentityError::TokenExchangeRejected {
+                    reason: "actor_token missing jti".to_string(),
+                    oauth_error: "invalid_grant",
+                })?;
+            let actor_exp = actor_json
+                .get("exp")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(now_secs + 300);
+            // Actor tokens MUST expire within 5 minutes of issue.
+            let actor_iat = actor_json
+                .get("iat")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(now_secs);
+            if actor_exp.saturating_sub(actor_iat) > 300 {
+                return Err(IdentityError::TokenExchangeRejected {
+                    reason: "actor_token lifetime exceeds 5-minute maximum".to_string(),
+                    oauth_error: "invalid_grant",
+                });
+            }
+            self.check_and_record_actor_jti(realm_id, actor_jti, now_secs, actor_exp)?;
+            actor_json
+                .get("sub")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| IdentityError::TokenExchangeRejected {
+                    reason: "actor_token missing sub".to_string(),
+                    oauth_error: "invalid_grant",
+                })?
+        } else {
+            request.client_id.as_uuid().to_string()
+        };
+
+        // 4. Delegation depth check.
+        let existing_depth = subject_claims.act.as_ref().map_or(0, |a| a.depth());
+        let new_depth = existing_depth + 1;
+
+        // Resolve max_delegation_depth from the agent record if actor is an agent.
+        let max_depth = self
+            .resolve_agent_max_depth(realm_id, &actor_sub)
+            .unwrap_or(crate::abuse::MAX_ACT_CHAIN_DEPTH as u8);
+
+        if new_depth as u8 > max_depth {
+            return Err(IdentityError::DelegationDepthExceeded {
+                max: max_depth,
+                attempted: new_depth as u8,
+            });
+        }
+
+        // 5. Scope intersection.
+        let subject_scope = subject_claims.scope.as_deref().unwrap_or("");
+        // actor_permitted defaults to subject_scope (full RBAC lookup is Phase B enhancement).
+        let effective_scope =
+            intersect_three(subject_scope, subject_scope, request.scope.as_deref());
+        if effective_scope.is_empty() {
+            return Err(IdentityError::EmptyScopeIntersection);
+        }
+
+        // 6. Lifetime: min(subject_remaining, configured access_token_ttl).
+        let ttl = subject_remaining.min(self.config.token.access_token_ttl_secs);
+        let exp = now_secs + ttl;
+
+        // 7. Build act chain.
+        let new_act = ActClaim {
+            sub: actor_sub.clone(),
+            act: subject_claims.act.clone().map(Box::new),
+        };
+
+        // 8. Audience.
+        let aud = if let Some(ref resource_uri) = request.resource {
+            crate::identity::tokens::Audience::Multi(vec![
+                subject_claims.aud.base().to_string(),
+                resource_uri.clone(),
+            ])
+        } else if let Some(ref audience) = request.audience {
+            crate::identity::tokens::Audience::Single(audience.clone())
+        } else {
+            subject_claims.aud.clone()
+        };
+
+        // 9. Issue token.
+        let signing_key = self.get_signing_key_or_default(realm_id);
+        let jti = uuid::Uuid::new_v4().to_string();
+        let issued_claims = crate::identity::tokens::TokenClaims {
+            sub: subject_claims.sub.clone(),
+            iss: subject_claims.iss.clone(),
+            aud,
+            exp,
+            iat: now_secs,
+            sid: subject_claims.sid.clone(),
+            tid: subject_claims.tid.clone(),
+            oid: subject_claims.oid.clone(),
+            token_type: "access".to_string(),
+            jti: Some(jti.clone()),
+            fid: subject_claims.fid.clone(),
+            scope: Some(effective_scope.clone()),
+            nonce: None,
+            cnf: request
+                .dpop_jkt
+                .as_ref()
+                .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.clone() }),
+            roles: subject_claims.roles.clone(),
+            groups: subject_claims.groups.clone(),
+            org_groups: subject_claims.org_groups.clone(),
+            permissions: subject_claims.permissions.clone(),
+            required_actions: Vec::new(),
+            act: Some(new_act),
+            amr: subject_claims.amr.clone(),
+            sv: subject_claims.sv,
+            custom: subject_claims.custom.clone(),
+        };
+        let access_token = signing_key.issue_token(&issued_claims)?;
+
+        // 10. Audit.
+        let audit_ctx = AuditContext {
+            actor: Actor::System,
+            metadata: Some(serde_json::json!({
+                "actor": actor_sub,
+                "on_behalf_of": subject_claims.sub,
+                "delegation_depth": new_depth,
+                "effective_scope": effective_scope,
+                "token_jti": jti,
+                "dpop_jkt": request.dpop_jkt,
+            })),
+        };
+        let _ = self.record_audit(
+            realm_id,
+            Some(&audit_ctx),
+            AuditAction::AgentDelegation,
+            "token",
+            &jti,
+        );
+
+        Ok(Rfc8693Response {
+            access_token,
+            issued_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+            token_type: if request.dpop_jkt.is_some() {
+                "DPoP"
+            } else {
+                "Bearer"
+            }
+            .to_string(),
+            expires_in: ttl,
+            scope: effective_scope,
+        })
+    }
+
+    fn check_and_record_actor_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        _now_secs: i64,
+        exp_secs: i64,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_actor_jti(jti);
+        if self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::ActorTokenReplayed);
+        }
+        self.storage
+            .put(realm_id, &key, &exp_secs.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        Ok(())
+    }
+}
+
+/// M2 private helpers for token exchange.
+impl EmbeddedIdentityEngine {
+    /// Resolves the `max_delegation_depth` for an actor subject string.
+    ///
+    /// Returns `None` when the actor is not a registered agent in this realm,
+    /// signalling that the global ceiling (`MAX_ACT_CHAIN_DEPTH`) applies.
+    fn resolve_agent_max_depth(&self, realm_id: &RealmId, actor_sub: &str) -> Option<u8> {
+        // Accept bare UUID, "agt_<uuid>", or "agent:agt_<uuid>" forms.
+        let raw = actor_sub
+            .strip_prefix("agent:agt_")
+            .or_else(|| actor_sub.strip_prefix("agt_"))
+            .unwrap_or(actor_sub);
+        let uuid = uuid::Uuid::parse_str(raw).ok()?;
+        let agent_id = crate::core::AgentId::new(uuid);
+        let agent = self.get_agent(realm_id, &agent_id).ok()??;
+        if matches!(agent.status(), AgentStatus::Revoked) {
+            return None;
+        }
+        Some(agent.max_delegation_depth())
+    }
+}
+
+/// Decodes the payload section of a JWT as a raw JSON object.
+///
+/// Does NOT verify the signature — callers MUST enforce replay prevention
+/// and other security properties separately.
+fn jwt_payload_json(token: &str) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() < 2 {
+        return Err("actor_token is not a valid JWT (expected header.payload.sig)".to_string());
+    }
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|e| format!("actor_token base64 decode failed: {e}"))?;
+    let value: serde_json::Value = serde_json::from_slice(&payload_bytes)
+        .map_err(|e| format!("actor_token JSON parse failed: {e}"))?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "actor_token payload is not a JSON object".to_string())
 }
 
 /// Generates and stores a new OTP then dispatches the SMS.
@@ -11852,7 +12331,7 @@ mod tests {
     use super::*;
     use crate::audit::EmbeddedAuditEngine;
     use crate::core::{FakeClock, Timestamp};
-    use crate::identity::types::RealmConfig;
+    use crate::identity::RealmConfig;
     use crate::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
     fn setup_engine() -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<FakeClock>) {
@@ -15386,11 +15865,9 @@ mod tests {
     // ===== Magic Link / Passwordless (Step 25) unit tests =====
 
     /// Helper: creates a realm and user with email for magic link tests.
-    fn setup_magic_link_user(
-        engine: &EmbeddedIdentityEngine,
-    ) -> (RealmId, crate::identity::types::User) {
+    fn setup_magic_link_user(engine: &EmbeddedIdentityEngine) -> (RealmId, crate::identity::User) {
         let realm = engine
-            .create_realm(&crate::identity::types::CreateRealmRequest {
+            .create_realm(&crate::identity::CreateRealmRequest {
                 name: format!("ml-test-{}", uuid::Uuid::new_v4()),
                 config: None,
             })
@@ -15398,7 +15875,7 @@ mod tests {
         let user = engine
             .create_user(
                 realm.id(),
-                &crate::identity::types::CreateUserRequest {
+                &crate::identity::CreateUserRequest {
                     email: format!("ml-{}@example.com", uuid::Uuid::new_v4()),
                     display_name: "ML Test User".to_string(),
                     ..Default::default()
@@ -16513,7 +16990,7 @@ mod tests {
 
     #[test]
     fn new_user_inherits_realm_default_required_actions() {
-        use crate::identity::types::RequiredAction;
+        use crate::identity::RequiredAction;
         let (_dir, engine, _clock) = setup_engine();
 
         let realm = engine
@@ -16549,7 +17026,7 @@ mod tests {
 
     #[test]
     fn required_actions_survive_storage_round_trip() {
-        use crate::identity::types::RequiredAction;
+        use crate::identity::RequiredAction;
         let (_dir, engine, _clock) = setup_engine();
 
         let realm = engine
@@ -17029,25 +17506,32 @@ mod tests {
 
     #[test]
     fn act_chain_depth_at_max_accepted() {
-        // Two wraps → depth 3 = MAX; must pass the guard.
-        let leaf = serde_json::json!({ "sub": "leaf" });
-        let mid = serde_json::json!({ "sub": "a1", "act": leaf });
-        let root = serde_json::json!({ "sub": "a0", "act": mid });
-        let depth = EmbeddedIdentityEngine::act_chain_depth(&root);
-        assert_eq!(depth, crate::abuse::MAX_ACT_CHAIN_DEPTH);
-        assert!(depth <= crate::abuse::MAX_ACT_CHAIN_DEPTH);
+        // Build a chain exactly MAX_ACT_CHAIN_DEPTH deep; must pass the guard.
+        let max = crate::abuse::MAX_ACT_CHAIN_DEPTH;
+        // Start with the innermost leaf, then wrap max-1 times.
+        let mut node = serde_json::json!({ "sub": "leaf" });
+        for i in 0..(max - 1) {
+            node = serde_json::json!({ "sub": format!("a{i}"), "act": node });
+        }
+        let depth = EmbeddedIdentityEngine::act_chain_depth(&node);
+        assert_eq!(
+            depth, max,
+            "depth-{max} chain should equal MAX_ACT_CHAIN_DEPTH"
+        );
+        assert!(depth <= max, "depth-{max} chain should be within the cap");
     }
 
     #[test]
     fn act_chain_depth_over_max_rejected() {
-        // Three wraps → depth 4 = MAX + 1; must exceed the cap.
-        let leaf = serde_json::json!({ "sub": "leaf" });
-        let l2 = serde_json::json!({ "sub": "a2", "act": leaf });
-        let l1 = serde_json::json!({ "sub": "a1", "act": l2 });
-        let root = serde_json::json!({ "sub": "a0", "act": l1 });
-        let depth = EmbeddedIdentityEngine::act_chain_depth(&root);
-        assert_eq!(depth, crate::abuse::MAX_ACT_CHAIN_DEPTH + 1);
-        assert!(depth > crate::abuse::MAX_ACT_CHAIN_DEPTH);
+        // Build a chain MAX+1 deep; must exceed the cap.
+        let max = crate::abuse::MAX_ACT_CHAIN_DEPTH;
+        let mut node = serde_json::json!({ "sub": "leaf" });
+        for i in 0..max {
+            node = serde_json::json!({ "sub": format!("a{i}"), "act": node });
+        }
+        let depth = EmbeddedIdentityEngine::act_chain_depth(&node);
+        assert_eq!(depth, max + 1, "depth-{} chain should equal MAX+1", max + 1);
+        assert!(depth > max, "depth-{} chain should exceed the cap", max + 1);
     }
 
     // ===== DPoP storage tests (HEA-1410) =====

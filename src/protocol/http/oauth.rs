@@ -32,6 +32,10 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
     use axum::routing::{get, post};
     axum::Router::new()
         .route("/.well-known/openid-configuration", get(oidc_discovery))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(protected_resource_metadata),
+        )
         .route("/jwks", get(jwks))
         .route("/certs", get(jwks))
         .route("/.well-known/jwks.json", get(jwks))
@@ -158,6 +162,33 @@ async fn oidc_discovery(
     (StatusCode::OK, Json(doc)).into_response()
 }
 
+/// Protected Resource Metadata endpoint (RFC 9728 §3, AGENT_AUTH.md §2.4 / B.3).
+///
+/// Returns Hearth's own PRM document at `/.well-known/oauth-protected-resource`.
+/// MCP clients use this to discover which authorization server to use and
+/// which scopes Hearth itself exposes.
+async fn protected_resource_metadata(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let discovery = state.identity.oidc_discovery();
+    let doc = serde_json::json!({
+        "resource": discovery.issuer,
+        "authorization_servers": [discovery.issuer],
+        "jwks_uri": discovery.jwks_uri,
+        "scopes_supported": [
+            "openid",
+            "profile",
+            "email",
+            "mcp:tools:invoke",
+            "mcp:tools:list",
+            "mcp:resources:read",
+            "mcp:resources:write",
+            "mcp:prompts:read",
+        ],
+        "bearer_methods_supported": ["header"],
+        "resource_signing_alg_values_supported": ["EdDSA"],
+    });
+    (StatusCode::OK, Json(doc))
+}
+
 /// JWKS endpoint (`/jwks`, `/certs`, and `/.well-known/jwks.json`).
 ///
 /// Returns the JSON Web Key Set containing the server's public signing
@@ -229,6 +260,21 @@ struct HttpTokenRequest {
     client_assertion_type: Option<String>,
     #[serde(default)]
     client_assertion: Option<String>,
+    // RFC 8693 Token Exchange fields
+    #[serde(default)]
+    subject_token: Option<String>,
+    #[serde(default)]
+    subject_token_type: Option<String>,
+    #[serde(default)]
+    actor_token: Option<String>,
+    #[serde(default)]
+    actor_token_type: Option<String>,
+    #[serde(default)]
+    requested_token_type: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
+    #[serde(default)]
+    audience: Option<String>,
 }
 
 /// HTTP request body for token revocation (RFC 7009).
@@ -1348,6 +1394,70 @@ async fn token_exchange_impl(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
+        // RFC 8693 Token Exchange (AGENT_AUTH.md §3.3 / B.4)
+        "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            let subject_token = match body.subject_token {
+                Some(t) => t,
+                None => return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "subject_token is required for token-exchange grant"
+                    })),
+                )
+                    .into_response(),
+            };
+            let client_uuid = match uuid::Uuid::parse_str(&body.client_id) {
+                Ok(u) => u,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_client",
+                            "error_description": "invalid client_id"
+                        })),
+                    )
+                        .into_response()
+                }
+            };
+            let request = crate::identity::Rfc8693Request {
+                client_id: crate::core::ClientId::new(client_uuid),
+                subject_token,
+                subject_token_type: body
+                    .subject_token_type
+                    .unwrap_or_else(|| "urn:ietf:params:oauth:token-type:access_token".to_string()),
+                actor_token: body.actor_token,
+                actor_token_type: body.actor_token_type,
+                requested_token_type: body.requested_token_type,
+                scope: body.scope,
+                resource: body.resource,
+                audience: body.audience,
+                dpop_jkt: dpop_jkt.clone(),
+            };
+            match state.identity.rfc8693_token_exchange(&realm_id, &request) {
+                Ok(resp) => {
+                    crate::metrics::metrics()
+                        .tokens_issued_total
+                        .with_label_values(&[
+                            realm_id.as_uuid().to_string().as_str(),
+                            "token_exchange",
+                        ])
+                        .inc();
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "access_token": resp.access_token,
+                            "issued_token_type": resp.issued_token_type,
+                            "token_type": resp.token_type,
+                            "expires_in": resp.expires_in,
+                            "scope": resp.scope,
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
         _ => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -2214,6 +2324,69 @@ async fn realm_token_exchange(
                         refresh_token: String::new(),
                     };
                     (StatusCode::OK, Json(proto_to_rest_json(&token_resp))).into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
+        // RFC 8693 Token Exchange (AGENT_AUTH.md §3.3 / B.4)
+        "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            let subject_token = match body.subject_token {
+                Some(t) => t,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_request",
+                            "error_description": "subject_token is required"
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            let client_uuid = match uuid::Uuid::parse_str(&body.client_id) {
+                Ok(u) => u,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "invalid_client"})),
+                    )
+                        .into_response();
+                }
+            };
+            let request = crate::identity::Rfc8693Request {
+                client_id: crate::core::ClientId::new(client_uuid),
+                subject_token,
+                subject_token_type: body
+                    .subject_token_type
+                    .unwrap_or_else(|| "urn:ietf:params:oauth:token-type:access_token".to_string()),
+                actor_token: body.actor_token,
+                actor_token_type: body.actor_token_type,
+                requested_token_type: body.requested_token_type,
+                scope: body.scope,
+                resource: body.resource,
+                audience: body.audience,
+                dpop_jkt: dpop_jkt.clone(),
+            };
+            match state.identity.rfc8693_token_exchange(&realm_id, &request) {
+                Ok(resp) => {
+                    crate::metrics::metrics()
+                        .tokens_issued_total
+                        .with_label_values(&[
+                            realm_id.as_uuid().to_string().as_str(),
+                            "token_exchange",
+                        ])
+                        .inc();
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "access_token": resp.access_token,
+                            "issued_token_type": resp.issued_token_type,
+                            "token_type": resp.token_type,
+                            "expires_in": resp.expires_in,
+                            "scope": resp.scope,
+                        })),
+                    )
+                        .into_response()
                 }
                 Err(e) => identity_error_to_response(&e).into_response(),
             }

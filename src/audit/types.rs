@@ -240,6 +240,14 @@ pub enum AuditAction {
     ///
     /// Metadata carries `agent_id`.
     AgentDeleted,
+    /// An API key credential was created for an agent.
+    ///
+    /// Metadata carries `agent_id` and `credential_id`.
+    AgentCredentialCreated,
+    /// An agent credential was permanently revoked.
+    ///
+    /// Metadata carries `agent_id` and `credential_id`.
+    AgentCredentialRevoked,
     /// A required action was assigned to a user by an admin.
     ///
     /// Metadata carries `action_type` (e.g. `"VERIFY_EMAIL"`) and `admin_id`.
@@ -349,6 +357,56 @@ pub enum AuditAction {
     /// Metadata carries `user_id`, `client_id`, and `outcome`
     /// (`"code_issued"` / `"consent_required"` / `"rate_limited"`).
     OidcSilentAuthProbed,
+    /// A delegated token was issued via OBO or RFC 8693 token exchange
+    /// (§12.2 of AGENT_AUTH.md).
+    ///
+    /// Metadata carries `actor` (immediate actor subject), `on_behalf_of`
+    /// (delegating principal), `delegation_chain` (JSON array), `token_jti`,
+    /// and optionally `dpop_jkt`, `tool`, `approval_id`.
+    AgentDelegation,
+    /// An agent invoked a tool on an MCP server (logged by Hearth proxy or
+    /// resource server).
+    ///
+    /// Metadata carries `agent_id`, `tool`, `resource_uri`, and optionally
+    /// `approval_id` and `token_jti`.
+    AgentToolInvocation,
+    /// An agent requested human-in-the-loop approval for a tool invocation.
+    ///
+    /// Metadata carries `agent_id`, `tool`, `request_id`.
+    ApprovalRequested,
+    /// A human approved an agent's tool-invocation request.
+    ///
+    /// Metadata carries `agent_id`, `tool`, `request_id`, `approver_id`.
+    ApprovalGranted,
+    /// A human denied an agent's tool-invocation request.
+    ///
+    /// Metadata carries `agent_id`, `tool`, `request_id`, `approver_id`.
+    ApprovalDenied,
+    /// An agent token was explicitly revoked (manual or CAEP-triggered).
+    ///
+    /// Metadata carries `agent_id`, `token_jti`, and `reason`.
+    AgentTokenRevoked,
+    /// A cross-realm agent trust policy was created.
+    ///
+    /// Metadata carries `source_realm_id`, `target_realm_id`, and
+    /// `allowed_capabilities`.
+    CrossRealmTrustCreated,
+    /// A cross-realm agent trust policy was revoked.
+    ///
+    /// Metadata carries `source_realm_id` and `target_realm_id`.
+    CrossRealmTrustRevoked,
+    /// A protected resource (MCP server) was registered in the realm.
+    ///
+    /// Metadata carries `resource_id`, `resource_uri`, and `display_name`.
+    ProtectedResourceRegistered,
+    /// A protected resource was updated.
+    ///
+    /// Metadata carries `resource_id` and the changed fields.
+    ProtectedResourceUpdated,
+    /// A protected resource was deleted.
+    ///
+    /// Metadata carries `resource_id` and `resource_uri`.
+    ProtectedResourceDeleted,
 }
 
 impl AuditAction {
@@ -458,12 +516,27 @@ impl AuditAction {
             Self::AgentReactivated,
             Self::AgentRevoked,
             Self::AgentDeleted,
+            Self::AgentCredentialCreated,
+            Self::AgentCredentialRevoked,
+            // M2 delegation + MCP
+            Self::AgentDelegation,
+            Self::AgentToolInvocation,
+            Self::ApprovalRequested,
+            Self::ApprovalGranted,
+            Self::ApprovalDenied,
+            Self::AgentTokenRevoked,
+            Self::CrossRealmTrustCreated,
+            Self::CrossRealmTrustRevoked,
+            Self::ProtectedResourceRegistered,
+            Self::ProtectedResourceUpdated,
+            Self::ProtectedResourceDeleted,
         ]);
         v.sort_by_key(|a| a.as_str());
         v
     }
 
     /// Returns the string tag for storage key encoding.
+    #[allow(clippy::too_many_lines)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::UserCreated => "user_created",
@@ -562,6 +635,20 @@ impl AuditAction {
             Self::AgentReactivated => "agent_reactivated",
             Self::AgentRevoked => "agent_revoked",
             Self::AgentDeleted => "agent_deleted",
+            Self::AgentCredentialCreated => "agent_credential_created",
+            Self::AgentCredentialRevoked => "agent_credential_revoked",
+            // M2 delegation + MCP
+            Self::AgentDelegation => "agent_delegation",
+            Self::AgentToolInvocation => "agent_tool_invocation",
+            Self::ApprovalRequested => "approval_requested",
+            Self::ApprovalGranted => "approval_granted",
+            Self::ApprovalDenied => "approval_denied",
+            Self::AgentTokenRevoked => "agent_token_revoked",
+            Self::CrossRealmTrustCreated => "cross_realm_trust_created",
+            Self::CrossRealmTrustRevoked => "cross_realm_trust_revoked",
+            Self::ProtectedResourceRegistered => "protected_resource_registered",
+            Self::ProtectedResourceUpdated => "protected_resource_updated",
+            Self::ProtectedResourceDeleted => "protected_resource_deleted",
         }
     }
 }
@@ -569,6 +656,7 @@ impl AuditAction {
 impl std::str::FromStr for AuditAction {
     type Err = String;
 
+    #[allow(clippy::too_many_lines)]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "user_created" => Ok(Self::UserCreated),
@@ -667,6 +755,20 @@ impl std::str::FromStr for AuditAction {
             "agent_reactivated" => Ok(Self::AgentReactivated),
             "agent_revoked" => Ok(Self::AgentRevoked),
             "agent_deleted" => Ok(Self::AgentDeleted),
+            "agent_credential_created" => Ok(Self::AgentCredentialCreated),
+            "agent_credential_revoked" => Ok(Self::AgentCredentialRevoked),
+            // M2 delegation + MCP
+            "agent_delegation" => Ok(Self::AgentDelegation),
+            "agent_tool_invocation" => Ok(Self::AgentToolInvocation),
+            "approval_requested" => Ok(Self::ApprovalRequested),
+            "approval_granted" => Ok(Self::ApprovalGranted),
+            "approval_denied" => Ok(Self::ApprovalDenied),
+            "agent_token_revoked" => Ok(Self::AgentTokenRevoked),
+            "cross_realm_trust_created" => Ok(Self::CrossRealmTrustCreated),
+            "cross_realm_trust_revoked" => Ok(Self::CrossRealmTrustRevoked),
+            "protected_resource_registered" => Ok(Self::ProtectedResourceRegistered),
+            "protected_resource_updated" => Ok(Self::ProtectedResourceUpdated),
+            "protected_resource_deleted" => Ok(Self::ProtectedResourceDeleted),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -700,6 +802,7 @@ impl AuditAction {
     /// when an auditable destructive operation happens without a
     /// corresponding audit event.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn failure_policy(&self) -> AuditFailurePolicy {
         use AuditFailurePolicy::{FailOperation, LogOnly};
         match self {
@@ -771,7 +874,17 @@ impl AuditAction {
             | Self::AgentCreated
             | Self::AgentUpdated
             | Self::AgentSuspended
-            | Self::AgentReactivated => LogOnly,
+            | Self::AgentReactivated
+            | Self::AgentCredentialCreated
+            // M2: delegation events are informational
+            | Self::AgentDelegation
+            | Self::AgentToolInvocation
+            | Self::ApprovalRequested
+            | Self::ApprovalGranted
+            | Self::ApprovalDenied
+            | Self::CrossRealmTrustCreated
+            | Self::ProtectedResourceRegistered
+            | Self::ProtectedResourceUpdated => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
@@ -802,7 +915,13 @@ impl AuditAction {
             | Self::EmailChangeConfirmed
             // Agent revocation and deletion are terminal/security-sensitive.
             | Self::AgentRevoked
-            | Self::AgentDeleted => FailOperation,
+            | Self::AgentDeleted
+            // Credential revocation is a terminal security action — must be audited.
+            | Self::AgentCredentialRevoked
+            // Token revocation and cross-realm trust teardown are security-sensitive.
+            | Self::AgentTokenRevoked
+            | Self::CrossRealmTrustRevoked
+            | Self::ProtectedResourceDeleted => FailOperation,
         }
     }
 }

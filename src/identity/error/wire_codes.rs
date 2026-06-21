@@ -149,6 +149,14 @@ impl IdentityError {
 
             Self::Saml(e) => e.wire_error_code(),
 
+            // M2: protected resource + token exchange
+            Self::ProtectedResourceNotFound => Some("protected_resource_not_found"),
+            Self::DuplicateResourceUri => Some("duplicate_resource_uri"),
+            Self::TokenExchangeRejected { oauth_error, .. } => Some(oauth_error),
+            Self::DelegationDepthExceeded { .. } => Some("invalid_grant"),
+            Self::EmptyScopeIntersection => Some("invalid_scope"),
+            Self::ActorTokenReplayed => Some("invalid_grant"),
+
             // 5xx — do not leak internal detail
             Self::SigningError { .. }
             | Self::Storage(_)

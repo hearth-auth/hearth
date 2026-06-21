@@ -188,6 +188,13 @@ pub fn identity_to_status(err: IdentityError) -> Status {
         IdentityError::AgentRevoked => (Code::PermissionDenied, err.to_string()),
         IdentityError::AgentCredentialNotFound => (Code::NotFound, err.to_string()),
         IdentityError::PreTokenWebhookFailed { .. } => (Code::PermissionDenied, err.to_string()),
+        // M2: protected resource + token exchange
+        IdentityError::ProtectedResourceNotFound => (Code::NotFound, err.to_string()),
+        IdentityError::DuplicateResourceUri => (Code::AlreadyExists, err.to_string()),
+        IdentityError::TokenExchangeRejected { .. } => (Code::PermissionDenied, err.to_string()),
+        IdentityError::DelegationDepthExceeded { .. } => (Code::PermissionDenied, err.to_string()),
+        IdentityError::EmptyScopeIntersection => (Code::PermissionDenied, err.to_string()),
+        IdentityError::ActorTokenReplayed => (Code::Unauthenticated, err.to_string()),
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }

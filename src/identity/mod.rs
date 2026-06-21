@@ -18,6 +18,7 @@ pub mod hibp;
 pub(crate) mod keys;
 pub mod ldap;
 pub(crate) mod magic_link;
+pub mod mcp;
 pub mod migration;
 pub mod oidc;
 pub mod onboarding;
@@ -87,7 +88,8 @@ pub use types::{
 pub use types::{
     Agent, AgentCredential, AgentCredentialKind, AgentOwner, AgentStatus, CreateAgentApiKeyRequest,
     CreateAgentApiKeyResponse, CreateAgentRequest, ListAgentsQuery, PlaintextApiKey,
-    UpdateAgentRequest,
+    ProtectedResource, RegisterProtectedResourceRequest, Rfc8693Request, Rfc8693Response,
+    UpdateAgentRequest, UpdateProtectedResourceRequest,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -96,8 +98,8 @@ pub use webauthn::{
 };
 
 use crate::core::{
-    AgentId, ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId,
-    WebhookId,
+    AgentId, ClientId, InvitationId, OrganizationId, RealmId, ResourceServerId, SessionId,
+    Timestamp, UserId, WebhookId,
 };
 
 // Maximum page size for all paginated list operations (A-23).
@@ -2185,4 +2187,86 @@ pub trait IdentityEngine: Send + Sync {
     /// The returned secret is used with `current_dpop_nonce` / `is_valid_dpop_nonce`
     /// to generate and validate per-realm DPoP nonces.
     fn get_realm_dpop_nonce_secret(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError>;
+
+    // ── B.1 Protected Resource Registration (AGENT_AUTH.md §2.5) ─────────────
+
+    /// Registers a new protected resource (MCP server) within a realm.
+    ///
+    /// The `resource_uri` MUST be unique within the realm. In `--dev` mode HTTP
+    /// is permitted; in production HTTPS is required.
+    /// Emits `ProtectedResourceRegistered` audit event.
+    fn register_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        request: &types::RegisterProtectedResourceRequest,
+    ) -> Result<types::ProtectedResource, IdentityError>;
+
+    /// Retrieves a protected resource by its ID.
+    fn get_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &ResourceServerId,
+    ) -> Result<Option<types::ProtectedResource>, IdentityError>;
+
+    /// Lists all protected resources within a realm.
+    fn list_protected_resources(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<types::ProtectedResource>, IdentityError>;
+
+    /// Updates a protected resource.
+    ///
+    /// Only the fields present in `request` are updated.
+    /// Emits `ProtectedResourceUpdated` audit event.
+    fn update_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &ResourceServerId,
+        request: &types::UpdateProtectedResourceRequest,
+    ) -> Result<types::ProtectedResource, IdentityError>;
+
+    /// Deletes a protected resource.
+    ///
+    /// All outstanding tokens scoped to this resource's `resource_uri` are NOT
+    /// automatically revoked in this milestone; see AGENT_AUTH.md §2.5 for the
+    /// future revocation requirement. Emits `ProtectedResourceDeleted` audit event.
+    fn delete_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &ResourceServerId,
+    ) -> Result<(), IdentityError>;
+
+    // ── B.4 RFC 8693 Token Exchange ───────────────────────────────────────────
+
+    /// Processes an RFC 8693 `urn:ietf:params:oauth:grant-type:token-exchange` request.
+    ///
+    /// Validates:
+    /// 1. `subject_token` is a valid, non-expired access token for this realm.
+    /// 2. `actor_token` (when present) is a signed JWT assertion from the agent,
+    ///    with `sub` = agent identifier, `aud` = token endpoint, and a fresh `jti`
+    ///    (replay prevention; stored for `≤5 min`).
+    /// 3. The agent's `max_delegation_depth` is not exceeded.
+    /// 4. Effective scope = `subject_scope ∩ actor_permitted ∩ requested_scope`
+    ///    (rejects with `InvalidScope` when the intersection is empty).
+    /// 5. Resulting token lifetime ≤ remaining subject token lifetime.
+    ///
+    /// Emits `AgentDelegation` audit event on success.
+    fn rfc8693_token_exchange(
+        &self,
+        realm_id: &RealmId,
+        request: &types::Rfc8693Request,
+    ) -> Result<types::Rfc8693Response, IdentityError>;
+
+    /// Checks whether an actor-token `jti` has already been used and records it.
+    ///
+    /// Actor tokens are short-lived JWT assertions (`exp - iat ≤ 5 min`).
+    /// Their `jti` is stored for the remaining lifetime to prevent replay.
+    /// Returns `Err(DPopProofReplay)` (reusing the replay guard) if already seen.
+    fn check_and_record_actor_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        now_secs: i64,
+        exp_secs: i64,
+    ) -> Result<(), IdentityError>;
 }
