@@ -568,6 +568,18 @@ pub struct EmbeddedIdentityEngine {
     /// requests for the same token can both pass the `used` check before
     /// either writes back. Key: hex-encoded SHA-256 of the raw token.
     token_redemption_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-request-id advisory lock for approval CAS state transitions.
+    ///
+    /// Eliminates the TOCTOU race in `approve_approval_request_inner`:
+    /// two concurrent `approve` calls could both read `Pending` before either
+    /// writes `Approved`, causing double capability-token issuance. Applies
+    /// equally to concurrent `deny` calls. The outer map guard is released
+    /// before acquiring the per-request inner lock so different request IDs
+    /// never contend.
+    ///
+    // INVARIANT: outer guard released in scoped block before inner per-request lock is acquired.
+    // INVARIANT: inner (per-request) guard held only across the sync read-check-mint-write window; no .await in scope.
+    approval_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
     /// Realm ops are not on the hot path, and a realm record and its
@@ -953,6 +965,7 @@ impl EmbeddedIdentityEngine {
             // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
+            approval_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -1145,6 +1158,7 @@ impl EmbeddedIdentityEngine {
             // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
+            approval_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -2986,6 +3000,20 @@ impl EmbeddedIdentityEngine {
             .expect("token_redemption_locks poisoned");
         Arc::clone(
             map.entry(token_hash.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Returns a per-request-id advisory lock for approval state transitions.
+    ///
+    /// Callers hold this lock across the read → status-check → mint → write
+    /// sequence in `approve_approval_request_inner` and
+    /// `deny_approval_request_inner` to prevent two concurrent callers from
+    /// both passing the Pending check before either writes the final state.
+    fn approval_request_lock(&self, request_id: &str) -> Arc<Mutex<()>> {
+        let mut map = self.approval_locks.lock().expect("approval_locks poisoned");
+        Arc::clone(
+            map.entry(request_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     }

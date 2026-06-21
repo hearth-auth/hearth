@@ -119,6 +119,15 @@ impl EmbeddedIdentityEngine {
         request_id: &str,
         capability_ttl_secs: Option<i64>,
     ) -> Result<ApprovalRequestResponse, IdentityError> {
+        // Serialize concurrent transitions for this request. Without this lock,
+        // two racing `approve` calls can both read `Pending`, both pass the
+        // status check, both mint tokens with distinct JTIs, and both write
+        // `Approved` — issuing two valid capability tokens for one approval.
+        let lock = self.approval_request_lock(request_id);
+        let _guard = lock
+            .lock()
+            .expect("approval_locks per-request mutex poisoned");
+
         let key = keys::encode_approval_request_id(request_id);
         let bytes = self
             .storage
@@ -195,6 +204,13 @@ impl EmbeddedIdentityEngine {
         request_id: &str,
         reason: Option<String>,
     ) -> Result<ApprovalRequestResponse, IdentityError> {
+        // Same TOCTOU guard as approve: two concurrent deny calls must not
+        // both pass the Pending check and write duplicate Denied records.
+        let lock = self.approval_request_lock(request_id);
+        let _guard = lock
+            .lock()
+            .expect("approval_locks per-request mutex poisoned");
+
         let key = keys::encode_approval_request_id(request_id);
         let bytes = self
             .storage

@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use common::TestHarness;
 use hearth::core::AgentId;
 use hearth::identity::{
@@ -443,6 +445,62 @@ async fn capability_token_single_use_enforcement() {
             Err(IdentityError::ToolApprovalRequired { ref tool }) if tool == "send_email"
         ),
         "replayed capability token must return ToolApprovalRequired, got: {second:?}"
+    );
+}
+
+// ─── C.4.8: Concurrent approve — exactly one token ────────────────────────────
+
+/// Ten concurrent `approve` calls on the same request must result in exactly
+/// one success and nine `ApprovalRequestNotPending` errors, with at most one
+/// capability token ever issued.
+///
+/// Regression test for the TOCTOU double-issuance race (HEA-1430).
+#[tokio::test]
+async fn concurrent_approve_issues_exactly_one_token() {
+    let h = Arc::new(TestHarness::embedded().await.expect("harness init"));
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let req = CreateApprovalRequestInput {
+        agent_id,
+        tool: "concurrent_op".to_string(),
+        action: "invoke".to_string(),
+        context: serde_json::json!({}),
+        delegation_chain: vec![],
+        expires_in_secs: None,
+    };
+    let created = h
+        .identity()
+        .create_approval_request(&realm_id, &req)
+        .expect("create");
+    let request_id = created.request_id.clone();
+
+    // Spawn 10 concurrent approve tasks on the same request_id.
+    let handles: Vec<_> = (0..10)
+        .map(|_| {
+            let identity = h.identity_arc();
+            let realm_id = realm_id.clone();
+            let request_id = request_id.clone();
+            tokio::task::spawn_blocking(move || {
+                identity.approve_approval_request(&realm_id, &request_id, None)
+            })
+        })
+        .collect();
+
+    let mut successes = 0u32;
+    let mut not_pending = 0u32;
+    for handle in handles {
+        match handle.await.expect("task did not panic") {
+            Ok(_) => successes += 1,
+            Err(IdentityError::ApprovalRequestNotPending { .. }) => not_pending += 1,
+            Err(e) => panic!("unexpected error from concurrent approve: {e:?}"),
+        }
+    }
+
+    assert_eq!(successes, 1, "exactly one concurrent approve must succeed");
+    assert_eq!(
+        not_pending, 9,
+        "the remaining 9 must return ApprovalRequestNotPending"
     );
 }
 
