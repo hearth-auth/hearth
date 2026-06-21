@@ -9,6 +9,20 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Added
 
+- **Tool-level permission grammar (agent-auth Phase C)** — RBAC roles can now include
+  `tool.{name}.invoke`, `tool.{name}.invoke_with_approval`, and `tool.{name}.deny` permission
+  strings to govern per-tool agent access. Tool groups are supported via `toolgroup.{group}.{action}`
+  permissions, with group-to-tool membership declared in realm config. **Deny wins:** a `deny`
+  permission always overrides any co-present `invoke` grant. Scope intersection at delegation
+  narrows the effective scope to the triple intersection of user-granted, agent-permitted, and
+  requested scopes. (HEA-1423)
+- **Human-in-the-loop approval request lifecycle (agent-auth Phase C)** — agents holding
+  `tool.{name}.invoke_with_approval` can submit approval requests via the identity engine.
+  Approvers transition requests from `Pending → Approved` (issuing a time-boxed capability
+  token scoped to the approved tool, default TTL 5 min, max 1 h) or `Pending → Denied`.
+  Transitions from non-`Pending` states are rejected. Requests expire after a configurable
+  window (default 1 hour); expired requests are treated as denied. (HEA-1423)
+
 - **Consent UI: agent delegation view/revoke** — users can list and revoke active RFC 8693
   agent delegations at `GET /ui/consent/delegations`. Revoking immediately invalidates the
   bound access token via the JTI blocklist. Delegation grants are persisted on every

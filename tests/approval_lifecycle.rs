@@ -9,7 +9,7 @@ use common::TestHarness;
 use hearth::core::AgentId;
 use hearth::identity::{
     AgentOwner, ApprovalRequestStatus, CreateAgentRequest, CreateApprovalRequestInput,
-    CreateRealmRequest, CreateUserRequest,
+    CreateRealmRequest, CreateUserRequest, IdentityError,
 };
 
 fn make_realm(h: &TestHarness) -> hearth::core::RealmId {
@@ -238,7 +238,10 @@ async fn cannot_approve_already_approved_request() {
     let result = h
         .identity()
         .approve_approval_request(&realm_id, &created.request_id, None);
-    assert!(result.is_err(), "re-approving must fail");
+    assert!(
+        matches!(result, Err(IdentityError::ApprovalRequestNotPending { .. })),
+        "re-approving must return ApprovalRequestNotPending"
+    );
 }
 
 #[tokio::test]
@@ -266,7 +269,10 @@ async fn cannot_deny_already_denied_request() {
     let result = h
         .identity()
         .deny_approval_request(&realm_id, &created.request_id, None);
-    assert!(result.is_err(), "re-denying must fail");
+    assert!(
+        matches!(result, Err(IdentityError::ApprovalRequestNotPending { .. })),
+        "re-denying must return ApprovalRequestNotPending"
+    );
 }
 
 #[tokio::test]
@@ -294,7 +300,10 @@ async fn cannot_approve_denied_request() {
     let result = h
         .identity()
         .approve_approval_request(&realm_id, &created.request_id, None);
-    assert!(result.is_err(), "approving a denied request must fail");
+    assert!(
+        matches!(result, Err(IdentityError::ApprovalRequestNotPending { .. })),
+        "approving a denied request must return ApprovalRequestNotPending"
+    );
 }
 
 // ─── C.4.5: Not found ────────────────────────────────────────────────────────
@@ -307,7 +316,10 @@ async fn get_nonexistent_request_returns_error() {
     let result = h
         .identity()
         .get_approval_request(&realm_id, "nonexistent-request-id");
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(IdentityError::ApprovalRequestNotFound)),
+        "non-existent approval request must return ApprovalRequestNotFound"
+    );
 }
 
 // ─── C.4.6: List approval requests ───────────────────────────────────────────
