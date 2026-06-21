@@ -146,13 +146,13 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         }
         domain::AuditAction::ProtectedResourceUpdated => pb::AuditAction::ProtectedResourceUpdated,
         domain::AuditAction::ProtectedResourceDeleted => pb::AuditAction::ProtectedResourceDeleted,
-        // Phase D actions — no proto variants yet; fall back to Unspecified until proto backfill.
-        domain::AuditAction::AatIssued
-        | domain::AuditAction::AatRevoked
-        | domain::AuditAction::TransactionTokenIssued
-        | domain::AuditAction::CrossRealmTokenIssued
-        | domain::AuditAction::SpiffeIdMapped
-        | domain::AuditAction::SpiffeAuthSuccess => pb::AuditAction::Unspecified,
+        // Phase D actions — proto variants now available.
+        domain::AuditAction::AatIssued => pb::AuditAction::AatIssued,
+        domain::AuditAction::AatRevoked => pb::AuditAction::AatRevoked,
+        domain::AuditAction::TransactionTokenIssued => pb::AuditAction::TransactionTokenIssued,
+        domain::AuditAction::CrossRealmTokenIssued => pb::AuditAction::CrossRealmTokenIssued,
+        domain::AuditAction::SpiffeIdMapped => pb::AuditAction::SpiffeIdMapped,
+        domain::AuditAction::SpiffeAuthSuccess => pb::AuditAction::SpiffeAuthSuccess,
     }
 }
 
@@ -334,6 +334,15 @@ pub(crate) fn proto_audit_action_to_domain(a: pb::AuditAction) -> Option<domain:
         pb::AuditAction::ProtectedResourceDeleted => {
             Some(domain::AuditAction::ProtectedResourceDeleted)
         }
+        // Phase D
+        pb::AuditAction::AatIssued => Some(domain::AuditAction::AatIssued),
+        pb::AuditAction::AatRevoked => Some(domain::AuditAction::AatRevoked),
+        pb::AuditAction::TransactionTokenIssued => {
+            Some(domain::AuditAction::TransactionTokenIssued)
+        }
+        pb::AuditAction::CrossRealmTokenIssued => Some(domain::AuditAction::CrossRealmTokenIssued),
+        pb::AuditAction::SpiffeIdMapped => Some(domain::AuditAction::SpiffeIdMapped),
+        pb::AuditAction::SpiffeAuthSuccess => Some(domain::AuditAction::SpiffeAuthSuccess),
     }
 }
 

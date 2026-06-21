@@ -7,6 +7,43 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ## [Unreleased]
 
+### Added
+
+- **Attenuating Authorization Tokens (AATs) — Phase D.1** — agents can request root AATs
+  (signed with the realm's Ed25519 key, `typ: "aat+jwt"`) and derive child AATs that narrow
+  permissions offline. Derivation enforces strict subset invariants: child scope ⊆ parent scope,
+  child tools ⊆ parent tools, child constraints ≤ parent constraints, child exp ≤ parent exp.
+  Revocation of any ancestor invalidates all descendants. Adversarial crafted-AAT escalation
+  is rejected at the chain validation step. New engine methods: `issue_aat`, `derive_aat`,
+  `validate_aat`, `revoke_aat`. (HEA-1424 Phase D.1)
+- **Transaction tokens — Phase D.3** — single-use, 60-second transaction tokens bind two agents
+  to a specific operation. The `txn` claim (caller-supplied UUID) is written atomically at
+  issuance for replay prevention; a second issuance or consumption of the same `txn_id` returns
+  `TransactionTokenReplayed`. New engine methods: `issue_transaction_token`,
+  `consume_transaction_token`. (HEA-1424 Phase D.3)
+- **Cross-realm trust policies — Phase D.4** — realm admins can declare explicit trust policies
+  allowing agents from a source realm to present tokens to resources in the target realm,
+  restricted to a declared set of capabilities. No implicit trust: a missing policy always
+  returns `false`. New engine methods: `create_cross_realm_policy`, `get_cross_realm_policy`,
+  `list_cross_realm_policies`, `delete_cross_realm_policy`, `check_cross_realm_policy`.
+  Audit actions: `CrossRealmTrustCreated`, `CrossRealmTrustRevoked`. (HEA-1424 Phase D.4)
+- **SPIFFE / workload identity — Phase D.7** — agents can be registered with a SPIFFE ID
+  (`spiffe://{trust_domain}/agent/{uuid}`) for mTLS workload authentication. The TLS
+  termination layer maps the SVID's URI SAN to an `AgentId` via the SPIFFE mapping registry.
+  Invalid SPIFFE ID format and duplicate mappings are rejected. New engine methods:
+  `register_spiffe_mapping`, `lookup_agent_by_spiffe_id`, `delete_spiffe_mapping`,
+  `validate_spiffe_svid`. Audit actions: `SpiffeIdMapped`, `SpiffeAuthSuccess`. (HEA-1424 Phase D.7)
+- **Phase D proto backfill** — `AuditAction` proto enum gains 6 Phase D variants
+  (110–115: `AatIssued`, `AatRevoked`, `TransactionTokenIssued`, `CrossRealmTokenIssued`,
+  `SpiffeIdMapped`, `SpiffeAuthSuccess`). (HEA-1424)
+
+### Fixed
+
+- **RFC 8693 actor scope: absent claim treated as unconstrained** — an actor token with no
+  `scope` claim (field absent) no longer produces `EmptyScopeIntersection`; only an explicit
+  `"scope": ""` (zero permissions) is rejected. Actors that omit the claim are treated as not
+  imposing an additional scope ceiling beyond the subject token. (HEA-1424)
+
 ### Security
 
 - **RFC 8693 actor scope enforcement** — token exchange now enforces RFC 8693 §4.4:

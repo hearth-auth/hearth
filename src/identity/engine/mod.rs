@@ -12065,11 +12065,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     oauth_error: "invalid_grant",
                 })?;
             // Extract scope from the actor's JWT — this is the ceiling the actor may delegate.
-            let scope = actor_json
-                .get("scope")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            // Distinguish two cases:
+            // - Absent claim (no "scope" key): actor doesn't restrict scope → use subject scope.
+            // - Explicit empty string ("scope": ""): actor claims zero permissions → empty string
+            //   propagates and causes EmptyScopeIntersection downstream.
+            let scope = match actor_json.get("scope") {
+                None => subject_claims.scope.clone().unwrap_or_default(),
+                Some(v) => v.as_str().unwrap_or("").to_string(),
+            };
             (sub, scope)
         } else {
             // No actor_token: the client is acting on its own behalf (no delegation chain).

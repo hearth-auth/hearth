@@ -152,6 +152,13 @@ const (
 	AuditAction_AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED AuditAction = 107
 	AuditAction_AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED    AuditAction = 108
 	AuditAction_AUDIT_ACTION_PROTECTED_RESOURCE_DELETED    AuditAction = 109
+	// Phase D — advanced agent surface
+	AuditAction_AUDIT_ACTION_AAT_ISSUED               AuditAction = 110
+	AuditAction_AUDIT_ACTION_AAT_REVOKED              AuditAction = 111
+	AuditAction_AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED AuditAction = 112
+	AuditAction_AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED AuditAction = 113
+	AuditAction_AUDIT_ACTION_SPIFFE_ID_MAPPED         AuditAction = 114
+	AuditAction_AUDIT_ACTION_SPIFFE_AUTH_SUCCESS      AuditAction = 115
 )
 
 // Enum value maps for AuditAction.
@@ -267,6 +274,12 @@ var (
 		107: "AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED",
 		108: "AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED",
 		109: "AUDIT_ACTION_PROTECTED_RESOURCE_DELETED",
+		110: "AUDIT_ACTION_AAT_ISSUED",
+		111: "AUDIT_ACTION_AAT_REVOKED",
+		112: "AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED",
+		113: "AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED",
+		114: "AUDIT_ACTION_SPIFFE_ID_MAPPED",
+		115: "AUDIT_ACTION_SPIFFE_AUTH_SUCCESS",
 	}
 	AuditAction_value = map[string]int32{
 		"AUDIT_ACTION_UNSPECIFIED":                     0,
@@ -379,6 +392,12 @@ var (
 		"AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED":   107,
 		"AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED":      108,
 		"AUDIT_ACTION_PROTECTED_RESOURCE_DELETED":      109,
+		"AUDIT_ACTION_AAT_ISSUED":                      110,
+		"AUDIT_ACTION_AAT_REVOKED":                     111,
+		"AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED":        112,
+		"AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED":        113,
+		"AUDIT_ACTION_SPIFFE_ID_MAPPED":                114,
+		"AUDIT_ACTION_SPIFFE_AUTH_SUCCESS":             115,
 	}
 )
 
@@ -885,7 +904,7 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"\x12broken_at_event_id\x18\x02 \x01(\tH\x00R\x0fbrokenAtEventId\x88\x01\x01\x12\x1f\n" +
 	"\vevent_count\x18\x03 \x01(\x04R\n" +
 	"eventCountB\x15\n" +
-	"\x13_broken_at_event_id*\xd5 \n" +
+	"\x13_broken_at_event_id*\xaf\"\n" +
 	"\vAuditAction\x12\x1c\n" +
 	"\x18AUDIT_ACTION_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19AUDIT_ACTION_USER_CREATED\x10\x01\x12\x1d\n" +
@@ -997,7 +1016,13 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"&AUDIT_ACTION_CROSS_REALM_TRUST_REVOKED\x10j\x12.\n" +
 	"*AUDIT_ACTION_PROTECTED_RESOURCE_REGISTERED\x10k\x12+\n" +
 	"'AUDIT_ACTION_PROTECTED_RESOURCE_UPDATED\x10l\x12+\n" +
-	"'AUDIT_ACTION_PROTECTED_RESOURCE_DELETED\x10m2\xda\x01\n" +
+	"'AUDIT_ACTION_PROTECTED_RESOURCE_DELETED\x10m\x12\x1b\n" +
+	"\x17AUDIT_ACTION_AAT_ISSUED\x10n\x12\x1c\n" +
+	"\x18AUDIT_ACTION_AAT_REVOKED\x10o\x12)\n" +
+	"%AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED\x10p\x12)\n" +
+	"%AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED\x10q\x12!\n" +
+	"\x1dAUDIT_ACTION_SPIFFE_ID_MAPPED\x10r\x12$\n" +
+	" AUDIT_ACTION_SPIFFE_AUTH_SUCCESS\x10s2\xda\x01\n" +
 	"\fAuditService\x12b\n" +
 	"\n" +
 	"ListEvents\x12\x1c.hearth.events.v1.AuditQuery\x1a .hearth.events.v1.AuditEventPage\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/admin/audit\x12f\n" +
