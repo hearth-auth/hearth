@@ -2109,6 +2109,8 @@ async fn admin_list_audit(
         actor: params.actor,
         action,
         limit: Some(params.limit.unwrap_or(50).min(200)),
+        agent_id: None,
+        tool: None,
     };
 
     match state.audit.query(&query) {

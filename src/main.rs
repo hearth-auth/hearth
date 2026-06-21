@@ -1724,8 +1724,12 @@ async fn run_serve(
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
-            .with_agent_identity(config.agent_auth.capabilities.identity)
-            .with_agent_approval(config.agent_auth.capabilities.approval),
+            // In --dev, enable all agent-auth capability phases regardless of
+            // what hearth.yaml says, so developers can exercise Phase D routes
+            // without manually setting every capability flag.
+            .with_agent_identity(true)
+            .with_agent_approval(true)
+            .with_agent_advanced(true),
         )
     } else {
         Arc::new(
@@ -1742,7 +1746,8 @@ async fn run_serve(
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_agent_identity(config.agent_auth.capabilities.identity)
-            .with_agent_approval(config.agent_auth.capabilities.approval),
+            .with_agent_approval(config.agent_auth.capabilities.approval)
+            .with_agent_advanced(config.agent_auth.capabilities.advanced),
         )
     };
 

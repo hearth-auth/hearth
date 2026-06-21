@@ -92,6 +92,12 @@ pub struct AppState {
     /// Controlled by `agent_auth.capabilities.approval` in `hearth.yaml`.
     /// When `false`, all `/v1/approval-requests` routes are absent.
     pub agent_approval_enabled: bool,
+    /// Whether Phase-D advanced agent routes are active.
+    ///
+    /// Controlled by `agent_auth.capabilities.advanced` in `hearth.yaml`.
+    /// When `false`, all AAT, transaction-token, SPIFFE, and cross-realm
+    /// trust routes are absent from the router.
+    pub agent_advanced_enabled: bool,
 }
 
 impl AppState {
@@ -121,6 +127,7 @@ impl AppState {
             jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
             agent_identity_enabled: false,
             agent_approval_enabled: false,
+            agent_advanced_enabled: false,
         }
     }
 
@@ -156,6 +163,7 @@ impl AppState {
             jwks_rate_limiter: Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX)),
             agent_identity_enabled: false,
             agent_approval_enabled: false,
+            agent_advanced_enabled: false,
         }
     }
 
@@ -188,6 +196,7 @@ impl AppState {
             jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
             agent_identity_enabled: false,
             agent_approval_enabled: false,
+            agent_advanced_enabled: false,
         }
     }
 
@@ -206,6 +215,14 @@ impl AppState {
     /// in the operator config.
     pub fn with_agent_approval(mut self, enabled: bool) -> Self {
         self.agent_approval_enabled = enabled;
+        self
+    }
+
+    /// Enables the Phase-D advanced agent routes (AAT, txn-token, SPIFFE, cross-realm).
+    ///
+    /// Call this during server startup when `agent_auth.capabilities.advanced = true`.
+    pub fn with_agent_advanced(mut self, enabled: bool) -> Self {
+        self.agent_advanced_enabled = enabled;
         self
     }
 

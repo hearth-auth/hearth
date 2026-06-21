@@ -11,5 +11,6 @@ mod sst_compact_crash;
 mod sst_crash;
 mod tiered_crash;
 mod txn_concurrent;
+mod txn_single_use;
 mod wal_crash;
 mod wal_rotation_crash;

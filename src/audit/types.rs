@@ -1078,6 +1078,18 @@ pub struct AuditQuery {
     pub action: Option<AuditAction>,
     /// Maximum number of events to return.
     pub limit: Option<usize>,
+    /// Only events involving this agent ID (§12.4 MUST).
+    ///
+    /// Matches audit events where `metadata.agent_id` equals the provided
+    /// string. Covers delegation (`AgentDelegation`), approval (`ApprovalRequested`,
+    /// `ApprovalGranted`, `ApprovalDenied`), AAT (`AatIssued`, `AatRevoked`),
+    /// and tool-invocation (`ToolInvoked`) events.
+    pub agent_id: Option<String>,
+    /// Only events involving this tool name (§12.4 MUST).
+    ///
+    /// Matches `ToolInvoked` and `ApprovalRequested` events where
+    /// `metadata.tool` equals the provided name.
+    pub tool: Option<String>,
 }
 
 impl AuditQuery {
@@ -1090,6 +1102,8 @@ impl AuditQuery {
             actor: None,
             action: None,
             limit: None,
+            agent_id: None,
+            tool: None,
         }
     }
 }

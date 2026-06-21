@@ -1020,6 +1020,8 @@ pub async fn admin_audit_list(
         actor: params.actor.clone().filter(|s| !s.is_empty()),
         action,
         limit: Some(limit),
+        agent_id: None,
+        tool: None,
     };
 
     match state.audit.query(&query) {
@@ -1232,6 +1234,8 @@ pub async fn admin_api_audit_events(
         actor: params.actor.filter(|s| !s.is_empty()),
         action,
         limit: Some(limit),
+        agent_id: None,
+        tool: None,
     };
 
     match state.audit.query(&query) {
@@ -1302,6 +1306,8 @@ pub async fn admin_audit_export(
         actor: params.actor.filter(|s| !s.is_empty()),
         action,
         limit: Some(limit),
+        agent_id: None,
+        tool: None,
     };
 
     let use_csv = params.format.as_deref() == Some("csv");

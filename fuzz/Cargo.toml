@@ -65,3 +65,8 @@ doc = false
 name = "redirect_uri_parse"
 path = "fuzz_targets/redirect_uri_parse.rs"
 doc = false
+
+[[bin]]
+name = "aat_parse"
+path = "fuzz_targets/aat_parse.rs"
+doc = false

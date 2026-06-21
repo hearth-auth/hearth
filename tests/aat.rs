@@ -4,6 +4,8 @@
 //! - D.1 derivation rules: scope only narrows
 //! - D.1 chain validation
 //! - D.1 adversarial: escalation via crafted AATs rejected
+//! - D.1 adversarial: derive from revoked parent rejected (jti-reuse)
+//! - D.1 adversarial: forged act-chain payload claim rejected
 //! - D.1 revocation propagates to descendants
 
 mod common;
@@ -561,7 +563,369 @@ async fn derive_aat_same_string_child_constraint_rejected() {
     );
 }
 
+// ── D.1.9: Adversarial — tampered payload without re-signing rejected ─────────
+
+/// Decode the AAT payload, inject a wider scope, re-encode *without* re-signing.
+/// The Ed25519 signature covers the original `header.payload` bytes, so modifying
+/// the payload without a new signature is detected as `InvalidToken`.
+#[tokio::test]
+async fn crafted_aat_tampered_scope_payload_rejected() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let resp = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool("search", &["invoke"])],
+                scope: vec!["search:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue root AAT");
+
+    let parts: Vec<&str> = resp.aat.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT must have 3 segments");
+
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let raw = b64.decode(parts[1]).expect("decode payload");
+    let mut claims: serde_json::Value = serde_json::from_slice(&raw).expect("parse claims JSON");
+
+    // Inject a scope not present in the original token.
+    claims["scope"]
+        .as_array_mut()
+        .expect("scope is array")
+        .push(serde_json::Value::String("admin:write".to_string()));
+
+    let tampered = b64.encode(serde_json::to_vec(&claims).expect("re-serialize"));
+    // Reassemble with the *original* signature — which now mismatches.
+    let forged = format!("{}.{}.{}", parts[0], tampered, parts[2]);
+
+    let err = h
+        .identity()
+        .validate_aat(&realm_id, &forged)
+        .expect_err("tampered-payload AAT must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidToken),
+        "expected InvalidToken for tampered payload, got {err:?}"
+    );
+}
+
+/// Inflate the `aat_chain` claim without re-signing to test that the signature
+/// check fires before chain-depth or revocation logic.
+#[tokio::test]
+async fn crafted_aat_forged_chain_depth_rejected() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let resp = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![],
+                scope: vec!["x:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue root AAT");
+
+    let parts: Vec<&str> = resp.aat.split('.').collect();
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let raw = b64.decode(parts[1]).expect("decode payload");
+    let mut claims: serde_json::Value = serde_json::from_slice(&raw).expect("parse claims JSON");
+
+    // Stuff fake JTIs into aat_chain to push apparent depth to the cap (5).
+    let chain = claims["aat_chain"]
+        .as_array_mut()
+        .expect("aat_chain is array");
+    for i in 0..4usize {
+        chain.push(serde_json::Value::String(format!("fake-jti-{i}")));
+    }
+    let tampered = b64.encode(serde_json::to_vec(&claims).expect("re-serialize"));
+    let forged = format!("{}.{}.{}", parts[0], tampered, parts[2]);
+
+    let err = h
+        .identity()
+        .validate_aat(&realm_id, &forged)
+        .expect_err("forged chain must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidToken),
+        "expected InvalidToken for forged chain, got {err:?}"
+    );
+}
+
+/// Cross-sign: take the header+payload from AAT B but the signature from AAT A.
+/// The signature does not cover B's payload, so validation must return `InvalidToken`.
+#[tokio::test]
+async fn crafted_aat_cross_signed_rejected() {
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let aat_a = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id: agent_id.clone(),
+                tools: vec![tool("search", &["invoke"])],
+                scope: vec!["search:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue AAT A");
+
+    let aat_b = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool("admin", &["invoke"])],
+                scope: vec!["admin:write".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue AAT B");
+
+    let parts_a: Vec<&str> = aat_a.aat.split('.').collect();
+    let parts_b: Vec<&str> = aat_b.aat.split('.').collect();
+
+    // Forge: B's header+payload with A's signature.
+    let forged = format!("{}.{}.{}", parts_b[0], parts_b[1], parts_a[2]);
+
+    let err = h
+        .identity()
+        .validate_aat(&realm_id, &forged)
+        .expect_err("cross-signed AAT must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidToken),
+        "expected InvalidToken for cross-signed AAT, got {err:?}"
+    );
+}
+
+// ── D.1 Property tests ────────────────────────────────────────────────────────
+
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn make_harness_sync() -> TestHarness {
+        tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(TestHarness::embedded())
+            .expect("harness init")
+    }
+
+    /// Strategy: non-empty, deduplicated list of scope strings (e.g. `"ab:cde"`).
+    fn scope_list() -> impl Strategy<Value = Vec<String>> {
+        proptest::collection::vec("[a-z]{2,6}:[a-z]{2,8}", 1..=8usize)
+            .prop_map(|mut v| {
+                v.sort();
+                v.dedup();
+                v
+            })
+            .prop_filter("non-empty after dedup", |v| !v.is_empty())
+    }
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+
+        /// Property: for any non-empty scope set `P`, deriving an AAT with scope ⊆ P succeeds;
+        /// deriving with any scope ∉ P returns `AatScopeEscalation`.
+        #[test]
+        fn aat_attenuation_scope_only_narrows(
+            parent_scopes in scope_list(),
+            extra_scope in "[a-z]{2,6}:extra[0-9]",
+        ) {
+            // Make sure the extra scope doesn't accidentally appear in the parent.
+            prop_assume!(!parent_scopes.contains(&extra_scope));
+
+            let h = make_harness_sync();
+            let realm_id = make_realm(&h);
+            let agent_id = make_agent(&h, &realm_id);
+
+            let root = h
+                .identity()
+                .issue_aat(
+                    &realm_id,
+                    &IssueAatRequest {
+                        agent_id,
+                        tools: vec![],
+                        scope: parent_scopes.clone(),
+                        aud: None,
+                        expires_in_secs: Some(3600),
+                    },
+                )
+                .expect("issue root AAT");
+
+            // Deriving with the full parent scope (equal set) must succeed.
+            let equal_result = h.identity().derive_aat(
+                &realm_id,
+                &DeriveAatRequest {
+                    parent_aat: root.aat.clone(),
+                    tools: vec![],
+                    scope: parent_scopes.clone(),
+                    aud: None,
+                    expires_in_secs: Some(60),
+                },
+            );
+            prop_assert!(
+                equal_result.is_ok(),
+                "derive with equal scope must succeed; err={equal_result:?}"
+            );
+
+            // Deriving with a scope NOT in parent must return AatScopeEscalation.
+            let mut escalated = parent_scopes.clone();
+            escalated.push(extra_scope.clone());
+
+            let esc_result = h.identity().derive_aat(
+                &realm_id,
+                &DeriveAatRequest {
+                    parent_aat: root.aat.clone(),
+                    tools: vec![],
+                    scope: escalated,
+                    aud: None,
+                    expires_in_secs: Some(60),
+                },
+            );
+            prop_assert!(
+                matches!(esc_result, Err(IdentityError::AatScopeEscalation)),
+                "derive with extra scope must return AatScopeEscalation; scope={extra_scope}, got={esc_result:?}"
+            );
+        }
+    }
+}
+
 // ── D.1.8: Forged signature is rejected ──────────────────────────────────────
+
+#[tokio::test]
+async fn crafted_aat_jti_reuse_derive_from_revoked_rejected() {
+    // A revoked AAT must not be usable as a parent for derivation.
+    // This covers the "mismatched jti reuse" adversarial case: the
+    // revoked JTI is still present in the aat_chain, making it invalid.
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let root = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool("send_email", &["invoke"])],
+                scope: vec!["email:send".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue root AAT");
+
+    // Extract the JTI via validate_aat (returns AatClaims with the jti field).
+    let claims = h
+        .identity()
+        .validate_aat(&realm_id, &root.aat)
+        .expect("validate root AAT to extract JTI");
+    let jti = claims.jti.clone();
+
+    // Revoke the root AAT.
+    h.identity()
+        .revoke_aat(&realm_id, &jti)
+        .expect("revoke root AAT");
+
+    // Attempt to derive from the revoked parent — must fail.
+    let err = h
+        .identity()
+        .derive_aat(
+            &realm_id,
+            &DeriveAatRequest {
+                parent_aat: root.aat,
+                tools: vec![tool("send_email", &["invoke"])],
+                scope: vec!["email:send".to_string()],
+                aud: None,
+                expires_in_secs: Some(60),
+            },
+        )
+        .expect_err("derive from revoked parent must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::AatRevoked),
+        "expected AatRevoked when parent JTI is revoked, got {err:?}"
+    );
+}
+
+// ── D.1.9: Forged act-chain claim is rejected ────────────────────────────────
+
+#[tokio::test]
+async fn crafted_aat_forged_act_chain_rejected() {
+    // Tampering with the aat_chain payload claim invalidates the Ed25519 signature.
+    // This proves the chain is tamper-evident: you cannot inject a false ancestor.
+    let h = TestHarness::embedded().await.expect("harness init");
+    let realm_id = make_realm(&h);
+    let agent_id = make_agent(&h, &realm_id);
+
+    let resp = h
+        .identity()
+        .issue_aat(
+            &realm_id,
+            &IssueAatRequest {
+                agent_id,
+                tools: vec![tool("search", &["invoke"])],
+                scope: vec!["search:read".to_string()],
+                aud: None,
+                expires_in_secs: Some(300),
+            },
+        )
+        .expect("issue root AAT");
+
+    // Decode the payload, inject a fake ancestor JTI into aat_chain.
+    let parts: Vec<&str> = resp.aat.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT must have 3 segments");
+    let payload_json =
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, parts[1])
+            .expect("decode payload");
+    let mut claims: serde_json::Value =
+        serde_json::from_slice(&payload_json).expect("parse claims JSON");
+
+    // Inject a fake JTI into the aat_chain to forge a longer delegation chain.
+    if let Some(chain) = claims.get_mut("aat_chain").and_then(|v| v.as_array_mut()) {
+        chain.insert(0, serde_json::json!("fake-ancestor-jti-00000000"));
+    }
+
+    let forged_payload = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        serde_json::to_vec(&claims).expect("re-serialize"),
+    );
+
+    // Reassemble: original header + tampered payload + original signature.
+    let forged = format!("{}.{}.{}", parts[0], forged_payload, parts[2]);
+
+    let err = h
+        .identity()
+        .validate_aat(&realm_id, &forged)
+        .expect_err("forged act-chain AAT must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidToken),
+        "expected InvalidToken for tampered aat_chain, got {err:?}"
+    );
+}
 
 #[tokio::test]
 async fn forged_aat_signature_rejected() {

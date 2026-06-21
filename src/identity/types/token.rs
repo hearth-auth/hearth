@@ -858,7 +858,7 @@ pub struct AatClaims {
 ///
 /// Used by realm admins or trusted systems. For agent-to-agent delegation
 /// the agent calls `derive_aat` with its existing parent AAT.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IssueAatRequest {
     /// Agent the AAT is issued for.
     pub agent_id: AgentId,
@@ -875,7 +875,7 @@ pub struct IssueAatRequest {
 /// Request to derive a child AAT from an existing parent AAT.
 ///
 /// The child's permissions MUST be a subset of the parent's.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeriveAatRequest {
     /// The parent AAT JWT string.
     pub parent_aat: String,
@@ -890,7 +890,7 @@ pub struct DeriveAatRequest {
 }
 
 /// Successful AAT issuance or derivation response.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AatResponse {
     /// The signed AAT JWT.
     pub aat: String,
@@ -926,7 +926,7 @@ pub struct TransactionTokenClaims {
 }
 
 /// Request to issue a single-use transaction token.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateTransactionTokenRequest {
     /// The agent issuing the request (must be authenticated).
     pub requesting_agent_id: AgentId,
@@ -939,7 +939,7 @@ pub struct CreateTransactionTokenRequest {
 }
 
 /// Successful transaction token response.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionTokenResponse {
     /// The signed transaction token JWT.
     pub token: String,
@@ -973,7 +973,7 @@ pub struct CrossRealmTrustPolicy {
 }
 
 /// Request to create a cross-realm trust policy.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateCrossRealmPolicyRequest {
     /// The realm to trust (agents originate there).
     pub source_realm_id: RealmId,
@@ -1003,7 +1003,7 @@ pub struct SpiffeIdentityMapping {
 }
 
 /// Request to register a SPIFFE ID → `AgentId` mapping.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisterSpiffeIdRequest {
     /// Agent to map.
     pub agent_id: AgentId,

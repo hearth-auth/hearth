@@ -97,9 +97,36 @@ pub struct Metrics {
     /// Sampled once per sweep pass across all realms. Useful for capacity
     /// planning and detecting abnormal fingerprint accumulation.
     pub dfp_keys_active: Gauge,
+
+    // ── Agent Auth (Phase A–D) ──────────────────────────────────────────────
+    /// Total agent delegation token exchanges completed.
+    ///
+    /// Labels: `realm` (realm UUID), `outcome` (`success` | `failure`).
+    pub agent_delegation_total: CounterVec,
+
+    /// Total approval request state transitions.
+    ///
+    /// Labels: `realm` (realm UUID), `transition` (`requested` | `granted` | `denied` | `expired`).
+    pub agent_approval_total: CounterVec,
+
+    /// Total Attenuating Authorization Tokens issued or derived.
+    ///
+    /// Labels: `realm` (realm UUID), `kind` (`root` | `derived`).
+    pub agent_aat_issued_total: CounterVec,
+
+    /// Total AAT revocations.
+    ///
+    /// Labels: `realm` (realm UUID).
+    pub agent_aat_revoked_total: CounterVec,
+
+    /// Total transaction token operations.
+    ///
+    /// Labels: `realm` (realm UUID), `op` (`issued` | `consumed` | `replayed`).
+    pub agent_txn_token_total: CounterVec,
 }
 
 impl Metrics {
+    #[allow(clippy::too_many_lines)]
     fn new() -> Self {
         let registry = Registry::new();
 
@@ -189,6 +216,63 @@ impl Metrics {
             .register(Box::new(dfp_keys_active.clone()))
             .expect("metric registration succeeds on a fresh registry");
 
+        let agent_delegation_total = CounterVec::new(
+            Opts::new(
+                "hearth_agent_delegation_total",
+                "Total agent delegation token exchanges",
+            ),
+            &["realm", "outcome"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(agent_delegation_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let agent_approval_total = CounterVec::new(
+            Opts::new(
+                "hearth_agent_approval_total",
+                "Total approval request state transitions",
+            ),
+            &["realm", "transition"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(agent_approval_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let agent_aat_issued_total = CounterVec::new(
+            Opts::new(
+                "hearth_agent_aat_issued_total",
+                "Total Attenuating Authorization Tokens issued or derived",
+            ),
+            &["realm", "kind"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(agent_aat_issued_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let agent_aat_revoked_total = CounterVec::new(
+            Opts::new("hearth_agent_aat_revoked_total", "Total AAT revocations"),
+            &["realm"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(agent_aat_revoked_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
+        let agent_txn_token_total = CounterVec::new(
+            Opts::new(
+                "hearth_agent_txn_token_total",
+                "Total transaction token operations",
+            ),
+            &["realm", "op"],
+        )
+        .expect("metric descriptor is valid");
+        registry
+            .register(Box::new(agent_txn_token_total.clone()))
+            .expect("metric registration succeeds on a fresh registry");
+
         Self {
             registry,
             http_request_duration_seconds,
@@ -199,6 +283,11 @@ impl Metrics {
             audit_integrity_failures_total,
             dfp_sweeper_evicted_total,
             dfp_keys_active,
+            agent_delegation_total,
+            agent_approval_total,
+            agent_aat_issued_total,
+            agent_aat_revoked_total,
+            agent_txn_token_total,
         }
     }
 

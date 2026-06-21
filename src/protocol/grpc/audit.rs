@@ -77,6 +77,8 @@ fn proto_query_to_domain(q: &pb::AuditQuery, realm_id: RealmId) -> AuditQuery {
         actor: q.actor.clone(),
         action: q.action.and_then(proto_action_to_domain),
         limit: q.limit.map(|v| v as usize),
+        agent_id: None,
+        tool: None,
     }
 }
 

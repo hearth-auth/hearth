@@ -21,6 +21,7 @@ use tracing::Level;
 // ── Sub-modules ──────────────────────────────────────────────────────────────
 
 mod admin;
+mod advanced;
 mod agents;
 mod approval;
 mod auth;
@@ -197,6 +198,11 @@ pub fn router(state: Arc<AppState>) -> Router {
     if state.agent_approval_enabled {
         base = base.merge(approval::routes());
         base = base.merge(tool_invocation::routes());
+    }
+
+    // Register Phase-D advanced routes (AAT, txn-token, SPIFFE, cross-realm).
+    if state.agent_advanced_enabled {
+        base = base.merge(advanced::routes());
     }
 
     // Registered only in dev mode so the route is absent from the table in

@@ -774,7 +774,8 @@ onboarding:
 # agent_auth:
 #   capabilities:
 #     identity: true   # enables /v1/agents, /.well-known/agent.json, gRPC stubs
-#
-# Future phases (not yet implemented — setting these is a startup error):
-#   delegation: false  # Phase C: act-as delegation + AATs
-#   mcp: false         # Phase B: MCP authorization server + protected resources
+#     approval: true   # enables /v1/approval-requests + webhook delivery (Phase C)
+#                      # requires: identity = true
+#     advanced: true   # enables Phase D: AATs, transaction tokens, cross-realm trust,
+#                      # SPIFFE/mTLS workload identity
+#                      # requires: identity = true

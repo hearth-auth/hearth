@@ -9,6 +9,18 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 
 ### Security
 
+- **DPoP JKT thumbprint blocklist (§10.4)** — operators can block a DPoP JWK thumbprint via the
+  admin API (`POST /v1/dpop/block-jkt`). Blocked thumbprints are maintained in an in-memory
+  projection loaded at startup and updated on each block/unblock call. Tokens whose `cnf.jkt`
+  matches a blocked entry are rejected at `validate_token` time with `HEARTH_DPOP_JKT_BLOCKED`
+  without any storage syscall on the hot path. New engine methods: `block_dpop_jkt`,
+  `unblock_dpop_jkt`, `is_dpop_jkt_blocked`. New error variant: `DPopJktBlocked`. (HEA-1408 §10.4)
+- **Hot-path JTI revocation projection (§10.5)** — sessionless token revocation now populates an
+  `ArcSwap`-backed in-memory map (`revoked_jti_cache`) at startup and on each revoke call.
+  `validate_token`, introspection, and `decide_permission` check this map atomically instead of
+  hitting storage; each `rcu()` sweep evicts expired entries. Revocation survives restarts and is
+  consistent across Raft nodes via WAL replay. (HEA-1408 §10.5)
+
 - **SPIFFE SVID validation hardened** — `extract_spiffe_id_from_der` now uses `x509-parser` to
   extract the SPIFFE identity exclusively from the URI-type SubjectAlternativeName extension;
   a `spiffe://` string in Subject CN, Issuer, or any non-SAN field is no longer accepted as a
@@ -22,6 +34,14 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
   per-`txn_id` advisory lock across the consumed-key check and write, closing a TOCTOU
   window where two concurrent callers presenting the same token could both pass the
   `get(consumed_key)` guard before either wrote the consumed marker (HEA-1445).
+
+### Changed
+
+- **`--dev` auto-enables all agent-auth capabilities** — running `hearth serve --dev` now
+  unconditionally enables `agent_auth.capabilities.{identity,approval,advanced}`, so Phase D
+  routes (AATs, transaction tokens, SPIFFE, cross-realm) are available out of the box in
+  development without requiring `hearth.yaml` edits. Production deployments (without `--dev`)
+  are unaffected: capabilities remain `false` unless explicitly set. (HEA-1408)
 
 ### Added
 
@@ -58,6 +78,21 @@ Hearth has not yet cut a versioned release; all shipped work appears under `[Unr
 - **Phase D proto backfill** — `AuditAction` proto enum gains 6 Phase D variants
   (110–115: `AatIssued`, `AatRevoked`, `TransactionTokenIssued`, `CrossRealmTokenIssued`,
   `SpiffeIdMapped`, `SpiffeAuthSuccess`). (HEA-1424)
+- **Phase D HTTP REST API** — `POST /v1/aats`, `POST /v1/aats/derive`, `POST /v1/aats/validate`,
+  `DELETE /v1/aats/{jti}`, `POST /v1/transaction-tokens`, `POST /v1/transaction-tokens/consume`,
+  `POST /v1/spiffe-mappings`, `GET|DELETE /v1/spiffe-mappings/{agent_id}`,
+  `POST|GET /v1/cross-realm-policies`, `GET|DELETE /v1/cross-realm-policies/{id}`.
+  All gated by `agent_auth.capabilities.advanced = true`. (HEA-1408)
+- **Prometheus metrics for agent operations** — five new counters:
+  `hearth_agent_delegation_total` (realm, outcome), `hearth_agent_approval_total` (realm, transition),
+  `hearth_agent_aat_issued_total` (realm, kind), `hearth_agent_aat_revoked_total` (realm),
+  `hearth_agent_txn_token_total` (realm, op). (HEA-1408)
+- **AAT fuzz target** — `fuzz/fuzz_targets/aat_parse.rs` exercises `decode_claims_unverified`
+  and `verify_token_signature` on arbitrary byte sequences covering AAT, agentic-JWT, and
+  actor-token parsing paths. (HEA-1408)
+- **`AuditQuery` agent/chain/tool filters (§12.4 MUST)** — `AuditQuery` gains `agent_id` and
+  `tool` optional fields that match against `metadata.agent_id` and `metadata.tool` in the
+  stored event JSON, enabling per-agent and per-tool audit query scoping. (HEA-1408)
 
 ### Fixed
 

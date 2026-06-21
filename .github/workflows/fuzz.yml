@@ -58,6 +58,7 @@ jobs:
           - saml_xml_parse
           - token_exchange_parse
           - redirect_uri_parse
+          - aat_parse
 
     steps:
       - name: Checkout
