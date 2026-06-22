@@ -17,7 +17,7 @@
     "noFallthroughCasesInSwitch": true,
     "types": ["vite/client"],
     "paths": {
-      "@hearth/sdk": ["../../../sdks/typescript/src/index.ts"]
+      "@hearth-auth/sdk": ["../../../sdks/typescript/src/index.ts"]
     }
   },
   "include": ["src"],

@@ -4,6 +4,9 @@ version = "0.2.0"
 edition = "2021"
 description = "Hearth identity platform Rust SDK"
 license = "MIT"
+repository = "https://github.com/hearth-auth/hearth"
+homepage = "https://github.com/hearth-auth/hearth"
+documentation = "https://docs.rs/hearth-sdk"
 
 [workspace]
 

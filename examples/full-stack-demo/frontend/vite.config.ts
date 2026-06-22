@@ -13,7 +13,7 @@ export default defineConfig({
     alias: {
       // Resolve the local SDK from TypeScript sources so Vite
       // handles transpilation rather than requiring a build step.
-      "@hearth/sdk": resolve(
+      "@hearth-auth/sdk": resolve(
         __dirname,
         "../../../sdks/typescript/src/index.ts",
       ),

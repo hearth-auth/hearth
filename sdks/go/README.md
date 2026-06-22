@@ -7,13 +7,13 @@ Go client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 ## Installation
 
 ```bash
-go get github.com/anthropics/hearth/sdks/go
+go get github.com/hearth-auth/hearth/sdks/go
 ```
 
 ## Quick start
 
 ```go
-import "github.com/anthropics/hearth/sdks/go/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/hearth"
 
 client := hearth.NewClient("https://hearth.example.com", "<your-realm-id>")
 ```
@@ -37,7 +37,7 @@ import (
     "encoding/hex"
     "fmt"
 
-    "github.com/anthropics/hearth/sdks/go/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
 func pkce() (verifier, challenge string) {
@@ -236,7 +236,7 @@ import (
     "errors"
     "fmt"
 
-    "github.com/anthropics/hearth/sdks/go/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
 tokens, err := client.ExchangeCode(ctx, req)

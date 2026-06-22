@@ -24,7 +24,7 @@ import { v5 as uuidv5 } from "uuid";
 import { renderError, renderIndex, renderSignedIn } from "./views.js";
 
 /**
- * Deliberately NOT using `@hearth/sdk` — this example uses raw `fetch`
+ * Deliberately NOT using `@hearth-auth/sdk` — this example uses raw `fetch`
  * calls so the OAuth 2.0 / OIDC HTTP contract is visible in one file.
  * Integrators building real apps should prefer the SDK (see
  * `sdks/typescript/src/client.ts`), but the teaching value of this

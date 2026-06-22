@@ -1,4 +1,4 @@
-import { useHasRole, useHasPermission } from "@hearth/sdk";
+import { useHasRole, useHasPermission } from "@hearth-auth/sdk";
 
 interface RoleGateProps {
   /** Render children when the user has this role. */

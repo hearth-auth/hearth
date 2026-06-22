@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Multi-arch container image published to GHCR** — release tags now build `linux/amd64` + `linux/arm64`
+  images via `docker buildx` and push to `ghcr.io/hearth-auth/hearth`. Each image is tagged
+  `vX.Y.Z`, `sha-<rev>`, and `latest` (non-prerelease only). The pushed digest is cosign-signed
+  (keyless OIDC) and a CycloneDX SBOM attestation is attached via `cosign attest` (HEA-1481).
+- **Helm chart published to GHCR as a signed OCI artifact** — release tags now package and push
+  the chart to `oci://ghcr.io/hearth-auth/charts/hearth`; the pushed digest is cosign-signed
+  (keyless OIDC). Install with:
+  `helm pull oci://ghcr.io/hearth-auth/charts/hearth --version <tag>` (HEA-1482).
+
+### Fixed
+- **Go SDK module path corrected** — `go.mod` now declares `module github.com/hearth-auth/hearth/sdks/go`,
+  matching the published repository URL. The previous path (`github.com/anthropics/hearth/sdks/go`)
+  caused `go get` to fail with a 404 (HEA-1479).
+
 ## [1.0.0] — 2026-06-21
 
 ### Security
@@ -1542,7 +1557,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `RequiredActionError` when the returned token has `token_type === "required_action"`
   or the callback URL carries `required_action_redirect_uri`.
 
-- **Node SDK spec conformance (HEA-959)** — `@hearth/node` now fully implements the
+- **Node SDK spec conformance (HEA-959)** — `@hearth-auth/node` now fully implements the
   SDK spec (§4 Claims, §5 Errors, §6 Middleware, §12 AdminClient):
   - Claims: `audiences()` (was `audience()`), `expiry()` (was `expiresAt()`), plus new
     `jwtID()`, `inGroup()`, `inOrg()`, `tokenType()`, `organizationId()`, `orgGroups()`.

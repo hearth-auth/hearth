@@ -1,4 +1,4 @@
-/** @hearth/node — server-side Hearth SDK for Node.js. Public API surface. */
+/** @hearth-auth/node — server-side Hearth SDK for Node.js. Public API surface. */
 
 // §1 — Configuration & unified client
 export { HearthClient } from "./client.js";

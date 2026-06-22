@@ -216,7 +216,7 @@ All server-side SDKs (node, go, python) must provide HTTP middleware that:
 6. On a token where `token_type === "required_action"`: MUST respond with `401 Unauthorized` and throw `RequiredActionError` (not a generic `UnauthorizedError`). The `requiredActions` field MUST be populated from the `required_actions` claim in the JWT. This token is valid but scoped only to completing the required actions — it MUST NOT be accepted for general API access.
 7. Does not call `next` on auth failure.
 
-The browser SDK (`@hearth/browser`) is exempt from the middleware requirement but must provide equivalent helpers for SPA route guards.
+The browser SDK (`@hearth-auth/browser`) is exempt from the middleware requirement but must provide equivalent helpers for SPA route guards.
 
 **Framework adapters** (Express, Fastify, Flask, FastAPI, net/http, chi, gin) are bundled with the SDK or in a companion package. The core SDK has no framework dependency.
 

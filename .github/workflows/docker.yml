@@ -1,0 +1,197 @@
+name: Docker
+
+# Build + publish multi-arch container image to GHCR (HEA-1481).
+#
+# Trust chain for each release:
+#   image ──cosign──▶  OCI signature record (Sigstore Fulcio / Rekor, keyless OIDC)
+#   image ──cosign──▶  CycloneDX SBOM attestation (predicate attached to image digest)
+#
+# Cosign OIDC identity for post-release verification:
+#   cosign verify \
+#     --certificate-identity-regexp \
+#     '^https://github\.com/hearth-auth/hearth/\.github/workflows/docker\.yml@refs/tags/v' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     ghcr.io/hearth-auth/hearth:<tag>
+#
+# SBOM verification:
+#   cosign verify-attestation --type cyclonedx \
+#     --certificate-identity-regexp \
+#     '^https://github\.com/hearth-auth/hearth/\.github/workflows/docker\.yml@refs/tags/v' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     ghcr.io/hearth-auth/hearth:<tag>
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'src/**'
+  push:
+    # Release-tag-only publish. No push on branch commits — images are only
+    # promoted from signed, tagged release commits. Strict semver pattern
+    # mirrors release.yml (HEA-791 SR-3) to prevent arbitrary ref names from
+    # minting Sigstore certs under the project identity.
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+# Minimal default; build-and-push escalates to packages:write + id-token:write.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR builds; always finish tag-push runs (they push to the registry).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-push:
+    name: "build + publish"
+    runs-on: ubuntu-latest
+    # Multi-arch emulation via QEMU is slow; arm64 emulation of a Rust
+    # release build can take 25–40 min.
+    timeout-minutes: 60
+
+    permissions:
+      contents: read
+      packages: write    # push to ghcr.io
+      id-token: write    # cosign keyless OIDC token exchange
+
+    outputs:
+      image-digest: ${{ steps.push.outputs.digest }}
+      image-tags:   ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # QEMU allows the x86_64 runner to emulate arm64. This avoids the need
+      # for self-hosted ARM runners. Build time is longer than native (~2–3x),
+      # but the emulation is transparent to the Dockerfile — no changes needed.
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.6.0
+
+      # Login is only needed for push events (release tags).
+      # PR builds exercise the build path without writing to the registry.
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derives tags and OCI labels from git metadata.
+      #
+      # Tag policy:
+      #   type=semver,pattern=v{{version}}  → vX.Y.Z (e.g. v1.2.3)
+      #   type=sha,prefix=sha-,format=short → sha-<7-char-rev>
+      #   flavor: latest=auto               → `latest` only for non-prerelease semver
+      #                                       (v1.2.3 → latest; v1.2.3-rc.1 → no latest)
+      - name: Extract Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbea7a8f1214d21cf08cd1cfb1e1 # v5.7.0
+        with:
+          images: ghcr.io/hearth-auth/hearth
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=sha,prefix=sha-,format=short
+          flavor: |
+            latest=auto
+
+      # Build multi-arch manifest (amd64 + arm64) and push on release tags.
+      # GHA layer cache (type=gha) persists base + dep layers across runs so
+      # unchanged dependencies are not re-downloaded for every tag push.
+      #
+      # BUILD_VERSION: the tag name (e.g. v1.2.3). Dockerfile defaults to "dev".
+      # BUILD_REVISION: the full commit SHA. Dockerfile defaults to "unknown".
+      # provenance: false — SLSA provenance for binaries is handled by
+      #   release.yml (slsa-github-generator); the container image ships only
+      #   the cosign signature + CycloneDX SBOM attestation added below.
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@67a2d409b0a6135e7f3d85c5b6534c3e2e4e5f0a # v6.7.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      # ── Post-push: signing + SBOM attestation (release tags only) ────────────
+      #
+      # Skipped on PR builds — there is no pushed digest to reference, and the
+      # cosign OIDC token would identify a PR commit, not a release.
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      # Sign the image manifest digest rather than a tag. Tag references are
+      # mutable; the digest is not. A compromised registry could remap a tag
+      # to a different image — signing by digest closes that gap.
+      - name: Sign image digest (keyless OIDC)
+        if: github.event_name != 'pull_request'
+        run: |
+          cosign sign --yes \
+            "ghcr.io/hearth-auth/hearth@${{ steps.push.outputs.digest }}"
+
+      # Generate CycloneDX SBOM via cargo-cyclonedx — same toolchain and
+      # version as release.yml — so the binary SBOM and image SBOM share the
+      # same dependency graph representation and trust chain.
+      - name: Set up Rust toolchain (cargo-cyclonedx)
+        if: github.event_name != 'pull_request'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-cyclonedx
+        if: github.event_name != 'pull_request'
+        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285 # v2
+        with:
+          tool: cargo-cyclonedx@0.5.9
+
+      - name: Generate CycloneDX SBOM
+        if: github.event_name != 'pull_request'
+        run: cargo cyclonedx --format json --spec-version 1.4
+
+      # Attach SBOM as a cosign attestation on the image digest. Stored in
+      # the registry alongside the image as a linked OCI artifact — no
+      # external storage required.
+      - name: Attach CycloneDX SBOM attestation
+        if: github.event_name != 'pull_request'
+        run: |
+          cosign attest --yes \
+            --predicate hearth.cdx.json \
+            --type cyclonedx \
+            "ghcr.io/hearth-auth/hearth@${{ steps.push.outputs.digest }}"
+
+      - name: Summarize build
+        if: always()
+        run: |
+          {
+            echo "## Docker build summary"
+            echo ""
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "Build-only run (PR — no push, no signing)."
+            else
+              echo "| | |"
+              echo "| --- | --- |"
+              echo "| **Image** | \`ghcr.io/hearth-auth/hearth\` |"
+              echo "| **Digest** | \`${{ steps.push.outputs.digest }}\` |"
+              tags="${{ steps.meta.outputs.tags }}"
+              echo "| **Tags** | ${tags//$'\n'/ } |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

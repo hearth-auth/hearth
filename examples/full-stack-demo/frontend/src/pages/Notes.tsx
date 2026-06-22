@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { useHasRole } from "@hearth/sdk";
+import { useHasRole } from "@hearth-auth/sdk";
 import UserMenu from "../components/UserMenu.js";
 import RoleGate from "../components/RoleGate.js";
 import { api, type Note } from "../api.js";

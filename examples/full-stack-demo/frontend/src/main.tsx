@@ -6,7 +6,7 @@ import {
   createHearth,
   createHearthAuth,
   getAccessToken,
-} from "@hearth/sdk";
+} from "@hearth-auth/sdk";
 import App from "./App.js";
 import "./index.css";
 

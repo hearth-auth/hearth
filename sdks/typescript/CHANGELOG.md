@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `@hearth/browser` and `@hearth/node` are documented here.
+All notable changes to `@hearth-auth/browser` and `@hearth-auth/node` are documented here.
 
 ## [Unreleased]
 

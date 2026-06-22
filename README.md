@@ -673,17 +673,17 @@ Per-realm variants of the core OAuth/OIDC endpoints are available at `/realms/{r
 
 Two first-party SDKs live under [`sdks/`](sdks):
 
-**TypeScript** — [`sdks/typescript/`](sdks/typescript) (package `@hearth/sdk`)
+**TypeScript** — [`sdks/typescript/`](sdks/typescript) (package `@hearth-auth/sdk`)
 
 ```ts
-import { HearthClient } from "@hearth/sdk";
+import { HearthClient } from "@hearth-auth/sdk";
 const hearth = new HearthClient({ baseUrl: "https://auth.example.com", realmId });
 ```
 
-**Go** — [`sdks/go/`](sdks/go) (module `github.com/anthropics/hearth/sdks/go`)
+**Go** — [`sdks/go/`](sdks/go) (module `github.com/hearth-auth/hearth/sdks/go`)
 
 ```go
-import "github.com/anthropics/hearth/sdks/go/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/hearth"
 client := hearth.NewClient("https://auth.example.com", realmID)
 ```
 

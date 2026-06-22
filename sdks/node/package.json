@@ -1,6 +1,6 @@
 {
-  "name": "@hearth/node",
-  "version": "1.0.0",
+  "name": "@hearth-auth/node",
+  "version": "0.0.1",
   "description": "Hearth server-side Node.js SDK — JWKS verification, token introspection, Express/Fastify middleware",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -13,7 +13,9 @@
       "require": "./dist/index.cjs"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run --coverage",
@@ -24,12 +26,15 @@
     "jose": "5.9.6"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^3.2.0",
     "typescript": "^5.5.0",
-    "vitest": "^3.2.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^3.2.0"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

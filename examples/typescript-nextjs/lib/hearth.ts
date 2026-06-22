@@ -1,4 +1,4 @@
-import { HearthApiClient, createHearth } from "@hearth/sdk";
+import { HearthApiClient, createHearth } from "@hearth-auth/sdk";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 
 export const CLIENT_ID = process.env.HEARTH_CLIENT_ID!;

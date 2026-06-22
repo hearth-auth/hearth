@@ -1,0 +1,48 @@
+name: SDK publish — rust (dry-run)
+
+# Dry-run gate for the hearth-sdk crate on crates.io.
+# `cargo publish --dry-run` packs the crate and validates metadata without
+# pushing. Flip to live in HEA-1487 once CARGO_REGISTRY_TOKEN is provisioned.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/rust/**"
+      - ".github/workflows/sdk-publish-rust.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/rust/**"
+      - ".github/workflows/sdk-publish-rust.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-dry-run:
+    name: cargo publish --dry-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: sdks/rust
+
+      - name: Dry-run publish
+        # CARGO_REGISTRY_TOKEN is not required for --dry-run; this validates
+        # Cargo.toml metadata and crate structure against crates.io rules.
+        working-directory: sdks/rust
+        run: cargo publish --dry-run

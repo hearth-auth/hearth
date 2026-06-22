@@ -1,0 +1,53 @@
+name: SDK publish — php (validate)
+
+# Packagist publishing is webhook-triggered (no push command exists), so the
+# equivalent gate is `composer validate --strict` plus a no-dev install to
+# confirm all production dependencies resolve. The webhook to Packagist is
+# configured in HEA-1487.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/php/**"
+      - ".github/workflows/sdk-publish-php.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/php/**"
+      - ".github/workflows/sdk-publish-php.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: composer validate --strict
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2 # TODO(HEA-1487): pin to SHA
+        with:
+          php-version: "8.3"
+          extensions: json, sodium
+          tools: composer:v2
+
+      - name: Validate composer.json schema
+        working-directory: sdks/php
+        run: composer validate --strict --no-check-publish
+
+      - name: Install production dependencies
+        working-directory: sdks/php
+        run: composer install --no-dev --prefer-dist --no-interaction --no-scripts
+
+      - name: Verify autoloader
+        working-directory: sdks/php
+        run: composer dump-autoload --no-dev --optimize

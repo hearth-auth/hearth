@@ -1,4 +1,4 @@
-/** §1 — HearthClient: unified entry point for the @hearth/node SDK. */
+/** §1 — HearthClient: unified entry point for the @hearth-auth/node SDK. */
 
 import type { HearthConfig } from "./config.js";
 import { resolveConfig } from "./config.js";

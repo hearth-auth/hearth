@@ -28,7 +28,7 @@ The required files are:
 ### `projects/hearth/project.yaml`
 
 ```yaml
-homepage: "https://github.com/anthropics/hearth"
+homepage: "https://github.com/hearth-auth/hearth"
 language: rust
 primary_contact: "therecluse26@protonmail.com"
 auto_ccs:
@@ -68,7 +68,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 https://github.com/anthropics/hearth $SRC/hearth
+RUN git clone --depth 1 https://github.com/hearth-auth/hearth $SRC/hearth
 COPY build.sh $SRC/
 WORKDIR $SRC/hearth
 ```

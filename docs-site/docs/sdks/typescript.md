@@ -7,13 +7,13 @@ description: Add Hearth authentication and RBAC to a TypeScript app in under 5 m
 
 # TypeScript SDK quickstart
 
-Get your first protected route in under 5 minutes using `@hearth/sdk`.
+Get your first protected route in under 5 minutes using `@hearth-auth/sdk`.
 
 ## Install
 
 ```bash
-npm install @hearth/sdk
-# or: yarn add @hearth/sdk  |  pnpm add @hearth/sdk
+npm install @hearth-auth/sdk
+# or: yarn add @hearth-auth/sdk  |  pnpm add @hearth-auth/sdk
 ```
 
 **Peer dependency:** React 17–19 is required only if you use the `HearthProvider`
@@ -53,7 +53,7 @@ curl -X POST "http://127.0.0.1:8420/admin/realms/$REALM_ID/clients" \
 ## Initialize the client
 
 ```typescript
-import { HearthClient } from "@hearth/sdk";
+import { HearthClient } from "@hearth-auth/sdk";
 
 const client = new HearthClient({
   baseUrl: "http://127.0.0.1:8420",
@@ -140,7 +140,7 @@ import {
   useHasPermission,
   useHasRole,
   useInGroup,
-} from "@hearth/sdk";
+} from "@hearth-auth/sdk";
 
 const hearth = createHearth({
   baseUrl: "http://127.0.0.1:8420",
@@ -174,7 +174,7 @@ function NavBar() {
 ### Non-React (synchronous facade)
 
 ```typescript
-import { createHearth } from "@hearth/sdk";
+import { createHearth } from "@hearth-auth/sdk";
 
 const hearth = createHearth({
   baseUrl: "http://127.0.0.1:8420",
@@ -228,7 +228,7 @@ rotation is handled automatically.
 All `HearthClient` methods throw `HearthError` on non-2xx responses.
 
 ```typescript
-import { HearthClient, HearthError } from "@hearth/sdk";
+import { HearthClient, HearthError } from "@hearth-auth/sdk";
 
 try {
   const tokens = await client.exchangeCode({ ... });
