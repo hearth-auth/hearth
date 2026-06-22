@@ -1557,7 +1557,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `RequiredActionError` when the returned token has `token_type === "required_action"`
   or the callback URL carries `required_action_redirect_uri`.
 
-- **Node SDK spec conformance (HEA-959)** — `@hearth/node` now fully implements the
+- **Node SDK spec conformance (HEA-959)** — `@hearth-auth/node` now fully implements the
   SDK spec (§4 Claims, §5 Errors, §6 Middleware, §12 AdminClient):
   - Claims: `audiences()` (was `audience()`), `expiry()` (was `expiresAt()`), plus new
     `jwtID()`, `inGroup()`, `inOrg()`, `tokenType()`, `organizationId()`, `orgGroups()`.

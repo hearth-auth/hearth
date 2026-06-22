@@ -148,7 +148,7 @@ import {
   HearthProvider,
   useHasRole,
   useHasPermission,
-} from "@hearth/sdk";
+} from "@hearth-auth/sdk";
 
 const client = new HearthClient({
   baseUrl: "https://hearth.example.com",

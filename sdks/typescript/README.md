@@ -7,11 +7,11 @@ TypeScript client for the [Hearth](https://github.com/hearth-auth/hearth) identi
 ## Installation
 
 ```bash
-npm install @hearth/sdk
+npm install @hearth-auth/sdk
 # or
-yarn add @hearth/sdk
+yarn add @hearth-auth/sdk
 # or
-pnpm add @hearth/sdk
+pnpm add @hearth-auth/sdk
 ```
 
 **Peer dependencies:** React (`>=17 <20`) is optional. Only required for the `HearthProvider` / `useHasPermission` hooks.
@@ -21,7 +21,7 @@ pnpm add @hearth/sdk
 ## Quick start
 
 ```typescript
-import { createHearth, HearthClient } from "@hearth/sdk";
+import { createHearth, HearthClient } from "@hearth-auth/sdk";
 
 // Low-level HTTP client — auth flows, token exchange, admin ops
 const client = new HearthClient({
@@ -46,7 +46,7 @@ const hearth = createHearth({
 PKCE is the secure default for every OAuth authorization code flow — required for public clients, recommended for confidential clients.
 
 ```typescript
-import { HearthClient } from "@hearth/sdk";
+import { HearthClient } from "@hearth-auth/sdk";
 import { createHash, randomBytes } from "crypto"; // Node.js built-in
 
 const client = new HearthClient({
@@ -155,7 +155,7 @@ Use `client.permissions()` when you need post-issuance accuracy (e.g., after an 
 
 ## React integration
 
-The React hooks are exported from the main `@hearth/sdk` package. No subpath import needed.
+The React hooks are exported from the main `@hearth-auth/sdk` package. No subpath import needed.
 
 ```tsx
 import {
@@ -165,7 +165,7 @@ import {
   useHasRole,
   useInGroup,
   useInOrg,
-} from "@hearth/sdk";
+} from "@hearth-auth/sdk";
 
 // 1. Create the facade once at app startup
 const hearth = createHearth({
@@ -311,7 +311,7 @@ await admin.deleteRealm("<realm-id>");
 All methods throw `HearthError` on non-2xx responses.
 
 ```typescript
-import { HearthClient, HearthError } from "@hearth/sdk";
+import { HearthClient, HearthError } from "@hearth-auth/sdk";
 
 try {
   const tokens = await client.exchangeCode({ ... });
@@ -333,7 +333,7 @@ try {
 The bootstrap endpoint creates a realm, admin user, session, assigns the `realm.admin` role, and returns tokens. It is available only when Hearth is running with `--dev`. In production, it returns 404.
 
 ```typescript
-import { HearthClient } from "@hearth/sdk";
+import { HearthClient } from "@hearth-auth/sdk";
 
 const { realm_id, user_id, access_token, refresh_token } =
   await HearthClient.bootstrap("http://127.0.0.1:8420");
@@ -493,7 +493,7 @@ RBAC claims (`permissions`, `roles`, `groups`) are embedded in the JWT at issuan
 network traffic on every request — stateless and fastest.
 
 ```typescript
-import { requirePermission } from "@hearth/sdk";
+import { requirePermission } from "@hearth-auth/sdk";
 
 const check = requirePermission("docs.write", {
   mode: "embedded",
@@ -510,7 +510,7 @@ JWT carries only identity claims. The SDK calls `POST /oauth/authorize` on every
 Fail-closed: any network or server error returns `false`.
 
 ```typescript
-import { HearthClient, requirePermission } from "@hearth/sdk";
+import { HearthClient, requirePermission } from "@hearth-auth/sdk";
 
 const client = new HearthClient({
   issuerUrl: "https://auth.example.com",
@@ -532,7 +532,7 @@ the response. Throws `AuthorizationModeMismatchError` when the server echoes a m
 differs from what the middleware expects.
 
 ```typescript
-import { HearthClient, requirePermission } from "@hearth/sdk";
+import { HearthClient, requirePermission } from "@hearth-auth/sdk";
 
 const client = new HearthClient({
   issuerUrl: "https://auth.example.com",

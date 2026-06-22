@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { hearthAuth } from "./main.js";
-import { getRefreshToken, clearTokens, isAuthenticated } from "@hearth/sdk";
+import { getRefreshToken, clearTokens, isAuthenticated } from "@hearth-auth/sdk";
 import Login from "./pages/Login.js";
 import Callback from "./pages/Callback.js";
 import Dashboard from "./pages/Dashboard.js";

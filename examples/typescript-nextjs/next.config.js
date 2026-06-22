@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  transpilePackages: ['@hearth/sdk'],
+  transpilePackages: ['@hearth-auth/sdk'],
   webpack: (config) => {
     // Resolve .js imports to .ts source files for unbuilt local SDK packages.
     config.resolve.extensionAlias = {

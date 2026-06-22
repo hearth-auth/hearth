@@ -44,7 +44,7 @@ function sanitize(value: string): string {
   return out;
 }
 
-/** Base class for all @hearth/node errors. Messages are sanitized to remove tokens/secrets. */
+/** Base class for all @hearth-auth/node errors. Messages are sanitized to remove tokens/secrets. */
 export class HearthError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(sanitize(message), options);

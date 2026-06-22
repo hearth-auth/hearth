@@ -6,7 +6,7 @@ import {
   HearthProvider,
   useHasPermission,
   useHasRole,
-} from "@hearth/sdk";
+} from "@hearth-auth/sdk";
 import Link from "next/link";
 
 const hearth = createHearth({

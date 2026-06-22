@@ -5,7 +5,7 @@ A minimal Next.js 14 (App Router) application demonstrating:
 - Standard OIDC authorization code flow with PKCE via Hearth
 - HTTP-only cookie session storage (tokens never exposed to JavaScript)
 - Edge middleware route protection using Hearth's JWKS
-- Client-side RBAC with `useHasPermission` / `useHasRole` hooks from `@hearth/sdk`
+- Client-side RBAC with `useHasPermission` / `useHasRole` hooks from `@hearth-auth/sdk`
 
 ## Prerequisites
 

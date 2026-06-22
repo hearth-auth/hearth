@@ -1,5 +1,5 @@
 {
-  "name": "@hearth/node",
+  "name": "@hearth-auth/node",
   "version": "1.0.0",
   "description": "Hearth server-side Node.js SDK — JWKS verification, token introspection, Express/Fastify middleware",
   "type": "module",

@@ -8,7 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
-    "@hearth/sdk": "file:../../sdks/typescript",
+    "@hearth-auth/sdk": "file:../../sdks/typescript",
     "jose": "^5.0.0",
     "next": "15.5.18",
     "react": "^18.3.0",

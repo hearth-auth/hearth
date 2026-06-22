@@ -1,6 +1,6 @@
 name: SDK publish — node (dry-run)
 
-# Dry-run gate for the @hearth/node npm package.
+# Dry-run gate for the @hearth-auth/node npm package.
 # Builds the TypeScript library and runs `npm publish --dry-run --provenance`
 # to prove the package would publish cleanly. Flip to live in HEA-1487 once
 # NPM_TOKEN and provenance OIDC are provisioned.

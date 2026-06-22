@@ -85,7 +85,7 @@ NEXT_PUBLIC_HEARTH_REALM_ID="$HEARTH_REALM_ID" \
 echo "    tsc: OK"
 
 node - <<'JSEOF'
-const { HearthClient } = require("@hearth/sdk");
+const { HearthClient } = require("@hearth-auth/sdk");
 
 (async () => {
     const client = new HearthClient({
