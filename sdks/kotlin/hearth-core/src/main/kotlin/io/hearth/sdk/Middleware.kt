@@ -3,6 +3,7 @@ package io.hearth.sdk
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * A suspend gate that returns `true` iff the token holder has the required permission
