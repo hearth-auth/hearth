@@ -1,14 +1,15 @@
-name: SDK publish — go (verify)
+name: SDK publish — go
 
-# Go module publishing is handled by the Go module proxy (proxy.golang.org)
-# fetching directly from the tagged VCS ref — there is no `go publish` command.
-# The equivalent gate is `go build ./...` + `go vet ./...` which proves the
-# module at github.com/hearth-auth/hearth/sdks/go is importable and clean.
-# Live publishing in HEA-1487 requires only a version tag push.
+# CI verify on PRs and pushes to main; Go module publishing is handled
+# automatically by proxy.golang.org fetching from the VCS on tag push.
+# Module path: github.com/hearth-auth/hearth/sdks/go
+# Version tags must follow the Go sub-module convention: sdks/go/vX.Y.Z
 
 on:
   push:
     branches: [main]
+    tags:
+      - "sdks/go/v*"
     paths:
       - "sdks/go/**"
       - ".github/workflows/sdk-publish-go.yml"
@@ -28,7 +29,7 @@ concurrency:
 
 jobs:
   verify:
-    name: go build + go vet
+    name: go build + go vet github.com/hearth-auth/hearth/sdks/go
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -46,3 +47,13 @@ jobs:
       - name: Vet
         working-directory: sdks/go
         run: go vet ./...
+
+      # On tag push, the Go module proxy indexes the new version automatically.
+      # No upload step needed — proxy.golang.org fetches directly from GitHub.
+      - name: Confirm module proxy sync (informational)
+        if: startsWith(github.ref, 'refs/tags/sdks/go/v')
+        run: |
+          VERSION="${GITHUB_REF_NAME#sdks/go/v}"
+          echo "Tag sdks/go/v${VERSION} pushed."
+          echo "proxy.golang.org will index github.com/hearth-auth/hearth/sdks/go@v${VERSION} automatically."
+          echo "Verify at: https://pkg.go.dev/github.com/hearth-auth/hearth/sdks/go@v${VERSION}"
