@@ -307,16 +307,6 @@ impl Config {
 
         validate_trusted_proxies(&self.server, &mut issues);
 
-        if self.agent_auth.enabled {
-            issues.push(ValidationIssue {
-                field: "agent_auth.enabled".to_string(),
-                reason: "agent_auth is not yet fully implemented (Agent entity, delegation, \
-                         MCP/A2A surfaces, AATs are incomplete per docs/specs/AGENT_AUTH.md). \
-                         Set agent_auth.enabled = false until the feature ships."
-                    .to_string(),
-            });
-        }
-
         issues
     }
 
@@ -325,7 +315,7 @@ impl Config {
     /// Called automatically by [`from_yaml_str`] and [`from_file`].
     /// Dev-mode configs skip certain checks (e.g., empty `data_dir`).
     #[allow(clippy::too_many_lines)]
-    fn validate(&self) -> Result<(), ConfigError> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         if self.server.port == 0 {
             return Err(ConfigError::ValidationError {
                 field: "server.port".to_string(),
@@ -411,15 +401,6 @@ impl Config {
                 field: "operational.queue_depth".to_string(),
                 reason: "must be greater than 0".to_string(),
             });
-        }
-
-        if self.agent_auth.enabled {
-            return Err(invalid(
-                "agent_auth.enabled",
-                "agent_auth is not yet fully implemented (Agent entity, delegation, \
-                 MCP/A2A surfaces, AATs are incomplete per docs/specs/AGENT_AUTH.md). \
-                 Set agent_auth.enabled = false until the feature ships.",
-            ));
         }
 
         validate_oidc(&self.oidc, self.dev_mode)?;

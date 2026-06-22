@@ -790,6 +790,56 @@ Phase 1 extends the Phase 0 RBAC engine with group nesting, role composition, or
 
 ---
 
+## Phase 2 — Agent Authentication (AGENT_AUTH.md)
+
+### Agent Identity — Phase A (M1, HEA-1405)
+
+**Unit (7 of 7 passing)**
+- [x] A.1: AgentId newtype — display prefix, serde round-trip, parse
+- [x] A.2: Agent CRUD — create, get, update, delete, list, list-filtered-by-owner
+- [x] A.2: Lifecycle — Active→Suspended→Active, Active→Revoked (terminal)
+- [x] A.2: Display-name length validation (1–256 chars)
+- [x] A.2: max_delegation_depth validation (1–10)
+- [x] A.3: Owner FK validation — nonexistent user owner rejected
+- [x] A.3: max_agents realm quota enforced
+
+**Integration (A.3 credentials — 5 of 5 passing)**
+- [x] A.3: API key create → show-once plaintext (64 hex chars, SHA-256 hash stored, differ)
+- [x] A.3: API key list → both keys visible, none revoked
+- [x] A.3: API key revoke → revoked key no longer verifies
+- [x] A.3: API key verify → correct key returns true
+- [x] A.3: API key verify wrong key → false
+- [x] A.3: delete_agent purges credentials (no stale scan)
+- [x] A.3: delete_user cascades owned agents (no orphans)
+
+**Integration (REST/Agent Card — via test harness)**
+- [ ] A.4: GET /.well-known/agent.json?agent_id= returns name/description/capabilities
+- [ ] A.4: Agent Card does not expose credential hash or full permissions
+- [ ] A.7: POST /v1/agents returns 201 with agent body
+- [ ] A.7: GET /v1/agents/{id} returns 200
+- [ ] A.7: PATCH /v1/agents/{id} updates fields
+- [ ] A.7: DELETE /v1/agents/{id} returns 204
+- [ ] A.7: POST /v1/agents/{id}/credentials/keys returns 201 with plaintext key
+- [ ] A.7: GET /v1/agents/{id}/credentials lists credentials
+- [ ] A.7: DELETE /v1/agents/{id}/credentials/{cred_id} revokes, returns 204
+
+**Adversarial**
+- [ ] A.3: Timing-attack resistance — verify time constant across correct/wrong key
+- [ ] A.3: Revoked key cannot re-activate via second verify call
+- [ ] A.3: Agent Card with nonexistent agent_id → 404
+
+**Property / Benchmark**
+- [ ] A.3: verify_agent_api_key p99 < 1 ms on hot path
+- [ ] Non-agent token bytes byte-identical before and after M1 merge (regression guard)
+
+### Agent DPoP — Phase A.5–A.6 (blocked on HEA-1410)
+
+- [ ] DPoP proof parsing, signature verification, nonce, replay (Unit)
+- [ ] RFC 9449 test vector conformance (Conformance)
+- [ ] DPoP-bound token issuance full flow (Integration)
+- [ ] Token replay without proof rejected (Adversarial)
+- [ ] Proof reuse rejected (Adversarial)
+
 ## Phases 2–3+
 
 High-level test categories for future phases. Individual checkboxes will be expanded as each phase begins development.

@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file hearth/identity/v1/identity.proto.
  */
 export const file_hearth_identity_v1_identity: GenFile = /*@__PURE__*/
-  fileDesc("CiFoZWFydGgvaWRlbnRpdHkvdjEvaWRlbnRpdHkucHJvdG8SEmhlYXJ0aC5pZGVudGl0eS52MSLQAQoEVXNlchIKCgJpZBgBIAEoCRINCgVlbWFpbBgCIAEoCRIUCgxkaXNwbGF5X25hbWUYAyABKAkSLgoGc3RhdHVzGAQgASgOMh4uaGVhcnRoLmlkZW50aXR5LnYxLlVzZXJTdGF0dXMSEgoKY3JlYXRlZF9hdBgFIAEoAxISCgp1cGRhdGVkX2F0GAYgASgDEhIKCmZpcnN0X25hbWUYByABKAkSEQoJbGFzdF9uYW1lGAggASgJEhgKEHJlcXVpcmVkX2FjdGlvbnMYCSADKAkiaQoHU2Vzc2lvbhIKCgJpZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEhIKCmNyZWF0ZWRfYXQYAyABKAMSEgoKZXhwaXJlc19hdBgEIAEoAxIZChFsYXN0X3JlZnJlc2hlZF9hdBgFIAEoAyK5AQoLUmVhbG1Db25maWcSHwoSc2Vzc2lvbl90dGxfbWljcm9zGAEgASgDSACIAQESIQoUcGFzc3dvcmRfbWVtb3J5X2Nvc3QYAiABKA1IAYgBARIfChJwYXNzd29yZF90aW1lX2Nvc3QYAyABKA1IAogBAUIVChNfc2Vzc2lvbl90dGxfbWljcm9zQhcKFV9wYXNzd29yZF9tZW1vcnlfY29zdEIVChNfcGFzc3dvcmRfdGltZV9jb3N0IqsBCgVSZWFsbRIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJEi8KBnN0YXR1cxgDIAEoDjIfLmhlYXJ0aC5pZGVudGl0eS52MS5SZWFsbVN0YXR1cxIvCgZjb25maWcYBCABKAsyHy5oZWFydGguaWRlbnRpdHkudjEuUmVhbG1Db25maWcSEgoKY3JlYXRlZF9hdBgFIAEoAxISCgp1cGRhdGVkX2F0GAYgASgDIt0BChFDcmVhdGVVc2VyUmVxdWVzdBINCgVlbWFpbBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkSEgoKZmlyc3RfbmFtZRgDIAEoCRIRCglsYXN0X25hbWUYBCABKAkSSQoKYXR0cmlidXRlcxgFIAMoCzI1LmhlYXJ0aC5pZGVudGl0eS52MS5DcmVhdGVVc2VyUmVxdWVzdC5BdHRyaWJ1dGVzRW50cnkaMQoPQXR0cmlidXRlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEigwMKEVVwZGF0ZVVzZXJSZXF1ZXN0EhIKBWVtYWlsGAEgASgJSACIAQESGQoMZGlzcGxheV9uYW1lGAIgASgJSAGIAQESMwoGc3RhdHVzGAMgASgOMh4uaGVhcnRoLmlkZW50aXR5LnYxLlVzZXJTdGF0dXNIAogBARIXCgpmaXJzdF9uYW1lGAQgASgJSAOIAQESFgoJbGFzdF9uYW1lGAUgASgJSASIAQESSQoKYXR0cmlidXRlcxgGIAMoCzI1LmhlYXJ0aC5pZGVudGl0eS52MS5VcGRhdGVVc2VyUmVxdWVzdC5BdHRyaWJ1dGVzRW50cnkSGAoQY2xlYXJfYXR0cmlidXRlcxgHIAEoCBoxCg9BdHRyaWJ1dGVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIICgZfZW1haWxCDwoNX2Rpc3BsYXlfbmFtZUIJCgdfc3RhdHVzQg0KC19maXJzdF9uYW1lQgwKCl9sYXN0X25hbWUiYwoSQ3JlYXRlUmVhbG1SZXF1ZXN0EgwKBG5hbWUYASABKAkSNAoGY29uZmlnGAIgASgLMh8uaGVhcnRoLmlkZW50aXR5LnYxLlJlYWxtQ29uZmlnSACIAQFCCQoHX2NvbmZpZyKyAQoSVXBkYXRlUmVhbG1SZXF1ZXN0EhEKBG5hbWUYASABKAlIAIgBARI0CgZzdGF0dXMYAiABKA4yHy5oZWFydGguaWRlbnRpdHkudjEuUmVhbG1TdGF0dXNIAYgBARI0CgZjb25maWcYAyABKAsyHy5oZWFydGguaWRlbnRpdHkudjEuUmVhbG1Db25maWdIAogBAUIHCgVfbmFtZUIJCgdfc3RhdHVzQgkKB19jb25maWciXQoIVXNlclBhZ2USJwoFaXRlbXMYASADKAsyGC5oZWFydGguaWRlbnRpdHkudjEuVXNlchIYCgtuZXh0X2N1cnNvchgCIAEoCUgAiAEBQg4KDF9uZXh0X2N1cnNvciJfCglSZWFsbVBhZ2USKAoFaXRlbXMYASADKAsyGS5oZWFydGguaWRlbnRpdHkudjEuUmVhbG0SGAoLbmV4dF9jdXJzb3IYAiABKAlIAIgBAUIOCgxfbmV4dF9jdXJzb3IihQEKD0J1bGtSZXN1bHRFbnRyeRINCgVpbmRleBgBIAEoDRIPCgdzdWNjZXNzGAIgASgIEisKBHVzZXIYAyABKAsyGC5oZWFydGguaWRlbnRpdHkudjEuVXNlckgAiAEBEhIKBWVycm9yGAQgASgJSAGIAQFCBwoFX3VzZXJCCAoGX2Vycm9yIkIKCkJ1bGtSZXN1bHQSNAoHcmVzdWx0cxgBIAMoCzIjLmhlYXJ0aC5pZGVudGl0eS52MS5CdWxrUmVzdWx0RW50cnki1QIKDE9yZ2FuaXphdGlvbhIKCgJpZBgBIAEoCRIQCghyZWFsbV9pZBgCIAEoCRIMCgRzbHVnGAMgASgJEhQKDGRpc3BsYXlfbmFtZRgEIAEoCRI2CgZzdGF0dXMYBSABKA4yJi5oZWFydGguaWRlbnRpdHkudjEuT3JnYW5pemF0aW9uU3RhdHVzEhIKCmNyZWF0ZWRfYXQYBiABKAMSEgoKdXBkYXRlZF9hdBgHIAEoAxIZCgxtZW1iZXJfbGltaXQYCCABKA1IAIgBARJECgphdHRyaWJ1dGVzGAkgAygLMjAuaGVhcnRoLmlkZW50aXR5LnYxLk9yZ2FuaXphdGlvbi5BdHRyaWJ1dGVzRW50cnkaMQoPQXR0cmlidXRlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAFCDwoNX21lbWJlcl9saW1pdCLxAQoZQ3JlYXRlT3JnYW5pemF0aW9uUmVxdWVzdBIMCgRzbHVnGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCRIZCgxtZW1iZXJfbGltaXQYAyABKA1IAIgBARJRCgphdHRyaWJ1dGVzGAQgAygLMj0uaGVhcnRoLmlkZW50aXR5LnYxLkNyZWF0ZU9yZ2FuaXphdGlvblJlcXVlc3QuQXR0cmlidXRlc0VudHJ5GjEKD0F0dHJpYnV0ZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBQg8KDV9tZW1iZXJfbGltaXQi9wIKGVVwZGF0ZU9yZ2FuaXphdGlvblJlcXVlc3QSEQoEc2x1ZxgBIAEoCUgAiAEBEhkKDGRpc3BsYXlfbmFtZRgCIAEoCUgBiAEBEjsKBnN0YXR1cxgDIAEoDjImLmhlYXJ0aC5pZGVudGl0eS52MS5Pcmdhbml6YXRpb25TdGF0dXNIAogBARIZCgxtZW1iZXJfbGltaXQYBCABKA1IA4gBARJRCgphdHRyaWJ1dGVzGAUgAygLMj0uaGVhcnRoLmlkZW50aXR5LnYxLlVwZGF0ZU9yZ2FuaXphdGlvblJlcXVlc3QuQXR0cmlidXRlc0VudHJ5EhgKEGNsZWFyX2F0dHJpYnV0ZXMYBiABKAgaMQoPQXR0cmlidXRlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAFCBwoFX3NsdWdCDwoNX2Rpc3BsYXlfbmFtZUIJCgdfc3RhdHVzQg8KDV9tZW1iZXJfbGltaXQibQoQT3JnYW5pemF0aW9uUGFnZRIvCgVpdGVtcxgBIAMoCzIgLmhlYXJ0aC5pZGVudGl0eS52MS5Pcmdhbml6YXRpb24SGAoLbmV4dF9jdXJzb3IYAiABKAlIAIgBAUIOCgxfbmV4dF9jdXJzb3IiHAoOR2V0VXNlclJlcXVlc3QSCgoCaWQYASABKAkiHwoRRGVsZXRlVXNlclJlcXVlc3QSCgoCaWQYASABKAkiUAoQTGlzdFVzZXJzUmVxdWVzdBITCgZjdXJzb3IYASABKAlIAIgBARISCgVsaW1pdBgCIAEoDUgBiAEBQgkKB19jdXJzb3JCCAoGX2xpbWl0IlEKDlVwZGF0ZVVzZXJDYWxsEgoKAmlkGAEgASgJEjMKBGJvZHkYAiABKAsyJS5oZWFydGguaWRlbnRpdHkudjEuVXBkYXRlVXNlclJlcXVlc3QiUQoRTGlzdFJlYWxtc1JlcXVlc3QSEwoGY3Vyc29yGAEgASgJSACIAQESEgoFbGltaXQYAiABKA1IAYgBAUIJCgdfY3Vyc29yQggKBl9saW1pdCIdCg9HZXRSZWFsbVJlcXVlc3QSCgoCaWQYASABKAkiIAoSRGVsZXRlUmVhbG1SZXF1ZXN0EgoKAmlkGAEgASgJIlMKD1VwZGF0ZVJlYWxtQ2FsbBIKCgJpZBgBIAEoCRI0CgRib2R5GAIgASgLMiYuaGVhcnRoLmlkZW50aXR5LnYxLlVwZGF0ZVJlYWxtUmVxdWVzdCJYChhMaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QSEwoGY3Vyc29yGAEgASgJSACIAQESEgoFbGltaXQYAiABKA1IAYgBAUIJCgdfY3Vyc29yQggKBl9saW1pdCIkChZHZXRPcmdhbml6YXRpb25SZXF1ZXN0EgoKAmlkGAEgASgJIicKGURlbGV0ZU9yZ2FuaXphdGlvblJlcXVlc3QSCgoCaWQYASABKAkiYQoWVXBkYXRlT3JnYW5pemF0aW9uQ2FsbBIKCgJpZBgBIAEoCRI7CgRib2R5GAIgASgLMi0uaGVhcnRoLmlkZW50aXR5LnYxLlVwZGF0ZU9yZ2FuaXphdGlvblJlcXVlc3QiBwoFRW1wdHkqgQEKClVzZXJTdGF0dXMSGwoXVVNFUl9TVEFUVVNfVU5TUEVDSUZJRUQQABIWChJVU0VSX1NUQVRVU19BQ1RJVkUQARIYChRVU0VSX1NUQVRVU19ESVNBQkxFRBACEiQKIFVTRVJfU1RBVFVTX1BFTkRJTkdfVkVSSUZJQ0FUSU9OEAMqYAoLUmVhbG1TdGF0dXMSHAoYUkVBTE1fU1RBVFVTX1VOU1BFQ0lGSUVEEAASFwoTUkVBTE1fU1RBVFVTX0FDVElWRRABEhoKFlJFQUxNX1NUQVRVU19TVVNQRU5ERUQQAip8ChJPcmdhbml6YXRpb25TdGF0dXMSIwofT1JHQU5JWkFUSU9OX1NUQVRVU19VTlNQRUNJRklFRBAAEh4KGk9SR0FOSVpBVElPTl9TVEFUVVNfQUNUSVZFEAESIQodT1JHQU5JWkFUSU9OX1NUQVRVU19TVVNQRU5ERUQQAjK0DAoUSWRlbnRpdHlBZG1pblNlcnZpY2USZQoJTGlzdFVzZXJzEiQuaGVhcnRoLmlkZW50aXR5LnYxLkxpc3RVc2Vyc1JlcXVlc3QaHC5oZWFydGguaWRlbnRpdHkudjEuVXNlclBhZ2UiFILT5JMCDhIML2FkbWluL3VzZXJzEmIKB0dldFVzZXISIi5oZWFydGguaWRlbnRpdHkudjEuR2V0VXNlclJlcXVlc3QaGC5oZWFydGguaWRlbnRpdHkudjEuVXNlciIZgtPkkwITEhEvYWRtaW4vdXNlcnMve2lkfRJmCgpDcmVhdGVVc2VyEiUuaGVhcnRoLmlkZW50aXR5LnYxLkNyZWF0ZVVzZXJSZXF1ZXN0GhguaGVhcnRoLmlkZW50aXR5LnYxLlVzZXIiF4LT5JMCEToBKiIML2FkbWluL3VzZXJzEmsKClVwZGF0ZVVzZXISIi5oZWFydGguaWRlbnRpdHkudjEuVXBkYXRlVXNlckNhbGwaGC5oZWFydGguaWRlbnRpdHkudjEuVXNlciIfgtPkkwIZOgRib2R5MhEvYWRtaW4vdXNlcnMve2lkfRJpCgpEZWxldGVVc2VyEiUuaGVhcnRoLmlkZW50aXR5LnYxLkRlbGV0ZVVzZXJSZXF1ZXN0GhkuaGVhcnRoLmlkZW50aXR5LnYxLkVtcHR5IhmC0+STAhMqES9hZG1pbi91c2Vycy97aWR9EmkKCkxpc3RSZWFsbXMSJS5oZWFydGguaWRlbnRpdHkudjEuTGlzdFJlYWxtc1JlcXVlc3QaHS5oZWFydGguaWRlbnRpdHkudjEuUmVhbG1QYWdlIhWC0+STAg8SDS9hZG1pbi9yZWFsbXMSZgoIR2V0UmVhbG0SIy5oZWFydGguaWRlbnRpdHkudjEuR2V0UmVhbG1SZXF1ZXN0GhkuaGVhcnRoLmlkZW50aXR5LnYxLlJlYWxtIhqC0+STAhQSEi9hZG1pbi9yZWFsbXMve2lkfRJqCgtDcmVhdGVSZWFsbRImLmhlYXJ0aC5pZGVudGl0eS52MS5DcmVhdGVSZWFsbVJlcXVlc3QaGS5oZWFydGguaWRlbnRpdHkudjEuUmVhbG0iGILT5JMCEjoBKiINL2FkbWluL3JlYWxtcxJvCgtVcGRhdGVSZWFsbRIjLmhlYXJ0aC5pZGVudGl0eS52MS5VcGRhdGVSZWFsbUNhbGwaGS5oZWFydGguaWRlbnRpdHkudjEuUmVhbG0iIILT5JMCGjoEYm9keTISL2FkbWluL3JlYWxtcy97aWR9EmwKC0RlbGV0ZVJlYWxtEiYuaGVhcnRoLmlkZW50aXR5LnYxLkRlbGV0ZVJlYWxtUmVxdWVzdBoZLmhlYXJ0aC5pZGVudGl0eS52MS5FbXB0eSIagtPkkwIUKhIvYWRtaW4vcmVhbG1zL3tpZH0SZwoRTGlzdE9yZ2FuaXphdGlvbnMSLC5oZWFydGguaWRlbnRpdHkudjEuTGlzdE9yZ2FuaXphdGlvbnNSZXF1ZXN0GiQuaGVhcnRoLmlkZW50aXR5LnYxLk9yZ2FuaXphdGlvblBhZ2USXwoPR2V0T3JnYW5pemF0aW9uEiouaGVhcnRoLmlkZW50aXR5LnYxLkdldE9yZ2FuaXphdGlvblJlcXVlc3QaIC5oZWFydGguaWRlbnRpdHkudjEuT3JnYW5pemF0aW9uEmUKEkNyZWF0ZU9yZ2FuaXphdGlvbhItLmhlYXJ0aC5pZGVudGl0eS52MS5DcmVhdGVPcmdhbml6YXRpb25SZXF1ZXN0GiAuaGVhcnRoLmlkZW50aXR5LnYxLk9yZ2FuaXphdGlvbhJiChJVcGRhdGVPcmdhbml6YXRpb24SKi5oZWFydGguaWRlbnRpdHkudjEuVXBkYXRlT3JnYW5pemF0aW9uQ2FsbBogLmhlYXJ0aC5pZGVudGl0eS52MS5Pcmdhbml6YXRpb24SXgoSRGVsZXRlT3JnYW5pemF0aW9uEi0uaGVhcnRoLmlkZW50aXR5LnYxLkRlbGV0ZU9yZ2FuaXphdGlvblJlcXVlc3QaGS5oZWFydGguaWRlbnRpdHkudjEuRW1wdHlCRVpDZ2l0aHViLmNvbS9oZWFydGhkYi9oZWFydGgvc2Rrcy9nby9nZW5lcmF0ZWQvaWRlbnRpdHkvdjE7aWRlbnRpdHl2MWIGcHJvdG8z", [file_google_api_annotations]);
+  fileDesc("CiFoZWFydGgvaWRlbnRpdHkvdjEvaWRlbnRpdHkucHJvdG8SEmhlYXJ0aC5pZGVudGl0eS52MSLQAQoEVXNlchIKCgJpZBgBIAEoCRINCgVlbWFpbBgCIAEoCRIUCgxkaXNwbGF5X25hbWUYAyABKAkSLgoGc3RhdHVzGAQgASgOMh4uaGVhcnRoLmlkZW50aXR5LnYxLlVzZXJTdGF0dXMSEgoKY3JlYXRlZF9hdBgFIAEoAxISCgp1cGRhdGVkX2F0GAYgASgDEhIKCmZpcnN0X25hbWUYByABKAkSEQoJbGFzdF9uYW1lGAggASgJEhgKEHJlcXVpcmVkX2FjdGlvbnMYCSADKAkiaQoHU2Vzc2lvbhIKCgJpZBgBIAEoCRIPCgd1c2VyX2lkGAIgASgJEhIKCmNyZWF0ZWRfYXQYAyABKAMSEgoKZXhwaXJlc19hdBgEIAEoAxIZChFsYXN0X3JlZnJlc2hlZF9hdBgFIAEoAyK5AQoLUmVhbG1Db25maWcSHwoSc2Vzc2lvbl90dGxfbWljcm9zGAEgASgDSACIAQESIQoUcGFzc3dvcmRfbWVtb3J5X2Nvc3QYAiABKA1IAYgBARIfChJwYXNzd29yZF90aW1lX2Nvc3QYAyABKA1IAogBAUIVChNfc2Vzc2lvbl90dGxfbWljcm9zQhcKFV9wYXNzd29yZF9tZW1vcnlfY29zdEIVChNfcGFzc3dvcmRfdGltZV9jb3N0IqsBCgVSZWFsbRIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJEi8KBnN0YXR1cxgDIAEoDjIfLmhlYXJ0aC5pZGVudGl0eS52MS5SZWFsbVN0YXR1cxIvCgZjb25maWcYBCABKAsyHy5oZWFydGguaWRlbnRpdHkudjEuUmVhbG1Db25maWcSEgoKY3JlYXRlZF9hdBgFIAEoAxISCgp1cGRhdGVkX2F0GAYgASgDIt0BChFDcmVhdGVVc2VyUmVxdWVzdBINCgVlbWFpbBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkSEgoKZmlyc3RfbmFtZRgDIAEoCRIRCglsYXN0X25hbWUYBCABKAkSSQoKYXR0cmlidXRlcxgFIAMoCzI1LmhlYXJ0aC5pZGVudGl0eS52MS5DcmVhdGVVc2VyUmVxdWVzdC5BdHRyaWJ1dGVzRW50cnkaMQoPQXR0cmlidXRlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEigwMKEVVwZGF0ZVVzZXJSZXF1ZXN0EhIKBWVtYWlsGAEgASgJSACIAQESGQoMZGlzcGxheV9uYW1lGAIgASgJSAGIAQESMwoGc3RhdHVzGAMgASgOMh4uaGVhcnRoLmlkZW50aXR5LnYxLlVzZXJTdGF0dXNIAogBARIXCgpmaXJzdF9uYW1lGAQgASgJSAOIAQESFgoJbGFzdF9uYW1lGAUgASgJSASIAQESSQoKYXR0cmlidXRlcxgGIAMoCzI1LmhlYXJ0aC5pZGVudGl0eS52MS5VcGRhdGVVc2VyUmVxdWVzdC5BdHRyaWJ1dGVzRW50cnkSGAoQY2xlYXJfYXR0cmlidXRlcxgHIAEoCBoxCg9BdHRyaWJ1dGVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIICgZfZW1haWxCDwoNX2Rpc3BsYXlfbmFtZUIJCgdfc3RhdHVzQg0KC19maXJzdF9uYW1lQgwKCl9sYXN0X25hbWUiYwoSQ3JlYXRlUmVhbG1SZXF1ZXN0EgwKBG5hbWUYASABKAkSNAoGY29uZmlnGAIgASgLMh8uaGVhcnRoLmlkZW50aXR5LnYxLlJlYWxtQ29uZmlnSACIAQFCCQoHX2NvbmZpZyKyAQoSVXBkYXRlUmVhbG1SZXF1ZXN0EhEKBG5hbWUYASABKAlIAIgBARI0CgZzdGF0dXMYAiABKA4yHy5oZWFydGguaWRlbnRpdHkudjEuUmVhbG1TdGF0dXNIAYgBARI0CgZjb25maWcYAyABKAsyHy5oZWFydGguaWRlbnRpdHkudjEuUmVhbG1Db25maWdIAogBAUIHCgVfbmFtZUIJCgdfc3RhdHVzQgkKB19jb25maWciXQoIVXNlclBhZ2USJwoFaXRlbXMYASADKAsyGC5oZWFydGguaWRlbnRpdHkudjEuVXNlchIYCgtuZXh0X2N1cnNvchgCIAEoCUgAiAEBQg4KDF9uZXh0X2N1cnNvciJfCglSZWFsbVBhZ2USKAoFaXRlbXMYASADKAsyGS5oZWFydGguaWRlbnRpdHkudjEuUmVhbG0SGAoLbmV4dF9jdXJzb3IYAiABKAlIAIgBAUIOCgxfbmV4dF9jdXJzb3IihQEKD0J1bGtSZXN1bHRFbnRyeRINCgVpbmRleBgBIAEoDRIPCgdzdWNjZXNzGAIgASgIEisKBHVzZXIYAyABKAsyGC5oZWFydGguaWRlbnRpdHkudjEuVXNlckgAiAEBEhIKBWVycm9yGAQgASgJSAGIAQFCBwoFX3VzZXJCCAoGX2Vycm9yIkIKCkJ1bGtSZXN1bHQSNAoHcmVzdWx0cxgBIAMoCzIjLmhlYXJ0aC5pZGVudGl0eS52MS5CdWxrUmVzdWx0RW50cnki1QIKDE9yZ2FuaXphdGlvbhIKCgJpZBgBIAEoCRIQCghyZWFsbV9pZBgCIAEoCRIMCgRzbHVnGAMgASgJEhQKDGRpc3BsYXlfbmFtZRgEIAEoCRI2CgZzdGF0dXMYBSABKA4yJi5oZWFydGguaWRlbnRpdHkudjEuT3JnYW5pemF0aW9uU3RhdHVzEhIKCmNyZWF0ZWRfYXQYBiABKAMSEgoKdXBkYXRlZF9hdBgHIAEoAxIZCgxtZW1iZXJfbGltaXQYCCABKA1IAIgBARJECgphdHRyaWJ1dGVzGAkgAygLMjAuaGVhcnRoLmlkZW50aXR5LnYxLk9yZ2FuaXphdGlvbi5BdHRyaWJ1dGVzRW50cnkaMQoPQXR0cmlidXRlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAFCDwoNX21lbWJlcl9saW1pdCLxAQoZQ3JlYXRlT3JnYW5pemF0aW9uUmVxdWVzdBIMCgRzbHVnGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCRIZCgxtZW1iZXJfbGltaXQYAyABKA1IAIgBARJRCgphdHRyaWJ1dGVzGAQgAygLMj0uaGVhcnRoLmlkZW50aXR5LnYxLkNyZWF0ZU9yZ2FuaXphdGlvblJlcXVlc3QuQXR0cmlidXRlc0VudHJ5GjEKD0F0dHJpYnV0ZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBQg8KDV9tZW1iZXJfbGltaXQi9wIKGVVwZGF0ZU9yZ2FuaXphdGlvblJlcXVlc3QSEQoEc2x1ZxgBIAEoCUgAiAEBEhkKDGRpc3BsYXlfbmFtZRgCIAEoCUgBiAEBEjsKBnN0YXR1cxgDIAEoDjImLmhlYXJ0aC5pZGVudGl0eS52MS5Pcmdhbml6YXRpb25TdGF0dXNIAogBARIZCgxtZW1iZXJfbGltaXQYBCABKA1IA4gBARJRCgphdHRyaWJ1dGVzGAUgAygLMj0uaGVhcnRoLmlkZW50aXR5LnYxLlVwZGF0ZU9yZ2FuaXphdGlvblJlcXVlc3QuQXR0cmlidXRlc0VudHJ5EhgKEGNsZWFyX2F0dHJpYnV0ZXMYBiABKAgaMQoPQXR0cmlidXRlc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAFCBwoFX3NsdWdCDwoNX2Rpc3BsYXlfbmFtZUIJCgdfc3RhdHVzQg8KDV9tZW1iZXJfbGltaXQibQoQT3JnYW5pemF0aW9uUGFnZRIvCgVpdGVtcxgBIAMoCzIgLmhlYXJ0aC5pZGVudGl0eS52MS5Pcmdhbml6YXRpb24SGAoLbmV4dF9jdXJzb3IYAiABKAlIAIgBAUIOCgxfbmV4dF9jdXJzb3IiHAoOR2V0VXNlclJlcXVlc3QSCgoCaWQYASABKAkiHwoRRGVsZXRlVXNlclJlcXVlc3QSCgoCaWQYASABKAkiUAoQTGlzdFVzZXJzUmVxdWVzdBITCgZjdXJzb3IYASABKAlIAIgBARISCgVsaW1pdBgCIAEoDUgBiAEBQgkKB19jdXJzb3JCCAoGX2xpbWl0IlEKDlVwZGF0ZVVzZXJDYWxsEgoKAmlkGAEgASgJEjMKBGJvZHkYAiABKAsyJS5oZWFydGguaWRlbnRpdHkudjEuVXBkYXRlVXNlclJlcXVlc3QiUQoRTGlzdFJlYWxtc1JlcXVlc3QSEwoGY3Vyc29yGAEgASgJSACIAQESEgoFbGltaXQYAiABKA1IAYgBAUIJCgdfY3Vyc29yQggKBl9saW1pdCIdCg9HZXRSZWFsbVJlcXVlc3QSCgoCaWQYASABKAkiIAoSRGVsZXRlUmVhbG1SZXF1ZXN0EgoKAmlkGAEgASgJIlMKD1VwZGF0ZVJlYWxtQ2FsbBIKCgJpZBgBIAEoCRI0CgRib2R5GAIgASgLMiYuaGVhcnRoLmlkZW50aXR5LnYxLlVwZGF0ZVJlYWxtUmVxdWVzdCJYChhMaXN0T3JnYW5pemF0aW9uc1JlcXVlc3QSEwoGY3Vyc29yGAEgASgJSACIAQESEgoFbGltaXQYAiABKA1IAYgBAUIJCgdfY3Vyc29yQggKBl9saW1pdCIkChZHZXRPcmdhbml6YXRpb25SZXF1ZXN0EgoKAmlkGAEgASgJIicKGURlbGV0ZU9yZ2FuaXphdGlvblJlcXVlc3QSCgoCaWQYASABKAkiYQoWVXBkYXRlT3JnYW5pemF0aW9uQ2FsbBIKCgJpZBgBIAEoCRI7CgRib2R5GAIgASgLMi0uaGVhcnRoLmlkZW50aXR5LnYxLlVwZGF0ZU9yZ2FuaXphdGlvblJlcXVlc3QiBwoFRW1wdHkigwIKBUFnZW50EgoKAmlkGAEgASgJEhAKCHJlYWxtX2lkGAIgASgJEhIKCm93bmVyX3R5cGUYAyABKAkSEAoIb3duZXJfaWQYBCABKAkSFAoMZGlzcGxheV9uYW1lGAUgASgJEhMKC2Rlc2NyaXB0aW9uGAYgASgJEhQKDGNhcGFiaWxpdGllcxgHIAMoCRIvCgZzdGF0dXMYCCABKA4yHy5oZWFydGguaWRlbnRpdHkudjEuQWdlbnRTdGF0dXMSHAoUbWF4X2RlbGVnYXRpb25fZGVwdGgYCSABKA0SEgoKY3JlYXRlZF9hdBgKIAEoAxISCgp1cGRhdGVkX2F0GAsgASgDIrEBCg9BZ2VudENyZWRlbnRpYWwSCgoCaWQYASABKAkSEAoIYWdlbnRfaWQYAiABKAkSNQoEa2luZBgDIAEoDjInLmhlYXJ0aC5pZGVudGl0eS52MS5BZ2VudENyZWRlbnRpYWxLaW5kEg0KBWxhYmVsGAQgASgJEhIKCmNyZWF0ZWRfYXQYBSABKAMSFwoKcmV2b2tlZF9hdBgGIAEoA0gAiAEBQg0KC19yZXZva2VkX2F0Il8KCUFnZW50UGFnZRIoCgVpdGVtcxgBIAMoCzIZLmhlYXJ0aC5pZGVudGl0eS52MS5BZ2VudBIYCgtuZXh0X2N1cnNvchgCIAEoCUgAiAEBQg4KDF9uZXh0X2N1cnNvciJJChNBZ2VudENyZWRlbnRpYWxQYWdlEjIKBWl0ZW1zGAEgAygLMiMuaGVhcnRoLmlkZW50aXR5LnYxLkFnZW50Q3JlZGVudGlhbCLeAQoRTGlzdEFnZW50c1JlcXVlc3QSFQoIb3duZXJfaWQYASABKAlIAIgBARI0CgZzdGF0dXMYAiABKA4yHy5oZWFydGguaWRlbnRpdHkudjEuQWdlbnRTdGF0dXNIAYgBARIXCgpjYXBhYmlsaXR5GAMgASgJSAKIAQESEwoGY3Vyc29yGAQgASgJSAOIAQESEgoFbGltaXQYBSABKA1IBIgBAUILCglfb3duZXJfaWRCCQoHX3N0YXR1c0INCgtfY2FwYWJpbGl0eUIJCgdfY3Vyc29yQggKBl9saW1pdCIdCg9HZXRBZ2VudFJlcXVlc3QSCgoCaWQYASABKAkirgEKEkNyZWF0ZUFnZW50UmVxdWVzdBIUCgxkaXNwbGF5X25hbWUYASABKAkSGAoLZGVzY3JpcHRpb24YAiABKAlIAIgBARISCgpvd25lcl90eXBlGAMgASgJEhAKCG93bmVyX2lkGAQgASgJEhQKDGNhcGFiaWxpdGllcxgFIAMoCRIcChRtYXhfZGVsZWdhdGlvbl9kZXB0aBgGIAEoDUIOCgxfZGVzY3JpcHRpb24ivAEKElVwZGF0ZUFnZW50UmVxdWVzdBIZCgxkaXNwbGF5X25hbWUYASABKAlIAIgBARIYCgtkZXNjcmlwdGlvbhgCIAEoCUgBiAEBEhQKDGNhcGFiaWxpdGllcxgDIAMoCRIhChRtYXhfZGVsZWdhdGlvbl9kZXB0aBgEIAEoDUgCiAEBQg8KDV9kaXNwbGF5X25hbWVCDgoMX2Rlc2NyaXB0aW9uQhcKFV9tYXhfZGVsZWdhdGlvbl9kZXB0aCJTCg9VcGRhdGVBZ2VudENhbGwSCgoCaWQYASABKAkSNAoEYm9keRgCIAEoCzImLmhlYXJ0aC5pZGVudGl0eS52MS5VcGRhdGVBZ2VudFJlcXVlc3QiIAoSRGVsZXRlQWdlbnRSZXF1ZXN0EgoKAmlkGAEgASgJIjsKGENyZWF0ZUFnZW50QXBpS2V5UmVxdWVzdBIQCghhZ2VudF9pZBgBIAEoCRINCgVsYWJlbBgCIAEoCSJhChlDcmVhdGVBZ2VudEFwaUtleVJlc3BvbnNlEjcKCmNyZWRlbnRpYWwYASABKAsyIy5oZWFydGguaWRlbnRpdHkudjEuQWdlbnRDcmVkZW50aWFsEgsKA2tleRgCIAEoCSIvChtMaXN0QWdlbnRDcmVkZW50aWFsc1JlcXVlc3QSEAoIYWdlbnRfaWQYASABKAkiRwocUmV2b2tlQWdlbnRDcmVkZW50aWFsUmVxdWVzdBIQCghhZ2VudF9pZBgBIAEoCRIVCg1jcmVkZW50aWFsX2lkGAIgASgJKoEBCgpVc2VyU3RhdHVzEhsKF1VTRVJfU1RBVFVTX1VOU1BFQ0lGSUVEEAASFgoSVVNFUl9TVEFUVVNfQUNUSVZFEAESGAoUVVNFUl9TVEFUVVNfRElTQUJMRUQQAhIkCiBVU0VSX1NUQVRVU19QRU5ESU5HX1ZFUklGSUNBVElPThADKmAKC1JlYWxtU3RhdHVzEhwKGFJFQUxNX1NUQVRVU19VTlNQRUNJRklFRBAAEhcKE1JFQUxNX1NUQVRVU19BQ1RJVkUQARIaChZSRUFMTV9TVEFUVVNfU1VTUEVOREVEEAIqfAoST3JnYW5pemF0aW9uU3RhdHVzEiMKH09SR0FOSVpBVElPTl9TVEFUVVNfVU5TUEVDSUZJRUQQABIeChpPUkdBTklaQVRJT05fU1RBVFVTX0FDVElWRRABEiEKHU9SR0FOSVpBVElPTl9TVEFUVVNfU1VTUEVOREVEEAIqegoLQWdlbnRTdGF0dXMSHAoYQUdFTlRfU1RBVFVTX1VOU1BFQ0lGSUVEEAASFwoTQUdFTlRfU1RBVFVTX0FDVElWRRABEhoKFkFHRU5UX1NUQVRVU19TVVNQRU5ERUQQAhIYChRBR0VOVF9TVEFUVVNfUkVWT0tFRBADKrIBChNBZ2VudENyZWRlbnRpYWxLaW5kEiUKIUFHRU5UX0NSRURFTlRJQUxfS0lORF9VTlNQRUNJRklFRBAAEiEKHUFHRU5UX0NSRURFTlRJQUxfS0lORF9BUElfS0VZEAESLAooQUdFTlRfQ1JFREVOVElBTF9LSU5EX0VEMjU1MTlfUFVCTElDX0tFWRACEiMKH0FHRU5UX0NSRURFTlRJQUxfS0lORF9NVExTX0NFUlQQAzKpFAoUSWRlbnRpdHlBZG1pblNlcnZpY2USZQoJTGlzdFVzZXJzEiQuaGVhcnRoLmlkZW50aXR5LnYxLkxpc3RVc2Vyc1JlcXVlc3QaHC5oZWFydGguaWRlbnRpdHkudjEuVXNlclBhZ2UiFILT5JMCDhIML2FkbWluL3VzZXJzEmIKB0dldFVzZXISIi5oZWFydGguaWRlbnRpdHkudjEuR2V0VXNlclJlcXVlc3QaGC5oZWFydGguaWRlbnRpdHkudjEuVXNlciIZgtPkkwITEhEvYWRtaW4vdXNlcnMve2lkfRJmCgpDcmVhdGVVc2VyEiUuaGVhcnRoLmlkZW50aXR5LnYxLkNyZWF0ZVVzZXJSZXF1ZXN0GhguaGVhcnRoLmlkZW50aXR5LnYxLlVzZXIiF4LT5JMCEToBKiIML2FkbWluL3VzZXJzEmsKClVwZGF0ZVVzZXISIi5oZWFydGguaWRlbnRpdHkudjEuVXBkYXRlVXNlckNhbGwaGC5oZWFydGguaWRlbnRpdHkudjEuVXNlciIfgtPkkwIZOgRib2R5MhEvYWRtaW4vdXNlcnMve2lkfRJpCgpEZWxldGVVc2VyEiUuaGVhcnRoLmlkZW50aXR5LnYxLkRlbGV0ZVVzZXJSZXF1ZXN0GhkuaGVhcnRoLmlkZW50aXR5LnYxLkVtcHR5IhmC0+STAhMqES9hZG1pbi91c2Vycy97aWR9EmkKCkxpc3RSZWFsbXMSJS5oZWFydGguaWRlbnRpdHkudjEuTGlzdFJlYWxtc1JlcXVlc3QaHS5oZWFydGguaWRlbnRpdHkudjEuUmVhbG1QYWdlIhWC0+STAg8SDS9hZG1pbi9yZWFsbXMSZgoIR2V0UmVhbG0SIy5oZWFydGguaWRlbnRpdHkudjEuR2V0UmVhbG1SZXF1ZXN0GhkuaGVhcnRoLmlkZW50aXR5LnYxLlJlYWxtIhqC0+STAhQSEi9hZG1pbi9yZWFsbXMve2lkfRJqCgtDcmVhdGVSZWFsbRImLmhlYXJ0aC5pZGVudGl0eS52MS5DcmVhdGVSZWFsbVJlcXVlc3QaGS5oZWFydGguaWRlbnRpdHkudjEuUmVhbG0iGILT5JMCEjoBKiINL2FkbWluL3JlYWxtcxJvCgtVcGRhdGVSZWFsbRIjLmhlYXJ0aC5pZGVudGl0eS52MS5VcGRhdGVSZWFsbUNhbGwaGS5oZWFydGguaWRlbnRpdHkudjEuUmVhbG0iIILT5JMCGjoEYm9keTISL2FkbWluL3JlYWxtcy97aWR9EmwKC0RlbGV0ZVJlYWxtEiYuaGVhcnRoLmlkZW50aXR5LnYxLkRlbGV0ZVJlYWxtUmVxdWVzdBoZLmhlYXJ0aC5pZGVudGl0eS52MS5FbXB0eSIagtPkkwIUKhIvYWRtaW4vcmVhbG1zL3tpZH0SZwoRTGlzdE9yZ2FuaXphdGlvbnMSLC5oZWFydGguaWRlbnRpdHkudjEuTGlzdE9yZ2FuaXphdGlvbnNSZXF1ZXN0GiQuaGVhcnRoLmlkZW50aXR5LnYxLk9yZ2FuaXphdGlvblBhZ2USXwoPR2V0T3JnYW5pemF0aW9uEiouaGVhcnRoLmlkZW50aXR5LnYxLkdldE9yZ2FuaXphdGlvblJlcXVlc3QaIC5oZWFydGguaWRlbnRpdHkudjEuT3JnYW5pemF0aW9uEmUKEkNyZWF0ZU9yZ2FuaXphdGlvbhItLmhlYXJ0aC5pZGVudGl0eS52MS5DcmVhdGVPcmdhbml6YXRpb25SZXF1ZXN0GiAuaGVhcnRoLmlkZW50aXR5LnYxLk9yZ2FuaXphdGlvbhJiChJVcGRhdGVPcmdhbml6YXRpb24SKi5oZWFydGguaWRlbnRpdHkudjEuVXBkYXRlT3JnYW5pemF0aW9uQ2FsbBogLmhlYXJ0aC5pZGVudGl0eS52MS5Pcmdhbml6YXRpb24SXgoSRGVsZXRlT3JnYW5pemF0aW9uEi0uaGVhcnRoLmlkZW50aXR5LnYxLkRlbGV0ZU9yZ2FuaXphdGlvblJlcXVlc3QaGS5oZWFydGguaWRlbnRpdHkudjEuRW1wdHkSZgoKTGlzdEFnZW50cxIlLmhlYXJ0aC5pZGVudGl0eS52MS5MaXN0QWdlbnRzUmVxdWVzdBodLmhlYXJ0aC5pZGVudGl0eS52MS5BZ2VudFBhZ2UiEoLT5JMCDBIKL3YxL2FnZW50cxJjCghHZXRBZ2VudBIjLmhlYXJ0aC5pZGVudGl0eS52MS5HZXRBZ2VudFJlcXVlc3QaGS5oZWFydGguaWRlbnRpdHkudjEuQWdlbnQiF4LT5JMCERIPL3YxL2FnZW50cy97aWR9EmcKC0NyZWF0ZUFnZW50EiYuaGVhcnRoLmlkZW50aXR5LnYxLkNyZWF0ZUFnZW50UmVxdWVzdBoZLmhlYXJ0aC5pZGVudGl0eS52MS5BZ2VudCIVgtPkkwIPOgEqIgovdjEvYWdlbnRzEmwKC1VwZGF0ZUFnZW50EiMuaGVhcnRoLmlkZW50aXR5LnYxLlVwZGF0ZUFnZW50Q2FsbBoZLmhlYXJ0aC5pZGVudGl0eS52MS5BZ2VudCIdgtPkkwIXOgRib2R5Mg8vdjEvYWdlbnRzL3tpZH0SaQoLRGVsZXRlQWdlbnQSJi5oZWFydGguaWRlbnRpdHkudjEuRGVsZXRlQWdlbnRSZXF1ZXN0GhkuaGVhcnRoLmlkZW50aXR5LnYxLkVtcHR5IheC0+STAhEqDy92MS9hZ2VudHMve2lkfRKjAQoRQ3JlYXRlQWdlbnRBcGlLZXkSLC5oZWFydGguaWRlbnRpdHkudjEuQ3JlYXRlQWdlbnRBcGlLZXlSZXF1ZXN0Gi0uaGVhcnRoLmlkZW50aXR5LnYxLkNyZWF0ZUFnZW50QXBpS2V5UmVzcG9uc2UiMYLT5JMCKzoBKiImL3YxL2FnZW50cy97YWdlbnRfaWR9L2NyZWRlbnRpYWxzL2tleXMSmwEKFExpc3RBZ2VudENyZWRlbnRpYWxzEi8uaGVhcnRoLmlkZW50aXR5LnYxLkxpc3RBZ2VudENyZWRlbnRpYWxzUmVxdWVzdBonLmhlYXJ0aC5pZGVudGl0eS52MS5BZ2VudENyZWRlbnRpYWxQYWdlIimC0+STAiMSIS92MS9hZ2VudHMve2FnZW50X2lkfS9jcmVkZW50aWFscxKfAQoVUmV2b2tlQWdlbnRDcmVkZW50aWFsEjAuaGVhcnRoLmlkZW50aXR5LnYxLlJldm9rZUFnZW50Q3JlZGVudGlhbFJlcXVlc3QaGS5oZWFydGguaWRlbnRpdHkudjEuRW1wdHkiOYLT5JMCMyoxL3YxL2FnZW50cy97YWdlbnRfaWR9L2NyZWRlbnRpYWxzL3tjcmVkZW50aWFsX2lkfUJFWkNnaXRodWIuY29tL2hlYXJ0aGRiL2hlYXJ0aC9zZGtzL2dvL2dlbmVyYXRlZC9pZGVudGl0eS92MTtpZGVudGl0eXYxYgZwcm90bzM", [file_google_api_annotations]);
 
 /**
  * A user record within a realm.
@@ -878,6 +878,445 @@ export const EmptySchema: GenMessage<Empty> = /*@__PURE__*/
   messageDesc(file_hearth_identity_v1_identity, 28);
 
 /**
+ * An autonomous agent registered within a realm.
+ *
+ * @generated from message hearth.identity.v1.Agent
+ */
+export type Agent = Message<"hearth.identity.v1.Agent"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string realm_id = 2;
+   */
+  realmId: string;
+
+  /**
+   * Owner type: "user" or "organization".
+   *
+   * @generated from field: string owner_type = 3;
+   */
+  ownerType: string;
+
+  /**
+   * UUID of the owning user or organization.
+   *
+   * @generated from field: string owner_id = 4;
+   */
+  ownerId: string;
+
+  /**
+   * @generated from field: string display_name = 5;
+   */
+  displayName: string;
+
+  /**
+   * @generated from field: string description = 6;
+   */
+  description: string;
+
+  /**
+   * @generated from field: repeated string capabilities = 7;
+   */
+  capabilities: string[];
+
+  /**
+   * @generated from field: hearth.identity.v1.AgentStatus status = 8;
+   */
+  status: AgentStatus;
+
+  /**
+   * @generated from field: uint32 max_delegation_depth = 9;
+   */
+  maxDelegationDepth: number;
+
+  /**
+   * @generated from field: int64 created_at = 10;
+   */
+  createdAt: bigint;
+
+  /**
+   * @generated from field: int64 updated_at = 11;
+   */
+  updatedAt: bigint;
+};
+
+/**
+ * Describes the message hearth.identity.v1.Agent.
+ * Use `create(AgentSchema)` to create a new message.
+ */
+export const AgentSchema: GenMessage<Agent> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 29);
+
+/**
+ * A stored agent credential record (no secret material).
+ *
+ * @generated from message hearth.identity.v1.AgentCredential
+ */
+export type AgentCredential = Message<"hearth.identity.v1.AgentCredential"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string agent_id = 2;
+   */
+  agentId: string;
+
+  /**
+   * @generated from field: hearth.identity.v1.AgentCredentialKind kind = 3;
+   */
+  kind: AgentCredentialKind;
+
+  /**
+   * @generated from field: string label = 4;
+   */
+  label: string;
+
+  /**
+   * @generated from field: int64 created_at = 5;
+   */
+  createdAt: bigint;
+
+  /**
+   * @generated from field: optional int64 revoked_at = 6;
+   */
+  revokedAt?: bigint | undefined;
+};
+
+/**
+ * Describes the message hearth.identity.v1.AgentCredential.
+ * Use `create(AgentCredentialSchema)` to create a new message.
+ */
+export const AgentCredentialSchema: GenMessage<AgentCredential> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 30);
+
+/**
+ * A cursor-based page of agents.
+ *
+ * @generated from message hearth.identity.v1.AgentPage
+ */
+export type AgentPage = Message<"hearth.identity.v1.AgentPage"> & {
+  /**
+   * @generated from field: repeated hearth.identity.v1.Agent items = 1;
+   */
+  items: Agent[];
+
+  /**
+   * @generated from field: optional string next_cursor = 2;
+   */
+  nextCursor?: string | undefined;
+};
+
+/**
+ * Describes the message hearth.identity.v1.AgentPage.
+ * Use `create(AgentPageSchema)` to create a new message.
+ */
+export const AgentPageSchema: GenMessage<AgentPage> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 31);
+
+/**
+ * A cursor-based page of agent credentials.
+ *
+ * @generated from message hearth.identity.v1.AgentCredentialPage
+ */
+export type AgentCredentialPage = Message<"hearth.identity.v1.AgentCredentialPage"> & {
+  /**
+   * @generated from field: repeated hearth.identity.v1.AgentCredential items = 1;
+   */
+  items: AgentCredential[];
+};
+
+/**
+ * Describes the message hearth.identity.v1.AgentCredentialPage.
+ * Use `create(AgentCredentialPageSchema)` to create a new message.
+ */
+export const AgentCredentialPageSchema: GenMessage<AgentCredentialPage> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 32);
+
+/**
+ * Request to list agents in a realm.
+ *
+ * @generated from message hearth.identity.v1.ListAgentsRequest
+ */
+export type ListAgentsRequest = Message<"hearth.identity.v1.ListAgentsRequest"> & {
+  /**
+   * @generated from field: optional string owner_id = 1;
+   */
+  ownerId?: string | undefined;
+
+  /**
+   * @generated from field: optional hearth.identity.v1.AgentStatus status = 2;
+   */
+  status?: AgentStatus | undefined;
+
+  /**
+   * @generated from field: optional string capability = 3;
+   */
+  capability?: string | undefined;
+
+  /**
+   * @generated from field: optional string cursor = 4;
+   */
+  cursor?: string | undefined;
+
+  /**
+   * @generated from field: optional uint32 limit = 5;
+   */
+  limit?: number | undefined;
+};
+
+/**
+ * Describes the message hearth.identity.v1.ListAgentsRequest.
+ * Use `create(ListAgentsRequestSchema)` to create a new message.
+ */
+export const ListAgentsRequestSchema: GenMessage<ListAgentsRequest> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 33);
+
+/**
+ * Request to fetch a single agent.
+ *
+ * @generated from message hearth.identity.v1.GetAgentRequest
+ */
+export type GetAgentRequest = Message<"hearth.identity.v1.GetAgentRequest"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+};
+
+/**
+ * Describes the message hearth.identity.v1.GetAgentRequest.
+ * Use `create(GetAgentRequestSchema)` to create a new message.
+ */
+export const GetAgentRequestSchema: GenMessage<GetAgentRequest> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 34);
+
+/**
+ * Request to create a new agent.
+ *
+ * @generated from message hearth.identity.v1.CreateAgentRequest
+ */
+export type CreateAgentRequest = Message<"hearth.identity.v1.CreateAgentRequest"> & {
+  /**
+   * @generated from field: string display_name = 1;
+   */
+  displayName: string;
+
+  /**
+   * @generated from field: optional string description = 2;
+   */
+  description?: string | undefined;
+
+  /**
+   * Owner type: "user" or "organization".
+   *
+   * @generated from field: string owner_type = 3;
+   */
+  ownerType: string;
+
+  /**
+   * UUID of the owning user or organization.
+   *
+   * @generated from field: string owner_id = 4;
+   */
+  ownerId: string;
+
+  /**
+   * @generated from field: repeated string capabilities = 5;
+   */
+  capabilities: string[];
+
+  /**
+   * Maximum delegation depth (1–10, default 1).
+   *
+   * @generated from field: uint32 max_delegation_depth = 6;
+   */
+  maxDelegationDepth: number;
+};
+
+/**
+ * Describes the message hearth.identity.v1.CreateAgentRequest.
+ * Use `create(CreateAgentRequestSchema)` to create a new message.
+ */
+export const CreateAgentRequestSchema: GenMessage<CreateAgentRequest> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 35);
+
+/**
+ * Fields that may be updated on an agent.
+ *
+ * @generated from message hearth.identity.v1.UpdateAgentRequest
+ */
+export type UpdateAgentRequest = Message<"hearth.identity.v1.UpdateAgentRequest"> & {
+  /**
+   * @generated from field: optional string display_name = 1;
+   */
+  displayName?: string | undefined;
+
+  /**
+   * @generated from field: optional string description = 2;
+   */
+  description?: string | undefined;
+
+  /**
+   * @generated from field: repeated string capabilities = 3;
+   */
+  capabilities: string[];
+
+  /**
+   * @generated from field: optional uint32 max_delegation_depth = 4;
+   */
+  maxDelegationDepth?: number | undefined;
+};
+
+/**
+ * Describes the message hearth.identity.v1.UpdateAgentRequest.
+ * Use `create(UpdateAgentRequestSchema)` to create a new message.
+ */
+export const UpdateAgentRequestSchema: GenMessage<UpdateAgentRequest> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 36);
+
+/**
+ * Wraps an UpdateAgentRequest with the target id.
+ *
+ * @generated from message hearth.identity.v1.UpdateAgentCall
+ */
+export type UpdateAgentCall = Message<"hearth.identity.v1.UpdateAgentCall"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: hearth.identity.v1.UpdateAgentRequest body = 2;
+   */
+  body?: UpdateAgentRequest | undefined;
+};
+
+/**
+ * Describes the message hearth.identity.v1.UpdateAgentCall.
+ * Use `create(UpdateAgentCallSchema)` to create a new message.
+ */
+export const UpdateAgentCallSchema: GenMessage<UpdateAgentCall> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 37);
+
+/**
+ * Request to delete an agent.
+ *
+ * @generated from message hearth.identity.v1.DeleteAgentRequest
+ */
+export type DeleteAgentRequest = Message<"hearth.identity.v1.DeleteAgentRequest"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+};
+
+/**
+ * Describes the message hearth.identity.v1.DeleteAgentRequest.
+ * Use `create(DeleteAgentRequestSchema)` to create a new message.
+ */
+export const DeleteAgentRequestSchema: GenMessage<DeleteAgentRequest> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 38);
+
+/**
+ * Request to issue an API key for an agent.
+ *
+ * @generated from message hearth.identity.v1.CreateAgentApiKeyRequest
+ */
+export type CreateAgentApiKeyRequest = Message<"hearth.identity.v1.CreateAgentApiKeyRequest"> & {
+  /**
+   * @generated from field: string agent_id = 1;
+   */
+  agentId: string;
+
+  /**
+   * @generated from field: string label = 2;
+   */
+  label: string;
+};
+
+/**
+ * Describes the message hearth.identity.v1.CreateAgentApiKeyRequest.
+ * Use `create(CreateAgentApiKeyRequestSchema)` to create a new message.
+ */
+export const CreateAgentApiKeyRequestSchema: GenMessage<CreateAgentApiKeyRequest> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 39);
+
+/**
+ * Response from creating an agent API key.
+ * The `key` field is the raw plaintext key — shown exactly once.
+ *
+ * @generated from message hearth.identity.v1.CreateAgentApiKeyResponse
+ */
+export type CreateAgentApiKeyResponse = Message<"hearth.identity.v1.CreateAgentApiKeyResponse"> & {
+  /**
+   * @generated from field: hearth.identity.v1.AgentCredential credential = 1;
+   */
+  credential?: AgentCredential | undefined;
+
+  /**
+   * The plaintext API key. Show to the user once and discard.
+   *
+   * @generated from field: string key = 2;
+   */
+  key: string;
+};
+
+/**
+ * Describes the message hearth.identity.v1.CreateAgentApiKeyResponse.
+ * Use `create(CreateAgentApiKeyResponseSchema)` to create a new message.
+ */
+export const CreateAgentApiKeyResponseSchema: GenMessage<CreateAgentApiKeyResponse> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 40);
+
+/**
+ * Request to list credentials for an agent.
+ *
+ * @generated from message hearth.identity.v1.ListAgentCredentialsRequest
+ */
+export type ListAgentCredentialsRequest = Message<"hearth.identity.v1.ListAgentCredentialsRequest"> & {
+  /**
+   * @generated from field: string agent_id = 1;
+   */
+  agentId: string;
+};
+
+/**
+ * Describes the message hearth.identity.v1.ListAgentCredentialsRequest.
+ * Use `create(ListAgentCredentialsRequestSchema)` to create a new message.
+ */
+export const ListAgentCredentialsRequestSchema: GenMessage<ListAgentCredentialsRequest> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 41);
+
+/**
+ * Request to revoke a single agent credential.
+ *
+ * @generated from message hearth.identity.v1.RevokeAgentCredentialRequest
+ */
+export type RevokeAgentCredentialRequest = Message<"hearth.identity.v1.RevokeAgentCredentialRequest"> & {
+  /**
+   * @generated from field: string agent_id = 1;
+   */
+  agentId: string;
+
+  /**
+   * @generated from field: string credential_id = 2;
+   */
+  credentialId: string;
+};
+
+/**
+ * Describes the message hearth.identity.v1.RevokeAgentCredentialRequest.
+ * Use `create(RevokeAgentCredentialRequestSchema)` to create a new message.
+ */
+export const RevokeAgentCredentialRequestSchema: GenMessage<RevokeAgentCredentialRequest> = /*@__PURE__*/
+  messageDesc(file_hearth_identity_v1_identity, 42);
+
+/**
  * The lifecycle status of a user account.
  *
  * @generated from enum hearth.identity.v1.UserStatus
@@ -965,6 +1404,72 @@ export enum OrganizationStatus {
  */
 export const OrganizationStatusSchema: GenEnum<OrganizationStatus> = /*@__PURE__*/
   enumDesc(file_hearth_identity_v1_identity, 2);
+
+/**
+ * Lifecycle status of an agent.
+ *
+ * @generated from enum hearth.identity.v1.AgentStatus
+ */
+export enum AgentStatus {
+  /**
+   * @generated from enum value: AGENT_STATUS_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: AGENT_STATUS_ACTIVE = 1;
+   */
+  ACTIVE = 1,
+
+  /**
+   * @generated from enum value: AGENT_STATUS_SUSPENDED = 2;
+   */
+  SUSPENDED = 2,
+
+  /**
+   * @generated from enum value: AGENT_STATUS_REVOKED = 3;
+   */
+  REVOKED = 3,
+}
+
+/**
+ * Describes the enum hearth.identity.v1.AgentStatus.
+ */
+export const AgentStatusSchema: GenEnum<AgentStatus> = /*@__PURE__*/
+  enumDesc(file_hearth_identity_v1_identity, 3);
+
+/**
+ * Discriminates the type of credential stored for an agent.
+ *
+ * @generated from enum hearth.identity.v1.AgentCredentialKind
+ */
+export enum AgentCredentialKind {
+  /**
+   * @generated from enum value: AGENT_CREDENTIAL_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: AGENT_CREDENTIAL_KIND_API_KEY = 1;
+   */
+  API_KEY = 1,
+
+  /**
+   * @generated from enum value: AGENT_CREDENTIAL_KIND_ED25519_PUBLIC_KEY = 2;
+   */
+  ED25519_PUBLIC_KEY = 2,
+
+  /**
+   * @generated from enum value: AGENT_CREDENTIAL_KIND_MTLS_CERT = 3;
+   */
+  MTLS_CERT = 3,
+}
+
+/**
+ * Describes the enum hearth.identity.v1.AgentCredentialKind.
+ */
+export const AgentCredentialKindSchema: GenEnum<AgentCredentialKind> = /*@__PURE__*/
+  enumDesc(file_hearth_identity_v1_identity, 4);
 
 /**
  * @generated from service hearth.identity.v1.IdentityAdminService
@@ -1095,6 +1600,72 @@ export const IdentityAdminService: GenService<{
   deleteOrganization: {
     methodKind: "unary";
     input: typeof DeleteOrganizationRequestSchema;
+    output: typeof EmptySchema;
+  },
+  /**
+   * Agents — Phase A (HEA-1405).
+   *
+   * @generated from rpc hearth.identity.v1.IdentityAdminService.ListAgents
+   */
+  listAgents: {
+    methodKind: "unary";
+    input: typeof ListAgentsRequestSchema;
+    output: typeof AgentPageSchema;
+  },
+  /**
+   * @generated from rpc hearth.identity.v1.IdentityAdminService.GetAgent
+   */
+  getAgent: {
+    methodKind: "unary";
+    input: typeof GetAgentRequestSchema;
+    output: typeof AgentSchema;
+  },
+  /**
+   * @generated from rpc hearth.identity.v1.IdentityAdminService.CreateAgent
+   */
+  createAgent: {
+    methodKind: "unary";
+    input: typeof CreateAgentRequestSchema;
+    output: typeof AgentSchema;
+  },
+  /**
+   * @generated from rpc hearth.identity.v1.IdentityAdminService.UpdateAgent
+   */
+  updateAgent: {
+    methodKind: "unary";
+    input: typeof UpdateAgentCallSchema;
+    output: typeof AgentSchema;
+  },
+  /**
+   * @generated from rpc hearth.identity.v1.IdentityAdminService.DeleteAgent
+   */
+  deleteAgent: {
+    methodKind: "unary";
+    input: typeof DeleteAgentRequestSchema;
+    output: typeof EmptySchema;
+  },
+  /**
+   * @generated from rpc hearth.identity.v1.IdentityAdminService.CreateAgentApiKey
+   */
+  createAgentApiKey: {
+    methodKind: "unary";
+    input: typeof CreateAgentApiKeyRequestSchema;
+    output: typeof CreateAgentApiKeyResponseSchema;
+  },
+  /**
+   * @generated from rpc hearth.identity.v1.IdentityAdminService.ListAgentCredentials
+   */
+  listAgentCredentials: {
+    methodKind: "unary";
+    input: typeof ListAgentCredentialsRequestSchema;
+    output: typeof AgentCredentialPageSchema;
+  },
+  /**
+   * @generated from rpc hearth.identity.v1.IdentityAdminService.RevokeAgentCredential
+   */
+  revokeAgentCredential: {
+    methodKind: "unary";
+    input: typeof RevokeAgentCredentialRequestSchema;
     output: typeof EmptySchema;
   },
 }> = /*@__PURE__*/

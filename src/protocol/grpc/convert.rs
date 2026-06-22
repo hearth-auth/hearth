@@ -180,13 +180,55 @@ pub fn identity_to_status(err: IdentityError) -> Status {
             Code::Unauthenticated,
             "DPoP key binding mismatch".to_string(),
         ),
+        IdentityError::DPopJktBlocked => (
+            Code::Unauthenticated,
+            "DPoP JWK thumbprint is server-blocked".to_string(),
+        ),
         // A-13: attestation policy violation.
         IdentityError::AttestationPolicyViolation { .. } => {
             (Code::PermissionDenied, err.to_string())
         }
         IdentityError::AgentNotFound => (Code::NotFound, err.to_string()),
         IdentityError::AgentRevoked => (Code::PermissionDenied, err.to_string()),
+        IdentityError::AgentRateLimitExceeded => (Code::ResourceExhausted, err.to_string()),
+        IdentityError::AgentCredentialNotFound => (Code::NotFound, err.to_string()),
         IdentityError::PreTokenWebhookFailed { .. } => (Code::PermissionDenied, err.to_string()),
+        // M2: protected resource + token exchange
+        IdentityError::ProtectedResourceNotFound => (Code::NotFound, err.to_string()),
+        IdentityError::DuplicateResourceUri => (Code::AlreadyExists, err.to_string()),
+        IdentityError::TokenExchangeRejected { .. } => (Code::PermissionDenied, err.to_string()),
+        IdentityError::DelegationDepthExceeded { .. } => (Code::PermissionDenied, err.to_string()),
+        IdentityError::EmptyScopeIntersection => (Code::PermissionDenied, err.to_string()),
+        IdentityError::ActorTokenReplayed => (Code::Unauthenticated, err.to_string()),
+        IdentityError::DelegationGrantNotFound => (Code::NotFound, err.to_string()),
+        // Phase C
+        IdentityError::ToolAccessDenied { .. } => (Code::PermissionDenied, err.to_string()),
+        IdentityError::ToolApprovalRequired { .. } => (Code::PermissionDenied, err.to_string()),
+        IdentityError::ApprovalRequestNotFound => (Code::NotFound, err.to_string()),
+        IdentityError::ApprovalRequestNotPending { .. } => {
+            (Code::FailedPrecondition, err.to_string())
+        }
+        IdentityError::ApprovalRequestExpired => (Code::DeadlineExceeded, err.to_string()),
+        // Phase D
+        IdentityError::AatScopeEscalation
+        | IdentityError::AatChainBroken { .. }
+        | IdentityError::AatRevoked
+        | IdentityError::AatExpired
+        | IdentityError::AatAudienceMismatch => (Code::PermissionDenied, err.to_string()),
+        IdentityError::TransactionTokenReplayed => (Code::AlreadyExists, err.to_string()),
+        IdentityError::CrossRealmPolicyNotFound | IdentityError::SpiffeMappingNotFound => {
+            (Code::NotFound, err.to_string())
+        }
+        IdentityError::CrossRealmPolicyConflict | IdentityError::SpiffeMappingConflict => {
+            (Code::AlreadyExists, err.to_string())
+        }
+        IdentityError::CrossRealmCapabilityNotAllowed { .. } => {
+            (Code::PermissionDenied, err.to_string())
+        }
+        IdentityError::SpiffeIdInvalid { .. } | IdentityError::SpiffeCertInvalid { .. } => {
+            (Code::InvalidArgument, err.to_string())
+        }
+        IdentityError::SpiffeCertExpired => (Code::Unauthenticated, err.to_string()),
         IdentityError::Storage(_)
         | IdentityError::Serialization { .. }
         | IdentityError::SigningError { .. }

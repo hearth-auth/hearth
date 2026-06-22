@@ -118,8 +118,24 @@ define_id_type!(
 );
 
 define_id_type!(
+    /// Unique identifier for a single agent credential (API key, Ed25519 key, or mTLS cert).
+    ///
+    /// Scoped to a specific agent; the same `AgentCredentialId` does not appear
+    /// across agents.
+    AgentCredentialId, "acred_"
+);
+
+define_id_type!(
     /// Unique identifier for a single webhook delivery attempt.
     WebhookDeliveryId, "whd_"
+);
+
+define_id_type!(
+    /// Unique identifier for a protected resource (MCP server) registered in a realm.
+    ///
+    /// Used as the primary key for protected resource records. See AGENT_AUTH.md §2.5
+    /// and RFC 9728 for the Protected Resource Metadata discovery specification.
+    ResourceServerId, "rs_"
 );
 
 /// Validated RFC 8707 resource URI.

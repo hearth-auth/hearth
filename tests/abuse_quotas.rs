@@ -72,6 +72,7 @@ fn quota_config_populated_roundtrip() {
         max_users: Some(1000),
         max_orgs: Some(50),
         max_clients: Some(10),
+        max_agents: Some(20),
         max_sessions: Some(5000),
         max_audit_rows: Some(100_000),
         max_disk_bytes: Some(1_073_741_824), // 1 GiB

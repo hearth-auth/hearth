@@ -59,6 +59,7 @@ class RealmNav {
       { key: 'identity_providers', label: 'Identity Providers', href: '/ui/admin/realms/{realm}/identity-providers' },
       { key: 'sessions',           label: 'Sessions',           href: '/ui/admin/realms/{realm}/sessions' },
       { key: 'webhooks',           label: 'Webhooks',           href: '/ui/admin/realms/{realm}/webhooks' },
+      { key: 'approvals',          label: 'Approvals',          href: '/ui/admin/realms/{realm}/approvals' },
       { key: 'audit',              label: 'Audit Log',          href: '/ui/admin/realms/{realm}/audit' },
       { key: 'rbac_permissions',   label: 'Permissions',        href: '/ui/admin/realms/{realm}/rbac/permissions' },
       { key: 'rbac_roles',         label: 'Roles',              href: '/ui/admin/realms/{realm}/rbac/roles' },

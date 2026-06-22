@@ -593,18 +593,25 @@ security:
 
 ### `agent_auth`
 
-Agent authentication feature gate. The Agent entity, delegation chains, MCP/A2A surfaces, approval lifecycle, and Agent Authorization Tokens (AATs) described in `docs/specs/AGENT_AUTH.md` are **not yet fully implemented**.
+Staged capability gate for agent authentication. Features are enabled per-capability rather than as a single binary switch — set only the capabilities whose implementation phase has shipped.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `false` | **Must be `false`.** Setting this to `true` is a **startup error** — Hearth refuses to start until the underlying Agent entity, delegation, MCP, AAT, and approval features are complete. This guardrail prevents silent misconfiguration on partial implementations. |
+| `capabilities.identity` | bool | `false` | Enables the M1 agent identity surface: `POST/GET/PATCH/DELETE /v1/agents`, `POST /v1/agents/{id}/credentials/keys`, `GET /v1/agents/{id}/credentials`, `DELETE /v1/agents/{id}/credentials/{cred_id}`, `GET /.well-known/agent.json`, `GET /realms/{name}/.well-known/agent.json`, and gRPC agent methods on `IdentityAdminService`. Set to `true` once M1 is deployed. |
+| `capabilities.delegation` | bool | `false` | **Not yet implemented (M3).** Setting to `true` is a startup error. Enables act-as delegation chains and Agent Authorization Tokens (AATs). |
+| `capabilities.mcp` | bool | `false` | **Not yet implemented (M2).** Setting to `true` is a startup error. Enables MCP authorization server and protected-resource surfaces. |
 
 ```yaml
 agent_auth:
-  enabled: false  # default; omit this block entirely unless explicitly testing
+  capabilities:
+    identity: true   # enables /v1/agents, /.well-known/agent.json, gRPC stubs
+
+# Future phases (not yet implemented — setting these is a startup error):
+#   delegation: false  # Phase C: act-as delegation + AATs
+#   mcp: false         # Phase B: MCP authorization server + protected resources
 ```
 
-> **Note:** Do not set `agent_auth.enabled: true` in any environment until the feature ships. The server will refuse to start with a descriptive error message pointing to `docs/specs/AGENT_AUTH.md` for current implementation status.
+> **Note:** Capabilities not listed here (delegation, mcp, approval, aat) are refused at startup with a descriptive error. See `docs/specs/AGENT_AUTH.md` for the full milestone map.
 
 ---
 
@@ -1294,7 +1301,9 @@ Every field's default value at a glance.
 | `realms.<name>.auth.token` | `magic_link_ttl` | `"15m"` |
 | `realms.<name>.auth.token` | `allow_unsafe_ttl` | `false` |
 | `realms.<name>.federation.providers.<idp>` | `leeway_seconds` | `60` |
-| `agent_auth` | `enabled` | `false` |
+| `agent_auth.capabilities` | `identity` | `false` |
+| `agent_auth.capabilities` | `delegation` | `false` |
+| `agent_auth.capabilities` | `mcp` | `false` |
 | `realms.<name>.seed_users[*]` | `email_verified` | `true` |
 | `realms.<name>.seed_users[*]` | `roles` | `[]` |
 | `realms.<name>.migrate` | `users` | `true` |

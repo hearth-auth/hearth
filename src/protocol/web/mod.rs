@@ -53,6 +53,7 @@ pub mod account_consents;
 pub mod account_linked;
 pub mod admin;
 pub mod auth;
+pub mod consent_delegations;
 pub mod federation;
 pub mod handlers;
 pub(crate) mod handlers_common;
@@ -961,6 +962,15 @@ pub fn router(state: WebState) -> Router {
             "/account/applications/{client_id}/revoke",
             axum::routing::post(account_consents::revoke_consent),
         )
+        // --- Self-service agent-delegation consent management ---
+        .route(
+            "/consent/delegations",
+            axum::routing::get(consent_delegations::delegations_index),
+        )
+        .route(
+            "/consent/delegations/{delegation_id}/revoke",
+            axum::routing::post(consent_delegations::revoke_delegation),
+        )
         // --- Self-service federation management ---
         .route(
             "/account/linked-accounts",
@@ -1544,6 +1554,23 @@ pub fn router(state: WebState) -> Router {
         .route(
             "/admin/realms/{realm}/webhooks/{id}/test",
             axum::routing::post(admin::admin_webhook_test),
+        )
+        // --- Realm-scoped: agent approval queue (Phase C.6) ---
+        .route(
+            "/admin/realms/{realm}/approvals",
+            axum::routing::get(admin::admin_approvals_queue),
+        )
+        .route(
+            "/admin/realms/{realm}/approvals/{id}",
+            axum::routing::get(admin::admin_approval_detail),
+        )
+        .route(
+            "/admin/realms/{realm}/approvals/{id}/approve",
+            axum::routing::post(admin::admin_approval_approve),
+        )
+        .route(
+            "/admin/realms/{realm}/approvals/{id}/deny",
+            axum::routing::post(admin::admin_approval_deny),
         )
         .route("/static/{*file}", axum::routing::get(serve_static))
         .with_state(Arc::clone(&shared));

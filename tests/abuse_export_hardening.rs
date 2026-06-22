@@ -275,6 +275,8 @@ async fn backup_endpoint_emits_watermark_audit_event() {
             end_time: None,
             actor: None,
             limit: Some(10),
+            agent_id: None,
+            tool: None,
         })
         .expect("audit query");
 

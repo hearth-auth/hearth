@@ -215,6 +215,8 @@ pub enum IdentityError {
     ConsentScopeNotRequested,
     /// No consent record exists for the requested `(user, client)` pair.
     ConsentNotFound,
+    /// No delegation grant record exists for the given `delegation_id` and user.
+    DelegationGrantNotFound,
     /// The referenced external IdP connector is not registered in this realm.
     FederationUnknownConnector,
     /// The federation `state` parameter returned by the upstream IdP does not
@@ -335,6 +337,9 @@ pub enum IdentityError {
     DPopBindingMismatch,
     /// The `nonce` in the DPoP proof does not match the server-issued nonce.
     DPopNonceInvalid,
+    /// The `cnf.jkt` thumbprint in the access token is in the server-side
+    /// blocklist (§10.4). The key has been revoked by an administrator.
+    DPopJktBlocked,
     /// A JWT bearer assertion (RFC 7523) is invalid.
     JwtBearerAssertionInvalid {
         /// Machine-readable reason string.
@@ -369,6 +374,13 @@ pub enum IdentityError {
     AgentNotFound,
     /// The agent has been permanently revoked.
     AgentRevoked,
+    /// The agent's per-minute request rate exceeded the configured threshold (D.6).
+    ///
+    /// The engine has already triggered auto-suspension via `suspend_agent()`.
+    /// Callers should surface this as HTTP 429 / gRPC `RESOURCE_EXHAUSTED`.
+    AgentRateLimitExceeded,
+    /// The requested agent credential was not found.
+    AgentCredentialNotFound,
     /// The pre-token enrichment webhook call failed and the realm's policy is `fail_closed`.
     PreTokenWebhookFailed {
         /// Description of the transport or parse failure.
@@ -376,6 +388,94 @@ pub enum IdentityError {
     },
     /// An error from the SAML federation flow.
     Saml(SamlError),
+    // ── M2: Protected Resource + RFC 8693 Token Exchange ─────────────────────
+    /// The requested protected resource was not found in this realm.
+    ProtectedResourceNotFound,
+    /// A protected resource with this URI already exists in the realm.
+    DuplicateResourceUri,
+    /// RFC 8693 token exchange was rejected.
+    ///
+    /// Wraps a human-readable reason for the rejection. Error responses
+    /// use `error: "invalid_grant"` or `error: "invalid_scope"` as
+    /// appropriate; the `reason` is logged but NOT exposed to callers.
+    TokenExchangeRejected {
+        /// Internal reason (not sent to client).
+        reason: String,
+        /// OAuth 2.0 error code to return to the caller.
+        oauth_error: &'static str,
+    },
+    /// The delegation chain depth would exceed the agent's `max_delegation_depth`.
+    DelegationDepthExceeded {
+        /// The agent's configured maximum.
+        max: u8,
+        /// The depth the exchange would produce.
+        attempted: u8,
+    },
+    /// The scope intersection of subject, actor, and requested is empty.
+    EmptyScopeIntersection,
+    /// An actor token `jti` was replayed (B.5 replay prevention).
+    ActorTokenReplayed,
+
+    // Phase C
+    ToolAccessDenied {
+        tool: String,
+    },
+    ToolApprovalRequired {
+        tool: String,
+    },
+    ApprovalRequestNotFound,
+    ApprovalRequestNotPending {
+        current_status: String,
+    },
+    ApprovalRequestExpired,
+
+    // Phase D.1 — Attenuating Authorization Tokens
+    /// A crafted AAT attempts to widen scope beyond its parent's permissions.
+    AatScopeEscalation,
+    /// The AAT attenuation chain is structurally invalid (missing link, wrong parent JTI).
+    AatChainBroken {
+        /// Human-readable description of the broken invariant.
+        reason: String,
+    },
+    /// An AAT or one of its ancestors has been explicitly revoked.
+    AatRevoked,
+    /// The presented AAT has expired.
+    AatExpired,
+    /// The AAT `aud` claim does not match the expected audience.
+    AatAudienceMismatch,
+
+    // Phase D.3 — Transaction Tokens
+    /// A transaction token with this `txn_id` has already been consumed.
+    TransactionTokenReplayed,
+
+    // Phase D.4 — Cross-Realm Trust Policies
+    /// No cross-realm trust policy was found for the given (source, target) pair.
+    CrossRealmPolicyNotFound,
+    /// A cross-realm trust policy already exists for this (source, target) pair.
+    CrossRealmPolicyConflict,
+    /// The requested capability is not permitted under the applicable cross-realm policy.
+    CrossRealmCapabilityNotAllowed {
+        /// The capability that was denied.
+        capability: String,
+    },
+
+    // Phase D.7 — SPIFFE / Workload Identity
+    /// The SPIFFE ID string does not match the expected `spiffe://{domain}/agent/{uuid}` format.
+    SpiffeIdInvalid {
+        /// Human-readable reason for the rejection.
+        reason: String,
+    },
+    /// No SPIFFE ID mapping was found for this agent or SPIFFE ID.
+    SpiffeMappingNotFound,
+    /// A SPIFFE ID mapping already exists for this agent.
+    SpiffeMappingConflict,
+    /// The X.509 certificate presented for SPIFFE authentication is invalid.
+    SpiffeCertInvalid {
+        /// Reason the certificate was rejected.
+        reason: String,
+    },
+    /// The X.509 SVID presented for SPIFFE authentication has expired.
+    SpiffeCertExpired,
 }
 
 impl From<SamlError> for IdentityError {

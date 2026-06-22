@@ -67,7 +67,8 @@ impl IdentityError {
             | Self::UserNotFound
             | Self::ClientNotFound
             | Self::WebhookNotFound
-            | Self::ConsentNotFound => Some("HEARTH_NOT_FOUND"),
+            | Self::ConsentNotFound
+            | Self::DelegationGrantNotFound => Some("HEARTH_NOT_FOUND"),
             Self::SessionNotFound => Some("HEARTH_SESSION_NOT_FOUND"),
             Self::SessionVersionDisabled => Some("HEARTH_SESSION_VERSION_DISABLED"),
 
@@ -138,15 +139,49 @@ impl IdentityError {
             Self::InvalidDPopProof { .. } => Some("invalid_dpop_proof"),
             Self::DPopProofReplay | Self::DPopNonceInvalid => Some("use_dpop_nonce"),
             Self::DPopBindingMismatch => Some("invalid_token"),
+            Self::DPopJktBlocked => Some("invalid_token"),
 
             Self::AttestationPolicyViolation { .. } => Some("HEARTH_ATTESTATION_POLICY_VIOLATION"),
 
             Self::AgentNotFound => Some("agent_not_found"),
             Self::AgentRevoked => Some("agent_revoked"),
+            Self::AgentRateLimitExceeded => Some("agent_rate_limit_exceeded"),
+            Self::AgentCredentialNotFound => Some("agent_credential_not_found"),
 
             Self::PreTokenWebhookFailed { .. } => Some("HEARTH_PRE_TOKEN_WEBHOOK_FAILED"),
 
             Self::Saml(e) => e.wire_error_code(),
+
+            // M2: protected resource + token exchange
+            Self::ProtectedResourceNotFound => Some("protected_resource_not_found"),
+            Self::DuplicateResourceUri => Some("duplicate_resource_uri"),
+            Self::TokenExchangeRejected { oauth_error, .. } => Some(oauth_error),
+            Self::DelegationDepthExceeded { .. } => Some("invalid_grant"),
+            Self::EmptyScopeIntersection => Some("invalid_scope"),
+            Self::ActorTokenReplayed => Some("invalid_grant"),
+            // Phase C
+            Self::ToolAccessDenied { .. } => Some("HEARTH_TOOL_ACCESS_DENIED"),
+            Self::ToolApprovalRequired { .. } => Some("HEARTH_TOOL_APPROVAL_REQUIRED"),
+            Self::ApprovalRequestNotFound => Some("HEARTH_APPROVAL_REQUEST_NOT_FOUND"),
+            Self::ApprovalRequestNotPending { .. } => Some("HEARTH_APPROVAL_REQUEST_NOT_PENDING"),
+            Self::ApprovalRequestExpired => Some("HEARTH_APPROVAL_REQUEST_EXPIRED"),
+            // Phase D
+            Self::AatScopeEscalation => Some("HEARTH_AAT_SCOPE_ESCALATION"),
+            Self::AatChainBroken { .. } => Some("HEARTH_AAT_CHAIN_BROKEN"),
+            Self::AatRevoked => Some("HEARTH_AAT_REVOKED"),
+            Self::AatExpired => Some("HEARTH_AAT_EXPIRED"),
+            Self::AatAudienceMismatch => Some("HEARTH_AAT_AUDIENCE_MISMATCH"),
+            Self::TransactionTokenReplayed => Some("HEARTH_TXN_TOKEN_REPLAYED"),
+            Self::CrossRealmPolicyNotFound => Some("HEARTH_CROSS_REALM_POLICY_NOT_FOUND"),
+            Self::CrossRealmPolicyConflict => Some("HEARTH_CROSS_REALM_POLICY_CONFLICT"),
+            Self::CrossRealmCapabilityNotAllowed { .. } => {
+                Some("HEARTH_CROSS_REALM_CAPABILITY_NOT_ALLOWED")
+            }
+            Self::SpiffeIdInvalid { .. } => Some("HEARTH_SPIFFE_ID_INVALID"),
+            Self::SpiffeMappingNotFound => Some("HEARTH_SPIFFE_MAPPING_NOT_FOUND"),
+            Self::SpiffeMappingConflict => Some("HEARTH_SPIFFE_MAPPING_CONFLICT"),
+            Self::SpiffeCertInvalid { .. } => Some("HEARTH_SPIFFE_CERT_INVALID"),
+            Self::SpiffeCertExpired => Some("HEARTH_SPIFFE_CERT_EXPIRED"),
 
             // 5xx — do not leak internal detail
             Self::SigningError { .. }

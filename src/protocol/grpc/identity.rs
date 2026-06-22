@@ -2,10 +2,11 @@
 
 use tonic::{Code, Request, Response, Status};
 
-use crate::core::{ClientId, OrganizationId, UserId};
+use crate::core::{AgentCredentialId, AgentId, ClientId, OrganizationId, UserId};
 use crate::identity::{
-    self as domain, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    RegisterClientRequest, UpdateClientRequest, UpdateOrganizationRequest, UpdateRealmRequest,
+    self as domain, AgentOwner, CreateAgentApiKeyRequest, CreateAgentRequest,
+    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, RegisterClientRequest,
+    UpdateAgentRequest, UpdateClientRequest, UpdateOrganizationRequest, UpdateRealmRequest,
     UpdateUserRequest,
 };
 use crate::protocol::convert::identity::{
@@ -400,6 +401,229 @@ impl IdentityAdminService for IdentityAdminSvc {
             .delete_organization(&auth.realm_id, &org_id)
             .map_err(identity_to_status)?;
         Ok(Response::new(pb::Empty {}))
+    }
+
+    // ── Agents (Phase A, HEA-1405) ──────────────────────────────────────────
+
+    async fn list_agents(
+        &self,
+        req: Request<pb::ListAgentsRequest>,
+    ) -> Result<Response<pb::AgentPage>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let body = req.into_inner();
+        let limit = body.limit.unwrap_or(50) as usize;
+        let query = domain::ListAgentsQuery::default();
+        let page = self
+            .state
+            .identity
+            .list_agents(&auth.realm_id, &query, body.cursor.as_deref(), limit)
+            .map_err(identity_to_status)?;
+        Ok(Response::new(pb::AgentPage {
+            items: page.items.iter().map(agent_to_proto).collect(),
+            next_cursor: page.next_cursor,
+        }))
+    }
+
+    async fn get_agent(
+        &self,
+        req: Request<pb::GetAgentRequest>,
+    ) -> Result<Response<pb::Agent>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let body = req.into_inner();
+        let agent_id = parse_agent_id(&body.id)?;
+        let agent = self
+            .state
+            .identity
+            .get_agent(&auth.realm_id, &agent_id)
+            .map_err(identity_to_status)?
+            .ok_or_else(|| Status::not_found("agent not found"))?;
+        Ok(Response::new(agent_to_proto(&agent)))
+    }
+
+    async fn create_agent(
+        &self,
+        req: Request<pb::CreateAgentRequest>,
+    ) -> Result<Response<pb::Agent>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let body = req.into_inner();
+        let owner = parse_agent_owner(&body.owner_type, &body.owner_id)?;
+        let request = CreateAgentRequest {
+            display_name: body.display_name,
+            description: body.description,
+            owner,
+            capabilities: body.capabilities,
+            #[allow(clippy::cast_possible_truncation)]
+            max_delegation_depth: body.max_delegation_depth as u8,
+        };
+        let agent = self
+            .state
+            .identity
+            .create_agent(&auth.realm_id, &request, Some(&auth.user_id))
+            .map_err(identity_to_status)?;
+        Ok(Response::new(agent_to_proto(&agent)))
+    }
+
+    async fn update_agent(
+        &self,
+        req: Request<pb::UpdateAgentCall>,
+    ) -> Result<Response<pb::Agent>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let call = req.into_inner();
+        let agent_id = parse_agent_id(&call.id)?;
+        let body = call
+            .body
+            .ok_or_else(|| Status::invalid_argument("body required"))?;
+        let update = UpdateAgentRequest {
+            display_name: body.display_name,
+            description: body.description,
+            capabilities: if body.capabilities.is_empty() {
+                None
+            } else {
+                Some(body.capabilities)
+            },
+            #[allow(clippy::cast_possible_truncation)]
+            max_delegation_depth: body.max_delegation_depth.map(|d| d as u8),
+        };
+        let agent = self
+            .state
+            .identity
+            .update_agent(&auth.realm_id, &agent_id, &update, Some(&auth.user_id))
+            .map_err(identity_to_status)?;
+        Ok(Response::new(agent_to_proto(&agent)))
+    }
+
+    async fn delete_agent(
+        &self,
+        req: Request<pb::DeleteAgentRequest>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let body = req.into_inner();
+        let agent_id = parse_agent_id(&body.id)?;
+        self.state
+            .identity
+            .delete_agent(&auth.realm_id, &agent_id, Some(&auth.user_id))
+            .map_err(identity_to_status)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+
+    async fn create_agent_api_key(
+        &self,
+        req: Request<pb::CreateAgentApiKeyRequest>,
+    ) -> Result<Response<pb::CreateAgentApiKeyResponse>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let body = req.into_inner();
+        let agent_id = parse_agent_id(&body.agent_id)?;
+        let resp = self
+            .state
+            .identity
+            .create_agent_api_key(
+                &auth.realm_id,
+                &agent_id,
+                &CreateAgentApiKeyRequest { label: body.label },
+                Some(&auth.user_id),
+            )
+            .map_err(identity_to_status)?;
+        Ok(Response::new(pb::CreateAgentApiKeyResponse {
+            credential: Some(cred_to_proto(&resp.credential)),
+            key: resp.plaintext_key.expose_once().to_string(),
+        }))
+    }
+
+    async fn list_agent_credentials(
+        &self,
+        req: Request<pb::ListAgentCredentialsRequest>,
+    ) -> Result<Response<pb::AgentCredentialPage>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let body = req.into_inner();
+        let agent_id = parse_agent_id(&body.agent_id)?;
+        let creds = self
+            .state
+            .identity
+            .list_agent_credentials(&auth.realm_id, &agent_id)
+            .map_err(identity_to_status)?;
+        Ok(Response::new(pb::AgentCredentialPage {
+            items: creds.iter().map(cred_to_proto).collect(),
+        }))
+    }
+
+    async fn revoke_agent_credential(
+        &self,
+        req: Request<pb::RevokeAgentCredentialRequest>,
+    ) -> Result<Response<pb::Empty>, Status> {
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
+        let body = req.into_inner();
+        let agent_id = parse_agent_id(&body.agent_id)?;
+        let cred_id = parse_cred_id(&body.credential_id)?;
+        self.state
+            .identity
+            .revoke_agent_credential(&auth.realm_id, &agent_id, &cred_id, Some(&auth.user_id))
+            .map_err(identity_to_status)?;
+        Ok(Response::new(pb::Empty {}))
+    }
+}
+
+// ── Agent proto helpers ──────────────────────────────────────────────────────
+
+fn agent_to_proto(a: &domain::Agent) -> pb::Agent {
+    let (owner_type, owner_id) = match a.owner() {
+        AgentOwner::User(uid) => ("user".to_string(), uid.as_uuid().to_string()),
+        AgentOwner::Organization(oid) => ("organization".to_string(), oid.as_uuid().to_string()),
+    };
+    pb::Agent {
+        id: a.id().to_string(),
+        realm_id: a.realm_id().as_uuid().to_string(),
+        owner_type,
+        owner_id,
+        display_name: a.display_name().to_string(),
+        description: a.description().to_string(),
+        capabilities: a.capabilities().to_vec(),
+        status: match a.status() {
+            domain::AgentStatus::Active => pb::AgentStatus::Active as i32,
+            domain::AgentStatus::Suspended => pb::AgentStatus::Suspended as i32,
+            domain::AgentStatus::Revoked => pb::AgentStatus::Revoked as i32,
+        },
+        max_delegation_depth: u32::from(a.max_delegation_depth()),
+        created_at: a.created_at().as_micros(),
+        updated_at: a.updated_at().as_micros(),
+    }
+}
+
+fn cred_to_proto(c: &domain::AgentCredential) -> pb::AgentCredential {
+    pb::AgentCredential {
+        id: c.id().to_string(),
+        agent_id: c.agent_id().to_string(),
+        kind: match c.kind() {
+            domain::AgentCredentialKind::ApiKey => pb::AgentCredentialKind::ApiKey as i32,
+            domain::AgentCredentialKind::Ed25519PublicKey => {
+                pb::AgentCredentialKind::Ed25519PublicKey as i32
+            }
+            domain::AgentCredentialKind::MtlsCert => pb::AgentCredentialKind::MtlsCert as i32,
+        },
+        label: c.label().to_string(),
+        created_at: c.created_at().as_micros(),
+        revoked_at: c.revoked_at().map(|t| t.as_micros()),
+    }
+}
+
+fn parse_agent_id(s: &str) -> Result<AgentId, Status> {
+    s.parse::<AgentId>()
+        .map_err(|_| Status::invalid_argument(format!("invalid agent id: {s}")))
+}
+
+fn parse_cred_id(s: &str) -> Result<AgentCredentialId, Status> {
+    s.parse::<AgentCredentialId>()
+        .map_err(|_| Status::invalid_argument(format!("invalid credential id: {s}")))
+}
+
+fn parse_agent_owner(owner_type: &str, owner_id: &str) -> Result<AgentOwner, Status> {
+    let uuid = uuid::Uuid::parse_str(owner_id)
+        .map_err(|_| Status::invalid_argument("owner_id must be a UUID"))?;
+    match owner_type {
+        "user" => Ok(AgentOwner::User(UserId::new(uuid))),
+        "organization" => Ok(AgentOwner::Organization(OrganizationId::new(uuid))),
+        _ => Err(Status::invalid_argument(
+            "owner_type must be 'user' or 'organization'",
+        )),
     }
 }
 

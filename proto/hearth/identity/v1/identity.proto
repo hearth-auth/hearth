@@ -250,6 +250,135 @@ message UpdateOrganizationCall {
 message Empty {}
 
 // ---------------------------------------------------------------------------
+// Agents (AGENT_AUTH.md Phase A, HEA-1405)
+// ---------------------------------------------------------------------------
+
+// Lifecycle status of an agent.
+enum AgentStatus {
+  AGENT_STATUS_UNSPECIFIED = 0;
+  AGENT_STATUS_ACTIVE = 1;
+  AGENT_STATUS_SUSPENDED = 2;
+  AGENT_STATUS_REVOKED = 3;
+}
+
+// Discriminates the type of credential stored for an agent.
+enum AgentCredentialKind {
+  AGENT_CREDENTIAL_KIND_UNSPECIFIED = 0;
+  AGENT_CREDENTIAL_KIND_API_KEY = 1;
+  AGENT_CREDENTIAL_KIND_ED25519_PUBLIC_KEY = 2;
+  AGENT_CREDENTIAL_KIND_MTLS_CERT = 3;
+}
+
+// An autonomous agent registered within a realm.
+message Agent {
+  string id = 1;
+  string realm_id = 2;
+  // Owner type: "user" or "organization".
+  string owner_type = 3;
+  // UUID of the owning user or organization.
+  string owner_id = 4;
+  string display_name = 5;
+  string description = 6;
+  repeated string capabilities = 7;
+  AgentStatus status = 8;
+  uint32 max_delegation_depth = 9;
+  int64 created_at = 10;
+  int64 updated_at = 11;
+}
+
+// A stored agent credential record (no secret material).
+message AgentCredential {
+  string id = 1;
+  string agent_id = 2;
+  AgentCredentialKind kind = 3;
+  string label = 4;
+  int64 created_at = 5;
+  optional int64 revoked_at = 6;
+}
+
+// A cursor-based page of agents.
+message AgentPage {
+  repeated Agent items = 1;
+  optional string next_cursor = 2;
+}
+
+// A cursor-based page of agent credentials.
+message AgentCredentialPage {
+  repeated AgentCredential items = 1;
+}
+
+// Request to list agents in a realm.
+message ListAgentsRequest {
+  optional string owner_id = 1;
+  optional AgentStatus status = 2;
+  optional string capability = 3;
+  optional string cursor = 4;
+  optional uint32 limit = 5;
+}
+
+// Request to fetch a single agent.
+message GetAgentRequest {
+  string id = 1;
+}
+
+// Request to create a new agent.
+message CreateAgentRequest {
+  string display_name = 1;
+  optional string description = 2;
+  // Owner type: "user" or "organization".
+  string owner_type = 3;
+  // UUID of the owning user or organization.
+  string owner_id = 4;
+  repeated string capabilities = 5;
+  // Maximum delegation depth (1–10, default 1).
+  uint32 max_delegation_depth = 6;
+}
+
+// Fields that may be updated on an agent.
+message UpdateAgentRequest {
+  optional string display_name = 1;
+  optional string description = 2;
+  repeated string capabilities = 3;
+  optional uint32 max_delegation_depth = 4;
+}
+
+// Wraps an UpdateAgentRequest with the target id.
+message UpdateAgentCall {
+  string id = 1;
+  UpdateAgentRequest body = 2;
+}
+
+// Request to delete an agent.
+message DeleteAgentRequest {
+  string id = 1;
+}
+
+// Request to issue an API key for an agent.
+message CreateAgentApiKeyRequest {
+  string agent_id = 1;
+  string label = 2;
+}
+
+// Response from creating an agent API key.
+// The `key` field is the raw plaintext key — shown exactly once.
+message CreateAgentApiKeyResponse {
+  AgentCredential credential = 1;
+  // The plaintext API key. Show to the user once and discard.
+  string key = 2;
+}
+
+// Request to list credentials for an agent.
+message ListAgentCredentialsRequest {
+  string agent_id = 1;
+}
+
+// Request to revoke a single agent credential.
+message RevokeAgentCredentialRequest {
+  string agent_id = 1;
+  string credential_id = 2;
+}
+
+// ---------------------------------------------------------------------------
 // Admin service — realm context is supplied via the `x-realm-id` request
 // metadata, authenticated via the admin interceptor (bearer token + RBAC
 // admin permission check). Rate-limited to 100 req/min per admin user,
@@ -310,4 +439,39 @@ service IdentityAdminService {
   rpc CreateOrganization(CreateOrganizationRequest) returns (Organization);
   rpc UpdateOrganization(UpdateOrganizationCall) returns (Organization);
   rpc DeleteOrganization(DeleteOrganizationRequest) returns (Empty);
+
+  // Agents — Phase A (HEA-1405).
+  rpc ListAgents(ListAgentsRequest) returns (AgentPage) {
+    option (google.api.http) = {get: "/v1/agents"};
+  }
+  rpc GetAgent(GetAgentRequest) returns (Agent) {
+    option (google.api.http) = {get: "/v1/agents/{id}"};
+  }
+  rpc CreateAgent(CreateAgentRequest) returns (Agent) {
+    option (google.api.http) = {
+      post: "/v1/agents"
+      body: "*"
+    };
+  }
+  rpc UpdateAgent(UpdateAgentCall) returns (Agent) {
+    option (google.api.http) = {
+      patch: "/v1/agents/{id}"
+      body: "body"
+    };
+  }
+  rpc DeleteAgent(DeleteAgentRequest) returns (Empty) {
+    option (google.api.http) = {delete: "/v1/agents/{id}"};
+  }
+  rpc CreateAgentApiKey(CreateAgentApiKeyRequest) returns (CreateAgentApiKeyResponse) {
+    option (google.api.http) = {
+      post: "/v1/agents/{agent_id}/credentials/keys"
+      body: "*"
+    };
+  }
+  rpc ListAgentCredentials(ListAgentCredentialsRequest) returns (AgentCredentialPage) {
+    option (google.api.http) = {get: "/v1/agents/{agent_id}/credentials"};
+  }
+  rpc RevokeAgentCredential(RevokeAgentCredentialRequest) returns (Empty) {
+    option (google.api.http) = {delete: "/v1/agents/{agent_id}/credentials/{credential_id}"};
+  }
 }

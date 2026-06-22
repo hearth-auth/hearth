@@ -78,7 +78,6 @@ struct DPopClaims {
     /// Access token hash (`BASE64URL(SHA-256(ASCII(access_token)))`).
     /// Required on resource server requests (not token endpoint).
     #[serde(default)]
-    #[allow(dead_code)]
     ath: Option<String>,
 }
 
@@ -256,6 +255,7 @@ pub fn validate_dpop_proof(
     expected_htu: &str,
     now_secs: i64,
     expected_nonce: Option<&str>,
+    access_token: Option<&str>,
 ) -> Result<ValidatedDPopProof, IdentityError> {
     // 1. Split JWT
     let parts: Vec<&str> = proof_jwt.splitn(3, '.').collect();
@@ -337,7 +337,29 @@ pub fn validate_dpop_proof(
         });
     }
 
-    // 6. Nonce check
+    // 6. ath check — required when an access token is bound to this proof (RFC 9449 §4.3)
+    if let Some(token) = access_token {
+        let expected_ath = compute_access_token_hash(token);
+        let presented_ath =
+            claims
+                .ath
+                .as_deref()
+                .ok_or_else(|| IdentityError::InvalidDPopProof {
+                    reason: "ath claim required when access_token is present".to_string(),
+                })?;
+        // Constant-time comparison to prevent timing oracle on the hash value.
+        let matches: bool = presented_ath
+            .as_bytes()
+            .ct_eq(expected_ath.as_bytes())
+            .into();
+        if !matches {
+            return Err(IdentityError::InvalidDPopProof {
+                reason: "ath mismatch: access token hash does not match".to_string(),
+            });
+        }
+    }
+
+    // 7. Nonce check
     if let Some(expected) = expected_nonce {
         match claims.nonce.as_deref() {
             Some(n) if n == expected => {}

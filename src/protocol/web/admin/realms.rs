@@ -318,6 +318,7 @@ pub struct AuditRow {
 /// label suitable for rendering in the admin audit log. The match is
 /// exhaustive — operators see real prose ("Consent Revoked"), not raw
 /// snake-case tags.
+#[allow(clippy::too_many_lines)]
 fn action_label(action: &crate::audit::AuditAction) -> &'static str {
     use crate::audit::AuditAction as A;
     match action {
@@ -417,6 +418,27 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::AgentReactivated => "Agent Reactivated",
         A::AgentRevoked => "Agent Revoked",
         A::AgentDeleted => "Agent Deleted",
+        A::AgentCredentialCreated => "Agent Credential Created",
+        A::AgentCredentialRevoked => "Agent Credential Revoked",
+        // M2 delegation + MCP
+        A::AgentDelegation => "Agent Delegation",
+        A::AgentToolInvocation => "Agent Tool Invocation",
+        A::ApprovalRequested => "Approval Requested",
+        A::ApprovalGranted => "Approval Granted",
+        A::ApprovalDenied => "Approval Denied",
+        A::AgentTokenRevoked => "Agent Token Revoked",
+        A::CrossRealmTrustCreated => "Cross-Realm Trust Created",
+        A::CrossRealmTrustRevoked => "Cross-Realm Trust Revoked",
+        A::ProtectedResourceRegistered => "Protected Resource Registered",
+        A::ProtectedResourceUpdated => "Protected Resource Updated",
+        A::ProtectedResourceDeleted => "Protected Resource Deleted",
+        // Phase D
+        A::AatIssued => "AAT Issued",
+        A::AatRevoked => "AAT Revoked",
+        A::TransactionTokenIssued => "Transaction Token Issued",
+        A::CrossRealmTokenIssued => "Cross-Realm Token Issued",
+        A::SpiffeIdMapped => "SPIFFE ID Mapped",
+        A::SpiffeAuthSuccess => "SPIFFE Auth Success",
     }
 }
 
@@ -429,6 +451,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
 /// updates inside a category (e.g. `UserUpdated`) share the category with
 /// their destructive counterpart (`UserDeleted`); the row-level severity
 /// indicator is what separates them visually.
+#[allow(clippy::too_many_lines)]
 fn action_category(action: &crate::audit::AuditAction) -> &'static str {
     use crate::audit::AuditAction as A;
     match action {
@@ -535,7 +558,28 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::AgentSuspended
         | A::AgentReactivated
         | A::AgentRevoked
-        | A::AgentDeleted => "System",
+        | A::AgentDeleted
+        | A::AgentCredentialCreated
+        | A::AgentCredentialRevoked
+        // M2 delegation + MCP — classified as Agent sub-domain within System
+        | A::AgentDelegation
+        | A::AgentToolInvocation
+        | A::ApprovalRequested
+        | A::ApprovalGranted
+        | A::ApprovalDenied
+        | A::AgentTokenRevoked
+        | A::CrossRealmTrustCreated
+        | A::CrossRealmTrustRevoked
+        | A::ProtectedResourceRegistered
+        | A::ProtectedResourceUpdated
+        | A::ProtectedResourceDeleted
+        // Phase D — agent infrastructure events
+        | A::AatIssued
+        | A::AatRevoked
+        | A::TransactionTokenIssued
+        | A::CrossRealmTokenIssued
+        | A::SpiffeIdMapped
+        | A::SpiffeAuthSuccess => "System",
     }
 }
 
@@ -976,6 +1020,8 @@ pub async fn admin_audit_list(
         actor: params.actor.clone().filter(|s| !s.is_empty()),
         action,
         limit: Some(limit),
+        agent_id: None,
+        tool: None,
     };
 
     match state.audit.query(&query) {
@@ -1188,6 +1234,8 @@ pub async fn admin_api_audit_events(
         actor: params.actor.filter(|s| !s.is_empty()),
         action,
         limit: Some(limit),
+        agent_id: None,
+        tool: None,
     };
 
     match state.audit.query(&query) {
@@ -1258,6 +1306,8 @@ pub async fn admin_audit_export(
         actor: params.actor.filter(|s| !s.is_empty()),
         action,
         limit: Some(limit),
+        agent_id: None,
+        tool: None,
     };
 
     let use_csv = params.format.as_deref() == Some("csv");

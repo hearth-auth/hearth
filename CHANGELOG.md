@@ -3,11 +3,315 @@
 All notable changes to Hearth will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Hearth has not yet cut a versioned release; all shipped work appears under `[Unreleased]`.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-06-21
+
+### Security
+
+- **Agent REST endpoints now require admin auth — BFLA remediation (HEA-1412)** — All 8 agent
+  management endpoints (`GET/POST /v1/agents`, `GET/PATCH/DELETE /v1/agents/{id}`,
+  `POST /v1/agents/{id}/credentials/keys`, `GET /v1/agents/{id}/credentials`,
+  `DELETE /v1/agents/{id}/credentials/{cred_id}`) previously accepted unauthenticated requests.
+  Every handler now calls `extract_admin_auth` + `require_admin_permission("hearth.agents.admin")`.
+  A fail-closed `route_layer` guard is also applied at the router level so future handlers in this
+  router return `401` by default even if per-handler auth is accidentally omitted. Regression tests
+  assert `401` for all endpoints without a token (HEA-1412).
+- **Agent API key entropy zeroed after use (HEA-1412)** — `create_agent_api_key` now calls
+  `raw.zeroize()` on the 32-byte entropy buffer after the SHA-256 hash is computed, preventing
+  key material from lingering on the stack (HEA-1412).
+- **actor_token signature verified and sub-bound to client_id (HEA-1466 F3)** — RFC 8693 token
+  exchange now verifies the `actor_token` Ed25519 signature against the realm key before reading
+  any claims. Previously, `actor_token` was only base64-decoded without signature verification;
+  a fresh forged JWT with an arbitrary `sub` claim bypassed the JTI replay guard and allowed
+  impersonation of any agent in the `act` delegation chain (confused-deputy). The exchange also
+  now asserts `actor_token.sub == client_id` — a token belonging to principal A cannot be used
+  to impersonate principal B. Rejects with `invalid_grant` (HEA-1466).
+- **AAT audience claim validated at parse time (HEA-1469 F6)** — `parse_and_validate_aat` (and
+  the public `validate_aat` trait method) now accept an `expected_aud: Option<&str>` parameter.
+  When supplied, the `aud` JWT claim must exactly match; otherwise `AatAudienceMismatch`
+  (`HEARTH_AAT_AUDIENCE_MISMATCH`) is returned. Previously a token issued for `service-A` was
+  silently accepted by `service-B`. The `/v1/aats/validate` HTTP endpoint accepts the new
+  optional `expected_aud` body field (HEA-1469).
+- **AAT string constraint widening blocked (HEA-1468 F5)** — `validate_tools_subset` now enforces
+  equality for non-numeric constraint values (strings, booleans, nested objects). Previously a child
+  AAT could set an arbitrary string for any constraint key the parent held (e.g. swapping
+  `allowed_domain` from `safe.example.com` to `attacker.example.com`) without triggering
+  `AatScopeEscalation`. Numeric constraints (≤ parent) are unchanged (HEA-1468).
+- **Cross-realm token exchange rejection (HEA-1467 F4)** — RFC 8693 token exchange now rejects
+  subject tokens whose `tid` claim does not match the serving realm, preventing identity laundering
+  across realm trust boundaries. The issued token's `iss` and `tid` are always pinned to the
+  serving realm's configured issuer URL and realm ID, regardless of what the subject token carried.
+  Rejects with `invalid_grant` (HEA-1467).
+- **DPoP JKT thumbprint blocklist (§10.4)** — operators can block a DPoP JWK thumbprint via the
+  admin API (`POST /v1/dpop/block-jkt`). Blocked thumbprints are maintained in an in-memory
+  projection loaded at startup and updated on each block/unblock call. Tokens whose `cnf.jkt`
+  matches a blocked entry are rejected at `validate_token` time with `HEARTH_DPOP_JKT_BLOCKED`
+  without any storage syscall on the hot path. New engine methods: `block_dpop_jkt`,
+  `unblock_dpop_jkt`, `is_dpop_jkt_blocked`. New error variant: `DPopJktBlocked`. (HEA-1408 §10.4)
+- **Hot-path JTI revocation projection (§10.5)** — sessionless token revocation now populates an
+  `ArcSwap`-backed in-memory map (`revoked_jti_cache`) at startup and on each revoke call.
+  `validate_token`, introspection, and `decide_permission` check this map atomically instead of
+  hitting storage; each `rcu()` sweep evicts expired entries. Revocation survives restarts and is
+  consistent across Raft nodes via WAL replay. (HEA-1408 §10.5)
+
+- **SPIFFE SVID validation hardened** — `extract_spiffe_id_from_der` now uses `x509-parser` to
+  extract the SPIFFE identity exclusively from the URI-type SubjectAlternativeName extension;
+  a `spiffe://` string in Subject CN, Issuer, or any non-SAN field is no longer accepted as a
+  valid identity. `check_cert_not_expired` validates the `notAfter` field and returns the new
+  `SpiffeCertExpired` error variant (wire code `HEARTH_SPIFFE_CERT_EXPIRED`) instead of silently
+  accepting expired SVIDs (HEA-1444).
+
+- **DPoP binding enforced at resource endpoints (RFC 9449 §7.2)** — `extract_user_auth` now
+  calls `enforce_dpop_binding` for tokens carrying a `cnf.jkt` claim. The DPoP proof presented
+  in the `DPoP` header is validated against the token's bound key thumbprint, the `htm` HTTP
+  method, and the `htu` URI (issuer + request path). A DPoP-bound access token presented as a
+  plain Bearer token (no `DPoP` header) is rejected with `invalid_token`. JTI replay prevention
+  applies via `check_and_record_dpop_jti`. Callers on MFA and OAuth resource endpoints
+  automatically supply `method` and `uri` for `htm`/`htu` computation. (HEA-1409 M5)
+
+- **Per-agent request rate monitor with fail-closed auto-suspend (D.6)** — Hearth now maintains
+  a per-agent in-memory rolling-window rate counter (`AgentRateMonitor`). The default threshold
+  is 1 000 requests per 60-second window. When an agent exceeds its threshold, `verify_agent_api_key`
+  auto-suspends the agent (status → `Suspended`), emits an audit event, and returns
+  `AgentRateLimitExceeded` (HTTP 429 / gRPC `RESOURCE_EXHAUSTED`, wire code
+  `HEARTH_AGENT_RATE_LIMIT_EXCEEDED`). Counters reset on server restart; the threshold is not
+  yet configurable via `hearth.yaml`. (HEA-1409 M5 D.6)
+
+### Fixed
+
+- **Transaction token double-consumption** — `consume_transaction_token` now holds the
+  per-`txn_id` advisory lock across the consumed-key check and write, closing a TOCTOU
+  window where two concurrent callers presenting the same token could both pass the
+  `get(consumed_key)` guard before either wrote the consumed marker (HEA-1445).
+
+### Changed
+
+- **A-36 startup guardrail removed** — the startup check that rejected
+  `agent_auth.capabilities.approval = true` without `identity = true`, and
+  `agent_auth.capabilities.advanced = true` without `identity = true`, has been removed.
+  All agent-auth capability phases (M1–M4) are fully implemented; the prerequisite-ordering
+  enforcement is no longer needed. Operators can now enable any combination of capability
+  flags without a startup error. (HEA-1409)
+
+- **`--dev` auto-enables all agent-auth capabilities** — running `hearth serve --dev` now
+  unconditionally enables `agent_auth.capabilities.{identity,approval,advanced}`, so Phase D
+  routes (AATs, transaction tokens, SPIFFE, cross-realm) are available out of the box in
+  development without requiring `hearth.yaml` edits. Production deployments (without `--dev`)
+  are unaffected: capabilities remain `false` unless explicitly set. (HEA-1408)
+
 ### Added
+
+- **Agent Auth end-to-end smoke example** — `examples/agent-auth-smoke/smoke.sh` demonstrates
+  the full M5 surface against a live `hearth --dev` server: DPoP-bound token issuance (RFC 9449,
+  Node.js native crypto), RFC 8693 token exchange with `act` chain and `on_behalf_of`, AAT
+  issuance + child derivation, and transaction token lifecycle including replay prevention.
+  Runs as part of `make sdk-smoke-local`. (HEA-1463)
+
+- **Agent auth surface documented in all 7 SDK READMEs** — TypeScript and Go READMEs include
+  full DPoP proof construction, RFC 8693 exchange, AAT, and transaction token code samples. Rust,
+  Python, PHP, and Kotlin READMEs include language-specific idioms and cross-references.
+  `docs/specs/SDK.md` gains Section 13 (agent-auth SDK contract) and a conformance checklist item.
+  Draft-tracking owner: CTO (@therecluse26). (HEA-1463)
+
+- **`agent_auth.capabilities.advanced` flag** — enables Phase D agent features: Attenuating
+  Authorization Tokens (AATs), transaction tokens, cross-realm trust policies, and SPIFFE/mTLS
+  workload identity. Requires `agent_auth.capabilities.identity = true`. (HEA-1425)
+- **Agent-Auth M5 close-out** — all five implementation milestones complete. AGENT_AUTH.md
+  banner updated to final status; end-to-end conformance tests pass for M1–M4. (HEA-1425)
+
+- **Attenuating Authorization Tokens (AATs) — Phase D.1** — agents can request root AATs
+  (signed with the realm's Ed25519 key, `typ: "aat+jwt"`) and derive child AATs that narrow
+  permissions offline. Derivation enforces strict subset invariants: child scope ⊆ parent scope,
+  child tools ⊆ parent tools, child constraints ≤ parent constraints, child exp ≤ parent exp.
+  Revocation of any ancestor invalidates all descendants. Adversarial crafted-AAT escalation
+  is rejected at the chain validation step. New engine methods: `issue_aat`, `derive_aat`,
+  `validate_aat`, `revoke_aat`. (HEA-1424 Phase D.1)
+- **Transaction tokens — Phase D.3** — single-use, 60-second transaction tokens bind two agents
+  to a specific operation. The `txn` claim (caller-supplied UUID) is written atomically at
+  issuance for replay prevention; a second issuance or consumption of the same `txn_id` returns
+  `TransactionTokenReplayed`. New engine methods: `issue_transaction_token`,
+  `consume_transaction_token`. (HEA-1424 Phase D.3)
+- **Cross-realm trust policies — Phase D.4** — realm admins can declare explicit trust policies
+  allowing agents from a source realm to present tokens to resources in the target realm,
+  restricted to a declared set of capabilities. No implicit trust: a missing policy always
+  returns `false`. New engine methods: `create_cross_realm_policy`, `get_cross_realm_policy`,
+  `list_cross_realm_policies`, `delete_cross_realm_policy`, `check_cross_realm_policy`.
+  Audit actions: `CrossRealmTrustCreated`, `CrossRealmTrustRevoked`. (HEA-1424 Phase D.4)
+- **SPIFFE / workload identity — Phase D.7** — agents can be registered with a SPIFFE ID
+  (`spiffe://{trust_domain}/agent/{uuid}`) for mTLS workload authentication. The TLS
+  termination layer maps the SVID's URI SAN to an `AgentId` via the SPIFFE mapping registry.
+  Invalid SPIFFE ID format and duplicate mappings are rejected. New engine methods:
+  `register_spiffe_mapping`, `lookup_agent_by_spiffe_id`, `delete_spiffe_mapping`,
+  `validate_spiffe_svid`. Audit actions: `SpiffeIdMapped`, `SpiffeAuthSuccess`. (HEA-1424 Phase D.7)
+- **Phase D proto backfill** — `AuditAction` proto enum gains 6 Phase D variants
+  (110–115: `AatIssued`, `AatRevoked`, `TransactionTokenIssued`, `CrossRealmTokenIssued`,
+  `SpiffeIdMapped`, `SpiffeAuthSuccess`). (HEA-1424)
+- **Phase D HTTP REST API** — `POST /v1/aats`, `POST /v1/aats/derive`, `POST /v1/aats/validate`,
+  `DELETE /v1/aats/{jti}`, `POST /v1/transaction-tokens`, `POST /v1/transaction-tokens/consume`,
+  `POST /v1/spiffe-mappings`, `GET|DELETE /v1/spiffe-mappings/{agent_id}`,
+  `POST|GET /v1/cross-realm-policies`, `GET|DELETE /v1/cross-realm-policies/{id}`.
+  All gated by `agent_auth.capabilities.advanced = true`. (HEA-1408)
+- **Prometheus metrics for agent operations** — five new counters:
+  `hearth_agent_delegation_total` (realm, outcome), `hearth_agent_approval_total` (realm, transition),
+  `hearth_agent_aat_issued_total` (realm, kind), `hearth_agent_aat_revoked_total` (realm),
+  `hearth_agent_txn_token_total` (realm, op). (HEA-1408)
+- **AAT fuzz target** — `fuzz/fuzz_targets/aat_parse.rs` exercises `decode_claims_unverified`
+  and `verify_token_signature` on arbitrary byte sequences covering AAT, agentic-JWT, and
+  actor-token parsing paths. (HEA-1408)
+- **`AuditQuery` agent/chain/tool filters (§12.4 MUST)** — `AuditQuery` gains `agent_id` and
+  `tool` optional fields that match against `metadata.agent_id` and `metadata.tool` in the
+  stored event JSON, enabling per-agent and per-tool audit query scoping. (HEA-1408)
+
+### Fixed
+
+- **RFC 8693 actor scope: absent claim treated as unconstrained** — an actor token with no
+  `scope` claim (field absent) no longer produces `EmptyScopeIntersection`; only an explicit
+  `"scope": ""` (zero permissions) is rejected. Actors that omit the claim are treated as not
+  imposing an additional scope ceiling beyond the subject token. (HEA-1424)
+
+### Security
+
+- **RFC 8693 actor scope enforcement** — token exchange now enforces RFC 8693 §4.4:
+  `effective_scope ⊆ actor_scope ∩ subject_scope`. Previously, `actor_scope` defaulted to
+  `subject_scope`, allowing a zero-permission actor to obtain the subject's full privilege set
+  via a delegated token. The actor's scope ceiling is now taken from the `scope` claim in the
+  actor's JWT; actors with no scope claim or empty scope produce an `EmptyScopeIntersection`
+  rejection. (HEA-1429 / HEA-1427 F-2)
+
+### Added
+
+- **Tool-level permission grammar (agent-auth Phase C)** — RBAC roles can now include
+  `tool.{name}.invoke`, `tool.{name}.invoke_with_approval`, and `tool.{name}.deny` permission
+  strings to govern per-tool agent access. Tool groups are supported via `toolgroup.{group}.{action}`
+  permissions, with group-to-tool membership declared in realm config. **Deny wins:** a `deny`
+  permission always overrides any co-present `invoke` grant. Scope intersection at delegation
+  narrows the effective scope to the triple intersection of user-granted, agent-permitted, and
+  requested scopes. (HEA-1423)
+- **Human-in-the-loop approval request lifecycle (agent-auth Phase C)** — agents holding
+  `tool.{name}.invoke_with_approval` can submit approval requests via the identity engine.
+  Approvers transition requests from `Pending → Approved` (issuing a time-boxed capability
+  token scoped to the approved tool, default TTL 5 min, max 1 h) or `Pending → Denied`.
+  Transitions from non-`Pending` states are rejected. Requests expire after a configurable
+  window (default 1 hour); expired requests are treated as denied. (HEA-1423)
+- **Approval webhook notifications (agent-auth Phase C.5)** — realms can configure
+  `approval_webhook.url` (plus optional `secret` and `timeout_ms`) to receive durable
+  at-least-once HTTP POST notifications when an approval request is created. The payload
+  carries `request_id`, `agent_id`, `tool`, `delegation_chain`, `approve_url`, and `deny_url`.
+  Delivery is HMAC-SHA256 signed when a secret is configured (same `X-Hearth-Signature-256`
+  convention as the audit webhook engine). The outbox record is written to WAL atomically with
+  the approval record, guaranteeing delivery survives server crashes. (HEA-1407)
+- **Approval REST API (agent-auth Phase C)** — `POST /v1/approval-requests`,
+  `GET /v1/approval-requests`, `GET /v1/approval-requests/{id}`,
+  `POST /v1/approval-requests/{id}/approve`, `POST /v1/approval-requests/{id}/deny`.
+  Gated by `agent_auth.capabilities.approval = true`. (HEA-1407)
+- **`agent_auth.capabilities.approval` flag** — enables Phase C approval routes and webhook
+  delivery. Requires `agent_auth.capabilities.identity = true`. (HEA-1407)
+
+- **Consent UI: agent delegation view/revoke** — users can list and revoke active RFC 8693
+  agent delegations at `GET /ui/consent/delegations`. Revoking immediately invalidates the
+  bound access token via the JTI blocklist. Delegation grants are persisted on every
+  successful token exchange and indexed by user subject. (HEA-1418)
+- **gRPC `AuditAction` enum fully synced** — the proto enum now covers all 109 domain variants
+  (previously 59 variants mapped to `UNSPECIFIED`, losing information on the wire). Includes
+  RBAC group events, login/lockout events, backup/export watermarking, required-action lifecycle,
+  SMS MFA, adaptive step-up, device fingerprints, email-change, agent lifecycle, and M2
+  delegation/MCP events (`AgentDelegation` through `ProtectedResourceDeleted`). Go and TypeScript
+  SDK types regenerated; reverse mapping (`proto → domain`) added for gRPC filter queries. (HEA-1417)
+- **RFC 8693 token exchange** (`urn:ietf:params:oauth:grant-type:token-exchange`) — agents
+  can exchange a user's access token for a delegated token via `POST /token` with the new
+  grant type. Resulting tokens carry an `act` (actor) claim per RFC 8693 §4.1. The exchange
+  enforces scope intersection (`subject ∩ actor_permitted ∩ requested`), lifetime ≤ subject
+  remaining, per-agent `max_delegation_depth` cap, and actor-token JTI replay prevention
+  (5-minute window, persisted). (HEA-1406)
+- **Protected resource registration** — realms can register MCP tool servers as protected
+  resources via `POST /v1/resource-servers`. Resources have a canonical `resource_uri`, scope
+  list, and required-claims list. URI uniqueness is enforced per realm. (HEA-1406)
+- **Protected Resource Metadata endpoint** (RFC 9728) — `GET /.well-known/oauth-protected-resource`
+  returns Hearth's PRM document advertising itself as an OAuth AS, its JWKS URI, and supported
+  MCP scopes. (HEA-1406)
+- **MCP scope strings** (§2.6) — Hearth accepts and validates `{namespace}:{category}:{action}`
+  scope format. Standard scopes: `mcp:tools:invoke`, `mcp:tools:list`, `mcp:resources:read`,
+  `mcp:resources:write`, `mcp:prompts:read`. (HEA-1406)
+- **`act` chain on `TokenClaims`** — all issued JWTs now include an optional `act` field
+  (RFC 8693 §4.1) encoding the full delegation chain. Existing non-delegated tokens omit it
+  (`skip_serializing_if = None`). (HEA-1406)
+- **`ResourceServerId` newtype** (prefix `rs_`) added to `hearth::core`. (HEA-1406)
+- **Delegation audit actions** — `AuditAction` extended with `AgentDelegation`,
+  `AgentToolInvocation`, `ApprovalRequested`, `ApprovalGranted`, `ApprovalDenied`,
+  `AgentTokenRevoked`, `CrossRealmTrustCreated`, `CrossRealmTrustRevoked`,
+  `ProtectedResourceRegistered`, `ProtectedResourceUpdated`, `ProtectedResourceDeleted`. (HEA-1406)
+- **Actor JTI cleanup sweeper** — `sweep_actor_jtis` evicts expired actor-token JTI entries
+  during the periodic cleanup sweep. (HEA-1406)
+
+### Changed
+
+- **`MAX_ACT_CHAIN_DEPTH` raised 3 → 10** (A-38 global ceiling, `src/abuse/mod.rs`). The
+  per-agent `max_delegation_depth` field (1–10) gates individual agents; the global constant
+  is the hard ceiling when validating inbound tokens from external parties. (HEA-1406)
+- **`resource_indicators_supported` set to `true`** in both the test `OidcDiscoveryDocument`
+  default and the live discovery document. RFC 8707 `resource` parameter support was already
+  implemented; the discovery field now reflects reality. (HEA-1406)
+- **`grant_types_supported`** in the OIDC discovery document now includes
+  `urn:ietf:params:oauth:grant-type:token-exchange`. (HEA-1406)
+
+### Security
+
+- **Agent endpoint authentication (HEA-1414)** — all 9 `/v1/agents` HTTP handlers
+  now require a valid Bearer token with `hearth.admin` permission; unauthenticated
+  requests return `401 Unauthorized`. Cross-realm BOLA is blocked at the
+  token-validation layer (per-realm Ed25519 signing keys).
+- **DPoP `ath` claim validation (HEA-1414)** — `validate_dpop_proof` now accepts
+  an `access_token` parameter; when provided, the proof's `ath` claim is required
+  and validated with constant-time comparison (`subtle::ConstantTimeEq`).
+- **Capability string bounds (HEA-1414)** — `create_agent` and `update_agent`
+  reject requests with more than 50 capability URIs or any URI exceeding 256
+  characters.
+- **Agent credential quota (HEA-1414)** — `create_agent_api_key` enforces a
+  per-agent cap of 25 active (non-revoked) credentials; further attempts return
+  `QuotaExceeded { resource: "agent_credentials" }`.
+- **Audit actor attribution (HEA-1414)** — all 8 agent-mutating engine methods now
+  accept `caller: Option<&UserId>`; HTTP and gRPC handlers pass the authenticated
+  user so audit events record who performed the action.
+- **Credential audit events (HEA-1416)** — `create_agent_api_key` and
+  `revoke_agent_credential` now emit `AgentCredentialCreated` / `AgentCredentialRevoked`
+  audit events with the caller's `UserId` as actor; previously these two operations
+  emitted no audit event and the `_caller` parameter was unused.
+
+### Added
+
+- **DPoP storage infrastructure (HEA-1410)** — lays the persistence foundation for M2
+  DPoP-bound agent tokens:
+  - Per-realm DPoP nonce HMAC secret generated once and persisted under
+    `agt:dpop:nonce-secret`; reloaded on restart so nonces survive server restarts.
+    Previously a global ephemeral key caused all nonces to expire on every restart.
+  - DPoP proof JTI replay cache persisted to storage under `agt:dpop:jti:{jti}` with
+    8-byte little-endian i64 TTL expiry; survives restarts and is consistent across
+    Raft nodes. Previously an in-memory `HashMap` was bypassed on restart.
+  - Background cleanup sweeper extended to evict expired `agt:dpop:jti:*` entries
+    on every tick (same pattern as JAR JTI and fingerprint sweepers).
+  - New `IdentityEngine` methods: `check_and_record_dpop_jti` and
+    `get_realm_dpop_nonce_secret`.
+
+- **Agent identity (M1, HEA-1405)** — Phase A of `AGENT_AUTH.md` is now reachable:
+  - `POST /v1/agents` — register an agent; owner (user or organization) FK-checked;
+    realm `max_agents` quota enforced when configured.
+  - `GET /v1/agents`, `GET /v1/agents/{id}`, `PATCH /v1/agents/{id}`,
+    `DELETE /v1/agents/{id}` — full CRUD with credential cascade on delete.
+  - `POST /v1/agents/{id}/credentials/keys` — issue a 256-bit API key (show-once;
+    SHA-256 hash stored, plaintext never persisted); constant-time verification.
+  - `GET /v1/agents/{id}/credentials` — list credentials (active and revoked).
+  - `DELETE /v1/agents/{id}/credentials/{cred_id}` — revoke a credential.
+  - `GET /.well-known/agent.json?agent_id={id}` — Agent Card per A2A protocol.
+  - All routes absent from the router unless `agent_auth.capabilities.identity: true`.
+
+- **`agent_auth.capabilities.identity` config flag** — replaces the old A-36 binary
+  guardrail (`agent_auth.enabled`). Setting `capabilities.identity: true` activates M1
+  agent routes. Future phases add their own capability flags.
+
+- **`RealmQuotaConfig.max_agents`** — per-realm limit on registered agents;
+  mirrors `max_clients` / `max_users`.
 
 - **`GET /admin/users/{id}/sessions`** — lists active (non-revoked) sessions for a user.
   Returns a paginated `{"items": [...], "next_cursor": "..."}` response with session ID,

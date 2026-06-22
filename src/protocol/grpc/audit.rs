@@ -75,66 +75,16 @@ fn proto_query_to_domain(q: &pb::AuditQuery, realm_id: RealmId) -> AuditQuery {
         start_time: q.start_time.map(Timestamp::from_micros),
         end_time: q.end_time.map(Timestamp::from_micros),
         actor: q.actor.clone(),
-        action: q.action.and_then(|v| proto_action_to_domain(v).ok()),
+        action: q.action.and_then(proto_action_to_domain),
         limit: q.limit.map(|v| v as usize),
+        agent_id: None,
+        tool: None,
     }
 }
 
-fn proto_action_to_domain(v: i32) -> Result<AuditAction, ()> {
-    let p = pb::AuditAction::try_from(v).map_err(|_| ())?;
-    Ok(match p {
-        pb::AuditAction::Unspecified => return Err(()),
-        pb::AuditAction::UserCreated => AuditAction::UserCreated,
-        pb::AuditAction::UserUpdated => AuditAction::UserUpdated,
-        pb::AuditAction::UserDeleted => AuditAction::UserDeleted,
-        pb::AuditAction::CredentialSet => AuditAction::CredentialSet,
-        pb::AuditAction::CredentialChanged => AuditAction::CredentialChanged,
-        pb::AuditAction::CredentialVerified => AuditAction::CredentialVerified,
-        pb::AuditAction::SessionCreated => AuditAction::SessionCreated,
-        pb::AuditAction::SessionRevoked => AuditAction::SessionRevoked,
-        pb::AuditAction::TokenIssued => AuditAction::TokenIssued,
-        pb::AuditAction::TokenRefreshed => AuditAction::TokenRefreshed,
-        pb::AuditAction::RealmCreated => AuditAction::RealmCreated,
-        pb::AuditAction::RealmUpdated => AuditAction::RealmUpdated,
-        pb::AuditAction::RealmDeleted => AuditAction::RealmDeleted,
-        pb::AuditAction::ClientRegistered => AuditAction::ClientRegistered,
-        pb::AuditAction::AuthorizationCodeIssued => AuditAction::AuthorizationCodeIssued,
-        pb::AuditAction::AuthorizationCodeExchanged => AuditAction::AuthorizationCodeExchanged,
-        pb::AuditAction::TupleWritten => AuditAction::TupleWritten,
-        pb::AuditAction::TupleDeleted => AuditAction::TupleDeleted,
-        pb::AuditAction::ClientUpdated => AuditAction::ClientUpdated,
-        pb::AuditAction::ClientDeleted => AuditAction::ClientDeleted,
-        pb::AuditAction::BulkUsersCreated => AuditAction::BulkUsersCreated,
-        pb::AuditAction::BulkUsersDisabled => AuditAction::BulkUsersDisabled,
-        pb::AuditAction::OrgCreated => AuditAction::OrgCreated,
-        pb::AuditAction::OrgUpdated => AuditAction::OrgUpdated,
-        pb::AuditAction::OrgDeleted => AuditAction::OrgDeleted,
-        pb::AuditAction::ConsentGranted => AuditAction::ConsentGranted,
-        pb::AuditAction::ConsentDenied => AuditAction::ConsentDenied,
-        pb::AuditAction::ConsentRevoked => AuditAction::ConsentRevoked,
-        pb::AuditAction::FederationLoginStarted => AuditAction::FederationLoginStarted,
-        pb::AuditAction::FederationLoginCompleted => AuditAction::FederationLoginCompleted,
-        pb::AuditAction::FederationAccountLinked => AuditAction::FederationAccountLinked,
-        pb::AuditAction::FederationAccountUnlinked => AuditAction::FederationAccountUnlinked,
-        pb::AuditAction::FederationJitProvisioned => AuditAction::FederationJitProvisioned,
-        pb::AuditAction::SamlLoginInitiated => AuditAction::SamlLoginInitiated,
-        pb::AuditAction::SamlLoginCompleted => AuditAction::SamlLoginCompleted,
-        pb::AuditAction::SamlLoginFailed => AuditAction::SamlLoginFailed,
-        pb::AuditAction::SamlIdpAuthnRequestReceived => AuditAction::SamlIdpAuthnRequestReceived,
-        pb::AuditAction::SamlIdpResponseIssued => AuditAction::SamlIdpResponseIssued,
-        pb::AuditAction::SamlIdpInitiatedSso => AuditAction::SamlIdpInitiatedSso,
-        pb::AuditAction::SamlSloRequested => AuditAction::SamlSloRequested,
-        pb::AuditAction::SamlSloCompleted => AuditAction::SamlSloCompleted,
-        pb::AuditAction::ScimUserCreated => AuditAction::ScimUserCreated,
-        pb::AuditAction::ScimUserUpdated => AuditAction::ScimUserUpdated,
-        pb::AuditAction::ScimUserDeleted => AuditAction::ScimUserDeleted,
-        pb::AuditAction::ScimGroupCreated => AuditAction::ScimGroupCreated,
-        pb::AuditAction::ScimGroupUpdated => AuditAction::ScimGroupUpdated,
-        pb::AuditAction::ScimGroupDeleted => AuditAction::ScimGroupDeleted,
-        pb::AuditAction::RoleAssigned => AuditAction::RoleAssigned,
-        pb::AuditAction::RoleRevoked => AuditAction::RoleRevoked,
-        pb::AuditAction::Cleanup => AuditAction::Cleanup,
-    })
+fn proto_action_to_domain(v: i32) -> Option<AuditAction> {
+    let p = pb::AuditAction::try_from(v).ok()?;
+    crate::protocol::convert::audit::proto_audit_action_to_domain(p)
 }
 
 #[allow(dead_code)]

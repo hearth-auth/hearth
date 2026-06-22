@@ -385,3 +385,20 @@ The `hearth.claims` request attribute is set by the `hearth.auth` middleware. En
 2. The request has a valid `Authorization: Bearer <token>` header.
 3. `HEARTH_REQUIRE_AUTH` is `true` — when `false`, unauthenticated requests pass through
    and `hearth.claims` will be null if no token was provided.
+
+---
+
+## Agent Authentication (M5)
+
+Enable `agent_auth.capabilities.identity = true` (and `advanced = true` for AATs + transaction tokens) in `hearth.yaml`. The REST API is identical across all SDKs — use any HTTP client to call the endpoints below with an admin bearer token.
+
+| Feature | Endpoint |
+|---------|----------|
+| Create agent | `POST /v1/agents` |
+| Issue API key | `POST /v1/agents/{id}/credentials/keys` |
+| DPoP token | `POST /realms/{id}/token` with `DPoP:` header (RFC 9449) |
+| Token exchange | `POST /token` with `grant_type=…token-exchange` (RFC 8693) |
+| Issue AAT | `POST /v1/aats` |
+| Transaction token | `POST /v1/transaction-tokens` |
+
+For PHP, use OpenSSL's `openssl_pkey_new(['curve_name' => 'prime256v1', 'private_key_type' => OPENSSL_KEYTYPE_EC])` to generate the P-256 key pair for DPoP. For the full flow and draft-tracking table, see the [TypeScript SDK README](../typescript/README.md#agent-authentication-m5).

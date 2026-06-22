@@ -45,16 +45,41 @@ pub enum RaftCommand {
         /// `(key, value)` pairs to write atomically.
         entries: Vec<(Vec<u8>, Vec<u8>)>,
     },
+    /// Insert a key-value pair only if the key is currently absent.
+    ///
+    /// The check and write are performed atomically inside the state machine —
+    /// Raft serializes all log entries, so no concurrent apply can interleave
+    /// between the existence check and the write.  This closes the TOCTOU
+    /// window that the per-node advisory lock cannot prevent across nodes.
+    PutIfAbsent {
+        /// Leader wall-clock timestamp (microseconds since UNIX epoch).
+        leader_timestamp: i64,
+        realm: RealmId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
 }
 
 /// Openraft `D` type alias — keeps the `declare_raft_types!` binding stable.
 pub type HearthLogData = RaftCommand;
 
 /// Response returned by the state machine after each applied log entry.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HearthLogResponse {
+    /// `true` when the command succeeded or was unconditional; `false` when a
+    /// conditional command (e.g. `PutIfAbsent`) found the key already present.
+    pub success: bool,
     /// Optional result bytes returned to the caller.
     pub payload: Vec<u8>,
+}
+
+impl Default for HearthLogResponse {
+    fn default() -> Self {
+        Self {
+            success: true,
+            payload: Vec::new(),
+        }
+    }
 }
 
 openraft::declare_raft_types!(

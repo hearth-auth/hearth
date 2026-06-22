@@ -93,6 +93,7 @@ unicode-normalization = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 woothee = "0.13"
 zeroize = { version = "1", features = ["derive"] }
+x509-parser = "0.16"
 form_urlencoded = "1.2.2"
 prometheus = { version = "0.14", default-features = false, features = ["process"] }
 tar = "0.4"
@@ -164,6 +165,10 @@ harness = false
 
 [[bench]]
 name = "validate_token"
+harness = false
+
+[[bench]]
+name = "agent_credentials"
 harness = false
 
 [profile.release]

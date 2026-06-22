@@ -34,10 +34,12 @@ HEARTH_BASE_URL="http://127.0.0.1:${HEARTH_PORT}"
 echo "==> Building hearth (debug)"
 cd "$REPO_ROOT"
 PROTOC="${PROTOC:-protoc}" cargo build 2>&1
+HEARTH_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+HEARTH_BIN="$HEARTH_TARGET_DIR/debug/hearth"
 
 # ── 2. Start hearth --dev ─────────────────────────────────────────────────────
 echo "==> Starting hearth serve --dev on port ${HEARTH_PORT}"
-"$REPO_ROOT/target/debug/hearth" serve --dev --port "$HEARTH_PORT" &
+"$HEARTH_BIN" serve --dev --port "$HEARTH_PORT" &
 HEARTH_PID=$!
 
 echo "==> Waiting for /health"
@@ -188,6 +190,12 @@ STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
 kill "$DEMO_PID" 2>/dev/null || true
 DEMO_PID=""
 echo "    full-stack-demo backend: PASS"
+
+# ── 8. Agent Auth smoke ───────────────────────────────────────────────────────
+echo "==> SDK smoke — agent-auth"
+# Runs its own hearth instance (different port, agent_auth caps enabled).
+# The sub-script exits non-zero on any failure, which propagates via set -e.
+bash "$REPO_ROOT/examples/agent-auth-smoke/smoke.sh"
 
 echo ""
 echo "sdk-smoke-local: PASS"

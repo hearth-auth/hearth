@@ -2050,21 +2050,53 @@ impl FederationProviderYaml {
     }
 }
 
+/// Staged capability flags for `agent_auth`.
+///
+/// Each flag activates one phase of the agent feature set independently.
+/// Flags must be enabled in order; enabling a phase without its predecessor
+/// is rejected at startup. Defaults: all `false`.
+///
+/// See `docs/specs/AGENT_AUTH.md` for phase definitions.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct AgentAuthCapabilities {
+    /// Phase A — Agent identity: CRUD, API-key credentials, Agent Card,
+    /// and REST endpoints (`/v1/agents`).
+    #[serde(default)]
+    pub identity: bool,
+    /// Phase B + C — MCP authorization server, RFC 8693 token exchange,
+    /// tool-level permissions, and human-in-the-loop approvals.
+    ///
+    /// Requires `identity = true`. When enabled, adds:
+    /// - Tool-permission grammar (`tool.*`/`toolgroup.*`, deny-wins)
+    /// - Approval request lifecycle (create/approve/deny/capability-token)
+    /// - Approval webhook notification (per-realm `approval_webhook` config)
+    /// - REST endpoints (`/v1/approval-requests`)
+    #[serde(default)]
+    pub approval: bool,
+    /// Phase D — Advanced delegation: Attenuating Authorization Tokens (AATs),
+    /// transaction tokens, cross-realm trust policies, and SPIFFE/mTLS workload
+    /// identity.
+    ///
+    /// Requires `identity = true`. When enabled, adds:
+    /// - AAT issuance, derivation, validation, and revocation
+    /// - Single-use transaction tokens with replay prevention
+    /// - Cross-realm trust policy management
+    /// - SPIFFE SVID mapping and mTLS workload authentication
+    #[serde(default)]
+    pub advanced: bool,
+}
+
 /// Agent authentication / authorization feature gate.
 ///
-/// The Agent entity, delegation chains, MCP/A2A surfaces, approval lifecycle,
-/// and Agent Authorization Tokens (AATs) described in `docs/specs/AGENT_AUTH.md`
-/// are **not yet fully implemented**. Setting `enabled: true` will be refused
-/// at startup until the feature ships to prevent silent misconfiguration.
+/// Uses staged capability flags so each phase can be enabled independently.
+/// Enabling a phase without its required predecessor is rejected at startup.
 ///
-/// See `docs/specs/AGENT_AUTH.md` for current implementation status.
+/// See `docs/specs/AGENT_AUTH.md` for the normative specification.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct AgentAuthConfig {
-    /// Whether agent authentication primitives are enabled. Defaults to
-    /// `false`. Setting `true` currently produces a startup error because the
-    /// underlying Agent entity implementation is incomplete.
+    /// Staged capability flags. All default to `false`.
     #[serde(default)]
-    pub enabled: bool,
+    pub capabilities: AgentAuthCapabilities,
 }
 
 /// Parses a human-readable duration string into microseconds.
@@ -2623,6 +2655,7 @@ impl RealmYamlConfig {
             // Pre-token webhook is configured via admin API or per-realm YAML.
             // Defaults to None (disabled) so existing realms are unaffected.
             pre_token_webhook: None,
+            approval_webhook: None,
             mfa_required_roles: None,
         })
     }
@@ -3010,10 +3043,11 @@ pub struct Config {
     /// default), Hearth runs in single-node mode with no clustering overhead.
     #[serde(default)]
     pub cluster: Option<ClusterConfig>,
-    /// Agent authentication / authorization feature gate.
+    /// Agent authentication / authorization feature gate (staged capabilities).
     ///
-    /// Setting `agent_auth.enabled = true` while the Agent entity is not fully
-    /// implemented produces a startup error. See `docs/specs/AGENT_AUTH.md`.
+    /// `agent_auth.capabilities.identity = true` enables Phase A (M1): agent
+    /// CRUD, API-key credentials, Agent Card, and REST endpoints.
+    /// See `docs/specs/AGENT_AUTH.md` for the full capability map.
     #[serde(default)]
     pub agent_auth: AgentAuthConfig,
     /// Whether development mode is active. Not serialized — set by [`Config::dev`].

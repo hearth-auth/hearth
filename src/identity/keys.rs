@@ -12,11 +12,14 @@
 //! - **OAuth code**: `oauth:code:{sha256_hex}` → JSON-serialized code
 //! - **Realm primary**: `realm:id:{uuid}` → JSON-serialized `Realm` (system realm scope)
 //! - **Realm signing key**: `realm:key:{uuid}` → PKCS#8 DER bytes (system realm scope)
+//! - **DPoP JTI replay cache**: `agt:dpop:jti:{jti}` → 8-byte LE i64 expiry (Unix seconds)
+//! - **DPoP nonce secret**: `agt:dpop:nonce-secret` → 32 raw bytes (HMAC-SHA256 key, per realm)
 //!
 //! Scan prefix `usr:id:` enables listing all users in a realm.
 
 use crate::core::{
-    AgentId, ClientId, IdpId, InvitationId, OrganizationId, RealmId, SessionId, UserId, WebhookId,
+    AgentCredentialId, AgentId, ClientId, IdpId, InvitationId, OrganizationId, RealmId,
+    ResourceServerId, SessionId, UserId, WebhookId,
 };
 
 // ───────────────────────────────────────────────────────────────────────
@@ -699,6 +702,14 @@ pub(crate) fn password_reset_scan_prefix() -> Vec<u8> {
 /// that cannot be revoked via session revocation.
 pub(crate) fn encode_revoked_jti(jti: &str) -> Vec<u8> {
     format!("{REVOKED_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all revoked OAuth JTIs in a realm.
+///
+/// Used at startup to populate the hot-path revocation projection and during
+/// cascade realm deletion to purge the blocklist.
+pub(crate) fn revoked_jti_scan_prefix() -> Vec<u8> {
+    REVOKED_JTI_PREFIX.as_bytes().to_vec()
 }
 
 /// Encodes the storage key for a consumed JWT bearer assertion JTI.
@@ -1472,6 +1483,96 @@ pub(crate) fn agent_owner_global_scan_prefix() -> Vec<u8> {
     AGENT_OWNER_PREFIX.as_bytes().to_vec()
 }
 
+// ===== Agent credential keys (A.3) =====
+
+/// Prefix for agent credential records.
+///
+/// Format: `agt:cred:{agent_uuid}:{credential_uuid}`
+const AGENT_CRED_PREFIX: &str = "agt:cred:";
+
+/// Encodes the primary key for a single agent credential.
+///
+/// Format: `agt:cred:{agent_uuid}:{credential_uuid}`
+pub(crate) fn encode_agent_credential(agent_id: &AgentId, cred_id: &AgentCredentialId) -> Vec<u8> {
+    format!(
+        "{AGENT_CRED_PREFIX}{}:{}",
+        agent_id.as_uuid(),
+        cred_id.as_uuid()
+    )
+    .into_bytes()
+}
+
+/// Returns the scan prefix for all credentials belonging to one agent.
+///
+/// Format: `agt:cred:{agent_uuid}:`
+pub(crate) fn agent_credential_scan_prefix(agent_id: &AgentId) -> Vec<u8> {
+    format!("{AGENT_CRED_PREFIX}{}:", agent_id.as_uuid()).into_bytes()
+}
+
+// ===== DPoP storage keys (AGENT_AUTH.md §13.2) =====
+
+/// Prefix for DPoP proof JTI replay-prevention entries.
+///
+/// Format: `agt:dpop:jti:{jti}`
+///
+/// Value: 8 bytes, little-endian `i64` Unix-seconds expiry.
+/// Realm-scoped by the storage engine — no realm segment in the key itself.
+const DPOP_JTI_PREFIX: &str = "agt:dpop:jti:";
+
+/// Storage key for the per-realm DPoP nonce HMAC secret.
+///
+/// Format: `agt:dpop:nonce-secret`
+///
+/// Value: 32 raw bytes — the HMAC-SHA256 key used for stateless nonce
+/// generation (`HMAC-SHA256(secret, window_id)`). Generated once per realm,
+/// persisted so nonces survive server restarts. Realm-scoped by the storage
+/// engine.
+const DPOP_NONCE_SECRET_KEY: &str = "agt:dpop:nonce-secret";
+
+/// Encodes the storage key for a DPoP proof JTI replay-cache entry.
+///
+/// Format: `agt:dpop:jti:{jti}`
+pub(crate) fn encode_dpop_jti(jti: &str) -> Vec<u8> {
+    format!("{DPOP_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all DPoP JTI entries in a realm.
+///
+/// Used by the cleanup sweeper to evict expired entries.
+pub(crate) fn dpop_jti_scan_prefix() -> Vec<u8> {
+    DPOP_JTI_PREFIX.as_bytes().to_vec()
+}
+
+/// Returns the storage key for the per-realm DPoP nonce HMAC secret.
+pub(crate) fn dpop_nonce_secret_key() -> Vec<u8> {
+    DPOP_NONCE_SECRET_KEY.as_bytes().to_vec()
+}
+
+// ===== DPoP JKT blocklist keys (§10.4) =====
+
+/// Storage key prefix for the server-side DPoP JWK thumbprint (jkt) blocklist.
+///
+/// Format: `agt:dpop:block:jkt:{thumbprint}`
+///
+/// Value: empty (`b""`). Presence of the key means the thumbprint is blocked.
+/// All tokens carrying `cnf.jkt` equal to this thumbprint will be rejected at
+/// validate_token time via the hot-path in-memory projection.
+const DPOP_BLOCKED_JKT_PREFIX: &str = "agt:dpop:block:jkt:";
+
+/// Encodes the storage key for a blocked DPoP JWK thumbprint.
+///
+/// Format: `agt:dpop:block:jkt:{jkt}`
+pub(crate) fn encode_blocked_dpop_jkt(jkt: &str) -> Vec<u8> {
+    format!("{DPOP_BLOCKED_JKT_PREFIX}{jkt}").into_bytes()
+}
+
+/// Returns the scan prefix for all blocked DPoP JKT entries in a realm.
+///
+/// Used at startup to populate the hot-path blocklist projection.
+pub(crate) fn blocked_dpop_jkt_scan_prefix() -> Vec<u8> {
+    DPOP_BLOCKED_JKT_PREFIX.as_bytes().to_vec()
+}
+
 // ===== Attempt tracker WAL keys =====
 
 /// Encodes the WAL storage key for a per-user login-failure attempt tracker.
@@ -1674,6 +1775,220 @@ pub(crate) fn encode_org_slug_reservation(realm_id: &RealmId, slug: &str) -> Vec
     k.push(b':');
     k.extend_from_slice(slug.as_bytes());
     k
+}
+
+// ── Protected Resource keys (AGENT_AUTH.md §2.5 / RFC 9728) ──────────────────
+
+/// Prefix for protected resource primary records.
+///
+/// Format: `rs:id:{resource_server_uuid}` → JSON-serialized `ProtectedResource`
+const RESOURCE_SERVER_ID_PREFIX: &str = "rs:id:";
+
+/// Prefix for the resource-URI uniqueness index.
+///
+/// Format: `rs:uri:{uri_sha256_hex}` → `ResourceServerId` UUID bytes
+const RESOURCE_SERVER_URI_PREFIX: &str = "rs:uri:";
+
+/// Encodes the primary key for a protected resource.
+pub(crate) fn encode_resource_server_id(id: &ResourceServerId) -> Vec<u8> {
+    format!("{RESOURCE_SERVER_ID_PREFIX}{}", id.as_uuid()).into_bytes()
+}
+
+/// Returns the realm-level scan prefix for all protected resources.
+pub(crate) fn resource_server_scan_prefix() -> Vec<u8> {
+    RESOURCE_SERVER_ID_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the URI index key for a protected resource.
+///
+/// The URI is SHA-256 hashed to avoid putting potentially long URIs in storage
+/// keys. The hex digest is 64 chars and is safe in a key.
+pub(crate) fn encode_resource_server_uri_index(uri: &str) -> Vec<u8> {
+    use ring::digest;
+    let hash = digest::digest(&digest::SHA256, uri.as_bytes());
+    let hex: String = hash.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    format!("{RESOURCE_SERVER_URI_PREFIX}{hex}").into_bytes()
+}
+
+// ── Actor JTI replay cache (RFC 8693 §4 / AGENT_AUTH.md §3.3) ────────────────
+
+/// Prefix for actor-token JTI replay entries.
+///
+/// Format: `agt:actor:jti:{jti}` → 8-byte LE i64 expiry
+const ACTOR_JTI_PREFIX: &str = "agt:actor:jti:";
+
+/// Encodes the storage key for an actor-token JTI replay-cache entry.
+pub(crate) fn encode_actor_jti(jti: &str) -> Vec<u8> {
+    format!("{ACTOR_JTI_PREFIX}{jti}").into_bytes()
+}
+
+/// Returns the scan prefix for all actor JTI entries (used by cleanup sweeper).
+pub(crate) fn actor_jti_scan_prefix() -> Vec<u8> {
+    ACTOR_JTI_PREFIX.as_bytes().to_vec()
+}
+
+const DELEGATION_GRANT_PREFIX: &str = "dgrant:id:";
+const DELEGATION_GRANT_USER_PREFIX: &str = "dgrant:user:";
+
+/// Encodes the primary storage key for a delegation grant.
+pub(crate) fn encode_delegation_grant(delegation_id: &str) -> Vec<u8> {
+    format!("{DELEGATION_GRANT_PREFIX}{delegation_id}").into_bytes()
+}
+
+/// Encodes the user-index key for a delegation grant.
+pub(crate) fn encode_delegation_grant_user_index(user_sub: &str, delegation_id: &str) -> Vec<u8> {
+    format!("{DELEGATION_GRANT_USER_PREFIX}{user_sub}:{delegation_id}").into_bytes()
+}
+
+/// Returns the scan prefix for all delegation grants belonging to a user.
+pub(crate) fn delegation_grant_user_prefix(user_sub: &str) -> Vec<u8> {
+    format!("{DELEGATION_GRANT_USER_PREFIX}{user_sub}:").into_bytes()
+}
+
+// Approval Request keys (Phase C.4)
+const APPROVAL_REQUEST_ID_PREFIX: &str = "appreq:id:";
+const APPROVAL_REQUEST_LIST_PREFIX: &str = "appreq:list:";
+const APPROVAL_REQUEST_PENDING_PREFIX: &str = "appreq:pending:";
+
+pub(crate) fn encode_approval_request_id(request_id: &str) -> Vec<u8> {
+    format!("{APPROVAL_REQUEST_ID_PREFIX}{request_id}").into_bytes()
+}
+pub(crate) fn encode_approval_request_list(request_id: &str) -> Vec<u8> {
+    format!("{APPROVAL_REQUEST_LIST_PREFIX}{request_id}").into_bytes()
+}
+pub(crate) fn approval_request_list_scan_prefix() -> Vec<u8> {
+    APPROVAL_REQUEST_LIST_PREFIX.as_bytes().to_vec()
+}
+pub(crate) fn encode_approval_request_pending(request_id: &str) -> Vec<u8> {
+    format!("{APPROVAL_REQUEST_PENDING_PREFIX}{request_id}").into_bytes()
+}
+pub(crate) fn approval_request_pending_scan_prefix() -> Vec<u8> {
+    APPROVAL_REQUEST_PENDING_PREFIX.as_bytes().to_vec()
+}
+
+// Capability token single-use JTI blocklist (Phase C — enforce complete mediation)
+//
+// Written on first use; subsequent uses of the same JTI are rejected.
+// Separate namespace from `oauth:revjti:` to avoid key collisions.
+const CAPABILITY_JTI_PREFIX: &str = "appreq:cap-jti:";
+
+/// Encodes the blocklist key for a spent capability token JTI.
+///
+/// Presence means the token has already been used; further use is rejected
+/// with `ToolApprovalRequired`.
+pub(crate) fn encode_capability_jti(jti: &str) -> Vec<u8> {
+    format!("{CAPABILITY_JTI_PREFIX}{jti}").into_bytes()
+}
+
+// Approval webhook outbox (Phase C.5 — durable at-least-once delivery)
+const APPROVAL_WEBHOOK_OUTBOX_PREFIX: &str = "appreq:outbox:";
+
+/// Outbox key for a pending approval webhook delivery.
+///
+/// Written atomically with the approval request record. Deleted on
+/// successful delivery. The background scanner uses the prefix to find
+/// undelivered entries on startup.
+pub(crate) fn encode_approval_webhook_outbox(request_id: &str) -> Vec<u8> {
+    format!("{APPROVAL_WEBHOOK_OUTBOX_PREFIX}{request_id}").into_bytes()
+}
+
+#[allow(dead_code)]
+pub(crate) fn approval_webhook_outbox_scan_prefix() -> Vec<u8> {
+    APPROVAL_WEBHOOK_OUTBOX_PREFIX.as_bytes().to_vec()
+}
+
+// ── Phase D.1: AAT (Attenuating Authorization Token) revocation ───────────────
+
+/// Prefix for AAT revocation entries.
+///
+/// Format: `aat:rev:{jti}`
+const AAT_REVOKED_JTI_PREFIX: &str = "aat:rev:";
+
+/// Storage key for a revoked AAT JTI.
+pub(crate) fn encode_aat_revoked_jti(jti: &str) -> Vec<u8> {
+    format!("{AAT_REVOKED_JTI_PREFIX}{jti}").into_bytes()
+}
+
+// ── Phase D.3: Transaction token replay prevention ───────────────────────────
+
+/// Prefix for consumed transaction token entries.
+///
+/// Format: `txn:used:{txn_id}` — value is the expiry timestamp (Unix seconds).
+const TXN_TOKEN_USED_PREFIX: &str = "txn:used:";
+
+/// Storage key marking a transaction token ID as consumed.
+pub(crate) fn encode_txn_token_used(txn_id: &str) -> Vec<u8> {
+    format!("{TXN_TOKEN_USED_PREFIX}{txn_id}").into_bytes()
+}
+
+// ── Phase D.4: Cross-realm trust policies ────────────────────────────────────
+
+/// Prefix for cross-realm trust policy records.
+///
+/// Format: `xrealm:pol:{policy_id}`
+const CROSS_REALM_POLICY_PREFIX: &str = "xrealm:pol:";
+
+/// Prefix for the source-realm → policy index.
+///
+/// Format: `xrealm:from:{source_realm_uuid}:{policy_id}` — empty value.
+const CROSS_REALM_FROM_INDEX_PREFIX: &str = "xrealm:from:";
+
+/// Primary key for a cross-realm trust policy record.
+pub(crate) fn encode_cross_realm_policy(policy_id: &str) -> Vec<u8> {
+    format!("{CROSS_REALM_POLICY_PREFIX}{policy_id}").into_bytes()
+}
+
+/// Source-realm index key for a cross-realm trust policy.
+pub(crate) fn encode_cross_realm_from_index(
+    source_realm_id: &crate::core::RealmId,
+    policy_id: &str,
+) -> Vec<u8> {
+    format!(
+        "{CROSS_REALM_FROM_INDEX_PREFIX}{}:{policy_id}",
+        source_realm_id.as_uuid()
+    )
+    .into_bytes()
+}
+
+/// Scan prefix for all policies trusting a specific source realm.
+pub(crate) fn cross_realm_from_scan_prefix(source_realm_id: &crate::core::RealmId) -> Vec<u8> {
+    format!(
+        "{CROSS_REALM_FROM_INDEX_PREFIX}{}:",
+        source_realm_id.as_uuid()
+    )
+    .into_bytes()
+}
+
+/// Scan prefix for all cross-realm policy records (within a realm).
+pub(crate) fn cross_realm_policy_scan_prefix() -> Vec<u8> {
+    CROSS_REALM_POLICY_PREFIX.as_bytes().to_vec()
+}
+
+// ── Phase D.7: SPIFFE identity mapping ───────────────────────────────────────
+
+/// Prefix for SPIFFE ID → AgentId mapping records.
+///
+/// Format: `spiffe:map:{spiffe_id_sha256}` — value is the `SpiffeIdentityMapping` JSON.
+const SPIFFE_MAPPING_PREFIX: &str = "spiffe:map:";
+
+/// Prefix for the agent → SPIFFE ID reverse index.
+///
+/// Format: `spiffe:agt:{agent_uuid}` — value is the SPIFFE ID string.
+const SPIFFE_AGENT_INDEX_PREFIX: &str = "spiffe:agt:";
+
+/// Primary key for a SPIFFE ID mapping.
+///
+/// The SPIFFE ID is SHA-256 hashed to produce a fixed-length key.
+pub(crate) fn encode_spiffe_mapping(spiffe_id: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(spiffe_id.as_bytes());
+    let hex = hex::encode(hash);
+    format!("{SPIFFE_MAPPING_PREFIX}{hex}").into_bytes()
+}
+
+/// Reverse-index key: agent UUID → SPIFFE ID.
+pub(crate) fn encode_spiffe_agent_index(agent_id: &crate::core::AgentId) -> Vec<u8> {
+    format!("{SPIFFE_AGENT_INDEX_PREFIX}{}", agent_id.as_uuid()).into_bytes()
 }
 
 #[cfg(test)]

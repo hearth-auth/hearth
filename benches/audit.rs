@@ -70,6 +70,8 @@ fn bench_audit_query_by_actor(c: &mut Criterion) {
                 actor: Some("actor-042".to_string()),
                 action: None,
                 limit: Some(2000),
+                agent_id: None,
+                tool: None,
             };
             let events = engine.query(&query).expect("query");
             assert!(!events.is_empty(), "actor should have events");
@@ -90,6 +92,8 @@ fn bench_audit_query_all(c: &mut Criterion) {
                 actor: None,
                 action: None,
                 limit: Some(1000),
+                agent_id: None,
+                tool: None,
             };
             let events = engine.query(&query).expect("query");
             assert!(!events.is_empty());

@@ -5064,7 +5064,9 @@ License: Apache License 2.0 (Apache-2.0)
 Used by:
   - arc-swap 1.9.1
   - arrayvec 0.7.6
+  - asn1-rs-derive 0.5.1
   - asn1-rs-derive 0.6.0
+  - asn1-rs 0.6.2
   - asn1-rs 0.7.2
   - atomic-waker 1.1.2
   - autocfg 1.5.0
@@ -5084,6 +5086,7 @@ Used by:
   - crossbeam-epoch 0.9.18
   - crossbeam-utils 0.8.21
   - der-parser 10.0.0
+  - der-parser 9.0.0
   - displaydoc 0.2.5
   - either 1.15.0
   - equivalent 1.0.2
@@ -5120,6 +5123,7 @@ Used by:
   - num-bigint 0.4.6
   - num-integer 0.1.46
   - num-traits 0.2.19
+  - oid-registry 0.7.1
   - oid-registry 0.8.1
   - once_cell 1.21.4
   - openssl-probe 0.2.1
@@ -5181,6 +5185,7 @@ Used by:
   - web-sys 0.3.98
   - wit-bindgen 0.51.0
   - wit-bindgen 0.57.1
+  - x509-parser 0.16.0
   - x509-parser 0.18.1
   - xattr 1.6.1
 

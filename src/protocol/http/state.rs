@@ -81,6 +81,23 @@ pub struct AppState {
     /// `/realms/{name}/.well-known/openid-configuration`) so a caller
     /// cannot evade the limit by rotating between aliases.
     pub jwks_rate_limiter: Arc<JwksRateLimiter>,
+    /// Whether Phase-A agent identity routes are active.
+    ///
+    /// Controlled by `agent_auth.capabilities.identity` in `hearth.yaml`.
+    /// When `false`, all `/v1/agents` and `/.well-known/agent.json` routes
+    /// are absent from the router (prevents fingerprinting).
+    pub agent_identity_enabled: bool,
+    /// Whether Phase-C approval routes are active.
+    ///
+    /// Controlled by `agent_auth.capabilities.approval` in `hearth.yaml`.
+    /// When `false`, all `/v1/approval-requests` routes are absent.
+    pub agent_approval_enabled: bool,
+    /// Whether Phase-D advanced agent routes are active.
+    ///
+    /// Controlled by `agent_auth.capabilities.advanced` in `hearth.yaml`.
+    /// When `false`, all AAT, transaction-token, SPIFFE, and cross-realm
+    /// trust routes are absent from the router.
+    pub agent_advanced_enabled: bool,
 }
 
 impl AppState {
@@ -108,6 +125,9 @@ impl AppState {
             // zero key is overridden in production via with_dpop_nonce_secret
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
             jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
+            agent_identity_enabled: false,
+            agent_approval_enabled: false,
+            agent_advanced_enabled: false,
         }
     }
 
@@ -141,6 +161,9 @@ impl AppState {
             // explicit `with_jwks_rate_limiter` call wired from
             // `config.security.jwks_rps_limit`.
             jwks_rate_limiter: Arc::new(JwksRateLimiter::with_rps_limit(u32::MAX)),
+            agent_identity_enabled: false,
+            agent_approval_enabled: false,
+            agent_advanced_enabled: false,
         }
     }
 
@@ -171,7 +194,36 @@ impl AppState {
             cluster: None,
             dpop: Arc::new(crate::identity::dpop::DPopProcessor::new([0u8; 32])),
             jwks_rate_limiter: Arc::new(JwksRateLimiter::new()),
+            agent_identity_enabled: false,
+            agent_approval_enabled: false,
+            agent_advanced_enabled: false,
         }
+    }
+
+    /// Enables the Phase-A agent identity routes (`/v1/agents`, `/.well-known/agent.json`).
+    ///
+    /// Call this during server startup when `agent_auth.capabilities.identity = true`
+    /// in the operator config.
+    pub fn with_agent_identity(mut self, enabled: bool) -> Self {
+        self.agent_identity_enabled = enabled;
+        self
+    }
+
+    /// Enables the Phase-C approval routes (`/v1/approval-requests`).
+    ///
+    /// Call this during server startup when `agent_auth.capabilities.approval = true`
+    /// in the operator config.
+    pub fn with_agent_approval(mut self, enabled: bool) -> Self {
+        self.agent_approval_enabled = enabled;
+        self
+    }
+
+    /// Enables the Phase-D advanced agent routes (AAT, txn-token, SPIFFE, cross-realm).
+    ///
+    /// Call this during server startup when `agent_auth.capabilities.advanced = true`.
+    pub fn with_agent_advanced(mut self, enabled: bool) -> Self {
+        self.agent_advanced_enabled = enabled;
+        self
     }
 
     /// Configures trusted reverse-proxy IPs for `X-Forwarded-For` extraction.

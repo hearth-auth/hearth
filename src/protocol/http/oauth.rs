@@ -32,6 +32,10 @@ pub(super) fn routes() -> axum::Router<Arc<AppState>> {
     use axum::routing::{get, post};
     axum::Router::new()
         .route("/.well-known/openid-configuration", get(oidc_discovery))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(protected_resource_metadata),
+        )
         .route("/jwks", get(jwks))
         .route("/certs", get(jwks))
         .route("/.well-known/jwks.json", get(jwks))
@@ -158,6 +162,33 @@ async fn oidc_discovery(
     (StatusCode::OK, Json(doc)).into_response()
 }
 
+/// Protected Resource Metadata endpoint (RFC 9728 §3, AGENT_AUTH.md §2.4 / B.3).
+///
+/// Returns Hearth's own PRM document at `/.well-known/oauth-protected-resource`.
+/// MCP clients use this to discover which authorization server to use and
+/// which scopes Hearth itself exposes.
+async fn protected_resource_metadata(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let discovery = state.identity.oidc_discovery();
+    let doc = serde_json::json!({
+        "resource": discovery.issuer,
+        "authorization_servers": [discovery.issuer],
+        "jwks_uri": discovery.jwks_uri,
+        "scopes_supported": [
+            "openid",
+            "profile",
+            "email",
+            "mcp:tools:invoke",
+            "mcp:tools:list",
+            "mcp:resources:read",
+            "mcp:resources:write",
+            "mcp:prompts:read",
+        ],
+        "bearer_methods_supported": ["header"],
+        "resource_signing_alg_values_supported": ["EdDSA"],
+    });
+    (StatusCode::OK, Json(doc))
+}
+
 /// JWKS endpoint (`/jwks`, `/certs`, and `/.well-known/jwks.json`).
 ///
 /// Returns the JSON Web Key Set containing the server's public signing
@@ -229,6 +260,21 @@ struct HttpTokenRequest {
     client_assertion_type: Option<String>,
     #[serde(default)]
     client_assertion: Option<String>,
+    // RFC 8693 Token Exchange fields
+    #[serde(default)]
+    subject_token: Option<String>,
+    #[serde(default)]
+    subject_token_type: Option<String>,
+    #[serde(default)]
+    actor_token: Option<String>,
+    #[serde(default)]
+    actor_token_type: Option<String>,
+    #[serde(default)]
+    requested_token_type: Option<String>,
+    #[serde(default)]
+    resource: Option<String>,
+    #[serde(default)]
+    audience: Option<String>,
 }
 
 /// HTTP request body for token revocation (RFC 7009).
@@ -900,7 +946,11 @@ async fn token_exchange(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let nonce = state.dpop.current_nonce(now_secs);
+    let nonce = maybe_realm_id
+        .as_ref()
+        .and_then(|rid| state.identity.get_realm_dpop_nonce_secret(rid).ok())
+        .map(|s| crate::identity::dpop::current_dpop_nonce(&s, now_secs))
+        .unwrap_or_else(|| state.dpop.current_nonce(now_secs));
     if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
         resp.headers_mut().insert("DPoP-Nonce", val);
     }
@@ -955,35 +1005,47 @@ async fn token_exchange_impl(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let dpop_jkt: Option<String> =
-        if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
-            let expected_htu = state.identity.oidc_discovery().token_endpoint.clone();
-            match crate::identity::dpop::validate_dpop_proof(
-                proof,
-                "POST",
-                &expected_htu,
-                now_secs,
-                None,
-            ) {
-                Ok(validated) => {
-                    if let Some(ref nonce) = validated.nonce {
-                        if !state.dpop.is_valid_nonce(nonce, now_secs) {
-                            return identity_error_to_response(
-                                &crate::identity::error::IdentityError::DPopNonceInvalid,
-                            )
-                            .into_response();
-                        }
+    let dpop_jkt: Option<String> = if let Some(proof) =
+        headers.get("DPoP").and_then(|v| v.to_str().ok())
+    {
+        let expected_htu = state.identity.oidc_discovery().token_endpoint.clone();
+        match crate::identity::dpop::validate_dpop_proof(
+            proof,
+            "POST",
+            &expected_htu,
+            now_secs,
+            None,
+            None, // token endpoint: no access_token to bind yet
+        ) {
+            Ok(validated) => {
+                if let Some(ref nonce) = validated.nonce {
+                    let valid = state
+                        .identity
+                        .get_realm_dpop_nonce_secret(&realm_id)
+                        .ok()
+                        .map(|s| crate::identity::dpop::is_valid_dpop_nonce(&s, nonce, now_secs))
+                        .unwrap_or(false);
+                    if !valid {
+                        return identity_error_to_response(
+                            &crate::identity::error::IdentityError::DPopNonceInvalid,
+                        )
+                        .into_response();
                     }
-                    if let Err(e) = state.dpop.check_and_insert_jti(&validated.jti, now_secs) {
-                        return identity_error_to_response(&e).into_response();
-                    }
-                    Some(validated.jkt)
                 }
-                Err(e) => return identity_error_to_response(&e).into_response(),
+                if let Err(e) =
+                    state
+                        .identity
+                        .check_and_record_dpop_jti(&realm_id, &validated.jti, now_secs)
+                {
+                    return identity_error_to_response(&e).into_response();
+                }
+                Some(validated.jkt)
             }
-        } else {
-            None
-        };
+            Err(e) => return identity_error_to_response(&e).into_response(),
+        }
+    } else {
+        None
+    };
 
     match grant_type {
         "authorization_code" => {
@@ -1332,6 +1394,70 @@ async fn token_exchange_impl(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
+        // RFC 8693 Token Exchange (AGENT_AUTH.md §3.3 / B.4)
+        "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            let subject_token = match body.subject_token {
+                Some(t) => t,
+                None => return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid_request",
+                        "error_description": "subject_token is required for token-exchange grant"
+                    })),
+                )
+                    .into_response(),
+            };
+            let client_uuid = match uuid::Uuid::parse_str(&body.client_id) {
+                Ok(u) => u,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_client",
+                            "error_description": "invalid client_id"
+                        })),
+                    )
+                        .into_response()
+                }
+            };
+            let request = crate::identity::Rfc8693Request {
+                client_id: crate::core::ClientId::new(client_uuid),
+                subject_token,
+                subject_token_type: body
+                    .subject_token_type
+                    .unwrap_or_else(|| "urn:ietf:params:oauth:token-type:access_token".to_string()),
+                actor_token: body.actor_token,
+                actor_token_type: body.actor_token_type,
+                requested_token_type: body.requested_token_type,
+                scope: body.scope,
+                resource: body.resource,
+                audience: body.audience,
+                dpop_jkt: dpop_jkt.clone(),
+            };
+            match state.identity.rfc8693_token_exchange(&realm_id, &request) {
+                Ok(resp) => {
+                    crate::metrics::metrics()
+                        .tokens_issued_total
+                        .with_label_values(&[
+                            realm_id.as_uuid().to_string().as_str(),
+                            "token_exchange",
+                        ])
+                        .inc();
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "access_token": resp.access_token,
+                            "issued_token_type": resp.issued_token_type,
+                            "token_type": resp.token_type,
+                            "expires_in": resp.expires_in,
+                            "scope": resp.scope,
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
         _ => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -1668,13 +1794,16 @@ async fn me_permissions(
 
 async fn self_list_consents(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let realm_id = match extract_realm_id(&headers) {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    let user_id = match extract_user_auth(&headers, &state, &realm_id) {
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -1700,6 +1829,8 @@ async fn self_list_consents(
 /// consent for a specific client.
 async fn self_revoke_consent(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     axum::extract::Path(client_id_str): axum::extract::Path<String>,
 ) -> impl IntoResponse {
@@ -1707,7 +1838,8 @@ async fn self_revoke_consent(
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-    let user_id = match extract_user_auth(&headers, &state, &realm_id) {
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let user_id = match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
         Ok(u) => u,
         Err(e) => return e.into_response(),
     };
@@ -1873,36 +2005,48 @@ async fn realm_token_exchange(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let dpop_jkt: Option<String> =
-        if let Some(proof) = headers.get("DPoP").and_then(|v| v.to_str().ok()) {
-            let base_issuer = state.identity.oidc_discovery().issuer;
-            let expected_htu = format!("{base_issuer}/realms/{realm_name}/token");
-            match crate::identity::dpop::validate_dpop_proof(
-                proof,
-                "POST",
-                &expected_htu,
-                now_secs,
-                None,
-            ) {
-                Ok(validated) => {
-                    if let Some(ref nonce) = validated.nonce {
-                        if !state.dpop.is_valid_nonce(nonce, now_secs) {
-                            return identity_error_to_response(
-                                &crate::identity::error::IdentityError::DPopNonceInvalid,
-                            )
-                            .into_response();
-                        }
+    let dpop_jkt: Option<String> = if let Some(proof) =
+        headers.get("DPoP").and_then(|v| v.to_str().ok())
+    {
+        let base_issuer = state.identity.oidc_discovery().issuer;
+        let expected_htu = format!("{base_issuer}/realms/{realm_name}/token");
+        match crate::identity::dpop::validate_dpop_proof(
+            proof,
+            "POST",
+            &expected_htu,
+            now_secs,
+            None,
+            None, // token endpoint: no access_token to bind yet
+        ) {
+            Ok(validated) => {
+                if let Some(ref nonce) = validated.nonce {
+                    let valid = state
+                        .identity
+                        .get_realm_dpop_nonce_secret(&realm_id)
+                        .ok()
+                        .map(|s| crate::identity::dpop::is_valid_dpop_nonce(&s, nonce, now_secs))
+                        .unwrap_or(false);
+                    if !valid {
+                        return identity_error_to_response(
+                            &crate::identity::error::IdentityError::DPopNonceInvalid,
+                        )
+                        .into_response();
                     }
-                    if let Err(e) = state.dpop.check_and_insert_jti(&validated.jti, now_secs) {
-                        return identity_error_to_response(&e).into_response();
-                    }
-                    Some(validated.jkt)
                 }
-                Err(e) => return identity_error_to_response(&e).into_response(),
+                if let Err(e) =
+                    state
+                        .identity
+                        .check_and_record_dpop_jti(&realm_id, &validated.jti, now_secs)
+                {
+                    return identity_error_to_response(&e).into_response();
+                }
+                Some(validated.jkt)
             }
-        } else {
-            None
-        };
+            Err(e) => return identity_error_to_response(&e).into_response(),
+        }
+    } else {
+        None
+    };
 
     let mut resp = match grant_type {
         "authorization_code" => {
@@ -2190,6 +2334,69 @@ async fn realm_token_exchange(
                 Err(e) => identity_error_to_response(&e).into_response(),
             }
         }
+        // RFC 8693 Token Exchange (AGENT_AUTH.md §3.3 / B.4)
+        "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            let subject_token = match body.subject_token {
+                Some(t) => t,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_request",
+                            "error_description": "subject_token is required"
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            let client_uuid = match uuid::Uuid::parse_str(&body.client_id) {
+                Ok(u) => u,
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "invalid_client"})),
+                    )
+                        .into_response();
+                }
+            };
+            let request = crate::identity::Rfc8693Request {
+                client_id: crate::core::ClientId::new(client_uuid),
+                subject_token,
+                subject_token_type: body
+                    .subject_token_type
+                    .unwrap_or_else(|| "urn:ietf:params:oauth:token-type:access_token".to_string()),
+                actor_token: body.actor_token,
+                actor_token_type: body.actor_token_type,
+                requested_token_type: body.requested_token_type,
+                scope: body.scope,
+                resource: body.resource,
+                audience: body.audience,
+                dpop_jkt: dpop_jkt.clone(),
+            };
+            match state.identity.rfc8693_token_exchange(&realm_id, &request) {
+                Ok(resp) => {
+                    crate::metrics::metrics()
+                        .tokens_issued_total
+                        .with_label_values(&[
+                            realm_id.as_uuid().to_string().as_str(),
+                            "token_exchange",
+                        ])
+                        .inc();
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "access_token": resp.access_token,
+                            "issued_token_type": resp.issued_token_type,
+                            "token_type": resp.token_type,
+                            "expires_in": resp.expires_in,
+                            "scope": resp.scope,
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(e) => identity_error_to_response(&e).into_response(),
+            }
+        }
         other => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("unsupported grant_type: {other}")})),
@@ -2198,7 +2405,12 @@ async fn realm_token_exchange(
     };
 
     // RFC 9449 §9: always return DPoP-Nonce so clients can use it in the next proof.
-    let nonce = state.dpop.current_nonce(now_secs);
+    let nonce = state
+        .identity
+        .get_realm_dpop_nonce_secret(&realm_id)
+        .ok()
+        .map(|s| crate::identity::dpop::current_dpop_nonce(&s, now_secs))
+        .unwrap_or_else(|| state.dpop.current_nonce(now_secs));
     if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
         resp.headers_mut().insert("DPoP-Nonce", val);
     }

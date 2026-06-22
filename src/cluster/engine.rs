@@ -334,13 +334,24 @@ impl ClusterEngine {
 
     /// Propose a [`RaftCommand`] and block until quorum commit.
     async fn propose(&self, cmd: RaftCommand) -> Result<(), ClusterError> {
+        self.propose_with_response(cmd).await.map(|_| ())
+    }
+
+    /// Propose a [`RaftCommand`] and return the state-machine response.
+    ///
+    /// Used by conditional commands (e.g. `PutIfAbsent`) that need to inspect
+    /// the `success` flag of the applied response.
+    async fn propose_with_response(
+        &self,
+        cmd: RaftCommand,
+    ) -> Result<crate::cluster::types::HearthLogResponse, ClusterError> {
         let raft = self.raft.as_ref().ok_or_else(|| {
             ClusterError::Raft("propose called on single-node engine".to_string())
         })?;
 
         raft.client_write(cmd)
             .await
-            .map(|_| ())
+            .map(|resp| resp.data)
             .map_err(|e| match e {
                 RaftError::APIError(ClientWriteError::ForwardToLeader(fwd)) => {
                     let addr = fwd
@@ -473,6 +484,38 @@ impl ClusterEngine {
             .map_err(|e| ClusterError::Raft(e.to_string()))?
             .map_err(ClusterError::Storage)
     }
+
+    /// Conditionally insert a key-value pair only if the key is absent.
+    ///
+    /// In cluster mode proposes `RaftCommand::PutIfAbsent` through Raft,
+    /// making the check-and-write atomic across all nodes.  Returns `true` if
+    /// the write was performed (key was absent), `false` if already present.
+    pub async fn put_if_absent(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, ClusterError> {
+        if self.raft.is_some() {
+            let resp = self
+                .propose_with_response(RaftCommand::PutIfAbsent {
+                    leader_timestamp: Self::leader_timestamp_now(),
+                    realm: realm_id.clone(),
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                })
+                .await?;
+            return Ok(resp.success);
+        }
+        let inner = Arc::clone(&self.inner);
+        let realm_id = realm_id.clone();
+        let key = key.to_vec();
+        let value = value.to_vec();
+        spawn_blocking(move || inner.put_if_absent(&realm_id, &key, &value))
+            .await
+            .map_err(|e| ClusterError::Raft(e.to_string()))?
+            .map_err(ClusterError::Storage)
+    }
 }
 
 // ── IncomingRpcDispatch ───────────────────────────────────────────────────────
@@ -564,6 +607,9 @@ fn check_clock_skew(payload: &[u8]) {
                     leader_timestamp, ..
                 }
                 | RaftCommand::Batch {
+                    leader_timestamp, ..
+                }
+                | RaftCommand::PutIfAbsent {
                     leader_timestamp, ..
                 } => *leader_timestamp,
             },
@@ -703,6 +749,23 @@ impl StorageEngine for ClusterStorageAdapter {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(async move { engine.put_batch(&realm_id, &entries).await })
+        })
+        .map_err(cluster_to_storage_err)
+    }
+
+    fn put_if_absent(
+        &self,
+        realm_id: &RealmId,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<bool, crate::storage::StorageError> {
+        let engine = Arc::clone(&self.engine);
+        let realm_id = realm_id.clone();
+        let key = key.to_vec();
+        let value = value.to_vec();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async move { engine.put_if_absent(&realm_id, &key, &value).await })
         })
         .map_err(cluster_to_storage_err)
     }

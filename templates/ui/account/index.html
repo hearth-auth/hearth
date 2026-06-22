@@ -92,6 +92,24 @@
     {% endif %}
   </div>
 
+  {# ── Agent Delegations card ── #}
+  <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
+    <h2 class="mb-4 text-base font-semibold text-ht-content-primary">Agent Delegations</h2>
+    <div class="flex items-center gap-3">
+      <div class="flex h-8 w-8 items-center justify-center rounded-full bg-ht-surface-elevated">
+        <svg class="h-4 w-4 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="8" r="3" />
+          <path d="M6 20v-1a6 6 0 0 1 12 0v1" />
+          <path d="M19 3l2 2-2 2M21 5H17" />
+        </svg>
+      </div>
+      <div>
+        <p class="text-sm text-ht-content-muted">View and revoke agents authorized to act on your behalf.</p>
+        <a href="/ui/consent/delegations" class="text-sm font-medium text-ht-content-brand hover:text-ht-brand-deep">Manage delegations</a>
+      </div>
+    </div>
+  </div>
+
   {# ── Active sessions card ── #}
   <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
     <h2 class="mb-4 text-base font-semibold text-ht-content-primary">Active sessions</h2>

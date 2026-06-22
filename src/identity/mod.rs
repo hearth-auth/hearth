@@ -4,6 +4,7 @@
 //! Depends on `storage` (for persistence) and `core` (for shared types).
 //! May call `authz` (lateral dependency). Never the reverse.
 
+pub mod approval_notifier;
 pub mod claims_config;
 pub(crate) mod cleanup;
 pub(crate) mod credentials;
@@ -18,6 +19,7 @@ pub mod hibp;
 pub(crate) mod keys;
 pub mod ldap;
 pub(crate) mod magic_link;
+pub mod mcp;
 pub mod migration;
 pub mod oidc;
 pub mod onboarding;
@@ -29,6 +31,7 @@ pub mod session_version;
 pub mod sessions;
 pub mod sms;
 pub mod tokens;
+pub mod tool_permissions;
 pub(crate) mod totp;
 mod types;
 mod validation;
@@ -71,21 +74,29 @@ pub use tokens::{
 };
 pub use totp::{RecoveryCodes, TotpEnrollment};
 pub use types::{
-    canonicalize_scopes, AdaptiveMfaConfig, AttributeDefinition, AttributeDefinitions,
-    AttributeType, BreachCheckConfig, BulkResult, ConsentDecision, ConsentListEntry, ConsentRecord,
-    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    CreateWebhookRequest, CredentialExport, DcrPolicy, FapiProfile, ImportClientRequest,
-    ImportUserRequest, InvitationStatus, MigrationReport, Organization, OrganizationConfig,
-    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PasswordPolicy, PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy,
-    RawCredential, Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, Session,
-    SessionContext, SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest,
-    UpdateRealmRequest, UpdateUserRequest, UpdateWebhookRequest, User, UserStatus,
-    WebAuthnAttestationPolicy, Webhook,
+    canonicalize_scopes, AdaptiveMfaConfig, ApprovalWebhookConfig, AttributeDefinition,
+    AttributeDefinitions, AttributeType, BreachCheckConfig, BulkResult, ConsentDecision,
+    ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
+    CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
+    FapiProfile, ImportClientRequest, ImportUserRequest, InvitationStatus, MigrationReport,
+    Organization, OrganizationConfig, OrganizationInvitation, OrganizationMembership,
+    OrganizationRole, OrganizationStatus, Page, PasswordPolicy, PendingAuthorizationRequest,
+    PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential, Realm, RealmConfig,
+    RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
+    RequiredAction, RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy,
+    SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
+    UpdateWebhookRequest, User, UserStatus, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
-    Agent, AgentOwner, AgentStatus, CreateAgentRequest, ListAgentsQuery, UpdateAgentRequest,
+    AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
+    AgentOwner, AgentStatus, ApprovalRequest, ApprovalRequestResponse, ApprovalRequestStatus,
+    CapabilityTokenInfo, CreateAgentApiKeyRequest, CreateAgentApiKeyResponse, CreateAgentRequest,
+    CreateApprovalRequestInput, CreateCrossRealmPolicyRequest, CreateTransactionTokenRequest,
+    CrossRealmTrustPolicy, DelegationGrantEntry, DeriveAatRequest, IssueAatRequest,
+    ListAgentsQuery, PlaintextApiKey, ProtectedResource, RegisterProtectedResourceRequest,
+    RegisterSpiffeIdRequest, Rfc8693Request, Rfc8693Response, SpiffeIdentityMapping,
+    StoredDelegationGrant, TransactionTokenClaims, TransactionTokenResponse, UpdateAgentRequest,
+    UpdateProtectedResourceRequest,
 };
 pub use validation::fuzz_validate_redirect_uri;
 pub use webauthn::{
@@ -94,8 +105,8 @@ pub use webauthn::{
 };
 
 use crate::core::{
-    AgentId, ClientId, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId,
-    WebhookId,
+    AgentId, ClientId, InvitationId, OrganizationId, RealmId, ResourceServerId, SessionId,
+    Timestamp, UserId, WebhookId,
 };
 
 // Maximum page size for all paginated list operations (A-23).
@@ -1846,6 +1857,7 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         request: &types::CreateAgentRequest,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
 
     /// Retrieves an agent by ID. Returns `None` if not found.
@@ -1864,11 +1876,17 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         agent_id: &AgentId,
         request: &types::UpdateAgentRequest,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
 
     /// Permanently deletes an agent and cascades: removes all credentials,
     /// RBAC role assignments, and the owner index entry. Emits `AgentDeleted` audit.
-    fn delete_agent(&self, realm_id: &RealmId, agent_id: &AgentId) -> Result<(), IdentityError>;
+    fn delete_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<(), IdentityError>;
 
     /// Lists agents in a realm with optional filtering and cursor-based pagination.
     ///
@@ -1888,6 +1906,7 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
 
     /// Transitions an agent from `Suspended` back to `Active`.
@@ -1897,6 +1916,7 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
 
     /// Permanently revokes an agent (`Active | Suspended → Revoked`).
@@ -1907,7 +1927,52 @@ pub trait IdentityEngine: Send + Sync {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<types::Agent, IdentityError>;
+
+    // ── A.3 Agent credentials ────────────────────────────────────────────────
+
+    /// Issues a new API-key credential for an agent.
+    ///
+    /// Generates 256 bits of entropy, returns the hex-encoded plaintext once
+    /// (show-once contract), and stores only the SHA-256 hash.
+    fn create_agent_api_key(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        request: &types::CreateAgentApiKeyRequest,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<types::CreateAgentApiKeyResponse, IdentityError>;
+
+    /// Returns all credentials (active and revoked) for the given agent.
+    fn list_agent_credentials(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<Vec<types::AgentCredential>, IdentityError>;
+
+    /// Marks a credential as revoked. Revoked credentials cannot authenticate.
+    ///
+    /// Returns `AgentCredentialNotFound` if the credential does not exist or
+    /// belongs to a different agent.
+    fn revoke_agent_credential(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        cred_id: &crate::core::AgentCredentialId,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<(), IdentityError>;
+
+    /// Verifies a plaintext API key against all active credentials for an agent.
+    ///
+    /// Returns `true` if any active credential's hash matches. Uses
+    /// constant-time comparison to prevent timing attacks.
+    fn verify_agent_api_key(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        plaintext_key_hex: &str,
+    ) -> Result<bool, IdentityError>;
 
     /// Sweeps expired entities (authorization codes, device codes,
     /// pending authorization tickets, grant families) from storage.
@@ -2100,4 +2165,336 @@ pub trait IdentityEngine: Send + Sync {
     /// Returns `IdentityError::SessionVersionDisabled` when the feature is
     /// off for the realm.
     fn sv_bump_all(&self, realm_id: &RealmId) -> Result<usize, IdentityError>;
+
+    // ===== DPoP storage operations (AGENT_AUTH.md §13.2) =====
+
+    /// Checks a DPoP proof `jti` for replay and records it in persistent storage.
+    ///
+    /// Stores `jti` under `agt:dpop:jti:{jti}` in the realm's storage namespace
+    /// with an 8-byte little-endian i64 expiry of `now_secs + DPOP_MAX_AGE_SECS`.
+    /// Returns `Err(DPopProofReplay)` if the key already exists. The background
+    /// cleanup sweeper evicts expired entries on each tick.
+    ///
+    /// Unlike the in-memory `DPopJtiCache`, this survives server restarts and
+    /// is consistent across Raft nodes (both read from the same storage).
+    fn check_and_record_dpop_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        now_secs: i64,
+    ) -> Result<(), IdentityError>;
+
+    /// Returns the per-realm DPoP nonce HMAC secret, creating it if absent.
+    ///
+    /// On first call for a realm, generates a 32-byte CSPRNG secret, persists
+    /// it under `agt:dpop:nonce-secret` in the realm's storage namespace, and
+    /// caches it in memory. Subsequent calls return the cached value without
+    /// touching storage. The stored value survives server restarts.
+    ///
+    /// The returned secret is used with `current_dpop_nonce` / `is_valid_dpop_nonce`
+    /// to generate and validate per-realm DPoP nonces.
+    fn get_realm_dpop_nonce_secret(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError>;
+
+    // ── B.1 Protected Resource Registration (AGENT_AUTH.md §2.5) ─────────────
+
+    /// Registers a new protected resource (MCP server) within a realm.
+    ///
+    /// The `resource_uri` MUST be unique within the realm. In `--dev` mode HTTP
+    /// is permitted; in production HTTPS is required.
+    /// Emits `ProtectedResourceRegistered` audit event.
+    fn register_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        request: &types::RegisterProtectedResourceRequest,
+    ) -> Result<types::ProtectedResource, IdentityError>;
+
+    /// Retrieves a protected resource by its ID.
+    fn get_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &ResourceServerId,
+    ) -> Result<Option<types::ProtectedResource>, IdentityError>;
+
+    /// Lists all protected resources within a realm.
+    fn list_protected_resources(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<types::ProtectedResource>, IdentityError>;
+
+    /// Updates a protected resource.
+    ///
+    /// Only the fields present in `request` are updated.
+    /// Emits `ProtectedResourceUpdated` audit event.
+    fn update_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &ResourceServerId,
+        request: &types::UpdateProtectedResourceRequest,
+    ) -> Result<types::ProtectedResource, IdentityError>;
+
+    /// Deletes a protected resource.
+    ///
+    /// All outstanding tokens scoped to this resource's `resource_uri` are NOT
+    /// automatically revoked in this milestone; see AGENT_AUTH.md §2.5 for the
+    /// future revocation requirement. Emits `ProtectedResourceDeleted` audit event.
+    fn delete_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &ResourceServerId,
+    ) -> Result<(), IdentityError>;
+
+    // ── B.4 RFC 8693 Token Exchange ───────────────────────────────────────────
+
+    /// Processes an RFC 8693 `urn:ietf:params:oauth:grant-type:token-exchange` request.
+    ///
+    /// Validates:
+    /// 1. `subject_token` is a valid, non-expired access token for this realm.
+    /// 2. `actor_token` (when present) is a signed JWT assertion from the agent,
+    ///    with `sub` = agent identifier, `aud` = token endpoint, and a fresh `jti`
+    ///    (replay prevention; stored for `≤5 min`).
+    /// 3. The agent's `max_delegation_depth` is not exceeded.
+    /// 4. Effective scope = `subject_scope ∩ actor_permitted ∩ requested_scope`
+    ///    (rejects with `InvalidScope` when the intersection is empty).
+    /// 5. Resulting token lifetime ≤ remaining subject token lifetime.
+    ///
+    /// Emits `AgentDelegation` audit event on success.
+    fn rfc8693_token_exchange(
+        &self,
+        realm_id: &RealmId,
+        request: &types::Rfc8693Request,
+    ) -> Result<types::Rfc8693Response, IdentityError>;
+
+    /// Checks whether an actor-token `jti` has already been used and records it.
+    ///
+    /// Actor tokens are short-lived JWT assertions (`exp - iat ≤ 5 min`).
+    /// Their `jti` is stored for the remaining lifetime to prevent replay.
+    /// Returns `Err(DPopProofReplay)` (reusing the replay guard) if already seen.
+    fn check_and_record_actor_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        now_secs: i64,
+        exp_secs: i64,
+    ) -> Result<(), IdentityError>;
+
+    /// Lists active (non-revoked, non-expired) RFC 8693 delegation grants for
+    /// the given subject user. Used by `GET /ui/consent/delegations`.
+    fn list_delegation_grants(
+        &self,
+        realm_id: &RealmId,
+        user_sub: &str,
+    ) -> Result<Vec<types::DelegationGrantEntry>, IdentityError>;
+
+    /// Revokes the delegation grant with the given `delegation_id`, if it
+    /// belongs to `user_sub`. Immediately adds the bound JTI to the revoked-JTI
+    /// blocklist so the issued access token becomes invalid.
+    fn revoke_delegation_grant(
+        &self,
+        realm_id: &RealmId,
+        delegation_id: &str,
+        user_sub: &str,
+    ) -> Result<(), IdentityError>;
+
+    fn create_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request: &types::CreateApprovalRequestInput,
+    ) -> Result<types::ApprovalRequest, IdentityError>;
+    fn get_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+    ) -> Result<types::ApprovalRequest, IdentityError>;
+    fn approve_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+        capability_ttl_secs: Option<i64>,
+    ) -> Result<types::ApprovalRequestResponse, IdentityError>;
+    fn deny_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+        reason: Option<String>,
+    ) -> Result<types::ApprovalRequestResponse, IdentityError>;
+    fn list_approval_requests(
+        &self,
+        realm_id: &RealmId,
+        status_filter: Option<types::ApprovalRequestStatus>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<types::Page<types::ApprovalRequest>, IdentityError>;
+
+    /// Validates a capability token for a tool invocation (Phase C — Complete Mediation).
+    ///
+    /// Verifies signature, token type, audience, expiry, tool/action match, and
+    /// single-use JTI. Returns the calling `AgentId` on success.
+    /// All failure modes return `ToolApprovalRequired { tool }`.
+    fn validate_capability_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        tool_name: &str,
+        action: &str,
+    ) -> Result<crate::core::AgentId, IdentityError>;
+
+    // ── Phase D.1: Attenuating Authorization Tokens ──────────────────────────
+
+    /// Issues a root Attenuating Authorization Token for an agent.
+    ///
+    /// The AAT is signed by the realm's Ed25519 key (typ: `"aat+jwt"`).
+    /// Returns `AgentNotFound` if the agent does not exist or is not Active.
+    fn issue_aat(
+        &self,
+        realm_id: &RealmId,
+        request: &types::IssueAatRequest,
+    ) -> Result<types::AatResponse, IdentityError>;
+
+    /// Derives a child AAT by narrowing the permissions of an existing parent AAT.
+    ///
+    /// Validates that:
+    /// - The parent AAT has a valid Hearth Ed25519 signature.
+    /// - The parent has not expired and is not revoked.
+    /// - The child's `tools` and `scope` are subsets of the parent's.
+    /// - The child's `exp` is ≤ the parent's `exp`.
+    /// Returns `AatScopeEscalation` if the child attempts to widen permissions.
+    fn derive_aat(
+        &self,
+        realm_id: &RealmId,
+        request: &types::DeriveAatRequest,
+    ) -> Result<types::AatResponse, IdentityError>;
+
+    /// Validates the full attenuation chain of a presented AAT.
+    ///
+    /// Returns the decoded `AatClaims` on success.
+    /// Returns `AatChainBroken` / `AatRevoked` / `AatExpired` / `AatAudienceMismatch` on failure.
+    ///
+    /// When `expected_aud` is `Some`, the `aud` claim must exactly match; otherwise
+    /// `AatAudienceMismatch` is returned. Pass `None` to skip audience checking.
+    fn validate_aat(
+        &self,
+        realm_id: &RealmId,
+        aat: &str,
+        expected_aud: Option<&str>,
+    ) -> Result<types::AatClaims, IdentityError>;
+
+    /// Revokes an AAT by JTI. Any descendant chain validation will also fail.
+    fn revoke_aat(&self, realm_id: &RealmId, jti: &str) -> Result<(), IdentityError>;
+
+    // ── Phase D.3: Transaction Tokens ────────────────────────────────────────
+
+    /// Issues a single-use transaction token binding two agents to one operation.
+    ///
+    /// The token carries a `txn` claim (the provided `txn_id`) and expires in 60 s.
+    /// Returns `TransactionTokenReplayed` if `txn_id` has already been used.
+    fn issue_transaction_token(
+        &self,
+        realm_id: &RealmId,
+        request: &types::CreateTransactionTokenRequest,
+    ) -> Result<types::TransactionTokenResponse, IdentityError>;
+
+    /// Validates a transaction token and marks it consumed (replay prevention).
+    ///
+    /// Returns the decoded `TransactionTokenClaims` on success.
+    /// Returns `TransactionTokenReplayed` if the token has already been used.
+    fn consume_transaction_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+    ) -> Result<types::TransactionTokenClaims, IdentityError>;
+
+    // ── Phase D: DPoP JKT blocklist (§10.4) ──────────────────────────────────
+
+    /// Adds a DPoP JWK thumbprint to the server-side blocklist (§10.4).
+    ///
+    /// After this call, every access token whose `cnf.jkt` matches `jkt`
+    /// will be rejected at `validate_token` time without a storage lookup.
+    fn block_dpop_jkt(&self, realm_id: &RealmId, jkt: &str) -> Result<(), IdentityError>;
+
+    /// Removes a DPoP JWK thumbprint from the server-side blocklist (§10.4).
+    fn unblock_dpop_jkt(&self, realm_id: &RealmId, jkt: &str) -> Result<(), IdentityError>;
+
+    // ── Phase D.4: Cross-Realm Trust Policies ────────────────────────────────
+
+    /// Creates a cross-realm trust policy in the given realm.
+    ///
+    /// The policy allows agents from `source_realm_id` to interact with
+    /// resources in this realm, limited to `allowed_capabilities`.
+    fn create_cross_realm_policy(
+        &self,
+        realm_id: &RealmId,
+        request: &types::CreateCrossRealmPolicyRequest,
+    ) -> Result<types::CrossRealmTrustPolicy, IdentityError>;
+
+    /// Retrieves a cross-realm trust policy by ID.
+    fn get_cross_realm_policy(
+        &self,
+        realm_id: &RealmId,
+        policy_id: &str,
+    ) -> Result<Option<types::CrossRealmTrustPolicy>, IdentityError>;
+
+    /// Lists all cross-realm trust policies in the given realm.
+    fn list_cross_realm_policies(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<types::CrossRealmTrustPolicy>, IdentityError>;
+
+    /// Deletes a cross-realm trust policy.
+    ///
+    /// Returns `CrossRealmPolicyNotFound` if the policy does not exist.
+    fn delete_cross_realm_policy(
+        &self,
+        realm_id: &RealmId,
+        policy_id: &str,
+    ) -> Result<(), IdentityError>;
+
+    /// Checks whether a capability is permitted under the active cross-realm
+    /// trust policy between `source_realm` and `target_realm`.
+    fn check_cross_realm_policy(
+        &self,
+        target_realm: &RealmId,
+        source_realm: &RealmId,
+        capability: &str,
+    ) -> Result<bool, IdentityError>;
+
+    // ── Phase D.7: SPIFFE / Workload Identity ────────────────────────────────
+
+    /// Registers a SPIFFE ID → `AgentId` mapping for mTLS workload authentication.
+    ///
+    /// Returns `SpiffeIdInvalid` if the SPIFFE ID format is wrong.
+    /// Returns `SpiffeMappingConflict` if the agent already has a mapping.
+    fn register_spiffe_mapping(
+        &self,
+        realm_id: &RealmId,
+        request: &types::RegisterSpiffeIdRequest,
+    ) -> Result<types::SpiffeIdentityMapping, IdentityError>;
+
+    /// Looks up an `AgentId` by SPIFFE ID.
+    fn lookup_agent_by_spiffe_id(
+        &self,
+        realm_id: &RealmId,
+        spiffe_id: &str,
+    ) -> Result<Option<AgentId>, IdentityError>;
+
+    /// Removes the SPIFFE mapping for the given agent.
+    fn delete_spiffe_mapping(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<(), IdentityError>;
+
+    /// Validates an X.509 client certificate presented via mTLS against the
+    /// realm's SPIFFE trust bundle and returns the mapped `AgentId`.
+    ///
+    /// This is called by the TLS termination layer when a workload presents a
+    /// client certificate. The DER-encoded leaf certificate is passed in
+    /// `der_cert`; the chain is not passed here (validated at TLS layer).
+    ///
+    /// Returns `SpiffeCertInvalid` if the certificate is malformed or expired.
+    /// Returns `SpiffeMappingNotFound` if the SPIFFE ID is not registered.
+    fn validate_spiffe_svid(
+        &self,
+        realm_id: &RealmId,
+        der_cert: &[u8],
+    ) -> Result<AgentId, IdentityError>;
 }

@@ -236,11 +236,12 @@ async fn a38c_non_fapi_client_credentials_without_dpop_ok() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Verifies the constant equals the documented default so spec and code
-/// stay in sync.
+/// stay in sync. Raised from 3 → 10 in HEA-1406 (M2 Phase B: delegation chains
+/// need deeper `max_delegation_depth` per AGENT_AUTH.md §3.4).
 #[test]
-fn a38d_max_act_chain_depth_is_3() {
+fn a38d_max_act_chain_depth_is_10() {
     assert_eq!(
-        MAX_ACT_CHAIN_DEPTH, 3,
-        "constant changed — update ABUSE.md and CHANGELOG"
+        MAX_ACT_CHAIN_DEPTH, 10,
+        "constant changed — update docs/specs/AGENT_AUTH.md and CHANGELOG"
     );
 }

@@ -67,6 +67,7 @@ impl std::error::Error for IdentityError {
             | Self::ConsentTicketExpired
             | Self::ConsentScopeNotRequested
             | Self::ConsentNotFound
+            | Self::DelegationGrantNotFound
             | Self::FederationUnknownConnector
             | Self::FederationInvalidState
             | Self::FederationUpstreamError { .. }
@@ -100,6 +101,7 @@ impl std::error::Error for IdentityError {
             | Self::DPopProofReplay
             | Self::DPopBindingMismatch
             | Self::DPopNonceInvalid
+            | Self::DPopJktBlocked
             | Self::JwtBearerAssertionInvalid { .. }
             | Self::InvalidJar { .. }
             | Self::SessionVersionDisabled
@@ -112,7 +114,37 @@ impl std::error::Error for IdentityError {
             | Self::AttestationPolicyViolation { .. }
             | Self::AgentNotFound
             | Self::AgentRevoked
-            | Self::PreTokenWebhookFailed { .. } => None,
+            | Self::AgentRateLimitExceeded
+            | Self::AgentCredentialNotFound
+            | Self::PreTokenWebhookFailed { .. }
+            // M2
+            | Self::ProtectedResourceNotFound
+            | Self::DuplicateResourceUri
+            | Self::TokenExchangeRejected { .. }
+            | Self::DelegationDepthExceeded { .. }
+            | Self::EmptyScopeIntersection
+            | Self::ActorTokenReplayed
+            // Phase C
+            | Self::ToolAccessDenied { .. }
+            | Self::ToolApprovalRequired { .. }
+            | Self::ApprovalRequestNotFound
+            | Self::ApprovalRequestNotPending { .. }
+            | Self::ApprovalRequestExpired
+            // Phase D
+            | Self::AatScopeEscalation
+            | Self::AatChainBroken { .. }
+            | Self::AatRevoked
+            | Self::AatExpired
+            | Self::AatAudienceMismatch
+            | Self::TransactionTokenReplayed
+            | Self::CrossRealmPolicyNotFound
+            | Self::CrossRealmPolicyConflict
+            | Self::CrossRealmCapabilityNotAllowed { .. }
+            | Self::SpiffeIdInvalid { .. }
+            | Self::SpiffeMappingNotFound
+            | Self::SpiffeMappingConflict
+            | Self::SpiffeCertInvalid { .. }
+            | Self::SpiffeCertExpired => None,
         }
     }
 }

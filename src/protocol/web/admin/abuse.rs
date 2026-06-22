@@ -118,6 +118,8 @@ pub async fn admin_abuse_dashboard(
                 actor: None,
                 action: Some(action.clone()),
                 limit: Some(MAX_EVENTS),
+                agent_id: None,
+                tool: None,
             };
             if let Ok(events) = audit.query(&q) {
                 merged.extend(events);

@@ -32,6 +32,33 @@ const JWT_TYPE: &str = "JWT";
 /// Microseconds per second, for timestamp conversion.
 const MICROS_PER_SEC: i64 = 1_000_000;
 
+/// RFC 8693 §4.1 `act` (actor) claim.
+///
+/// Encodes the delegation chain. The outermost `act.sub` is the immediate actor;
+/// nested `act.act` entries record the delegation history. Example (2-hop chain):
+///
+/// ```text
+/// { "sub": "agent:B", "act": { "sub": "agent:A" } }
+/// ```
+///
+/// The depth of nesting equals the delegation depth minus one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActClaim {
+    /// Identifier of the actor (e.g., `"agent:agt_00000000..."`).
+    pub sub: String,
+    /// Inner delegation chain, present when this actor was itself delegated to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<Box<ActClaim>>,
+}
+
+impl ActClaim {
+    /// Counts the depth of the `act` chain (1 for a single actor, 2 for A→B, etc.).
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        1 + self.act.as_ref().map_or(0, |inner| inner.depth())
+    }
+}
+
 /// JWT `aud` claim — either a single StringOrURI or a JSON array.
 ///
 /// Per RFC 7519 §4.1.3. Serializes as a plain string when the audience
@@ -112,10 +139,54 @@ impl Default for TokenConfig {
 
 /// JWT header.
 #[derive(Debug, Serialize, Deserialize)]
-struct JwtHeader {
-    alg: String,
-    typ: String,
-    kid: String,
+pub(crate) struct JwtHeader {
+    pub(crate) alg: String,
+    pub(crate) typ: String,
+    pub(crate) kid: String,
+}
+
+/// Parses a JWT and verifies its Ed25519 signature, returning typed claims.
+///
+/// The `expected_typ` parameter is checked against the JWT header; pass `None`
+/// to skip the `typ` check (e.g. for assertions that omit it).
+///
+/// # Errors
+/// Returns `IdentityError::InvalidToken` if the JWT is malformed, the algorithm
+/// is not `EdDSA`, the `typ` does not match (when `expected_typ` is `Some`),
+/// or the signature fails to verify.
+pub(crate) fn verify_jwt_typed<T: serde::de::DeserializeOwned>(
+    token: &str,
+    public_key_bytes: &[u8],
+    expected_typ: Option<&str>,
+) -> Result<T, IdentityError> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(IdentityError::InvalidToken);
+    }
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(parts[0])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let header: JwtHeader =
+        serde_json::from_slice(&header_bytes).map_err(|_| IdentityError::InvalidToken)?;
+    if header.alg != JWT_ALGORITHM {
+        return Err(IdentityError::InvalidToken);
+    }
+    if let Some(exp_typ) = expected_typ {
+        if header.typ != exp_typ {
+            return Err(IdentityError::InvalidToken);
+        }
+    }
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let pk = signature::UnparsedPublicKey::new(&signature::ED25519, public_key_bytes);
+    pk.verify(signing_input.as_bytes(), &sig_bytes)
+        .map_err(|_| IdentityError::InvalidToken)?;
+    let claims_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .map_err(|_| IdentityError::InvalidToken)?;
+    serde_json::from_slice(&claims_bytes).map_err(|_| IdentityError::InvalidToken)
 }
 
 /// Confirmation claim (RFC 7800 §3.1) — carries the JWK thumbprint for DPoP binding.
@@ -226,6 +297,13 @@ pub struct TokenClaims {
     /// where `session_version.enabled = false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sv: Option<u64>,
+    /// RFC 8693 §4.1 actor claim — present only on delegated tokens.
+    ///
+    /// When set, `sub` remains the delegating principal (user or agent) and
+    /// `act.sub` identifies the immediate actor performing the request.
+    /// Nested `act.act` entries record the full delegation history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<ActClaim>,
     /// Declaratively-mapped custom claims emitted at the top level.
     #[serde(default, flatten)]
     pub custom: BTreeMap<String, serde_json::Value>,
@@ -613,7 +691,7 @@ impl SigningKey {
             token_type: "access".to_string(),
             jti: None,
             fid: None,
-            scope: None,
+            scope: request.scope.clone(),
             nonce: None,
             cnf: request.dpop_jkt.as_deref().map(|jkt| CnfClaim {
                 jkt: jkt.to_string(),
@@ -623,6 +701,7 @@ impl SigningKey {
             org_groups: org_groups.clone(),
             permissions: request.permissions.to_vec(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             sv: request.sv,
             custom: request.custom.clone(),
@@ -648,6 +727,7 @@ impl SigningKey {
             org_groups: Vec::new(),
             permissions: Vec::new(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             sv: None, // sv is never present on refresh tokens
             custom: BTreeMap::new(),
@@ -708,6 +788,12 @@ pub struct IssueTokenRequest<'a> {
     /// `Some(n)` when `session_version.enabled = true` for the realm and
     /// this is an access token bound to a session. `None` otherwise.
     pub sv: Option<u64>,
+    /// Optional OAuth scope to embed in the access token (space-delimited).
+    ///
+    /// `None` → the `scope` claim is omitted from the issued token.
+    /// Set to `Some(scope_str)` when the token is issued within an explicit
+    /// OAuth grant so that token-exchange can enforce scope intersection.
+    pub scope: Option<String>,
 }
 
 /// Validates a JWT's signature and returns the decoded claims.
@@ -1281,6 +1367,7 @@ mod tests {
             permissions: Vec::new(),
             custom: BTreeMap::new(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             sv: None,
         }
@@ -1435,6 +1522,7 @@ mod tests {
                 resource: None,
                 dpop_jkt: None,
                 sv: None,
+                scope: None,
             })
             .expect("issue pair");
 
@@ -1476,6 +1564,7 @@ mod tests {
                 resource: None,
                 dpop_jkt: None,
                 sv: None,
+                scope: None,
             })
             .expect("reissue pair");
 

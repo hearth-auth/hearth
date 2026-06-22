@@ -99,6 +99,7 @@ impl fmt::Display for IdentityError {
                 write!(f, "approved scope was not in the original request")
             }
             Self::ConsentNotFound => write!(f, "no consent record for this client"),
+            Self::DelegationGrantNotFound => write!(f, "no delegation grant record found"),
             Self::FederationUnknownConnector => write!(f, "unknown federation connector"),
             Self::FederationInvalidState => write!(f, "invalid federation state"),
             Self::FederationUpstreamError { provider, reason } => {
@@ -181,6 +182,7 @@ impl fmt::Display for IdentityError {
                 write!(f, "DPoP proof key does not match token cnf.jkt binding")
             }
             Self::DPopNonceInvalid => write!(f, "DPoP proof nonce invalid or expired"),
+            Self::DPopJktBlocked => write!(f, "DPoP JWK thumbprint is server-blocked (§10.4)"),
             Self::JwtBearerAssertionInvalid { reason } => {
                 write!(f, "invalid JWT bearer assertion: {reason}")
             }
@@ -212,10 +214,84 @@ impl fmt::Display for IdentityError {
             }
             Self::AgentNotFound => write!(f, "agent not found"),
             Self::AgentRevoked => write!(f, "agent has been permanently revoked"),
+            Self::AgentRateLimitExceeded => {
+                write!(
+                    f,
+                    "agent request rate limit exceeded; agent has been suspended"
+                )
+            }
+            Self::AgentCredentialNotFound => write!(f, "agent credential not found"),
             Self::PreTokenWebhookFailed { reason } => {
                 write!(f, "pre-token webhook failed: {reason}")
             }
             Self::Saml(e) => write!(f, "{e}"),
+            // M2
+            Self::ProtectedResourceNotFound => write!(f, "protected resource not found"),
+            Self::DuplicateResourceUri => {
+                write!(
+                    f,
+                    "a protected resource with this URI already exists in this realm"
+                )
+            }
+            Self::TokenExchangeRejected { oauth_error, .. } => {
+                write!(f, "token exchange rejected: {oauth_error}")
+            }
+            Self::DelegationDepthExceeded { max, attempted } => write!(
+                f,
+                "delegation depth {attempted} exceeds agent maximum {max}"
+            ),
+            Self::EmptyScopeIntersection => {
+                write!(f, "scope intersection is empty — exchange rejected")
+            }
+            Self::ActorTokenReplayed => write!(f, "actor token jti has already been used"),
+            // Phase C
+            Self::ToolAccessDenied { tool } => {
+                write!(f, "access to tool `{tool}` is explicitly denied")
+            }
+            Self::ToolApprovalRequired { tool } => {
+                write!(f, "tool `{tool}` requires human approval")
+            }
+            Self::ApprovalRequestNotFound => write!(f, "approval request not found"),
+            Self::ApprovalRequestNotPending { current_status } => write!(
+                f,
+                "approval request is not pending (current status: {current_status})"
+            ),
+            Self::ApprovalRequestExpired => write!(f, "approval request has expired"),
+            // Phase D
+            Self::AatScopeEscalation => {
+                write!(f, "AAT derivation rejected: child scope exceeds parent")
+            }
+            Self::AatChainBroken { reason } => write!(f, "AAT chain invalid: {reason}"),
+            Self::AatRevoked => write!(f, "AAT or an ancestor in the chain has been revoked"),
+            Self::AatExpired => write!(f, "AAT has expired"),
+            Self::AatAudienceMismatch => {
+                write!(
+                    f,
+                    "AAT audience claim does not match the expected service identity"
+                )
+            }
+            Self::TransactionTokenReplayed => {
+                write!(f, "transaction token has already been consumed")
+            }
+            Self::CrossRealmPolicyNotFound => write!(f, "cross-realm trust policy not found"),
+            Self::CrossRealmPolicyConflict => {
+                write!(f, "a cross-realm trust policy already exists for this pair")
+            }
+            Self::CrossRealmCapabilityNotAllowed { capability } => {
+                write!(
+                    f,
+                    "capability `{capability}` is not permitted by the cross-realm trust policy"
+                )
+            }
+            Self::SpiffeIdInvalid { reason } => write!(f, "SPIFFE ID invalid: {reason}"),
+            Self::SpiffeMappingNotFound => write!(f, "SPIFFE identity mapping not found"),
+            Self::SpiffeMappingConflict => {
+                write!(f, "a SPIFFE mapping already exists for this agent")
+            }
+            Self::SpiffeCertInvalid { reason } => {
+                write!(f, "SPIFFE X.509 certificate invalid: {reason}")
+            }
+            Self::SpiffeCertExpired => write!(f, "SPIFFE X.509 certificate has expired"),
         }
     }
 }

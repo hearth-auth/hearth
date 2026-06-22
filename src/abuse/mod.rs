@@ -17,6 +17,7 @@
 //! | A-24 | Per-realm resource quotas                | `src/identity/engine`    |
 //! | A-25 | Audit auto-retention + max_rows backstop | `src/audit/engine` + `src/main` |
 //! | A-38 | ACT actor-chain depth cap                | (constant here)          |
+//! | D-6  | Per-agent rate monitor + auto-suspend    | [`agent_monitor`]        |
 //! | A-39 | HTTP/2 rapid-reset defense               | `src/protocol/http`      |
 //! | A-40 | Host allowlist + COOP/COEP + cookies     | `src/protocol/web`       |
 //! | A-44 | SAML XML parse-event cap                 | (constant here)          |
@@ -31,6 +32,7 @@
 //! | P-5  | Email-reputation trait + disposable list | [`email_reputation`]     |
 //! | P-8  | Pluggable SecretsBackend (HSM/KMS/file)  | [`secrets_backend`]      |
 
+pub mod agent_monitor;
 pub mod backoff;
 pub mod bot_signal;
 pub mod captcha;
@@ -51,7 +53,11 @@ pub mod tarpit;
 pub const MAX_PAGE_SIZE: usize = 1_000;
 
 /// Maximum RFC 8693 `act` actor-chain depth accepted in inbound access tokens (A-38).
-pub const MAX_ACT_CHAIN_DEPTH: usize = 3;
+///
+/// This is the hard global ceiling. Per-agent `max_delegation_depth` (1–10) further
+/// constrains chains at token-exchange time; this constant is the safety net when
+/// validating inbound tokens from external parties.
+pub const MAX_ACT_CHAIN_DEPTH: usize = 10;
 
 /// Maximum number of SCIM `Operations` in a single PATCH body (A-35a).
 pub const MAX_SCIM_OPERATIONS: usize = 1_000;

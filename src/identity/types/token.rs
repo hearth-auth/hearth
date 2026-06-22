@@ -2,7 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{AgentId, ClientId, OrganizationId, RealmId, Timestamp, UserId, WebhookId};
+use zeroize::Zeroize;
+
+use crate::core::{
+    AgentCredentialId, AgentId, ClientId, OrganizationId, RealmId, ResourceServerId, Timestamp,
+    UserId, WebhookId,
+};
 
 /// A user's persisted consent to share a set of scopes with an OAuth client.
 ///
@@ -458,4 +463,585 @@ pub struct ListAgentsQuery {
     pub status: Option<AgentStatus>,
     /// Filter agents that declare a specific capability URI.
     pub capability: Option<String>,
+}
+
+// ── Agent Credentials (A.3) ──────────────────────────────────────────────────
+
+/// Discriminates the kind of credential stored for an agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCredentialKind {
+    /// A server-generated 256-bit random API key. Only the SHA-256 hash is stored.
+    ApiKey,
+    /// An Ed25519 public key supplied by the agent at registration time.
+    Ed25519PublicKey,
+    /// An mTLS client-certificate fingerprint (SHA-256 of the DER-encoded cert).
+    MtlsCert,
+}
+
+/// A stored agent credential record (no secret material).
+///
+/// API keys are stored as SHA-256 hashes; public keys and cert fingerprints
+/// are stored as-is. Plaintext API keys are never persisted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCredential {
+    id: AgentCredentialId,
+    agent_id: AgentId,
+    kind: AgentCredentialKind,
+    /// Human-readable label chosen at creation time (max 256 chars).
+    label: String,
+    /// SHA-256 hex of the API key, or the raw Ed25519/cert material (no secrets).
+    credential_hash: String,
+    created_at: Timestamp,
+    /// When the credential was revoked, or `None` if still active.
+    revoked_at: Option<Timestamp>,
+}
+
+impl AgentCredential {
+    /// Creates a new credential record. Used internally by the identity engine.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        id: AgentCredentialId,
+        agent_id: AgentId,
+        kind: AgentCredentialKind,
+        label: String,
+        credential_hash: String,
+        created_at: Timestamp,
+    ) -> Self {
+        Self {
+            id,
+            agent_id,
+            kind,
+            label,
+            credential_hash,
+            created_at,
+            revoked_at: None,
+        }
+    }
+
+    /// Returns the credential's unique identifier.
+    pub fn id(&self) -> &AgentCredentialId {
+        &self.id
+    }
+
+    /// Returns the agent this credential belongs to.
+    pub fn agent_id(&self) -> &AgentId {
+        &self.agent_id
+    }
+
+    /// Returns the kind of this credential.
+    pub fn kind(&self) -> AgentCredentialKind {
+        self.kind
+    }
+
+    /// Returns the human-readable label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns the stored hash or public key material.
+    pub fn credential_hash(&self) -> &str {
+        &self.credential_hash
+    }
+
+    /// Returns when this credential was created.
+    pub fn created_at(&self) -> Timestamp {
+        self.created_at
+    }
+
+    /// Returns when this credential was revoked, or `None` if active.
+    pub fn revoked_at(&self) -> Option<Timestamp> {
+        self.revoked_at
+    }
+
+    /// Returns `true` if this credential has been revoked.
+    pub fn is_revoked(&self) -> bool {
+        self.revoked_at.is_some()
+    }
+
+    /// Marks the credential revoked. Used internally by the engine.
+    pub(crate) fn revoke(&mut self, at: Timestamp) {
+        self.revoked_at = Some(at);
+    }
+}
+
+/// Request to issue a new API-key credential for an agent.
+#[derive(Clone, Debug)]
+pub struct CreateAgentApiKeyRequest {
+    /// Human-readable label for the key (max 256 chars).
+    pub label: String,
+}
+
+/// Response from creating an agent API key.
+///
+/// The `plaintext_key` field is the only time the raw key is visible.
+/// It is wrapped in a `Zeroize`-on-drop guard and MUST NOT be logged.
+pub struct CreateAgentApiKeyResponse {
+    /// The stored credential record (no secrets).
+    pub credential: AgentCredential,
+    /// The raw 256-bit API key — show once, never stored.
+    pub plaintext_key: PlaintextApiKey,
+}
+
+/// A 256-bit random API key shown exactly once at creation time.
+///
+/// Wraps the hex-encoded key in a `Zeroize`-on-drop guard.
+/// MUST NOT implement `Debug`, `Display`, `Serialize`, or `Clone`.
+pub struct PlaintextApiKey(String);
+
+impl PlaintextApiKey {
+    /// Creates a new plaintext API key from its hex representation.
+    pub(crate) fn new(hex: String) -> Self {
+        Self(hex)
+    }
+
+    /// Returns the hex-encoded key. Call once and discard.
+    pub fn expose_once(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for PlaintextApiKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+// ── Protected Resource / MCP Authorization Server (AGENT_AUTH.md §2.5) ───────
+
+/// A protected resource (MCP tool server) registered within a realm.
+///
+/// MCP clients discover these via PRM (`.well-known/oauth-protected-resource`)
+/// and request tokens scoped to a specific resource URI per RFC 8707.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedResource {
+    /// Unique identifier.
+    pub id: ResourceServerId,
+    /// The owning realm.
+    pub realm_id: RealmId,
+    /// Canonical URI of the MCP server (used as `aud` in access tokens).
+    pub resource_uri: String,
+    /// Human-readable name for admin display.
+    pub display_name: String,
+    /// Scopes this resource accepts. Empty means all realm-level scopes apply.
+    pub scopes: Vec<String>,
+    /// JWT claims the resource requires in tokens presented to it.
+    pub required_claims: Vec<String>,
+    /// When the resource was registered.
+    pub created_at: Timestamp,
+    /// When the resource record was last updated.
+    pub updated_at: Timestamp,
+}
+
+/// Request to register a new protected resource.
+#[derive(Clone, Debug)]
+pub struct RegisterProtectedResourceRequest {
+    /// Canonical URI of the MCP server.
+    pub resource_uri: String,
+    /// Human-readable name.
+    pub display_name: String,
+    /// Scopes this resource supports.
+    #[allow(clippy::struct_field_names)]
+    pub scopes: Vec<String>,
+    /// Claims required in tokens.
+    pub required_claims: Vec<String>,
+}
+
+/// Request to update an existing protected resource.
+#[derive(Clone, Debug, Default)]
+pub struct UpdateProtectedResourceRequest {
+    /// New human-readable name, if changing.
+    pub display_name: Option<String>,
+    /// New scope list, if replacing.
+    pub scopes: Option<Vec<String>>,
+    /// New required-claims list, if replacing.
+    pub required_claims: Option<Vec<String>>,
+}
+
+// ── RFC 8693 Token Exchange ───────────────────────────────────────────────────
+
+/// RFC 8693 `urn:ietf:params:oauth:grant-type:token-exchange` request.
+///
+/// Distinct from the (misnamed) `TokenExchangeRequest` which handles
+/// authorization-code exchange. This struct maps to the actual RFC 8693
+/// token exchange grant type.
+#[derive(Clone, Debug)]
+pub struct Rfc8693Request {
+    /// Authenticating client_id.
+    pub client_id: ClientId,
+    /// The subject token (user's access token whose authority is being delegated).
+    pub subject_token: String,
+    /// Token type of `subject_token`. MUST be
+    /// `urn:ietf:params:oauth:token-type:access_token`.
+    pub subject_token_type: String,
+    /// Actor token (agent's JWT assertion proving the agent's identity).
+    pub actor_token: Option<String>,
+    /// Token type of `actor_token`. MUST be
+    /// `urn:ietf:params:oauth:token-type:jwt` when present.
+    pub actor_token_type: Option<String>,
+    /// Requested token type. Defaults to
+    /// `urn:ietf:params:oauth:token-type:access_token`.
+    pub requested_token_type: Option<String>,
+    /// Requested scope — intersected with subject token's scope and agent's
+    /// permitted scope. Optional; if absent, defaults to subject token's scope.
+    pub scope: Option<String>,
+    /// Optional RFC 8707 resource indicator.
+    pub resource: Option<String>,
+    /// Optional target audience claim override.
+    pub audience: Option<String>,
+    /// DPoP key thumbprint, if the caller provided a DPoP proof header.
+    pub dpop_jkt: Option<String>,
+}
+
+/// Successful RFC 8693 token exchange response.
+#[derive(Clone, Debug)]
+pub struct Rfc8693Response {
+    /// The issued access token.
+    pub access_token: String,
+    /// Always `urn:ietf:params:oauth:token-type:access_token`.
+    pub issued_token_type: String,
+    /// `"Bearer"` or `"DPoP"` depending on DPoP binding.
+    pub token_type: String,
+    /// Seconds until access token expiry.
+    pub expires_in: i64,
+    /// Effective scopes in the issued token (may be narrower than requested).
+    pub scope: String,
+}
+
+/// Persisted record of an RFC 8693 token-exchange delegation.
+///
+/// Created when `rfc8693_token_exchange` issues a delegated access token.
+/// Stored so the user can list active delegations and revoke them via
+/// `GET /ui/consent/delegations`. Revoking adds `token_jti` to the
+/// JTI blocklist, immediately invalidating the issued access token.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredDelegationGrant {
+    /// Unique ID for this delegation record (UUID string).
+    pub delegation_id: String,
+    /// `sub` claim of the actor (agent identifier, e.g. `"agt_xxxx"`).
+    pub actor_sub: String,
+    /// `sub` claim of the subject (the user who authorized the delegation).
+    pub user_sub: String,
+    /// Effective scope string as issued.
+    pub granted_scope: String,
+    /// When this delegation was created.
+    pub created_at: Timestamp,
+    /// When the issued access token expires.
+    pub expires_at: Timestamp,
+    /// Whether the user has explicitly revoked this delegation.
+    pub revoked: bool,
+    /// JTI of the issued delegated access token, for immediate revocation.
+    pub token_jti: String,
+}
+
+/// Listing entry returned from [`IdentityEngine::list_delegation_grants`].
+#[derive(Clone, Debug)]
+pub struct DelegationGrantEntry {
+    /// Unique ID of this delegation record.
+    pub delegation_id: String,
+    /// Actor identifier (agent or client).
+    pub actor_sub: String,
+    /// Granted scopes as individual tokens.
+    pub granted_scopes: Vec<String>,
+    /// When this delegation was created.
+    pub created_at: Timestamp,
+    /// When the delegation expires.
+    pub expires_at: Timestamp,
+}
+
+// Approval Request Lifecycle (AGENT_AUTH.md §9 / Phase C.4)
+
+/// Status of a human-in-the-loop approval request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRequestStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+/// Input for creating a new approval request.
+#[derive(Clone, Debug)]
+pub struct CreateApprovalRequestInput {
+    pub agent_id: AgentId,
+    pub tool: String,
+    pub action: String,
+    pub context: serde_json::Value,
+    pub delegation_chain: Vec<String>,
+    pub expires_in_secs: Option<i64>,
+}
+
+/// A persisted approval request record.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApprovalRequest {
+    pub request_id: String,
+    pub agent_id: AgentId,
+    pub tool: String,
+    pub action: String,
+    pub context: serde_json::Value,
+    pub delegation_chain: Vec<String>,
+    pub status: ApprovalRequestStatus,
+    pub requested_at: Timestamp,
+    pub expires_at: Timestamp,
+    pub resolved_at: Option<Timestamp>,
+    pub denial_reason: Option<String>,
+}
+
+/// A short-lived capability token issued after approval.
+#[derive(Clone, Debug)]
+pub struct CapabilityTokenInfo {
+    pub token: String,
+    pub expires_in_secs: i64,
+}
+
+/// Response from approving or denying an approval request.
+#[derive(Clone, Debug)]
+pub struct ApprovalRequestResponse {
+    pub request_id: String,
+    pub status: ApprovalRequestStatus,
+    pub capability_token: Option<CapabilityTokenInfo>,
+}
+
+// ── Phase D.1: Attenuating Authorization Tokens (AATs) ───────────────────────
+
+/// A permission entry inside an AAT, scoped to a single tool.
+///
+/// Each entry allows the token holder to invoke the named tool with
+/// the specified `actions` and optional argument-level `constraints`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AatToolPermission {
+    /// Tool URI (e.g. `"send_email"` or `"urn:example:tools:search"`).
+    pub tool: String,
+    /// Allowed action names (e.g. `"invoke"`, `"list"`, `"describe"`).
+    pub actions: Vec<String>,
+    /// Argument-level constraints. `null` means unconstrained.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub constraints: serde_json::Value,
+}
+
+/// JWT payload for an Attenuating Authorization Token.
+///
+/// Issued by Hearth (typ: `"aat+jwt"`, signed with the realm key).
+/// Each derived child includes a reference back to its parent via
+/// `aat_parent` and the full ordered `aat_chain`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AatClaims {
+    /// Token ID (UUID string). Used for revocation and chain references.
+    pub jti: String,
+    /// Issuer — realm issuer URL.
+    pub iss: String,
+    /// Subject — agent identifier (e.g. `"agt_xxxx"`).
+    pub sub: String,
+    /// Optional audience restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aud: Option<String>,
+    /// Expiry (Unix seconds).
+    pub exp: i64,
+    /// Issued-at (Unix seconds).
+    pub iat: i64,
+    /// Tool permissions granted to this token.
+    #[serde(default)]
+    pub tools: Vec<AatToolPermission>,
+    /// OAuth scopes carried by this token.
+    #[serde(default)]
+    pub scope: Vec<String>,
+    /// JTI of the immediate parent in the attenuation chain; absent for root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aat_parent: Option<String>,
+    /// Full ordered chain of JTIs from root to this token (inclusive).
+    #[serde(default)]
+    pub aat_chain: Vec<String>,
+}
+
+/// Request to issue a root AAT for an agent acting under delegated scope.
+///
+/// Used by realm admins or trusted systems. For agent-to-agent delegation
+/// the agent calls `derive_aat` with its existing parent AAT.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IssueAatRequest {
+    /// Agent the AAT is issued for.
+    pub agent_id: AgentId,
+    /// Tool permissions to include in the AAT.
+    pub tools: Vec<AatToolPermission>,
+    /// OAuth scopes to include in the AAT.
+    pub scope: Vec<String>,
+    /// Optional audience restriction.
+    pub aud: Option<String>,
+    /// Token lifetime in seconds (capped at 3 600 s / 1 hour).
+    pub expires_in_secs: Option<i64>,
+}
+
+/// Request to derive a child AAT from an existing parent AAT.
+///
+/// The child's permissions MUST be a subset of the parent's.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeriveAatRequest {
+    /// The parent AAT JWT string.
+    pub parent_aat: String,
+    /// Tool permissions for the child — must be a subset of the parent's.
+    pub tools: Vec<AatToolPermission>,
+    /// OAuth scopes for the child — must be a subset of the parent's.
+    pub scope: Vec<String>,
+    /// Optional audience restriction (must equal or be absent when parent has none).
+    pub aud: Option<String>,
+    /// Lifetime in seconds — capped at the parent's remaining lifetime.
+    pub expires_in_secs: Option<i64>,
+}
+
+/// Successful AAT issuance or derivation response.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AatResponse {
+    /// The signed AAT JWT.
+    pub aat: String,
+    /// Token lifetime in seconds.
+    pub expires_in_secs: i64,
+}
+
+// ── Phase D.3: Transaction Tokens ────────────────────────────────────────────
+
+/// JWT payload for a single-use transaction token (typ: `"txn+jwt"`).
+///
+/// Transaction tokens are bound to a specific `txn` ID (UUID), expire in 60 s,
+/// and are tracked for replay prevention.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionTokenClaims {
+    /// Token ID. Used in the JTI blocklist for replay prevention.
+    pub jti: String,
+    /// Issuer — realm issuer URL.
+    pub iss: String,
+    /// Subject — requesting agent identifier.
+    pub sub: String,
+    /// Audience — target agent identifier or endpoint.
+    pub aud: String,
+    /// Expiry (Unix seconds).
+    pub exp: i64,
+    /// Issued-at (Unix seconds).
+    pub iat: i64,
+    /// Unique transaction identifier binding this token to one operation.
+    pub txn: String,
+    /// Delegation context (`act` chain) if the agent acts on behalf of a user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub act: Option<serde_json::Value>,
+}
+
+/// Request to issue a single-use transaction token.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateTransactionTokenRequest {
+    /// The agent issuing the request (must be authenticated).
+    pub requesting_agent_id: AgentId,
+    /// The target agent (audience).
+    pub target_agent_id: AgentId,
+    /// Caller-supplied unique transaction ID. Used for replay prevention.
+    pub txn_id: String,
+    /// Optional delegation context if acting on behalf of a user.
+    pub delegation_context: Option<serde_json::Value>,
+}
+
+/// Successful transaction token response.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionTokenResponse {
+    /// The signed transaction token JWT.
+    pub token: String,
+    /// The transaction ID echoed back.
+    pub txn_id: String,
+    /// Token lifetime in seconds (always 60).
+    pub expires_in_secs: i64,
+}
+
+// ── Phase D.4: Cross-Realm Trust Policies ────────────────────────────────────
+
+/// A persisted cross-realm trust policy.
+///
+/// Allows agents from `source_realm_id` to present tokens to resources in
+/// the owning realm, restricted to `allowed_capabilities`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CrossRealmTrustPolicy {
+    /// Unique policy identifier.
+    pub policy_id: String,
+    /// Realm that owns this policy (the trusting realm).
+    pub target_realm_id: RealmId,
+    /// The realm being trusted (the source of agents).
+    pub source_realm_id: RealmId,
+    /// Capability URIs that agents from `source_realm_id` may present.
+    pub allowed_capabilities: Vec<String>,
+    /// When this policy expires. `None` means no expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+    /// When the policy was created.
+    pub created_at: Timestamp,
+}
+
+/// Request to create a cross-realm trust policy.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateCrossRealmPolicyRequest {
+    /// The realm to trust (agents originate there).
+    pub source_realm_id: RealmId,
+    /// Capabilities agents from that realm are allowed to present.
+    pub allowed_capabilities: Vec<String>,
+    /// Optional policy lifetime in seconds. `None` means never expires.
+    pub expires_in_secs: Option<i64>,
+}
+
+// ── Phase D.7: SPIFFE / Workload Identity ────────────────────────────────────
+
+/// Persisted mapping from a SPIFFE ID to an `AgentId`.
+///
+/// The SPIFFE ID format is `spiffe://{trust_domain}/agent/{agent_uuid}`.
+/// Hearth uses this mapping when a workload authenticates via mTLS with
+/// an X.509 SVID.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpiffeIdentityMapping {
+    /// The full SPIFFE ID URI.
+    pub spiffe_id: String,
+    /// Agent this SPIFFE ID is mapped to.
+    pub agent_id: AgentId,
+    /// SPIFFE trust domain extracted from the URI.
+    pub trust_domain: String,
+    /// When this mapping was created.
+    pub created_at: Timestamp,
+}
+
+/// Request to register a SPIFFE ID → `AgentId` mapping.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegisterSpiffeIdRequest {
+    /// Agent to map.
+    pub agent_id: AgentId,
+    /// The SPIFFE ID to map (must follow `spiffe://{domain}/agent/{uuid}` format).
+    pub spiffe_id: String,
+    /// Optional PEM-encoded trust bundle for an external SPIRE server.
+    /// If absent, Hearth's own CA is used for validation.
+    pub trust_bundle_pem: Option<String>,
+}
+
+/// Payload delivered to the approval webhook endpoint (Phase C.5).
+///
+/// Sent as a JSON POST body when a realm has `approval_webhook` configured.
+/// The approver resolves the request by POSTing to `approve_url` or
+/// `deny_url` (each requires an admin bearer token).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ApprovalWebhookPayload {
+    /// Stable delivery ID — `"approval:{request_id}"`.
+    ///
+    /// Identical across retry attempts; receivers should use this for
+    /// idempotency (ignore duplicates).
+    pub delivery_id: String,
+    /// ID of the approval request.
+    pub request_id: String,
+    /// UUID string of the agent requesting tool invocation.
+    pub agent_id: String,
+    /// Tool name that triggered the approval flow.
+    pub tool: String,
+    /// Action being requested (typically `"invoke"`).
+    pub action: String,
+    /// Caller-supplied context object.
+    pub context: serde_json::Value,
+    /// Delegation chain from the token exchange (act-chain entries).
+    pub delegation_chain: Vec<String>,
+    /// URL to approve the request.
+    pub approve_url: String,
+    /// URL to deny the request.
+    pub deny_url: String,
+    /// Unix timestamp (seconds) when this approval request expires.
+    pub expires_at_secs: i64,
 }

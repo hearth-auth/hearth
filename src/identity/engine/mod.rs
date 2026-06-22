@@ -12,12 +12,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ring::rand::SecureRandom;
 use secrecy::ExposeSecret;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::audit::{Actor, AuditAction, AuditContext, AuditEngine, CreateAuditEvent};
 use crate::core::{
-    AgentId, ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId, Timestamp, UserId,
-    WebhookId,
+    AgentCredentialId, AgentId, ClientId, Clock, InvitationId, OrganizationId, RealmId, SessionId,
+    Timestamp, UserId, WebhookId,
 };
 use crate::identity::claims_config::{
     resolve_claims_for_target, ClaimEvaluationContext, ClaimTarget,
@@ -37,6 +37,23 @@ fn hex_encode(bytes: &[u8]) -> String {
             let _ = write!(s, "{b:02x}");
             s
         })
+}
+
+/// Validates capability list bounds: max 50 entries, max 256 chars each.
+fn validate_agent_capabilities(caps: &[String]) -> Result<(), crate::identity::IdentityError> {
+    if caps.len() > 50 {
+        return Err(crate::identity::IdentityError::InvalidInput {
+            reason: format!("too many capabilities: max 50 allowed, got {}", caps.len()),
+        });
+    }
+    for cap in caps {
+        if cap.len() > 256 {
+            return Err(crate::identity::IdentityError::InvalidInput {
+                reason: "each capability string must not exceed 256 characters".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 use crate::identity::magic_link::{
@@ -217,13 +234,16 @@ use crate::identity::tokens::{
 };
 use crate::identity::totp::{self, RecoveryCodes, StoredMfaState, TotpEnrollment, TotpSecret};
 use crate::identity::types::{
-    Agent, AgentStatus, BulkResult, ConsentListEntry, ConsentRecord, CreateAgentRequest,
-    CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    ImportClientRequest, ImportUserRequest, InvitationStatus, ListAgentsQuery, Organization,
-    OrganizationInvitation, OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
-    PendingAuthorizationRequest, Realm, RealmStatus, RegisterUserRequest, RegisterUserResponse,
-    RegistrationPolicy, Session, SessionContext, SessionLimitPolicy, UpdateAgentRequest,
-    UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
+    Agent, AgentCredential, AgentCredentialKind, AgentOwner, AgentStatus, BulkResult,
+    ConsentListEntry, ConsentRecord, CreateAgentApiKeyRequest, CreateAgentApiKeyResponse,
+    CreateAgentRequest, CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest,
+    CreateUserRequest, ImportClientRequest, ImportUserRequest, InvitationStatus, ListAgentsQuery,
+    Organization, OrganizationInvitation, OrganizationMembership, OrganizationRole,
+    OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey, ProtectedResource,
+    Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
+    RegisterUserResponse, RegistrationPolicy, Rfc8693Request, Rfc8693Response, Session,
+    SessionContext, SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
+    UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
 use crate::identity::webauthn::{
@@ -236,7 +256,13 @@ use crate::rbac::error::RbacError;
 use crate::rbac::registry::{classify_scope_string, ScopeKind};
 use crate::storage::StorageEngine;
 
+pub(super) mod approval;
 pub(super) mod oauth;
+// Phase D engine modules
+pub(super) mod aat;
+pub(super) mod cross_realm;
+pub(super) mod spiffe;
+pub(super) mod txn;
 
 /// Context supplied to [`IdentityEngine::issue_tokens_with_context`] to
 /// influence which claims are embedded in the issued token pair.
@@ -542,6 +568,31 @@ pub struct EmbeddedIdentityEngine {
     /// requests for the same token can both pass the `used` check before
     /// either writes back. Key: hex-encoded SHA-256 of the raw token.
     token_redemption_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-request-id advisory lock for approval CAS state transitions.
+    ///
+    /// Eliminates the TOCTOU race in `approve_approval_request_inner`:
+    /// two concurrent `approve` calls could both read `Pending` before either
+    /// writes `Approved`, causing double capability-token issuance. Applies
+    /// equally to concurrent `deny` calls. The outer map guard is released
+    /// before acquiring the per-request inner lock so different request IDs
+    /// never contend.
+    ///
+    // INVARIANT: outer guard released in scoped block before inner per-request lock is acquired.
+    // INVARIANT: inner (per-request) guard held only across the sync read-check-mint-write window; no .await in scope.
+    approval_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Per-`(realm_id, txn_id)` advisory lock for single-use enforcement in
+    /// `issue_transaction_token_inner`.
+    ///
+    /// Eliminates the TOCTOU race between the guard read (`storage.get`) and
+    /// the guard write (`storage.put`) in that function: two concurrent
+    /// requests with the same `txn_id` could both pass the `get` check before
+    /// either writes the used marker, resulting in two independently valid
+    /// transaction tokens from one authorization. Key format:
+    /// `"{realm_uuid}:{txn_id}"` so locks are realm-scoped.
+    ///
+    // INVARIANT: outer guard released in scoped block before inner per-txn lock is acquired.
+    // INVARIANT: inner (per-txn) guard held only across the sync guard-read + sign + guard-write; no .await in scope.
+    txn_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Serializes realm-record lifecycle mutations (create/update/delete).
     ///
     /// Realm ops are not on the hot path, and a realm record and its
@@ -596,6 +647,37 @@ pub struct EmbeddedIdentityEngine {
     /// access token. Hot-path readers call `load()`. Bounded to
     /// [`TOKEN_CLAIMS_CACHE_MAX`].
     token_claims_cache: ArcSwap<HashMap<[u8; 32], Arc<TokenClaims>>>,
+    /// Per-realm DPoP nonce HMAC secrets (AGENT_AUTH.md §13.2).
+    ///
+    /// Lazily populated: first call for a realm loads or generates the secret
+    /// from storage, subsequent calls return the cached value. The underlying
+    /// storage key is `agt:dpop:nonce-secret` in the realm's namespace.
+    ///
+    // INVARIANT: guard released before any I/O or storage call.
+    dpop_nonce_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
+    /// Hot-path DPoP JKT blocklist projection (§10.4).
+    ///
+    /// Key: JWK thumbprint string. Present = blocked; absent = allowed.
+    ///
+    /// Populated at startup by scanning `agt:dpop:block:jkt:*` across all realms.
+    /// Updated via `rcu()` by `block_dpop_jkt` / `unblock_dpop_jkt`.
+    /// Hot-path readers call `load()` — one atomic fence, no lock, no syscall.
+    blocked_dpop_jkt_cache: ArcSwap<std::collections::HashSet<String>>,
+    /// Hot-path JTI revocation projection (§10.5).
+    ///
+    /// Key: `"{realm_uuid}:{jti}"`. Value: expiry (Unix seconds); `i64::MAX`
+    /// for entries written before this projection existed (stored as `b"1"`).
+    ///
+    /// Populated at startup by scanning `oauth:revjti:*` across all realms.
+    /// Updated (via `rcu()`) whenever a sessionless token is revoked.
+    /// Hot-path readers call `load()` — one atomic fence, no lock, no syscall.
+    ///
+    /// Expired entries remain until the next `rcu()` eviction sweep; an expired
+    /// token is rejected by the `exp` claim check before we reach this cache,
+    /// so stale entries are harmless.
+    revoked_jti_cache: ArcSwap<HashMap<String, i64>>,
+    // INVARIANT: guard released before method returns; no .await in scope.
+    agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -919,6 +1001,9 @@ impl EmbeddedIdentityEngine {
             // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
+            approval_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released in scoped block before inner per-txn lock is acquired.
+            txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -931,10 +1016,19 @@ impl EmbeddedIdentityEngine {
             sv_store,
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
+            dpop_nonce_cache: Mutex::new(HashMap::new()),
+            blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
+            revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
+            // INVARIANT: guard released before method returns; no .await in scope.
+            agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
+                crate::abuse::agent_monitor::AgentRateConfig::default(),
+            ),
         };
         engine.seed_system_realm_if_absent()?;
         engine.restore_attempt_trackers_from_wal()?;
         engine.populate_realm_status_cache()?;
+        engine.populate_revoked_jti_cache()?;
+        engine.populate_blocked_dpop_jkt_cache()?;
         Ok(engine)
     }
 
@@ -1057,6 +1151,178 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
+    /// Scans all realm namespaces for `oauth:revjti:*` keys and loads
+    /// non-expired entries into `revoked_jti_cache`.
+    ///
+    /// Called once at startup.  Handles two storage-value formats:
+    /// - 8-byte little-endian `i64` expiry (current format)
+    /// - Any other length (legacy `b"1"` format): mapped to `i64::MAX`
+    ///   so the entry is never self-evicted (the `exp` claim check catches it).
+    fn populate_revoked_jti_cache(&self) -> Result<(), IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let realm_prefix = keys::realm_id_scan_prefix();
+        let realm_end = keys::prefix_end(&realm_prefix);
+        let realm_entries = self
+            .storage
+            .scan(&sys_realm, &realm_prefix, &realm_end)
+            .map_err(Self::storage_err)?;
+
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        let jti_prefix = keys::revoked_jti_scan_prefix();
+        let jti_end = keys::prefix_end(&jti_prefix);
+
+        let mut map: HashMap<String, i64> = HashMap::new();
+
+        for realm_entry in &realm_entries {
+            let Ok(realm) =
+                serde_json::from_slice::<crate::identity::types::Realm>(&realm_entry.value)
+            else {
+                continue;
+            };
+            if keys::is_system_realm(realm.id()) {
+                continue;
+            }
+            let jti_entries = self
+                .storage
+                .scan(realm.id(), &jti_prefix, &jti_end)
+                .map_err(Self::storage_err)?;
+
+            for entry in jti_entries {
+                let exp: i64 = if entry.value.len() == 8 {
+                    // Current format: LE i64 expiry.
+                    i64::from_le_bytes(entry.value[..8].try_into().unwrap_or([0xff_u8; 8]))
+                } else {
+                    // Legacy b"1" format: no expiry stored; never self-evict.
+                    i64::MAX
+                };
+                // Skip entries that are already expired.
+                if exp != i64::MAX && now_secs >= exp {
+                    continue;
+                }
+                let jti_key = String::from_utf8_lossy(&entry.key);
+                // Strip the `oauth:revjti:` prefix to get the raw JTI string.
+                let jti = jti_key.strip_prefix("oauth:revjti:").unwrap_or(&jti_key);
+                let cache_key = format!("{}:{}", realm.id().as_uuid(), jti);
+                map.insert(cache_key, exp);
+            }
+        }
+
+        self.revoked_jti_cache.store(Arc::new(map));
+        Ok(())
+    }
+
+    /// Scans all realm namespaces for `agt:dpop:block:jkt:*` keys and loads
+    /// their thumbprints into `blocked_dpop_jkt_cache`.
+    ///
+    /// Called once at startup. The blocklist has no expiry — entries are
+    /// admin-managed via `block_dpop_jkt` / `unblock_dpop_jkt`.
+    fn populate_blocked_dpop_jkt_cache(&self) -> Result<(), IdentityError> {
+        let sys_realm = keys::system_realm_id();
+        let realm_prefix = keys::realm_id_scan_prefix();
+        let realm_end = keys::prefix_end(&realm_prefix);
+        let realm_entries = self
+            .storage
+            .scan(&sys_realm, &realm_prefix, &realm_end)
+            .map_err(Self::storage_err)?;
+
+        let jkt_prefix = keys::blocked_dpop_jkt_scan_prefix();
+        let jkt_end = keys::prefix_end(&jkt_prefix);
+
+        let mut set = std::collections::HashSet::new();
+
+        for realm_entry in &realm_entries {
+            let Ok(realm) =
+                serde_json::from_slice::<crate::identity::types::Realm>(&realm_entry.value)
+            else {
+                continue;
+            };
+            if keys::is_system_realm(realm.id()) {
+                continue;
+            }
+            let entries = self
+                .storage
+                .scan(realm.id(), &jkt_prefix, &jkt_end)
+                .map_err(Self::storage_err)?;
+
+            for entry in entries {
+                let raw = String::from_utf8_lossy(&entry.key);
+                let jkt = raw
+                    .strip_prefix("agt:dpop:block:jkt:")
+                    .unwrap_or(&raw)
+                    .to_string();
+                set.insert(jkt);
+            }
+        }
+
+        self.blocked_dpop_jkt_cache.store(Arc::new(set));
+        Ok(())
+    }
+
+    /// Adds `(realm, jti, exp)` entry to `revoked_jti_cache` via RCU.
+    ///
+    /// Also evicts any entries whose expiry has already passed to bound
+    /// cache memory.  Called from every revocation write site.
+    fn insert_revoked_jti_cache(&self, realm_id: &RealmId, jti: &str, exp_secs: i64) {
+        let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
+        let now_secs = self.clock.now().as_micros() / 1_000_000;
+        self.revoked_jti_cache.rcu(|old| {
+            let mut next: HashMap<String, i64> = old
+                .iter()
+                // Evict expired entries while we hold the clone.
+                .filter(|(_, &exp)| exp == i64::MAX || now_secs < exp)
+                .map(|(k, &v)| (k.clone(), v))
+                .collect();
+            next.insert(cache_key.clone(), exp_secs);
+            next
+        });
+    }
+
+    /// Adds a DPoP JWK thumbprint to the server-side blocklist (§10.4).
+    ///
+    /// Writes the thumbprint to persistent storage and updates the hot-path
+    /// in-memory projection via `rcu()`. After this call, every access token
+    /// whose `cnf.jkt` matches `jkt` will be rejected at `validate_token` time.
+    pub(super) fn block_dpop_jkt_inner(
+        &self,
+        realm_id: &RealmId,
+        jkt: &str,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_blocked_dpop_jkt(jkt);
+        self.storage
+            .put(realm_id, &key, b"")
+            .map_err(Self::storage_err)?;
+        let jkt_owned = jkt.to_string();
+        self.blocked_dpop_jkt_cache.rcu(|old| {
+            let mut next = (**old).clone();
+            next.insert(jkt_owned.clone());
+            next
+        });
+        Ok(())
+    }
+
+    /// Removes a DPoP JWK thumbprint from the server-side blocklist (§10.4).
+    ///
+    /// Deletes the thumbprint from persistent storage and updates the hot-path
+    /// in-memory projection. After this call, tokens bound to `jkt` are
+    /// accepted again (subject to normal validation rules).
+    pub(super) fn unblock_dpop_jkt_inner(
+        &self,
+        realm_id: &RealmId,
+        jkt: &str,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_blocked_dpop_jkt(jkt);
+        self.storage
+            .delete(realm_id, &key)
+            .map_err(Self::storage_err)?;
+        let jkt_owned = jkt.to_string();
+        self.blocked_dpop_jkt_cache.rcu(|old| {
+            let mut next = (**old).clone();
+            next.remove(&jkt_owned);
+            next
+        });
+        Ok(())
+    }
+
     /// Creates a new identity engine with a pre-existing signing key.
     ///
     /// Used for testing with a known key or for key restoration from storage.
@@ -1110,6 +1376,9 @@ impl EmbeddedIdentityEngine {
             // INVARIANT: outer guard released inside jwt_bearer_jti_lock() before returning the inner Arc.
             jti_locks: Mutex::new(HashMap::new()),
             token_redemption_locks: Mutex::new(HashMap::new()),
+            approval_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released in scoped block before inner per-txn lock is acquired.
+            txn_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -1122,6 +1391,13 @@ impl EmbeddedIdentityEngine {
             sv_store,
             session_cache: ArcSwap::from_pointee(HashMap::new()),
             token_claims_cache: ArcSwap::from_pointee(HashMap::new()),
+            dpop_nonce_cache: Mutex::new(HashMap::new()),
+            blocked_dpop_jkt_cache: ArcSwap::from_pointee(std::collections::HashSet::new()),
+            revoked_jti_cache: ArcSwap::from_pointee(HashMap::new()),
+            // INVARIANT: guard released before method returns; no .await in scope.
+            agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor::new(
+                crate::abuse::agent_monitor::AgentRateConfig::default(),
+            ),
         };
         // Best-effort: log but do not propagate initialization errors so
         // existing test harnesses that pre-seed storage don't break on a
@@ -1131,6 +1407,12 @@ impl EmbeddedIdentityEngine {
         }
         if let Err(e) = engine.populate_realm_status_cache() {
             tracing::warn!(error = %e, "with_signing_key: populate_realm_status_cache failed");
+        }
+        if let Err(e) = engine.populate_revoked_jti_cache() {
+            tracing::warn!(error = %e, "with_signing_key: populate_revoked_jti_cache failed");
+        }
+        if let Err(e) = engine.populate_blocked_dpop_jkt_cache() {
+            tracing::warn!(error = %e, "with_signing_key: populate_blocked_dpop_jkt_cache failed");
         }
         engine
     }
@@ -2272,6 +2554,7 @@ impl EmbeddedIdentityEngine {
             org_groups: claims.org_groups.clone(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
+            act: None,
             amr: family.amr_values.clone(),
             cnf: dpop_jkt.map(|jkt| crate::identity::tokens::CnfClaim {
                 jkt: jkt.to_string(),
@@ -2298,6 +2581,7 @@ impl EmbeddedIdentityEngine {
             org_groups: Vec::new(),
             permissions: claims.permissions.clone(),
             required_actions: Vec::new(),
+            act: None,
             amr: Vec::new(),
             cnf: None,
             custom: claims.custom.clone(),
@@ -2844,6 +3128,7 @@ impl EmbeddedIdentityEngine {
                 "client_credentials".to_string(),
                 "urn:ietf:params:oauth:grant-type:device_code".to_string(),
                 "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
+                "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
             ],
             registration_endpoint: Some(format!("{issuer}/register")),
             device_authorization_endpoint: Some(format!("{issuer}/device/authorize")),
@@ -2868,20 +3153,19 @@ impl EmbeddedIdentityEngine {
     }
 
     /// Verifies a client_credentials (sessionless) token by checking the JTI
-    /// blocklist. Returns `Ok(())` if the token is not revoked.
+    /// revocation projection. Returns `Ok(())` if the token is not revoked.
+    ///
+    /// Hot-path safe: reads `revoked_jti_cache` via a single atomic `load()` —
+    /// no lock, no syscall (§10.5).
     fn verify_client_credentials_token(
         &self,
         realm_id: &RealmId,
         claims: &TokenClaims,
     ) -> Result<(), IdentityError> {
         if let Some(ref jti) = claims.jti {
-            let jti_key = keys::encode_revoked_jti(jti);
-            if self
-                .storage
-                .get(realm_id, &jti_key)
-                .map_err(Self::storage_err)?
-                .is_some()
-            {
+            let cache_key = format!("{}:{}", realm_id.as_uuid(), jti);
+            let cache = self.revoked_jti_cache.load();
+            if cache.contains_key(cache_key.as_str()) {
                 return Err(IdentityError::InvalidToken);
             }
         }
@@ -2949,6 +3233,31 @@ impl EmbeddedIdentityEngine {
             map.entry(token_hash.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
+    }
+
+    /// Returns a per-request-id advisory lock for approval state transitions.
+    ///
+    /// Callers hold this lock across the read → status-check → mint → write
+    /// sequence in `approve_approval_request_inner` and
+    /// `deny_approval_request_inner` to prevent two concurrent callers from
+    /// both passing the Pending check before either writes the final state.
+    fn approval_request_lock(&self, request_id: &str) -> Arc<Mutex<()>> {
+        let mut map = self.approval_locks.lock().expect("approval_locks poisoned");
+        Arc::clone(
+            map.entry(request_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Returns the per-`(realm_id, txn_id)` advisory lock for serializing
+    /// concurrent calls to `issue_transaction_token_inner`.
+    ///
+    /// The outer `txn_locks` map guard is released before returning so that
+    /// callers for different `txn_id` values never contend with each other.
+    fn txn_advisory_lock(&self, realm_id: &RealmId, txn_id: &str) -> Arc<Mutex<()>> {
+        let key = format!("{}:{}", realm_id.as_uuid(), txn_id);
+        let mut map = self.txn_locks.lock().expect("txn_locks poisoned");
+        Arc::clone(map.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
     }
 
     /// Atomically checks and consumes a JWT Bearer assertion JTI for replay prevention.
@@ -4252,6 +4561,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 org_groups: Vec::new(),
                 permissions: Vec::new(),
                 required_actions: remaining,
+                act: None,
                 amr: Vec::new(),
                 cnf: None,
                 custom: Default::default(),
@@ -4778,6 +5088,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .map_err(|e| IdentityError::Internal {
                 reason: format!("rbac cascade failed during delete_user: {e}"),
             })?;
+
+        // 13. Cascade: delete all agents owned by this user to prevent orphans.
+        {
+            let owner = AgentOwner::User(user_id.clone());
+            let prefix = keys::agent_owner_scan_prefix(owner.storage_tag(), &owner.uuid_str());
+            let end = keys::prefix_end(&prefix);
+            if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                for entry in &entries {
+                    if let Ok(key_str) = std::str::from_utf8(&entry.key) {
+                        if let Some(uuid_str) = key_str.rsplit(':').next() {
+                            if let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) {
+                                let aid = AgentId::new(uuid);
+                                let _ = <Self as IdentityEngine>::delete_agent(
+                                    self, realm_id, &aid, None,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         self.record_audit(
             realm_id,
@@ -5816,6 +6147,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             resource: ctx.resource.as_ref(),
             dpop_jkt: None,
             sv: sv_claim,
+            scope: if scope_str.is_empty() {
+                None
+            } else {
+                Some(scope_str)
+            },
         })
     }
 
@@ -5914,6 +6250,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // RFC 7519 §4.1.3 — audience must include the configured value.
         if !claims.aud.contains(&self.config.token.audience) {
             return Err(IdentityError::InvalidToken);
+        }
+
+        // §10.4 — DPoP JKT blocklist: reject tokens whose `cnf.jkt` thumbprint
+        // is server-blocked. Hot-path safe: single atomic `load()`, no syscall.
+        if let Some(ref cnf) = claims.cnf {
+            if self.blocked_dpop_jkt_cache.load().contains(&cnf.jkt) {
+                return Err(IdentityError::DPopJktBlocked);
+            }
         }
 
         // Parse session ID from claims. Sessionless tokens (client_credentials,
@@ -8731,7 +9075,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .map_err(Self::storage_err)?;
         }
 
-        // 5. Delete org record
+        // 5. Cascade: delete all agents owned by this organization
+        {
+            let owner = AgentOwner::Organization(org_id.clone());
+            let prefix = keys::agent_owner_scan_prefix(owner.storage_tag(), &owner.uuid_str());
+            let end = keys::prefix_end(&prefix);
+            if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                for entry in &entries {
+                    if let Ok(key_str) = std::str::from_utf8(&entry.key) {
+                        if let Some(uuid_str) = key_str.rsplit(':').next() {
+                            if let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) {
+                                let aid = AgentId::new(uuid);
+                                let _ = <Self as IdentityEngine>::delete_agent(
+                                    self, realm_id, &aid, None,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 6. Delete org record
         let id_key = keys::encode_org_id(org_id);
         self.storage
             .delete(realm_id, &id_key)
@@ -10135,6 +10500,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         request: &CreateAgentRequest,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
         if keys::is_system_realm(realm_id) {
             return Err(IdentityError::SystemRealmProtected {
@@ -10175,6 +10541,32 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
+        validate_agent_capabilities(&request.capabilities)?;
+
+        // Owner FK: the referenced user or org must exist in this realm.
+        match &request.owner {
+            AgentOwner::User(uid) => {
+                if self.get_user(realm_id, uid)?.is_none() {
+                    return Err(IdentityError::UserNotFound);
+                }
+            }
+            AgentOwner::Organization(oid) => {
+                if self.get_organization(realm_id, oid)?.is_none() {
+                    return Err(IdentityError::OrganizationNotFound);
+                }
+            }
+        }
+
+        // max_agents quota check
+        if let Some(realm) = self.get_realm(realm_id)? {
+            if let Some(quotas) = &realm.config().quotas {
+                if let Some(max) = quotas.max_agents {
+                    let prefix = keys::agent_id_scan_prefix();
+                    self.check_resource_quota(realm_id, "agents", &prefix, max)?;
+                }
+            }
+        }
+
         let now = self.clock.now();
         let agent_id = AgentId::generate();
         let description = request.description.clone().unwrap_or_default();
@@ -10210,9 +10602,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             )
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentCreated,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10248,6 +10644,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         agent_id: &AgentId,
         request: &UpdateAgentRequest,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
         let key = keys::encode_agent_id(agent_id);
         let mut agent = self
@@ -10279,6 +10676,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         if let Some(caps) = &request.capabilities {
+            validate_agent_capabilities(caps)?;
             agent.set_capabilities(caps.clone());
         }
 
@@ -10300,9 +10698,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &agent_bytes)
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentUpdated,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10311,28 +10713,54 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(agent)
     }
 
-    fn delete_agent(&self, realm_id: &RealmId, agent_id: &AgentId) -> Result<(), IdentityError> {
+    fn delete_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<(), IdentityError> {
         let agent = self
             .get_agent(realm_id, agent_id)?
             .ok_or(IdentityError::AgentNotFound)?;
 
+        // 1. Cascade: delete all credentials for this agent
+        let cred_prefix = keys::agent_credential_scan_prefix(agent_id);
+        let cred_end = keys::prefix_end(&cred_prefix);
+        let cred_entries = self
+            .storage
+            .scan(realm_id, &cred_prefix, &cred_end)
+            .map_err(Self::storage_err)?;
+        for entry in &cred_entries {
+            self.storage
+                .delete(realm_id, &entry.key)
+                .map_err(Self::storage_err)?;
+        }
+
+        // 2. Cascade: purge RBAC role assignments and group memberships.
+        // Agents share the RBAC subject namespace with users via the same UUID.
+        let agent_subject_id = UserId::new(*agent_id.as_uuid());
+        let _ = self.rbac.purge_user_from_realm(realm_id, &agent_subject_id);
+
+        // 3. Delete primary record and owner index atomically
         let id_key = keys::encode_agent_id(agent_id);
         let owner_index_key = keys::encode_agent_owner_index(
             agent.owner().storage_tag(),
             &agent.owner().uuid_str(),
             agent_id,
         );
-
-        // Remove primary record and owner index atomically
         self.storage
             .delete(realm_id, &id_key)
             .map_err(Self::storage_err)?;
         // Owner index deletion is best-effort; primary is gone.
         let _ = self.storage.delete(realm_id, &owner_index_key);
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentDeleted,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10432,6 +10860,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
         let mut agent = self
             .get_agent(realm_id, agent_id)?
@@ -10452,9 +10881,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentSuspended,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10467,6 +10900,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
     ) -> Result<Agent, IdentityError> {
         let mut agent = self
             .get_agent(realm_id, agent_id)?
@@ -10487,9 +10921,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentReactivated,
             "agent",
             &agent_id.as_uuid().to_string(),
@@ -10498,7 +10936,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         Ok(agent)
     }
 
-    fn revoke_agent(&self, realm_id: &RealmId, agent_id: &AgentId) -> Result<Agent, IdentityError> {
+    fn revoke_agent(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<Agent, IdentityError> {
         let mut agent = self
             .get_agent(realm_id, agent_id)?
             .ok_or(IdentityError::AgentNotFound)?;
@@ -10519,15 +10962,245 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)?;
 
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
         self.record_audit(
             realm_id,
-            None,
+            audit_ctx.as_ref(),
             AuditAction::AgentRevoked,
             "agent",
             &agent_id.as_uuid().to_string(),
         )?;
 
         Ok(agent)
+    }
+
+    // ── A.3 Agent credentials ────────────────────────────────────────────────
+
+    fn create_agent_api_key(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        request: &CreateAgentApiKeyRequest,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<CreateAgentApiKeyResponse, IdentityError> {
+        // Agent must exist and be active
+        let agent = self
+            .get_agent(realm_id, agent_id)?
+            .ok_or(IdentityError::AgentNotFound)?;
+        if agent.status() == AgentStatus::Revoked {
+            return Err(IdentityError::AgentRevoked);
+        }
+
+        // Validate label
+        let label = request.label.trim();
+        if label.is_empty() || label.len() > 256 {
+            return Err(IdentityError::InvalidInput {
+                reason: "credential label must be 1–256 characters".to_string(),
+            });
+        }
+
+        // Enforce max_credentials_per_agent quota (default 25, active only)
+        const MAX_CREDENTIALS_PER_AGENT: usize = 25;
+        let cred_prefix = keys::agent_credential_scan_prefix(agent_id);
+        let cred_end = keys::prefix_end(&cred_prefix);
+        let existing = self
+            .storage
+            .scan(realm_id, &cred_prefix, &cred_end)
+            .map_err(Self::storage_err)?;
+        let active_count = existing
+            .iter()
+            .filter(|e| {
+                serde_json::from_slice::<AgentCredential>(&e.value)
+                    .map(|c| !c.is_revoked())
+                    .unwrap_or(false)
+            })
+            .count();
+        if active_count >= MAX_CREDENTIALS_PER_AGENT {
+            return Err(IdentityError::QuotaExceeded {
+                resource: "agent_credentials",
+                limit: MAX_CREDENTIALS_PER_AGENT as u64,
+                current: active_count as u64,
+            });
+        }
+
+        // Generate 256 bits of entropy → hex-encode as plaintext key
+        let mut raw = [0u8; 32];
+        ring::rand::SystemRandom::new()
+            .fill(&mut raw)
+            .map_err(|_| IdentityError::SigningError {
+                reason: "RNG failure generating agent API key".to_string(),
+            })?;
+        let plaintext_hex = hex::encode(raw);
+
+        // Store only the SHA-256 hash
+        use sha2::{Digest, Sha256};
+        let hash_bytes = Sha256::digest(raw);
+        let hash_hex = hex::encode(hash_bytes);
+        // Zeroize raw entropy from the stack to prevent key material lingering in memory.
+        // sha2::Digest::digest() takes raw by copy ([u8;32]: Copy) so raw remains here.
+        raw.zeroize();
+
+        let cred_id = AgentCredentialId::generate();
+        let cred = AgentCredential::new(
+            cred_id,
+            agent_id.clone(),
+            AgentCredentialKind::ApiKey,
+            label.to_string(),
+            hash_hex,
+            self.clock.now(),
+        );
+
+        let cred_bytes = serde_json::to_vec(&cred).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        let cred_key = keys::encode_agent_credential(agent_id, cred.id());
+        self.storage
+            .put(realm_id, &cred_key, &cred_bytes)
+            .map_err(Self::storage_err)?;
+
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
+        self.record_audit(
+            realm_id,
+            audit_ctx.as_ref(),
+            AuditAction::AgentCredentialCreated,
+            "agent_credential",
+            &cred.id().as_uuid().to_string(),
+        )?;
+
+        Ok(CreateAgentApiKeyResponse {
+            credential: cred,
+            plaintext_key: PlaintextApiKey::new(plaintext_hex),
+        })
+    }
+
+    fn list_agent_credentials(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<Vec<AgentCredential>, IdentityError> {
+        let prefix = keys::agent_credential_scan_prefix(agent_id);
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+
+        let mut creds = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let cred: AgentCredential =
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            creds.push(cred);
+        }
+        Ok(creds)
+    }
+
+    fn revoke_agent_credential(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        cred_id: &AgentCredentialId,
+        caller: Option<&crate::core::UserId>,
+    ) -> Result<(), IdentityError> {
+        let cred_key = keys::encode_agent_credential(agent_id, cred_id);
+        let bytes = self
+            .storage
+            .get(realm_id, &cred_key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::AgentCredentialNotFound)?;
+
+        let mut cred: AgentCredential =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+
+        // Verify the credential belongs to the given agent
+        if cred.agent_id() != agent_id {
+            return Err(IdentityError::AgentCredentialNotFound);
+        }
+
+        if !cred.is_revoked() {
+            cred.revoke(self.clock.now());
+            let updated = serde_json::to_vec(&cred).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+            self.storage
+                .put(realm_id, &cred_key, &updated)
+                .map_err(Self::storage_err)?;
+        }
+
+        let audit_ctx = caller.map(|uid| crate::audit::AuditContext {
+            actor: crate::audit::Actor::User(uid.clone()),
+            metadata: None,
+        });
+        self.record_audit(
+            realm_id,
+            audit_ctx.as_ref(),
+            AuditAction::AgentCredentialRevoked,
+            "agent_credential",
+            &cred_id.as_uuid().to_string(),
+        )?;
+
+        Ok(())
+    }
+
+    fn verify_agent_api_key(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+        plaintext_key_hex: &str,
+    ) -> Result<bool, IdentityError> {
+        // D.6: Record every attempt (correct key or not) against the rate monitor.
+        use crate::abuse::agent_monitor::RateDecision;
+        match self.agent_rate_monitor.check_and_record(
+            realm_id,
+            agent_id,
+            std::time::Instant::now(),
+        ) {
+            RateDecision::Deny {
+                triggered_suspension,
+            } => {
+                if triggered_suspension {
+                    let _ = self.suspend_agent(realm_id, agent_id, None);
+                }
+                return Err(IdentityError::AgentRateLimitExceeded);
+            }
+            RateDecision::Allow => {}
+        }
+
+        // Compute SHA-256 of the supplied plaintext
+        use sha2::{Digest, Sha256};
+        use subtle::ConstantTimeEq;
+
+        let raw = match hex::decode(plaintext_key_hex) {
+            Ok(b) => b,
+            Err(_) => return Ok(false), // malformed key never matches
+        };
+        let candidate_hash = hex::encode(Sha256::digest(&raw));
+
+        let creds = self.list_agent_credentials(realm_id, agent_id)?;
+        for cred in &creds {
+            if cred.is_revoked() {
+                continue;
+            }
+            if cred.kind() != AgentCredentialKind::ApiKey {
+                continue;
+            }
+            // Constant-time comparison to prevent timing attacks
+            let stored = cred.credential_hash().as_bytes();
+            let candidate = candidate_hash.as_bytes();
+            if stored.len() == candidate.len() && stored.ct_eq(candidate).unwrap_u8() == 1 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     // ===== Periodic cleanup =====
@@ -10583,6 +11256,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .expect("ip login tracker lock"),
             now - self.config.rate_limit.ip_window_micros * 2,
         );
+
+        // D.6: evict idle agent-rate windows to bound memory.
+        self.agent_rate_monitor
+            .prune_idle(std::time::Instant::now());
 
         if stats.total_deleted() > 0 {
             let metadata = Some(serde_json::json!({
@@ -11318,6 +11995,764 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         self.sv_store.bump_all(realm_id, retention)
     }
+
+    fn check_and_record_dpop_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        now_secs: i64,
+    ) -> Result<(), IdentityError> {
+        use crate::identity::dpop::DPOP_MAX_AGE_SECS;
+
+        let jti_key = keys::encode_dpop_jti(jti);
+        // Reuse the per-realm JTI lock to close the TOCTOU window between
+        // the storage get (replay check) and the storage put (recording).
+        let lock = self.jwt_bearer_jti_lock(realm_id);
+        let _guard = lock.lock().expect("jti lock poisoned");
+
+        if self
+            .storage
+            .get(realm_id, &jti_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DPopProofReplay);
+        }
+
+        let expires_at = now_secs.saturating_add(DPOP_MAX_AGE_SECS);
+        self.storage
+            .put(realm_id, &jti_key, &expires_at.to_le_bytes())
+            .map_err(Self::storage_err)
+    }
+
+    fn get_realm_dpop_nonce_secret(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError> {
+        // Fast path: return cached secret without touching storage.
+        {
+            let cache = self
+                .dpop_nonce_cache
+                .lock()
+                .expect("dpop_nonce_cache poisoned");
+            if let Some(secret) = cache.get(realm_id) {
+                return Ok(*secret);
+            }
+        }
+
+        // Slow path: load from storage or generate a fresh secret.
+        let secret_key = keys::dpop_nonce_secret_key();
+
+        let secret: [u8; 32] = if let Some(stored) = self
+            .storage
+            .get(realm_id, &secret_key)
+            .map_err(Self::storage_err)?
+        {
+            stored
+                .as_slice()
+                .try_into()
+                .map_err(|_| IdentityError::Internal {
+                    reason: format!(
+                        "dpop nonce secret has wrong length {} (expected 32)",
+                        stored.len()
+                    ),
+                })?
+        } else {
+            use ring::rand::SecureRandom as _;
+            let rng = ring::rand::SystemRandom::new();
+            let mut bytes = [0u8; 32];
+            rng.fill(&mut bytes).map_err(|_| IdentityError::Internal {
+                reason: "dpop nonce secret: ring CSPRNG error".to_string(),
+            })?;
+            self.storage
+                .put(realm_id, &secret_key, &bytes)
+                .map_err(Self::storage_err)?;
+            bytes
+        };
+
+        // Cache the loaded/generated secret.
+        let mut cache = self
+            .dpop_nonce_cache
+            .lock()
+            .expect("dpop_nonce_cache poisoned");
+        cache.insert(realm_id.clone(), secret);
+        Ok(secret)
+    }
+
+    // ── B.1 Protected Resource Registration (AGENT_AUTH.md §2.5) ─────────────
+
+    fn register_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        request: &RegisterProtectedResourceRequest,
+    ) -> Result<ProtectedResource, IdentityError> {
+        if request.resource_uri.is_empty() {
+            return Err(IdentityError::InvalidInput {
+                reason: "resource_uri must not be empty".to_string(),
+            });
+        }
+        if !request.resource_uri.contains("://") {
+            return Err(IdentityError::InvalidInput {
+                reason: "resource_uri must be an absolute URI with a scheme".to_string(),
+            });
+        }
+        let uri_key = keys::encode_resource_server_uri_index(&request.resource_uri);
+        if self
+            .storage
+            .get(realm_id, &uri_key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::DuplicateResourceUri);
+        }
+        let now = self.clock.now();
+        let id = crate::core::ResourceServerId::generate();
+        let resource = ProtectedResource {
+            id: id.clone(),
+            realm_id: realm_id.clone(),
+            resource_uri: request.resource_uri.clone(),
+            display_name: request.display_name.clone(),
+            scopes: request.scopes.clone(),
+            required_claims: request.required_claims.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        let primary_key = keys::encode_resource_server_id(&id);
+        let bytes = serde_json::to_vec(&resource).map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put_batch(
+                realm_id,
+                &[
+                    (primary_key, bytes),
+                    (uri_key, id.as_uuid().as_bytes().to_vec()),
+                ],
+            )
+            .map_err(Self::storage_err)?;
+        let ctx = AuditContext {
+            actor: Actor::System,
+            metadata: Some(serde_json::json!({
+                "resource_id": id.as_uuid().to_string(),
+                "resource_uri": request.resource_uri,
+                "display_name": request.display_name,
+            })),
+        };
+        let _ = self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::ProtectedResourceRegistered,
+            "protected_resource",
+            &id.as_uuid().to_string(),
+        );
+        Ok(resource)
+    }
+
+    fn get_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &crate::core::ResourceServerId,
+    ) -> Result<Option<ProtectedResource>, IdentityError> {
+        let key = keys::encode_resource_server_id(resource_id);
+        let Some(bytes) = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+        else {
+            return Ok(None);
+        };
+        let resource =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        Ok(Some(resource))
+    }
+
+    fn list_protected_resources(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<ProtectedResource>, IdentityError> {
+        let prefix = keys::resource_server_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(realm_id, &prefix, &end)
+            .map_err(Self::storage_err)?;
+        let mut resources = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let r =
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            resources.push(r);
+        }
+        Ok(resources)
+    }
+
+    fn update_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &crate::core::ResourceServerId,
+        request: &UpdateProtectedResourceRequest,
+    ) -> Result<ProtectedResource, IdentityError> {
+        let key = keys::encode_resource_server_id(resource_id);
+        let bytes = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::ProtectedResourceNotFound)?;
+        let mut resource: ProtectedResource =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        if let Some(name) = &request.display_name {
+            resource.display_name = name.clone();
+        }
+        if let Some(scopes) = &request.scopes {
+            resource.scopes = scopes.clone();
+        }
+        if let Some(claims) = &request.required_claims {
+            resource.required_claims = claims.clone();
+        }
+        resource.updated_at = self.clock.now();
+        let new_bytes =
+            serde_json::to_vec(&resource).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        self.storage
+            .put(realm_id, &key, &new_bytes)
+            .map_err(Self::storage_err)?;
+        let ctx = AuditContext {
+            actor: Actor::System,
+            metadata: None,
+        };
+        let _ = self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::ProtectedResourceUpdated,
+            "protected_resource",
+            &resource_id.as_uuid().to_string(),
+        );
+        Ok(resource)
+    }
+
+    fn delete_protected_resource(
+        &self,
+        realm_id: &RealmId,
+        resource_id: &crate::core::ResourceServerId,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_resource_server_id(resource_id);
+        let bytes = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .ok_or(IdentityError::ProtectedResourceNotFound)?;
+        let resource: ProtectedResource =
+            serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+        let uri_key = keys::encode_resource_server_uri_index(&resource.resource_uri);
+        self.storage
+            .write_batch(realm_id, &[], &[key, uri_key])
+            .map_err(Self::storage_err)?;
+        let ctx = AuditContext {
+            actor: Actor::System,
+            metadata: Some(serde_json::json!({
+                "resource_id": resource_id.as_uuid().to_string(),
+                "resource_uri": resource.resource_uri,
+            })),
+        };
+        self.record_audit(
+            realm_id,
+            Some(&ctx),
+            AuditAction::ProtectedResourceDeleted,
+            "protected_resource",
+            &resource_id.as_uuid().to_string(),
+        )?;
+        Ok(())
+    }
+
+    // ── B.4 RFC 8693 Token Exchange ───────────────────────────────────────────
+
+    #[allow(clippy::too_many_lines)]
+    fn rfc8693_token_exchange(
+        &self,
+        realm_id: &RealmId,
+        request: &Rfc8693Request,
+    ) -> Result<Rfc8693Response, IdentityError> {
+        use crate::identity::mcp::intersect_three;
+        use crate::identity::tokens::ActClaim;
+
+        let now_micros = self.clock.now().as_micros();
+        let now_secs = now_micros / 1_000_000;
+
+        // 1. Validate subject_token_type.
+        const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+        if request.subject_token_type != ACCESS_TOKEN_TYPE {
+            return Err(IdentityError::TokenExchangeRejected {
+                reason: format!(
+                    "subject_token_type must be {ACCESS_TOKEN_TYPE} (got {})",
+                    request.subject_token_type
+                ),
+                oauth_error: "invalid_request",
+            });
+        }
+
+        // 2. Cryptographically verify and validate the subject token.
+        // validate_token checks Ed25519 signature against the realm's key, expiry,
+        // and realm binding — a token signed by a different realm's key is rejected
+        // here, making a separate tid guard unnecessary.
+        let subject_claims = self
+            .validate_token(realm_id, &request.subject_token)
+            .map_err(|_| IdentityError::TokenExchangeRejected {
+                reason: "invalid or expired subject_token".into(),
+                oauth_error: "invalid_grant",
+            })?;
+        let subject_remaining = subject_claims.exp.saturating_sub(now_secs);
+
+        // 3. Validate actor_token if present (B.5 OBO).
+        // Returns (actor_sub, actor_scope_owned) where actor_scope_owned is the space-separated
+        // scope string the actor is permitted to hold (RFC 8693 §4.4).
+        let (actor_sub, actor_scope_owned) =
+            if let Some(ref actor_jwt) = request.actor_token {
+                // F3 (HEA-1466): verify actor_token signature with the realm key before reading any
+                // claims. The prior jwt_payload_json path was unverified — fresh forgeries with
+                // arbitrary sub claims bypassed the JTI replay guard (confused-deputy attack).
+                let actor_claims = self
+                    .verify_token_signature_for_realm(realm_id, actor_jwt)
+                    .map_err(|_| IdentityError::TokenExchangeRejected {
+                        reason: "actor_token signature verification failed".to_string(),
+                        oauth_error: "invalid_grant",
+                    })?;
+
+                // Only access tokens are valid actor assertions; refresh tokens must be rejected.
+                if actor_claims.token_type != "access" {
+                    return Err(IdentityError::TokenExchangeRejected {
+                        reason: "actor_token must be an access token".to_string(),
+                        oauth_error: "invalid_grant",
+                    });
+                }
+
+                // Reject expired actor tokens (verify_token_signature_for_realm does not check exp).
+                if actor_claims.exp <= now_secs {
+                    return Err(IdentityError::TokenExchangeRejected {
+                        reason: "actor_token has expired".to_string(),
+                        oauth_error: "invalid_grant",
+                    });
+                }
+
+                // F3: assert actor_token.sub == client_id — the entity presenting the delegation
+                // must own the actor_token. Without this check, any holder of a valid Hearth token
+                // for principal A could impersonate principal B in the act chain.
+                if actor_claims.sub != request.client_id.to_string() {
+                    return Err(IdentityError::TokenExchangeRejected {
+                        reason: "actor_token.sub does not match client_id".to_string(),
+                        oauth_error: "invalid_grant",
+                    });
+                }
+
+                let actor_jti = actor_claims.jti.clone().ok_or_else(|| {
+                    IdentityError::TokenExchangeRejected {
+                        reason: "actor_token missing jti".to_string(),
+                        oauth_error: "invalid_grant",
+                    }
+                })?;
+                let actor_exp = actor_claims.exp;
+                self.check_and_record_actor_jti(realm_id, &actor_jti, now_secs, actor_exp)?;
+
+                // Scope ceiling: actor's token scope narrows delegation per RFC 8693 §4.4.
+                // - Absent claim → actor doesn't restrict beyond the subject's own scope.
+                // - Explicit empty string → zero permissions → EmptyScopeIntersection downstream.
+                let scope = actor_claims
+                    .scope
+                    .unwrap_or_else(|| subject_claims.scope.clone().unwrap_or_default());
+
+                (actor_claims.sub, scope)
+            } else {
+                // No actor_token: the client is acting on its own behalf (no delegation chain).
+                // Preserve the original behavior — actor ceiling matches the subject's own scope
+                // so this path doesn't further restrict scope beyond subject ∩ requested.
+                let actor_sub = request.client_id.as_uuid().to_string();
+                let actor_scope = subject_claims.scope.clone().unwrap_or_default();
+                (actor_sub, actor_scope)
+            };
+
+        // 4. Delegation depth check.
+        let existing_depth = subject_claims.act.as_ref().map_or(0, |a| a.depth());
+        let new_depth = existing_depth + 1;
+
+        // Resolve max_delegation_depth from the agent record if actor is an agent.
+        let max_depth = self
+            .resolve_agent_max_depth(realm_id, &actor_sub)
+            .unwrap_or(crate::abuse::MAX_ACT_CHAIN_DEPTH as u8);
+
+        if new_depth as u8 > max_depth {
+            return Err(IdentityError::DelegationDepthExceeded {
+                max: max_depth,
+                attempted: new_depth as u8,
+            });
+        }
+
+        // 5. Scope intersection (RFC 8693 §4.4: effective ⊆ actor_scope ∩ subject_scope).
+        let subject_scope = subject_claims.scope.as_deref().unwrap_or("");
+        let effective_scope =
+            intersect_three(subject_scope, &actor_scope_owned, request.scope.as_deref());
+        if effective_scope.is_empty() {
+            return Err(IdentityError::EmptyScopeIntersection);
+        }
+
+        // 6. Lifetime: min(subject_remaining, configured access_token_ttl).
+        let ttl = subject_remaining.min(self.config.token.access_token_ttl_secs);
+        let exp = now_secs + ttl;
+
+        // 7. Build act chain.
+        let new_act = ActClaim {
+            sub: actor_sub.clone(),
+            act: subject_claims.act.clone().map(Box::new),
+        };
+
+        // 8. Audience.
+        let aud = if let Some(ref resource_uri) = request.resource {
+            crate::identity::tokens::Audience::Multi(vec![
+                subject_claims.aud.base().to_string(),
+                resource_uri.clone(),
+            ])
+        } else if let Some(ref audience) = request.audience {
+            crate::identity::tokens::Audience::Single(audience.clone())
+        } else {
+            subject_claims.aud.clone()
+        };
+
+        // 9. Issue token.
+        let signing_key = self.get_signing_key_or_default(realm_id);
+        let jti = uuid::Uuid::new_v4().to_string();
+        let issued_claims = crate::identity::tokens::TokenClaims {
+            sub: subject_claims.sub.clone(),
+            iss: self.config.token.issuer.clone(),
+            aud,
+            exp,
+            iat: now_secs,
+            sid: subject_claims.sid.clone(),
+            tid: realm_id.to_string(),
+            oid: subject_claims.oid.clone(),
+            token_type: "access".to_string(),
+            jti: Some(jti.clone()),
+            fid: subject_claims.fid.clone(),
+            scope: Some(effective_scope.clone()),
+            nonce: None,
+            cnf: request
+                .dpop_jkt
+                .as_ref()
+                .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.clone() }),
+            roles: subject_claims.roles.clone(),
+            groups: subject_claims.groups.clone(),
+            org_groups: subject_claims.org_groups.clone(),
+            permissions: subject_claims.permissions.clone(),
+            required_actions: Vec::new(),
+            act: Some(new_act),
+            amr: subject_claims.amr.clone(),
+            sv: subject_claims.sv,
+            custom: subject_claims.custom.clone(),
+        };
+        let access_token = signing_key.issue_token(&issued_claims)?;
+
+        // 10. Audit.
+        let audit_ctx = AuditContext {
+            actor: Actor::System,
+            metadata: Some(serde_json::json!({
+                "actor": actor_sub,
+                "on_behalf_of": subject_claims.sub,
+                "delegation_depth": new_depth,
+                "effective_scope": effective_scope,
+                "token_jti": jti,
+                "dpop_jkt": request.dpop_jkt,
+            })),
+        };
+        let _ = self.record_audit(
+            realm_id,
+            Some(&audit_ctx),
+            AuditAction::AgentDelegation,
+            "token",
+            &jti,
+        );
+
+        // 11. Persist delegation grant for self-service consent management (§3.5).
+        let delegation_id = uuid::Uuid::new_v4().to_string();
+        let now_ts = self.clock.now();
+        let expires_ts = crate::core::Timestamp::from_micros(exp * 1_000_000);
+        let grant = crate::identity::types::StoredDelegationGrant {
+            delegation_id,
+            actor_sub: actor_sub.clone(),
+            user_sub: subject_claims.sub.clone(),
+            granted_scope: effective_scope.clone(),
+            created_at: now_ts,
+            expires_at: expires_ts,
+            revoked: false,
+            token_jti: jti.clone(),
+        };
+        let _ = self.store_delegation_grant_inner(realm_id, &grant);
+
+        Ok(Rfc8693Response {
+            access_token,
+            issued_token_type: "urn:ietf:params:oauth:token-type:access_token".to_string(),
+            token_type: if request.dpop_jkt.is_some() {
+                "DPoP"
+            } else {
+                "Bearer"
+            }
+            .to_string(),
+            expires_in: ttl,
+            scope: effective_scope,
+        })
+    }
+
+    fn check_and_record_actor_jti(
+        &self,
+        realm_id: &RealmId,
+        jti: &str,
+        _now_secs: i64,
+        exp_secs: i64,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_actor_jti(jti);
+        if self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?
+            .is_some()
+        {
+            return Err(IdentityError::ActorTokenReplayed);
+        }
+        self.storage
+            .put(realm_id, &key, &exp_secs.to_le_bytes())
+            .map_err(Self::storage_err)?;
+        Ok(())
+    }
+
+    fn list_delegation_grants(
+        &self,
+        realm_id: &RealmId,
+        user_sub: &str,
+    ) -> Result<Vec<crate::identity::types::DelegationGrantEntry>, IdentityError> {
+        self.list_delegation_grants_inner(realm_id, user_sub)
+    }
+
+    fn revoke_delegation_grant(
+        &self,
+        realm_id: &RealmId,
+        delegation_id: &str,
+        user_sub: &str,
+    ) -> Result<(), IdentityError> {
+        self.revoke_delegation_grant_inner(realm_id, delegation_id, user_sub)
+    }
+
+    fn create_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::CreateApprovalRequestInput,
+    ) -> Result<crate::identity::types::ApprovalRequest, IdentityError> {
+        let approval = self.create_approval_request_inner(realm_id, request)?;
+        // C.5: attempt immediate webhook delivery; outbox entry is already
+        // WAL-durable so failures are safe (recovery scan will retry).
+        self.notify_approval_webhook_inner(realm_id, &approval);
+        Ok(approval)
+    }
+    fn get_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+    ) -> Result<crate::identity::types::ApprovalRequest, IdentityError> {
+        self.get_approval_request_inner(realm_id, request_id)
+    }
+    fn approve_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+        capability_ttl_secs: Option<i64>,
+    ) -> Result<crate::identity::types::ApprovalRequestResponse, IdentityError> {
+        self.approve_approval_request_inner(realm_id, request_id, capability_ttl_secs)
+    }
+    fn deny_approval_request(
+        &self,
+        realm_id: &RealmId,
+        request_id: &str,
+        reason: Option<String>,
+    ) -> Result<crate::identity::types::ApprovalRequestResponse, IdentityError> {
+        self.deny_approval_request_inner(realm_id, request_id, reason)
+    }
+    fn list_approval_requests(
+        &self,
+        realm_id: &RealmId,
+        status_filter: Option<crate::identity::types::ApprovalRequestStatus>,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::identity::types::Page<crate::identity::types::ApprovalRequest>, IdentityError>
+    {
+        self.list_approval_requests_inner(realm_id, status_filter, cursor, limit)
+    }
+
+    fn validate_capability_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+        tool_name: &str,
+        action: &str,
+    ) -> Result<crate::core::AgentId, IdentityError> {
+        self.validate_capability_token_inner(realm_id, token, tool_name, action)
+    }
+
+    // ── Phase D.1: AATs ─────────────────────────────────────────────────────
+
+    fn issue_aat(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::IssueAatRequest,
+    ) -> Result<crate::identity::types::AatResponse, IdentityError> {
+        self.issue_aat_inner(realm_id, request)
+    }
+
+    fn derive_aat(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::DeriveAatRequest,
+    ) -> Result<crate::identity::types::AatResponse, IdentityError> {
+        self.derive_aat_inner(realm_id, request)
+    }
+
+    fn validate_aat(
+        &self,
+        realm_id: &RealmId,
+        aat: &str,
+        expected_aud: Option<&str>,
+    ) -> Result<crate::identity::types::AatClaims, IdentityError> {
+        self.parse_and_validate_aat(realm_id, aat, expected_aud)
+    }
+
+    fn revoke_aat(&self, realm_id: &RealmId, jti: &str) -> Result<(), IdentityError> {
+        self.revoke_aat_inner(realm_id, jti)
+    }
+
+    // ── Phase D.3: Transaction Tokens ───────────────────────────────────────
+
+    fn issue_transaction_token(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::CreateTransactionTokenRequest,
+    ) -> Result<crate::identity::types::TransactionTokenResponse, IdentityError> {
+        self.issue_transaction_token_inner(realm_id, request)
+    }
+
+    fn consume_transaction_token(
+        &self,
+        realm_id: &RealmId,
+        token: &str,
+    ) -> Result<crate::identity::types::TransactionTokenClaims, IdentityError> {
+        self.consume_transaction_token_inner(realm_id, token)
+    }
+
+    // ── Phase D: DPoP JKT blocklist (§10.4) ─────────────────────────────────
+
+    fn block_dpop_jkt(&self, realm_id: &RealmId, jkt: &str) -> Result<(), IdentityError> {
+        self.block_dpop_jkt_inner(realm_id, jkt)
+    }
+
+    fn unblock_dpop_jkt(&self, realm_id: &RealmId, jkt: &str) -> Result<(), IdentityError> {
+        self.unblock_dpop_jkt_inner(realm_id, jkt)
+    }
+
+    // ── Phase D.4: Cross-Realm Trust Policies ───────────────────────────────
+
+    fn create_cross_realm_policy(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::CreateCrossRealmPolicyRequest,
+    ) -> Result<crate::identity::types::CrossRealmTrustPolicy, IdentityError> {
+        self.create_cross_realm_policy_inner(realm_id, request)
+    }
+
+    fn get_cross_realm_policy(
+        &self,
+        realm_id: &RealmId,
+        policy_id: &str,
+    ) -> Result<Option<crate::identity::types::CrossRealmTrustPolicy>, IdentityError> {
+        self.get_cross_realm_policy_inner(realm_id, policy_id)
+    }
+
+    fn list_cross_realm_policies(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<crate::identity::types::CrossRealmTrustPolicy>, IdentityError> {
+        self.list_cross_realm_policies_inner(realm_id)
+    }
+
+    fn delete_cross_realm_policy(
+        &self,
+        realm_id: &RealmId,
+        policy_id: &str,
+    ) -> Result<(), IdentityError> {
+        self.delete_cross_realm_policy_inner(realm_id, policy_id)
+    }
+
+    fn check_cross_realm_policy(
+        &self,
+        target_realm: &RealmId,
+        source_realm: &RealmId,
+        capability: &str,
+    ) -> Result<bool, IdentityError> {
+        self.check_cross_realm_policy_inner(target_realm, source_realm, capability)
+    }
+
+    // ── Phase D.7: SPIFFE / Workload Identity ───────────────────────────────
+
+    fn register_spiffe_mapping(
+        &self,
+        realm_id: &RealmId,
+        request: &crate::identity::types::RegisterSpiffeIdRequest,
+    ) -> Result<crate::identity::types::SpiffeIdentityMapping, IdentityError> {
+        self.register_spiffe_mapping_inner(realm_id, request)
+    }
+
+    fn lookup_agent_by_spiffe_id(
+        &self,
+        realm_id: &RealmId,
+        spiffe_id: &str,
+    ) -> Result<Option<AgentId>, IdentityError> {
+        self.lookup_agent_by_spiffe_id_inner(realm_id, spiffe_id)
+    }
+
+    fn delete_spiffe_mapping(
+        &self,
+        realm_id: &RealmId,
+        agent_id: &AgentId,
+    ) -> Result<(), IdentityError> {
+        self.delete_spiffe_mapping_inner(realm_id, agent_id)
+    }
+
+    fn validate_spiffe_svid(
+        &self,
+        realm_id: &RealmId,
+        der_cert: &[u8],
+    ) -> Result<AgentId, IdentityError> {
+        self.validate_spiffe_svid_inner(realm_id, der_cert)
+    }
+}
+
+/// M2 private helpers for token exchange.
+impl EmbeddedIdentityEngine {
+    /// Resolves the `max_delegation_depth` for an actor subject string.
+    ///
+    /// Returns `None` when the actor is not a registered agent in this realm,
+    /// signalling that the global ceiling (`MAX_ACT_CHAIN_DEPTH`) applies.
+    fn resolve_agent_max_depth(&self, realm_id: &RealmId, actor_sub: &str) -> Option<u8> {
+        // Accept bare UUID, "agt_<uuid>", or "agent:agt_<uuid>" forms.
+        let raw = actor_sub
+            .strip_prefix("agent:agt_")
+            .or_else(|| actor_sub.strip_prefix("agt_"))
+            .unwrap_or(actor_sub);
+        let uuid = uuid::Uuid::parse_str(raw).ok()?;
+        let agent_id = crate::core::AgentId::new(uuid);
+        let agent = self.get_agent(realm_id, &agent_id).ok()??;
+        if matches!(agent.status(), AgentStatus::Revoked) {
+            return None;
+        }
+        Some(agent.max_delegation_depth())
+    }
 }
 
 /// Generates and stores a new OTP then dispatches the SMS.
@@ -11438,7 +12873,7 @@ mod tests {
     use super::*;
     use crate::audit::EmbeddedAuditEngine;
     use crate::core::{FakeClock, Timestamp};
-    use crate::identity::types::RealmConfig;
+    use crate::identity::RealmConfig;
     use crate::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
     fn setup_engine() -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<FakeClock>) {
@@ -14972,11 +16407,9 @@ mod tests {
     // ===== Magic Link / Passwordless (Step 25) unit tests =====
 
     /// Helper: creates a realm and user with email for magic link tests.
-    fn setup_magic_link_user(
-        engine: &EmbeddedIdentityEngine,
-    ) -> (RealmId, crate::identity::types::User) {
+    fn setup_magic_link_user(engine: &EmbeddedIdentityEngine) -> (RealmId, crate::identity::User) {
         let realm = engine
-            .create_realm(&crate::identity::types::CreateRealmRequest {
+            .create_realm(&crate::identity::CreateRealmRequest {
                 name: format!("ml-test-{}", uuid::Uuid::new_v4()),
                 config: None,
             })
@@ -14984,7 +16417,7 @@ mod tests {
         let user = engine
             .create_user(
                 realm.id(),
-                &crate::identity::types::CreateUserRequest {
+                &crate::identity::CreateUserRequest {
                     email: format!("ml-{}@example.com", uuid::Uuid::new_v4()),
                     display_name: "ML Test User".to_string(),
                     ..Default::default()
@@ -16099,7 +17532,7 @@ mod tests {
 
     #[test]
     fn new_user_inherits_realm_default_required_actions() {
-        use crate::identity::types::RequiredAction;
+        use crate::identity::RequiredAction;
         let (_dir, engine, _clock) = setup_engine();
 
         let realm = engine
@@ -16135,7 +17568,7 @@ mod tests {
 
     #[test]
     fn required_actions_survive_storage_round_trip() {
-        use crate::identity::types::RequiredAction;
+        use crate::identity::RequiredAction;
         let (_dir, engine, _clock) = setup_engine();
 
         let realm = engine
@@ -16615,24 +18048,167 @@ mod tests {
 
     #[test]
     fn act_chain_depth_at_max_accepted() {
-        // Two wraps → depth 3 = MAX; must pass the guard.
-        let leaf = serde_json::json!({ "sub": "leaf" });
-        let mid = serde_json::json!({ "sub": "a1", "act": leaf });
-        let root = serde_json::json!({ "sub": "a0", "act": mid });
-        let depth = EmbeddedIdentityEngine::act_chain_depth(&root);
-        assert_eq!(depth, crate::abuse::MAX_ACT_CHAIN_DEPTH);
-        assert!(depth <= crate::abuse::MAX_ACT_CHAIN_DEPTH);
+        // Build a chain exactly MAX_ACT_CHAIN_DEPTH deep; must pass the guard.
+        let max = crate::abuse::MAX_ACT_CHAIN_DEPTH;
+        // Start with the innermost leaf, then wrap max-1 times.
+        let mut node = serde_json::json!({ "sub": "leaf" });
+        for i in 0..(max - 1) {
+            node = serde_json::json!({ "sub": format!("a{i}"), "act": node });
+        }
+        let depth = EmbeddedIdentityEngine::act_chain_depth(&node);
+        assert_eq!(
+            depth, max,
+            "depth-{max} chain should equal MAX_ACT_CHAIN_DEPTH"
+        );
+        assert!(depth <= max, "depth-{max} chain should be within the cap");
     }
 
     #[test]
     fn act_chain_depth_over_max_rejected() {
-        // Three wraps → depth 4 = MAX + 1; must exceed the cap.
-        let leaf = serde_json::json!({ "sub": "leaf" });
-        let l2 = serde_json::json!({ "sub": "a2", "act": leaf });
-        let l1 = serde_json::json!({ "sub": "a1", "act": l2 });
-        let root = serde_json::json!({ "sub": "a0", "act": l1 });
-        let depth = EmbeddedIdentityEngine::act_chain_depth(&root);
-        assert_eq!(depth, crate::abuse::MAX_ACT_CHAIN_DEPTH + 1);
-        assert!(depth > crate::abuse::MAX_ACT_CHAIN_DEPTH);
+        // Build a chain MAX+1 deep; must exceed the cap.
+        let max = crate::abuse::MAX_ACT_CHAIN_DEPTH;
+        let mut node = serde_json::json!({ "sub": "leaf" });
+        for i in 0..max {
+            node = serde_json::json!({ "sub": format!("a{i}"), "act": node });
+        }
+        let depth = EmbeddedIdentityEngine::act_chain_depth(&node);
+        assert_eq!(depth, max + 1, "depth-{} chain should equal MAX+1", max + 1);
+        assert!(depth > max, "depth-{} chain should exceed the cap", max + 1);
+    }
+
+    // ===== DPoP storage tests (HEA-1410) =====
+
+    #[test]
+    fn check_and_record_dpop_jti_rejects_replay() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let now_secs = 1_700_000_000_i64;
+
+        assert!(
+            engine
+                .check_and_record_dpop_jti(&realm, "jti-abc", now_secs)
+                .is_ok(),
+            "first use must succeed"
+        );
+        assert!(
+            matches!(
+                engine.check_and_record_dpop_jti(&realm, "jti-abc", now_secs),
+                Err(crate::identity::error::IdentityError::DPopProofReplay)
+            ),
+            "second use of same jti must be rejected"
+        );
+    }
+
+    #[test]
+    fn check_and_record_dpop_jti_allows_different_jtis() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let now_secs = 1_700_000_000_i64;
+
+        assert!(engine
+            .check_and_record_dpop_jti(&realm, "jti-1", now_secs)
+            .is_ok());
+        assert!(engine
+            .check_and_record_dpop_jti(&realm, "jti-2", now_secs)
+            .is_ok());
+    }
+
+    #[test]
+    fn check_and_record_dpop_jti_isolated_across_realms() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_a = create_test_realm(&engine);
+        let realm_b = create_test_realm(&engine);
+        let now_secs = 1_700_000_000_i64;
+
+        assert!(engine
+            .check_and_record_dpop_jti(&realm_a, "shared-jti", now_secs)
+            .is_ok());
+        assert!(
+            engine
+                .check_and_record_dpop_jti(&realm_b, "shared-jti", now_secs)
+                .is_ok(),
+            "same jti in different realm must be independent"
+        );
+    }
+
+    #[test]
+    fn get_realm_dpop_nonce_secret_is_stable_across_calls() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        let secret1 = engine
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("first call");
+        let secret2 = engine
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("second call");
+        assert_eq!(
+            secret1, secret2,
+            "same realm must always return the same secret"
+        );
+        assert_ne!(secret1, [0u8; 32], "secret must not be the zero key");
+    }
+
+    #[test]
+    fn get_realm_dpop_nonce_secret_differs_across_realms() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm_a = create_test_realm(&engine);
+        let realm_b = create_test_realm(&engine);
+
+        let s_a = engine
+            .get_realm_dpop_nonce_secret(&realm_a)
+            .expect("realm_a");
+        let s_b = engine
+            .get_realm_dpop_nonce_secret(&realm_b)
+            .expect("realm_b");
+        assert_ne!(s_a, s_b, "each realm must get an independent nonce secret");
+    }
+
+    #[test]
+    fn get_realm_dpop_nonce_secret_survives_restart() {
+        // Simulate persistence across restarts by rebuilding the engine from
+        // the same storage directory. The second engine instance must load the
+        // same secret that the first one generated.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_cfg = StorageConfig::dev(dir.path().to_path_buf());
+
+        let make_engine = |cfg: StorageConfig, ts: i64| {
+            let storage = Arc::new(EmbeddedStorageEngine::open(cfg).expect("open storage"))
+                as Arc<dyn StorageEngine>;
+            let clock = Arc::new(FakeClock::new(Timestamp::from_micros(ts))) as Arc<dyn Clock>;
+            let audit = Arc::new(EmbeddedAuditEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock),
+            ));
+            EmbeddedIdentityEngine::new(
+                storage,
+                clock,
+                IdentityConfig {
+                    credential: CredentialConfig::fast_for_testing(),
+                    ..IdentityConfig::default()
+                },
+                audit as Arc<dyn AuditEngine>,
+            )
+            .expect("engine")
+        };
+
+        let engine1 = make_engine(storage_cfg.clone(), 1_000_000);
+        let realm = create_test_realm(&engine1);
+        let secret1 = engine1
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("engine1 secret");
+        assert_ne!(secret1, [0u8; 32], "secret must not be zero key");
+        drop(engine1);
+
+        // Re-open the same storage — equivalent to a server restart.
+        let engine2 = make_engine(storage_cfg, 2_000_000);
+        let secret2 = engine2
+            .get_realm_dpop_nonce_secret(&realm)
+            .expect("engine2 secret");
+
+        assert_eq!(
+            secret1, secret2,
+            "nonce secret must survive a server restart"
+        );
     }
 }

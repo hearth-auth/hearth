@@ -227,14 +227,145 @@ impl TestHarness {
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
 
         // Build the HTTP router backed by the same engines.
-        let app_state = Arc::new(hearth::protocol::http::AppState::new_dev(
-            Arc::clone(&identity_engine) as Arc<dyn IdentityEngine>,
-            Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
-            Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
-        ));
+        // Enable agent identity routes so HTTP-level adversarial tests can reach them.
+        let app_state = Arc::new(
+            hearth::protocol::http::AppState::new_dev(
+                Arc::clone(&identity_engine) as Arc<dyn IdentityEngine>,
+                Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
+                Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
+            )
+            .with_agent_identity(true),
+        );
         let router = hearth::protocol::http::router(app_state);
 
         // Bind to a random OS-assigned port so tests never collide.
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
+        let addr = listener.local_addr()?;
+        let base_url = format!("http://{addr}");
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        Ok(Self {
+            mode: HarnessMode::Server,
+            engine,
+            rbac_engine,
+            identity_engine,
+            audit_engine,
+            base_url: Some(base_url),
+            _server_handle: Some(handle.abort_handle()),
+            _temp_dir: temp_dir,
+        })
+    }
+
+    /// Creates a test harness in server mode with agent auth routes enabled.
+    ///
+    /// Identical to [`Self::server`] but sets `agent_identity_enabled = true`
+    /// so the `/v1/agents` REST surface is registered. Use this for adversarial
+    /// HTTP tests against agent endpoints.
+    pub async fn server_with_agent_auth() -> Result<Self, TestHarnessError> {
+        let temp_dir = tempfile::tempdir().map_err(hearth::storage::StorageError::Io)?;
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let engine = Arc::new(EmbeddedStorageEngine::open(config)?);
+        let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
+        let rbac_engine = Arc::new(EmbeddedRbacEngine::new(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        ));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let audit_engine = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        ));
+        let identity_engine = EmbeddedIdentityEngine::with_rbac(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+            identity_config,
+            Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
+            Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
+        )
+        .expect("identity engine creation");
+        let identity_engine = Arc::new(identity_engine);
+        rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
+
+        let app_state = Arc::new(
+            hearth::protocol::http::AppState::new_dev(
+                Arc::clone(&identity_engine) as Arc<dyn IdentityEngine>,
+                Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
+                Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
+            )
+            .with_agent_identity(true),
+        );
+        let router = hearth::protocol::http::router(app_state);
+
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
+        let addr = listener.local_addr()?;
+        let base_url = format!("http://{addr}");
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+
+        Ok(Self {
+            mode: HarnessMode::Server,
+            engine,
+            rbac_engine,
+            identity_engine,
+            audit_engine,
+            base_url: Some(base_url),
+            _server_handle: Some(handle.abort_handle()),
+            _temp_dir: temp_dir,
+        })
+    }
+
+    /// Creates a test harness in server mode with approval + tool-invocation routes enabled.
+    ///
+    /// Enables `agent_identity = true` AND `agent_approval = true` so the full
+    /// Phase C HTTP surface (`/v1/approval-requests`, `/v1/tools/invoke`) is
+    /// reachable for enforcement regression tests.
+    pub async fn server_with_agent_approval() -> Result<Self, TestHarnessError> {
+        let temp_dir = tempfile::tempdir().map_err(hearth::storage::StorageError::Io)?;
+        let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+        let engine = Arc::new(EmbeddedStorageEngine::open(config)?);
+        let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
+        let rbac_engine = Arc::new(EmbeddedRbacEngine::new(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        ));
+        let identity_config = IdentityConfig {
+            credential: CredentialConfig::fast_for_testing(),
+            ..IdentityConfig::default()
+        };
+        let audit_engine = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        ));
+        let identity_engine = EmbeddedIdentityEngine::with_rbac(
+            Arc::clone(&engine) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+            identity_config,
+            Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
+            Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
+        )
+        .expect("identity engine creation");
+        let identity_engine = Arc::new(identity_engine);
+        rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
+
+        let app_state = Arc::new(
+            hearth::protocol::http::AppState::new_dev(
+                Arc::clone(&identity_engine) as Arc<dyn IdentityEngine>,
+                Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
+                Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
+            )
+            .with_agent_identity(true)
+            .with_agent_approval(true),
+        );
+        let router = hearth::protocol::http::router(app_state);
+
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
         let addr = listener.local_addr()?;
         let base_url = format!("http://{addr}");

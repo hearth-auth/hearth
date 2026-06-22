@@ -342,6 +342,33 @@ Requires Java 17+ or Kotlin 2.0+.
 
 ---
 
+## Agent Authentication (M5)
+
+Enable `agent_auth.capabilities.identity = true` (and `advanced = true` for AATs + transaction tokens) in `hearth.yaml`.
+
+```kotlin
+import java.security.KeyPairGenerator
+import java.security.spec.ECGenParameterSpec
+import java.util.Base64
+
+// Generate EC P-256 key pair for DPoP (RFC 9449)
+val kpg = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }
+val keyPair = kpg.generateKeyPair()
+// Build DPoP proof JWT: header {alg:ES256, jwk:{crv,kty,x,y}, typ:dpop+jwt}
+//                       claims {htm, htu, iat, jti, nonce}
+// Sign with ECDSA/SHA256 and encode r||s (not DER) as base64url
+
+// POST /v1/agents to create an agent
+// POST /v1/agents/{id}/credentials/keys to issue an API key
+// POST /realms/{id}/token with DPoP header for DPoP-bound token
+// POST /v1/aats for root AAT; POST /v1/aats/derive for child AAT
+// POST /v1/transaction-tokens + /consume for single-use A2A tokens
+```
+
+For the full flow, DPoP proof construction details, RFC 8693 exchange, and draft-tracking owner, see the [TypeScript SDK README](../typescript/README.md#agent-authentication-m5).
+
+---
+
 ## License
 
 Apache 2.0 — see [LICENSE](../../LICENSE).
