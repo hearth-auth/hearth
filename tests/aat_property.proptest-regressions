@@ -6,3 +6,5 @@
 # everyone who runs the test benefits from these saved cases.
 cc fe91d2121ff33c24d49ee818c7fe4011f94fe88f029f82fdd7f7513444c0c447 # shrinks to (parent_scope, attenuated_scope) = (["aa:aa"], [])
 cc 2504391b2a15d1bfb7134be798c86b9ff69f2e80b63845e6cc0ffaa3e2e5804a # shrinks to (parent_scope, escalated_scope) = (["aa:aa"], ["aa:aa", "aa:gz"])
+cc 64bc476062ad315f7f2734f424f3a0c074bd1bac25913e377b77364014001cd5 # shrinks to (parent_scope, attenuated_scope) = (["aa:aa"], [])
+cc 6b7fc469afeaf661cbe9a6be043fffd31d9c079ef4557d1de08546c9b2ffd39b # shrinks to (parent_scope, escalated_scope) = (["aa:aa"], ["aa:aa", "kwtbl:smslcg"])
