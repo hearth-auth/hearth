@@ -1,22 +1,22 @@
-name: SDK publish — node
+name: SDK publish — typescript
 
-# CI dry-run on PRs and pushes to main; live publish on sdk-node-v* tags.
-# npm trusted-publisher binding: repo=hearth-auth/hearth, workflow=sdk-publish-node.yml
+# CI dry-run on PRs and pushes to main; live publish on sdk-ts-v* tags.
+# npm trusted-publisher binding: repo=hearth-auth/hearth, workflow=sdk-publish-typescript.yml
 # NODE_AUTH_TOKEN must be set as a repository secret (npm automation token).
 
 on:
   push:
     branches: [main]
     tags:
-      - "sdk-node-v*"
+      - "sdk-ts-v*"
     paths:
-      - "sdks/node/**"
-      - ".github/workflows/sdk-publish-node.yml"
+      - "sdks/typescript/**"
+      - ".github/workflows/sdk-publish-typescript.yml"
   pull_request:
     branches: [main]
     paths:
-      - "sdks/node/**"
-      - ".github/workflows/sdk-publish-node.yml"
+      - "sdks/typescript/**"
+      - ".github/workflows/sdk-publish-typescript.yml"
   workflow_dispatch:
 
 # id-token:write is required for npm --provenance (OIDC attestation).
@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   publish:
-    name: npm publish @hearth-auth/node
+    name: npm publish @hearth-auth/sdk
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -41,25 +41,25 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
           cache: npm
-          cache-dependency-path: sdks/node/package-lock.json
+          cache-dependency-path: sdks/typescript/package-lock.json
 
       - name: Install dependencies
-        working-directory: sdks/node
+        working-directory: sdks/typescript
         run: npm ci
 
       - name: Build
-        working-directory: sdks/node
+        working-directory: sdks/typescript
         run: npm run build
 
-      # Dry-run on PRs and branch pushes; live publish only on sdk-node-v* tags.
+      # Dry-run on PRs and branch pushes; live publish only on sdk-ts-v* tags.
       - name: Publish (dry-run)
-        if: "!startsWith(github.ref, 'refs/tags/sdk-node-v')"
-        working-directory: sdks/node
+        if: "!startsWith(github.ref, 'refs/tags/sdk-ts-v')"
+        working-directory: sdks/typescript
         run: npm publish --dry-run --provenance
 
       - name: Publish (live)
-        if: startsWith(github.ref, 'refs/tags/sdk-node-v')
-        working-directory: sdks/node
+        if: startsWith(github.ref, 'refs/tags/sdk-ts-v')
+        working-directory: sdks/typescript
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
