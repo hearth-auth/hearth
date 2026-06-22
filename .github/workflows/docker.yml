@@ -191,6 +191,7 @@ jobs:
               echo "| --- | --- |"
               echo "| **Image** | \`ghcr.io/hearth-auth/hearth\` |"
               echo "| **Digest** | \`${{ steps.push.outputs.digest }}\` |"
-              echo "| **Tags** | $(echo '${{ steps.meta.outputs.tags }}' | tr '\n' ' ') |"
+              tags="${{ steps.meta.outputs.tags }}"
+              echo "| **Tags** | ${tags//$'\n'/ } |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
