@@ -1,4 +1,4 @@
-module github.com/anthropics/hearth/sdks/go
+module github.com/hearth-auth/hearth/sdks/go
 
 go 1.26.2
 

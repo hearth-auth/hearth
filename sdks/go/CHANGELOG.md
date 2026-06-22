@@ -4,6 +4,11 @@ All notable changes to `hearth-go` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **Module path corrected** — `go.mod` now declares `module github.com/hearth-auth/hearth/sdks/go`,
+  matching the repo at `github.com/hearth-auth/hearth`. The old path (`github.com/anthropics/hearth/sdks/go`)
+  caused `go get github.com/hearth-auth/hearth/sdks/go` to fail (HEA-1479).
+
 ### Added
 - **`Client.CheckPermission(ctx, token, req)`** — calls `POST /oauth/authorize` (the
   decision endpoint, HEA-921/HEA-922) and returns whether the token holder has

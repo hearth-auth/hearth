@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/hearth/sdks/go/hearth"
+	"github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
 // testServer holds a running Hearth dev server and its bootstrap credentials.

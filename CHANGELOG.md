@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Helm chart published to GHCR as a signed OCI artifact** — release tags now package and push
+  the chart to `oci://ghcr.io/hearth-auth/charts/hearth`; the pushed digest is cosign-signed
+  (keyless OIDC). Install with:
+  `helm pull oci://ghcr.io/hearth-auth/charts/hearth --version <tag>` (HEA-1482).
+
+### Fixed
+- **Go SDK module path corrected** — `go.mod` now declares `module github.com/hearth-auth/hearth/sdks/go`,
+  matching the published repository URL. The previous path (`github.com/anthropics/hearth/sdks/go`)
+  caused `go get` to fail with a 404 (HEA-1479).
+
 ## [1.0.0] — 2026-06-21
 
 ### Security

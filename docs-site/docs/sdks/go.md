@@ -12,7 +12,7 @@ Get your first protected HTTP endpoint in under 5 minutes using the Hearth Go SD
 ## Install
 
 ```bash
-go get github.com/anthropics/hearth/sdks/go
+go get github.com/hearth-auth/hearth/sdks/go
 ```
 
 ## Start Hearth locally
@@ -29,7 +29,7 @@ curl -X POST http://127.0.0.1:8420/admin/bootstrap
 ## Initialize the client
 
 ```go
-import "github.com/anthropics/hearth/sdks/go/hearth"
+import "github.com/hearth-auth/hearth/sdks/go/hearth"
 
 client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>")
 ```
@@ -97,7 +97,7 @@ import (
     "encoding/hex"
     "fmt"
 
-    "github.com/anthropics/hearth/sdks/go/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
 func pkce() (verifier, challenge string) {
@@ -224,7 +224,7 @@ import (
     "errors"
     "fmt"
 
-    "github.com/anthropics/hearth/sdks/go/hearth"
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
 tokens, err := client.ExchangeCode(ctx, req)

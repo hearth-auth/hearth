@@ -45,7 +45,7 @@ publishing {
             pom {
                 name.set("Hearth Core SDK")
                 description.set("Official Kotlin/JVM SDK for Hearth identity server")
-                url.set("https://github.com/anthropics/hearth")
+                url.set("https://github.com/hearth-auth/hearth")
                 licenses {
                     license {
                         name.set("Apache-2.0")

@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/anthropics/hearth/examples/full-stack-demo/backend/handlers"
-	"github.com/anthropics/hearth/examples/full-stack-demo/backend/middleware"
-	"github.com/anthropics/hearth/sdks/go/hearth"
+	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/handlers"
+	"github.com/hearth-auth/hearth/examples/full-stack-demo/backend/middleware"
+	"github.com/hearth-auth/hearth/sdks/go/hearth"
 	"github.com/gin-gonic/gin"
 )
 

@@ -1,6 +1,12 @@
 name: Helm
 
 # Lint and snapshot-test the Hearth Helm chart on changes to deploy/helm/.
+# On release tags: package, publish as a signed OCI artifact to GHCR, and
+# cosign-sign the pushed digest (keyless OIDC — no long-lived secrets).
+#
+# Cosign OIDC identity for chart verification:
+#   Issuer:  https://token.actions.githubusercontent.com
+#   Subject: ^https://github\.com/hearth-auth/hearth/\.github/workflows/helm\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$
 
 on:
   pull_request:
@@ -11,7 +17,12 @@ on:
     branches: [main]
     paths:
       - "deploy/helm/**"
+    # Strict semver-only tag trigger — matches release.yml convention.
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
 
+# Minimal default; each job escalates only what it needs.
 permissions:
   contents: read
 
@@ -22,6 +33,8 @@ concurrency:
 jobs:
   helm:
     name: Helm lint + template
+    # Lint/snapshot runs on PRs and branch pushes only — not on release tags.
+    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,3 +50,56 @@ jobs:
 
       - name: helm template snapshot diff
         run: make helm-template
+
+  publish:
+    name: Package + publish Helm chart (OCI, signed)
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push OCI artifact to GHCR
+      id-token: write   # keyless cosign OIDC token exchange
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Install Helm
+        uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814  # v4.2.0
+        with:
+          version: "v3.16.4"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5  # v3.10.1
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password-stdin
+
+      - name: Package chart
+        run: |
+          # Strip the leading 'v' — Helm chart versions must be semver without prefix.
+          VER="${GITHUB_REF_NAME#v}"
+          helm package deploy/helm/hearth \
+            --version "$VER" \
+            --app-version "$VER"
+          echo "CHART_VER=$VER" >> "$GITHUB_ENV"
+
+      - name: Push chart to GHCR
+        id: push
+        run: |
+          PUSH_OUT=$(helm push "hearth-${CHART_VER}.tgz" oci://ghcr.io/hearth-auth/charts 2>&1)
+          echo "$PUSH_OUT"
+          DIGEST=$(echo "$PUSH_OUT" | awk '/^Digest:/ { print $2 }')
+          if [[ -z "$DIGEST" ]]; then
+            echo "::error::helm push did not return a digest — cannot sign." >&2
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Sign chart digest with cosign (keyless OIDC)
+        run: |
+          cosign sign --yes \
+            "ghcr.io/hearth-auth/charts/hearth@${{ steps.push.outputs.digest }}"
