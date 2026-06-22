@@ -23,6 +23,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the chart to `oci://ghcr.io/hearth-auth/charts/hearth`; the pushed digest is cosign-signed
   (keyless OIDC). Install with:
   `helm pull oci://ghcr.io/hearth-auth/charts/hearth --version <tag>` (HEA-1482).
+- **Go SDK PKCE support** — `hearth.GeneratePKCE()` returns a verifier/challenge pair, and
+  `AuthorizeRequest` (`CodeChallenge`/`CodeChallengeMethod`) and `TokenRequest` (`CodeVerifier`)
+  now carry PKCE parameters. Required to complete the authorization-code flow, which the server
+  mandates for public clients (RFC 9700 §2.1.1).
 
 ### Fixed
 - **Go SDK module path corrected** — `go.mod` now declares `module github.com/hearth-auth/hearth/sdks/go`,
