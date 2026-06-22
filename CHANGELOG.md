@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Multi-arch container image published to GHCR** — release tags now build `linux/amd64` + `linux/arm64`
+  images via `docker buildx` and push to `ghcr.io/hearth-auth/hearth`. Each image is tagged
+  `vX.Y.Z`, `sha-<rev>`, and `latest` (non-prerelease only). The pushed digest is cosign-signed
+  (keyless OIDC) and a CycloneDX SBOM attestation is attached via `cosign attest` (HEA-1481).
 - **Helm chart published to GHCR as a signed OCI artifact** — release tags now package and push
   the chart to `oci://ghcr.io/hearth-auth/charts/hearth`; the pushed digest is cosign-signed
   (keyless OIDC). Install with:
