@@ -1,0 +1,6 @@
+{
+  "name": "@hearth-auth/sdk-rust",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Hearth Rust SDK — package.json shim for multi-semantic-release"
+}

@@ -1,0 +1,19 @@
+{
+  "branches": [
+    "main",
+    { "name": "1.x", "range": "1.x.x", "channel": "1.x" },
+    { "name": "2.x", "range": "2.x.x", "channel": "2.x" }
+  ],
+  "tagFormat": "sdk-ts-v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    ["@semantic-release/changelog", { "changelogFile": "CHANGELOG.md" }],
+    ["@semantic-release/npm", { "npmPublish": false }],
+    ["@semantic-release/git", {
+      "assets": ["CHANGELOG.md", "package.json"],
+      "message": "chore(release): sdk-ts-v${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+    }],
+    "@semantic-release/github"
+  ]
+}

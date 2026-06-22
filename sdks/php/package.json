@@ -1,0 +1,6 @@
+{
+  "name": "@hearth-auth/sdk-php",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hearth PHP SDK — package.json shim for multi-semantic-release"
+}

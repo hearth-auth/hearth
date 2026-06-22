@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Continuous deployment via semantic-release** — merging a `fix:` or `feat:` PR to `main`
+  now automatically computes the next semver version, updates CHANGELOGs, bumps version files,
+  pushes a git tag, and fires the downstream publish workflows (binaries, Helm, SDKs). Each
+  package in the monorepo is independently versioned with its own tag format (`v*`, `sdk-node-v*`,
+  `sdks/go/v*`, etc.). Maintenance branches (`1.x`, `2.x`) enable security backports without
+  shipping from `main`. See `docs/release-runbook.md` for setup and operational procedures
+  (HEA-1496).
+- **PR-title Conventional Commit lint** — the `commit-lint.yml` workflow rejects non-conforming
+  PR titles using `amannn/action-semantic-pull-request`; the PR title serves as the
+  squash-merge commit message that semantic-release reads for its version bump calculation
+  (HEA-1496).
 - **Windows release binary** — `hearth-windows-amd64.exe` (`x86_64-pc-windows-msvc`) is now
   included in every tagged release alongside the Linux and macOS binaries (HEA-1494).
 - **`SHA256SUMS` in release artifacts** — every tagged release includes a `SHA256SUMS` manifest
