@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Windows release binary** — `hearth-windows-amd64.exe` (`x86_64-pc-windows-msvc`) is now
+  included in every tagged release alongside the Linux and macOS binaries (HEA-1494).
+- **`SHA256SUMS` in release artifacts** — every tagged release includes a `SHA256SUMS` manifest
+  covering all binaries and the SBOM; verify locally with `sha256sum -c SHA256SUMS` (HEA-1494).
+- **Release version stamped in binary** — `hearth --version` now reports the release tag version
+  (e.g. `1.2.3`) rather than the Cargo.toml placeholder `0.1.0`; set at build time via
+  `HEARTH_RELEASE_VERSION` in `build.rs` (HEA-1494).
 - **`@hearth-auth/sdk` npm package is now publishable** — the TypeScript browser/React SDK
   (`sdks/typescript/`) is publish-ready: `private` flag removed, `exports` and `types` fields
   point to compiled `dist/` output, and a `files: ["dist"]` constraint ensures only built
