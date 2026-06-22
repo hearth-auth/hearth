@@ -1,12 +1,13 @@
-name: SDK publish — rust (dry-run)
+name: SDK publish — rust
 
-# Dry-run gate for the hearth-sdk crate on crates.io.
-# `cargo publish --dry-run` packs the crate and validates metadata without
-# pushing. Flip to live in HEA-1487 once CARGO_REGISTRY_TOKEN is provisioned.
+# CI dry-run on PRs and pushes to main; live publish on sdk-rust-v* tags.
+# CARGO_REGISTRY_TOKEN must be set as a repository secret (crates.io API token).
 
 on:
   push:
     branches: [main]
+    tags:
+      - "sdk-rust-v*"
     paths:
       - "sdks/rust/**"
       - ".github/workflows/sdk-publish-rust.yml"
@@ -28,8 +29,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  publish-dry-run:
-    name: cargo publish --dry-run
+  publish:
+    name: cargo publish hearth-sdk
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -41,8 +42,15 @@ jobs:
         with:
           workspaces: sdks/rust
 
-      - name: Dry-run publish
-        # CARGO_REGISTRY_TOKEN is not required for --dry-run; this validates
-        # Cargo.toml metadata and crate structure against crates.io rules.
+      # Dry-run on PRs and branch pushes; live publish only on sdk-rust-v* tags.
+      - name: Publish (dry-run)
+        if: "!startsWith(github.ref, 'refs/tags/sdk-rust-v')"
         working-directory: sdks/rust
         run: cargo publish --dry-run
+
+      - name: Publish (live)
+        if: startsWith(github.ref, 'refs/tags/sdk-rust-v')
+        working-directory: sdks/rust
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

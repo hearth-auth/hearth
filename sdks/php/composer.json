@@ -1,5 +1,5 @@
 {
-  "name": "hearth-auth/hearth-php",
+  "name": "hearth-auth/php-sdk",
   "description": "Official PHP SDK for Hearth Identity Provider",
   "type": "library",
   "license": "MIT",
