@@ -117,9 +117,10 @@ jobs:
 
       - name: Sign chart digest with cosign (keyless OIDC)
         if: github.ref_type == 'tag'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          cosign sign --yes \
-            "ghcr.io/hearth-auth/charts/hearth@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "ghcr.io/hearth-auth/charts/hearth@${DIGEST}"
 
       - name: Dry-run summary
         if: github.event_name == 'workflow_dispatch'
