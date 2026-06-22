@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/anthropics/hearth/sdks/go/hearth"
+	"github.com/hearth-auth/hearth/sdks/go/hearth"
 	"github.com/gin-gonic/gin"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"

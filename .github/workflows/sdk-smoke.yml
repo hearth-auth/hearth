@@ -116,6 +116,15 @@ jobs:
             -d '{"client_name":"nextjs-smoke","redirect_uris":["http://localhost:3000/api/auth/callback"]}')
           echo "HEARTH_CLIENT_ID=$(echo "$CLIENT" | jq -r .client_id)" >> $GITHUB_ENV
 
+      # The example consumes @hearth-auth/sdk via a file: dependency, but the
+      # SDK's dist/ output is gitignored. Build it first so the example can
+      # resolve the published entrypoints and type declarations.
+      - name: Build TypeScript SDK
+        working-directory: sdks/typescript
+        run: |
+          npm ci
+          npm run build
+
       - name: Install dependencies
         working-directory: examples/typescript-nextjs
         run: npm ci
