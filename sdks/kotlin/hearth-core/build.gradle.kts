@@ -3,6 +3,7 @@ plugins {
     kotlin("plugin.serialization")
     `java-library`
     `maven-publish`
+    signing
 }
 
 kotlin {
@@ -52,7 +53,24 @@ publishing {
                         url.set("https://www.apache.org/licenses/LICENSE-2.0")
                     }
                 }
+                scm {
+                    url.set("https://github.com/hearth-auth/hearth")
+                    connection.set("scm:git:git://github.com/hearth-auth/hearth.git")
+                    developerConnection.set("scm:git:ssh://git@github.com/hearth-auth/hearth.git")
+                }
             }
         }
     }
+}
+
+signing {
+    // signingKey is an in-memory ASCII-armored PGP private key injected at release time.
+    // When absent (dry-run / publishToMavenLocal), signing is skipped entirely.
+    val signingKey: String? by project
+    val signingPassword: String? by project
+    if (signingKey != null) {
+        useInMemoryPgpKeys(signingKey, signingPassword ?: "")
+    }
+    required { signingKey != null }
+    sign(publishing.publications["maven"])
 }

@@ -1,0 +1,48 @@
+name: SDK publish — go (verify)
+
+# Go module publishing is handled by the Go module proxy (proxy.golang.org)
+# fetching directly from the tagged VCS ref — there is no `go publish` command.
+# The equivalent gate is `go build ./...` + `go vet ./...` which proves the
+# module at github.com/hearth-auth/hearth/sdks/go is importable and clean.
+# Live publishing in HEA-1487 requires only a version tag push.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/go/**"
+      - ".github/workflows/sdk-publish-go.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/go/**"
+      - ".github/workflows/sdk-publish-go.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: go build + go vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: sdks/go/go.mod
+          cache-dependency-path: sdks/go/go.sum
+
+      - name: Build
+        working-directory: sdks/go
+        run: go build ./...
+
+      - name: Vet
+        working-directory: sdks/go
+        run: go vet ./...

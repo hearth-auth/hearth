@@ -1,0 +1,57 @@
+name: SDK publish — node (dry-run)
+
+# Dry-run gate for the @hearth/node npm package.
+# Builds the TypeScript library and runs `npm publish --dry-run --provenance`
+# to prove the package would publish cleanly. Flip to live in HEA-1487 once
+# NPM_TOKEN and provenance OIDC are provisioned.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/node/**"
+      - ".github/workflows/sdk-publish-node.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/node/**"
+      - ".github/workflows/sdk-publish-node.yml"
+  workflow_dispatch:
+
+# id-token:write is required for npm --provenance (OIDC attestation to npm).
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  publish-dry-run:
+    name: npm publish --dry-run --provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: sdks/node/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sdks/node
+        run: npm ci
+
+      - name: Build
+        working-directory: sdks/node
+        run: npm run build
+
+      - name: Dry-run publish
+        working-directory: sdks/node
+        # NODE_AUTH_TOKEN is not required for --dry-run; --provenance simulates
+        # OIDC attestation without pushing to the registry.
+        run: npm publish --dry-run --provenance

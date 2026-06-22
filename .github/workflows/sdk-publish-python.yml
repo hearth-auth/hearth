@@ -1,0 +1,48 @@
+name: SDK publish — python (dry-run)
+
+# Dry-run gate for the hearth-sdk Python package.
+# Builds sdist + wheel with hatchling, then validates with twine check.
+# Flip to live publish in HEA-1487 once PyPI trusted publisher is configured.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdks/python/**"
+      - ".github/workflows/sdk-publish-python.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sdks/python/**"
+      - ".github/workflows/sdk-publish-python.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  publish-dry-run:
+    name: hatchling build + twine check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install hatchling hatch twine
+
+      - name: Build sdist + wheel
+        working-directory: sdks/python
+        run: python -m hatch build
+
+      - name: Validate distributions
+        # twine check validates metadata and long_description without uploading.
+        run: twine check sdks/python/dist/*
