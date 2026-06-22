@@ -4,6 +4,15 @@ use std::process::Command;
 const GENERATED_DIR: &str = "src/protocol/generated";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Allow CI to stamp the binary version from the release tag without
+    // modifying Cargo.toml.  When HEARTH_RELEASE_VERSION=1.0.0 is exported
+    // before `cargo build`, `hearth --version` reports 1.0.0 instead of the
+    // Cargo.toml placeholder (0.1.0).
+    if let Ok(v) = std::env::var("HEARTH_RELEASE_VERSION") {
+        println!("cargo:rustc-env=CARGO_PKG_VERSION={v}");
+    }
+    println!("cargo:rerun-if-env-changed=HEARTH_RELEASE_VERSION");
+
     compile_tailwind_if_available();
 
     // When SKIP_PROTO_BUILD is set, skip protoc and pbjson.  The generated
