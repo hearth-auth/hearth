@@ -2,7 +2,7 @@ name: SDK publish — php
 
 # CI validate on PRs and pushes to main; Packagist sync is webhook-triggered
 # automatically on sdk-php-v* tag push (no CI publish step required).
-# Webhook configuration: https://packagist.org/packages/hearth-auth/hearth-php
+# Webhook configuration: https://packagist.org/packages/hearth-auth/php-sdk
 # Connect via: https://packagist.org/profile/ → Setup GitHub Hook
 
 on:
@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   validate:
-    name: composer validate hearth-auth/hearth-php
+    name: composer validate hearth-auth/php-sdk
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -60,5 +60,5 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#sdk-php-v}"
           echo "Tag sdk-php-v${VERSION} pushed."
-          echo "Packagist will sync hearth-auth/hearth-php automatically via GitHub webhook."
-          echo "Verify at: https://packagist.org/packages/hearth-auth/hearth-php"
+          echo "Packagist will sync hearth-auth/php-sdk automatically via GitHub webhook."
+          echo "Verify at: https://packagist.org/packages/hearth-auth/php-sdk"
