@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`@hearth-auth/sdk` npm package is now publishable** — the TypeScript browser/React SDK
+  (`sdks/typescript/`) is publish-ready: `private` flag removed, `exports` and `types` fields
+  point to compiled `dist/` output, and a `files: ["dist"]` constraint ensures only built
+  artifacts are included in the tarball. Publish via the new `sdk-ts-v*` tag trigger (HEA-1488).
+- **npm publish workflows for `@hearth-auth/node` and `@hearth-auth/sdk`** — pushing a
+  `sdk-node-v*` or `sdk-ts-v*` git tag now triggers a live `npm publish --provenance` run via
+  GitHub's OIDC trusted-publisher binding; PRs and branch pushes continue to run dry-run gates
+  (HEA-1488).
 - **Multi-arch container image published to GHCR** — release tags now build `linux/amd64` + `linux/arm64`
   images via `docker buildx` and push to `ghcr.io/hearth-auth/hearth`. Each image is tagged
   `vX.Y.Z`, `sha-<rev>`, and `latest` (non-prerelease only). The pushed digest is cosign-signed
