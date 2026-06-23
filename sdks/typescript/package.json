@@ -1,6 +1,11 @@
 {
   "name": "@hearth-auth/sdk",
   "version": "0.0.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hearth-auth/hearth.git",
+    "directory": "sdks/typescript"
+  },
   "type": "module",
   "types": "./dist/index.d.ts",
   "exports": {
