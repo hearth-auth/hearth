@@ -262,11 +262,11 @@ jobs:
     permissions:
       actions: read
       id-token: write
-      contents: write   # needed to upload .intoto.jsonl to the draft release
+      contents: read    # upload-assets: false — provenance stays as a workflow artifact
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
     with:
       base64-subjects: "${{ needs.hash.outputs.hashes }}"
-      upload-assets: true
+      upload-assets: false
 
   # ── 6. Publish GitHub Release ─────────────────────────────────────────────
   release:
@@ -298,5 +298,6 @@ jobs:
             dist/SHA256SUMS
             dist/*.sig
             dist/*.pem
+            dist/multiple.intoto.jsonl
           generate_release_notes: true
           fail_on_unmatched_files: true
