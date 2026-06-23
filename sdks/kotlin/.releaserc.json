@@ -12,10 +12,6 @@
     ["@semantic-release/exec", {
       "prepareCmd": "sed -i 's/^version = \"[^\"]*\"/version = \"${nextRelease.version}\"/' build.gradle.kts"
     }],
-    ["@semantic-release/git", {
-      "assets": ["CHANGELOG.md", "build.gradle.kts"],
-      "message": "chore(release): sdk-kotlin-v${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
-    }],
     "@semantic-release/github"
   ]
 }

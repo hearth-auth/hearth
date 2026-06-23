@@ -60,6 +60,13 @@ jobs:
         working-directory: sdks/typescript
         run: npm run build
 
+      # Releases are tag-only (no commit-back to main), so the tag points at an
+      # un-bumped commit — stamp the published version from the tag name.
+      - name: Stamp version from tag
+        if: startsWith(github.ref, 'refs/tags/sdk-ts-v')
+        working-directory: sdks/typescript
+        run: npm version "${GITHUB_REF_NAME#sdk-ts-v}" --no-git-tag-version --allow-same-version
+
       # Dry-run on PRs and branch pushes; live publish only on sdk-ts-v* tags.
       - name: Publish (dry-run)
         if: "!startsWith(github.ref, 'refs/tags/sdk-ts-v')"
