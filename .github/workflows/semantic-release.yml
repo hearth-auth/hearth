@@ -1,8 +1,11 @@
 name: Semantic Release
 
 # Runs on every push to a release branch (main, 1.x, 2.x) and releases live.
-# multi-semantic-release computes the next version for each SDK package,
-# updates CHANGELOG files, bumps version files, commits, and pushes git tags.
+# Each SDK is released independently with plain semantic-release (one matrix job
+# per package). Plain semantic-release honours each package's .releaserc
+# `tagFormat`, so the tags match the downstream publish triggers — unlike
+# multi-semantic-release, which hardcodes `${name}@${version}` tags that match
+# neither the sdk-<lang>-v* triggers nor Go's module-version scheme.
 # The tags trigger the downstream publish workflows:
 #   v*             → release.yml (binaries), helm.yml (Helm OCI)
 #   sdk-node-v*    → sdk-publish-node.yml
@@ -41,12 +44,16 @@ concurrency:
 
 jobs:
   release:
-    name: multi-semantic-release
+    name: release ${{ matrix.pkg }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: [node, typescript, go, rust, python, php, kotlin]
     steps:
       # Fetch full history so semantic-release can walk all commits.
-      # Use the PAT so commits + tags pushed back trigger downstream workflows.
+      # Use the PAT so tags pushed back trigger the downstream publish workflows.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
@@ -64,18 +71,14 @@ jobs:
       - name: Install release tooling
         run: npm install --ignore-scripts
 
-      # Package discovery is via pnpm-workspace.yaml, read by
-      # multi-semantic-release's @manypkg/get-packages. (npm ignores that file,
-      # so the root `npm install` above is unaffected.) Packages with no new
-      # releasable commits since their last tag are silently skipped.
-      #
-      # Live continuous deployment: each push computes the next version per SDK
-      # package, bumps version files, updates CHANGELOGs, commits back, and
-      # pushes `sdk-<lang>-v<version>` tags. semantic-release itself does NOT
-      # publish (npmPublish:false / exec prepareCmd only) — each tag triggers
-      # its sdk-publish-*.yml workflow, which performs the registry publish.
-      - name: Run multi-semantic-release (live)
-        run: npx multi-semantic-release
+      # @semantic-release/git is intentionally absent from every .releaserc, so
+      # semantic-release never pushes to main (the Protect main ruleset blocks
+      # direct pushes) — core pushes only the version tag. semantic-release does
+      # NOT publish (npmPublish:false / exec prepareCmd only); each sdk-<lang>-v*
+      # tag triggers its sdk-publish-*.yml workflow for the registry publish.
+      - name: Release ${{ matrix.pkg }}
+        working-directory: sdks/${{ matrix.pkg }}
+        run: npx semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.SEMANTIC_RELEASE_PAT }}
           GIT_AUTHOR_NAME: "hearth-release-bot"
