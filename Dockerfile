@@ -29,9 +29,14 @@
 FROM rust:1.89-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6 AS builder
 
 # Build-time deps:
-#   - protobuf-compiler: `build.rs` calls `prost_build::compile_protos`, which
-#     shells out to `protoc`. Without it the build fails at the "compile
+#   - protobuf-compiler: `build.rs` calls `tonic_prost_build::compile_protos`,
+#     which shells out to `protoc`. Without it the build fails at the "compile
 #     protos" step before a single .rs file is touched.
+#   - libprotobuf-dev: provides the protobuf well-known type (WKT) .proto
+#     sources at /usr/include/google/protobuf/ (descriptor.proto, etc.).
+#     On Debian these are split from the compiler package; on Ubuntu they ship
+#     together. `build.rs` looks for WKTs in /usr/include as a fallback when
+#     the buf module cache is absent (which it always is inside Docker).
 #   - pkg-config: cargo convention for native-dep crates even though we avoid
 #     the big ones (no libssl-dev: Hearth uses ring + rustls, pure-Rust TLS).
 #   - ca-certificates: so cargo can fetch from crates.io over HTTPS.
@@ -39,6 +44,7 @@ FROM rust:1.89-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f05
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         protobuf-compiler \
+        libprotobuf-dev \
         pkg-config \
         ca-certificates \
         git \
