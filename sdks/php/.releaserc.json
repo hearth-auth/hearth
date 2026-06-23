@@ -1,0 +1,18 @@
+{
+  "branches": [
+    "main",
+    { "name": "1.x", "range": "1.x.x", "channel": "1.x" },
+    { "name": "2.x", "range": "2.x.x", "channel": "2.x" }
+  ],
+  "tagFormat": "sdk-php-v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    ["@semantic-release/changelog", { "changelogFile": "CHANGELOG.md" }],
+    ["@semantic-release/git", {
+      "assets": ["CHANGELOG.md"],
+      "message": "chore(release): sdk-php-v${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+    }],
+    "@semantic-release/github"
+  ]
+}

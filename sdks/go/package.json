@@ -1,0 +1,6 @@
+{
+  "name": "@hearth-auth/sdk-go",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hearth Go SDK — package.json shim for multi-semantic-release"
+}

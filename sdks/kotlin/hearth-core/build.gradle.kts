@@ -71,6 +71,6 @@ signing {
     if (signingKey != null) {
         useInMemoryPgpKeys(signingKey, signingPassword ?: "")
     }
-    required { signingKey != null }
+    isRequired = signingKey != null
     sign(publishing.publications["maven"])
 }

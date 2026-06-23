@@ -137,13 +137,20 @@ func TestAuthCodeFlow(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	// 3. Authorize
+	// 3. Authorize — Hearth mandates PKCE for public clients, so derive a
+	// challenge/verifier pair and send the challenge here.
+	pkce, err := hearth.GeneratePKCE()
+	if err != nil {
+		t.Fatalf("generate pkce: %v", err)
+	}
 	authResp, err := srv.client.Authorize(ctx, hearth.AuthorizeRequest{
-		ClientID:    oauthClient.ClientID,
-		RedirectURI: "http://localhost:3000/callback",
-		Scope:       "openid profile email",
-		State:       "go-state-123",
-		UserID:      user.ID,
+		ClientID:            oauthClient.ClientID,
+		RedirectURI:         "http://localhost:3000/callback",
+		Scope:               "openid profile email",
+		State:               "go-state-123",
+		UserID:              user.ID,
+		CodeChallenge:       pkce.Challenge,
+		CodeChallengeMethod: pkce.Method,
 	})
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
@@ -155,11 +162,12 @@ func TestAuthCodeFlow(t *testing.T) {
 		t.Fatalf("state mismatch: got %q", authResp.State)
 	}
 
-	// 4. Exchange code for tokens
+	// 4. Exchange code for tokens — supply the matching PKCE verifier.
 	tokens, err := srv.client.ExchangeCode(ctx, hearth.TokenRequest{
-		ClientID:    oauthClient.ClientID,
-		Code:        authResp.Code,
-		RedirectURI: "http://localhost:3000/callback",
+		ClientID:     oauthClient.ClientID,
+		Code:         authResp.Code,
+		RedirectURI:  "http://localhost:3000/callback",
+		CodeVerifier: pkce.Verifier,
 	})
 	if err != nil {
 		t.Fatalf("exchange code: %v", err)
@@ -260,49 +268,39 @@ func TestAdminCRUD(t *testing.T) {
 		t.Fatalf("expected 404, got: %v", err)
 	}
 
-	// === Realm CRUD ===
+	// === Realm read paths ===
+	//
+	// Realms are provisioned via hearth.yaml, not the admin API: POST and
+	// PATCH /admin/realms now return 405 ("Realms are managed via
+	// hearth.yaml"). Only the list and get endpoints remain, so exercise
+	// those against the realm the dev server bootstrapped.
 
-	// Create
-	realm, err := admin.CreateRealm(ctx, hearth.CreateRealmRequest{
-		Name: "go-test-realm",
-	})
+	// List
+	realmPage, err := admin.ListRealms(ctx, hearth.ListOptions{Limit: 10})
 	if err != nil {
-		t.Fatalf("create realm: %v", err)
+		t.Fatalf("list realms: %v", err)
 	}
-	if realm.Name != "go-test-realm" {
-		t.Fatalf("name mismatch: %q", realm.Name)
+	if len(realmPage.Items) < 1 {
+		t.Fatal("expected at least 1 realm")
 	}
 
-	// Read
-	fetchedRealm, err := admin.GetRealm(ctx, realm.ID)
+	// Read the bootstrapped realm by ID
+	fetchedRealm, err := admin.GetRealm(ctx, srv.bootstrap.RealmID)
 	if err != nil {
 		t.Fatalf("get realm: %v", err)
 	}
-	if fetchedRealm.ID != realm.ID {
-		t.Fatalf("realm id mismatch")
+	if fetchedRealm.ID != srv.bootstrap.RealmID {
+		t.Fatalf("realm id mismatch: %q != %q", fetchedRealm.ID, srv.bootstrap.RealmID)
 	}
 
-	// Update
-	newRealmName := "updated-go-realm"
-	updatedRealm, err := admin.UpdateRealm(ctx, realm.ID, hearth.UpdateRealmRequest{
-		Name: &newRealmName,
-	})
-	if err != nil {
-		t.Fatalf("update realm: %v", err)
-	}
-	if updatedRealm.Name != "updated-go-realm" {
-		t.Fatalf("realm name mismatch: %q", updatedRealm.Name)
-	}
-
-	// Delete
-	if err := admin.DeleteRealm(ctx, realm.ID); err != nil {
-		t.Fatalf("delete realm: %v", err)
-	}
-
-	// Verify deleted
-	_, err = admin.GetRealm(ctx, realm.ID)
+	// Create is rejected — realms are config-managed.
+	_, err = admin.CreateRealm(ctx, hearth.CreateRealmRequest{Name: "go-test-realm"})
 	if err == nil {
-		t.Fatal("expected error after realm delete")
+		t.Fatal("expected error creating realm via admin API")
+	}
+	apiErr, ok = err.(*hearth.APIError)
+	if !ok || apiErr.StatusCode != 405 {
+		t.Fatalf("expected 405 on realm create, got: %v", err)
 	}
 }
 
@@ -328,22 +326,29 @@ func TestTransparentRefresh(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	// 2. Get initial tokens via auth code flow
+	// 2. Get initial tokens via auth code flow (PKCE is mandatory).
+	pkce, err := hearth.GeneratePKCE()
+	if err != nil {
+		t.Fatalf("generate pkce: %v", err)
+	}
 	authResp, err := srv.client.Authorize(ctx, hearth.AuthorizeRequest{
-		ClientID:    oauthClient.ClientID,
-		RedirectURI: "http://localhost:3000/callback",
-		Scope:       "openid profile email",
-		State:       "refresh-test",
-		UserID:      user.ID,
+		ClientID:            oauthClient.ClientID,
+		RedirectURI:         "http://localhost:3000/callback",
+		Scope:               "openid profile email",
+		State:               "refresh-test",
+		UserID:              user.ID,
+		CodeChallenge:       pkce.Challenge,
+		CodeChallengeMethod: pkce.Method,
 	})
 	if err != nil {
 		t.Fatalf("authorize: %v", err)
 	}
 
 	tokens, err := srv.client.ExchangeCode(ctx, hearth.TokenRequest{
-		ClientID:    oauthClient.ClientID,
-		Code:        authResp.Code,
-		RedirectURI: "http://localhost:3000/callback",
+		ClientID:     oauthClient.ClientID,
+		Code:         authResp.Code,
+		RedirectURI:  "http://localhost:3000/callback",
+		CodeVerifier: pkce.Verifier,
 	})
 	if err != nil {
 		t.Fatalf("exchange code: %v", err)

@@ -21,6 +21,8 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
+  # Manual dry-run: packages the chart and lints it; skips push and sign.
+  workflow_dispatch:
 
 # Minimal default; each job escalates only what it needs.
 permissions:
@@ -53,7 +55,8 @@ jobs:
 
   publish:
     name: Package + publish Helm chart (OCI, signed)
-    if: github.ref_type == 'tag'
+    # Run on release tags (live publish) or manual workflow_dispatch (dry-run only).
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -70,9 +73,11 @@ jobs:
           version: "v3.16.4"
 
       - name: Install cosign
+        if: github.ref_type == 'tag'
         uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5  # v3.10.1
 
       - name: Log in to GHCR
+        if: github.ref_type == 'tag'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
             --username "${{ github.actor }}" \
@@ -81,14 +86,25 @@ jobs:
       - name: Package chart
         run: |
           # Strip the leading 'v' — Helm chart versions must be semver without prefix.
-          VER="${GITHUB_REF_NAME#v}"
+          # On workflow_dispatch (no tag), fall back to the Chart.yaml version for
+          # dry-run validation; the packaged .tgz is not pushed.
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER=$(grep '^version:' deploy/helm/hearth/Chart.yaml | awk '{print $2}')
+            echo "::notice::Dry-run — using Chart.yaml version ${VER}; push + sign will be skipped."
+          fi
           helm package deploy/helm/hearth \
             --version "$VER" \
             --app-version "$VER"
           echo "CHART_VER=$VER" >> "$GITHUB_ENV"
 
+      - name: Lint packaged chart
+        run: helm lint "hearth-${CHART_VER}.tgz"
+
       - name: Push chart to GHCR
         id: push
+        if: github.ref_type == 'tag'
         run: |
           PUSH_OUT=$(helm push "hearth-${CHART_VER}.tgz" oci://ghcr.io/hearth-auth/charts 2>&1)
           echo "$PUSH_OUT"
@@ -100,6 +116,13 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Sign chart digest with cosign (keyless OIDC)
+        if: github.ref_type == 'tag'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
-          cosign sign --yes \
-            "ghcr.io/hearth-auth/charts/hearth@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "ghcr.io/hearth-auth/charts/hearth@${DIGEST}"
+
+      - name: Dry-run summary
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "::notice::Dry-run complete — hearth-${CHART_VER}.tgz packaged and linted successfully. Push and sign skipped."

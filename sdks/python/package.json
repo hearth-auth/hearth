@@ -1,0 +1,6 @@
+{
+  "name": "@hearth-auth/sdk-python",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hearth Python SDK — package.json shim for multi-semantic-release"
+}

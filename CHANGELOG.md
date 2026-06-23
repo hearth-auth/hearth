@@ -7,6 +7,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Continuous deployment via semantic-release** — merging a `fix:` or `feat:` PR to `main`
+  now automatically computes the next semver version, updates CHANGELOGs, bumps version files,
+  pushes a git tag, and fires the downstream publish workflows (binaries, Helm, SDKs). Each
+  package in the monorepo is independently versioned with its own tag format (`v*`, `sdk-node-v*`,
+  `sdks/go/v*`, etc.). Maintenance branches (`1.x`, `2.x`) enable security backports without
+  shipping from `main`. See `docs/release-runbook.md` for setup and operational procedures
+  (HEA-1496).
+- **PR-title Conventional Commit lint** — the `commit-lint.yml` workflow rejects non-conforming
+  PR titles using `amannn/action-semantic-pull-request`; the PR title serves as the
+  squash-merge commit message that semantic-release reads for its version bump calculation
+  (HEA-1496).
+- **Windows release binary** — `hearth-windows-amd64.exe` (`x86_64-pc-windows-msvc`) is now
+  included in every tagged release alongside the Linux and macOS binaries (HEA-1494).
+- **`SHA256SUMS` in release artifacts** — every tagged release includes a `SHA256SUMS` manifest
+  covering all binaries and the SBOM; verify locally with `sha256sum -c SHA256SUMS` (HEA-1494).
+- **Release version stamped in binary** — `hearth --version` now reports the release tag version
+  (e.g. `1.2.3`) rather than the Cargo.toml placeholder `0.1.0`; set at build time via
+  `HEARTH_RELEASE_VERSION` in `build.rs` (HEA-1494).
 - **`@hearth-auth/sdk` npm package is now publishable** — the TypeScript browser/React SDK
   (`sdks/typescript/`) is publish-ready: `private` flag removed, `exports` and `types` fields
   point to compiled `dist/` output, and a `files: ["dist"]` constraint ensures only built
@@ -23,6 +41,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the chart to `oci://ghcr.io/hearth-auth/charts/hearth`; the pushed digest is cosign-signed
   (keyless OIDC). Install with:
   `helm pull oci://ghcr.io/hearth-auth/charts/hearth --version <tag>` (HEA-1482).
+- **Go SDK PKCE support** — `hearth.GeneratePKCE()` returns a verifier/challenge pair, and
+  `AuthorizeRequest` (`CodeChallenge`/`CodeChallengeMethod`) and `TokenRequest` (`CodeVerifier`)
+  now carry PKCE parameters. Required to complete the authorization-code flow, which the server
+  mandates for public clients (RFC 9700 §2.1.1).
 
 ### Fixed
 - **Go SDK module path corrected** — `go.mod` now declares `module github.com/hearth-auth/hearth/sdks/go`,

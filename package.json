@@ -1,9 +1,17 @@
 {
+  "name": "hearth",
   "private": true,
-  "description": "MCP server dependencies for Hearth development tooling",
+  "description": "Hearth identity provider — monorepo root",
   "devDependencies": {
     "reflex-search": "^1.3.5",
-    "context-mode": "^1.0.111"
+    "context-mode": "^1.0.111",
+    "multi-semantic-release": "^3.0.2",
+    "semantic-release": "^23.1.1",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/exec": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/github": "^10.3.5",
+    "@semantic-release/npm": "^12.0.1"
   },
   "scripts": {
     "postinstall": "node scripts/patch-shrinkwrap.js"

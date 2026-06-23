@@ -22,6 +22,16 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Skip signing, SLSA provenance, and publishing — builds and checksums all targets only"
+        type: boolean
+        default: true
+      version_override:
+        description: "Version to stamp into the binary (e.g. 1.2.3). Defaults to 0.0.0-dry-run when blank."
+        type: string
+        default: ""
 
 # Minimal default; each job escalates only what it needs.
 permissions:
@@ -59,10 +69,19 @@ jobs:
       # Strip the leading "v" from the tag (v1.0.0 → 1.0.0) and export it so
       # the build script can forward it to CARGO_PKG_VERSION via
       # cargo:rustc-env, making `hearth --version` match the release tag.
+      # For workflow_dispatch dry-runs, use the version_override input or
+      # fall back to 0.0.0-dry-run. Passed through env: to avoid injection.
       - name: Derive release version from tag
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          VERSION_OVERRIDE: ${{ inputs.version_override }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            VERSION="${VERSION_OVERRIDE:-0.0.0-dry-run}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
           echo "HEARTH_RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -200,6 +219,8 @@ jobs:
   sign:
     name: Sign with cosign (keyless OIDC)
     needs: [build, sbom, hash]
+    # Skip on workflow_dispatch dry-runs: cosign OIDC requires a tag-scoped ref.
+    if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for OIDC token exchange
@@ -236,6 +257,8 @@ jobs:
   # Runs in a slsa-github-generator-controlled job to establish the attestation.
   provenance:
     needs: [hash]
+    # Skip on workflow_dispatch dry-runs: SLSA generator requires tag context.
+    if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
     permissions:
       actions: read
       id-token: write
@@ -249,6 +272,9 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [sign, provenance]
+    # Skip on workflow_dispatch dry-runs (sign/provenance are also skipped;
+    # this explicit guard prevents a confusing "skipped needs" failure message).
+    if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
     runs-on: ubuntu-latest
     permissions:
       contents: write

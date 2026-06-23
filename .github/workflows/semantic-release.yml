@@ -1,0 +1,88 @@
+name: Semantic Release
+
+# Runs on every push to a release branch (main, 1.x, 2.x).
+# multi-semantic-release computes the next version for each package (server +
+# all SDKs), updates CHANGELOG files, bumps version files, commits, and pushes
+# git tags.  The tags trigger the downstream publish workflows:
+#   v*             → release.yml (binaries), helm.yml (Helm OCI)
+#   sdk-node-v*    → sdk-publish-node.yml
+#   sdk-ts-v*      → sdk-publish-typescript.yml
+#   sdks/go/v*     → sdk-publish-go.yml
+#   sdk-rust-v*    → sdk-publish-rust.yml
+#   sdk-python-v*  → sdk-publish-python.yml
+#   sdk-php-v*     → sdk-publish-php.yml
+#   sdk-kotlin-v*  → sdk-publish-kotlin.yml
+#
+# Prerequisites (repository secrets that must be configured before enabling):
+#   SEMANTIC_RELEASE_PAT — a Personal Access Token or GitHub App token with
+#                          repo + workflow scopes.  GITHUB_TOKEN cannot be used
+#                          because tags pushed by it do NOT trigger other
+#                          workflows (GitHub security model).
+#
+# Bootstrap (run once before the first live release):
+#   See docs/release-runbook.md § "Bootstrapping — anchor tags"
+
+on:
+  push:
+    branches:
+      - main
+      - "1.x"
+      - "2.x"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: semantic-release-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a release mid-run
+
+jobs:
+  release:
+    name: multi-semantic-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Fetch full history so semantic-release can walk all commits.
+      # Use the PAT so commits + tags pushed back trigger downstream workflows.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.SEMANTIC_RELEASE_PAT }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      # Install release tooling (semantic-release + plugins) declared in the
+      # root package.json.  --ignore-scripts prevents the reflex-search
+      # postinstall from running, which would otherwise cause a redundant
+      # reinstall loop.
+      - name: Install release tooling
+        run: npm install --ignore-scripts
+
+      # multi-semantic-release processes each package in dependency order.
+      # --packages lists the package directories relative to the repo root;
+      # "." is the server root itself.  Packages without new releasable
+      # commits since their last tag are silently skipped.
+      - name: Run multi-semantic-release (dry-run)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && false
+        run: npx multi-semantic-release --dry-run --packages sdks/node sdks/typescript sdks/go sdks/rust sdks/python sdks/php sdks/kotlin .
+        env:
+          GITHUB_TOKEN: ${{ secrets.SEMANTIC_RELEASE_PAT }}
+          GIT_AUTHOR_NAME: "hearth-release-bot"
+          GIT_AUTHOR_EMAIL: "releases@hearth.example"
+          GIT_COMMITTER_NAME: "hearth-release-bot"
+          GIT_COMMITTER_EMAIL: "releases@hearth.example"
+
+      - name: Run multi-semantic-release
+        run: npx multi-semantic-release --packages sdks/node sdks/typescript sdks/go sdks/rust sdks/python sdks/php sdks/kotlin .
+        env:
+          GITHUB_TOKEN: ${{ secrets.SEMANTIC_RELEASE_PAT }}
+          GIT_AUTHOR_NAME: "hearth-release-bot"
+          GIT_AUTHOR_EMAIL: "releases@hearth.example"
+          GIT_COMMITTER_NAME: "hearth-release-bot"
+          GIT_COMMITTER_EMAIL: "releases@hearth.example"

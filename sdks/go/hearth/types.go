@@ -17,6 +17,12 @@ type AuthorizeRequest struct {
 	State        string `json:"state"`
 	ResponseType string `json:"response_type"`
 	UserID       string `json:"user_id"`
+	// CodeChallenge is the PKCE challenge (RFC 7636). Required for public
+	// clients and, by default, confidential clients. See [GeneratePKCE].
+	CodeChallenge string `json:"code_challenge,omitempty"`
+	// CodeChallengeMethod must be "S256" when CodeChallenge is set; Hearth
+	// rejects "plain".
+	CodeChallengeMethod string `json:"code_challenge_method,omitempty"`
 }
 
 // AuthorizeResponse is returned by the authorize endpoint.
@@ -32,6 +38,10 @@ type TokenRequest struct {
 	Code         string `json:"code,omitempty"`
 	RedirectURI  string `json:"redirect_uri,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
+	// CodeVerifier is the PKCE verifier (RFC 7636) matching the challenge
+	// sent at authorize time. Required when the auth code was issued with a
+	// challenge. See [GeneratePKCE].
+	CodeVerifier string `json:"code_verifier,omitempty"`
 }
 
 // TokenResponse is returned by the token endpoint.

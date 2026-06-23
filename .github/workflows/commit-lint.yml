@@ -1,0 +1,52 @@
+name: Conventional Commits
+
+# Enforces the Conventional Commits specification on every PR title.
+# The PR title becomes the squash-merge commit message, which semantic-release
+# uses to compute the next version:
+#   fix:      → patch bump
+#   feat:     → minor bump
+#   fix!: / feat!: / BREAKING CHANGE: footer → major bump
+#
+# Non-conforming PR titles are rejected with an error message that explains
+# the required format.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint-pr-title:
+    name: Lint PR title (Conventional Commits)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017 # v5.5.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Allowed commit types (semantic-release recognized + housekeeping types).
+          types: |
+            fix
+            feat
+            build
+            chore
+            ci
+            docs
+            perf
+            refactor
+            revert
+            style
+            test
+            security
+            hardening
+          # Scopes are optional but encouraged (e.g. feat(oidc):, fix(storage):).
+          requireScope: false
+          # Allow BREAKING CHANGE via ! suffix (feat!:) or footer.
+          # amannn/action-semantic-pull-request supports this natively.
+          subjectPattern: ^.{1,100}$
+          subjectPatternError: |
+            The PR title subject must be 1–100 characters.
+            Example: "fix(auth): correct token expiry calculation"
