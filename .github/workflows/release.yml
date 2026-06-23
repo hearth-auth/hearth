@@ -299,5 +299,4 @@ jobs:
             dist/*.sig
             dist/*.pem
             dist/multiple.intoto.jsonl
-          generate_release_notes: true
           fail_on_unmatched_files: true

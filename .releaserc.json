@@ -12,6 +12,6 @@
     ["@semantic-release/exec", {
       "prepareCmd": "sed -i 's/^version = \"[^\"]*\"/version = \"${nextRelease.version}\"/' Cargo.toml"
     }],
-    ["@semantic-release/github", { "successComment": false, "failComment": false }]
+    ["@semantic-release/github", { "draft": true, "successComment": false, "failComment": false }]
   ]
 }
