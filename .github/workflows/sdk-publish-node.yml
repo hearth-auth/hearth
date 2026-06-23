@@ -1,8 +1,9 @@
 name: SDK publish — node
 
 # CI dry-run on PRs and pushes to main; live publish on sdk-node-v* tags.
+# Tokenless publish via npm OIDC trusted publishing — no NPM_TOKEN stored.
 # npm trusted-publisher binding: repo=hearth-auth/hearth, workflow=sdk-publish-node.yml
-# NODE_AUTH_TOKEN must be set as a repository secret (npm automation token).
+# Requires npm >= 11.5.1 (Node 20 ships npm 10) — upgraded in the job below.
 
 on:
   push:
@@ -19,7 +20,7 @@ on:
       - ".github/workflows/sdk-publish-node.yml"
   workflow_dispatch:
 
-# id-token:write is required for npm --provenance (OIDC attestation).
+# id-token:write is required for npm OIDC trusted publishing + provenance.
 permissions:
   contents: read
   id-token: write
@@ -43,6 +44,14 @@ jobs:
           cache: npm
           cache-dependency-path: sdks/node/package-lock.json
 
+      # Node 20 bundles npm 10, which predates OIDC trusted publishing.
+      # Only upgrade for the live (tag) publish — newer npm's `publish --dry-run`
+      # does a registry version preflight, which would fail PR/main runs once a
+      # version is already published. Dry-run validates packaging on npm 10.
+      - name: Upgrade npm for OIDC trusted publishing (>= 11.5.1)
+        if: startsWith(github.ref, 'refs/tags/sdk-node-v')
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         working-directory: sdks/node
         run: npm ci
@@ -57,9 +66,7 @@ jobs:
         working-directory: sdks/node
         run: npm publish --dry-run --provenance
 
-      - name: Publish (live)
+      - name: Publish (live — OIDC trusted publishing, no token)
         if: startsWith(github.ref, 'refs/tags/sdk-node-v')
         working-directory: sdks/node
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
