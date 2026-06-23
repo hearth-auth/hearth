@@ -1,0 +1,16 @@
+# Package discovery for multi-semantic-release only.
+#
+# multi-semantic-release resolves the SDK packages via @manypkg/get-packages,
+# which recognises this file. We deliberately use pnpm-workspace.yaml rather
+# than a package.json "workspaces" field so that `npm install` at the repo root
+# does NOT treat the SDKs as install-time workspaces (npm ignores this file) —
+# that hoisting/override resolution breaks the root install. The repo does not
+# use pnpm; this file is purely a discovery manifest.
+packages:
+  - "sdks/node"
+  - "sdks/typescript"
+  - "sdks/go"
+  - "sdks/rust"
+  - "sdks/python"
+  - "sdks/php"
+  - "sdks/kotlin"
