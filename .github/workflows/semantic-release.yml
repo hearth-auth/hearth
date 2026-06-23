@@ -1,10 +1,9 @@
 name: Semantic Release
 
-# Runs on every push to a release branch (main, 1.x, 2.x), currently in
-# DRY-RUN (see the run step). When live, multi-semantic-release computes the
-# next version for each package (server + all SDKs), updates CHANGELOG files,
-# bumps version files, commits, and pushes git tags.  The tags trigger the
-# downstream publish workflows:
+# Runs on every push to a release branch (main, 1.x, 2.x) and releases live.
+# multi-semantic-release computes the next version for each SDK package,
+# updates CHANGELOG files, bumps version files, commits, and pushes git tags.
+# The tags trigger the downstream publish workflows:
 #   v*             → release.yml (binaries), helm.yml (Helm OCI)
 #   sdk-node-v*    → sdk-publish-node.yml
 #   sdk-ts-v*      → sdk-publish-typescript.yml
@@ -70,14 +69,13 @@ jobs:
       # so the root `npm install` above is unaffected.) Packages with no new
       # releasable commits since their last tag are silently skipped.
       #
-      # DRY-RUN until the anchor-tag bootstrap is complete
-      # (docs/release-runbook.md § "Bootstrapping — anchor tags"): this
-      # validates config and computes the next version per package WITHOUT
-      # tagging or publishing, so a push to main cannot trigger an uncontrolled
-      # first release. To enable live continuous deployment after bootstrapping,
-      # remove `--dry-run` from the run line below.
-      - name: Run multi-semantic-release (dry-run)
-        run: npx multi-semantic-release --dry-run
+      # Live continuous deployment: each push computes the next version per SDK
+      # package, bumps version files, updates CHANGELOGs, commits back, and
+      # pushes `sdk-<lang>-v<version>` tags. semantic-release itself does NOT
+      # publish (npmPublish:false / exec prepareCmd only) — each tag triggers
+      # its sdk-publish-*.yml workflow, which performs the registry publish.
+      - name: Run multi-semantic-release (live)
+        run: npx multi-semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.SEMANTIC_RELEASE_PAT }}
           GIT_AUTHOR_NAME: "hearth-release-bot"
