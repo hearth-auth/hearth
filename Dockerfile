@@ -57,13 +57,17 @@ WORKDIR /build
 # dependencies are never recompiled regardless of which source files changed.
 # Cargo.lock is gitignored in this repo; if absent, cargo generates one into
 # the cache mount on first build and reuses it on subsequent builds.
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY simulation/Cargo.toml simulation/Cargo.toml
 COPY build.rs ./
 COPY proto ./proto
 COPY src ./src
 COPY simulation ./simulation
 COPY templates ./templates
+# openapi.json and openapi.supplement.yaml are embedded via include_str!() in
+# src/protocol/web/openapi.rs — they must be present at compile time.
+# .dockerignore un-excludes them from the docs/ exclusion rule.
+COPY docs/api/openapi.json docs/api/openapi.supplement.yaml docs/api/
 COPY benches ./benches
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
