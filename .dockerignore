@@ -27,8 +27,12 @@ src/protocol/generated/
 # Reflex / search indexes
 .reflex/
 
-# Docs and specs (not needed to build the binary)
+# Docs and specs (not needed to build the binary) — except openapi files,
+# which are embedded via include_str!() in src/protocol/web/openapi.rs at
+# compile time. Without them cargo fails with "No such file or directory".
 docs/
+!docs/api/openapi.json
+!docs/api/openapi.supplement.yaml
 CONTRIBUTING.md
 
 # Bruno API request collection — dev-time only
