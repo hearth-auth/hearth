@@ -285,9 +285,10 @@ jobs:
           merge-multiple: true
           path: dist
 
-      - name: Create GitHub Release and upload artifacts
+      - name: Upload artifacts to draft release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
+          draft: true   # keep as draft so parallel uploads finish before publish
           files: |
             dist/hearth-linux-amd64
             dist/hearth-linux-arm64
@@ -300,3 +301,8 @@ jobs:
             dist/*.pem
             dist/multiple.intoto.jsonl
           fail_on_unmatched_files: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false --repo "${{ github.repository }}"
