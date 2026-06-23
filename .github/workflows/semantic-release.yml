@@ -85,3 +85,34 @@ jobs:
           GIT_AUTHOR_EMAIL: "releases@hearth.example"
           GIT_COMMITTER_NAME: "hearth-release-bot"
           GIT_COMMITTER_EMAIL: "releases@hearth.example"
+
+  release-server:
+    name: release server
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Fetch full history so semantic-release can walk all commits.
+      # Use the PAT so the pushed v* tag triggers docker.yml, helm.yml, release.yml.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.SEMANTIC_RELEASE_PAT }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      - name: Install release tooling
+        run: npm install --ignore-scripts
+
+      # Runs from the repo root, picking up the root .releaserc.json.
+      # tagFormat "v${version}" fires docker.yml + helm.yml + release.yml.
+      - name: Release server
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.SEMANTIC_RELEASE_PAT }}
+          GIT_AUTHOR_NAME: "hearth-release-bot"
+          GIT_AUTHOR_EMAIL: "releases@hearth.example"
+          GIT_COMMITTER_NAME: "hearth-release-bot"
+          GIT_COMMITTER_EMAIL: "releases@hearth.example"

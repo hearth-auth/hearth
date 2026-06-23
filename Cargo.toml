@@ -3,7 +3,7 @@ members = [".", "simulation"]
 
 [package]
 name = "hearth"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Purpose-built identity database: authentication, authorization, and session management"
 license = "Apache-2.0"
