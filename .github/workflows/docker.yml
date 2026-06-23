@@ -96,7 +96,7 @@ jobs:
       #                                       (v1.2.3 → latest; v1.2.3-rc.1 → no latest)
       - name: Extract Docker metadata (tags + labels)
         id: meta
-        uses: docker/metadata-action@902fa8ec7d6ecbea7a8f1214d21cf08cd1cfb1e1 # v5.7.0
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
           images: ghcr.io/hearth-auth/hearth
           tags: |
@@ -116,7 +116,7 @@ jobs:
       #   the cosign signature + CycloneDX SBOM attestation added below.
       - name: Build and push
         id: push
-        uses: docker/build-push-action@67a2d409b0a6135e7f3d85c5b6534c3e2e4e5f0a # v6.7.0
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
