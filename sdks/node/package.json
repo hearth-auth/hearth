@@ -2,6 +2,11 @@
   "name": "@hearth-auth/node",
   "version": "0.0.1",
   "description": "Hearth server-side Node.js SDK — JWKS verification, token introspection, Express/Fastify middleware",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hearth-auth/hearth.git",
+    "directory": "sdks/node"
+  },
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
