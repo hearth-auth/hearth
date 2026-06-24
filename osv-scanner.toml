@@ -31,6 +31,13 @@ reason = "esbuild dev-server file read on Windows. Affects esbuild >=0.27.3 <0.2
 
 [[PackageOverrides]]
 name = "*"
+ecosystem = "Go"
+group = "examples/**"
+ignore = true
+reason = "Example apps are reference implementations, not shipped artifacts. Lockfiles drift from main and aren't security-critical (HEA-690, HEA-1512)."
+
+[[PackageOverrides]]
+name = "*"
 ecosystem = "npm"
 group = "examples/**"
 ignore = true

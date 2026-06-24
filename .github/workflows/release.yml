@@ -263,6 +263,8 @@ jobs:
       actions: read
       id-token: write
       contents: write   # SLSA generator's nested upload-assets job statically requires write; upload-assets: false keeps it as a workflow artifact only
+    # Scorecard-exception: SHA pin intentionally omitted — slsa-github-generator
+    # verifies its own ref at runtime; a digest pin breaks the provenance chain.
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
     with:
       base64-subjects: "${{ needs.hash.outputs.hashes }}"

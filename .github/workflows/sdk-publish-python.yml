@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5 # TODO(HEA-1487): pin to SHA
         with:
           python-version: "3.12"
 
@@ -64,6 +64,8 @@ jobs:
       # Dry-run on PRs and branch pushes; live upload only on sdk-python-v* tags.
       - name: Publish (live — PyPI trusted publisher)
         if: startsWith(github.ref, 'refs/tags/sdk-python-v')
+        # Scorecard-exception: SHA pin intentionally omitted — PyPI OIDC trusted
+        # publishing verifies the workflow ref; a digest pin breaks the OIDC match.
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: sdks/python/dist/
