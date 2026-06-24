@@ -25,13 +25,17 @@ curl -fsS http://127.0.0.1:8420/health
 
 Once this returns `{"status":"ok"}`, skip to [§2 — Bootstrap a realm and admin token](#2-bootstrap-a-realm-and-admin-token). All subsequent `curl` commands in this guide target `http://127.0.0.1:8420` and work against the Docker container without modification.
 
-> For production deployment (Docker Compose, systemd, Helm), see [`deploy/README.md`](../../deploy/README.md).
+:::tip[Production deployment]
+For Docker Compose, systemd, or Helm deployment, see [`deploy/README.md`](../../deploy/README.md).
+:::
 
 ---
 
 ## 1. Start Hearth in dev mode (from source)
 
-> **Prerequisite:** A Rust toolchain. Skip this section if you used the Docker path above.
+:::note[Prerequisite]
+A Rust toolchain is required. Skip this section if you used the Docker path above.
+:::
 
 ```bash
 make dev
@@ -59,7 +63,9 @@ echo "Realm: $REALM_ID"
 
 The response contains `realm_id`, `user_id`, `access_token`, `refresh_token`, and a `quickstart` field — ready-to-copy shell commands with your realm ID and admin token already interpolated.
 
-> **Production note:** This endpoint returns `404 Not Found` outside `--dev` mode. In production, create your realm via `hearth.yaml` and issue credentials through normal OAuth flows.
+:::warning[Production note]
+This endpoint returns `404 Not Found` outside `--dev` mode. In production, create your realm via `hearth.yaml` and issue credentials through normal OAuth flows.
+:::
 
 ## 3. Register an OAuth application
 
@@ -208,7 +214,9 @@ def require_permission(token: str, permission: str) -> dict:
     return payload
 ```
 
-> **JWKS caching:** `createRemoteJWKSet` caches keys automatically. In Python, cache `_get_key` results (e.g., with `functools.lru_cache(ttl=...)`) to avoid a JWKS fetch on every request.
+:::tip[JWKS caching]
+`createRemoteJWKSet` caches keys automatically. In Python, cache `_get_key` results (e.g., with `functools.lru_cache(ttl=...)`) to avoid a JWKS fetch on every request.
+:::
 
 ## 7. Token delivery for browser SPAs
 

@@ -306,7 +306,9 @@ Optional fields in the request body:
 
 **Fail-closed behaviour:** The endpoint returns `{"allowed": false}` on every failure path — invalid token, expired token, session revocation, missing permission, or internal resolution error. Only a valid token with the specific permission resolves to `{"allowed": true}`. Missing `permission` field returns `400 Bad Request`.
 
-**Security note:** Treat `POST /oauth/authorize` as an internal endpoint. Expose it only to your own services; it MUST NOT be reachable from public internet or browser clients. Rate-limit or circuit-break callers to prevent cascading failures if Hearth is slow or unavailable.
+:::warning[Security]
+Treat `POST /oauth/authorize` as an internal endpoint. Expose it only to your own services; it MUST NOT be reachable from public internet or browser clients. Rate-limit or circuit-break callers to prevent cascading failures if Hearth is slow or unavailable.
+:::
 
 **Trade-offs:** Maximum consistency — decisions reflect permission state at call time. Every protected request requires a network round-trip to Hearth. Use when revocation latency must be zero (e.g. financial, healthcare).
 
