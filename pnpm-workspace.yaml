@@ -14,3 +14,11 @@ packages:
   - "sdks/python"
   - "sdks/php"
   - "sdks/kotlin"
+
+# Force patched versions for vulnerable transitive deps (Dependabot alerts
+# #81-#86). hono is a dep of context-mode/reflex-search; form-data comes from
+# @semantic-release/github. Neither is shipped in a production artifact — this
+# is tooling-only, but we keep the lockfile clean.
+overrides:
+  hono: ">=4.12.25"
+  form-data: ">=4.0.6"
