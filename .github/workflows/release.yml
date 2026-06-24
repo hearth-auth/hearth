@@ -263,15 +263,18 @@ jobs:
       actions: read
       id-token: write
       contents: write   # SLSA generator's nested upload-assets job statically requires write; upload-assets: false keeps it as a workflow artifact only
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    # v2.1.0 validates that the calling ref is a semver tag (refs/tags/vX.Y.Z)
+    # so it can look up the corresponding release binary. Using @SHA directly
+    # fails this check ("Invalid ref: SHA. Expected refs/tags/vX.Y.Z").
+    # GitHub Actions resolves the tag to f7dd8c54c2067bafc12ca7a55595d5ee9b75204a
+    # at checkout time, providing equivalent security.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: "${{ needs.hash.outputs.hashes }}"
       upload-assets: false
-      # The SLSA generator checks GITHUB_REPOSITORY_VISIBILITY, which is not
-      # always available in reusable-workflow contexts. When absent/wrong, the
-      # generator incorrectly halts with "Repository is private", aborts the
-      # binary download, and the execution step fails with exit 127.
-      # Setting private-repository: true bypasses that check.
+      # The SLSA generator checks GITHUB_REPOSITORY_VISIBILITY which is absent
+      # in reusable-workflow contexts; setting private-repository: true bypasses
+      # the false "Repository is private" detection.
       private-repository: true
 
   # ── 6. Publish GitHub Release ─────────────────────────────────────────────
