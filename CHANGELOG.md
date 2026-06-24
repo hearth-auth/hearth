@@ -51,6 +51,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   matching the published repository URL. The previous path (`github.com/anthropics/hearth/sdks/go`)
   caused `go get` to fail with a 404 (HEA-1479).
 
+### Security
+- **Go SDK toolchain bumped to 1.26.4** — both `sdks/go/go.mod` and
+  `examples/full-stack-demo/backend/go.mod` now require `go 1.26.4`, clearing the ~13 Go stdlib
+  CVEs that traced to `stdlib@1.26.2` (HEA-1511).
+- **`memmap2` bumped 0.9.10 → 0.9.11** — resolves RUSTSEC-2026-0186 (unsound pointer-offset in
+  the mmap helper used by the storage engine's SST and hot-tier reads) (HEA-1510).
+- **`quinn-proto` bumped 0.11.14 → 0.11.15** — resolves RUSTSEC-2026-0185 (remote memory
+  exhaustion via unbounded out-of-order stream reassembly; severity 7.5 high) across the root
+  workspace, `fuzz/`, and `sdks/rust/` lockfiles (HEA-1510).
+
 ## [1.0.0] — 2026-06-21
 
 ### Security

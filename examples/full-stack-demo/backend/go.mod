@@ -1,10 +1,10 @@
 module github.com/hearth-auth/hearth/examples/full-stack-demo/backend
 
-go 1.26.2
+go 1.26.4
 
 require (
-	github.com/hearth-auth/hearth/sdks/go v0.0.0
 	github.com/gin-gonic/gin v1.12.0
+	github.com/hearth-auth/hearth/sdks/go v0.0.0
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 )
 
