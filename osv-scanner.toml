@@ -38,6 +38,13 @@ reason = "Example apps are reference implementations, not shipped artifacts. Loc
 
 [[PackageOverrides]]
 name = "*"
+ecosystem = "Go"
+group = "examples/**"
+ignore = true
+reason = "Example apps are reference implementations, not shipped artifacts. Go modules drift from main and aren't security-critical (HEA-1523)."
+
+[[PackageOverrides]]
+name = "*"
 ecosystem = "npm"
 group = "tests/ui/**"
 ignore = true
