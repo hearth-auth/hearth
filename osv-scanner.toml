@@ -29,6 +29,10 @@ reason = "Marvin Attack timing side-channel in rsa crate. Hearth uses rsa only f
 id = "GHSA-g7r4-m6w7-qqqr"
 reason = "esbuild dev-server file read on Windows. Affects esbuild >=0.27.3 <0.28.1. The sdks/node devDependency is constrained to 0.27.x by vite@7.x's peer-dep; 0.28.1 is not yet reachable without a vite major bump. The vulnerability only triggers when running esbuild's HTTP dev server on Windows — Hearth's Node SDK never runs a dev server in CI or production, and the shipped artifact only contains jose. Low severity; Windows-only; dev-tooling-only surface. Revisit when vite@8 ships with esbuild >=0.28.1."
 
+[[IgnoredVulns]]
+id = "GHSA-h67p-54hq-rp68"
+reason = "js-yaml@3.14.2 quadratic-complexity DoS via YAML merge keys. Transitive path: multi-semantic-release→@manypkg/get-packages@1.1.3→read-yaml-file@1.1.0→js-yaml@3.x. Used exclusively in the release CI pipeline to parse the local pnpm-workspace.yaml config file — attacker-crafted YAML input is not possible in this context. No feasible upgrade path: read-yaml-file@1.1.0 uses js-yaml's v3 API (safeLoad) removed in v4.x; upgrading to read-yaml-file@3.x would break @manypkg/get-packages@1.1.3 which pins to the v1 API. CI-tooling-only; never shipped to users. Tracked in HEA-1513."
+
 [[PackageOverrides]]
 name = "*"
 ecosystem = "Go"

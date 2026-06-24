@@ -37,6 +37,12 @@
   "overrides": {
     "webpackbar": "^7.0.0",
     "serialize-javascript": "^7.0.0",
-    "uuid": "^11.0.0"
+    "uuid": "^11.0.0",
+    "undici": "^7.28.0",
+    "webpack-dev-server": "^5.2.5",
+    "http-proxy-middleware": "^2.0.10",
+    "joi": "^17.13.4",
+    "js-yaml": "^4.2.0",
+    "launch-editor": "^2.14.1"
   }
 }

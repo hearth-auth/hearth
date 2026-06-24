@@ -14,3 +14,13 @@ packages:
   - "sdks/python"
   - "sdks/php"
   - "sdks/kotlin"
+allowBuilds:
+  better-sqlite3: set this to true or false
+  context-mode: set this to true or false
+  esbuild: set this to true or false
+  reflex-search: set this to true or false
+minimumReleaseAgeExclude:
+  - hono@4.12.27
+overrides:
+  hono: ^4.12.27
+  form-data: ^4.0.6
