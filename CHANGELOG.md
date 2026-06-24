@@ -46,6 +46,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   now carry PKCE parameters. Required to complete the authorization-code flow, which the server
   mandates for public clients (RFC 9700 §2.1.1).
 
+### Fixed
+- **`sms` now accepted as a valid `mfa_methods` value** — `hearth config validate` previously
+  rejected `sms` with "unknown MFA method sms; valid methods are: totp, webauthn". Added `sms`
+  to the allowlist and added a cross-validation error when `sms` appears in `mfa_methods` but
+  `sms.transport` is `log` (which cannot deliver real OTPs). Also, `config validate` now checks
+  `HEARTH_SMS_OTP_HMAC_KEY` for non-log transports so misconfigured deployments are caught at
+  validate time rather than startup (HEA-1542).
+- **Deploy assets corrected to canonical `hearth-auth` GitHub org** — `deploy/helm/hearth/values.yaml`,
+  `values-prod.yaml`, `Chart.yaml`, Helm test fixtures, `deploy/docker-compose.yml`,
+  `deploy/systemd/hearth.service`, and `deploy/README.md` all referenced `ghcr.io/hearth-rs/hearth`
+  and `github.com/hearth-rs/hearth`; corrected to `hearth-auth`, which is the org the Docker
+  publishing workflow actually pushes to (HEA-1537).
+- **SDK manifest versions bumped to `1.0.0`** — `sdks/typescript/package.json` (was `0.0.1`),
+  `sdks/python/pyproject.toml` (was `0.1.0`), and `sdks/rust/Cargo.toml` (was `0.2.0`) now
+  reflect the `1.0.0` tags that have been released (HEA-1537).
+
 ### Security
 
 - **`quinn-proto` bumped to 0.11.15 (RUSTSEC-2026-0185)** — `quinn-proto@0.11.14` carried a
