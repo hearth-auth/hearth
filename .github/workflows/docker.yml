@@ -2,6 +2,12 @@ name: Docker
 
 # Build + publish multi-arch container image to GHCR (HEA-1481).
 #
+# Strategy (HEA-1525): Build each platform on its NATIVE runner — no QEMU.
+# amd64 → ubuntu-latest, arm64 → ubuntu-22.04-arm. Platform images are pushed
+# by digest (untagged), then merged into a single multi-arch OCI index.
+# Eliminates the 60-minute QEMU arm64 emulation timeout that cancelled docker.yml
+# on every tag push from v1.0.6 through v1.0.14.
+#
 # Trust chain for each release:
 #   image ──cosign──▶  OCI signature record (Sigstore Fulcio / Rekor, keyless OIDC)
 #   image ──cosign──▶  CycloneDX SBOM attestation (predicate attached to image digest)
@@ -36,7 +42,7 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
 
-# Minimal default; build-and-push escalates to packages:write + id-token:write.
+# Minimal default; individual jobs escalate only what they need.
 permissions:
   contents: read
 
@@ -46,20 +52,167 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-and-push:
-    name: "build + publish"
+  # ── PR smoke test: amd64-only build, no registry push ──────────────────────
+  # Validates Dockerfile correctness without QEMU (~5–10 min).
+  # arm64 is intentionally skipped for PRs — native arm64 runners are only
+  # used for release tags to keep PR feedback fast.
+  build-pr:
+    name: Build (amd64, PR smoke)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # Multi-arch emulation via QEMU is slow; arm64 emulation of a Rust
-    # release build can take 25–40 min.
-    timeout-minutes: 60
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.6.0
+
+      - name: Build (linux/amd64, no push)
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            BUILD_VERSION=pr-${{ github.event.pull_request.number }}
+            BUILD_REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Summarize
+        if: always()
+        run: echo "Build-only run (PR — no push, no signing)." >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Release: build linux/amd64 on native x86_64 runner ─────────────────────
+  # Pushes a digest-only image (no tag). The merge-and-sign job assembles the
+  # final tagged multi-arch index from this digest + the arm64 digest.
+  build-amd64:
+    name: Build linux/amd64
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     permissions:
       contents: read
-      packages: write    # push to ghcr.io
-      id-token: write    # cosign keyless OIDC token exchange
+      packages: write
 
     outputs:
-      image-digest: ${{ steps.push.outputs.digest }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.6.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Labels are embedded in the image config at build time. Tags are NOT
+      # applied here — the merge job tags the final multi-arch index.
+      - name: Extract OCI labels
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        with:
+          images: ghcr.io/hearth-auth/hearth
+
+      - name: Build and push by digest (linux/amd64)
+        id: build
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
+        with:
+          context: .
+          platforms: linux/amd64
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/hearth-auth/hearth,push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+          provenance: false
+
+  # ── Release: build linux/arm64 on NATIVE ARM runner (no QEMU) ──────────────
+  # ubuntu-22.04-arm is GitHub's hosted ARM64 runner — native compilation takes
+  # ~15–20 min vs 60+ min under QEMU emulation (which caused timeouts on every
+  # tag push from v1.0.6 through v1.0.14, HEA-1525).
+  build-arm64:
+    name: Build linux/arm64 (native)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 45
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.6.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract OCI labels
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        with:
+          images: ghcr.io/hearth-auth/hearth
+
+      - name: Build and push by digest (linux/arm64)
+        id: build
+        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
+        with:
+          context: .
+          platforms: linux/arm64
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/hearth-auth/hearth,push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+          provenance: false
+
+  # ── Merge platform images into multi-arch OCI index + sign + SBOM attest ───
+  # Source images referenced by immutable digest (not mutable tag) for integrity.
+  merge-and-sign:
+    name: Merge manifest + sign + SBOM attest
+    needs: [build-amd64, build-arm64]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # cosign keyless OIDC token exchange
+
+    outputs:
+      image-digest: ${{ steps.inspect.outputs.digest }}
       image-tags:   ${{ steps.meta.outputs.tags }}
 
     steps:
@@ -68,32 +221,18 @@ jobs:
         with:
           persist-credentials: false
 
-      # QEMU allows the x86_64 runner to emulate arm64. This avoids the need
-      # for self-hosted ARM runners. Build time is longer than native (~2–3x),
-      # but the emulation is transparent to the Dockerfile — no changes needed.
-      - name: Set up QEMU (arm64 emulation)
-        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.6.0
-
-      # Login is only needed for push events (release tags).
-      # PR builds exercise the build path without writing to the registry.
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.3.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Derives tags and OCI labels from git metadata.
-      #
+      # Generate final semver tags + OCI labels from the release tag.
       # Tag policy:
       #   type=semver,pattern=v{{version}}  → vX.Y.Z (e.g. v1.2.3)
       #   type=sha,prefix=sha-,format=short → sha-<7-char-rev>
       #   flavor: latest=auto               → `latest` only for non-prerelease semver
-      #                                       (v1.2.3 → latest; v1.2.3-rc.1 → no latest)
       - name: Extract Docker metadata (tags + labels)
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
@@ -105,78 +244,64 @@ jobs:
           flavor: |
             latest=auto
 
-      # Build multi-arch manifest (amd64 + arm64) and push on release tags.
-      # GHA layer cache (type=gha) persists base + dep layers across runs so
-      # unchanged dependencies are not re-downloaded for every tag push.
-      #
-      # BUILD_VERSION: the tag name (e.g. v1.2.3). Dockerfile defaults to "dev".
-      # BUILD_REVISION: the full commit SHA. Dockerfile defaults to "unknown".
-      # provenance: false — SLSA provenance for binaries is handled by
-      #   release.yml (slsa-github-generator); the container image ships only
-      #   the cosign signature + CycloneDX SBOM attestation added below.
-      - name: Build and push
-        id: push
-        uses: docker/build-push-action@5cd11c3a4ced054e52742c5fd54dca954e0edd85 # v6.7.0
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BUILD_VERSION=${{ github.ref_name }}
-            BUILD_REVISION=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
+      # Assemble the multi-arch OCI index from the two platform digests and push
+      # all semver tags atomically. Source images are digest-referenced (immutable).
+      - name: Create and push multi-arch manifest
+        run: |
+          TAG_ARGS=$(echo "${{ steps.meta.outputs.tags }}" | \
+            while IFS= read -r tag; do printf -- '--tag %s ' "$tag"; done)
+          docker buildx imagetools create $TAG_ARGS \
+            "ghcr.io/hearth-auth/hearth@${{ needs.build-amd64.outputs.digest }}" \
+            "ghcr.io/hearth-auth/hearth@${{ needs.build-arm64.outputs.digest }}"
 
-      # ── Post-push: signing + SBOM attestation (release tags only) ────────────
-      #
-      # Skipped on PR builds — there is no pushed digest to reference, and the
-      # cosign OIDC token would identify a PR commit, not a release.
+      # Obtain the OCI index digest (not a platform-specific digest) so that
+      # the cosign signature and SBOM attestation are anchored to the index.
+      - name: Get merged manifest digest
+        id: inspect
+        run: |
+          PRIMARY_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+          DIGEST=$(docker buildx imagetools inspect "$PRIMARY_TAG" 2>&1 | \
+            awk '/^Digest:/ { print $2; exit }')
+          if [[ -z "$DIGEST" ]]; then
+            echo "::error::Could not retrieve manifest digest from imagetools inspect" >&2
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Merged manifest digest: $DIGEST"
 
       - name: Install cosign
-        if: github.event_name != 'pull_request'
         uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
-      # Sign the image manifest digest rather than a tag. Tag references are
-      # mutable; the digest is not. A compromised registry could remap a tag
-      # to a different image — signing by digest closes that gap.
-      - name: Sign image digest (keyless OIDC)
-        if: github.event_name != 'pull_request'
+      # Sign the OCI index digest — tag references are mutable; the digest is not.
+      # A compromised registry could remap a tag to a different image; signing by
+      # digest closes that gap.
+      - name: Sign image manifest digest (keyless OIDC)
         run: |
           cosign sign --yes \
-            "ghcr.io/hearth-auth/hearth@${{ steps.push.outputs.digest }}"
+            "ghcr.io/hearth-auth/hearth@${{ steps.inspect.outputs.digest }}"
 
-      # Generate CycloneDX SBOM via cargo-cyclonedx — same toolchain and
-      # version as release.yml — so the binary SBOM and image SBOM share the
-      # same dependency graph representation and trust chain.
-      - name: Set up Rust toolchain (cargo-cyclonedx)
-        if: github.event_name != 'pull_request'
+      # Generate CycloneDX SBOM — same toolchain and version as release.yml so the
+      # binary SBOM and image SBOM share the same dependency graph representation
+      # and trust chain.
+      - name: Set up Rust toolchain (for cargo-cyclonedx)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
 
       - name: Install cargo-cyclonedx
-        if: github.event_name != 'pull_request'
         uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285 # v2
         with:
           tool: cargo-cyclonedx@0.5.9
 
       - name: Generate CycloneDX SBOM
-        if: github.event_name != 'pull_request'
         run: cargo cyclonedx --format json --spec-version 1.4
 
-      # Attach SBOM as a cosign attestation on the image digest. Stored in
-      # the registry alongside the image as a linked OCI artifact — no
-      # external storage required.
       - name: Attach CycloneDX SBOM attestation
-        if: github.event_name != 'pull_request'
         run: |
           cosign attest --yes \
             --predicate hearth.cdx.json \
             --type cyclonedx \
-            "ghcr.io/hearth-auth/hearth@${{ steps.push.outputs.digest }}"
+            "ghcr.io/hearth-auth/hearth@${{ steps.inspect.outputs.digest }}"
 
       - name: Summarize build
         if: always()
@@ -184,14 +309,10 @@ jobs:
           {
             echo "## Docker build summary"
             echo ""
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              echo "Build-only run (PR — no push, no signing)."
-            else
-              echo "| | |"
-              echo "| --- | --- |"
-              echo "| **Image** | \`ghcr.io/hearth-auth/hearth\` |"
-              echo "| **Digest** | \`${{ steps.push.outputs.digest }}\` |"
-              tags="${{ steps.meta.outputs.tags }}"
-              echo "| **Tags** | ${tags//$'\n'/ } |"
-            fi
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| **Image** | \`ghcr.io/hearth-auth/hearth\` |"
+            echo "| **Digest** | \`${{ steps.inspect.outputs.digest }}\` |"
+            tags="${{ steps.meta.outputs.tags }}"
+            echo "| **Tags** | ${tags//$'\n'/ } |"
           } >> "$GITHUB_STEP_SUMMARY"

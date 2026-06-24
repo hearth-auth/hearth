@@ -13,6 +13,8 @@ on:
     - cron: '41 22 * * 4'
   push:
     branches: [ "main" ]
+  # Allow manual re-runs to verify alert state after config changes (HEA-1523)
+  workflow_dispatch:
 
 # Declare default permissions as read only.
 permissions: read-all

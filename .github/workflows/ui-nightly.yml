@@ -33,6 +33,11 @@ jobs:
     name: Build hearth binary (shared artifact)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Force HTTP/1.1 to eliminate crates.io HTTP/2 framing-layer resets (HEA-1530).
+      CARGO_HTTP_MULTIPLEXING: "false"
+      # Retry transient registry downloads; default is 3 (HEA-1530).
+      CARGO_NET_RETRY: "10"
 
     steps:
       - name: Checkout
@@ -48,7 +53,12 @@ jobs:
           install-tailwind: "true"
 
       - name: Build Hearth binary (debug)
-        run: PROTOC=protoc make build
+        run: |
+          for i in 1 2 3; do
+            PROTOC=protoc make build && exit 0
+            echo "build attempt $i failed; retrying in $((i*15))s"; sleep $((i*15))
+          done
+          exit 1
 
       - name: Upload hearth binary artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

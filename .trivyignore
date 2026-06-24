@@ -1,0 +1,23 @@
+# Trivy vulnerability ignore file — Hearth (HEA-1528)
+#
+# Policy: CVEs listed here affect the docs-site Docusaurus build toolchain
+# only. The docs-site is a static documentation site deployed to GitHub Pages
+# (see .github/workflows/docs-site.yml). Its npm dependencies are never part
+# of the Hearth server binary, any client SDK, or any production artifact.
+# The Hearth runtime surface (Rust binary + SDKs) is scanned and must remain
+# clean — suppressions here are strictly limited to build-tooling CVEs.
+#
+# Review: revisit each entry when a patched version of the affected package
+# is available in the Docusaurus dependency graph.
+
+# CVE-2026-55602: docs-site transitive npm dep (Docusaurus build tooling only).
+# Not present in the Hearth binary or any shipped SDK artifact.
+CVE-2026-55602
+
+# CVE-2026-53550: docs-site transitive npm dep (Docusaurus build tooling only).
+# Two instances (different transitive paths); both are build-time only.
+CVE-2026-53550
+
+# CVE-2026-48038: docs-site transitive npm dep (Docusaurus build tooling only).
+# Not present in the Hearth binary or any shipped SDK artifact.
+CVE-2026-48038
