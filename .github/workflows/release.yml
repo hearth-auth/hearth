@@ -290,12 +290,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
           # Remove any stale release left by a previous failed run (keeps the git tag).
-          gh release delete "$TAG" --yes 2>/dev/null || true
+          gh release delete "$TAG" --yes --repo "$REPO" 2>/dev/null || true
           # Create as draft so all uploads complete before the release goes live.
           gh release create "$TAG" \
             --draft \
             --generate-notes \
+            --repo "$REPO" \
             dist/hearth-linux-amd64 \
             dist/hearth-linux-arm64 \
             dist/hearth-darwin-amd64 \
@@ -307,4 +309,4 @@ jobs:
             dist/*.pem \
             dist/multiple.intoto.jsonl
           # Publish only after every asset is confirmed uploaded.
-          gh release edit "$TAG" --draft=false
+          gh release edit "$TAG" --draft=false --repo "$REPO"
