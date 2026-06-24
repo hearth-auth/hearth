@@ -133,4 +133,22 @@ describe("IntrospectionClient", () => {
     const body = spy.mock.calls[0][1]?.body;
     expect(String(body)).toContain("token_type_hint=refresh_token");
   });
+
+  it("parses permissions, roles, and groups arrays from active token response", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        active: true,
+        sub: "user1",
+        permissions: ["docs.read", "docs.write", 42],
+        roles: ["admin", null],
+        groups: ["eng"],
+      }),
+    } as Response);
+    const result = await makeClient().introspect("tok");
+    expect(result.active).toBe(true);
+    expect(result.permissions).toEqual(["docs.read", "docs.write"]);
+    expect(result.roles).toEqual(["admin"]);
+    expect(result.groups).toEqual(["eng"]);
+  });
 });
