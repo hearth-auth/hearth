@@ -233,16 +233,25 @@ jobs:
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         continue-on-error: true
         with:
-          # HEA-690: osv-scanner.toml at repo root scopes scanning to
-          # production lockfiles only — examples/** and tests/ui/** lockfiles
-          # are excluded via [[PackageOverrides]]. Production SDKs
-          # (sdks/<lang>/*) and root Cargo.lock remain in scope.
+          # HEA-1523: Explicit lockfile list instead of --recursive so examples/**
+          # and tests/ui/** are never scanned. The [[PackageOverrides]] `group`
+          # field is a lockfile-internal group name, NOT a path glob, so the
+          # previous `group = "examples/**"` override was silently ignored.
+          # Production scope: root Cargo.lock, fuzz harness, all SDK lockfiles,
+          # root pnpm-lock.yaml (UI tooling), docs-site/package-lock.json.
           scan-args: |-
             --config=osv-scanner.toml
-            --recursive
+            --lockfile=Cargo.lock
+            --lockfile=fuzz/Cargo.lock
+            --lockfile=pnpm-lock.yaml
+            --lockfile=docs-site/package-lock.json
+            --lockfile=sdks/go/go.mod
+            --lockfile=sdks/node/package-lock.json
+            --lockfile=sdks/php/composer.lock
+            --lockfile=sdks/rust/Cargo.lock
+            --lockfile=sdks/typescript/package-lock.json
             --format=sarif
             --output-file=osv.sarif
-            ./
 
       - name: Upload OSV SARIF to GitHub Code Scanning
         if: always() && hashFiles('osv.sarif') != ''
