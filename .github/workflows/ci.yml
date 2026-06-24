@@ -67,7 +67,7 @@ jobs:
 
       - name: Compute changed paths
         id: filter
-        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
         with:
           # `predicate-quantifier: every` is the default — a filter matches
           # if any one of its patterns matches a changed file.
@@ -383,7 +383,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["18", "20", "22"]
+        node-version: ["20", "22"]
 
     steps:
       - name: Checkout

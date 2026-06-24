@@ -56,7 +56,8 @@ sdks/go/bin/
 .env.*
 *.env
 hearth.yaml
-hearth.example.yaml
+# hearth.example.yaml is NOT excluded — embedded at compile time via
+# include_str!() in src/ and must remain in the Docker build context.
 
 # Local runtime state — never ship a dev data dir into the image
 data/

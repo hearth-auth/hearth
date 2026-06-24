@@ -46,6 +46,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   now carry PKCE parameters. Required to complete the authorization-code flow, which the server
   mandates for public clients (RFC 9700 §2.1.1).
 
+### Security
+
+- **`quinn-proto` bumped to 0.11.15 (RUSTSEC-2026-0185)** — `quinn-proto@0.11.14` carried a
+  high-severity advisory (CVSS 7.5). Bumped to 0.11.15 across `Cargo.lock`, `fuzz/Cargo.lock`,
+  and `sdks/rust/Cargo.lock` via `cargo update -p quinn-proto` (HEA-1510).
+- **`memmap2` bumped to 0.9.11 (RUSTSEC-2026-0186)** — `memmap2@0.9.10` was flagged by an
+  upstream security advisory. Hearth's storage engine uses memmap2 for SST/hot-tier reads.
+  Bumped to 0.9.11 in `Cargo.lock` and `fuzz/Cargo.lock` (HEA-1510).
+- **Go SDK toolchain pinned to 1.26.3** — `sdks/go/go.mod` `go` directive raised from
+  `1.26.2` → `1.26.3` with an explicit `toolchain go1.26.3` line, addressing Go stdlib CVEs
+  (net/mail, net/http, net/url, html/template et al.) fixed in Go 1.26.3 (HEA-1511).
+
 ### Fixed
 - **Go SDK module path corrected** — `go.mod` now declares `module github.com/hearth-auth/hearth/sdks/go`,
   matching the published repository URL. The previous path (`github.com/anthropics/hearth/sdks/go`)

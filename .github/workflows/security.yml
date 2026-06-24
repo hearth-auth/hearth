@@ -55,6 +55,8 @@ on:
       - "CHANGELOG.md"
   schedule:
     - cron: "0 6 * * 1"  # Weekly Monday 06:00 UTC
+  # Allow manual re-runs to verify alert state after config changes (HEA-1523)
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -107,7 +109,7 @@ jobs:
           components: ""
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           languages: ${{ matrix.language }}
           # HEA-690: effective for interpreted legs (JS/TS, Python) only.
@@ -151,7 +153,7 @@ jobs:
 
       - name: Autobuild
         if: matrix.build-mode == 'autobuild'
-        uses: github/codeql-action/autobuild@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
+        uses: github/codeql-action/autobuild@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
 
       - name: Free disk space for Rust CodeQL build
         if: matrix.language == 'rust'
@@ -169,7 +171,7 @@ jobs:
         run: cargo build --workspace --all-features --locked
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@28deaeda66b76a05916b6923827895f2b14ab387 # v3.28.16
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           category: "/language:${{ matrix.language }}"
 
@@ -191,7 +193,7 @@ jobs:
           persist-credentials: false
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8 # v0.29.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.29.0
         with:
           scan-type: fs
           scan-ref: .
@@ -205,7 +207,7 @@ jobs:
 
       - name: Upload Trivy SARIF to GitHub Code Scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: trivy.sarif
           category: trivy
@@ -244,7 +246,7 @@ jobs:
 
       - name: Upload OSV SARIF to GitHub Code Scanning
         if: always() && hashFiles('osv.sarif') != ''
-        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: osv.sarif
           category: osv-scanner

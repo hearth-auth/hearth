@@ -69,6 +69,10 @@ COPY templates ./templates
 # .dockerignore un-excludes them from the docs/ exclusion rule.
 COPY docs/api/openapi.json docs/api/openapi.supplement.yaml docs/api/
 COPY benches ./benches
+# hearth.example.yaml is embedded at compile time via include_str!() in src/ —
+# must be in the build context. Unlike hearth.yaml (runtime secrets), the
+# example config contains no credentials and is safe to include.
+COPY hearth.example.yaml ./
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
