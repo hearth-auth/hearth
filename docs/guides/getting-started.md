@@ -11,7 +11,7 @@
 Run Hearth in dev mode with a single Docker command:
 
 ```bash
-docker run --rm -p 8420:8420 ghcr.io/hearth-rs/hearth:latest serve --dev --bind 0.0.0.0
+docker run --rm -p 8420:8420 ghcr.io/hearth-auth/hearth:latest serve --dev --bind 0.0.0.0
 ```
 
 `--dev` uses in-memory storage, enables the bootstrap endpoint, and starts the built-in **mailcatcher** (captured email visible at `http://127.0.0.1:8420/dev/mail`). **Data does not persist across container restarts.** `--bind 0.0.0.0` makes the process reachable through Docker's port mapping.

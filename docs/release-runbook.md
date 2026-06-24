@@ -10,7 +10,7 @@ PR merged to main (or 1.x / 2.x)
   └─▶ semantic-release.yml
         │  (multi-semantic-release — one run, all packages)
         │
-        ├─▶ server root  → tag v0.1.0      ─▶ release.yml   (binaries, SBOM, SLSA)
+        ├─▶ server root  → tag v1.1.0      ─▶ release.yml   (binaries, SBOM, SLSA)
         │                                  ─▶ helm.yml      (Helm OCI chart)
         ├─▶ sdks/node    → tag sdk-node-v0.0.1 ─▶ sdk-publish-node.yml
         ├─▶ sdks/typescript → tag sdk-ts-v0.0.1 ─▶ sdk-publish-typescript.yml
