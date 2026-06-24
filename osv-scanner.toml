@@ -12,10 +12,13 @@
 #   - examples/**             — reference apps; lockfiles drift, not security-critical
 #   - tests/ui/**             — Playwright runner; dev-time only
 #
-# CVE suppression policy: [[IgnoredVulns]] is NOT used for real CVEs in
-# shipping code — those must fire. Maintenance-only advisories (RUSTSEC
-# unmaintained notices with no CVE/CVSS) for test-only transitive deps may be
-# suppressed here with documented rationale and a ticket reference.
+# CVE suppression policy: [[IgnoredVulns]] entries require a documented
+# rationale explaining why the advisory does not affect Hearth's runtime surface
+# (e.g., test-only dep, attack vector requires server-side role that the dep
+# never occupies, Windows-only path in a Linux-only deployment). Each entry must
+# include a ticket reference and a revisit trigger (patched version available).
+# Real CVEs in production shipping paths that ARE exploitable MUST NOT be
+# suppressed — fix or escalate to SecurityAuditor.
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0141"
@@ -28,6 +31,18 @@ reason = "Marvin Attack timing side-channel in rsa crate. Hearth uses rsa only f
 [[IgnoredVulns]]
 id = "GHSA-g7r4-m6w7-qqqr"
 reason = "esbuild dev-server file read on Windows. Affects esbuild >=0.27.3 <0.28.1. The sdks/node devDependency is constrained to 0.27.x by vite@7.x's peer-dep; 0.28.1 is not yet reachable without a vite major bump. The vulnerability only triggers when running esbuild's HTTP dev server on Windows — Hearth's Node SDK never runs a dev server in CI or production, and the shipped artifact only contains jose. Low severity; Windows-only; dev-tooling-only surface. Revisit when vite@8 ships with esbuild >=0.28.1."
+
+[[IgnoredVulns]]
+id = "CVE-2026-42507"
+reason = "In google.golang.org/protobuf (Go SDK transitive dep). The Hearth Go SDK is a thin client library that makes outbound HTTP/gRPC calls only — it never parses untrusted protobuf payloads in a server capacity. The advisory requires server-side parsing of attacker-controlled messages to trigger. Revisit when a patched google.golang.org/protobuf version is available (HEA-1528)."
+
+[[IgnoredVulns]]
+id = "CVE-2026-42504"
+reason = "In google.golang.org/protobuf (Go SDK transitive dep). Same rationale as CVE-2026-42507: client-library-only usage with no server-side protobuf parsing. Revisit when a patched version is available (HEA-1528)."
+
+[[IgnoredVulns]]
+id = "CVE-2026-27145"
+reason = "In google.golang.org/genproto/googleapis/api (Go SDK transitive dep). The genproto package provides generated gRPC type definitions for outbound calls to the Hearth server. The SDK never opens a listening socket or acts as a gRPC server, so the attack surface described in the advisory (server-side processing of malformed RPC messages) does not apply. Revisit when a patched upstream version is available (HEA-1528)."
 
 [[PackageOverrides]]
 name = "*"

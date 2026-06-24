@@ -32,11 +32,9 @@ on:
       - "1.x"
       - "2.x"
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  id-token: write
+# Deny all permissions at the workflow level; each job grants only what it needs.
+# (Scorecard TokenPermissions check requires per-job scoping for write grants.)
+permissions: {}
 
 concurrency:
   group: semantic-release-${{ github.ref }}
@@ -47,6 +45,11 @@ jobs:
     name: release ${{ matrix.pkg }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write       # push sdk-<lang>-v* tags
+      issues: write         # semantic-release release notes
+      pull-requests: write  # semantic-release PR decoration
+      id-token: write       # OIDC token for sigstore/attestation (future use)
     strategy:
       fail-fast: false
       matrix:
@@ -90,6 +93,11 @@ jobs:
     name: release server
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write       # push v* tag that triggers docker.yml + helm.yml + release.yml
+      issues: write         # semantic-release release notes
+      pull-requests: write  # semantic-release PR decoration
+      id-token: write       # OIDC token for sigstore/attestation (future use)
     steps:
       # Fetch full history so semantic-release can walk all commits.
       # Use the PAT so the pushed v* tag triggers docker.yml, helm.yml, release.yml.
