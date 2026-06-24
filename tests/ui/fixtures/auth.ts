@@ -77,13 +77,30 @@ export async function setupAdminAuth(): Promise<void> {
   await page.fill('input[name="password"]', ADMIN_PASSWORD);
 
   await Promise.all([
-    // Exclude the login page itself — resolves only on a successful post-login redirect.
-    page.waitForURL((url) => !url.pathname.includes('/login'), { timeout: 15_000 }),
+    // Wait for a successful post-login redirect to /ui (the admin dashboard area).
+    // Using a positive match avoids accidentally resolving on /required-action,
+    // /mfa-enroll-required, or /ui/setup/sent — all of which are non-/login URLs
+    // but do NOT carry a hearth_ui_session cookie.
+    page.waitForURL((url) => url.pathname.startsWith('/ui') && !url.pathname.includes('/login') && !url.pathname.includes('/setup') && !url.pathname.includes('/required-action') && !url.pathname.includes('/mfa'), { timeout: 15_000 }),
     page.click('button[type="submit"]'),
   ]);
 
+  const finalUrl = page.url();
+  console.log(`[setupAdminAuth] post-login URL: ${finalUrl}`);
+
   await context.storageState({ path: path.join(AUTH_DIR, 'admin.json') });
   await browser.close();
+
+  // Verify the session cookie was actually issued.
+  const savedState = JSON.parse(fs.readFileSync(path.join(AUTH_DIR, 'admin.json'), 'utf-8')) as { cookies: Array<{name: string}> };
+  const hasSession = savedState.cookies.some((c) => c.name === 'hearth_ui_session');
+  if (!hasSession) {
+    throw new Error(
+      `[setupAdminAuth] admin login succeeded (landed at ${finalUrl}) but ` +
+      `no hearth_ui_session cookie was issued. Check server logs for session creation errors.`,
+    );
+  }
+  console.log(`[setupAdminAuth] session cookie present — admin.json is valid`);
 }
 
 /**
