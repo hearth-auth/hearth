@@ -7,8 +7,12 @@ Go client for the [Hearth](https://github.com/hearth-auth/hearth) identity API.
 ## Installation
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go
+go get github.com/hearth-auth/hearth/sdks/go@v1.0.0
 ```
+
+| SDK version | Minimum Hearth server |
+|-------------|----------------------|
+| 1.0.x       | 1.0.0                |
 
 ## Quick start
 

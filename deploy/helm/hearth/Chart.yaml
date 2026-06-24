@@ -9,9 +9,9 @@ keywords:
   - auth
   - oidc
   - oauth2
-home: https://github.com/hearth-rs/hearth
+home: https://github.com/hearth-auth/hearth
 sources:
-  - https://github.com/hearth-rs/hearth
+  - https://github.com/hearth-auth/hearth
 maintainers:
   - name: Hearth maintainers
-    url: https://github.com/hearth-rs/hearth
+    url: https://github.com/hearth-auth/hearth

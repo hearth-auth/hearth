@@ -12,7 +12,7 @@
 
 # -- Image -----------------------------------------------------------------------
 image:
-  repository: ghcr.io/hearth-rs/hearth
+  repository: ghcr.io/hearth-auth/hearth
   pullPolicy: IfNotPresent
   tag: ""          # defaults to Chart.yaml appVersion; pin to a release tag in production
 

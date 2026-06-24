@@ -1,4 +1,4 @@
-[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) ![pre-1.0](https://img.shields.io/badge/status-pre--1.0-yellow)
+[![CI](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml/badge.svg)](https://github.com/hearth-auth/hearth/actions/workflows/ci.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hearth-auth/hearth/badge)](https://scorecard.dev/viewer/?uri=github.com/hearth-auth/hearth) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0) [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) ![v1.0.0](https://img.shields.io/badge/status-v1.0.0-brightgreen)
 
 # Hearth — a purpose-built identity database
 
@@ -12,7 +12,80 @@ Every other identity provider is an application sitting on top of a generic data
 
 Token validation, session lookup, and permission checks run in-process against memory-mapped structures — no network hop, no cache round-trip, no database query on the hot path. Deploy as a single static binary with one config file and a data directory. No Postgres to provision, no Redis to invalidate, no policy service to operate.
 
-> **Pre-1.0:** APIs and on-disk formats may change before 1.0.
+> **Stable 1.0.0:** APIs and on-disk formats are stable. See [CHANGELOG](CHANGELOG.md) for the full release history.
+
+---
+
+## Install
+
+Download pre-built 1.0.0 artifacts from the [Releases page](https://github.com/hearth-auth/hearth/releases/tag/v1.0.0), or use Docker or Helm.
+
+### Released binary — Linux / macOS
+
+```bash
+# Example: Linux x86_64. Swap the filename for your platform:
+#   hearth-linux-amd64 | hearth-linux-arm64
+#   hearth-darwin-amd64 | hearth-darwin-arm64
+ARTIFACT=hearth-linux-amd64
+
+curl -LO "https://github.com/hearth-auth/hearth/releases/download/v1.0.0/${ARTIFACT}"
+curl -LO https://github.com/hearth-auth/hearth/releases/download/v1.0.0/SHA256SUMS
+
+# Verify the checksum
+sha256sum -c SHA256SUMS --ignore-missing
+
+chmod +x "${ARTIFACT}"
+"./${ARTIFACT}" --version
+```
+
+### Released binary — Windows
+
+```powershell
+Invoke-WebRequest `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.0.0/hearth-windows-amd64.exe" `
+  -OutFile hearth-windows-amd64.exe
+Invoke-WebRequest `
+  -Uri "https://github.com/hearth-auth/hearth/releases/download/v1.0.0/SHA256SUMS" `
+  -OutFile SHA256SUMS
+
+# Verify the checksum
+$expected = (Select-String 'hearth-windows-amd64.exe' SHA256SUMS).Line.Split(' ')[0]
+$actual   = (Get-FileHash hearth-windows-amd64.exe -Algorithm SHA256).Hash.ToLower()
+if ($expected -eq $actual) { "OK" } else { throw "CHECKSUM MISMATCH" }
+
+.\hearth-windows-amd64.exe --version
+```
+
+### Docker — multi-arch (linux/amd64 + linux/arm64)
+
+```bash
+docker pull ghcr.io/hearth-auth/hearth:v1.0.0
+
+# Dev mode — in-memory store, no data persistence
+docker run --rm -p 8420:8420 ghcr.io/hearth-auth/hearth:v1.0.0 serve --dev --bind 0.0.0.0
+curl -fsS http://127.0.0.1:8420/health   # → {"status":"ok"}
+```
+
+### Helm OCI chart (signed)
+
+```bash
+helm install hearth oci://ghcr.io/hearth-auth/charts/hearth \
+  --version 1.0.0 \
+  --namespace auth \
+  --create-namespace
+```
+
+The chart is cosign-signed (keyless OIDC). To verify:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp \
+    '^https://github\.com/hearth-auth/hearth/\.github/workflows/helm\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/hearth-auth/charts/hearth:1.0.0
+```
+
+For signature and SLSA provenance verification of binaries, see [docs/guides/verify-release.md](docs/guides/verify-release.md). For production deployment (systemd, Docker Compose, Kubernetes), see [`deploy/README.md`](deploy/README.md).
 
 ---
 

@@ -10,7 +10,10 @@ Every Hearth release ships four artefacts per platform plus a CycloneDX SBOM:
 | `hearth-sbom.cdx.json` | CycloneDX SBOM (JSON) |
 | `hearth-sbom.cdx.json.sig` | cosign signature for the SBOM |
 | `hearth-sbom.cdx.json.pem` | Certificate for the SBOM signature |
-| `hearth.intoto.jsonl` | SLSA L1 provenance document |
+| `SHA256SUMS` | SHA-256 checksums for all binaries, the SBOM, and the manifest itself |
+| `SHA256SUMS.sig` | cosign detached signature for SHA256SUMS |
+| `SHA256SUMS.pem` | Certificate for the SHA256SUMS signature |
+| `multiple.intoto.jsonl` | SLSA L1 provenance document (covers all binaries and the SBOM) |
 
 All signing is **keyless** — there is no long-lived private key. Each binary receives a short-lived X.509 certificate issued by [Sigstore Fulcio](https://docs.sigstore.dev/certificate_authority/overview/) bound to the GitHub Actions workflow that produced it. The certificate is logged to [Sigstore Rekor](https://docs.sigstore.dev/logging/overview/) (public, append-only transparency log).
 
@@ -38,7 +41,7 @@ brew install slsa-verifier
 Download the binary, its `.sig`, and its `.pem` from the [GitHub Releases page](https://github.com/hearth-auth/hearth/releases), then run:
 
 ```bash
-VERSION=v0.1.0   # replace with the release tag
+VERSION=v1.0.0   # replace with the release tag
 ARTIFACT=hearth-linux-amd64   # replace with your target
 
 cosign verify-blob \
@@ -59,6 +62,27 @@ Verified OK
 
 If verification fails, do not run the binary.
 
+## Verify the checksum manifest
+
+`SHA256SUMS` is itself cosign-signed, so you can confirm it was not tampered with after the build:
+
+```bash
+cosign verify-blob \
+  --certificate         SHA256SUMS.pem \
+  --signature           SHA256SUMS.sig \
+  --certificate-identity-regexp \
+    '^https://github\.com/hearth-auth/hearth/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$' \
+  --certificate-oidc-issuer \
+    'https://token.actions.githubusercontent.com' \
+  SHA256SUMS
+```
+
+Once verified, check your binary or SBOM against it:
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
 ## Verify the SBOM
 
 ```bash
@@ -74,11 +98,11 @@ cosign verify-blob \
 
 ## Verify SLSA L1 provenance
 
-Download `hearth.intoto.jsonl` from the release assets, then:
+Download `multiple.intoto.jsonl` from the release assets, then:
 
 ```bash
 slsa-verifier verify-artifact \
-  --provenance-path hearth.intoto.jsonl \
+  --provenance-path multiple.intoto.jsonl \
   --source-uri     github.com/hearth-auth/hearth \
   --source-tag     "$VERSION" \
   "${ARTIFACT}"
@@ -98,7 +122,7 @@ openssl x509 -in "${ARTIFACT}.pem" -noout -text \
 You should see a URI extension containing the full workflow path, for example:
 
 ```
-URI:https://github.com/hearth-auth/hearth/.github/workflows/release.yml@refs/tags/v0.1.0
+URI:https://github.com/hearth-auth/hearth/.github/workflows/release.yml@refs/tags/v1.0.0
 ```
 
 ## Inspect the transparency log entry

@@ -31,8 +31,12 @@ Official PHP SDK for [Hearth](https://github.com/hearth-auth/hearth) — a singl
 ## Installation
 
 ```bash
-composer require hearth-auth/php-sdk
+composer require hearth-auth/php-sdk:^1.0
 ```
+
+| SDK version | Minimum PHP | Minimum Hearth server |
+|-------------|-------------|----------------------|
+| 1.0.x       | 8.1         | 1.0.0                |
 
 For Laravel, also install the framework adapter dependencies (if not already present):
 

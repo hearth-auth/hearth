@@ -266,6 +266,6 @@ dev bootstrap flow — all runnable with `go run .`.
 
 ## Next steps
 
-- [RBAC guide](../rbac.md) — roles, groups, permissions, and JWT claim structure
-- [Admin API guide](../admin-api.md) — managing users and clients programmatically
+- [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
+- [Admin API guide](/docs/admin-api) — managing users and clients programmatically
 - [Go type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/go/README.md) — full type list

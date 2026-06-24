@@ -250,6 +250,6 @@ hooks — all runnable with `npm run dev`.
 
 ## Next steps
 
-- [RBAC guide](../rbac.md) — roles, groups, permissions, and JWT claim structure
-- [Admin API guide](../admin-api.md) — managing users and clients programmatically
+- [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
+- [Admin API guide](/docs/admin-api) — managing users and clients programmatically
 - [TypeScript type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/typescript/README.md) — full interface list
