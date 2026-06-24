@@ -4,7 +4,7 @@
 
 # -- Image ----------------------------------------------------------------------
 image:
-  repository: ghcr.io/hearth-rs/hearth
+  repository: ghcr.io/hearth-auth/hearth
   pullPolicy: IfNotPresent
   # Defaults to appVersion from Chart.yaml
   tag: ""

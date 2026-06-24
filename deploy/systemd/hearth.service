@@ -1,6 +1,6 @@
 [Unit]
 Description=Hearth — single-binary identity database
-Documentation=https://github.com/hearth-rs/hearth
+Documentation=https://github.com/hearth-auth/hearth
 After=network-online.target
 Wants=network-online.target
 # Restart the service when it exits. Combine with RestartSec so that a

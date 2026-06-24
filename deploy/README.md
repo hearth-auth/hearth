@@ -12,10 +12,10 @@ This directory contains ready-to-use deployment artifacts for three environments
 
 ## Prerequisites
 
-All methods share the same binary. Download from [GitHub Releases](https://github.com/hearth-rs/hearth/releases) or use the Docker image:
+All methods share the same binary. Download from [GitHub Releases](https://github.com/hearth-auth/hearth/releases) or use the Docker image:
 
 ```
-ghcr.io/hearth-rs/hearth:latest
+ghcr.io/hearth-auth/hearth:latest
 ```
 
 ---
@@ -234,7 +234,7 @@ automatically triggers a new rollout.
 
 | Key | Default | Description |
 |---|---|---|
-| `image.repository` | `ghcr.io/hearth-rs/hearth` | Image repository |
+| `image.repository` | `ghcr.io/hearth-auth/hearth` | Image repository |
 | `image.tag` | Chart `appVersion` | Image tag |
 | `replicaCount` | `1` | Pod count (see note on stateful scaling) |
 | `persistence.enabled` | `true` | Enable PVC for data |
