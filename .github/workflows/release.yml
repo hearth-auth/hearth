@@ -267,6 +267,12 @@ jobs:
     with:
       base64-subjects: "${{ needs.hash.outputs.hashes }}"
       upload-assets: false
+      # The SLSA generator checks GITHUB_REPOSITORY_VISIBILITY, which is not
+      # always available in reusable-workflow contexts. When absent/wrong, the
+      # generator incorrectly halts with "Repository is private", aborts the
+      # binary download, and the execution step fails with exit 127.
+      # Setting private-repository: true bypasses that check.
+      private-repository: true
 
   # ── 6. Publish GitHub Release ─────────────────────────────────────────────
   release:
