@@ -10,14 +10,14 @@ description: Side-by-side recipe for moving from Keycloak to Hearth — data exp
 This guide is a side-by-side recipe for teams moving from Keycloak to Hearth.
 It covers data migration, SDK swap, and authorization model translation.
 
-> **Version context:** This guide was written against Keycloak 24.x and the
-> current Hearth main branch (May 2025). Verify claim names against your
-> specific Keycloak configuration.
+> **Version context:** This guide was written against Keycloak 24.x and
+> Hearth 1.0.0. Verify claim names against your specific Keycloak
+> configuration.
 
 > **Operator migration guide:** For the full `hearth migrate keycloak` CLI
 > walkthrough, data directory setup, post-migration checklist, and detailed
 > migration gap rationale, see the
-> [Migrating from Keycloak operator guide](../../docs/guides/migrating-from-keycloak.md).
+> [Migrating from Keycloak operator guide](/docs/migrating-from-keycloak).
 
 ## Concept mapping
 
@@ -112,7 +112,7 @@ next-login step. Handle each action type:
 | `TERMS_AND_CONDITIONS` | No equivalent; implement acceptance tracking in your application layer |
 
 > For full gap rationale and step-by-step workarounds, see the
-> [Operator migration guide — Migration gaps](../../docs/guides/migrating-from-keycloak.md#migration-gaps).
+> [Operator migration guide — Migration gaps](/docs/migrating-from-keycloak#migration-gaps).
 
 ## Step 3 — Update your application code
 
@@ -286,7 +286,7 @@ Hearth's admin UI and update your application's `HEARTH_CLIENT_SECRET`.
 
 ## Further reading
 
-- [Operator migration guide](../../docs/guides/migrating-from-keycloak.md) — full CLI walkthrough, post-migration checklist, and migration gap details
-- [RBAC guide](../rbac.md) — Hearth role/permission model in depth
+- [Operator migration guide](/docs/migrating-from-keycloak) — full CLI walkthrough, post-migration checklist, and migration gap details
+- [RBAC guide](/docs/rbac) — Hearth role/permission model in depth
 - [TypeScript SDK quickstart](./typescript.md)
 - [Go SDK quickstart](./go.md)

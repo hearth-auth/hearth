@@ -25,10 +25,12 @@ const sidebars = {
       label: 'Identity & Auth',
       items: [
         'rbac',
+        'permission-delivery',
         'client-scoped-roles',
         'organizations',
         'required-actions',
         'sms-mfa-deployment',
+        'session-version-revocation',
         'webhooks',
         'federation',
         'scim-provisioning',
@@ -36,14 +38,25 @@ const sidebars = {
     },
     {
       type: 'category',
+      label: 'Security',
+      items: [
+        'security-model',
+        'fapi2',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Operations',
       items: [
         'admin-api',
+        'api-reference',
         'auditing',
         'backup',
         'clustering',
         'storage-sizing',
         'security-hardening',
+        'data-retention',
+        'privacy',
         'troubleshooting',
         'disaster-recovery',
         'verify-release',
