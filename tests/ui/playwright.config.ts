@@ -13,6 +13,8 @@ export default defineConfig({
     headless: true,
     screenshot: 'only-on-failure',
     video: 'off',
+    // Allow self-signed certs in the HTTPS CI leg (https-tls-chromium matrix).
+    ignoreHTTPSErrors: true,
     // NixOS: point at the nixpkgs chromium binary via CHROMIUM_EXECUTABLE_PATH
     // (set automatically by tests/ui/shell.nix). Ignored when unset.
     launchOptions: {
