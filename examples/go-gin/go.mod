@@ -1,6 +1,6 @@
 module github.com/hearth-auth/hearth/examples/go-gin
 
-go 1.26.2
+go 1.26.4
 
 require (
 	github.com/hearth-auth/hearth/sdks/go v0.0.0
