@@ -51,6 +51,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   matching the published repository URL. The previous path (`github.com/anthropics/hearth/sdks/go`)
   caused `go get` to fail with a 404 (HEA-1479).
 
+### Security
+- **`memmap2` bumped to 0.9.11** — resolves RUSTSEC-2026-0186 (unsound pointer offset in
+  `[unchecked_]advise_range()` and `flush[_async]_range()`); 0.9.11 adds bounds validation
+  before the `madvise`/`msync` syscalls, eliminating the UB path (HEA-1520).
+
 ## [1.0.0] — 2026-06-21
 
 ### Security
