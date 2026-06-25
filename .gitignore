@@ -73,3 +73,7 @@ go-gin
 *.cache
 
 .claude/scheduled_tasks.lock
+
+build
+**/.gradle/*
+__pycache__

@@ -62,6 +62,22 @@ SDKs must parse OKP JWKs that omit `y`. Parsers that assume `y` is always presen
 
 **Rejected tokens must return a typed error** (see Section 5), not a bare string or generic exception.
 
+**`verifyToken()` — required in every SDK, no per-language exception ([HEA-1553](/HEA/issues/HEA-1553) §7.1):**
+
+Every SDK MUST expose a `verifyToken()` method — or the language-idiomatic equivalent (`VerifyToken` in Go, `verify_token` in Python/Rust/Kotlin) — with the following contract:
+
+```
+verifyToken(token: string) → Claims
+```
+
+- MUST execute all five JWT validation steps above, in order.
+- MUST use JWKS-based Ed25519/EdDSA local signature verification. An introspection-only path does not satisfy this requirement.
+- MUST return a typed `Claims` object on success (see §4).
+- MUST return a typed error from §5 on any validation failure — never a bare string or generic exception.
+- MUST NOT silently fall back to introspection or skip signature verification on any recoverable error.
+
+**No per-language or per-platform exception applies.** Go, Python, Rust, Kotlin, PHP, and all future language SDKs must implement full EdDSA JWKS-based local verification. If a language's standard library does not include an Ed25519 verifier, the SDK MUST declare a dependency on a reputable Ed25519 library (e.g., `golang.org/x/crypto` for Go; `PyNaCl` or `cryptography` for Python; `ring` or `ed25519-dalek` for Rust; `tink` or `bouncycastle` for Kotlin/Java). Delegating signature verification to a reverse-proxy header, gateway, or remote service is non-conformant.
+
 ---
 
 ## 3. Token Introspection
@@ -174,6 +190,129 @@ The following non-standard claims are embedded in every Hearth-issued JWT. SDKs 
 | `tid` | `string` | Realm / tenant ID (matches the realm's `RealmId`) |
 | `sid` | `string` | Session ID — present on access tokens tied to an interactive session |
 | `token_type` | `string` | Token purpose: `"access"`, `"refresh"`, or `"required_action"` |
+
+---
+
+## 4.5 Required OAuth Flows
+
+**Board decision ([HEA-1553](/HEA/issues/HEA-1553) §7.2):** Client-credentials, device authorization, and magic-link initiation are canonical required flows. Every Hearth SDK MUST implement all three. These are not optional extensions and are not browser-only: all server-side, CLI, and language SDKs must expose them.
+
+> All endpoint URLs MUST be discovered from `{issuer_url}/.well-known/openid-configuration` on first use. Hard-coded paths are prohibited (see §1).
+
+### 4.5.1 Client Credentials Grant (RFC 6749 §4.4)
+
+Required for machine-to-machine (M2M) authentication: services, daemons, and admin tooling acting as their own principal.
+
+**Required method:**
+
+```
+clientCredentials(scope?: string) → TokenResponse
+```
+
+`TokenResponse` must expose:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `access_token` | string | The issued access token |
+| `token_type` | string | `"Bearer"` or `"DPoP"` when DPoP is active |
+| `expires_in` | int | Seconds until expiry |
+| `scope` | string | Granted scope (may differ from requested) |
+
+- MUST send `client_id` and `client_secret` as `application/x-www-form-urlencoded` body fields (RFC 6749 §2.3.1). Sending credentials as query parameters is explicitly prohibited.
+- MUST discover the token endpoint (`token_endpoint`) from the OIDC discovery document.
+
+**Example** (token endpoint path discovered from `/.well-known/openid-configuration`):
+
+```bash
+curl -s -X POST https://auth.example.com/realms/my-realm/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=<your-client-id>" \
+  -d "client_secret=<your-client-secret>" \
+  -d "scope=read:users"
+# → {"access_token":"eyJ...","token_type":"Bearer","expires_in":3600,"scope":"read:users"}
+```
+
+### 4.5.2 Device Authorization Flow (RFC 8628)
+
+Required for devices and CLI tools with limited input capability (headless servers, CI pipelines, IoT devices).
+
+**Required methods:**
+
+```
+startDeviceFlow(scope?: string) → DeviceAuthorizationResponse
+pollDeviceToken(deviceCode: string, interval: int) → TokenResponse
+```
+
+`DeviceAuthorizationResponse` must expose:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `device_code` | string | Opaque code passed to `pollDeviceToken` |
+| `user_code` | string | Short code the user enters at `verification_uri` |
+| `verification_uri` | string | URL the user visits to authorize |
+| `verification_uri_complete` | string | `verification_uri` with `user_code` pre-filled (when provided by server) |
+| `expires_in` | int | Seconds until device code expires |
+| `interval` | int | Minimum polling interval in seconds |
+
+`pollDeviceToken` MUST:
+- Respect the server's `interval` value (RFC 8628 §3.5 default: 5 s).
+- Handle `authorization_pending` by continuing to poll without surfacing an error to the caller.
+- Handle `slow_down` by increasing the polling interval by 5 s per occurrence and continuing to poll.
+- Raise `TokenExpiredError` when the device code expires (`expired_token` error response).
+
+**Example — initiate** (endpoint path from `device_authorization_endpoint` in discovery):
+
+```bash
+curl -s -X POST https://auth.example.com/realms/my-realm/device/authorize \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "client_id=<your-client-id>" \
+  -d "scope=openid profile"
+# → {"device_code":"GmRh...","user_code":"WDJB-MJHT",
+#    "verification_uri":"https://auth.example.com/realms/my-realm/activate",
+#    "expires_in":600,"interval":5}
+```
+
+**Example — poll** (token endpoint path from `token_endpoint` in discovery):
+
+```bash
+curl -s -X POST https://auth.example.com/realms/my-realm/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+  -d "device_code=<device_code>" \
+  -d "client_id=<your-client-id>"
+# User approved → {"access_token":"eyJ...","token_type":"Bearer","expires_in":900}
+# Still waiting → {"error":"authorization_pending"}
+# Polling too fast → {"error":"slow_down"}
+```
+
+### 4.5.3 Magic-Link Initiation (Passwordless)
+
+Required for passwordless authentication flows where a user authenticates by clicking a single-use link delivered by email.
+
+**Required method:**
+
+```
+requestMagicLink(email: string) → void
+```
+
+- MUST call `POST /v1/{realm}/auth/magic-link` with a JSON body `{"email": "<address>"}`, where `{realm}` is the realm's slug extracted from `issuer_url`.
+- MUST accept any 202 response as success without surfacing additional detail.
+- MUST NOT raise a "user not found" or equivalent error when the email is unrecognized. The server always returns `202 Accepted` regardless of whether the email is registered (enumeration resistance); the SDK must pass this behavior through unchanged.
+- MUST surface HTTP 429 (`Too Many Requests`) as a typed rate-limit error.
+
+The magic-link endpoint is a Hearth-specific endpoint and is **not** advertised in the OIDC discovery document. The SDK derives the path using the realm slug from `issuer_url`: `POST {base_url}/v1/{realm_slug}/auth/magic-link`.
+
+After the SDK method returns, authentication completes entirely in the user's browser. Hearth validates the token when the user clicks the link and establishes a session cookie — no further API call is required from the SDK.
+
+**Example:**
+
+```bash
+curl -s -X POST https://auth.example.com/v1/my-realm/auth/magic-link \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}'
+# Always → 202 Accepted: {"message":"If an account exists, a magic link has been sent"}
+```
 
 ---
 
@@ -378,6 +517,11 @@ For use in PR reviews and automated CI checks (see `.github/workflows/sdk-confor
 - [ ] Ed25519/OKP JWKS key parsing: SDK correctly parses OKP keys (`kty: "OKP"`, `crv: "Ed25519"`) from the JWKS endpoint; does not require a `y` coordinate; does not error on unrecognized `kty` values (Section 2)
 - [ ] Admin SDK entry-point pattern: `AdminClient` is a separate type from `HearthClient`; takes `(base_url, realm_id, access_token)` directly (no OIDC discovery); sends `X-Realm-ID` header on every request; implements minimum CRUD + list for users, realms, clients, roles, groups, and org memberships (Section 12)
 - [ ] Agent auth section present in README: covers agent CRUD (`/v1/agents`), API-key issuance, DPoP proof construction (RFC 9449), RFC 8693 token exchange, AAT issuance/derivation (`/v1/aats`), transaction token lifecycle (`/v1/transaction-tokens`), and draft-tracking owner reference (Section 13)
+- [ ] `verifyToken()` (or language-idiomatic equivalent `VerifyToken` / `verify_token`) present in every SDK: performs full Ed25519/EdDSA JWKS signature verification locally; returns typed `Claims` on success; returns typed §5 error on failure; does not delegate to introspection-only or reverse-proxy verification (§2)
+- [ ] No per-language EdDSA exception: SDK declares an Ed25519 library dependency rather than skipping or proxying local signature verification; verification works without a running proxy or gateway (§2)
+- [ ] Client credentials grant present: `clientCredentials()` (or equivalent) sends `client_id` and `client_secret` as POST body fields (`application/x-www-form-urlencoded`); discovers token endpoint from OIDC discovery document; does not send credentials as query parameters (§4.5.1)
+- [ ] Device authorization flow present: `startDeviceFlow()` (or equivalent) calls discovered `device_authorization_endpoint`; `pollDeviceToken()` respects server `interval`; `authorization_pending` handled transparently; `slow_down` increases interval by 5 s per occurrence; `expired_token` raises `TokenExpiredError` (§4.5.2)
+- [ ] Magic-link initiation present: `requestMagicLink()` (or equivalent) POSTs JSON `{"email":"..."}` to `/v1/{realm_slug}/auth/magic-link`; always passes through `202 Accepted` without surfacing a "user not found" error; surfaces HTTP 429 as a rate-limit error (§4.5.3)
 
 ---
 
