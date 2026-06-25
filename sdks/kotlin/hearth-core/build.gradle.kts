@@ -20,6 +20,10 @@ dependencies {
     // JWT + JWKS verification (nimbus-jose-jwt is the JVM standard)
     api("com.nimbusds:nimbus-jose-jwt:9.41.2")
 
+    // Google Tink: required at runtime for EdDSA (OKP/Ed25519) sign + verify.
+    // nimbus-jose-jwt declares it as <optional> so consumers must add it explicitly.
+    implementation("com.google.crypto.tink:tink:1.14.1")
+
     // OkHttp for HTTP transport (coroutine-compatible via suspendCoroutine bridge)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 

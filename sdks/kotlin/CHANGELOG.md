@@ -9,9 +9,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **EdDSA/Ed25519 signature verification** — `TokenVerifier` now correctly verifies JWTs signed
-  with Hearth's Ed25519 key. Previously the `CompositeKeySelector` only registered RS256 and ES256
-  selectors, causing every EdDSA token to fail with `TokenInvalidError` regardless of validity
-  (HEA-1556).
+  with Hearth's Ed25519 key. The verifier now uses `Ed25519Verifier(OctetKeyPair)` directly,
+  bypassing a `java.security.EdECPublicKey` round-trip that silently corrupted the public-key
+  bytes on some JVM/provider combinations (HEA-1563).
+- **`iat` future validation** — tokens with an issued-at time more than the allowed clock skew
+  (5 s) in the future now correctly throw `TokenNotYetValidError`. `DefaultJWTClaimsVerifier`
+  only checked presence, not value; the check is now applied explicitly (HEA-1563).
+- **JWKS re-fetch not triggered by claims errors** — a `TokenInvalidError` from claims validation
+  (e.g. missing required claim) no longer triggers an unnecessary JWKS re-fetch. Re-fetch is
+  reserved for key-miss and signature-mismatch cases (HEA-1563).
 
 ### Added
 
