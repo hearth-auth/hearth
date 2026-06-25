@@ -1,5 +1,4 @@
 ---
-id: typescript
 title: TypeScript SDK quickstart
 sidebar_label: TypeScript
 description: Add Hearth authentication and RBAC to a TypeScript app in under 5 minutes.

@@ -2,9 +2,61 @@ import React from 'react';
 import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import CodeBlock from '@theme/CodeBlock';
 import clsx from 'clsx';
 
 import styles from './index.module.css';
+
+const TS_SNIPPET = `\
+import { HearthApiClient, generateCodeVerifier, generateCodeChallenge } from '@hearth-auth/sdk';
+
+const client    = new HearthApiClient({ baseUrl: 'http://localhost:8420', realmId: '<realm-id>' });
+const app       = await client.registerClient({ clientName: 'quickstart', redirectUris: ['http://localhost:3000/callback'] });
+const verifier  = generateCodeVerifier();
+const challenge = await generateCodeChallenge(verifier);
+const { code }  = await client.authorize({
+  clientId: app.client_id, codeChallenge: challenge, codeChallengeMethod: 'S256',
+  userId: '<user-id>',    // dev mode only — omit in production
+});
+const tokens = await client.exchangeCode({ clientId: app.client_id, code, codeVerifier: verifier });
+const { permissions } = await client.permissions(tokens.access_token);
+console.log('has hearth.admin:', permissions.includes('hearth.admin')); // → true
+`;
+
+const GO_SNIPPET = `\
+// go get github.com/hearth-auth/hearth/sdks/go/hearth
+client   := hearth.NewClient("http://localhost:8420", "<realm-id>")
+app, _   := client.RegisterClient(ctx, hearth.RegisterClientRequest{
+    ClientName: "quickstart", RedirectURIs: []string{"http://localhost:3000/callback"},
+})
+pkce, _  := hearth.GeneratePKCE()
+auth, _  := client.Authorize(ctx, hearth.AuthorizeRequest{
+    ClientID: app.ClientID, UserID: "<user-id>", // dev mode only — omit in production
+    CodeChallenge: pkce.Challenge, CodeChallengeMethod: pkce.Method,
+})
+tokens, _ := client.ExchangeCode(ctx, hearth.TokenRequest{
+    ClientID: app.ClientID, Code: auth.Code, CodeVerifier: pkce.Verifier,
+})
+fmt.Println("has hearth.admin:", client.HasPermission(tokens.AccessToken, "hearth.admin")) // → true
+`;
+
+const CURL_SNIPPET = `\
+# Boot: docker run --rm -p 8420:8420 ghcr.io/hearth-auth/hearth:latest serve --dev --bind 0.0.0.0
+BOOT=$(curl -fsS -X POST http://127.0.0.1:8420/admin/bootstrap)
+REALM=$(echo "$BOOT" | jq -r .realm_id)
+TOKEN=$(echo "$BOOT" | jq -r .access_token)
+
+# Register a public client (PKCE — no secret needed)
+CLIENT=$(curl -fsS -X POST http://127.0.0.1:8420/admin/clients \\
+  -H "Authorization: Bearer $TOKEN" -H "X-Realm-ID: $REALM" \\
+  -d '{"client_name":"quickstart","redirect_uris":["http://localhost:3000/callback"]}')
+
+# Verify the OIDC discovery document is live
+curl -fsS "http://127.0.0.1:8420/.well-known/openid-configuration?realm=$REALM" | jq .issuer
+# → "http://127.0.0.1:8420/realms/<realm-id>"
+`;
 
 const FEATURES = [
   {
@@ -38,6 +90,40 @@ const FEATURES = [
     desc: 'Embedded WAL storage engine. No Postgres, no Redis, no sidecar. Raft clustering for HA. Ships as one statically-linked binary.',
   },
 ];
+
+function QuickstartTeaser() {
+  return (
+    <section className={styles.quickstart}>
+      <div className="container">
+        <h2 className={styles.sectionHeading}>First authenticated request in 5 minutes</h2>
+        <p className={styles.sectionSub}>
+          Boot Hearth, bootstrap a realm, run the PKCE flow from your stack.
+        </p>
+        <div className={styles.quickstartTabs}>
+          <Tabs groupId="lang">
+            <TabItem value="ts" label="TypeScript" default>
+              <CodeBlock language="ts">{TS_SNIPPET}</CodeBlock>
+            </TabItem>
+            <TabItem value="go" label="Go">
+              <CodeBlock language="go">{GO_SNIPPET}</CodeBlock>
+            </TabItem>
+            <TabItem value="bash" label="curl">
+              <CodeBlock language="bash">{CURL_SNIPPET}</CodeBlock>
+            </TabItem>
+          </Tabs>
+        </div>
+        <div className={styles.heroCta} style={{ marginTop: '2rem' }}>
+          <Link className="button button--primary button--lg" to="/docs/getting-started">
+            Full quickstart →
+          </Link>
+          <Link className="button button--outline button--lg" to="/docs/sdks/overview">
+            SDK reference
+          </Link>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 function HeroSection() {
   return (
@@ -143,6 +229,7 @@ export default function Home() {
     >
       <main>
         <HeroSection />
+        <QuickstartTeaser />
         <StatsBar />
         <FeaturesSection />
         <MigrateSection />

@@ -15,7 +15,23 @@ const sidebars = {
       type: 'category',
       label: 'Configuration',
       items: [
-        'hearth-yaml-examples',
+        {
+          type: 'category',
+          label: 'hearth.yaml Examples',
+          link: { type: 'doc', id: 'hearth-yaml-examples/index' },
+          items: [
+            'hearth-yaml-examples/basics',
+            'hearth-yaml-examples/passwordless',
+            'hearth-yaml-examples/mfa',
+            'hearth-yaml-examples/federation',
+            'hearth-yaml-examples/email',
+            'hearth-yaml-examples/tls',
+            'hearth-yaml-examples/multi-tenancy',
+            'hearth-yaml-examples/rbac-and-oauth',
+            'hearth-yaml-examples/enterprise',
+            'hearth-yaml-examples/branding-and-complex',
+          ],
+        },
         'config-migration',
         'error-codes',
       ],
@@ -60,6 +76,16 @@ const sidebars = {
         'troubleshooting',
         'disaster-recovery',
         'verify-release',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'SDKs',
+      link: { type: 'doc', id: 'sdks/overview' },
+      items: [
+        'sdks/typescript',
+        'sdks/go',
+        'sdks/migration-from-keycloak',
       ],
     },
     {

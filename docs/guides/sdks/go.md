@@ -1,5 +1,4 @@
 ---
-id: go
 title: Go SDK quickstart
 sidebar_label: Go
 description: Add Hearth authentication and RBAC to a Go service in under 5 minutes.
@@ -37,54 +36,11 @@ client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>")
 `Client` is goroutine-safe and is designed to be created once and reused across
 requests.
 
-## Verify tokens with JWKS
-
-Hearth signs JWTs with Ed25519. Verify them using the realm's JWKS endpoint
-and the [`lestrrat-go/jwx`](https://github.com/lestrrat-go/jwx) library:
-
-```bash
-go get github.com/lestrrat-go/jwx/v2
-```
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-
-    "github.com/lestrrat-go/jwx/v2/jwk"
-    "github.com/lestrrat-go/jwx/v2/jwt"
-)
-
-func main() {
-    ctx := context.Background()
-
-    // Fetch and cache the JWKS once at startup.
-    jwksURL := "http://127.0.0.1:8420/realms/<realm_id>/jwks"
-    keySet, err := jwk.Fetch(ctx, jwksURL)
-    if err != nil {
-        panic(err)
-    }
-
-    // Verify a token.
-    accessToken := "<token>"
-    tok, err := jwt.Parse([]byte(accessToken), jwt.WithKeySet(keySet))
-    if err != nil {
-        panic(fmt.Errorf("invalid token: %w", err))
-    }
-
-    fmt.Println("user:", tok.Subject())
-}
-```
-
-The key set should be refreshed once on a verification failure (to handle
-server key rotation). See `examples/go-gin/main.go` for a complete example.
-
 ## Auth code flow with PKCE
 
-Hearth implements standard OIDC authorization code flow. To issue tokens for a
-user your service has already authenticated:
+Hearth implements standard OIDC authorization code flow with mandatory PKCE.
+Generate a verifier and challenge, then exchange the authorization code for
+tokens:
 
 ```go
 package main
@@ -147,6 +103,50 @@ func main() {
     _ = codeVerifier
 }
 ```
+
+## Verify tokens with JWKS
+
+Hearth signs JWTs with Ed25519. Verify them using the realm's JWKS endpoint
+and the [`lestrrat-go/jwx`](https://github.com/lestrrat-go/jwx) library:
+
+```bash
+go get github.com/lestrrat-go/jwx/v2
+```
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+
+    "github.com/lestrrat-go/jwx/v2/jwk"
+    "github.com/lestrrat-go/jwx/v2/jwt"
+)
+
+func main() {
+    ctx := context.Background()
+
+    // Fetch and cache the JWKS once at startup.
+    jwksURL := "http://127.0.0.1:8420/realms/<realm_id>/jwks"
+    keySet, err := jwk.Fetch(ctx, jwksURL)
+    if err != nil {
+        panic(err)
+    }
+
+    // Verify a token.
+    accessToken := "<token>"
+    tok, err := jwt.Parse([]byte(accessToken), jwt.WithKeySet(keySet))
+    if err != nil {
+        panic(fmt.Errorf("invalid token: %w", err))
+    }
+
+    fmt.Println("user:", tok.Subject())
+}
+```
+
+The key set should be refreshed once on a verification failure (to handle
+server key rotation). See `examples/go-gin/main.go` for a complete example.
 
 ## RBAC checks
 

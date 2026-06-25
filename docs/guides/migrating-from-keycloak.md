@@ -1,10 +1,18 @@
 # Migrating from Keycloak
 
+**Audience:** operators moving an existing Keycloak deployment to Hearth.
+**Goal:** Export a Keycloak realm, import it into Hearth, verify users and roles migrated correctly, and cut over application traffic.
+**Time to complete:** 30–60 min for a typical realm; large realms (100 k+ users) may require additional time for the import step.
+
 This guide walks you through moving an existing Keycloak deployment to Hearth. You will export your Keycloak data, import it into Hearth's embedded storage, verify the result, and update your application configuration.
 
-> **Scope of this guide:** Keycloak realm exports produced by Keycloak 21 and later. The importer handles PBKDF2-SHA256 and PBKDF2-SHA512 password credentials natively. Users with bcrypt or other hashes are imported without a credential and must reset their passwords on first login.
+:::note[Scope of this guide]
+Keycloak realm exports produced by Keycloak 21 and later. The importer handles PBKDF2-SHA256 and PBKDF2-SHA512 password credentials natively. Users with bcrypt or other hashes are imported without a credential and must reset their passwords on first login.
+:::
 
-> **Runnable example:** `examples/keycloak-migration/` contains a self-contained end-to-end example — a committed sample export, annotated config, and a one-command `./run.sh` that migrates, boots Hearth, and verifies the result. Run it on a clean checkout to confirm the migration pipeline works before using your own export.
+:::tip[Runnable example]
+`examples/keycloak-migration/` contains a self-contained end-to-end example — a committed sample export, annotated config, and a one-command `./run.sh` that migrates, boots Hearth, and verifies the result. Run it on a clean checkout to confirm the migration pipeline works before using your own export.
+:::
 
 ---
 
@@ -49,7 +57,9 @@ docker exec -it keycloak /opt/keycloak/bin/kc.sh export \
 docker cp keycloak:/tmp/keycloak-export.json ./keycloak-export.json
 ```
 
-> **Important:** Use `--users realm_file` (not `--users different_files`) so that all users are included in the single export file. The importer expects the standard single-file format.
+:::warning[Important]
+Use `--users realm_file` (not `--users different_files`) so that all users are included in the single export file. The importer expects the standard single-file format.
+:::
 
 ---
 
@@ -216,7 +226,9 @@ The following Keycloak features do not migrate automatically. They require manua
 
 The importer skips four categories of Keycloak data that have no direct equivalent in Hearth's current data model. Each gap lists what Keycloak stores, why Hearth does not import it, and what to do after migration.
 
-> **See also:** The [SDK migration guide](../../docs-site/docs/sdks/migration-from-keycloak.md) covers the same gaps from a code and SDK-swap perspective.
+:::note[See also]
+The [SDK migration guide](/docs/sdks/migration-from-keycloak) covers the same gaps from a code and SDK-swap perspective.
+:::
 
 ### Client roles
 

@@ -119,6 +119,11 @@ const config = {
             label: 'Guides',
           },
           {
+            to: 'docs/sdks/overview',
+            label: 'SDKs',
+            position: 'left',
+          },
+          {
             to: 'docs/migrating-from-keycloak',
             label: 'Migrate from Keycloak',
             position: 'left',
@@ -165,6 +170,14 @@ const config = {
               { label: 'Backup', to: 'docs/backup' },
               { label: 'Security Hardening', to: 'docs/security-hardening' },
               { label: 'Troubleshooting', to: 'docs/troubleshooting' },
+            ],
+          },
+          {
+            title: 'SDKs',
+            items: [
+              { label: 'TypeScript', to: 'docs/sdks/typescript' },
+              { label: 'Go', to: 'docs/sdks/go' },
+              { label: 'Migrate from Keycloak', to: 'docs/sdks/migration-from-keycloak' },
             ],
           },
           {

@@ -1,5 +1,4 @@
 ---
-id: migration-from-keycloak
 title: Migrating from Keycloak
 sidebar_label: Migrate from Keycloak
 description: Side-by-side recipe for moving from Keycloak to Hearth — data export, SDK swap, and RBAC mapping.
@@ -10,14 +9,16 @@ description: Side-by-side recipe for moving from Keycloak to Hearth — data exp
 This guide is a side-by-side recipe for teams moving from Keycloak to Hearth.
 It covers data migration, SDK swap, and authorization model translation.
 
-> **Version context:** This guide was written against Keycloak 24.x and
-> Hearth 1.0.0. Verify claim names against your specific Keycloak
-> configuration.
+:::note[Version context]
+This guide was written against Keycloak 24.x and Hearth 1.0.0. Verify claim
+names against your specific Keycloak configuration.
+:::
 
-> **Operator migration guide:** For the full `hearth migrate keycloak` CLI
-> walkthrough, data directory setup, post-migration checklist, and detailed
-> migration gap rationale, see the
-> [Migrating from Keycloak operator guide](/docs/migrating-from-keycloak).
+:::tip[Operator migration guide]
+For the full `hearth migrate keycloak` CLI walkthrough, data directory setup,
+post-migration checklist, and detailed migration gap rationale, see the
+[Migrating from Keycloak operator guide](/docs/migrating-from-keycloak).
+:::
 
 ## Concept mapping
 

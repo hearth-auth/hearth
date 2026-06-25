@@ -1,5 +1,9 @@
 # Disaster Recovery Guide
 
+**Audience:** operators responding to or preparing for a catastrophic Hearth failure — corrupted storage, signing-key compromise, Raft split-brain, or full data loss.
+**Goal:** Identify the failure shape, execute the correct recovery procedure, and validate functional parity before restoring traffic.
+**Time to complete:** Minutes for WAL auto-recovery; 30–90 min for a full restore depending on dataset size. See [RTO and RPO estimation](#rto-and-rpo-estimation) for sizing guidance.
+
 This guide is the operator runbook for recovering a Hearth deployment from
 catastrophic events: corrupted SST files, torn WAL writes, Raft log
 divergence, signing-key compromise, and full data-loss restore. It
