@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **PHP SDK C5 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1560):
+  `generatePkce()`, `buildAuthorizeUrl()`, `refreshToken()`, `clientCredentials()`,
+  `startDeviceFlow()` / `pollDeviceToken()` (with `slow_down` + `authorization_pending` handling),
+  `requestMagicLink()`, `registerClient()`, `getMyPermissions()`, `checkDecision()`,
+  `startWebAuthnRegistration()` / `finishWebAuthnRegistration()` / `startWebAuthnAuthentication()` / `finishWebAuthnAuthentication()`,
+  `getSessionVersion()`, and `bootstrap()`. New types: `PkceChallenge`, `DeviceAuthorizationResponse`,
+  `PermissionsResponse`, `ClientRegistrationResponse`, `WebAuthnOptions`, `BootstrapResponse`,
+  `RateLimitException`.
 - **Continuous deployment via semantic-release** — merging a `fix:` or `feat:` PR to `main`
   now automatically computes the next semver version, updates CHANGELOGs, bumps version files,
   pushes a git tag, and fires the downstream publish workflows (binaries, Helm, SDKs). Each
