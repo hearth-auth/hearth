@@ -1,7 +1,7 @@
 ---
 title: SDKs
 sidebar_label: Overview
-description: Official Hearth client SDKs — TypeScript, Node.js, Go, Python, Rust, PHP, and Kotlin (coming soon).
+description: Official Hearth client SDKs — TypeScript, Node.js, Go, Python, Rust, PHP, and Kotlin.
 ---
 
 # Hearth SDKs
@@ -18,11 +18,7 @@ Hearth ships official client SDKs for integrating authentication and RBAC into y
 | [Python](./python.md) | `hearth-sdk` | `pip install hearth-sdk` | GA |
 | [Rust](./rust.md) | `hearth-sdk` (git) | see [install instructions](./rust.md#install) | GA |
 | [PHP](./php.md) | `hearth-auth/php-sdk` | `composer require hearth-auth/php-sdk:^1.0` | GA |
-| Kotlin / JVM | `io.hearth-auth:hearth-sdk` | — | **Coming soon** |
-
-:::note[Kotlin / JVM — not yet released]
-The Kotlin SDK is under active development and will target JVM 17+, Ktor, and Spring WebFlux. No install instructions or standalone page are available until GA.
-:::
+| [Kotlin / JVM](./kotlin.md) | `io.hearth-auth:hearth-sdk` | see [install instructions](./kotlin.md#install) | GA |
 
 ## TypeScript vs Node.js — which should I use?
 
@@ -40,17 +36,22 @@ A typical full-stack setup uses **both**: the TypeScript SDK in the browser to r
 
 ## Common patterns
 
-All SDKs expose the same surface (method names vary by language convention):
+All SDKs expose the same surface (method names vary by language convention). See the [full symbol-name mapping table](../../specs/SDK.md#25-per-sdk-symbol-name-mapping) for a complete SDK-by-SDK reference, including platform exceptions.
 
-| Pattern | TypeScript | Node.js | Go | Python | Rust | PHP |
-|---------|-----------|---------|-----|--------|------|-----|
-| Auth code + PKCE | `client.exchangeCode()` | — (resource-server) | `client.ExchangeCode()` | `client.exchange_code()` | `client.exchange_code()` | `$hearth->exchangeCode()` |
-| Verify token | — | `client.verifyToken()` | JWKS + `jwt.Parse()` | `client.verify_token()` | `client.has_permission()` | `$hearth->verify()` |
-| Role check (local) | `hearth.hasRole()` | `token.hasRole()` | `client.HasRole()` | `claims.has_role()` | `client.has_role()` | `$claims->hasRole()` |
-| Permission check (local) | `hearth.hasPermission()` | `token.hasPermission()` | `client.HasPermission()` | `claims.has_permission()` | `client.has_permission()` | `$claims->hasPermission()` |
-| Group check (local) | `hearth.inGroup()` | `token.inGroup()` | `client.InGroup()` | `claims.in_group()` | `client.in_group()` | `$claims->inGroup()` |
-| Live permission refresh | `hearth.client.permissions()` | — | `client.Permissions()` | `client.check_permission()` | `client.check_permission()` | via introspect mode |
-| Token refresh | `client.refreshTokens()` | — | `client.RefreshTokens()` | httpx + `/token` | `client.refresh_tokens()` | `$hearth->refreshTokens()` |
+| Pattern | TypeScript | Node.js | Go | Python | Rust | PHP | Kotlin |
+|---------|-----------|---------|-----|--------|------|-----|--------|
+| Auth code + PKCE | `startLogin()` | — (resource-server) | `client.ExchangeCode()` | `client.exchange_code()` | `client.exchange_code().await` | `$client->exchangeCode()` | `client.exchangeCode()` |
+| Verify token (EdDSA) | `client.verifyToken()` | `client.verifyToken()` | `client.VerifyToken()` | `client.verify_token()` | `client.verify_token().await` | `$client->verifyToken()` | `client.verifyToken()` |
+| M2M (client credentials) | `client.clientCredentials()` | `client.clientCredentials()` | `client.ClientCredentials()` | `client.client_credentials()` | `client.client_credentials().await` | `$client->clientCredentials()` | `client.clientCredentials()` |
+| Device flow — start | `client.startDeviceFlow()` | `client.startDeviceFlow()` | `client.StartDeviceFlow()` | `client.start_device_flow()` | `client.start_device_flow().await` | `$client->startDeviceFlow()` | `client.deviceAuthorization()` ⚠ |
+| Device flow — poll | `client.pollDeviceToken()` | `client.pollDeviceToken()` | `client.PollDeviceToken()` ⚠ | `client.poll_device_token()` | `client.poll_device_token().await` | `$client->pollDeviceToken()` | `client.pollDeviceToken()` ⚠ |
+| Magic-link initiation | `client.requestMagicLink()` | `client.requestMagicLink()` | `client.RequestMagicLink()` | `client.request_magic_link()` | `client.initiate_magic_link().await` ⚠ | `$client->requestMagicLink()` | — ⚠ |
+| Role check (local) | `claims.hasRole()` | `token.hasRole()` | `client.HasRole()` | `claims.has_role()` | `HearthClient::has_role()` | `$claims->hasRole()` | `client.hasRole()` |
+| Permission check (local) | `claims.hasPermission()` | `token.hasPermission()` | `client.HasPermission()` | `claims.has_permission()` | `HearthClient::has_permission()` | `$claims->hasPermission()` | `client.hasPermission()` |
+| Group check (local) | `claims.inGroup()` | `token.inGroup()` | `client.InGroup()` | `claims.in_group()` | `HearthClient::in_group()` | `$claims->inGroup()` | `client.hasRole()` → `inGroup` |
+| Token refresh | `client.refreshTokens()` | — | `client.RefreshTokens()` | `client.refresh_tokens()` | `client.refresh_tokens().await` | `$client->refreshToken()` | `client.refreshTokens()` |
+
+> ⚠ marks a [platform exception](../../specs/SDK.md#platform-exceptions). Read the linked spec section before using these methods.
 
 :::note[PKCE is mandatory for public clients]
 All public clients (browser SPAs, mobile apps) must use PKCE. Hearth rejects authorization requests without `code_challenge`. Each SDK quickstart includes a copy-paste implementation.
@@ -58,13 +59,15 @@ All public clients (browser SPAs, mobile apps) must use PKCE. Hearth rejects aut
 
 ## Token verification without an SDK
 
-If you prefer not to use an SDK, verify tokens directly against Hearth's JWKS endpoint using any JWKS-aware library:
+Every GA SDK exposes `verifyToken()` (or the language-idiomatic equivalent — see the table above). Prefer `verifyToken()` over manual JWKS calls: it performs all five mandatory validation steps in the correct order, caches keys, re-fetches on rotation, and returns typed errors.
+
+If you need to verify tokens from a language or framework that has no Hearth SDK, call the JWKS endpoint directly:
 
 ```bash
 GET /realms/<realm_id>/jwks
 ```
 
-Hearth signs all tokens with **Ed25519** (`alg: EdDSA`). Compatible libraries: `jose` (Node/TypeScript), `lestrrat-go/jwx` (Go), `python-jose` (Python), `Auth0/java-jwt` (JVM). See [§ Verify tokens on the server](./typescript.md#verify-tokens-on-the-server) in the TypeScript quickstart for a full example.
+Hearth signs all tokens with **Ed25519** (`alg: EdDSA`, `kty: OKP`). Your parser **must** support OKP keys — parsers that only handle EC or RSA keys will fail to load Hearth's JWKS. Compatible JWKS libraries: `jose` (Node/TypeScript), `lestrrat-go/jwx` (Go), `python-jose` (Python), `Auth0/java-jwt` (JVM).
 
 ## Migrating from Keycloak?
 

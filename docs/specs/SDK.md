@@ -80,6 +80,47 @@ verifyToken(token: string) → Claims
 
 ---
 
+## 2.5 Per-SDK Symbol Name Mapping
+
+Every Hearth SDK exposes the same contract under language-idiomatic names. The table below maps the canonical spec method name to the shipped symbol in each SDK as of C1–C8. Use this table when reading spec requirements: "every SDK MUST expose `verifyToken()`" means the name in the **Canonical** column, with the language-specific form in each SDK column.
+
+| Canonical (spec) | TypeScript (`@hearth-auth/sdk`) | Node.js (`@hearth-auth/node`) | Go (`hearth`) | Python (`hearth`) | Rust (`hearth-sdk`) | PHP (`HearthClient`) | Kotlin (`HearthClient`) |
+|---|---|---|---|---|---|---|---|
+| `verifyToken(token)` | `client.verifyToken(token)` | `client.verifyToken(token)` | `client.VerifyToken(ctx, token, aud...)` | `client.verify_token(token)` | `client.verify_token(token).await` | `$client->verifyToken($token)` | `client.verifyToken(token)` |
+| `clientCredentials(scope?)` | `client.clientCredentials(scope?)` | `client.clientCredentials(scope?)` | `client.ClientCredentials(ctx, scope...)` | `client.client_credentials(scope?)` | `client.client_credentials(scope?).await` | `$client->clientCredentials($scope)` | `client.clientCredentials(scope?)` |
+| `startDeviceFlow(scope?)` | `client.startDeviceFlow(scope?)` | `client.startDeviceFlow(scope?)` | `client.StartDeviceFlow(ctx, scope...)` | `client.start_device_flow(scope?)` | `client.start_device_flow(scope?).await` | `$client->startDeviceFlow($scope)` | `client.deviceAuthorization(scope?)` ⚠ |
+| `pollDeviceToken(deviceCode, interval)` | `client.pollDeviceToken(deviceCode, interval)` | `client.pollDeviceToken(deviceCode, interval)` | `client.PollDeviceToken(ctx, deviceCode)` ⚠ | `client.poll_device_token(deviceCode, interval)` | `client.poll_device_token(deviceCode, interval).await` | `$client->pollDeviceToken($deviceCode, $interval)` | `client.pollDeviceToken(deviceCode)` ⚠ |
+| `requestMagicLink(email)` | `client.requestMagicLink(email)` | `client.requestMagicLink(email)` | `client.RequestMagicLink(ctx, email)` | `client.request_magic_link(email)` | `client.initiate_magic_link(email).await` ⚠ | `$client->requestMagicLink($email)` | — ⚠ |
+| `introspect(token)` | `client.introspect(token)` | `client.introspect(token)` | `client.Introspect(ctx, req)` | `client.introspect(token, ...)` | `client.introspect(token).await` | `$client->getIntrospectionClient()->introspect(...)` | `client.introspect(token)` |
+
+### Platform Exceptions
+
+The following deviations from the canonical name are intentional and permanent for their respective SDKs.
+
+**Go — `PollDeviceToken` manages the polling interval internally.**  
+Signature: `PollDeviceToken(ctx context.Context, deviceCode string) (*TokenResponse, error)`.  
+There is no `intervalSeconds` parameter. The Go SDK reads the `interval` from the `DeviceAuthorizationResponse` and advances it internally on `slow_down` responses. Callers loop until a non-nil `TokenResponse` is returned or an error is raised.
+
+**Rust — `initiate_magic_link` instead of `requestMagicLink`.**  
+Signature: `initiate_magic_link(email: &str) -> Result<(), HearthError>`.  
+Behaviour is identical to the spec; only the name differs.
+
+**Kotlin — `deviceAuthorization` instead of `startDeviceFlow`.**  
+Signature: `deviceAuthorization(scope: String? = null): DeviceAuthorizationResponse`.  
+The method calls the `device_authorization_endpoint` discovered from OIDC and returns the full `DeviceAuthorizationResponse`. Naming follows the RFC 8628 document title.
+
+**Kotlin — `pollDeviceToken` does not accept an `intervalSeconds` parameter.**  
+Signature: `pollDeviceToken(deviceCode: String): TokenResponse?`.  
+Returns `null` on `authorization_pending` or `slow_down`; the caller is responsible for the sleep loop. `slow_down` increments the interval by 5 s; the initial value comes from `DeviceAuthorizationResponse.interval`.
+
+**Kotlin — no `requestMagicLink` (magic-link initiation).**  
+The Kotlin SDK does not yet expose a method for initiating a magic-link email. Use a raw HTTP POST to `/v1/{realm_slug}/auth/magic-link` (see §4.5.3 example). The Kotlin SDK does expose `exchangeMagicLink(magicToken: String): TokenResponse` for completing the flow once the user clicks the link and is redirected back to the app with a token.
+
+**Node.js — OAuth flows are on `HearthClient` directly.**  
+`clientCredentials`, `startDeviceFlow`, `pollDeviceToken`, and `requestMagicLink` are methods on `HearthClient` (the primary entry point). `OAuthFlowsClient` is a lower-level export for advanced use.
+
+---
+
 ## 3. Token Introspection
 
 All SDKs must expose an introspection method (RFC 7662):
@@ -345,7 +386,7 @@ All errors must include a human-readable `message`. Errors that wrap an underlyi
 
 ## 6. Middleware
 
-All server-side SDKs (node, go, python) must provide HTTP middleware that:
+All server-side SDKs (node, go, python, php, rust, kotlin) must provide HTTP middleware that:
 
 1. Extracts the Bearer token from `Authorization: Bearer <token>`.
 2. Verifies the token locally (JWKS path) by default. Introspection must be opt-in.
@@ -522,6 +563,46 @@ For use in PR reviews and automated CI checks (see `.github/workflows/sdk-confor
 - [ ] Client credentials grant present: `clientCredentials()` (or equivalent) sends `client_id` and `client_secret` as POST body fields (`application/x-www-form-urlencoded`); discovers token endpoint from OIDC discovery document; does not send credentials as query parameters (§4.5.1)
 - [ ] Device authorization flow present: `startDeviceFlow()` (or equivalent) calls discovered `device_authorization_endpoint`; `pollDeviceToken()` respects server `interval`; `authorization_pending` handled transparently; `slow_down` increases interval by 5 s per occurrence; `expired_token` raises `TokenExpiredError` (§4.5.2)
 - [ ] Magic-link initiation present: `requestMagicLink()` (or equivalent) POSTs JSON `{"email":"..."}` to `/v1/{realm_slug}/auth/magic-link`; always passes through `202 Accepted` without surfacing a "user not found" error; surfaces HTTP 429 as a rate-limit error (§4.5.3)
+
+---
+
+## Section 14 — Keycloak Migration Reference
+
+Operators migrating from Keycloak encounter different SDK abstractions. The following table maps Keycloak adapter / client library concepts to Hearth SDK equivalents across all supported languages. Where there is no direct Keycloak equivalent (e.g. device flow was rare in Keycloak adapter libraries), this is noted explicitly.
+
+### Core entry-point mapping
+
+| Keycloak concept | Hearth equivalent (canonical) | Notes |
+|-----------------|-------------------------------|-------|
+| `KeycloakDeployment` / `KeycloakInstalled` config | `HearthClient(issuer_url, client_id, client_secret)` | Hearth auto-discovers endpoints; no separate adapter JSON required |
+| `KeycloakDeployment.authServerUrl` + `realm` | `issuer_url` (full realm URL: `{base}/realms/{slug}`) | Single `issuer_url` replaces the two-field Keycloak pattern |
+| `KeycloakSecurityContext.token` | `verifyToken(token) → Claims` | JWKS-backed local verification; same five-step validation |
+| `AuthzClient` (UMA/RPT) | `client.clientCredentials(scope?)` | Client Credentials replaces UMA for most M2M use cases |
+| Keycloak Protection API (`pat`) | no KC equivalent in Hearth SDK | Use `client.clientCredentials()` for bearer tokens |
+| Bearer-only adapter | `client.verifyToken(token)` | Hearth supports bearer-only resource servers natively |
+
+### OAuth flow mapping
+
+| Keycloak adapter method | Hearth canonical method | KC equivalent? |
+|------------------------|------------------------|----------------|
+| `KeycloakInstalled.login()` (PKCE CLI) | `client.startDeviceFlow()` + `client.pollDeviceToken()` | Partial — Keycloak CLI used auth code; device flow is the Hearth-preferred CLI pattern |
+| Implicit flow (deprecated) | **No equivalent** | Hearth does not implement implicit flow; use PKCE |
+| `AuthzClient.authorization()` | No direct equivalent | Use `client.checkPermission()` or embedded `roles` claim |
+| `KeycloakAdapter.getToken()` refresh | `client.refreshTokens()` | Direct equivalent |
+| Keycloak magic-link (admin API) | `client.requestMagicLink(email)` | No Keycloak adapter exposed magic-link; Hearth SDK exposes it as a first-class method |
+| Device Authorization Flow | `client.startDeviceFlow()` / `client.pollDeviceToken()` | No KC adapter equivalent — first-class in Hearth |
+
+### RBAC mapping
+
+| Keycloak concept | Hearth Claims equivalent |
+|-----------------|--------------------------|
+| Realm roles (`realm_access.roles`) | `claims.hasRole(r)` — reads `roles: string[]` claim |
+| Client roles (`resource_access.{client}.roles`) | Included in `roles` claim when configured; same `hasRole()` |
+| Groups (`groups` claim) | `claims.inGroup(g)` — reads `groups: string[]` claim |
+| Organization (`org_id`) | `claims.inOrg(o)` — reads `oid: string` claim |
+| Permissions (UMA scopes) | `claims.hasPermission(p)` — reads `permissions: string[]` |
+| `SecurityContext.hasRealmRole()` | `claims.hasRole(r)` |
+| `SecurityContext.hasResourceRole()` | `claims.hasRole(r)` (roles are realm-scoped in Hearth) |
 
 ---
 

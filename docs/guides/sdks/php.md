@@ -97,7 +97,7 @@ $hearth = new HearthClient(
 
 $bearerToken = str_replace('Bearer ', '', $_SERVER['HTTP_AUTHORIZATION'] ?? '');
 
-$claims = $hearth->verify($bearerToken);
+$claims = $hearth->verifyToken($bearerToken);
 
 // RBAC — synchronous, zero-network (reads embedded JWT claims)
 if ($claims->hasRole('admin')) {
@@ -113,8 +113,59 @@ if ($claims->inGroup('engineering')) {
 }
 
 // UserInfo — network call, returns scope-filtered OIDC claims
-$userInfo = $hearth->userInfo($tokens->accessToken);
+$userInfo = $hearth->getUserInfo($tokens->accessToken);
 // $userInfo->sub, $userInfo->name, $userInfo->email
+```
+
+## Machine-to-machine (client credentials)
+
+For service-to-service calls where your server authenticates as its own principal:
+
+```php
+$hearth = new HearthClient(
+    issuerUrl:    'https://hearth.example.com',
+    realmId:      '<realm_id>',
+    clientId:     '<service-client-id>',
+    clientSecret: '<service-client-secret>',
+);
+
+$tokens = $hearth->clientCredentials('read:reports');
+// $tokens->accessToken, $tokens->expiresIn
+```
+
+## Device authorization flow
+
+For CLI tools or headless processes that need interactive user approval:
+
+```php
+$resp = $hearth->startDeviceFlow('openid');
+echo "Visit {$resp->verificationUri}\nEnter code: {$resp->userCode}\n";
+
+// Poll until the user approves (or the device code expires)
+$tokens = null;
+$interval = $resp->interval;
+while (true) {
+    sleep($interval);
+    try {
+        $tokens = $hearth->pollDeviceToken($resp->deviceCode, $interval);
+        if ($tokens !== null) {
+            break; // approved
+        }
+    } catch (TokenExpiredException $e) {
+        throw new RuntimeException('device code expired before user approved');
+    }
+}
+```
+
+`pollDeviceToken` returns `null` on `authorization_pending` (continue polling)
+and throws `TokenExpiredException` on `expired_token`.
+
+## Magic-link (passwordless) initiation
+
+```php
+$hearth->requestMagicLink('user@example.com');
+// Always succeeds — server returns 202 whether or not the email is registered
+// (enumeration resistance). HTTP 429 throws RateLimitException.
 ```
 
 ## PSR-15 middleware (plain PHP)
@@ -187,7 +238,7 @@ public function show(Request $request): JsonResponse
 use HearthAuth\Laravel\Facades\Hearth;
 
 // Facade
-$claims = Hearth::verify($bearerToken);
+$claims = Hearth::verifyToken($bearerToken);
 
 // Or inject HearthClient directly
 public function __construct(private HearthClient $hearth) {}
@@ -209,7 +260,7 @@ use HearthAuth\Exceptions\TokenExpiredException;
 use HearthAuth\Exceptions\TokenInvalidException;
 
 try {
-    $claims = $hearth->verify($bearerToken);
+    $claims = $hearth->verifyToken($bearerToken);
 } catch (TokenExpiredException $e) {
     http_response_code(401);
     echo json_encode(['error' => 'token_expired']);

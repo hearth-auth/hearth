@@ -51,14 +51,20 @@ curl -X POST "http://127.0.0.1:8420/admin/realms/$REALM_ID/clients" \
 
 ## Initialize the client
 
+`HearthClient` takes the server base URL plus an optional `realmId` (UUID) and OAuth client credentials:
+
 ```typescript
 import { HearthClient } from "@hearth-auth/sdk";
 
 const client = new HearthClient({
-  baseUrl: "http://127.0.0.1:8420",
-  realmId: "<realm_id>",
+  issuerUrl: "http://127.0.0.1:8420",  // server base URL — NOT a realm-scoped URL
+  realmId: "<realm_id>",               // optional — required for magic-link and decision mode
+  clientId: "<client_id>",             // optional — required for flows needing a client identity
+  clientSecret: "<client_secret>",     // optional — required for confidential client flows
 });
 ```
+
+All endpoint URLs are auto-discovered from `{issuerUrl}/.well-known/openid-configuration` on first use. The `realmId` is sent as `X-Realm-ID` on endpoints that need it; for OAuth flows like `clientCredentials()` and `startDeviceFlow()`, the realm is resolved from `client_id` on the server side — no `realmId` needed.
 
 ## Authenticate with PKCE
 
@@ -68,32 +74,34 @@ recommended for confidential clients.
 ### Step 1 — Build the authorization URL
 
 ```typescript
-import { createHash, randomBytes } from "crypto";
+import {
+  generateCodeVerifier,
+  generateCodeChallenge,
+  buildAuthorizationUrl,
+} from "@hearth-auth/sdk";
 
-const codeVerifier = randomBytes(32).toString("hex");
-const codeChallenge = createHash("sha256")
-  .update(codeVerifier)
-  .digest("base64url");
-const state = randomBytes(16).toString("hex"); // CSRF token
+const codeVerifier = generateCodeVerifier();       // RFC 7636 S256 verifier
+const codeChallenge = await generateCodeChallenge(codeVerifier);
+const state = crypto.randomUUID(); // CSRF token
 
 // Fetch Hearth's OIDC discovery document
-const discovery = await client.discovery();
+const discovery = await client.discover();
 
-// Build the URL and redirect the browser to it
-const authUrl = new URL(discovery.authorization_endpoint);
-authUrl.searchParams.set("response_type", "code");
-authUrl.searchParams.set("client_id", "<client_id>");
-authUrl.searchParams.set("redirect_uri", "http://localhost:3000/callback");
-authUrl.searchParams.set("scope", "openid profile email");
-authUrl.searchParams.set("state", state);
-authUrl.searchParams.set("code_challenge", codeChallenge);
-authUrl.searchParams.set("code_challenge_method", "S256");
+// Build the authorization URL and redirect
+const { url } = buildAuthorizationUrl(discovery.authorization_endpoint, {
+  clientId: "<client_id>",
+  redirectUri: "http://localhost:3000/callback",
+  scope: "openid profile email",
+  state,
+  codeChallenge,
+});
 
-window.location.href = authUrl.toString();
+// Store verifier + state for the callback
+sessionStorage.setItem("pkce_verifier", codeVerifier);
+sessionStorage.setItem("oauth_state", state);
+
+window.location.href = url;
 ```
-
-Store `codeVerifier` and `state` in `sessionStorage` or an HTTP-only cookie
-for use in the callback.
 
 ### Step 2 — Exchange the code
 
@@ -101,15 +109,26 @@ After the user authenticates, Hearth redirects to your `redirect_uri` with
 `?code=…&state=…`. Verify state and exchange the code:
 
 ```typescript
+import { HearthApiClient } from "@hearth-auth/sdk";
+
 const params = new URLSearchParams(window.location.search);
 const code = params.get("code")!;
-// verify params.get("state") === savedState before proceeding
 
-const tokens = await client.exchangeCode({
+// Verify state matches before proceeding
+if (params.get("state") !== sessionStorage.getItem("oauth_state")) {
+  throw new Error("state mismatch");
+}
+
+const legacyClient = new HearthApiClient({
+  baseUrl: "http://127.0.0.1:8420",
+  realmId: "<realm_id>",
+});
+
+const tokens = await legacyClient.exchangeCode({
   clientId: "<client_id>",
   code,
   redirectUri: "http://localhost:3000/callback",
-  codeVerifier, // retrieved from storage
+  codeVerifier: sessionStorage.getItem("pkce_verifier")!,
 });
 
 // tokens.access_token   — short-lived JWT
@@ -121,7 +140,7 @@ const tokens = await client.exchangeCode({
 ### Step 3 — Refresh before expiry
 
 ```typescript
-const refreshed = await client.refreshTokens("<client_id>", tokens.refresh_token);
+const refreshed = await legacyClient.refreshTokens("<client_id>", tokens.refresh_token);
 ```
 
 ## RBAC checks
@@ -197,45 +216,137 @@ const { roles, groups, permissions } = await hearth.client.permissions();
 
 This hits `GET /v1/me/permissions` and returns the freshly-resolved RBAC set.
 
-## Verify tokens on the server
+## Verify tokens
 
-Use [`jose`](https://github.com/panva/jose) and Hearth's JWKS endpoint to
-verify tokens in Node.js without an SDK round-trip:
+Use `HearthClient.verifyToken()` to perform full Ed25519/EdDSA local signature
+verification without a network call beyond the initial JWKS fetch:
 
 ```typescript
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { HearthClient, TokenExpiredError, TokenInvalidError } from "@hearth-auth/sdk";
 
-const JWKS = createRemoteJWKSet(
-  new URL("http://127.0.0.1:8420/realms/<realm_id>/jwks"),
-);
-
-const { payload } = await jwtVerify(accessToken, JWKS, {
-  issuer: "http://127.0.0.1:8420",
-  audience: "<client_id>",
+const client = new HearthClient({
+  issuerUrl: "http://127.0.0.1:8420",
+  clientId: "<client_id>",
 });
-// payload.sub — stable user identifier
-// payload.permissions — string[]
-// payload.roles       — string[]
-// payload.groups      — string[]
+
+try {
+  const claims = await client.verifyToken(accessToken);
+  // claims.subject()        — JWT `sub`, stable user UUID
+  // claims.hasRole("admin") — reads `roles` claim (local, no network)
+  // claims.hasPermission("docs.write") — reads `permissions` claim
+  // claims.inGroup("engineering")      — reads `groups` claim
+} catch (err) {
+  if (err instanceof TokenExpiredError) {
+    // 401 — ask client to refresh
+  } else if (err instanceof TokenInvalidError) {
+    // 401 — reject the request
+  }
+}
 ```
 
-`createRemoteJWKSet` caches keys and re-fetches on a key miss, so server key
-rotation is handled automatically.
+`verifyToken()` caches JWKS keys by `kid`, re-fetches once on a key miss
+(transparent key rotation), and validates signature, `exp`, `iss`, `aud`, and
+`iat` in that order. It never falls back to introspection.
+
+:::note[`iss` validation and `issuerUrl`]
+`verifyToken()` checks that the token's `iss` claim exactly matches `issuerUrl`. System tokens (admin bootstrap) carry `iss = <baseUrl>`. User/client tokens issued by a realm carry `iss = <baseUrl>/realms/<realm-slug>`. Configure `issuerUrl` to match the issuer your tokens actually contain, or set `expectedMode: "introspection"` to skip local `iss` validation.
+:::
+
+## Machine-to-machine (client credentials)
+
+For service-to-service calls where your server acts as its own principal:
+
+```typescript
+const client = new HearthClient({
+  issuerUrl: "http://127.0.0.1:8420",
+  clientId: "<service-client-id>",
+  clientSecret: "<service-client-secret>",
+});
+
+const tokens = await client.clientCredentials("read:users");
+// tokens.access_token — short-lived M2M JWT
+// tokens.expires_in   — seconds until expiry
+```
+
+Credentials are sent as `application/x-www-form-urlencoded` body fields. The
+token endpoint is discovered from the OIDC discovery document.
+
+## Device authorization flow
+
+For CLI tools or headless servers that need interactive user approval:
+
+```typescript
+const resp = await client.startDeviceFlow("openid");
+// resp.user_code          — display this to the user (e.g. "WDJB-MJHT")
+// resp.verification_uri   — URL the user visits to approve
+console.log(`Visit ${resp.verification_uri} and enter code: ${resp.user_code}`);
+
+// Poll until the user approves (or the device code expires)
+let tokens;
+while (true) {
+  try {
+    tokens = await client.pollDeviceToken(resp.device_code, resp.interval);
+    break; // approved
+  } catch (err) {
+    if (err instanceof TokenExpiredError) {
+      throw new Error("device code expired before the user approved");
+    }
+    throw err;
+  }
+  await new Promise((r) => setTimeout(r, resp.interval * 1000));
+}
+```
+
+`pollDeviceToken` handles `authorization_pending` and `slow_down` transparently
+and throws `TokenExpiredError` when the device code expires.
+
+## Magic-link (passwordless) initiation
+
+Send a single-use login link to a user's email address:
+
+```typescript
+await client.requestMagicLink("user@example.com");
+// Always resolves — Hearth returns 202 whether or not the email is registered
+// (enumeration resistance). The user clicks the link to complete authentication.
+```
+
+HTTP 429 is surfaced as `OAuthFlowError`.
 
 ## Error handling
 
-All `HearthClient` methods throw `HearthError` on non-2xx responses.
+All `HearthClient` methods throw typed errors:
 
 ```typescript
-import { HearthClient, HearthError } from "@hearth-auth/sdk";
+import {
+  HearthClient,
+  ConfigurationError,
+  TokenExpiredError,
+  TokenInvalidError,
+  TokenIssuerError,
+  OAuthFlowError,
+  RequiredActionError,
+} from "@hearth-auth/sdk";
 
 try {
-  const tokens = await client.exchangeCode({ ... });
+  const claims = await client.verifyToken(accessToken);
 } catch (err) {
-  if (err instanceof HearthError) {
-    console.error(`HTTP ${err.status}:`, err.body);
-  } else {
-    throw err;
+  if (err instanceof RequiredActionError) {
+    // Token is valid but user must complete: err.requiredActions (string[])
+    // Redirect to err.redirectUri if present
+  } else if (err instanceof TokenExpiredError) {
+    // 401 — ask client to refresh
+  } else if (err instanceof TokenIssuerError) {
+    // 401 — token from wrong realm
+  } else if (err instanceof TokenInvalidError) {
+    // 401 — bad signature or malformed JWT
+  }
+}
+
+try {
+  await client.clientCredentials();
+} catch (err) {
+  if (err instanceof OAuthFlowError) {
+    console.error(`OAuth error HTTP ${err.statusCode}: ${err.errorCode}`);
   }
 }
 ```
