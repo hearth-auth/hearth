@@ -1,16 +1,31 @@
 """HearthClient: OAuth auth flows, RBAC predicates, and API operations."""
 
-from typing import Optional, Dict, Any, List
-from urllib.parse import urlencode
+from __future__ import annotations
+
+import base64
 import json
+import time
+from typing import Optional, Dict, Any, List
 
 import httpx
-import jwt
 
-from .errors import HearthError
+from .claims import Claims
+from .errors import (
+    ConfigurationError,
+    HearthError,
+    JWKSFetchError,
+    TokenAudienceError,
+    TokenExpiredError,
+    TokenInvalidError,
+    TokenIssuerError,
+    TokenNotYetValidError,
+)
 from .types import (
     BootstrapResponse,
     AuthorizeResponse,
+    DeviceAuthorizationResponse,
+    SvDeltaResponse,
+    SvSnapshotResponse,
     TokenResponse,
     UserInfoResponse,
     MePermissionsResponse,
@@ -38,11 +53,18 @@ class HearthClient:
         base_url: str,
         realm_id: str,
         access_token: Optional[str] = None,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        jwks_ttl: Optional[float] = None,
         timeout: float = 30.0,
     ):
         self._base = base_url.rstrip("/")
         self._realm = realm_id
         self._token = access_token
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._jwks_ttl = jwks_ttl
+        self._jwks_cache: Optional[Any] = None  # JwksCache, lazily initialised
         self._http = httpx.Client(
             headers={"X-Realm-ID": realm_id},
             timeout=timeout,
@@ -193,9 +215,7 @@ class HearthClient:
     def has_permission(token: str, permission: str) -> bool:
         """Check whether the JWT contains a specific permission."""
         try:
-            claims = jwt.decode(token, options={"verify_signature": False})
-            perms: List[str] = claims.get("permissions", [])
-            return permission in perms
+            return Claims.decode(token).hasPermission(permission)
         except Exception:
             return False
 
@@ -203,9 +223,7 @@ class HearthClient:
     def has_role(token: str, role: str) -> bool:
         """Check whether the JWT contains a specific role."""
         try:
-            claims = jwt.decode(token, options={"verify_signature": False})
-            roles: List[str] = claims.get("roles", [])
-            return role in roles
+            return Claims.decode(token).hasRole(role)
         except Exception:
             return False
 
@@ -213,9 +231,7 @@ class HearthClient:
     def in_group(token: str, group_slug: str) -> bool:
         """Check whether the JWT indicates membership in a group."""
         try:
-            claims = jwt.decode(token, options={"verify_signature": False})
-            groups: List[str] = claims.get("groups", [])
-            return group_slug in groups
+            return Claims.decode(token).in_group(group_slug)
         except Exception:
             return False
 
@@ -223,9 +239,7 @@ class HearthClient:
     def in_org(token: str, org_id: str) -> bool:
         """Check whether the JWT is scoped to a specific organization."""
         try:
-            claims = jwt.decode(token, options={"verify_signature": False})
-            oid: Optional[str] = claims.get("oid")
-            return oid == org_id
+            return Claims.decode(token).in_org(org_id)
         except Exception:
             return False
 
@@ -367,6 +381,290 @@ class HearthClient:
         if resp.status_code != 200:
             raise HearthError(resp.status_code, resp.text)
         return resp.json()
+
+    # ------------------------------------------------------------------
+    # §2 — verify_token: full EdDSA/Ed25519 local signature verification
+    # ------------------------------------------------------------------
+
+    def verify_token(
+        self,
+        token: str,
+        audience: Optional[str] = None,
+        issuer_url: Optional[str] = None,
+    ) -> Claims:
+        """Verify a JWT locally using JWKS-based Ed25519 signature verification.
+
+        Performs all five mandatory validation steps (spec §2) in order:
+
+        1. Verify Ed25519 signature against cached JWKS keys.
+        2. Verify ``exp`` claim (reject if expired).
+        3. Verify ``iss`` matches the configured ``base_url`` (or *issuer_url*).
+        4. Verify ``aud`` contains *audience* (server SDKs only; skipped when None).
+        5. Verify ``iat`` is not more than 5 s in the future.
+
+        :param token: Raw JWT string.
+        :param audience: Expected ``aud`` value.  When ``None``, audience is not checked.
+        :param issuer_url: Expected ``iss`` value.  Defaults to ``base_url``.
+        :returns: :class:`~hearth.claims.Claims` on success.
+        :raises TokenInvalidError: Structural failure or bad signature.
+        :raises TokenExpiredError: ``exp`` is in the past.
+        :raises TokenIssuerError: ``iss`` does not match.
+        :raises TokenAudienceError: ``aud`` does not include the expected value.
+        :raises TokenNotYetValidError: ``iat`` is more than 5 s in the future.
+        :raises JWKSFetchError: JWKS endpoint unreachable.
+        """
+        from cryptography.exceptions import InvalidSignature
+
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise TokenInvalidError("expected three dot-separated segments")
+
+        try:
+            header_bytes = base64.urlsafe_b64decode(parts[0] + "==")
+            header: Dict[str, Any] = json.loads(header_bytes)
+        except Exception as exc:
+            raise TokenInvalidError(f"failed to decode JWT header: {exc}") from exc
+
+        alg = header.get("alg")
+        if alg != "EdDSA":
+            raise TokenInvalidError(f"unsupported algorithm: {alg!r}")
+
+        kid: str = header.get("kid") or ""
+
+        # Lazy-init JWKS cache.
+        if self._jwks_cache is None:
+            from .jwks import JwksCache
+            self._jwks_cache = JwksCache(
+                f"{self._base}/.well-known/jwks.json",
+                ttl=self._jwks_ttl,
+            )
+
+        pub_key = self._jwks_cache.get_key(kid)
+
+        # Verify signature: message = header.payload (ASCII bytes).
+        message = f"{parts[0]}.{parts[1]}".encode("ascii")
+        try:
+            sig_bytes = base64.urlsafe_b64decode(parts[2] + "==")
+        except Exception as exc:
+            raise TokenInvalidError(f"failed to decode JWT signature: {exc}") from exc
+
+        try:
+            pub_key.verify(sig_bytes, message)
+        except InvalidSignature as exc:
+            raise TokenInvalidError("signature verification failed") from exc
+
+        # Decode payload claims.
+        try:
+            payload_bytes = base64.urlsafe_b64decode(parts[1] + "==")
+            payload: Dict[str, Any] = json.loads(payload_bytes)
+        except Exception as exc:
+            raise TokenInvalidError(f"failed to decode JWT payload: {exc}") from exc
+
+        now = int(time.time())
+
+        # Step 2: exp
+        exp = payload.get("exp")
+        if exp is not None and now > int(exp):
+            raise TokenExpiredError(int(exp))
+
+        # Step 3: iss
+        expected_iss = (issuer_url or self._base).rstrip("/")
+        actual_iss = str(payload.get("iss", ""))
+        if actual_iss != expected_iss:
+            raise TokenIssuerError(expected=expected_iss, actual=actual_iss)
+
+        # Step 4: aud (server SDKs only, skipped when audience is None)
+        if audience is not None:
+            aud = payload.get("aud", [])
+            if isinstance(aud, str):
+                aud = [aud]
+            if audience not in aud:
+                raise TokenAudienceError(expected=audience, actual=list(aud))
+
+        # Step 5: iat — must not be more than 5 s in the future
+        iat = payload.get("iat")
+        if iat is not None and int(iat) > now + 5:
+            raise TokenNotYetValidError(int(iat))
+
+        return Claims(payload)
+
+    # ------------------------------------------------------------------
+    # §4.5.1 — client_credentials (M2M)
+    # ------------------------------------------------------------------
+
+    def client_credentials(self, scope: Optional[str] = None) -> TokenResponse:
+        """Obtain a token using the Client Credentials grant (RFC 6749 §4.4).
+
+        :param scope: Optional space-delimited scope string.
+        :raises ConfigurationError: if ``client_id`` or ``client_secret`` are missing.
+        :raises HearthError: on non-200 responses.
+        """
+        if not self._client_id:
+            raise ConfigurationError("client_id is required for client_credentials flow")
+        if not self._client_secret:
+            raise ConfigurationError("client_secret is required for client_credentials flow")
+
+        body: Dict[str, str] = {
+            "grant_type": "client_credentials",
+            "client_id": self._client_id,
+            "client_secret": self._client_secret,
+        }
+        if scope is not None:
+            body["scope"] = scope
+
+        resp = self._http.post(
+            f"{self._base}/realms/{self._realm}/token",
+            data=body,
+        )
+        if resp.status_code != 200:
+            raise HearthError(resp.status_code, resp.text)
+        return TokenResponse(**resp.json())
+
+    # ------------------------------------------------------------------
+    # §4.5.2 — Device Authorization Flow
+    # ------------------------------------------------------------------
+
+    def start_device_flow(
+        self, scope: Optional[str] = None
+    ) -> DeviceAuthorizationResponse:
+        """Initiate the Device Authorization Flow (RFC 8628).
+
+        :param scope: Optional scope string.
+        :raises ConfigurationError: if ``client_id`` is missing.
+        :raises HearthError: on non-200 responses.
+        """
+        if not self._client_id:
+            raise ConfigurationError("client_id is required for device authorization flow")
+
+        body: Dict[str, str] = {"client_id": self._client_id}
+        if scope is not None:
+            body["scope"] = scope
+
+        resp = self._http.post(
+            f"{self._base}/realms/{self._realm}/device/authorize",
+            data=body,
+        )
+        if resp.status_code != 200:
+            raise HearthError(resp.status_code, resp.text)
+        return DeviceAuthorizationResponse(**resp.json())
+
+    def poll_device_token(
+        self,
+        device_code: str,
+        client_id: Optional[str] = None,
+    ) -> Optional[TokenResponse]:
+        """Poll the token endpoint for Device Flow completion (RFC 8628 §3.4).
+
+        Returns ``None`` when authorization is still pending (``authorization_pending``
+        or ``slow_down``).  The caller owns the sleep loop.
+
+        :param device_code: The ``device_code`` from :meth:`start_device_flow`.
+        :param client_id: Override client ID (falls back to constructor value).
+        :raises TokenExpiredError: when the device code has expired.
+        :raises HearthError: on other fatal errors (e.g. ``access_denied``).
+        """
+        cid = client_id or self._client_id
+        if not cid:
+            raise ConfigurationError("client_id is required for device flow polling")
+
+        body: Dict[str, str] = {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": device_code,
+            "client_id": cid,
+        }
+        if self._client_secret:
+            body["client_secret"] = self._client_secret
+
+        resp = self._http.post(
+            f"{self._base}/realms/{self._realm}/token",
+            data=body,
+        )
+
+        if resp.status_code == 200:
+            return TokenResponse(**resp.json())
+
+        # Parse error body.
+        try:
+            error_body = resp.json()
+            error = error_body.get("error", "")
+        except Exception:
+            error = ""
+
+        if error in ("authorization_pending", "slow_down"):
+            return None
+
+        if error == "expired_token":
+            raise TokenExpiredError(0, "device code expired")
+
+        raise HearthError(resp.status_code, resp.text)
+
+    # ------------------------------------------------------------------
+    # §4.5.3 — Magic Link initiation (passwordless)
+    # ------------------------------------------------------------------
+
+    def request_magic_link(self, email: str) -> None:
+        """Request a magic-link email for passwordless sign-in (§4.5.3).
+
+        Always silently succeeds on 202 (enumeration resistance).
+
+        :param email: The email address to send the magic link to.
+        :raises HearthError: on non-202 responses (e.g. HTTP 429 rate limit).
+        """
+        resp = self._http.post(
+            f"{self._base}/v1/{self._realm}/auth/magic-link",
+            json={"email": email},
+        )
+        if resp.status_code == 202:
+            return
+        raise HearthError(resp.status_code, resp.text)
+
+    # ------------------------------------------------------------------
+    # Session-version feed (HEA-930)
+    # ------------------------------------------------------------------
+
+    def sv_snapshot(self, access_token: str) -> SvSnapshotResponse:
+        """Fetch the full session-version snapshot.
+
+        Requires ``hearth.sv_feed`` permission on *access_token*.
+
+        :param access_token: Bearer token with ``hearth.sv_feed`` permission.
+        :raises HearthError: on non-200 responses.
+        """
+        resp = self._http.get(
+            f"{self._base}/oauth/session-versions/snapshot",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if resp.status_code != 200:
+            raise HearthError(resp.status_code, resp.text)
+        return SvSnapshotResponse(**resp.json())
+
+    def sv_delta(
+        self, access_token: str, since: int, limit: Optional[int] = None
+    ) -> Optional[SvDeltaResponse]:
+        """Fetch session-version deltas since sequence number *since*.
+
+        Returns ``None`` when there are no new deltas (HTTP 204).
+
+        :param access_token: Bearer token with ``hearth.sv_feed`` permission.
+        :param since: Only return events with seq > since.
+        :param limit: Maximum number of deltas (default: server-side default of 1000).
+        :raises HearthError: on error responses (including 400 when *since* is
+            older than the retention window).
+        """
+        params: Dict[str, Any] = {"since": since}
+        if limit is not None:
+            params["limit"] = limit
+
+        resp = self._http.get(
+            f"{self._base}/oauth/session-versions",
+            params=params,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if resp.status_code == 204:
+            return None
+        if resp.status_code != 200:
+            raise HearthError(resp.status_code, resp.text)
+        return SvDeltaResponse(**resp.json())
 
     def close(self):
         """Close the underlying HTTP client."""

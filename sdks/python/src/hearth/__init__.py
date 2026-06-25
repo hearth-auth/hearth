@@ -23,6 +23,8 @@ from .errors import (
 )
 from .claims import Claims
 from .middleware import RequirePermissionMiddleware, WsgiPermissionMiddleware
+from .pkce import PkcePair, generate_pkce_pair
+from .jwks import JwksCache
 from .types import (
     AccessTokenAuthorizationMode,
     BootstrapResponse,
@@ -54,6 +56,10 @@ from .types import (
     IntrospectResponse,
     CheckPermissionRequest,
     CheckPermissionResponse,
+    DeviceAuthorizationResponse,
+    SvDeltaEntry,
+    SvDeltaResponse,
+    SvSnapshotResponse,
 )
 
 __all__ = [
@@ -63,6 +69,11 @@ __all__ = [
     # Middleware
     "RequirePermissionMiddleware",
     "WsgiPermissionMiddleware",
+    # PKCE
+    "PkcePair",
+    "generate_pkce_pair",
+    # JWKS cache
+    "JwksCache",
     # Errors
     "HearthError",
     "HearthSdkError",
@@ -110,4 +121,8 @@ __all__ = [
     "IntrospectResponse",
     "CheckPermissionRequest",
     "CheckPermissionResponse",
+    "DeviceAuthorizationResponse",
+    "SvDeltaEntry",
+    "SvDeltaResponse",
+    "SvSnapshotResponse",
 ]
