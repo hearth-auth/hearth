@@ -2,7 +2,7 @@
 
 **Audience:** backend developers who know OAuth 2.0 / OIDC basics and want to understand how Hearth's building blocks fit together before writing integration code.
 
-If you want to skip straight to running commands, see [Getting Started](getting-started.md).
+If you want to skip straight to running commands, see [Getting Started](getting-started.mdx).
 
 ---
 
@@ -221,15 +221,15 @@ When a federated login arrives with an email that matches an existing local acco
 | `auto` | External identity is linked immediately on verified-email match. Suitable when the upstream IdP verifies emails. |
 | `disabled` | Always JIT-provision a new account; never link to an existing one. |
 
-→ See [Federation examples](hearth-yaml-examples.md#part-4--social-login--federation) for YAML configuration for each provider type.
+→ See [Federation examples](hearth-yaml-examples/federation.md) for YAML configuration for each provider type.
 
 ---
 
 ## Further reading
 
-- [Getting Started](getting-started.md) — hands-on curl walkthrough
+- [Getting Started](getting-started.mdx) — SDK quickstart and PKCE walkthrough
 - [RBAC guide](rbac.md) — creating roles, assigning permissions, managing groups, SDK helpers
 - [Organizations guide](organizations.md) — B2B multi-tenancy within a realm
-- [Federation examples](hearth-yaml-examples.md#part-4--social-login--federation) — Google, GitHub, Microsoft, Apple, SAML YAML config
+- [Federation examples](hearth-yaml-examples/federation.md) — Google, GitHub, Microsoft, Apple, SAML YAML config
 - [Security hardening](security-hardening.md) — production TLS, token TTLs, rate limiting
 - [Configuration reference](../specs/CONFIGURATION.md#realmsnamedfederation) — full federation field reference
