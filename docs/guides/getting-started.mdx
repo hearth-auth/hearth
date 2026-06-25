@@ -5,10 +5,10 @@ import TabItem from '@theme/TabItem';
 
 **Goal:** First authenticated request in your app. **Time:** ~5 minutes.
 
-**Prerequisites:** `docker` and a package manager for your stack (`npm` / Go toolchain / `pip`). For raw-HTTP examples you also need `curl` and `jq`.
+**Prerequisites:** `docker` and a package manager for your stack (`npm` / Go toolchain / `pip`). For the setup steps you also need `curl` and `jq`.
 
 :::tip[SDK reference]
-Step 3 below includes quickstart snippets for TypeScript, Go, and Python. For deeper coverage — RBAC hooks, middleware patterns, and the Admin API — see the [SDK quickstarts](/docs/sdks/overview).
+Step 3 adds browser login with the TypeScript SDK; step 4 checks permissions from TypeScript, Go, and Python backends. For deeper coverage — RBAC hooks, middleware patterns, and the Admin API — see the [SDK overview](/docs/sdks/overview).
 :::
 
 ---
@@ -38,34 +38,39 @@ For Docker Compose, systemd, or Helm, see [`deploy/README.md`](../../deploy/READ
 
 ---
 
-## 2. Bootstrap a realm and admin token
+## 2. Bootstrap a realm and register your app
+
+Create a dev realm with an admin token, then register a public OAuth client for your app. Both are one-time **setup** — not application code.
 
 ```bash
+# Create the dev realm + an admin token
 BOOTSTRAP=$(curl -fsS -X POST http://127.0.0.1:8420/admin/bootstrap)
 REALM_ID=$(echo "$BOOTSTRAP" | jq -r .realm_id)
-USER_ID=$(echo "$BOOTSTRAP"  | jq -r .user_id)
 ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r .access_token)
+
+# Register a public client (no secret — PKCE secures it)
+CLIENT_ID=$(curl -fsS -X POST http://127.0.0.1:8420/clients \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Realm-ID: $REALM_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"client_name":"quickstart","redirect_uris":["http://localhost:3000/callback"]}' \
+  | jq -r .client_id)
+
+echo "REALM_ID:  $REALM_ID"
+echo "CLIENT_ID: $CLIENT_ID"
 ```
 
-The response contains `realm_id`, `user_id`, `access_token`, and `refresh_token`. Keep `ADMIN_TOKEN` — you need it to register a client in step 3.
+Your app (step 3) needs three values: the **realm slug** — `dev-realm` in `--dev` mode — the **`CLIENT_ID`** printed above, and the server URL `http://localhost:8420`.
 
 :::warning[Dev-only endpoint]
-`/admin/bootstrap` returns `404 Not Found` outside `--dev` mode. In production, create realms via `hearth.yaml` and issue credentials through normal OAuth flows.
+`/admin/bootstrap` returns `404 Not Found` outside `--dev` mode. In production, create realms and register clients via `hearth.yaml` or the Admin API — never bootstrap.
 :::
 
 ---
 
-## 3. Install the SDK and run the PKCE flow
+## 3. Add login to your app
 
-Install the SDK for your stack, then run the snippet. Each tab:
-
-1. Registers a test OAuth client with your realm
-2. Generates a PKCE code verifier and challenge (RFC 7636)
-3. Requests an authorization code (dev mode: `user_id` bypasses the browser login page)
-4. Exchanges the code for an access token
-5. Verifies a permission from the token's claims
-
-All tabs target `http://127.0.0.1:8420` with the `REALM_ID`, `USER_ID`, and `ADMIN_TOKEN` from step 2.
+Logging a user in is the OAuth 2.0 authorization-code + PKCE flow: send the user to Hearth to authenticate, then exchange the returned `code` for tokens on your callback route. The TypeScript SDK wraps both halves in one `createHearthAuth` helper; the other SDKs build the redirect URL and call `exchangeCode` directly. Every tab uses the realm slug `dev-realm`, the `CLIENT_ID` from step 2, redirect URI `http://localhost:3000/callback`, and server `http://localhost:8420`.
 
 <Tabs groupId="lang">
 <TabItem value="ts" label="TypeScript" default>
@@ -75,104 +80,70 @@ npm install @hearth-auth/sdk
 ```
 
 ```ts
-import { HearthApiClient, generateCodeVerifier, generateCodeChallenge } from '@hearth-auth/sdk';
+import { HearthApiClient, createHearthAuth } from '@hearth-auth/sdk';
 
-const HEARTH_URL  = 'http://localhost:8420';
-const REALM_ID    = '<realm-id>';      // from bootstrap
-const USER_ID     = '<user-id>';       // from bootstrap
-const ADMIN_TOKEN = '<access-token>';  // from bootstrap
-
-const client = new HearthApiClient({ baseUrl: HEARTH_URL, realmId: REALM_ID });
-
-// 1. Register a public client (no client_secret — PKCE provides the security)
-const app = await client.registerClient({
-  clientName: 'quickstart',
-  redirectUris: ['http://localhost:3000/callback'],
+const client = new HearthApiClient({
+  baseUrl: 'http://localhost:8420/realms/dev-realm',  // {hearthUrl}/realms/{realmSlug}
+  realmId: '<realm-id>',
 });
 
-// 2. PKCE (RFC 7636)
-const verifier   = generateCodeVerifier();
-const challenge  = await generateCodeChallenge(verifier);
-
-// 3. Authorize — dev mode: user_id bypasses the browser login page
-const { code } = await client.authorize({
-  clientId: app.client_id,
+// createHearthAuth runs the full PKCE handshake, stores tokens, and auto-refreshes.
+const auth = createHearthAuth(client, {
+  clientId:    '<client-id>',
   redirectUri: 'http://localhost:3000/callback',
-  codeChallenge: challenge,
-  codeChallengeMethod: 'S256',
-  userId: USER_ID,           // omit in production; Hearth redirects to login page instead
+  hearthUrl:   'http://localhost:8420',
+  realmSlug:   'dev-realm',
 });
 
-// 4. Exchange code → tokens
-const tokens = await client.exchangeCode({
-  clientId: app.client_id,
-  code,
-  redirectUri: 'http://localhost:3000/callback',
-  codeVerifier: verifier,
-});
+// "Log in" button →
+await auth.startLogin();
 
-// 5. Verify a permission (local decode — no network call)
-const { permissions } = await client.permissions(tokens.access_token);
-console.log('has hearth.admin:', permissions.includes('hearth.admin')); // → true
+// /callback route →
+const p = new URLSearchParams(window.location.search);
+await auth.handleCallback(p.get('code')!, p.get('state')!);
+// Tokens are now stored and auto-refreshed.
 ```
 
 </TabItem>
 <TabItem value="go" label="Go">
 
 ```bash
-go get github.com/hearth-auth/hearth/sdks/go/hearth
+go get github.com/hearth-auth/hearth/sdks/go
 ```
 
 ```go
-package main
-
 import (
-    "context"
     "fmt"
+    "net/http"
+    "net/url"
+
     "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
-func main() {
-    ctx := context.Background()
+const (
+    hearthURL   = "http://localhost:8420"
+    realmSlug   = "dev-realm"
+    clientID    = "<client-id>"
+    redirectURI = "http://localhost:3000/callback"
+)
 
-    const (
-        hearthURL  = "http://localhost:8420"
-        realmID    = "<realm-id>"    // from bootstrap
-        userID     = "<user-id>"     // from bootstrap
-    )
+client := hearth.NewClient(hearthURL, "<realm-id>")
 
-    client := hearth.NewClient(hearthURL, realmID)
+// 1. "Log in" handler — build the URL and redirect (store pkce.Verifier + state in the session).
+pkce, _ := hearth.GeneratePKCE()
+authURL := fmt.Sprintf(
+    "%s/realms/%s/authorize?response_type=code&client_id=%s&redirect_uri=%s"+
+        "&scope=openid&state=%s&code_challenge=%s&code_challenge_method=S256",
+    hearthURL, realmSlug, clientID, url.QueryEscape(redirectURI), state, pkce.Challenge)
+http.Redirect(w, r, authURL, http.StatusFound)
 
-    // 1. Register a public client (no secret — PKCE provides the security)
-    app, _ := client.RegisterClient(ctx, hearth.RegisterClientRequest{
-        ClientName:   "quickstart",
-        RedirectURIs: []string{"http://localhost:3000/callback"},
-    })
-
-    // 2. PKCE (RFC 7636)
-    pkce, _ := hearth.GeneratePKCE()
-
-    // 3. Authorize — dev mode: UserID bypasses the browser login page
-    auth, _ := client.Authorize(ctx, hearth.AuthorizeRequest{
-        ClientID:            app.ClientID,
-        RedirectURI:         "http://localhost:3000/callback",
-        CodeChallenge:       pkce.Challenge,
-        CodeChallengeMethod: pkce.Method,
-        UserID:              userID, // omit in production
-    })
-
-    // 4. Exchange code → tokens
-    tokens, _ := client.ExchangeCode(ctx, hearth.TokenRequest{
-        ClientID:     app.ClientID,
-        Code:         auth.Code,
-        RedirectURI:  "http://localhost:3000/callback",
-        CodeVerifier: pkce.Verifier,
-    })
-
-    // 5. Verify a permission (local JWT decode — no network call)
-    fmt.Println("has hearth.admin:", client.HasPermission(tokens.AccessToken, "hearth.admin"))
-    // → has hearth.admin: true
-}
+// 2. /callback handler — exchange the code (verifier loaded from the session).
+tokens, _ := client.ExchangeCode(ctx, hearth.TokenRequest{
+    ClientID:     clientID,
+    Code:         r.URL.Query().Get("code"),
+    RedirectURI:  redirectURI,
+    CodeVerifier: verifier,
+})
 ```
 
 </TabItem>
@@ -184,118 +155,115 @@ pip install hearth-sdk
 
 ```python
 import secrets, hashlib, base64
-import httpx
-from hearth import HearthClient, RegisterClientRequest
+from hearth import HearthClient
 
-HEARTH_URL  = 'http://localhost:8420'
-REALM_ID    = '<realm-id>'     # from bootstrap
-USER_ID     = '<user-id>'      # from bootstrap
-ADMIN_TOKEN = '<access-token>' # from bootstrap
+HEARTH_URL, REALM_SLUG = "http://localhost:8420", "dev-realm"
+CLIENT_ID, REDIRECT_URI = "<client-id>", "http://localhost:3000/callback"
 
-client = HearthClient(HEARTH_URL, REALM_ID)
+client = HearthClient(HEARTH_URL, "<realm-id>")
 
-# 1. Register a public client
-app = client.register_client(RegisterClientRequest(
-    name='quickstart',
-    redirect_uris=['http://localhost:3000/callback'],
-))
+# 1. "Log in" view — redirect to Hearth (store verifier + state in the session).
+verifier  = secrets.token_urlsafe(32)
+challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+auth_url = (f"{HEARTH_URL}/realms/{REALM_SLUG}/authorize?response_type=code"
+            f"&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope=openid"
+            f"&state={state}&code_challenge={challenge}&code_challenge_method=S256")
+return redirect(auth_url)
 
-# 2. PKCE (RFC 7636) — Python SDK has no helper; use stdlib
-raw      = secrets.token_bytes(32)
-verifier = base64.urlsafe_b64encode(raw).rstrip(b'=').decode()
-digest   = hashlib.sha256(verifier.encode()).digest()
-challenge = base64.urlsafe_b64encode(digest).rstrip(b'=').decode()
-
-# 3. Authorize — dev mode: user_id bypasses the browser login page
-#    HearthClient.authorize() is for browser redirect flows; use httpx directly here.
-r = httpx.post(f'{HEARTH_URL}/authorize',
-    headers={'X-Realm-ID': REALM_ID},
-    json={
-        'client_id': app.id,
-        'redirect_uri': 'http://localhost:3000/callback',
-        'response_type': 'code',
-        'code_challenge': challenge,
-        'code_challenge_method': 'S256',
-        'user_id': USER_ID,  # dev mode only — omit in production
-    })
-code = r.json()['code']
-
-# 4. Exchange code → tokens (app.secret is None for public clients)
-tokens = client.exchange_code(code, app.id, app.secret or '',
-                               'http://localhost:3000/callback', verifier)
-
-# 5. Verify a permission (local JWT decode — no network call)
-print('has hearth.admin:', HearthClient.has_permission(tokens.access_token, 'hearth.admin'))
-# → has hearth.admin: True
+# 2. /callback view — exchange the code ("" = no secret for a public client).
+tokens = client.exchange_code(code, CLIENT_ID, "", REDIRECT_URI, code_verifier=verifier)
 ```
 
-:::note[Python SDK and browser flows]
-`HearthClient.authorize()` is designed for production browser-redirect flows. The `httpx.post()` call above is a dev-mode shortcut that passes `user_id` directly. In a real web app, Hearth redirects the user's browser to the login page instead.
-:::
+</TabItem>
+<TabItem value="php" label="PHP">
+
+```bash
+composer require hearth-auth/php-sdk:^1.0
+```
+
+```php
+use Hearth\HearthClient;
+
+$hearthUrl   = 'http://localhost:8420';
+$realmSlug   = 'dev-realm';
+$clientId    = '<client-id>';
+$redirectUri = 'http://localhost:3000/callback';
+
+$hearth = new HearthClient(issuerUrl: "{$hearthUrl}/realms/{$realmSlug}");
+
+// 1. "Log in" — redirect to Hearth (store verifier + state in the session).
+$verifier  = bin2hex(random_bytes(32));
+$challenge = rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '=');
+$_SESSION['verifier'] = $verifier;
+$query = http_build_query([
+    'response_type' => 'code', 'client_id' => $clientId, 'redirect_uri' => $redirectUri,
+    'scope' => 'openid', 'state' => $state,
+    'code_challenge' => $challenge, 'code_challenge_method' => 'S256',
+]);
+header("Location: {$hearthUrl}/realms/{$realmSlug}/authorize?{$query}");
+exit;
+
+// 2. /callback — exchange the code for tokens.
+$tokens = $hearth->exchangeCode($_GET['code'], $redirectUri, $_SESSION['verifier']);
+```
+
+</TabItem>
+<TabItem value="rust" label="Rust">
+
+```toml
+# Cargo.toml — see the Rust SDK page for the git dependency
+hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", package = "hearth-sdk" }
+```
+
+```rust
+use hearth_sdk::HearthClient;
+
+let client = HearthClient::new("http://localhost:8420", "<realm-id>");
+
+// 1. "Log in" handler — redirect to Hearth (store `verifier` + `state` in the session).
+// `verifier` is a random 43+ char string; `challenge` = BASE64URL(SHA256(verifier)).
+let auth_url = format!(
+    "http://localhost:8420/realms/dev-realm/authorize?response_type=code\
+     &client_id=<client-id>&redirect_uri=http://localhost:3000/callback&scope=openid\
+     &state={state}&code_challenge={challenge}&code_challenge_method=S256");
+// redirect the browser to `auth_url` with your framework (axum, actix, …).
+
+// 2. /callback handler — exchange the code ("" = no secret for a public client).
+let tokens = client
+    .exchange_code(&code, "<client-id>", "", "http://localhost:3000/callback", Some(&verifier))
+    .await?;
+```
 
 </TabItem>
 <TabItem value="curl" label="curl">
 
-No SDK required — `curl`, `openssl`, and `jq` only.
-
 ```bash
-# Paste REALM_ID, USER_ID, and ADMIN_TOKEN from the bootstrap step above.
+# 1. Generate an S256 PKCE pair, then open the login URL in a browser.
+VERIFIER=$(openssl rand -hex 32)
+CHALLENGE=$(printf '%s' "$VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+echo "http://localhost:8420/realms/dev-realm/authorize?response_type=code&client_id=$CLIENT_ID&redirect_uri=http://localhost:3000/callback&scope=openid&state=xyz&code_challenge=$CHALLENGE&code_challenge_method=S256"
 
-# 1. Register a public client
-CLIENT=$(curl -fsS -X POST http://127.0.0.1:8420/clients \
-  -H "X-Realm-ID: $REALM_ID" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"client_name":"quickstart","redirect_uris":["http://localhost:3000/callback"]}')
-CLIENT_ID=$(echo "$CLIENT" | jq -r .client_id)
-
-# 2. PKCE (RFC 7636)
-CODE_VERIFIER=$(openssl rand -hex 32)
-CODE_CHALLENGE=$(printf '%s' "$CODE_VERIFIER" \
-  | openssl dgst -sha256 -binary \
-  | openssl base64 -A \
-  | tr '+/' '-_' \
-  | tr -d '=')
-
-# 3. Authorize — dev mode: user_id bypasses the browser login page
-CODE=$(curl -fsS -X POST http://127.0.0.1:8420/authorize \
-  -H "X-Realm-ID: $REALM_ID" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"client_id\":             \"$CLIENT_ID\",
-    \"redirect_uri\":          \"http://localhost:3000/callback\",
-    \"response_type\":         \"code\",
-    \"code_challenge\":        \"$CODE_CHALLENGE\",
-    \"code_challenge_method\": \"S256\",
-    \"user_id\":               \"$USER_ID\"
-  }" | jq -r .code)
-
-# 4. Exchange code → tokens
-ACCESS_TOKEN=$(curl -fsS -X POST http://127.0.0.1:8420/token \
-  -H "X-Realm-ID: $REALM_ID" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "grant_type=authorization_code" \
-  --data-urlencode "code=$CODE" \
-  --data-urlencode "client_id=$CLIENT_ID" \
-  --data-urlencode "redirect_uri=http://localhost:3000/callback" \
-  --data-urlencode "code_verifier=$CODE_VERIFIER" | jq -r .access_token)
-
-echo "access_token: $ACCESS_TOKEN"
-
-# 5. Inspect permissions (local decode — no signature verification)
-echo "$ACCESS_TOKEN" \
-  | cut -d. -f2 \
-  | tr '_-' '/+' \
-  | awk '{pad=(4-length($0)%4)%4; for(i=0;i<pad;i++) $0=$0"="; print}' \
-  | base64 -d \
-  | jq '.permissions'
-# → ["hearth.admin","realm.read","realm.write","realm.admin"]
+# 2. After logging in, exchange the ?code= you were redirected with.
+curl -fsS -X POST http://localhost:8420/token -H "X-Realm-ID: $REALM_ID" \
+  --data-urlencode grant_type=authorization_code \
+  --data-urlencode code=$CODE \
+  --data-urlencode client_id=$CLIENT_ID \
+  --data-urlencode redirect_uri=http://localhost:3000/callback \
+  --data-urlencode code_verifier=$VERIFIER | jq -r .access_token
 ```
 
 </TabItem>
 </Tabs>
 
-All tabs produce an access token signed with your realm's Ed25519 key. The `permissions` array is resolved at issue time — no network call needed to check it at request time.
+The access token is signed with your realm's Ed25519 key, and its `permissions` are resolved at issue time — checking them needs no network call (step 4).
+
+:::tip[TypeScript logs in with one call]
+Only the TypeScript SDK ships the `createHearthAuth` facade today — it hides PKCE, token storage, and silent refresh, and powers the [`full-stack-demo`](https://github.com/hearth-auth/hearth/tree/main/examples/full-stack-demo) Vite + React app. One-call login facades for the other SDKs are on the roadmap; until then the explicit redirect → `exchangeCode` flow above is the supported pattern.
+:::
+
+:::note[Node is server-side only]
+`@hearth-auth/node` verifies tokens — it does not initiate login. Run the browser login with one of the SDKs above (or your own redirect), then verify the resulting tokens with Node in step 4. See the [Node SDK](/docs/sdks/node).
+:::
 
 ---
 
@@ -324,6 +292,28 @@ app.get('/admin/data', requirePermission('hearth.admin', {
 }), (req, res) => {
   res.json({ message: 'authorized', user: req.user });
 });
+```
+
+</TabItem>
+<TabItem value="node" label="Node">
+
+```bash
+npm install @hearth-auth/node
+```
+
+```ts
+import { HearthClient } from '@hearth-auth/node';
+
+const client = new HearthClient({
+  issuer_url: process.env.HEARTH_URL!,       // e.g. https://auth.example.com
+  realm_id:   process.env.HEARTH_REALM_ID!,
+});
+
+// In your Express / Fastify handler — `bearer` is the Authorization token:
+const token = await client.verifyToken(bearer);   // verifies the Ed25519 signature via cached JWKS
+if (!token.hasPermission('hearth.admin')) {
+  res.status(403).end();
+}
 ```
 
 </TabItem>
@@ -367,20 +357,41 @@ def require_permission(permission: str):
 ```
 
 </TabItem>
-<TabItem value="curl" label="curl">
+<TabItem value="php" label="PHP">
 
-```bash
-# Verify the token signature against the realm's JWKS endpoint
-curl -fsS http://127.0.0.1:8420/jwks -H "X-Realm-ID: $REALM_ID" | jq .
+```php
+use Hearth\HearthClient;
 
-# For production, use a JWT library — never skip signature verification.
-# The decode in step 3 above is for inspection only.
+$hearth = new HearthClient(issuerUrl: $hearthUrl);
+
+// In your PSR-15 / Laravel middleware:
+$token  = str_replace('Bearer ', '', $_SERVER['HTTP_AUTHORIZATION'] ?? '');
+$claims = $hearth->verifyToken($token);   // verifies the Ed25519 signature via cached JWKS
+
+if (!$claims->hasPermission('hearth.admin')) {
+    http_response_code(403);
+    exit;
+}
+```
+
+</TabItem>
+<TabItem value="rust" label="Rust">
+
+```rust
+use hearth_sdk::HearthClient;
+
+// `token: &str` is the Bearer value from the Authorization header.
+if !HearthClient::has_permission(token, "hearth.admin")? {
+    // reject with 403 Forbidden
+}
 ```
 
 </TabItem>
 </Tabs>
 
-`HasPermission` / `has_permission` / `requirePermission` all decode the JWT locally (no network call). The `permissions` array is embedded in the token at issue time by Hearth's RBAC engine, so route checks are zero-latency.
+The local RBAC checks — `requirePermission` (TypeScript), `HasPermission` (Go), `has_permission` (Python, Rust) — read the `permissions` array embedded in the token at issue time by Hearth's RBAC engine, with no network call. The `verifyToken()` calls (Node, PHP) additionally validate the token's Ed25519 signature against the realm's cached JWKS before the check.
+
+Prefer no SDK? Verify tokens directly against the realm's JWKS endpoint — see [Token verification without an SDK](/docs/sdks/overview#token-verification-without-an-sdk).
 
 For browser SPA and BFF token-storage patterns, see [Browser / SPA token handling](browser-spa-tokens.md).
 
