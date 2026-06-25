@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **EdDSA/Ed25519 signature verification** — `TokenVerifier` now correctly verifies JWTs signed
+  with Hearth's Ed25519 key. Previously the `CompositeKeySelector` only registered RS256 and ES256
+  selectors, causing every EdDSA token to fail with `TokenInvalidError` regardless of validity
+  (HEA-1556).
+
 ### Added
 
 - **Permission delivery modes** (`AccessTokenAuthorizationMode`) — `EMBEDDED`, `INTROSPECTION`,

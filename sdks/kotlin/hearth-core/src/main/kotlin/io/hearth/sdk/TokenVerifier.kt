@@ -21,7 +21,7 @@ private const val CLOCK_SKEW_SECONDS = 5
  * JWT signature verifier backed by a [JwksClient].
  *
  * Implements the mandatory validation order from SDK.md §2:
- * 1. Signature against JWKS (RS256 / ES256)
+ * 1. Signature against JWKS (EdDSA/Ed25519, RS256, ES256)
  * 2. `exp` claim
  * 3. `iss` matches configured issuer
  * 4. `aud` contains configured client_id (optional — server SDK mode)
@@ -73,11 +73,12 @@ class TokenVerifier(
 
     private fun processJwt(jwt: SignedJWT, keySet: com.nimbusds.jose.jwk.JWKSet): Claims {
         val processor = DefaultJWTProcessor<SecurityContext>().apply {
-            // Build a composite selector that supports RS256 + ES256 (sdk-spec §2).
+            // Build a composite selector that supports EdDSA/Ed25519 (Hearth default), RS256, and ES256.
             val source = ImmutableJWKSet<SecurityContext>(keySet)
             val rsaSelector = JWSVerificationKeySelector(JWSAlgorithm.RS256, source)
             val ecSelector  = JWSVerificationKeySelector(JWSAlgorithm.ES256, source)
-            jwsKeySelector = CompositeKeySelector(rsaSelector, ecSelector)
+            val edSelector  = JWSVerificationKeySelector(JWSAlgorithm.EdDSA, source)
+            jwsKeySelector = CompositeKeySelector(rsaSelector, ecSelector, edSelector)
             jwtClaimsSetVerifier = buildClaimsVerifier()
         }
 
