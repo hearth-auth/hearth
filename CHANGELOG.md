@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Node SDK C3 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1558):
+  `exchangeCode()` (authorization code → tokens, PKCE verifier support);
+  `clientCredentials()` (RFC 6749 §4.4 M2M token grant, credentials in body never URL);
+  `startDeviceFlow()` / `pollDeviceToken()` (RFC 8628, `authorization_pending` transparent,
+  `slow_down` increases interval by 5 s per occurrence, `expired_token` raises `TokenExpiredError`);
+  `requestMagicLink()` (enumeration-resistant passwordless initiation, 429 → `OAuthFlowError`);
+  `userinfo()` (OIDC userinfo endpoint, endpoint discovered); `mePermissions()` (`GET /v1/me/permissions`,
+  live RBAC state); `svSnapshot()` / `svDelta()` (session-version feed HEA-930).
+  New standalone `generatePkce()` helper (`PkcePair` with verifier/challenge/method, RFC 7636 S256).
+  New error: `OAuthFlowError` with `statusCode` for OAuth endpoint HTTP errors.
+  New types: `TokenResponse`, `DeviceAuthorizationResponse`, `UserInfoResponse`,
+  `MePermissionsResponse`, `SvDeltaEntry`, `SvDeltaResponse`, `SvSnapshotResponse`, `ExchangeCodeOptions`.
+  `OAuthFlowsClient` is exported as a standalone class for composition.
+  `verifyToken()` already supported full Ed25519/EdDSA via `jose` (EdDSA in algorithm list since initial ship).
 - **Rust SDK C7 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1562):
   `verify_token()` (full Ed25519/EdDSA local signature verification via JWKS cache with TTL,
   all five spec §2 validation steps, typed `HearthError` variants per §5);

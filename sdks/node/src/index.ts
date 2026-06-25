@@ -15,6 +15,23 @@ export type { IntrospectionResult } from "./introspect.js";
 export { VerifiedToken } from "./token.js";
 export type { AccessTokenAuthorizationMode } from "./token.js";
 
+// §4.5 — OAuth flows (client credentials, device flow, magic-link, exchangeCode)
+export { OAuthFlowsClient } from "./flows.js";
+export type {
+  TokenResponse,
+  DeviceAuthorizationResponse,
+  UserInfoResponse,
+  MePermissionsResponse,
+  SvDeltaEntry,
+  SvDeltaResponse,
+  SvSnapshotResponse,
+  ExchangeCodeOptions,
+} from "./flows.js";
+
+// §PKCE — RFC 7636 code verifier + challenge generation
+export { generatePkce } from "./pkce.js";
+export type { PkcePair } from "./pkce.js";
+
 // §5 — Error taxonomy
 export {
   HearthError,
@@ -34,6 +51,7 @@ export {
   AuthorizeError,
   RequiredActionError,
   AdminHttpError,
+  OAuthFlowError,
 } from "./errors.js";
 
 // §6 — Middleware
