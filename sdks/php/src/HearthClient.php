@@ -415,6 +415,36 @@ final class HearthClient
         // 202 Accepted — success, no body required
     }
 
+    /**
+     * Exchanges a magic-link token for tokens (spec §4.5.3 / §7.2 C-12).
+     *
+     * Completes the passwordless flow started by `requestMagicLink()`: posts
+     * `grant_type=urn:hearth:grant-type:magic-link` with the opaque `$token`
+     * from the magic-link URL to the token endpoint. The token is sent in the
+     * form body, never the URL.
+     *
+     * @param string $token The opaque magic-link token from the email/redirect URL.
+     *
+     * @throws NetworkException When the token endpoint is unreachable.
+     */
+    public function exchangeMagicLink(string $token): TokenResponse
+    {
+        $endpoint = $this->discoverEndpoint('token_endpoint');
+
+        $params = [
+            'grant_type' => 'urn:hearth:grant-type:magic-link',
+            'token'      => $token,
+        ];
+
+        if ($this->clientId !== null) {
+            $params['client_id'] = $this->clientId;
+        }
+
+        $data = $this->postForm($endpoint, $params);
+
+        return TokenResponse::fromArray($data);
+    }
+
     // =========================================================================
     // Dynamic Client Registration (RFC 7591)
     // =========================================================================

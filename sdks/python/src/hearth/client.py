@@ -618,6 +618,32 @@ class HearthClient:
             return
         raise HearthError(resp.status_code, resp.text)
 
+    def exchange_magic_link(self, token: str) -> TokenResponse:
+        """Exchange a magic-link token for tokens (§4.5.3 / §7.2 C-12).
+
+        Completes the passwordless flow started by :meth:`request_magic_link`:
+        posts ``grant_type=urn:hearth:grant-type:magic-link`` with the opaque
+        ``token`` from the magic-link URL to the token endpoint. The token is
+        sent in the form body, never the URL.
+
+        :param token: The opaque magic-link token from the email/redirect URL.
+        :raises HearthError: on a non-200 response (e.g. expired/used token).
+        """
+        body: Dict[str, str] = {
+            "grant_type": "urn:hearth:grant-type:magic-link",
+            "token": token,
+        }
+        if self._client_id:
+            body["client_id"] = self._client_id
+
+        resp = self._http.post(
+            f"{self._base}/realms/{self._realm}/token",
+            data=body,
+        )
+        if resp.status_code != 200:
+            raise HearthError(resp.status_code, resp.text)
+        return TokenResponse(**resp.json())
+
     # ------------------------------------------------------------------
     # Session-version feed (HEA-930)
     # ------------------------------------------------------------------

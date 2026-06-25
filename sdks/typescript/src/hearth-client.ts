@@ -457,6 +457,31 @@ export class HearthClient {
     }
   }
 
+  /**
+   * Exchange a magic-link token for tokens (spec §4.5.3 / §7.2 C-12).
+   *
+   * Completes the passwordless flow started by {@link requestMagicLink}: posts
+   * `grant_type=urn:hearth:grant-type:magic-link` with the opaque `token` from
+   * the magic-link URL to the discovered token endpoint. The `token` is sent in
+   * the body, never the URL.
+   *
+   * @param token - The opaque magic-link token from the email/redirect URL.
+   * @throws {@link OAuthFlowError} on any non-2xx response (e.g. expired/used token).
+   */
+  async exchangeMagicLink(token: string): Promise<TokenResponse> {
+    const doc = await this.discover();
+    const tokenEndpoint = (doc as Record<string, unknown>)["token_endpoint"] as string | undefined;
+    if (!tokenEndpoint) {
+      throw new ConfigurationError("token_endpoint not found in OIDC discovery document");
+    }
+    const params: Record<string, string> = {
+      grant_type: "urn:hearth:grant-type:magic-link",
+      token,
+    };
+    if (this.clientId) params.client_id = this.clientId;
+    return this.postForm<TokenResponse>(tokenEndpoint, params);
+  }
+
   // ── Private helpers ──────────────────────────────────────────────────────
 
   private async postForm<T>(endpoint: string, params: Record<string, string>): Promise<T> {

@@ -560,6 +560,40 @@ class TestMagicLink:
             self._client().request_magic_link("user@example.com")
         assert exc_info.value.status_code == 429
 
+    def test_exchange_returns_token_response(self, respx_mock):
+        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
+            return_value=httpx.Response(200, json={
+                "access_token": "at", "token_type": "Bearer", "expires_in": 3600,
+            })
+        )
+        result = self._client().exchange_magic_link("magic-token-xyz")
+        assert result.access_token == "at"
+        assert result.token_type == "Bearer"
+
+    def test_exchange_sends_magic_link_grant_with_token_in_body(self, respx_mock):
+        captured = {}
+
+        def handler(request):
+            captured["body"] = request.content.decode()
+            return httpx.Response(200, json={
+                "access_token": "at", "token_type": "Bearer", "expires_in": 3600,
+            })
+
+        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(side_effect=handler)
+        from hearth.client import HearthClient
+        HearthClient("http://localhost:8420", realm_id="realm-1", client_id="cid").exchange_magic_link("magic-token-xyz")
+        assert "grant_type=urn%3Ahearth%3Agrant-type%3Amagic-link" in captured["body"]
+        assert "token=magic-token-xyz" in captured["body"]
+        assert "client_id=cid" in captured["body"]
+
+    def test_exchange_raises_hearth_error_on_invalid_token(self, respx_mock):
+        from hearth.errors import HearthError
+        respx_mock.post("http://localhost:8420/realms/realm-1/token").mock(
+            return_value=httpx.Response(400, json={"error": "invalid_grant"})
+        )
+        with pytest.raises(HearthError):
+            self._client().exchange_magic_link("expired")
+
 
 # ---------------------------------------------------------------------------
 # Session-version endpoints

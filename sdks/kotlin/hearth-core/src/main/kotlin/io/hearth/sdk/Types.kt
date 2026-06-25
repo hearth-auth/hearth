@@ -65,6 +65,12 @@ data class DeviceAuthorizationRequest(
     val scope: String? = null,
 )
 
+/** Body for the magic-link send (initiation) request — `POST /v1/{realm}/auth/magic-link`. */
+@Serializable
+data class MagicLinkRequest(
+    val email: String,
+)
+
 @Serializable
 data class DeviceAuthorizationResponse(
     @SerialName("device_code") val deviceCode: String,

@@ -358,6 +358,28 @@ class HearthClient(
     }
 
     /**
+     * Sends a magic-link email for passwordless sign-in (spec §4.5.3).
+     *
+     * Completes the *send* half of the magic-link flow that pairs with
+     * [exchangeMagicLink]. Per enumeration-resistance requirements, the server
+     * always returns 202 regardless of whether the email is registered, so this
+     * method succeeds silently on any 2xx and never surfaces "user not found".
+     *
+     * Requires [realmId] to be set on this client.
+     *
+     * @throws ConfigurationError when [realmId] is not set.
+     * @throws ApiError on any non-2xx response (e.g. HTTP 429 rate limit).
+     */
+    suspend fun requestMagicLink(email: String) {
+        val rid = realmId
+            ?: throw ConfigurationError("realmId is required for requestMagicLink")
+        httpClient.postNoContent(
+            url = "$issuerUrl/v1/$rid/auth/magic-link",
+            payload = MagicLinkRequest(email = email),
+        )
+    }
+
+    /**
      * Exchanges a Magic Link token for tokens.
      */
     suspend fun exchangeMagicLink(magicToken: String): TokenResponse {

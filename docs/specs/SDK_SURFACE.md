@@ -1,7 +1,7 @@
 # Hearth SDK Canonical Surface
 
-> **Status:** Draft — pending CTO review.  
-> **Gates:** C2–C8 implementation. [C1 (Kotlin EdDSA fix)](/HEA/issues/HEA-1556) may proceed without waiting for this document.  
+> **Status:** As-built — coverage matrix re-verified from source after [PR #229](https://github.com/) (HEA-1552), 2026-06-25.  
+> **Coverage:** C-01–C-19 ship across all applicable SDKs; PKCE (C-17, the original trigger gap) is now universal. Residual gaps tracked in §7.1.  
 > **Source of truth for:** capability identity, required behavior contracts, and language-idiomatic symbol names.  
 > **Full behavioral spec:** [`docs/specs/SDK.md`](SDK.md) — this document maps capabilities to symbols; SDK.md is normative for behavior.
 
@@ -64,7 +64,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 | **C-09** | Refresh token flow | `refreshTokens(refreshToken)` → `TokenResponse`. Posts `grant_type=refresh_token`. |
 | **C-10** | **Client credentials flow** | `clientCredentials(scope?)` → `TokenResponse`. Posts `grant_type=client_credentials`. Requires `clientId` + `clientSecret`. **Required in every SDK per §7.2.** |
 | **C-11** | **Device authorization flow (RFC 8628)** | Two methods: (1) `deviceAuthorization(scope?)` → `DeviceAuthorizationResponse` — posts to `device_authorization_endpoint`, returns `device_code`, `user_code`, `verification_uri`, `expires_in`, `interval`. (2) `pollDeviceToken(deviceCode)` → `TokenResponse | null` — polls `token_endpoint`; returns `null` on `authorization_pending`/`slow_down`; throws on fatal errors. **Required in every SDK per §7.2.** |
-| **C-12** | **Magic link exchange** | `exchangeMagicLink(token)` → `TokenResponse`. Posts `grant_type=urn:hearth:grant-type:magic-link` with the opaque magic-link token. **Required in every SDK per §7.2.** |
+| **C-12** | **Magic link (send + exchange)** | **Both halves required in every SDK** (board decision 2026-06-25): (1) *send* — `requestMagicLink(email)` → `void`, posts `{email}` to `/v1/{realm}/auth/magic-link`, always succeeds on 202 (enumeration-resistant). (2) *exchange* — `exchangeMagicLink(token)` → `TokenResponse`, posts `grant_type=urn:hearth:grant-type:magic-link` with the opaque token to `token_endpoint`. A magic link you can send but not redeem is not a usable flow. **Required in every SDK per §7.2.** |
 
 ### Tier 3 — Identity & Authorization (all SDKs)
 
@@ -559,33 +559,53 @@ grant_type=urn:hearth:grant-type:magic-link&token={magicToken}&client_id={client
 
 ---
 
-## 7. Coverage Summary
+## 7. Coverage Summary (as-built — re-verified from source 2026-06-25, post-#229)
 
 | C-ID | Capability | TS | Node | Go | PHP | Python | Rust | Kotlin |
 |------|-----------|:--:|:----:|:--:|:---:|:------:|:----:|:------:|
 | C-01 | Config | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | C-02 | Discovery | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | C-03 | JWKS cache | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| C-04 | verifyToken | ❌ | ⚠ | ❌ | ⚠ | ❌ | ❌ | ✅ |
+| C-04 | verifyToken (EdDSA) | ✅ | ✅¹ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | C-05 | Introspect | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| C-06 | Claims API | ✅ | ⚠ | ⚠ | ✅ | ✅ | ✅ | ⚠ |
+| C-06 | Claims API (17) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | C-07 | Errors | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| C-08 | Auth code | ⚠ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| C-09 | Refresh | ⚠ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| C-10 | **Client creds** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| C-11 | **Device flow** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| C-12 | **Magic link** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| C-13 | UserInfo | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| C-14 | Permissions | ❌ | ❌ | ✅ | ❌ | ✅ | ✅ | ❌ |
-| C-15 | Check perm | ⚠ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| C-16 | Middleware | N/A | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| C-17 | PKCE utils | ✅ | N/A | ✅ | ❌ | ❌ | ❌ | ❌ |
+| C-08 | Auth code | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C-09 | Refresh | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C-10 | Client creds | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C-11 | Device flow | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C-12 | Magic link | ✅² | ✅² | ✅² | ✅² | ✅² | ✅² | ✅² |
+| C-13 | UserInfo | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C-14 | Permissions | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C-15 | Check perm | ✅ | ✅³ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C-16 | Middleware | N/A | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C-17 | PKCE utils | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | C-18 | Browser auth | ✅ | N/A | N/A | N/A | N/A | N/A | N/A |
-| C-19 | Admin SDK | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ✅ |
-| C-20 | Session cache | ✅ | — | ✅ | — | — | — | — |
+| C-19 | Admin SDK | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| C-20 | Session cache (managed) | ✅ | ✅ | ✅ | ⚠⁴ | ⚠ | ⚠ | ✅ |
+| C-21 | WebAuthn helpers | ✅ | N/A | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-**Legend:** ✅ implemented · ⚠ partial/gap · ❌ missing (C2–C8 target) · N/A platform exception · — not applicable/out of scope
+**Legend:** ✅ implemented · ⚠ primitive only / partial · ❌ missing · N/A platform exception · — out of scope
+
+**Notes:**
+- ¹ Node `verifyToken` verifies EdDSA via `jose`; confirm its README/JSDoc lists EdDSA as the *primary* algorithm (SDK.md §6.1 doc-only follow-up).
+- ² **Magic-link — both halves now shipped (resolved 2026-06-25).** Per board decision, C-12 requires *both* send and exchange in every SDK. Exchange (`exchangeMagicLink`/`exchange_magic_link`/`ExchangeMagicLink`) added to TS/Node/Go/PHP/Python/Rust; send (`requestMagicLink`) added to Kotlin (which already had exchange). All 7 SDKs now expose the full send→exchange flow.
+- ³ Node uses `authorize(token, permission, opts?)` as a documented alias for `checkPermission` (§5.1).
+- ⁴ **PHP C-20 is intentionally primitive-only.** PHP's request-scoped execution model (no long-lived process between requests) makes a background-polling cache non-idiomatic; the single-shot `getSessionVersion()` poll is the correct primitive there. Python/Rust still expose only raw `sv_snapshot`/`sv_delta` and remain optional managed-cache candidates.
+- **C-20** is optional. TS/Go/Kotlin **and now Node** ship the managed background-polling `SessionVersionCache` facade (`start`/`stop`/`validateSv`/`age`). Node — the resource server that enforces revocation in middleware — was the highest-value target.
+- **C-21 WebAuthn** is a newly-recognized capability (not in the original C-01–C-20 registry). **TS now ships** `startWebAuthnRegistration`/`finishWebAuthnRegistration`/`startWebAuthnAuthentication`/`finishWebAuthnAuthentication` on `HearthApiClient`, joining Go/PHP/Python/Rust/Kotlin. Node is a resource server (exempt — no login ceremonies). C-21 should be promoted into §3 with a formal behavioral contract.
+
+### 7.1 Residual parity gaps (post-#229, updated 2026-06-25)
+
+The original trigger gap — hand-rolled PKCE in Python/PHP/Rust — is **fully closed**: C-17 is universal across all 7 SDKs. Status of the gaps surfaced in the first re-review:
+
+1. ✅ **C-09 refresh in Node — DONE.** `OAuthFlowsClient.refreshTokens(refreshToken, scope?)` + `HearthClient.refreshTokens` shipped with tests (`sdks/node/src/flows.test.ts`).
+2. ✅ **C-21 WebAuthn in TS — DONE.** Four ceremony helpers added to `HearthApiClient` with tests (`sdks/typescript/tests/webauthn.test.ts`).
+3. ✅ **C-20 managed cache in Node — DONE.** `SessionVersionCache` (`start`/`stop`/`validateSv`/`age`) + `SessionVersionConfig` + `SessionVersionRevokedError`/`SessionVersionCacheStaleError` shipped with tests (`sdks/node/src/session-version-cache.test.ts`).
+4. ✅ **C-12 magic-link send + exchange — DONE.** Board decided both halves are required. Exchange added to TS/Node/Go/PHP/Python/Rust; send added to Kotlin. All test-first; see each SDK's flow tests. All 7 SDKs now expose the full send→exchange flow.
+5. ⏳ **C-20 managed cache in Python/Rust (P3, optional).** Recommended-optional; PHP intentionally exempt (note ⁴). Tracked in [HEA-1590](/HEA/issues/HEA-1590).
+6. ⏳ **Doc-only:** confirm Node `verifyToken` documents EdDSA as the primary algorithm (SDK.md §6.1).
 
 ---
 
-*This document was generated for [HEA-1555](/HEA/issues/HEA-1555). Updates must be accompanied by a revision comment on that issue.*
+*This document was generated for [HEA-1555](/HEA/issues/HEA-1555); §7 coverage matrix re-verified from source for [HEA-1552](/HEA/issues/HEA-1552) on 2026-06-25. Updates must be accompanied by a revision comment on the originating issue.*

@@ -237,6 +237,29 @@ export class OAuthFlowsClient {
   }
 
   /**
+   * Exchange a refresh token for a fresh access token (RFC 6749 §6).
+   *
+   * Posts `grant_type=refresh_token` to the discovered token endpoint with the
+   * confidential client's credentials in the body (never the URL). The server may
+   * return a rotated `refresh_token` — callers must replace the stored token with
+   * the one in the response when present.
+   *
+   * @param refreshToken - The refresh token previously issued to this client.
+   * @param scope - Optional space-delimited scope string (must not widen the grant).
+   */
+  async refreshTokens(refreshToken: string, scope?: string): Promise<TokenResponse> {
+    const endpoint = await this.getTokenEndpoint();
+    const params: Record<string, string> = {
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: this.config.client_id,
+      client_secret: this.config.client_secret,
+    };
+    if (scope) params.scope = scope;
+    return this.postForm<TokenResponse>(endpoint, params);
+  }
+
+  /**
    * Obtain a token using the Client Credentials grant (RFC 6749 §4.4).
    *
    * Required for M2M authentication (services, daemons, admin tooling acting as
@@ -390,6 +413,26 @@ export class OAuthFlowsClient {
 
     if (res.status === 202) return;
     throw new OAuthFlowError(res.status, `Magic-link request returned HTTP ${res.status}`);
+  }
+
+  /**
+   * Exchange a magic-link token for tokens (spec §4.5.3 / §7.2 C-12).
+   *
+   * Completes the passwordless flow started by {@link requestMagicLink}: posts
+   * `grant_type=urn:hearth:grant-type:magic-link` with the opaque `token` from
+   * the magic-link URL to the discovered token endpoint. The token is sent in
+   * the body, never the URL.
+   *
+   * @param token - The opaque magic-link token from the email/redirect URL.
+   */
+  async exchangeMagicLink(token: string): Promise<TokenResponse> {
+    const endpoint = await this.getTokenEndpoint();
+    const params: Record<string, string> = {
+      grant_type: "urn:hearth:grant-type:magic-link",
+      token,
+      client_id: this.config.client_id,
+    };
+    return this.postForm<TokenResponse>(endpoint, params);
   }
 
   /**

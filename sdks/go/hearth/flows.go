@@ -167,6 +167,27 @@ func (c *Client) RequestMagicLink(ctx context.Context, email string) error {
 	}
 }
 
+// ExchangeMagicLink exchanges a magic-link token for tokens (spec §4.5.3 / §7.2 C-12).
+//
+// Completes the passwordless flow started by RequestMagicLink: posts
+// grant_type=urn:hearth:grant-type:magic-link with the opaque token from the
+// magic-link URL to the token endpoint. The token is sent in the form body,
+// never the URL.
+func (c *Client) ExchangeMagicLink(ctx context.Context, token string) (*TokenResponse, error) {
+	body := url.Values{}
+	body.Set("grant_type", "urn:hearth:grant-type:magic-link")
+	body.Set("token", token)
+	if c.clientID != "" {
+		body.Set("client_id", c.clientID)
+	}
+
+	var result TokenResponse
+	if err := c.postForm(ctx, "/token", body, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // postForm sends a POST with an application/x-www-form-urlencoded body and
 // decodes the JSON response into result.
 func (c *Client) postForm(ctx context.Context, path string, body url.Values, result any) error {

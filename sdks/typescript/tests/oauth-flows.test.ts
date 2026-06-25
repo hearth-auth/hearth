@@ -312,3 +312,38 @@ describe("HearthClient.requestMagicLink()", () => {
     );
   });
 });
+
+// ── exchangeMagicLink ──────────────────────────────────────────────────────
+
+describe("HearthClient.exchangeMagicLink()", () => {
+  it("POSTs the magic-link grant to the discovered token_endpoint with token in body", async () => {
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(DISCOVERY), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(TOKEN_RESPONSE), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await makeClient().exchangeMagicLink("magic-token-xyz");
+
+    const [tokenUrl, tokenInit] = fetchSpy.mock.calls[1] as [string, RequestInit];
+    expect(tokenUrl).toBe(DISCOVERY.token_endpoint);
+    expect(tokenInit.method).toBe("POST");
+    const body = new URLSearchParams(tokenInit.body as string);
+    expect(body.get("grant_type")).toBe("urn:hearth:grant-type:magic-link");
+    expect(body.get("token")).toBe("magic-token-xyz");
+    expect(body.get("client_id")).toBe("client1");
+    // opaque token must not leak into the URL
+    expect(tokenUrl).not.toContain("magic-token-xyz");
+  });
+
+  it("returns the TokenResponse from the server", async () => {
+    mockFetch({ body: DISCOVERY }, { body: TOKEN_RESPONSE });
+    const result = await makeClient().exchangeMagicLink("magic-token-xyz");
+    expect(result.access_token).toBe(TOKEN_RESPONSE.access_token);
+    expect(result.token_type).toBe("Bearer");
+  });
+
+  it("throws OAuthFlowError on non-2xx (expired/used token)", async () => {
+    mockFetch({ body: DISCOVERY }, { body: { error: "invalid_grant" }, status: 400 });
+    await expect(makeClient().exchangeMagicLink("expired")).rejects.toBeInstanceOf(OAuthFlowError);
+  });
+});
