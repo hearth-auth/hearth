@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Go SDK C4 surface** — `Client` now exposes the full canonical SDK surface (HEA-1559):
+  `VerifyToken()` (full Ed25519/EdDSA local signature verification via JWKS cache),
+  `ClientCredentials()` (RFC 6749 §4.4 client credentials grant, form-encoded),
+  `StartDeviceFlow()` / `PollDeviceToken()` (RFC 8628 device authorization, with
+  `authorization_pending` and `slow_down` handling),
+  `RequestMagicLink()` (enumeration-resistant magic-link initiation),
+  `StartWebAuthnRegistration()` / `FinishWebAuthnRegistration()` /
+  `StartWebAuthnAuthentication()` / `FinishWebAuthnAuthentication()` (WebAuthn passkey ceremonies).
+  New types: `DeviceAuthorizationResponse`, `WebAuthnRegistrationBeginResponse`,
+  `WebAuthnRegistrationCompleteRequest`, `WebAuthnRegistrationCompleteResponse`,
+  `WebAuthnAuthenticationBeginResponse`, `WebAuthnAuthenticationCompleteRequest`,
+  `WebAuthnAllowCredential`. New options: `WithClientCredentials()`, `WithJWKSTTL()`.
+  `TokenResponse` gains a `Scope` field.
 - **PHP SDK C5 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1560):
   `generatePkce()`, `buildAuthorizeUrl()`, `refreshToken()`, `clientCredentials()`,
   `startDeviceFlow()` / `pollDeviceToken()` (with `slow_down` + `authorization_pending` handling),

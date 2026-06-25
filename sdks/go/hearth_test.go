@@ -390,3 +390,85 @@ func TestTransparentRefresh(t *testing.T) {
 		t.Fatal("sub should be the same across refreshes")
 	}
 }
+
+// TestVerifyToken verifies that VerifyToken performs full Ed25519/EdDSA local
+// signature verification against a live Hearth-issued JWT (spec §2, §7.1 —
+// required per [HEA-1559]).
+//
+// The token is obtained from a real auth-code exchange against the dev server;
+// no mocks are used for signature verification.
+func TestVerifyToken(t *testing.T) {
+	srv := startServer(t)
+	ctx := context.Background()
+
+	// 1. Register an OAuth client and create a user.
+	oauthClient, err := srv.client.RegisterClient(ctx, hearth.RegisterClientRequest{
+		ClientName:   "verify-token-test",
+		RedirectURIs: []string{"http://localhost:3000/callback"},
+	})
+	if err != nil {
+		t.Fatalf("register client: %v", err)
+	}
+
+	admin := srv.client.Admin(srv.bootstrap.AccessToken)
+	user, err := admin.CreateUser(ctx, hearth.CreateUserRequest{
+		Email:       "verify-token@test.local",
+		DisplayName: "Verify Token User",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// 2. Obtain a real access token via the auth code flow.
+	pkce, err := hearth.GeneratePKCE()
+	if err != nil {
+		t.Fatalf("generate pkce: %v", err)
+	}
+	authResp, err := srv.client.Authorize(ctx, hearth.AuthorizeRequest{
+		ClientID:            oauthClient.ClientID,
+		RedirectURI:         "http://localhost:3000/callback",
+		Scope:               "openid profile email",
+		State:               "vt-state",
+		UserID:              user.ID,
+		CodeChallenge:       pkce.Challenge,
+		CodeChallengeMethod: pkce.Method,
+	})
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	tokens, err := srv.client.ExchangeCode(ctx, hearth.TokenRequest{
+		ClientID:     oauthClient.ClientID,
+		Code:         authResp.Code,
+		RedirectURI:  "http://localhost:3000/callback",
+		CodeVerifier: pkce.Verifier,
+	})
+	if err != nil {
+		t.Fatalf("exchange code: %v", err)
+	}
+	if tokens.AccessToken == "" {
+		t.Fatal("access token empty")
+	}
+
+	// 3. VerifyToken must succeed and return correct claims.
+	claims, err := srv.client.VerifyToken(ctx, tokens.AccessToken)
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	if claims.Subject() == "" {
+		t.Fatal("subject is empty")
+	}
+	if claims.Issuer() == "" {
+		t.Fatal("issuer is empty")
+	}
+	if claims.Expiry() == 0 {
+		t.Fatal("expiry is zero")
+	}
+
+	// 4. A tampered token must be rejected with a typed error.
+	badToken := tokens.AccessToken[:len(tokens.AccessToken)-4] + "XXXX"
+	_, err = srv.client.VerifyToken(ctx, badToken)
+	if err == nil {
+		t.Fatal("expected error for tampered token")
+	}
+}
