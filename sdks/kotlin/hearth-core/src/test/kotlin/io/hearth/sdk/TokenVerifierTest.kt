@@ -50,7 +50,7 @@ class TokenVerifierTest {
     private fun issuer(): String = server.url("/").toString().trimEnd('/')
 
     /** JWKS document containing only the public half of [keyPair]. */
-    private fun jwksJson(): String = JWKSet(keyPair.toPublicJWK()).toJSONString()
+    private fun jwksJson(): String = JWKSet(keyPair.toPublicJWK()).toString()
 
     /**
      * Mints a compact-serialized Ed25519-signed JWT.
@@ -62,12 +62,13 @@ class TokenVerifierTest {
         issuer: String = issuer(),
         audience: List<String>? = null,
         ttlMs: Long = 300_000L,
+        iatOffsetMs: Long = 0L,
     ): String {
         val now = System.currentTimeMillis()
         val claims = JWTClaimsSet.Builder()
             .subject(subject)
             .issuer(issuer)
-            .issueTime(Date(now))
+            .issueTime(Date(now + iatOffsetMs))
             .expirationTime(Date(now + ttlMs))
             .apply { audience?.let { audience(it) } }
             .build()
@@ -180,14 +181,62 @@ class TokenVerifierTest {
     @Test
     fun `verify - OKP key with no y field is parsed and accepted`() = runTest {
         // Ed25519 JWKS keys must have no y coordinate — parsers must not require it.
+        // OctetKeyPair.toString() returns valid JWK JSON with no "y" field.
         val pub = keyPair.toPublicJWK()
-        val okpJson = pub.toJSONObject()
-        // Confirm y is absent from the generated JSON (OctetKeyPair never includes y for Ed25519).
-        val jwksNoY = """{"keys":[${okpJson}]}"""
+        val jwksNoY = """{"keys":[${pub}]}"""
         server.enqueue(MockResponse().setBody(jwksNoY).setResponseCode(200))
 
         val claims = verifier().verify(mintJwt())
 
         assertEquals("user-abc", claims.subject())
+    }
+
+    // ── SecurityAuditor follow-up gaps (HEA-1578, non-blocking, added pre-1.0 GA) ──
+
+    @Test
+    fun `verify - throws TokenInvalidError for alg-none unsigned token`() = runTest {
+        // SignedJWT.parse() treats alg:none as a PlainObject and throws ParseException,
+        // which the verify() catch block maps to TokenInvalidError. No JWKS fetch needed.
+        val enc = java.util.Base64.getUrlEncoder().withoutPadding()
+        val header  = enc.encodeToString("""{"alg":"none","typ":"JWT"}""".toByteArray())
+        val payload = enc.encodeToString("""{"sub":"u","iss":"x","iat":1,"exp":9999999999}""".toByteArray())
+        val noneToken = "$header.$payload."
+        assertFailsWith<TokenInvalidError> { verifier().verify(noneToken) }
+    }
+
+    @Test
+    fun `verify - throws TokenNotYetValidError when iat is more than 5s in the future`() = runTest {
+        server.enqueue(MockResponse().setBody(jwksJson()).setResponseCode(200))
+
+        // iat 2 minutes in the future — well beyond the 5 s clock-skew allowance.
+        val futureIat = mintJwt(iatOffsetMs = 120_000L)
+        assertFailsWith<TokenNotYetValidError> { verifier().verify(futureIat) }
+    }
+
+    @Test
+    fun `verify - throws TokenInvalidError when required claim sub is absent`() = runTest {
+        server.enqueue(MockResponse().setBody(jwksJson()).setResponseCode(200))
+
+        val now = System.currentTimeMillis()
+        val claims = JWTClaimsSet.Builder()
+            // sub intentionally omitted — DefaultJWTClaimsVerifier requires it
+            .issuer(issuer())
+            .issueTime(Date(now))
+            .expirationTime(Date(now + 300_000L))
+            .build()
+        val header = JWSHeader.Builder(JWSAlgorithm.EdDSA).keyID("hearth-ed-1").build()
+        val jwt = SignedJWT(header, claims)
+        jwt.sign(Ed25519Signer(keyPair))
+
+        assertFailsWith<TokenInvalidError> { verifier().verify(jwt.serialize()) }
+    }
+
+    @Test
+    fun `verify - throws JWKSFetchError when JWKS endpoint returns 5xx`() = runTest {
+        // JWKSFetchError is a HearthException but not TokenInvalidError — it is immediately
+        // re-thrown from the first getOrFetchSet() call without a second JWKS attempt.
+        server.enqueue(MockResponse().setResponseCode(503).setBody("Service Unavailable"))
+
+        assertFailsWith<JWKSFetchError> { verifier().verify(mintJwt()) }
     }
 }
