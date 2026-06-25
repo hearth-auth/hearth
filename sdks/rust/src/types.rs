@@ -177,7 +177,9 @@ pub struct AuthorizeResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
-    pub refresh_token: String,
+    /// Absent for `client_credentials` grant responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
     pub token_type: String,
     pub expires_in: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,4 +365,58 @@ pub struct AddOrgMemberRequest {
 pub struct UpdateOrgMemberRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+}
+
+// ── §4.5.2 Device Authorization Flow (RFC 8628) ──────────────────────────────
+
+/// Response from the device authorization endpoint (RFC 8628 §3.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceAuthorizationResponse {
+    /// Opaque device code; pass to `poll_device_token`.
+    pub device_code: String,
+    /// Short code displayed to the user (e.g., `"WDJB-MJHT"`).
+    pub user_code: String,
+    /// URL the user visits to authorize the device.
+    pub verification_uri: String,
+    /// `verification_uri` with `user_code` pre-filled (server-optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_uri_complete: Option<String>,
+    /// Seconds until the device code expires.
+    pub expires_in: i64,
+    /// Minimum polling interval in seconds (default 5 per RFC 8628 §3.5).
+    pub interval: i64,
+}
+
+// ── Session-version polling ───────────────────────────────────────────────────
+
+/// A single entry in a session-version delta or snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SvDeltaEntry {
+    /// The session ID this entry describes.
+    pub session_id: String,
+    /// Monotonically increasing version counter for this session.
+    pub version: i64,
+    /// Event type: `"created"`, `"refreshed"`, or `"revoked"`.
+    pub event: String,
+    /// ISO-8601 timestamp of the event, if provided by the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+}
+
+/// Response from `GET /v1/session-version/delta`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SvDeltaResponse {
+    pub entries: Vec<SvDeltaEntry>,
+    /// Opaque cursor for the next delta poll.
+    pub cursor: String,
+    #[serde(default)]
+    pub has_more: bool,
+}
+
+/// Response from `GET /v1/session-version/snapshot`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SvSnapshotResponse {
+    pub sessions: Vec<SvDeltaEntry>,
+    /// Opaque cursor to use for subsequent delta polls.
+    pub cursor: String,
 }

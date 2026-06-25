@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Rust SDK C7 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1562):
+  `verify_token()` (full Ed25519/EdDSA local signature verification via JWKS cache with TTL,
+  all five spec §2 validation steps, typed `HearthError` variants per §5);
+  `client_credentials()` (RFC 6749 §4.4 form-encoded, no refresh token);
+  `start_device_flow()` / `poll_device_token()` (RFC 8628 with `authorization_pending`
+  and `slow_down` handling); `initiate_magic_link()` (passwordless initiation);
+  `session_version_snapshot()` / `session_version_delta()` (session-version polling);
+  `HearthClientBuilder` (spec §1 config table: `issuer_url`, `client_id`, `client_secret`,
+  `jwks_ttl`, `http_timeout`); `JwksCache` (standalone TTL cache, Cache-Control-aware,
+  24h max, kid-indexed, keys never evicted). New module `hearth_sdk::pkce` exposes
+  `PkcePair` + `generate_pkce_pair()` (RFC 7636 S256). `TokenResponse.refresh_token`
+  is now `Option<String>` (absent on client_credentials responses). New types:
+  `DeviceAuthorizationResponse`, `SvDeltaEntry`, `SvDeltaResponse`, `SvSnapshotResponse`.
+  `authorize()` gains optional `code_challenge` / `code_challenge_method` PKCE parameters.
+  `Claims` now implements `Debug` (redacts payload, exposes only `sub`+`iss`).
 - **Go SDK C4 surface** — `Client` now exposes the full canonical SDK surface (HEA-1559):
   `VerifyToken()` (full Ed25519/EdDSA local signature verification via JWKS cache),
   `ClientCredentials()` (RFC 6749 §4.4 client credentials grant, form-encoded),

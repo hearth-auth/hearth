@@ -1,23 +1,170 @@
-//! HearthClient — OAuth flows, RBAC predicates, and WebAuthn.
+//! HearthClient — OAuth flows, RBAC predicates, JWKS-backed token verification.
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use reqwest::header;
 use serde_json::Value;
+use tokio::sync::Mutex;
 
+use crate::claims::Claims;
 use crate::error::HearthError;
+use crate::jwks_cache::JwksCache;
 use crate::types::*;
 
-/// Client for Hearth OAuth flows, userinfo, and RBAC predicates.
+// ── Discovery doc cache ───────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct DiscoveryDoc {
+    token_endpoint: String,
+    device_authorization_endpoint: Option<String>,
+    jwks_uri: String,
+}
+
+impl DiscoveryDoc {
+    fn from_json(value: &Value, source_url: &str) -> Result<Self, HearthError> {
+        Ok(Self {
+            token_endpoint: value["token_endpoint"]
+                .as_str()
+                .ok_or_else(|| HearthError::DiscoveryError {
+                    url: source_url.to_string(),
+                    message: "missing token_endpoint".into(),
+                })?
+                .to_string(),
+            device_authorization_endpoint: value["device_authorization_endpoint"]
+                .as_str()
+                .map(str::to_string),
+            jwks_uri: value["jwks_uri"]
+                .as_str()
+                .ok_or_else(|| HearthError::DiscoveryError {
+                    url: source_url.to_string(),
+                    message: "missing jwks_uri".into(),
+                })?
+                .to_string(),
+        })
+    }
+}
+
+// ── Builder ───────────────────────────────────────────────────────────────────
+
+/// Configuration parameters for [`HearthClientBuilder`] (spec §1).
+pub struct HearthClientConfig {
+    pub issuer_url: String,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// Override JWKS cache TTL. `None` → respect `Cache-Control`, default 5 min.
+    pub jwks_ttl: Option<Duration>,
+    /// Timeout for all outbound HTTP calls. `None` → 10 s.
+    pub http_timeout: Option<Duration>,
+}
+
+/// Builder for [`HearthClient`] (spec §1 config table).
 ///
-/// RBAC predicate methods decode the JWT locally — no network call needed.
-/// Clone is cheap: the inner [`reqwest::Client`] is reference-counted.
+/// OIDC auto-discovery is deferred until the first call that needs an endpoint URL.
+///
+/// # Example
+/// ```rust,ignore
+/// let client = HearthClientBuilder::new("https://auth.example.com/realms/my-realm")
+///     .client_id("my-app")
+///     .client_secret("s3cr3t")
+///     .build();
+/// ```
+pub struct HearthClientBuilder {
+    issuer_url: String,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    jwks_ttl: Option<Duration>,
+    http_timeout: Option<Duration>,
+}
+
+impl HearthClientBuilder {
+    /// Start building with the Hearth realm issuer URL.
+    pub fn new(issuer_url: impl Into<String>) -> Self {
+        Self {
+            issuer_url: issuer_url.into().trim_end_matches('/').to_string(),
+            client_id: None,
+            client_secret: None,
+            jwks_ttl: None,
+            http_timeout: None,
+        }
+    }
+
+    /// Set the OAuth `client_id` (required for flows that need a client identity).
+    pub fn client_id(mut self, id: impl Into<String>) -> Self {
+        self.client_id = Some(id.into());
+        self
+    }
+
+    /// Set the OAuth `client_secret` (required for confidential client flows).
+    pub fn client_secret(mut self, secret: impl Into<String>) -> Self {
+        self.client_secret = Some(secret.into());
+        self
+    }
+
+    /// Override the JWKS cache TTL. Ignores `Cache-Control` from the server.
+    pub fn jwks_ttl(mut self, ttl: Duration) -> Self {
+        self.jwks_ttl = Some(ttl);
+        self
+    }
+
+    /// Timeout for all outbound HTTP calls (default: 10 s).
+    pub fn http_timeout(mut self, timeout: Duration) -> Self {
+        self.http_timeout = Some(timeout);
+        self
+    }
+
+    /// Consume the builder and produce a [`HearthClient`].
+    ///
+    /// Discovery is deferred — no network calls are made here.
+    pub fn build(self) -> HearthClient {
+        let timeout = self.http_timeout.unwrap_or(Duration::from_secs(10));
+        let http = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .expect("reqwest client");
+        let jwks_cache = JwksCache::new(http.clone(), self.jwks_ttl);
+        HearthClient {
+            base_url: self.issuer_url.clone(),
+            realm_id: String::new(),
+            http,
+            issuer_url: Some(self.issuer_url),
+            client_id: self.client_id,
+            client_secret: self.client_secret,
+            jwks_cache,
+            discovery_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+// ── HearthClient ──────────────────────────────────────────────────────────────
+
+/// Client for Hearth OAuth flows, JWKS-backed token verification, and RBAC predicates.
+///
+/// ## Construction
+/// - **Recommended**: [`HearthClientBuilder`] — configures `issuer_url`, `client_id`,
+///   `jwks_ttl`, and enables OIDC auto-discovery for all endpoint URLs.
+/// - **Simple / backward-compat**: [`HearthClient::new`] — takes `base_url` and
+///   `realm_id` directly; skips OIDC discovery.
+///
+/// Clone is cheap: the inner [`reqwest::Client`] and caches are reference-counted.
 #[derive(Clone)]
 pub struct HearthClient {
     base_url: String,
     realm_id: String,
     http: reqwest::Client,
+    issuer_url: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    jwks_cache: JwksCache,
+    discovery_cache: Arc<Mutex<Option<DiscoveryDoc>>>,
 }
 
 impl HearthClient {
+    /// Create a client from a base URL and realm ID (no OIDC discovery).
+    ///
+    /// JWKS is served from `{base_url}/.well-known/jwks.json`.
+    /// For full OIDC auto-discovery, use [`HearthClientBuilder`].
     pub fn new(base_url: impl Into<String>, realm_id: impl Into<String>) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let realm_id = realm_id.into();
@@ -32,10 +179,16 @@ impl HearthClient {
             })
             .build()
             .expect("reqwest client");
+        let jwks_cache = JwksCache::new(http.clone(), None);
         Self {
             base_url,
             realm_id,
             http,
+            issuer_url: None,
+            client_id: None,
+            client_secret: None,
+            jwks_cache,
+            discovery_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -51,9 +204,348 @@ impl HearthClient {
     }
 
     // ------------------------------------------------------------------
-    // OAuth flows
+    // Internal: OIDC discovery + JWKS URL seeding
     // ------------------------------------------------------------------
 
+    async fn get_or_fetch_discovery(&self) -> Result<DiscoveryDoc, HearthError> {
+        {
+            let cache = self.discovery_cache.lock().await;
+            if let Some(doc) = cache.as_ref() {
+                return Ok(doc.clone());
+            }
+        }
+
+        let issuer = self.issuer_url.as_deref().unwrap_or(&self.base_url);
+        let discovery_url = format!("{}/.well-known/openid-configuration", issuer);
+
+        let resp = self.http.get(&discovery_url).send().await.map_err(|e| {
+            HearthError::DiscoveryError {
+                url: discovery_url.clone(),
+                message: e.to_string(),
+            }
+        })?;
+
+        let value: Value = resp.json().await.map_err(|e| HearthError::DiscoveryError {
+            url: discovery_url.clone(),
+            message: format!("JSON parse: {e}"),
+        })?;
+
+        let doc = DiscoveryDoc::from_json(&value, &discovery_url)?;
+        self.jwks_cache.set_url(&doc.jwks_uri).await;
+
+        let mut cache = self.discovery_cache.lock().await;
+        *cache = Some(doc.clone());
+        Ok(doc)
+    }
+
+    /// Ensure the JWKS cache has a URL to fetch from (lazy init, called by verify_token).
+    async fn ensure_jwks_url(&self) -> Result<(), HearthError> {
+        if self.issuer_url.is_some() {
+            // Discovery sets the JWKS URL as a side-effect.
+            self.get_or_fetch_discovery().await?;
+        } else {
+            // No discovery — use the conventional path under base_url.
+            let url = format!("{}/.well-known/jwks.json", self.base_url);
+            self.jwks_cache.set_url(url).await;
+        }
+        Ok(())
+    }
+
+    /// Return the token endpoint URL, using discovery when `issuer_url` is configured.
+    async fn token_endpoint(&self) -> Result<String, HearthError> {
+        if self.issuer_url.is_some() {
+            Ok(self.get_or_fetch_discovery().await?.token_endpoint)
+        } else {
+            Ok(format!("{}/token", self.base_url))
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // §2 verify_token — Ed25519/EdDSA JWKS-backed verification (spec §7.1)
+    // ------------------------------------------------------------------
+
+    /// Verify a JWT against Hearth's JWKS and return typed claims (spec §2).
+    ///
+    /// Executes the five validation steps required by spec §2:
+    /// 1. Verify Ed25519/EdDSA signature against cached JWKS (re-fetches on miss).
+    /// 2. Verify `exp` is not in the past (5 s clock skew allowed).
+    /// 3. Verify `iss` matches the configured issuer URL.
+    /// 4. Verify `aud` contains `client_id` when configured.
+    /// 5. Verify `iat` is not more than 5 s in the future.
+    ///
+    /// Returns [`HearthError::RequiredActionError`] when `token_type == "required_action"`.
+    pub async fn verify_token(&self, token: &str) -> Result<Claims, HearthError> {
+        // Seed the JWKS cache URL if not already done.
+        self.ensure_jwks_url().await?;
+
+        // Parse JWT header to get kid + algorithm.
+        let header = jsonwebtoken::decode_header(token)
+            .map_err(|e| HearthError::TokenInvalidError { reason: e.to_string() })?;
+
+        let kid = header.kid.ok_or_else(|| HearthError::TokenInvalidError {
+            reason: "JWT header is missing 'kid'".into(),
+        })?;
+
+        // Look up key from JWKS cache (fetches + retries on miss, per spec §2).
+        let jwk =
+            self.jwks_cache.get(&kid).await?.ok_or_else(|| HearthError::JWKSFetchError {
+                url: "JWKS".into(),
+                message: format!("kid '{kid}' not found in JWKS"),
+            })?;
+
+        let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|e| HearthError::TokenInvalidError {
+            reason: format!("invalid JWK for kid '{kid}': {e}"),
+        })?;
+
+        // Steps 2–4: build validation parameters.
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.leeway = 5; // 5 s clock skew
+
+        let issuer = self.issuer_url.as_deref().unwrap_or(&self.base_url);
+        validation.set_issuer(&[issuer]);
+
+        if let Some(aud) = &self.client_id {
+            validation.set_audience(&[aud.as_str()]);
+        } else {
+            validation.validate_aud = false;
+        }
+
+        // Steps 1–4: signature + exp + iss + aud (jsonwebtoken handles all four).
+        let token_data = jsonwebtoken::decode::<Value>(token, &decoding_key, &validation)
+            .map_err(|e| map_jwt_error(e, issuer, self.client_id.as_deref()))?;
+
+        let claims = Claims::from_value(token_data.claims);
+
+        // Step 5: iat not in the future (5 s skew).
+        if let Some(iat) = claims.issuedAt() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            if iat > now + 5 {
+                return Err(HearthError::TokenInvalidError {
+                    reason: format!("iat {iat} is in the future"),
+                });
+            }
+        }
+
+        // Guard: required_action tokens must never be accepted as access tokens.
+        if claims.tokenType() == "required_action" {
+            let required_actions = claims
+                .get("required_actions")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            return Err(HearthError::RequiredActionError {
+                required_actions,
+                redirect_uri: None,
+            });
+        }
+
+        Ok(claims)
+    }
+
+    // ------------------------------------------------------------------
+    // §4.5.1 Client Credentials Grant (RFC 6749 §4.4)
+    // ------------------------------------------------------------------
+
+    /// Obtain a machine-to-machine access token.
+    ///
+    /// `client_id` and `client_secret` are sent as form body fields per RFC 6749 §2.3.1
+    /// (never as query parameters).  The response contains no `refresh_token`.
+    pub async fn client_credentials(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+        scope: Option<&str>,
+    ) -> Result<TokenResponse, HearthError> {
+        let token_url = self.token_endpoint().await?;
+        let mut form: Vec<(&str, &str)> = vec![
+            ("grant_type", "client_credentials"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ];
+        let scope_owned;
+        if let Some(s) = scope {
+            scope_owned = s.to_string();
+            form.push(("scope", &scope_owned));
+        }
+        let resp = self.http.post(&token_url).form(&form).send().await?;
+        Self::check(&resp)?;
+        Ok(resp.json().await?)
+    }
+
+    // ------------------------------------------------------------------
+    // §4.5.2 Device Authorization Flow (RFC 8628)
+    // ------------------------------------------------------------------
+
+    /// Initiate a device authorization flow.
+    ///
+    /// Returns the `device_code`, `user_code`, and `verification_uri` to display to
+    /// the user.  Poll with [`HearthClient::poll_device_token`] until the user approves.
+    pub async fn start_device_flow(
+        &self,
+        client_id: &str,
+        scope: Option<&str>,
+    ) -> Result<DeviceAuthorizationResponse, HearthError> {
+        let device_url = if self.issuer_url.is_some() {
+            self.get_or_fetch_discovery()
+                .await?
+                .device_authorization_endpoint
+                .ok_or_else(|| HearthError::DiscoveryError {
+                    url: "discovery".into(),
+                    message: "server does not advertise device_authorization_endpoint".into(),
+                })?
+        } else {
+            format!("{}/device/authorize", self.base_url)
+        };
+
+        let mut form: Vec<(&str, &str)> = vec![("client_id", client_id)];
+        let scope_owned;
+        if let Some(s) = scope {
+            scope_owned = s.to_string();
+            form.push(("scope", &scope_owned));
+        }
+        let resp = self.http.post(&device_url).form(&form).send().await?;
+        Self::check(&resp)?;
+        Ok(resp.json().await?)
+    }
+
+    /// Poll the token endpoint until the device flow completes or the code expires.
+    ///
+    /// Per RFC 8628 §3.5:
+    /// - `authorization_pending` → continues polling.
+    /// - `slow_down` → adds 5 s to the polling interval per occurrence.
+    /// - `expired_token` → returns [`HearthError::TokenExpiredError`].
+    pub async fn poll_device_token(
+        &self,
+        client_id: &str,
+        device_code: &str,
+        interval_secs: u64,
+    ) -> Result<TokenResponse, HearthError> {
+        let token_url = self.token_endpoint().await?;
+        let mut interval = interval_secs;
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+
+            let resp = self
+                .http
+                .post(&token_url)
+                .form(&[
+                    ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                    ("device_code", device_code),
+                    ("client_id", client_id),
+                ])
+                .send()
+                .await?;
+
+            if resp.status().is_success() {
+                return Ok(resp.json().await?);
+            }
+
+            let err: OAuthErrorResponse = resp.json().await.map_err(|e| {
+                HearthError::Other(format!("device poll: could not parse error response: {e}"))
+            })?;
+
+            match err.error.as_str() {
+                "authorization_pending" => continue,
+                "slow_down" => {
+                    interval += 5;
+                    continue;
+                }
+                "expired_token" => {
+                    return Err(HearthError::TokenExpiredError { expired_at: 0 });
+                }
+                _ => {
+                    return Err(HearthError::Api {
+                        status: 400,
+                        message: err.error,
+                        details: err.error_description
+                            .map(|d| serde_json::json!({"description": d})),
+                    });
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // §4.5.3 Magic-Link Initiation (Passwordless)
+    // ------------------------------------------------------------------
+
+    /// Request a magic-link (passwordless) login email for `email`.
+    ///
+    /// The server sends an out-of-band email; no tokens are returned.
+    pub async fn initiate_magic_link(
+        &self,
+        email: &str,
+        client_id: &str,
+        redirect_uri: &str,
+        scope: Option<&str>,
+    ) -> Result<(), HearthError> {
+        let url = format!("{}/v1/passwordless/initiate", self.base_url);
+        let mut body = serde_json::json!({
+            "email": email,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+        });
+        if let Some(s) = scope {
+            body["scope"] = Value::String(s.to_string());
+        }
+        let resp = self.http.post(&url).json(&body).send().await?;
+        Self::check(&resp)?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Session-version polling
+    // ------------------------------------------------------------------
+
+    /// Retrieve a point-in-time snapshot of all session versions for the caller.
+    ///
+    /// Use the returned `cursor` for subsequent delta polls.
+    pub async fn session_version_snapshot(
+        &self,
+        access_token: &str,
+    ) -> Result<SvSnapshotResponse, HearthError> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/session-version/snapshot", self.base_url))
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+        Self::check(&resp)?;
+        Ok(resp.json().await?)
+    }
+
+    /// Poll for session-version changes since `cursor`.
+    ///
+    /// Clients should call this on a short interval to detect revocations.
+    pub async fn session_version_delta(
+        &self,
+        access_token: &str,
+        cursor: &str,
+    ) -> Result<SvDeltaResponse, HearthError> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/session-version/delta", self.base_url))
+            .query(&[("cursor", cursor)])
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+        Self::check(&resp)?;
+        Ok(resp.json().await?)
+    }
+
+    // ------------------------------------------------------------------
+    // OAuth flows (authorization code + PKCE extension)
+    // ------------------------------------------------------------------
+
+    /// Build an authorization URL for the authorization code flow.
+    ///
+    /// Pass `code_challenge` + `code_challenge_method` (typically `"S256"`) to enable
+    /// PKCE (RFC 7636).  Use [`crate::pkce::generate_pkce_pair`] to generate the pair,
+    /// then pass the verifier to [`HearthClient::exchange_code`].
     pub async fn authorize(
         &self,
         client_id: &str,
@@ -61,6 +553,8 @@ impl HearthClient {
         scope: &str,
         state: &str,
         resource: Option<&str>,
+        code_challenge: Option<&str>,
+        code_challenge_method: Option<&str>,
     ) -> Result<AuthorizeResponse, HearthError> {
         let mut params = vec![
             ("client_id", client_id),
@@ -71,6 +565,10 @@ impl HearthClient {
         ];
         if let Some(r) = resource {
             params.push(("resource", r));
+        }
+        if let Some(cc) = code_challenge {
+            params.push(("code_challenge", cc));
+            params.push(("code_challenge_method", code_challenge_method.unwrap_or("S256")));
         }
         let resp = self
             .http
@@ -149,10 +647,7 @@ impl HearthClient {
     // Protected endpoints
     // ------------------------------------------------------------------
 
-    pub async fn userinfo(
-        &self,
-        access_token: &str,
-    ) -> Result<UserInfoResponse, HearthError> {
+    pub async fn userinfo(&self, access_token: &str) -> Result<UserInfoResponse, HearthError> {
         let resp = self
             .http
             .get(format!("{}/userinfo", self.base_url))
@@ -179,10 +674,7 @@ impl HearthClient {
 
     /// Call `POST /introspect` and return the live token state (RFC 7662).
     ///
-    /// Requires `client_id` + `client_secret` for HTTP Basic Auth per RFC 7662 §2.1.
-    ///
-    /// # Cache policy
-    /// Do **not** cache the response — RFC 7662 §2.1 prohibits it.
+    /// Uses HTTP Basic Auth per RFC 7662 §2.1.  Do **not** cache the response.
     pub async fn introspect(
         &self,
         token: &str,
@@ -200,20 +692,11 @@ impl HearthClient {
         Ok(resp.json().await?)
     }
 
-    /// Mode-aware permission check.
+    /// Mode-aware permission check (spec §3.5).
     ///
-    /// Behaviour by mode:
-    /// - [`AccessTokenAuthorization::Embedded`] — decodes the JWT locally and checks
-    ///   `permissions[]`.  No network call.
-    /// - [`AccessTokenAuthorization::Introspection`] — calls `POST /introspect`, validates
-    ///   the echoed mode matches `Introspection`, then checks live `permissions[]`.
-    ///   Requires `client_credentials` in `opts`.
-    /// - [`AccessTokenAuthorization::Decision`] — calls `POST /oauth/authorize` with the
-    ///   bearer token.  Fail-closed: any network or server error returns
-    ///   [`HearthError::AuthorizationFailed`].
-    ///
-    /// **Mode is always explicit** — absence of `permissions` in the JWT is **never** used
-    /// to infer mode (HEA-921 design constraint).
+    /// - `Embedded` — decodes JWT locally; checks `permissions[]`. No network call.
+    /// - `Introspection` — calls `POST /introspect`; validates echoed mode; checks live perms.
+    /// - `Decision` — calls `POST /oauth/authorize` per request. Fail-closed on errors.
     pub async fn check_permission(
         &self,
         token: &str,
@@ -233,7 +716,6 @@ impl HearthClient {
                 if !resp.active {
                     return Ok(false);
                 }
-                // Validate the server echoes the expected mode (fail if mismatched).
                 if let Some(echoed) = resp.mode {
                     if echoed != AccessTokenAuthorization::Introspection {
                         return Err(HearthError::ModeMismatch {
@@ -288,10 +770,7 @@ impl HearthClient {
     pub async fn discovery(&self) -> Result<Value, HearthError> {
         let resp = self
             .http
-            .get(format!(
-                "{}/.well-known/openid-configuration",
-                self.base_url
-            ))
+            .get(format!("{}/.well-known/openid-configuration", self.base_url))
             .send()
             .await?;
         Self::check(&resp)?;
@@ -405,7 +884,7 @@ impl HearthClient {
     ) -> Result<Value, HearthError> {
         let mut body = serde_json::json!({ "rp_id": rp_id });
         if let Some(uid) = user_id {
-            body["user_id"] = serde_json::Value::String(uid.to_string());
+            body["user_id"] = Value::String(uid.to_string());
         }
         let resp = self
             .http
@@ -434,7 +913,7 @@ impl HearthClient {
             "origin": origin,
         });
         if let Some(uh) = user_handle {
-            body["user_handle"] = serde_json::Value::String(uh.to_string());
+            body["user_handle"] = Value::String(uh.to_string());
         }
         let resp = self
             .http
@@ -460,5 +939,337 @@ impl HearthClient {
             message: format!("{}", resp.status()),
             details: None,
         })
+    }
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// RFC 6749 / RFC 8628 JSON error response shape.
+#[derive(serde::Deserialize)]
+struct OAuthErrorResponse {
+    error: String,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+/// Map a `jsonwebtoken` error to the typed spec §5 variant.
+fn map_jwt_error(
+    err: jsonwebtoken::errors::Error,
+    issuer: &str,
+    audience: Option<&str>,
+) -> HearthError {
+    use jsonwebtoken::errors::ErrorKind;
+    match err.kind() {
+        ErrorKind::ExpiredSignature => HearthError::TokenExpiredError { expired_at: 0 },
+        ErrorKind::ImmatureSignature => HearthError::TokenNotYetValidError { not_before: 0 },
+        ErrorKind::InvalidSignature | ErrorKind::InvalidAlgorithm | ErrorKind::InvalidKeyFormat => {
+            HearthError::TokenInvalidError { reason: err.to_string() }
+        }
+        ErrorKind::InvalidIssuer => HearthError::TokenIssuerError {
+            expected: issuer.to_string(),
+            actual: "unknown".to_string(),
+        },
+        ErrorKind::InvalidAudience => HearthError::TokenAudienceError {
+            expected: audience.unwrap_or("").to_string(),
+            actual: vec![],
+        },
+        _ => HearthError::TokenInvalidError { reason: err.to_string() },
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use ring::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+    use serde_json::json;
+
+    // ── Key generation helpers ────────────────────────────────────────────
+
+    /// Returns `(pkcs8_der, raw_32_byte_public_key)`.
+    fn make_ed25519_pkcs8() -> (Vec<u8>, Vec<u8>) {
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let kp = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let pub_key = kp.public_key().as_ref().to_vec();
+        (pkcs8.as_ref().to_vec(), pub_key)
+    }
+
+    fn pkcs8_to_pem(der: &[u8]) -> Vec<u8> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let b64 = STANDARD.encode(der);
+        let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).unwrap());
+            pem.push('\n');
+        }
+        pem.push_str("-----END PRIVATE KEY-----\n");
+        pem.into_bytes()
+    }
+
+    fn make_test_jwt(claims: &serde_json::Value, pkcs8_der: &[u8], kid: &str) -> String {
+        let pem = pkcs8_to_pem(pkcs8_der);
+        let key = EncodingKey::from_ed_pem(&pem).unwrap();
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(kid.to_string());
+        encode(&header, claims, &key).unwrap()
+    }
+
+    fn make_jwk(kid: &str, pub_key_bytes: &[u8]) -> jsonwebtoken::jwk::Jwk {
+        let x = URL_SAFE_NO_PAD.encode(pub_key_bytes);
+        let jwk_json = json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": x,
+            "kid": kid,
+            "alg": "EdDSA",
+            "use": "sig"
+        });
+        serde_json::from_value(jwk_json).unwrap()
+    }
+
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    /// Build a HearthClient with a pre-seeded JWKS cache (no live server needed).
+    async fn client_with_cached_jwk(
+        kid: &str,
+        jwk: jsonwebtoken::jwk::Jwk,
+        client_id: Option<&str>,
+    ) -> HearthClient {
+        let http = reqwest::Client::new();
+        let cache = JwksCache::new(http.clone(), None);
+        // Set a dummy URL so set_url guard is satisfied (won't be fetched because key is fresh).
+        cache.set_url("https://auth.example.com/.well-known/jwks.json").await;
+        cache.inject_for_test(kid, jwk).await;
+
+        HearthClient {
+            base_url: "https://auth.example.com".to_string(),
+            realm_id: "realm-1".to_string(),
+            http,
+            issuer_url: None, // No discovery in unit tests
+            client_id: client_id.map(str::to_string),
+            client_secret: None,
+            jwks_cache: cache,
+            discovery_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    // ── verify_token: error path (no live server or keys) ────────────────
+
+    #[tokio::test]
+    async fn verify_token_rejects_malformed_jwt() {
+        let client = HearthClient::new("https://auth.example.com", "realm-1");
+        let err = client.verify_token("not.a.jwt").await.unwrap_err();
+        assert!(
+            matches!(err, HearthError::TokenInvalidError { .. }),
+            "expected TokenInvalidError, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_rejects_jwt_without_kid() {
+        // Craft a JWT with no kid in the header.
+        let header_b64 = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"EdDSA\"}");
+        let payload_b64 = URL_SAFE_NO_PAD.encode(b"{\"sub\":\"u1\"}");
+        let token = format!("{header_b64}.{payload_b64}.fakesig");
+
+        let client = HearthClient::new("https://auth.example.com", "realm-1");
+        let err = client.verify_token(&token).await.unwrap_err();
+        assert!(
+            matches!(err, HearthError::TokenInvalidError { .. }),
+            "expected TokenInvalidError for missing kid, got {err:?}"
+        );
+    }
+
+    // ── verify_token: cryptographic success path ──────────────────────────
+
+    #[tokio::test]
+    async fn verify_token_accepts_valid_eddsa_jwt() {
+        let (pkcs8_der, pub_key) = make_ed25519_pkcs8();
+        let kid = "test-key-1";
+        let issuer = "https://auth.example.com";
+        let now = now_secs();
+
+        let claims_json = json!({
+            "sub": "user_abc",
+            "iss": issuer,
+            "exp": now + 3600,
+            "iat": now,
+            "jti": "test-jti",
+            "token_type": "access",
+        });
+
+        let token = make_test_jwt(&claims_json, &pkcs8_der, kid);
+        let jwk = make_jwk(kid, &pub_key);
+        let client = client_with_cached_jwk(kid, jwk, None).await;
+
+        let claims = client.verify_token(&token).await
+            .expect("verify_token should succeed for a valid JWT");
+        assert_eq!(claims.subject(), "user_abc");
+        assert_eq!(claims.issuer(), issuer);
+    }
+
+    #[tokio::test]
+    async fn verify_token_rejects_expired_jwt() {
+        let (pkcs8_der, pub_key) = make_ed25519_pkcs8();
+        let kid = "test-key-exp";
+        let now = now_secs();
+
+        let claims_json = json!({
+            "sub": "user_abc",
+            "iss": "https://auth.example.com",
+            "exp": now - 3600, // expired 1h ago
+            "iat": now - 7200,
+            "token_type": "access",
+        });
+
+        let token = make_test_jwt(&claims_json, &pkcs8_der, kid);
+        let jwk = make_jwk(kid, &pub_key);
+        let client = client_with_cached_jwk(kid, jwk, None).await;
+
+        let err = client.verify_token(&token).await.unwrap_err();
+        assert!(
+            matches!(err, HearthError::TokenExpiredError { .. }),
+            "expected TokenExpiredError, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_rejects_wrong_issuer() {
+        let (pkcs8_der, pub_key) = make_ed25519_pkcs8();
+        let kid = "test-key-iss";
+        let now = now_secs();
+
+        let claims_json = json!({
+            "sub": "u",
+            "iss": "https://evil.example.com", // wrong issuer
+            "exp": now + 3600,
+            "iat": now,
+        });
+
+        let token = make_test_jwt(&claims_json, &pkcs8_der, kid);
+        let jwk = make_jwk(kid, &pub_key);
+        let client = client_with_cached_jwk(kid, jwk, None).await;
+
+        let err = client.verify_token(&token).await.unwrap_err();
+        assert!(
+            matches!(err, HearthError::TokenIssuerError { .. }),
+            "expected TokenIssuerError, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_token_rejects_required_action_token() {
+        let (pkcs8_der, pub_key) = make_ed25519_pkcs8();
+        let kid = "test-key-ra";
+        let now = now_secs();
+
+        let claims_json = json!({
+            "sub": "u",
+            "iss": "https://auth.example.com",
+            "exp": now + 3600,
+            "iat": now,
+            "token_type": "required_action",
+            "required_actions": ["VERIFY_EMAIL"],
+        });
+
+        let token = make_test_jwt(&claims_json, &pkcs8_der, kid);
+        let jwk = make_jwk(kid, &pub_key);
+        let client = client_with_cached_jwk(kid, jwk, None).await;
+
+        let err = client.verify_token(&token).await.unwrap_err();
+        match err {
+            HearthError::RequiredActionError { required_actions, .. } => {
+                assert_eq!(required_actions, vec!["VERIFY_EMAIL"]);
+            }
+            other => panic!("expected RequiredActionError, got {other:?}"),
+        }
+    }
+
+    // ── builder ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn builder_sets_fields() {
+        let client = HearthClientBuilder::new("https://auth.example.com/realms/test")
+            .client_id("my-client")
+            .client_secret("s3cr3t")
+            .jwks_ttl(Duration::from_secs(900))
+            .build();
+        assert_eq!(client.base_url, "https://auth.example.com/realms/test");
+        assert_eq!(client.client_id.as_deref(), Some("my-client"));
+        assert_eq!(
+            client.issuer_url.as_deref(),
+            Some("https://auth.example.com/realms/test")
+        );
+    }
+
+    #[test]
+    fn builder_trims_trailing_slash() {
+        let client = HearthClientBuilder::new("https://auth.example.com/").build();
+        assert_eq!(client.base_url, "https://auth.example.com");
+    }
+
+    // ── new types ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn device_authorization_response_deserializes() {
+        let json = json!({
+            "device_code": "GmRhxyz",
+            "user_code": "WDJB-MJHT",
+            "verification_uri": "https://auth.example.com/activate",
+            "verification_uri_complete": "https://auth.example.com/activate?user_code=WDJB-MJHT",
+            "expires_in": 600,
+            "interval": 5
+        });
+        let resp: DeviceAuthorizationResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.user_code, "WDJB-MJHT");
+        assert_eq!(resp.interval, 5);
+        assert!(resp.verification_uri_complete.is_some());
+    }
+
+    #[test]
+    fn sv_delta_response_deserializes() {
+        let json = json!({
+            "entries": [
+                {"session_id": "sess_1", "version": 3, "event": "refreshed"}
+            ],
+            "cursor": "cur_abc",
+            "has_more": false
+        });
+        let resp: SvDeltaResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.entries.len(), 1);
+        assert_eq!(resp.entries[0].event, "refreshed");
+    }
+
+    #[test]
+    fn sv_snapshot_response_deserializes() {
+        let json = json!({ "sessions": [], "cursor": "snap_cur" });
+        let resp: SvSnapshotResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.sessions.is_empty());
+        assert_eq!(resp.cursor, "snap_cur");
+    }
+
+    #[test]
+    fn token_response_without_refresh_token_ok() {
+        let json = json!({
+            "access_token": "eyJ...",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "read:users"
+        });
+        let resp: TokenResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.access_token, "eyJ...");
+        assert!(resp.refresh_token.is_none(), "client_credentials response has no refresh_token");
     }
 }
