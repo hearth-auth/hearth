@@ -125,6 +125,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **`jsonwebtoken` bumped to 10.4.0 in Rust SDK (type-confusion advisory)** — `jsonwebtoken@9.3.1`
+  in `sdks/rust/` was flagged by GitHub Advanced Security / Trivy for a type-confusion
+  vulnerability that could enable authorization bypass on the JWT verify path. Upgraded to
+  `jsonwebtoken = "10"` (resolves to 10.4.0) with the `rust_crypto` feature selected explicitly,
+  as v10 decoupled crypto backends from the default feature set. The EdDSA/Ed25519 verify path
+  is source-compatible; all 41 SDK unit tests remain green (HEA-1589).
 - **`quinn-proto` bumped to 0.11.15 (RUSTSEC-2026-0185)** — `quinn-proto@0.11.14` carried a
   high-severity advisory (CVSS 7.5). Bumped to 0.11.15 across `Cargo.lock`, `fuzz/Cargo.lock`,
   and `sdks/rust/Cargo.lock` via `cargo update -p quinn-proto` (HEA-1510).
