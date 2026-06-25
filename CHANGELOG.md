@@ -7,6 +7,67 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **TypeScript SDK C2 surface** — `@hearth-auth/sdk` now exposes the full canonical SDK surface (HEA-1557):
+  `verifyToken()` (full EdDSA/Ed25519 JWKS-backed local signature verification, all five spec §2 steps);
+  `clientCredentials()` (RFC 6749 §4.4 M2M grant, credentials in body);
+  `startDeviceFlow()` / `pollDeviceToken()` (RFC 8628, transparent `authorization_pending`,
+  `slow_down` back-off, `TokenExpiredError` on expiry);
+  `requestMagicLink()` (enumeration-resistant, 429 → `OAuthFlowError`).
+  Admin CRUD extended with Clients, Roles, Groups, and Org member management.
+  New error `OAuthFlowError` with `statusCode`/`errorCode` for token-endpoint failures.
+  New type `DeviceAuthorizationResponse`. `JwksClient.verify()` uses
+  `fetchKeys()` + `createLocalJWKSet` so JWKS fetches go through global `fetch`
+  (mockable in tests).
+- **Node SDK C3 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1558):
+  `exchangeCode()` (authorization code → tokens, PKCE verifier support);
+  `clientCredentials()` (RFC 6749 §4.4 M2M token grant, credentials in body never URL);
+  `startDeviceFlow()` / `pollDeviceToken()` (RFC 8628, `authorization_pending` transparent,
+  `slow_down` increases interval by 5 s per occurrence, `expired_token` raises `TokenExpiredError`);
+  `requestMagicLink()` (enumeration-resistant passwordless initiation, 429 → `OAuthFlowError`);
+  `userinfo()` (OIDC userinfo endpoint, endpoint discovered); `mePermissions()` (`GET /v1/me/permissions`,
+  live RBAC state); `svSnapshot()` / `svDelta()` (session-version feed HEA-930).
+  New standalone `generatePkce()` helper (`PkcePair` with verifier/challenge/method, RFC 7636 S256).
+  New error: `OAuthFlowError` with `statusCode` for OAuth endpoint HTTP errors.
+  New types: `TokenResponse`, `DeviceAuthorizationResponse`, `UserInfoResponse`,
+  `MePermissionsResponse`, `SvDeltaEntry`, `SvDeltaResponse`, `SvSnapshotResponse`, `ExchangeCodeOptions`.
+  `OAuthFlowsClient` is exported as a standalone class for composition.
+  `verifyToken()` already supported full Ed25519/EdDSA via `jose` (EdDSA in algorithm list since initial ship).
+- **Rust SDK C7 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1562):
+  `verify_token()` (full Ed25519/EdDSA local signature verification via JWKS cache with TTL,
+  all five spec §2 validation steps, typed `HearthError` variants per §5);
+  `client_credentials()` (RFC 6749 §4.4 form-encoded, no refresh token);
+  `start_device_flow()` / `poll_device_token()` (RFC 8628 with `authorization_pending`
+  and `slow_down` handling); `initiate_magic_link()` (passwordless initiation);
+  `session_version_snapshot()` / `session_version_delta()` (session-version polling);
+  `HearthClientBuilder` (spec §1 config table: `issuer_url`, `client_id`, `client_secret`,
+  `jwks_ttl`, `http_timeout`); `JwksCache` (standalone TTL cache, Cache-Control-aware,
+  24h max, kid-indexed, keys never evicted). New module `hearth_sdk::pkce` exposes
+  `PkcePair` + `generate_pkce_pair()` (RFC 7636 S256). `TokenResponse.refresh_token`
+  is now `Option<String>` (absent on client_credentials responses). New types:
+  `DeviceAuthorizationResponse`, `SvDeltaEntry`, `SvDeltaResponse`, `SvSnapshotResponse`.
+  `authorize()` gains optional `code_challenge` / `code_challenge_method` PKCE parameters.
+  `Claims` now implements `Debug` (redacts payload, exposes only `sub`+`iss`).
+- **Go SDK C4 surface** — `Client` now exposes the full canonical SDK surface (HEA-1559):
+  `VerifyToken()` (full Ed25519/EdDSA local signature verification via JWKS cache),
+  `ClientCredentials()` (RFC 6749 §4.4 client credentials grant, form-encoded),
+  `StartDeviceFlow()` / `PollDeviceToken()` (RFC 8628 device authorization, with
+  `authorization_pending` and `slow_down` handling),
+  `RequestMagicLink()` (enumeration-resistant magic-link initiation),
+  `StartWebAuthnRegistration()` / `FinishWebAuthnRegistration()` /
+  `StartWebAuthnAuthentication()` / `FinishWebAuthnAuthentication()` (WebAuthn passkey ceremonies).
+  New types: `DeviceAuthorizationResponse`, `WebAuthnRegistrationBeginResponse`,
+  `WebAuthnRegistrationCompleteRequest`, `WebAuthnRegistrationCompleteResponse`,
+  `WebAuthnAuthenticationBeginResponse`, `WebAuthnAuthenticationCompleteRequest`,
+  `WebAuthnAllowCredential`. New options: `WithClientCredentials()`, `WithJWKSTTL()`.
+  `TokenResponse` gains a `Scope` field.
+- **PHP SDK C5 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1560):
+  `generatePkce()`, `buildAuthorizeUrl()`, `refreshToken()`, `clientCredentials()`,
+  `startDeviceFlow()` / `pollDeviceToken()` (with `slow_down` + `authorization_pending` handling),
+  `requestMagicLink()`, `registerClient()`, `getMyPermissions()`, `checkDecision()`,
+  `startWebAuthnRegistration()` / `finishWebAuthnRegistration()` / `startWebAuthnAuthentication()` / `finishWebAuthnAuthentication()`,
+  `getSessionVersion()`, and `bootstrap()`. New types: `PkceChallenge`, `DeviceAuthorizationResponse`,
+  `PermissionsResponse`, `ClientRegistrationResponse`, `WebAuthnOptions`, `BootstrapResponse`,
+  `RateLimitException`.
 - **Continuous deployment via semantic-release** — merging a `fix:` or `feat:` PR to `main`
   now automatically computes the next semver version, updates CHANGELOGs, bumps version files,
   pushes a git tag, and fires the downstream publish workflows (binaries, Helm, SDKs). Each
@@ -64,6 +125,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- **`jsonwebtoken` bumped to 10.4.0 in Rust SDK (type-confusion advisory)** — `jsonwebtoken@9.3.1`
+  in `sdks/rust/` was flagged by GitHub Advanced Security / Trivy for a type-confusion
+  vulnerability that could enable authorization bypass on the JWT verify path. Upgraded to
+  `jsonwebtoken = "10"` (resolves to 10.4.0) with the `rust_crypto` feature selected explicitly,
+  as v10 decoupled crypto backends from the default feature set. The EdDSA/Ed25519 verify path
+  is source-compatible; all 41 SDK unit tests remain green (HEA-1589).
 - **`quinn-proto` bumped to 0.11.15 (RUSTSEC-2026-0185)** — `quinn-proto@0.11.14` carried a
   high-severity advisory (CVSS 7.5). Bumped to 0.11.15 across `Cargo.lock`, `fuzz/Cargo.lock`,
   and `sdks/rust/Cargo.lock` via `cargo update -p quinn-proto` (HEA-1510).

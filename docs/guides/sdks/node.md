@@ -151,6 +151,55 @@ if (!result.active) {
 // result.permissions, result.roles, result.groups
 ```
 
+## Machine-to-machine (client credentials)
+
+For services that authenticate as their own principal:
+
+```typescript
+import { HearthClient } from "@hearth-auth/node";
+
+const client = new HearthClient({
+  issuer_url: "https://hearth.example.com",
+  client_id: process.env.HEARTH_CLIENT_ID,
+  client_secret: process.env.HEARTH_CLIENT_SECRET,
+});
+
+const tokens = await client.clientCredentials("read:reports");
+// tokens.access_token, tokens.expires_in
+```
+
+## Device authorization flow
+
+For CLI tools or headless processes that need interactive user approval:
+
+```typescript
+const resp = await client.startDeviceFlow("openid");
+console.log(`Visit ${resp.verification_uri}\nEnter code: ${resp.user_code}`);
+
+let tokens;
+while (true) {
+  try {
+    tokens = await client.pollDeviceToken(resp.device_code, resp.interval);
+    break;
+  } catch (err) {
+    if (err instanceof TokenExpiredError) {
+      throw new Error("device code expired");
+    }
+    throw err;
+  }
+  await new Promise((r) => setTimeout(r, resp.interval * 1000));
+}
+```
+
+## Magic-link (passwordless) initiation
+
+```typescript
+await client.requestMagicLink("user@example.com");
+// Always resolves — Hearth returns 202 whether or not the email is registered
+```
+
+HTTP 429 is surfaced as `OAuthFlowError`.
+
 ## Admin API
 
 ```typescript

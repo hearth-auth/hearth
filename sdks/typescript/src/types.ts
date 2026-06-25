@@ -33,6 +33,18 @@ export interface TokenExchangeParams {
   codeVerifier?: string;
 }
 
+/** RFC 8628 device authorization response. */
+export interface DeviceAuthorizationResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  /** Pre-filled URI with user_code (when provided by server). */
+  verification_uri_complete?: string;
+  expires_in: number;
+  /** Minimum polling interval in seconds. */
+  interval: number;
+}
+
 /** Response from the token exchange endpoint. */
 export interface TokenResponse {
   access_token: string;

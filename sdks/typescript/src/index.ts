@@ -18,7 +18,7 @@ export type { HearthClientConfig } from "./hearth-client.js";
 
 // Lower-level primitives (JWKS and introspection).
 export { JwksClient } from "./jwks-client.js";
-export type { JwksClientConfig } from "./jwks-client.js";
+export type { JwksClientConfig, VerifyOptions } from "./jwks-client.js";
 export { IntrospectionClient } from "./introspection-client.js";
 export type {
   IntrospectionClientConfig,
@@ -33,6 +33,7 @@ export {
   HearthSdkError,
   IntrospectionError,
   JWKSFetchError,
+  OAuthFlowError,
   RequiredActionError,
   SessionVersionCacheStaleError,
   SessionVersionRevokedError,
@@ -86,6 +87,7 @@ export type {
   Realm,
   SessionVersionConfig,
   TokenExchangeParams,
+  DeviceAuthorizationResponse,
   TokenResponse,
   UpdateRealmParams,
   UpdateUserParams,

@@ -151,10 +151,12 @@ import {
   useHasPermission,
 } from "@hearth-auth/sdk";
 
+// Server-side token verification
 const client = new HearthClient({
-  baseUrl: "https://hearth.example.com",
-  realmId: "<realm_id>",
+  issuerUrl: "https://hearth.example.com",
+  clientId: "<client_id>",
 });
+const claims = await client.verifyToken(accessToken);
 
 // RBAC — synchronous local checks from JWT claims
 const hearth = createHearth({
@@ -167,7 +169,8 @@ if (hearth.hasRole("admin")) { ... }
 if (hearth.hasPermission("billing.read")) { ... }
 
 // Token refresh
-const tokens = await client.refreshTokens("<client_id>", refreshToken);
+const legacyClient = new HearthApiClient({ baseUrl: "https://hearth.example.com", realmId: "<realm_id>" });
+const tokens = await legacyClient.refreshTokens("<client_id>", refreshToken);
 ```
 
 **React hooks — before (Keycloak):**
@@ -210,11 +213,15 @@ userInfo, _ := client.GetRawUserInfo(ctx, token, realm)
 ```go
 import "github.com/hearth-auth/hearth/sdks/go/hearth"
 
-client := hearth.NewClient("https://hearth.example.com", "<realm_id>")
+client := hearth.NewClient("https://hearth.example.com", "<realm_id>",
+    hearth.WithClientCredentials("<client_id>", ""),
+)
 
-// Validate token against JWKS (cached, zero-network after first fetch)
-keySet, _ := jwk.Fetch(ctx, "https://hearth.example.com/realms/<realm_id>/jwks")
-tok, err := jwt.Parse([]byte(token), jwt.WithKeySet(keySet))
+// Validate token against JWKS (full Ed25519/EdDSA local verification)
+claims, err := client.VerifyToken(ctx, token)
+if err != nil {
+    // typed error: *hearth.TokenError
+}
 
 // Role and permission checks — synchronous, zero-network, no introspect call
 if client.HasRole(token, "admin") { ... }
@@ -244,13 +251,18 @@ Replace the Keycloak OIDC discovery URL with Hearth's:
 # Keycloak
 https://keycloak.example.com/realms/my-realm/.well-known/openid-configuration
 
-# Hearth
-https://hearth.example.com/realms/<realm_id>/.well-known/openid-configuration
+# Hearth — realm-scoped (use realm slug, not UUID)
+https://hearth.example.com/realms/<realm_slug>/.well-known/openid-configuration
+
+# Hearth — system-level (uses X-Realm-ID header; works with all Hearth SDKs)
+https://hearth.example.com/.well-known/openid-configuration
 ```
 
 Any library that reads the discovery document (e.g., `openid-client`,
 `passport-openidconnect`, Go's `coreos/go-oidc`) will auto-configure from the
-new URL — no other changes needed for standard OIDC flows.
+new URL — no other changes needed for standard OIDC flows. Note: `<realm_slug>`
+is the human-readable realm name, not the UUID. Hearth SDKs use the system-level
+discovery URL by default (base URL only) and resolve realm context via `client_id`.
 
 ## Step 5 — Verify in staging
 
@@ -265,7 +277,8 @@ new URL — no other changes needed for standard OIDC flows.
 **"Token signature verification failed"**
 
 Your application is still pointing at Keycloak's JWKS URL. Update it to
-`https://hearth.example.com/realms/<realm_id>/jwks`.
+`https://hearth.example.com/.well-known/jwks.json` (system-level) or
+`https://hearth.example.com/realms/<realm_slug>/.well-known/jwks.json` (realm-scoped, use slug not UUID).
 
 **"Role X not found after migration"**
 

@@ -25,52 +25,133 @@ hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", pa
 # hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", features = ["tower-middleware"] }
 ```
 
+## Build the client
+
+Use `HearthClientBuilder` to configure the client:
+
+```rust
+use hearth_sdk::HearthClientBuilder;
+
+let client = HearthClientBuilder::new("https://hearth.example.com")
+    .client_id("my-app")
+    .client_secret("s3cr3t")
+    .build();
+```
+
+All endpoint URLs are auto-discovered from `{issuer_url}/.well-known/openid-configuration`.
+
 ## Auth code flow with PKCE
 
 The Rust SDK handles both the OAuth client-side (initiating authorization) and server-side (verifying incoming tokens). For a backend service that receives tokens from a browser, jump straight to [Verify tokens](#verify-tokens).
 
-For a Rust server that also initiates the PKCE flow (e.g. a CLI or desktop app):
+For a Rust CLI or desktop app that initiates the PKCE flow:
 
 ```rust
-use hearth_sdk::HearthClient;
+use hearth_sdk::{HearthClientBuilder, pkce::generate_pkce_pair};
 
-let client = HearthClient::new("https://hearth.example.com", "my-realm");
+let client = HearthClientBuilder::new("https://hearth.example.com")
+    .client_id("my-app")
+    .build();
 
-// 1. Start authorization
-let auth_resp = client.authorize(hearth_sdk::AuthorizeRequest {
-    client_id:             "my-app".into(),
-    redirect_uri:          "http://localhost:8080/callback".into(),
-    scope:                 "openid profile email".into(),
-    state:                 "random-csrf-token".into(),
-    code_challenge:        pkce_challenge,
-    code_challenge_method: "S256".into(),
-    user_id:               None, // omit in production; used in dev mode only
-    ..Default::default()
-}).await?;
+let pkce = generate_pkce_pair();
+
+// 1. Build the authorization URL (get authorization_endpoint from discovery)
+let discovery = client.discovery().await?;
+// ... build URL with pkce.challenge and redirect user ...
 
 // 2. Exchange the code for tokens (on callback)
 let tokens = client.exchange_code(hearth_sdk::TokenRequest {
     client_id:     "my-app".into(),
-    code:          auth_resp.code,
+    code:          callback_code,
     redirect_uri:  "http://localhost:8080/callback".into(),
-    code_verifier: pkce_verifier,
+    code_verifier: Some(pkce.verifier),
 }).await?;
 
 // 3. Refresh before expiry
-let refreshed = client.refresh_tokens("my-app", &tokens.refresh_token).await?;
+let refreshed = client.refresh_tokens("my-app", &tokens.refresh_token.unwrap()).await?;
 ```
 
 ## Verify tokens
 
+`verify_token()` performs full Ed25519/EdDSA local signature verification:
+
 ```rust
-use hearth_sdk::{HearthClient, AccessTokenAuthorization, CheckPermissionOpts};
+use hearth_sdk::{HearthClientBuilder, HearthError};
 
-let client = HearthClient::new("https://hearth.example.com", "my-realm");
+let client = HearthClientBuilder::new("https://hearth.example.com")
+    .client_id("my-app")
+    .build();
 
-// Synchronous local check — zero network calls, no lock
-let allowed = client.has_permission(&access_token, "documents.write");
-let is_admin = client.has_role(&access_token, "admin");
-let in_eng   = client.in_group(&access_token, "engineering");
+let claims = client.verify_token(&access_token).await?;
+println!("user: {}", claims.subject());
+
+// Typed errors:
+// HearthError::TokenExpired — exp in the past
+// HearthError::TokenInvalid — bad signature or malformed JWT
+// HearthError::TokenIssuer  — iss mismatch
+// HearthError::TokenAudience — aud mismatch
+```
+
+`verify_token()` caches JWKS keys; a `kid` miss triggers one re-fetch before
+failing (transparent key rotation). It never falls back to introspection.
+
+## Machine-to-machine (client credentials)
+
+```rust
+let client = HearthClientBuilder::new("https://hearth.example.com")
+    .client_id("my-service")
+    .client_secret("s3cr3t")
+    .build();
+
+let tokens = client.client_credentials(None).await?;
+// tokens.access_token, tokens.expires_in
+
+// With scope:
+let tokens = client.client_credentials(Some("read:users")).await?;
+```
+
+## Device authorization flow
+
+```rust
+let resp = client.start_device_flow(None).await?;
+println!("Visit: {}", resp.verification_uri);
+println!("Code:  {}", resp.user_code);
+
+// Poll until approved or expired
+loop {
+    tokio::time::sleep(Duration::from_secs(resp.interval as u64)).await;
+    match client.poll_device_token(&resp.device_code, resp.interval).await {
+        Ok(tokens) => {
+            println!("access_token: {}", tokens.access_token);
+            break;
+        }
+        Err(HearthError::TokenExpired) => {
+            eprintln!("device code expired");
+            break;
+        }
+        Err(e) => return Err(e),
+    }
+}
+```
+
+## Magic-link (passwordless) initiation
+
+> **Platform note:** The Rust SDK uses `initiate_magic_link()` (not `requestMagicLink`). See [§2.5 platform exceptions](../../specs/SDK.md#platform-exceptions).
+
+```rust
+client.initiate_magic_link("user@example.com").await?;
+// Ok(()) whether or not the email is registered (enumeration resistance)
+// Err(HearthError::RateLimitExceeded) on HTTP 429
+```
+
+## Synchronous RBAC checks
+
+These decode the JWT locally — no network call, no lock:
+
+```rust
+let allowed  = HearthClient::has_permission(&access_token, "documents.write")?;
+let is_admin = HearthClient::has_role(&access_token, "admin")?;
+let in_eng   = HearthClient::in_group(&access_token, "engineering")?;
 ```
 
 ## Permission delivery modes
@@ -145,17 +226,27 @@ let app = axum::Router::new()
 
 | Method | Description |
 |--------|-------------|
-| `HearthClient::new(base_url, realm_id)` | Construct a new client |
+| `HearthClientBuilder::new(issuer_url)` | Start building a client (preferred) |
+| `HearthClientBuilder::client_id(id)` | Set OAuth client ID |
+| `HearthClientBuilder::client_secret(secret)` | Set OAuth client secret |
+| `HearthClientBuilder::build()` | Finalize and return `HearthClient` |
+| `verify_token(token)` | Full EdDSA JWKS-backed signature verification (§2) |
+| `client_credentials(scope?)` | Client Credentials grant (RFC 6749 §4.4) |
+| `start_device_flow(scope?)` | Begin Device Authorization Flow (RFC 8628) |
+| `poll_device_token(device_code, interval)` | Poll for device flow completion |
+| `initiate_magic_link(email)` | Initiate passwordless magic-link email ⚠ |
 | `has_permission(token, permission)` | Sync local JWT decode — no network |
 | `has_role(token, role)` | Sync local JWT decode — no network |
 | `in_group(token, group_slug)` | Sync local JWT decode — no network |
 | `check_permission(token, perm, mode, opts)` | Async, mode-aware permission check |
-| `introspect(token, client_id, client_secret)` | RFC 7662 introspection |
+| `introspect(token)` | RFC 7662 introspection |
 | `authorize(request)` | Begin OAuth authorization code flow |
 | `exchange_code(request)` | Exchange auth code for tokens |
 | `refresh_tokens(client_id, refresh_token)` | Refresh an access token |
 | `userinfo(access_token)` | Fetch OIDC UserInfo claims |
 | `jwks()` | Fetch realm JWKS |
+
+> ⚠ `initiate_magic_link` is the Rust name for the spec's `requestMagicLink`. See [§2.5 platform exceptions](../../specs/SDK.md#platform-exceptions).
 
 ## Error types
 

@@ -104,49 +104,121 @@ func main() {
 }
 ```
 
-## Verify tokens with JWKS
+## Verify tokens
 
-Hearth signs JWTs with Ed25519. Verify them using the realm's JWKS endpoint
-and the [`lestrrat-go/jwx`](https://github.com/lestrrat-go/jwx) library:
-
-```bash
-go get github.com/lestrrat-go/jwx/v2
-```
+`VerifyToken` performs full Ed25519/EdDSA local signature verification with JWKS
+caching and key-rotation recovery:
 
 ```go
 package main
 
 import (
     "context"
+    "errors"
     "fmt"
 
-    "github.com/lestrrat-go/jwx/v2/jwk"
-    "github.com/lestrrat-go/jwx/v2/jwt"
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
 func main() {
     ctx := context.Background()
+    client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
+        hearth.WithClientCredentials("<client_id>", ""),
+    )
 
-    // Fetch and cache the JWKS once at startup.
-    jwksURL := "http://127.0.0.1:8420/realms/<realm_id>/jwks"
-    keySet, err := jwk.Fetch(ctx, jwksURL)
+    claims, err := client.VerifyToken(ctx, accessToken)
     if err != nil {
-        panic(err)
+        var tokenErr *hearth.TokenError
+        if errors.As(err, &tokenErr) {
+            fmt.Println("token rejected:", tokenErr.Code) // "expired", "invalid", "issuer_mismatch", etc.
+        }
+        return
     }
 
-    // Verify a token.
-    accessToken := "<token>"
-    tok, err := jwt.Parse([]byte(accessToken), jwt.WithKeySet(keySet))
-    if err != nil {
-        panic(fmt.Errorf("invalid token: %w", err))
-    }
-
-    fmt.Println("user:", tok.Subject())
+    fmt.Println("user:", claims.Subject)
+    fmt.Println("roles:", claims.Roles)
+    fmt.Println("permissions:", claims.Permissions)
 }
 ```
 
-The key set should be refreshed once on a verification failure (to handle
-server key rotation). See `examples/go-gin/main.go` for a complete example.
+`VerifyToken` validates signature, `exp`, `iss`, `aud` (when `client_id` is
+set), and `iat` in that order. Keys are cached; a `kid` miss triggers one
+re-fetch before failing (transparent key rotation). It never falls back to
+introspection.
+
+Pass additional audience values as variadic arguments:
+
+```go
+claims, err := client.VerifyToken(ctx, token, "other-service")
+```
+
+## Machine-to-machine (client credentials)
+
+For daemon-to-daemon calls where the service authenticates as its own principal:
+
+```go
+client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
+    hearth.WithClientCredentials("<service-client-id>", "<service-client-secret>"),
+)
+
+tokens, err := client.ClientCredentials(ctx)
+if err != nil {
+    panic(err)
+}
+fmt.Println("access_token:", tokens.AccessToken)
+// tokens.ExpiresIn — seconds until expiry
+```
+
+Pass optional scopes as variadic strings:
+
+```go
+tokens, err := client.ClientCredentials(ctx, "read:users", "write:reports")
+```
+
+## Device authorization flow
+
+For CLI tools or headless servers that need interactive user approval:
+
+```go
+resp, err := client.StartDeviceFlow(ctx)
+if err != nil {
+    panic(err)
+}
+fmt.Printf("Visit %s\nEnter code: %s\n", resp.VerificationURI, resp.UserCode)
+
+// Poll until the user approves. PollDeviceToken manages the interval internally.
+for {
+    tokens, err := client.PollDeviceToken(ctx, resp.DeviceCode)
+    if err != nil {
+        var tokenErr *hearth.TokenError
+        if errors.As(err, &tokenErr) && tokenErr.Code == "expired_token" {
+            fmt.Println("device code expired")
+            return
+        }
+        panic(err)
+    }
+    if tokens != nil {
+        // Approved
+        fmt.Println("access_token:", tokens.AccessToken)
+        break
+    }
+    // nil means authorization_pending or slow_down — sleep and retry
+    time.Sleep(time.Duration(resp.Interval) * time.Second)
+}
+```
+
+`PollDeviceToken` handles `authorization_pending` and `slow_down` by returning
+`nil` (the caller is responsible for the sleep loop). It raises a `TokenError`
+with `Code == "expired_token"` when the device code expires.
+
+## Magic-link (passwordless) initiation
+
+```go
+err := client.RequestMagicLink(ctx, "user@example.com")
+// err is nil whether or not the email is registered (enumeration resistance)
+```
+
+HTTP 429 is surfaced as `*hearth.APIError` with `StatusCode == 429`.
 
 ## RBAC checks
 

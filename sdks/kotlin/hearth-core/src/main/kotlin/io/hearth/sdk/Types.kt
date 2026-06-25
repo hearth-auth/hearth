@@ -286,3 +286,63 @@ data class CheckPermissionRequest(
 data class CheckPermissionResponse(
     val allowed: Boolean,
 )
+
+// ── WebAuthn ──────────────────────────────────────────────────────────────────
+
+/** Server-issued `PublicKeyCredentialCreationOptions` for passkey registration. */
+@Serializable
+data class WebAuthnRegistrationBeginResponse(
+    val challenge: String,
+    @SerialName("rp_id") val rpId: String,
+    @SerialName("rp_name") val rpName: String,
+    @SerialName("user_id") val userId: String,
+    @SerialName("user_name") val userName: String,
+    @SerialName("user_display_name") val userDisplayName: String,
+    val attestation: String,
+    val timeout: Long,
+)
+
+/** Browser attestation result sent to `POST /webauthn/register/complete`. */
+@Serializable
+data class WebAuthnRegistrationCompleteRequest(
+    @SerialName("client_data_json") val clientDataJson: String,
+    @SerialName("attestation_object") val attestationObject: String,
+    val origin: String,
+    val discoverable: Boolean = false,
+)
+
+/** Returned after a successful passkey registration. */
+@Serializable
+data class WebAuthnRegistrationCompleteResponse(
+    @SerialName("credential_id") val credentialId: String,
+    val algorithm: Long,
+    val discoverable: Boolean,
+)
+
+/** An entry in the `allow_credentials` list during a WebAuthn authentication ceremony. */
+@Serializable
+data class WebAuthnAllowCredential(
+    val id: String,
+    val type: String,
+)
+
+/** Server-issued `PublicKeyCredentialRequestOptions` for passkey authentication. */
+@Serializable
+data class WebAuthnAuthenticationBeginResponse(
+    val challenge: String,
+    @SerialName("rp_id") val rpId: String,
+    @SerialName("allow_credentials") val allowCredentials: List<WebAuthnAllowCredential>,
+    @SerialName("user_verification") val userVerification: String,
+    val timeout: Long,
+)
+
+/** Browser-signed assertion sent to `POST /webauthn/auth/complete`. */
+@Serializable
+data class WebAuthnAuthenticationCompleteRequest(
+    @SerialName("credential_id") val credentialId: String,
+    @SerialName("client_data_json") val clientDataJson: String,
+    @SerialName("authenticator_data") val authenticatorData: String,
+    val signature: String,
+    @SerialName("user_handle") val userHandle: String? = null,
+    val origin: String,
+)

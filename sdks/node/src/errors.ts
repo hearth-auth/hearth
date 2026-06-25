@@ -191,3 +191,19 @@ export class AdminHttpError extends HearthError {
     this.status = status;
   }
 }
+
+/**
+ * Typed HTTP error for OAuth flow operations (token exchange, device flow, magic-link, etc.)
+ * that return non-2xx responses not covered by the standard error taxonomy.
+ *
+ * HTTP 429 from `requestMagicLink` is surfaced as this error (spec §4.5.3).
+ */
+export class OAuthFlowError extends HearthError {
+  /** HTTP status code from the server response; 0 for network-level failures. */
+  readonly statusCode: number;
+
+  constructor(statusCode: number, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.statusCode = statusCode;
+  }
+}

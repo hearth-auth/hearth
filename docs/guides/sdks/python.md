@@ -185,6 +185,58 @@ if "docs.write" not in (resp.permissions or []):
     raise PermissionError("forbidden")
 ```
 
+## Machine-to-machine (client credentials)
+
+For service-to-service calls where your server authenticates as its own principal:
+
+```python
+from hearth import HearthClient
+
+client = HearthClient(
+    issuer_url="https://hearth.example.com",
+    realm_id="<realm_id>",
+    client_id="<service-client-id>",
+    client_secret="<service-client-secret>",
+)
+
+tokens = client.client_credentials(scope="read:reports")
+# tokens.access_token, tokens.expires_in
+```
+
+## Device authorization flow
+
+For CLI tools or headless processes that need interactive user approval:
+
+```python
+import time
+
+resp = client.start_device_flow(scope="openid")
+print(f"Visit {resp.verification_uri}")
+print(f"Enter code: {resp.user_code}")
+
+# Poll until approved or expired
+interval = resp.interval
+tokens = None
+while True:
+    time.sleep(interval)
+    try:
+        result = client.poll_device_token(resp.device_code, interval)
+        if result is not None:
+            tokens = result
+            break
+        # None means authorization_pending or slow_down — keep polling
+    except TokenExpiredError:
+        raise RuntimeError("device code expired before user approved")
+```
+
+## Magic-link (passwordless) initiation
+
+```python
+client.request_magic_link("user@example.com")
+# Returns None whether or not the email is registered (enumeration resistance)
+# Raises OAuthFlowError on HTTP 429
+```
+
 ## Error types
 
 | Error | When raised |
@@ -195,6 +247,7 @@ if "docs.write" not in (resp.permissions or []):
 | `TokenAudienceError` | `aud` mismatch |
 | `DiscoveryError` | OIDC discovery unreachable |
 | `JWKSFetchError` | JWKS endpoint unreachable |
+| `OAuthFlowError` | OAuth endpoint error (client credentials, device flow, magic link) |
 | `AuthorizationModeMismatchError` | Server echoed a mode different from configured |
 | `IntrospectionError` | Introspection endpoint error |
 
