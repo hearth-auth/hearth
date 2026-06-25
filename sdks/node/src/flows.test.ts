@@ -36,7 +36,7 @@ const TOKEN_RESPONSE = {
 
 function makeClient(configOverrides?: Partial<ResolvedConfig>) {
   const config = { ...BASE_CONFIG, ...configOverrides };
-  const getDiscovery = vi.fn<[], Promise<OidcDiscovery>>().mockResolvedValue(DISCOVERY);
+  const getDiscovery = vi.fn<() => Promise<OidcDiscovery>>().mockResolvedValue(DISCOVERY);
   const client = new OAuthFlowsClient(config, getDiscovery);
   return { client, getDiscovery };
 }
@@ -81,7 +81,7 @@ describe("OAuthFlowsClient.exchangeCode", () => {
 
     await client.exchangeCode("code", "https://app.example.com/cb", { codeVerifier: "v3rif1er" });
 
-    const body = new URLSearchParams(vi.mocked(fetch).mock.calls[0][1].body as string);
+    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(body.get("code_verifier")).toBe("v3rif1er");
   });
 
@@ -116,7 +116,7 @@ describe("OAuthFlowsClient.clientCredentials", () => {
 
     await client.clientCredentials();
 
-    const body = new URLSearchParams(vi.mocked(fetch).mock.calls[0][1].body as string);
+    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(body.get("grant_type")).toBe("client_credentials");
     expect(body.get("client_id")).toBe("client1");
     expect(body.get("client_secret")).toBe("secret1");
@@ -131,7 +131,7 @@ describe("OAuthFlowsClient.clientCredentials", () => {
 
     await client.clientCredentials("read:users");
 
-    const body = new URLSearchParams(vi.mocked(fetch).mock.calls[0][1].body as string);
+    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(body.get("scope")).toBe("read:users");
   });
 
@@ -141,7 +141,7 @@ describe("OAuthFlowsClient.clientCredentials", () => {
 
     await client.clientCredentials();
 
-    const body = new URLSearchParams(vi.mocked(fetch).mock.calls[0][1].body as string);
+    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(body.get("scope")).toBeNull();
   });
 
@@ -192,7 +192,7 @@ describe("OAuthFlowsClient.startDeviceFlow", () => {
 
     await client.startDeviceFlow("openid profile");
 
-    const body = new URLSearchParams(vi.mocked(fetch).mock.calls[0][1].body as string);
+    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(body.get("client_id")).toBe("client1");
     expect(body.get("scope")).toBe("openid profile");
   });
@@ -276,7 +276,7 @@ describe("OAuthFlowsClient.pollDeviceToken", () => {
     await vi.runAllTimersAsync();
     await p;
 
-    const body = new URLSearchParams(vi.mocked(fetch).mock.calls[0][1].body as string);
+    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
     expect(body.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:device_code");
     expect(body.get("device_code")).toBe("dev-code-abc");
     expect(body.get("client_id")).toBe("client1");
