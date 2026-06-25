@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **TypeScript SDK C2 surface** — `@hearth-auth/sdk` now exposes the full canonical SDK surface (HEA-1557):
+  `verifyToken()` (full EdDSA/Ed25519 JWKS-backed local signature verification, all five spec §2 steps);
+  `clientCredentials()` (RFC 6749 §4.4 M2M grant, credentials in body);
+  `startDeviceFlow()` / `pollDeviceToken()` (RFC 8628, transparent `authorization_pending`,
+  `slow_down` back-off, `TokenExpiredError` on expiry);
+  `requestMagicLink()` (enumeration-resistant, 429 → `OAuthFlowError`).
+  Admin CRUD extended with Clients, Roles, Groups, and Org member management.
+  New error `OAuthFlowError` with `statusCode`/`errorCode` for token-endpoint failures.
+  New type `DeviceAuthorizationResponse`. `JwksClient.verify()` uses
+  `fetchKeys()` + `createLocalJWKSet` so JWKS fetches go through global `fetch`
+  (mockable in tests).
 - **Node SDK C3 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1558):
   `exchangeCode()` (authorization code → tokens, PKCE verifier support);
   `clientCredentials()` (RFC 6749 §4.4 M2M token grant, credentials in body never URL);
