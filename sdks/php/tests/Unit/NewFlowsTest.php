@@ -359,6 +359,38 @@ final class NewFlowsTest extends TestCase
         self::assertSame('POST', $req->getMethod());
     }
 
+    public function testExchangeMagicLinkReturnsTokenResponse(): void
+    {
+        $client = $this->makeClient([
+            $this->discoveryResponse(),
+            new Response(200, ['Content-Type' => 'application/json'], json_encode($this->tokenResponseData())),
+        ]);
+
+        $result = $client->exchangeMagicLink('magic-token-xyz');
+
+        self::assertInstanceOf(TokenResponse::class, $result);
+        self::assertSame('eyJ.tok.en', $result->accessToken);
+    }
+
+    public function testExchangeMagicLinkSendsMagicLinkGrantWithTokenInBody(): void
+    {
+        $mock    = new CapturingMockClient([
+            $this->discoveryResponse(),
+            new Response(200, ['Content-Type' => 'application/json'], json_encode($this->tokenResponseData())),
+        ]);
+        $factory = new HttpFactory();
+        $client  = new HearthClient('https://auth.example.com/realms/test', 'tc', 'sc', httpClient: $mock, requestFactory: $factory, streamFactory: $factory);
+
+        $client->exchangeMagicLink('magic-token-xyz');
+
+        $body = (string) $mock->requests[1]->getBody();
+        parse_str($body, $params);
+
+        self::assertSame('urn:hearth:grant-type:magic-link', $params['grant_type']);
+        self::assertSame('magic-token-xyz', $params['token']);
+        self::assertSame('tc', $params['client_id']);
+    }
+
     // -------------------------------------------------------------------------
     // Client Registration (RFC 7591)
     // -------------------------------------------------------------------------

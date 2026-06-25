@@ -161,6 +161,16 @@ export class HearthClient {
     return this.flows.requestMagicLink(email);
   }
 
+  /**
+   * Exchange a magic-link token for tokens (spec §4.5.3 / §7.2 C-12).
+   * Completes the passwordless flow started by {@link requestMagicLink}.
+   *
+   * @param token - The opaque magic-link token from the email/redirect URL.
+   */
+  async exchangeMagicLink(token: string): Promise<TokenResponse> {
+    return this.flows.exchangeMagicLink(token);
+  }
+
   // ── §4 UserInfo & Permissions ──────────────────────────────────────────────
 
   /**

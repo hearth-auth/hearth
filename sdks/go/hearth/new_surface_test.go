@@ -822,6 +822,53 @@ func TestRequestMagicLink_RaisesAPIErrorOn429(t *testing.T) {
 	}
 }
 
+// ─── ExchangeMagicLink ──────────────────────────────────────────────────────────
+
+func TestExchangeMagicLink_PostsMagicLinkGrantWithTokenInBody(t *testing.T) {
+	var capturedBody, capturedCT string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		capturedBody = r.Form.Encode()
+		capturedCT = r.Header.Get("Content-Type")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "eyJ...", "token_type": "Bearer", "expires_in": 3600,
+		})
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "realm-1", WithClientCredentials("my-client", "my-secret"))
+	resp, err := client.ExchangeMagicLink(context.Background(), "magic-token-xyz")
+	if err != nil {
+		t.Fatalf("ExchangeMagicLink: %v", err)
+	}
+	if resp.AccessToken != "eyJ..." {
+		t.Fatalf("access_token: %q", resp.AccessToken)
+	}
+	if !strings.Contains(capturedCT, "application/x-www-form-urlencoded") {
+		t.Fatalf("expected form content-type, got %q", capturedCT)
+	}
+	if !strings.Contains(capturedBody, "grant_type=urn%3Ahearth%3Agrant-type%3Amagic-link") {
+		t.Fatalf("missing magic-link grant_type in body: %q", capturedBody)
+	}
+	if !strings.Contains(capturedBody, "token=magic-token-xyz") {
+		t.Fatalf("missing token in body: %q", capturedBody)
+	}
+}
+
+func TestExchangeMagicLink_RaisesAPIErrorOnInvalidToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "realm-1", WithClientCredentials("my-client", "my-secret"))
+	if _, err := client.ExchangeMagicLink(context.Background(), "expired"); err == nil {
+		t.Fatal("expected error on invalid token")
+	}
+}
+
 // ─── WebAuthn ─────────────────────────────────────────────────────────────────
 
 func TestStartWebAuthnRegistration_ReturnsOptions(t *testing.T) {

@@ -389,6 +389,44 @@ describe("OAuthFlowsClient.requestMagicLink", () => {
   });
 });
 
+// ── exchangeMagicLink ───────────────────────────────────────────────────────────
+
+describe("OAuthFlowsClient.exchangeMagicLink", () => {
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("POSTs the magic-link grant to the discovered token_endpoint with token in body", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse(TOKEN_RESPONSE));
+
+    await client.exchangeMagicLink("magic-token-xyz");
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(DISCOVERY.token_endpoint);
+    expect(init.method).toBe("POST");
+    const body = new URLSearchParams(init.body as string);
+    expect(body.get("grant_type")).toBe("urn:hearth:grant-type:magic-link");
+    expect(body.get("token")).toBe("magic-token-xyz");
+    expect(body.get("client_id")).toBe("client1");
+    expect(url).not.toContain("magic-token-xyz");
+  });
+
+  it("returns a typed TokenResponse", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse(TOKEN_RESPONSE));
+
+    const result = await client.exchangeMagicLink("magic-token-xyz");
+    expect(result.access_token).toBe(TOKEN_RESPONSE.access_token);
+  });
+
+  it("throws OAuthFlowError on non-200 (expired/used token)", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ error: "invalid_grant" }, 400));
+
+    await expect(client.exchangeMagicLink("expired")).rejects.toBeInstanceOf(OAuthFlowError);
+  });
+});
+
 // ── userinfo ──────────────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.userinfo", () => {

@@ -64,7 +64,7 @@ Each capability has a stable **C-ID** used throughout this doc and in child issu
 | **C-09** | Refresh token flow | `refreshTokens(refreshToken)` → `TokenResponse`. Posts `grant_type=refresh_token`. |
 | **C-10** | **Client credentials flow** | `clientCredentials(scope?)` → `TokenResponse`. Posts `grant_type=client_credentials`. Requires `clientId` + `clientSecret`. **Required in every SDK per §7.2.** |
 | **C-11** | **Device authorization flow (RFC 8628)** | Two methods: (1) `deviceAuthorization(scope?)` → `DeviceAuthorizationResponse` — posts to `device_authorization_endpoint`, returns `device_code`, `user_code`, `verification_uri`, `expires_in`, `interval`. (2) `pollDeviceToken(deviceCode)` → `TokenResponse | null` — polls `token_endpoint`; returns `null` on `authorization_pending`/`slow_down`; throws on fatal errors. **Required in every SDK per §7.2.** |
-| **C-12** | **Magic link exchange** | `exchangeMagicLink(token)` → `TokenResponse`. Posts `grant_type=urn:hearth:grant-type:magic-link` with the opaque magic-link token. **Required in every SDK per §7.2.** |
+| **C-12** | **Magic link (send + exchange)** | **Both halves required in every SDK** (board decision 2026-06-25): (1) *send* — `requestMagicLink(email)` → `void`, posts `{email}` to `/v1/{realm}/auth/magic-link`, always succeeds on 202 (enumeration-resistant). (2) *exchange* — `exchangeMagicLink(token)` → `TokenResponse`, posts `grant_type=urn:hearth:grant-type:magic-link` with the opaque token to `token_endpoint`. A magic link you can send but not redeem is not a usable flow. **Required in every SDK per §7.2.** |
 
 ### Tier 3 — Identity & Authorization (all SDKs)
 
@@ -589,7 +589,7 @@ grant_type=urn:hearth:grant-type:magic-link&token={magicToken}&client_id={client
 
 **Notes:**
 - ¹ Node `verifyToken` verifies EdDSA via `jose`; confirm its README/JSDoc lists EdDSA as the *primary* algorithm (SDK.md §6.1 doc-only follow-up).
-- ² **Magic-link semantic divergence.** C-12 is normatively defined as the **exchange** step (`exchangeMagicLink(token) → TokenResponse`). Only Kotlin ships that exact semantic. TS/Node/Go/PHP/Python/Rust ship the **send/initiate** step (`requestMagicLink(email)` / `initiate_magic_link`). These are *different operations*; six SDKs are missing the exchange half (or Kotlin is missing the send half). Reconcile the contract and fill both halves where applicable.
+- ² **Magic-link — both halves now shipped (resolved 2026-06-25).** Per board decision, C-12 requires *both* send and exchange in every SDK. Exchange (`exchangeMagicLink`/`exchange_magic_link`/`ExchangeMagicLink`) added to TS/Node/Go/PHP/Python/Rust; send (`requestMagicLink`) added to Kotlin (which already had exchange). All 7 SDKs now expose the full send→exchange flow.
 - ³ Node uses `authorize(token, permission, opts?)` as a documented alias for `checkPermission` (§5.1).
 - ⁴ **PHP C-20 is intentionally primitive-only.** PHP's request-scoped execution model (no long-lived process between requests) makes a background-polling cache non-idiomatic; the single-shot `getSessionVersion()` poll is the correct primitive there. Python/Rust still expose only raw `sv_snapshot`/`sv_delta` and remain optional managed-cache candidates.
 - **C-20** is optional. TS/Go/Kotlin **and now Node** ship the managed background-polling `SessionVersionCache` facade (`start`/`stop`/`validateSv`/`age`). Node — the resource server that enforces revocation in middleware — was the highest-value target.
@@ -602,7 +602,7 @@ The original trigger gap — hand-rolled PKCE in Python/PHP/Rust — is **fully 
 1. ✅ **C-09 refresh in Node — DONE.** `OAuthFlowsClient.refreshTokens(refreshToken, scope?)` + `HearthClient.refreshTokens` shipped with tests (`sdks/node/src/flows.test.ts`).
 2. ✅ **C-21 WebAuthn in TS — DONE.** Four ceremony helpers added to `HearthApiClient` with tests (`sdks/typescript/tests/webauthn.test.ts`).
 3. ✅ **C-20 managed cache in Node — DONE.** `SessionVersionCache` (`start`/`stop`/`validateSv`/`age`) + `SessionVersionConfig` + `SessionVersionRevokedError`/`SessionVersionCacheStaleError` shipped with tests (`sdks/node/src/session-version-cache.test.ts`).
-4. ⏳ **C-12 magic-link contract reconciliation (P1, needs board decision).** Six SDKs ship *send* (`requestMagicLink(email)`); only Kotlin ships *exchange* (`exchangeMagicLink(token)`, the §7.2 normative shape). Decide whether the canonical surface requires send, exchange, or both, then align all 7. Tracked in [HEA-1590](/HEA/issues/HEA-1590).
+4. ✅ **C-12 magic-link send + exchange — DONE.** Board decided both halves are required. Exchange added to TS/Node/Go/PHP/Python/Rust; send added to Kotlin. All test-first; see each SDK's flow tests. All 7 SDKs now expose the full send→exchange flow.
 5. ⏳ **C-20 managed cache in Python/Rust (P3, optional).** Recommended-optional; PHP intentionally exempt (note ⁴). Tracked in [HEA-1590](/HEA/issues/HEA-1590).
 6. ⏳ **Doc-only:** confirm Node `verifyToken` documents EdDSA as the primary algorithm (SDK.md §6.1).
 

@@ -497,6 +497,28 @@ impl HearthClient {
         Ok(())
     }
 
+    /// Exchange a magic-link token for tokens (spec §4.5.3 / §7.2 C-12).
+    ///
+    /// Completes the passwordless flow started by [`HearthClient::initiate_magic_link`]:
+    /// posts `grant_type=urn:hearth:grant-type:magic-link` with the opaque `token`
+    /// from the magic-link URL to the token endpoint. The token is sent in the
+    /// form body, never the URL.
+    pub async fn exchange_magic_link(
+        &self,
+        token: &str,
+        client_id: &str,
+    ) -> Result<TokenResponse, HearthError> {
+        let token_url = self.token_endpoint().await?;
+        let form: Vec<(&str, &str)> = vec![
+            ("grant_type", "urn:hearth:grant-type:magic-link"),
+            ("token", token),
+            ("client_id", client_id),
+        ];
+        let resp = self.http.post(&token_url).form(&form).send().await?;
+        Self::check(&resp)?;
+        Ok(resp.json().await?)
+    }
+
     // ------------------------------------------------------------------
     // Session-version polling
     // ------------------------------------------------------------------
@@ -1271,5 +1293,50 @@ mod tests {
         let resp: TokenResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.access_token, "eyJ...");
         assert!(resp.refresh_token.is_none(), "client_credentials response has no refresh_token");
+    }
+
+    // ── exchange_magic_link (C-12) ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn exchange_magic_link_posts_grant_with_token_in_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = r#"{"access_token":"at","token_type":"Bearer","expires_in":3600}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+            req
+        });
+
+        let client = HearthClient::new(base, "realm-1");
+        let resp = client
+            .exchange_magic_link("magic-token-xyz", "cid")
+            .await
+            .expect("exchange_magic_link");
+        assert_eq!(resp.access_token, "at");
+        assert_eq!(resp.token_type, "Bearer");
+
+        let req = server.await.unwrap();
+        let (head, body) = req.split_once("\r\n\r\n").unwrap_or((&req, ""));
+        assert!(head.starts_with("POST /token "), "wrong target: {head}");
+        assert!(
+            body.contains("grant_type=urn%3Ahearth%3Agrant-type%3Amagic-link"),
+            "missing magic-link grant: {body}"
+        );
+        assert!(body.contains("token=magic-token-xyz"), "missing token: {body}");
+        assert!(body.contains("client_id=cid"), "missing client_id: {body}");
     }
 }

@@ -416,6 +416,26 @@ export class OAuthFlowsClient {
   }
 
   /**
+   * Exchange a magic-link token for tokens (spec §4.5.3 / §7.2 C-12).
+   *
+   * Completes the passwordless flow started by {@link requestMagicLink}: posts
+   * `grant_type=urn:hearth:grant-type:magic-link` with the opaque `token` from
+   * the magic-link URL to the discovered token endpoint. The token is sent in
+   * the body, never the URL.
+   *
+   * @param token - The opaque magic-link token from the email/redirect URL.
+   */
+  async exchangeMagicLink(token: string): Promise<TokenResponse> {
+    const endpoint = await this.getTokenEndpoint();
+    const params: Record<string, string> = {
+      grant_type: "urn:hearth:grant-type:magic-link",
+      token,
+      client_id: this.config.client_id,
+    };
+    return this.postForm<TokenResponse>(endpoint, params);
+  }
+
+  /**
    * Fetch the OIDC userinfo claims for the bearer token (discovered endpoint).
    *
    * @param token - Access token whose claims to retrieve.
