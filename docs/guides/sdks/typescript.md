@@ -71,32 +71,25 @@ All endpoint URLs are auto-discovered from `{issuerUrl}/.well-known/openid-confi
 PKCE is mandatory for all public clients (browser apps, mobile apps) and
 recommended for confidential clients.
 
-### Step 1 — Build the authorization URL
+### Step 1 — Start the login redirect
 
 ```typescript
-import {
-  generateCodeVerifier,
-  generateCodeChallenge,
-  buildAuthorizationUrl,
-} from "@hearth-auth/sdk";
+import { HearthApiClient, startLogin } from "@hearth-auth/sdk";
 
-const codeVerifier = generateCodeVerifier();       // RFC 7636 S256 verifier
-const codeChallenge = await generateCodeChallenge(codeVerifier);
-const state = crypto.randomUUID(); // CSRF token
+const client = new HearthApiClient({
+  baseUrl: "http://127.0.0.1:8420",
+  realmId: "<realm_id>",
+});
 
-// Fetch Hearth's OIDC discovery document
-const discovery = await client.discover();
-
-// Build the authorization URL and redirect
-const { url } = buildAuthorizationUrl(discovery.authorization_endpoint, {
+// startLogin discovers the authorization endpoint, generates the PKCE verifier
+// and S256 challenge, and builds the redirect URL — no manual crypto needed.
+const { url, state, codeVerifier } = await startLogin(client, {
   clientId: "<client_id>",
   redirectUri: "http://localhost:3000/callback",
   scope: "openid profile email",
-  state,
-  codeChallenge,
 });
 
-// Store verifier + state for the callback
+// Persist for the callback
 sessionStorage.setItem("pkce_verifier", codeVerifier);
 sessionStorage.setItem("oauth_state", state);
 
@@ -111,22 +104,19 @@ After the user authenticates, Hearth redirects to your `redirect_uri` with
 ```typescript
 import { HearthApiClient } from "@hearth-auth/sdk";
 
-const params = new URLSearchParams(window.location.search);
-const code = params.get("code")!;
-
-// Verify state matches before proceeding
-if (params.get("state") !== sessionStorage.getItem("oauth_state")) {
-  throw new Error("state mismatch");
-}
-
-const legacyClient = new HearthApiClient({
+const client = new HearthApiClient({
   baseUrl: "http://127.0.0.1:8420",
   realmId: "<realm_id>",
 });
 
-const tokens = await legacyClient.exchangeCode({
+// Verify state before exchanging the code
+if (new URLSearchParams(window.location.search).get("state") !== sessionStorage.getItem("oauth_state")) {
+  throw new Error("state mismatch");
+}
+
+const tokens = await client.handleCallback({
+  callbackUrl: window.location.href,
   clientId: "<client_id>",
-  code,
   redirectUri: "http://localhost:3000/callback",
   codeVerifier: sessionStorage.getItem("pkce_verifier")!,
 });
@@ -140,7 +130,7 @@ const tokens = await legacyClient.exchangeCode({
 ### Step 3 — Refresh before expiry
 
 ```typescript
-const refreshed = await legacyClient.refreshTokens("<client_id>", tokens.refresh_token);
+const refreshed = await client.refreshTokens("<client_id>", tokens.refresh_token);
 ```
 
 ## RBAC checks

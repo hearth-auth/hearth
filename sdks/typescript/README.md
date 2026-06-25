@@ -46,26 +46,27 @@ const hearth = createHearth({
 PKCE is the secure default for every OAuth authorization code flow — required for public clients, recommended for confidential clients.
 
 ```typescript
-import { HearthClient } from "@hearth-auth/sdk";
-import { createHash, randomBytes } from "crypto"; // Node.js built-in
+import {
+  HearthApiClient,
+  generateCodeVerifier,
+  generateCodeChallenge,
+} from "@hearth-auth/sdk";
 
-const client = new HearthClient({
+const client = new HearthApiClient({
   baseUrl: "https://hearth.example.com",
   realmId: "<your-realm-id>",
 });
 
-// 1. Generate PKCE verifier and challenge
-const codeVerifier = randomBytes(32).toString("hex"); // 64 unreserved chars
-const codeChallenge = createHash("sha256")
-  .update(codeVerifier)
-  .digest("base64url"); // base64url, no padding
+// 1. Generate PKCE pair using the SDK helper (works in Node.js 19+ and browsers)
+const codeVerifier = generateCodeVerifier();
+const codeChallenge = await generateCodeChallenge(codeVerifier);
 
 // 2. Start the authorization request
 const { code } = await client.authorize({
   clientId: "<client-id>",
   redirectUri: "https://app.example.com/callback",
   scope: "openid profile email",
-  state: randomBytes(16).toString("hex"), // CSRF token
+  state: crypto.randomUUID(), // CSRF token
   userId: "<authenticated-user-uuid>",    // resolved user on your backend
   codeChallenge,
   codeChallengeMethod: "S256",

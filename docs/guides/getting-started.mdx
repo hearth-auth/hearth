@@ -154,24 +154,26 @@ pip install hearth-sdk
 ```
 
 ```python
-import secrets, hashlib, base64
+import secrets, urllib.parse
 from hearth import HearthClient
+from hearth.pkce import generate_pkce_pair
 
 HEARTH_URL, REALM_SLUG = "http://localhost:8420", "dev-realm"
 CLIENT_ID, REDIRECT_URI = "<client-id>", "http://localhost:3000/callback"
 
 client = HearthClient(HEARTH_URL, "<realm-id>")
 
-# 1. "Log in" view — redirect to Hearth (store verifier + state in the session).
-verifier  = secrets.token_urlsafe(32)
-challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+# 1. "Log in" view — generate PKCE pair and redirect to Hearth.
+pkce  = generate_pkce_pair()
+state = secrets.token_hex(16)  # CSRF token
+# store pkce.code_verifier + state in the session
 auth_url = (f"{HEARTH_URL}/realms/{REALM_SLUG}/authorize?response_type=code"
-            f"&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}&scope=openid"
-            f"&state={state}&code_challenge={challenge}&code_challenge_method=S256")
+            f"&client_id={CLIENT_ID}&redirect_uri={urllib.parse.quote(REDIRECT_URI)}&scope=openid"
+            f"&state={state}&code_challenge={pkce.code_challenge}&code_challenge_method=S256")
 return redirect(auth_url)
 
 # 2. /callback view — exchange the code ("" = no secret for a public client).
-tokens = client.exchange_code(code, CLIENT_ID, "", REDIRECT_URI, code_verifier=verifier)
+tokens = client.exchange_code(code, CLIENT_ID, "", REDIRECT_URI, code_verifier=session["pkce_verifier"])
 ```
 
 </TabItem>
@@ -189,22 +191,23 @@ $realmSlug   = 'dev-realm';
 $clientId    = '<client-id>';
 $redirectUri = 'http://localhost:3000/callback';
 
-$hearth = new HearthClient(issuerUrl: "{$hearthUrl}/realms/{$realmSlug}");
+$hearth = new HearthClient(issuerUrl: "{$hearthUrl}/realms/{$realmSlug}", clientId: $clientId);
 
-// 1. "Log in" — redirect to Hearth (store verifier + state in the session).
-$verifier  = bin2hex(random_bytes(32));
-$challenge = rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '=');
-$_SESSION['verifier'] = $verifier;
-$query = http_build_query([
-    'response_type' => 'code', 'client_id' => $clientId, 'redirect_uri' => $redirectUri,
-    'scope' => 'openid', 'state' => $state,
-    'code_challenge' => $challenge, 'code_challenge_method' => 'S256',
-]);
-header("Location: {$hearthUrl}/realms/{$realmSlug}/authorize?{$query}");
+// 1. "Log in" — generatePkce() returns codeVerifier + S256 codeChallenge.
+$pkce  = HearthClient::generatePkce();
+$state = bin2hex(random_bytes(16)); // CSRF token
+$_SESSION['pkce_verifier'] = $pkce->codeVerifier;
+
+header('Location: ' . $hearth->buildAuthorizeUrl(
+    redirectUri: $redirectUri,
+    state:       $state,
+    scope:       'openid',
+    pkce:        $pkce,
+));
 exit;
 
 // 2. /callback — exchange the code for tokens.
-$tokens = $hearth->exchangeCode($_GET['code'], $redirectUri, $_SESSION['verifier']);
+$tokens = $hearth->exchangeCode($_GET['code'], $redirectUri, $_SESSION['pkce_verifier']);
 ```
 
 </TabItem>
@@ -216,21 +219,23 @@ hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", pa
 ```
 
 ```rust
-use hearth_sdk::HearthClient;
+use hearth_sdk::{HearthClient, pkce::generate_pkce_pair};
 
 let client = HearthClient::new("http://localhost:8420", "<realm-id>");
 
-// 1. "Log in" handler — redirect to Hearth (store `verifier` + `state` in the session).
-// `verifier` is a random 43+ char string; `challenge` = BASE64URL(SHA256(verifier)).
+// 1. "Log in" handler — generate PKCE pair and redirect to Hearth.
+let pkce = generate_pkce_pair(); // verifier + S256 challenge, no manual crypto
+// store pkce.verifier + state in the session
 let auth_url = format!(
     "http://localhost:8420/realms/dev-realm/authorize?response_type=code\
      &client_id=<client-id>&redirect_uri=http://localhost:3000/callback&scope=openid\
-     &state={state}&code_challenge={challenge}&code_challenge_method=S256");
+     &state={state}&code_challenge={}&code_challenge_method=S256",
+    pkce.challenge);
 // redirect the browser to `auth_url` with your framework (axum, actix, …).
 
 // 2. /callback handler — exchange the code ("" = no secret for a public client).
 let tokens = client
-    .exchange_code(&code, "<client-id>", "", "http://localhost:3000/callback", Some(&verifier))
+    .exchange_code(&code, "<client-id>", "", "http://localhost:3000/callback", Some(&pkce.verifier))
     .await?;
 ```
 

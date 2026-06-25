@@ -32,29 +32,33 @@ Laravel 10/11/12 auto-discovers the service provider — no manual registration 
 
 ### Step 1 — Build the authorization URL
 
-Generate a PKCE verifier and challenge, store them in the session, then redirect:
+Generate a PKCE pair, store the verifier in the session, and redirect:
 
 ```php
+use HearthAuth\HearthClient;
+
 session_start();
 
-$verifier  = bin2hex(random_bytes(32));
-$challenge = rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '=');
-$state     = bin2hex(random_bytes(16)); // CSRF token
+$hearth = new HearthClient(
+    issuerUrl: 'https://hearth.example.com',
+    realmId:   '<realm_id>',
+    clientId:  '<client_id>',
+);
 
-$_SESSION['pkce_verifier'] = $verifier;
+// generatePkce() returns a PkceChallenge with codeVerifier + S256 codeChallenge
+$pkce  = HearthClient::generatePkce();
+$state = bin2hex(random_bytes(16)); // CSRF token
+
+$_SESSION['pkce_verifier'] = $pkce->codeVerifier;
 $_SESSION['oauth_state']   = $state;
 
-$params = http_build_query([
-    'response_type'         => 'code',
-    'client_id'             => '<client_id>',
-    'redirect_uri'          => 'https://myapp.example.com/callback',
-    'scope'                 => 'openid profile email',
-    'state'                 => $state,
-    'code_challenge'        => $challenge,
-    'code_challenge_method' => 'S256',
-]);
-
-header("Location: https://hearth.example.com/realms/<realm_id>/authorize?{$params}");
+// buildAuthorizeUrl() discovers the authorization endpoint and builds the full URL
+header('Location: ' . $hearth->buildAuthorizeUrl(
+    redirectUri: 'https://myapp.example.com/callback',
+    state:       $state,
+    scope:       'openid profile email',
+    pkce:        $pkce,
+));
 exit;
 ```
 
