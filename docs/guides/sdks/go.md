@@ -47,48 +47,41 @@ package main
 
 import (
     "context"
-    "crypto/rand"
-    "crypto/sha256"
-    "encoding/base64"
-    "encoding/hex"
     "fmt"
 
     "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
-func pkce() (verifier, challenge string) {
-    raw := make([]byte, 32)
-    rand.Read(raw)
-    verifier = hex.EncodeToString(raw)
-    sum := sha256.Sum256([]byte(verifier))
-    challenge = base64.RawURLEncoding.EncodeToString(sum[:])
-    return
-}
-
 func main() {
     ctx := context.Background()
     client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>")
 
-    // 1. Generate PKCE verifier and challenge
-    codeVerifier, _ := pkce()
+    // 1. Generate PKCE pair — verifier + S256 challenge, no manual crypto needed
+    pkce, err := hearth.GeneratePKCE()
+    if err != nil {
+        panic(err)
+    }
 
-    // 2. Start authorization — exchange code for this specific user
+    // 2. Start authorization — pass the PKCE challenge
     authResp, err := client.Authorize(ctx, hearth.AuthorizeRequest{
-        ClientID:    "<client_id>",
-        RedirectURI: "http://localhost:8080/callback",
-        Scope:       "openid profile email",
-        State:       "random-csrf-token",
-        UserID:      "<user_uuid>", // authenticated user on your backend
+        ClientID:            "<client_id>",
+        RedirectURI:         "http://localhost:8080/callback",
+        Scope:               "openid profile email",
+        State:               "random-csrf-token",
+        UserID:              "<user_uuid>", // authenticated user on your backend
+        CodeChallenge:       pkce.Challenge,
+        CodeChallengeMethod: pkce.Method,
     })
     if err != nil {
         panic(err)
     }
 
-    // 3. Exchange the code for tokens
+    // 3. Exchange the code for tokens — pass the matching PKCE verifier
     tokens, err := client.ExchangeCode(ctx, hearth.TokenRequest{
-        ClientID:    "<client_id>",
-        Code:        authResp.Code,
-        RedirectURI: "http://localhost:8080/callback",
+        ClientID:     "<client_id>",
+        Code:         authResp.Code,
+        RedirectURI:  "http://localhost:8080/callback",
+        CodeVerifier: pkce.Verifier,
     })
     if err != nil {
         panic(err)
@@ -100,7 +93,6 @@ func main() {
     // 4. Refresh before expiry
     refreshed, err := client.RefreshTokens(ctx, "<client_id>", tokens.RefreshToken)
     _ = refreshed
-    _ = codeVerifier
 }
 ```
 
