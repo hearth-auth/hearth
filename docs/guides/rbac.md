@@ -1,6 +1,8 @@
 # RBAC Guide
 
-**Audience:** developers and operators who need to create roles, assign permissions, manage groups, and understand how authorization claims appear in Hearth JWTs.
+**Audience:** developers and operators configuring role-based authorization for a Hearth realm.
+**Goal:** Create roles and permissions, assign them to users and groups, and verify the resulting JWT claims — then choose the right token authorization mode for your consistency requirements.
+**Time to complete:** 20–30 min.
 
 Hearth uses **claims-based RBAC**: permissions are resolved at token-issue time and — by default — embedded directly in the JWT as the `permissions` claim. Downstream services read permissions synchronously from the verified token with no network call to Hearth.
 
@@ -81,16 +83,21 @@ Exceeding any limit causes token issuance to fail with a structured error naming
 All examples require an admin token. In dev mode, bootstrap one with:
 
 ```bash
-curl -X POST http://127.0.0.1:8420/admin/bootstrap
-# Returns: { "token": "<admin-token>", "realm_id": "<realm-uuid>", ... }
+BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
+export ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r .access_token)
+export REALM_ID=$(echo "$BOOTSTRAP" | jq -r .realm_id)
 ```
 
-Set environment variables for the examples:
+Set the header shorthand variables used throughout this guide:
 
 ```bash
-HEARTH_ADMIN="Authorization: Bearer <admin-token>"
-REALM="X-Realm-ID: <realm-uuid>"
+export HEARTH_ADMIN="Authorization: Bearer $ADMIN_TOKEN"
+export REALM="X-Realm-ID: $REALM_ID"
 ```
+
+:::tip[Production deployments]
+Replace `http://127.0.0.1:8420` with your Hearth base URL (e.g. `https://auth.example.com`) and source `ADMIN_TOKEN` from your secret manager rather than bootstrap.
+:::
 
 ### 1. Create permissions (via roles)
 

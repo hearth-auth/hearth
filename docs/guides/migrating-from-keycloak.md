@@ -1,5 +1,9 @@
 # Migrating from Keycloak
 
+**Audience:** operators moving an existing Keycloak deployment to Hearth.
+**Goal:** Export a Keycloak realm, import it into Hearth, verify users and roles migrated correctly, and cut over application traffic.
+**Time to complete:** 30–60 min for a typical realm; large realms (100 k+ users) may require additional time for the import step.
+
 This guide walks you through moving an existing Keycloak deployment to Hearth. You will export your Keycloak data, import it into Hearth's embedded storage, verify the result, and update your application configuration.
 
 :::note[Scope of this guide]
