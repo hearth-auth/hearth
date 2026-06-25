@@ -10,52 +10,106 @@ import clsx from 'clsx';
 import styles from './index.module.css';
 
 const TS_SNIPPET = `\
-import { HearthApiClient, generateCodeVerifier, generateCodeChallenge } from '@hearth-auth/sdk';
+import { HearthApiClient, createHearthAuth } from '@hearth-auth/sdk';
 
-const client    = new HearthApiClient({ baseUrl: 'http://localhost:8420', realmId: '<realm-id>' });
-const app       = await client.registerClient({ clientName: 'quickstart', redirectUris: ['http://localhost:3000/callback'] });
-const verifier  = generateCodeVerifier();
-const challenge = await generateCodeChallenge(verifier);
-const { code }  = await client.authorize({
-  clientId: app.client_id, codeChallenge: challenge, codeChallengeMethod: 'S256',
-  userId: '<user-id>',    // dev mode only — omit in production
+const client = new HearthApiClient({
+  baseUrl: 'http://localhost:8420/realms/dev-realm',
+  realmId: '<realm-id>',
 });
-const tokens = await client.exchangeCode({ clientId: app.client_id, code, codeVerifier: verifier });
-const { permissions } = await client.permissions(tokens.access_token);
-console.log('has hearth.admin:', permissions.includes('hearth.admin')); // → true
+
+// One helper runs the full OAuth 2.0 + PKCE handshake for you.
+const auth = createHearthAuth(client, {
+  clientId: '<client-id>',
+  redirectUri: 'http://localhost:3000/callback',
+  hearthUrl: 'http://localhost:8420',
+  realmSlug: 'dev-realm',
+});
+
+await auth.startLogin();                  // "Log in" button → redirect to Hearth
+// …on your /callback route:
+const p = new URLSearchParams(window.location.search);
+await auth.handleCallback(p.get('code'), p.get('state')); // tokens stored + auto-refreshed
 `;
 
 const GO_SNIPPET = `\
-// go get github.com/hearth-auth/hearth/sdks/go/hearth
-client   := hearth.NewClient("http://localhost:8420", "<realm-id>")
-app, _   := client.RegisterClient(ctx, hearth.RegisterClientRequest{
-    ClientName: "quickstart", RedirectURIs: []string{"http://localhost:3000/callback"},
-})
-pkce, _  := hearth.GeneratePKCE()
-auth, _  := client.Authorize(ctx, hearth.AuthorizeRequest{
-    ClientID: app.ClientID, UserID: "<user-id>", // dev mode only — omit in production
-    CodeChallenge: pkce.Challenge, CodeChallengeMethod: pkce.Method,
-})
+import "github.com/hearth-auth/hearth/sdks/go/hearth"
+
+client := hearth.NewClient("http://localhost:8420", "<realm-id>")
+pkce, _ := hearth.GeneratePKCE()
+
+// 1. Redirect the user to log in (store pkce.Verifier + state in the session):
+authURL := "http://localhost:8420/realms/dev-realm/authorize?response_type=code" +
+    "&client_id=<client-id>&redirect_uri=http://localhost:3000/callback&scope=openid" +
+    "&state=" + state + "&code_challenge=" + pkce.Challenge + "&code_challenge_method=S256"
+http.Redirect(w, r, authURL, http.StatusFound)
+
+// 2. On your /callback, exchange the code for tokens:
 tokens, _ := client.ExchangeCode(ctx, hearth.TokenRequest{
-    ClientID: app.ClientID, Code: auth.Code, CodeVerifier: pkce.Verifier,
+    ClientID: "<client-id>", Code: code,
+    RedirectURI: "http://localhost:3000/callback", CodeVerifier: verifier,
 })
-fmt.Println("has hearth.admin:", client.HasPermission(tokens.AccessToken, "hearth.admin")) // → true
+`;
+
+const PYTHON_SNIPPET = `\
+import secrets, hashlib, base64
+from hearth import HearthClient
+
+client = HearthClient("http://localhost:8420", "<realm-id>")
+
+# 1. Redirect the user to log in (store verifier + state in the session):
+verifier  = secrets.token_urlsafe(32)
+challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+auth_url = ("http://localhost:8420/realms/dev-realm/authorize?response_type=code"
+            "&client_id=<client-id>&redirect_uri=http://localhost:3000/callback&scope=openid"
+            "&state=" + state + "&code_challenge=" + challenge + "&code_challenge_method=S256")
+return redirect(auth_url)
+
+# 2. On your /callback, exchange the code ("" = public client, no secret):
+tokens = client.exchange_code(code, "<client-id>", "", "http://localhost:3000/callback", code_verifier=verifier)
+`;
+
+const PHP_SNIPPET = `\
+use Hearth\\HearthClient;
+
+$hearth = new HearthClient(issuerUrl: 'http://localhost:8420/realms/dev-realm');
+
+// 1. Redirect the user to log in (store verifier + state in the session):
+$verifier  = bin2hex(random_bytes(32));
+$challenge = rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '=');
+$q = http_build_query([
+  'response_type' => 'code', 'client_id' => '<client-id>',
+  'redirect_uri' => 'http://localhost:3000/callback', 'scope' => 'openid',
+  'state' => $state, 'code_challenge' => $challenge, 'code_challenge_method' => 'S256',
+]);
+header("Location: http://localhost:8420/realms/dev-realm/authorize?" . $q); exit;
+
+// 2. On your /callback, exchange the code for tokens:
+$tokens = $hearth->exchangeCode($_GET['code'], 'http://localhost:3000/callback', $verifier);
+`;
+
+const RUST_SNIPPET = `\
+use hearth_sdk::HearthClient;
+
+let client = HearthClient::new("http://localhost:8420", "<realm-id>");
+
+// 1. Redirect the user to log in (store verifier + state in the session).
+// challenge = BASE64URL(SHA256(verifier))
+let auth_url = format!("http://localhost:8420/realms/dev-realm/authorize?response_type=code&client_id=<client-id>&redirect_uri=http://localhost:3000/callback&scope=openid&state={state}&code_challenge={challenge}&code_challenge_method=S256");
+
+// 2. On your /callback, exchange the code ("" = public client, no secret):
+let tokens = client.exchange_code(&code, "<client-id>", "", "http://localhost:3000/callback", Some(&verifier)).await?;
 `;
 
 const CURL_SNIPPET = `\
-# Boot: docker run --rm -p 8420:8420 ghcr.io/hearth-auth/hearth:latest serve --dev --bind 0.0.0.0
-BOOT=$(curl -fsS -X POST http://127.0.0.1:8420/admin/bootstrap)
-REALM=$(echo "$BOOT" | jq -r .realm_id)
-TOKEN=$(echo "$BOOT" | jq -r .access_token)
+# 1. Generate an S256 PKCE pair, then open the login URL in a browser:
+VERIFIER=$(openssl rand -hex 32)
+CHALLENGE=$(printf '%s' "$VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+echo "http://localhost:8420/realms/dev-realm/authorize?response_type=code&client_id=$CLIENT_ID&redirect_uri=http://localhost:3000/callback&scope=openid&state=xyz&code_challenge=$CHALLENGE&code_challenge_method=S256"
 
-# Register a public client (PKCE — no secret needed)
-CLIENT=$(curl -fsS -X POST http://127.0.0.1:8420/admin/clients \\
-  -H "Authorization: Bearer $TOKEN" -H "X-Realm-ID: $REALM" \\
-  -d '{"client_name":"quickstart","redirect_uris":["http://localhost:3000/callback"]}')
-
-# Verify the OIDC discovery document is live
-curl -fsS "http://127.0.0.1:8420/.well-known/openid-configuration?realm=$REALM" | jq .issuer
-# → "http://127.0.0.1:8420/realms/<realm-id>"
+# 2. Exchange the ?code= you're redirected with for an access token:
+curl -fsS -X POST http://localhost:8420/token -H "X-Realm-ID: $REALM_ID" \\
+  -d grant_type=authorization_code -d code=$CODE -d client_id=$CLIENT_ID \\
+  -d redirect_uri=http://localhost:3000/callback -d code_verifier=$VERIFIER | jq -r .access_token
 `;
 
 const FEATURES = [
@@ -97,7 +151,9 @@ function QuickstartTeaser() {
       <div className="container">
         <h2 className={styles.sectionHeading}>First authenticated request in 5 minutes</h2>
         <p className={styles.sectionSub}>
-          Boot Hearth, bootstrap a realm, run the PKCE flow from your stack.
+          Drop SDK login into your stack — TypeScript, Go, Python, PHP, or Rust. The full
+          quickstart below covers bootstrapping a realm and registering a client; Node
+          verifies the resulting tokens server-side.
         </p>
         <div className={styles.quickstartTabs}>
           <Tabs groupId="lang">
@@ -106,6 +162,15 @@ function QuickstartTeaser() {
             </TabItem>
             <TabItem value="go" label="Go">
               <CodeBlock language="go">{GO_SNIPPET}</CodeBlock>
+            </TabItem>
+            <TabItem value="python" label="Python">
+              <CodeBlock language="python">{PYTHON_SNIPPET}</CodeBlock>
+            </TabItem>
+            <TabItem value="php" label="PHP">
+              <CodeBlock language="php">{PHP_SNIPPET}</CodeBlock>
+            </TabItem>
+            <TabItem value="rust" label="Rust">
+              <CodeBlock language="rust">{RUST_SNIPPET}</CodeBlock>
             </TabItem>
             <TabItem value="bash" label="curl">
               <CodeBlock language="bash">{CURL_SNIPPET}</CodeBlock>

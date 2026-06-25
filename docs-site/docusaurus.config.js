@@ -196,7 +196,7 @@ const config = {
         // Use nightOwl for both modes — dark-only site, both slots needed by Docusaurus.
         theme: prismThemes.nightOwl,
         darkTheme: prismThemes.nightOwl,
-        additionalLanguages: ['rust', 'bash', 'toml', 'yaml', 'json', 'protobuf'],
+        additionalLanguages: ['rust', 'php', 'markup-templating', 'bash', 'toml', 'yaml', 'json', 'protobuf'],
       },
     }),
 };
