@@ -381,6 +381,111 @@ class HearthClient(
         }
     }
 
+    // ── /v1/me/permissions ─────────────────────────────────────────────────────
+
+    /**
+     * Fetches the freshly-resolved RBAC claim set for the bearer-token user via
+     * `GET /v1/me/permissions`.
+     *
+     * Unlike [hasPermission] and [hasRole] which decode claims locally from the JWT,
+     * this call returns what the server resolves right now — reflecting any role or
+     * group changes made since the token was issued.
+     *
+     * Requires [realmId] to be set on this client.
+     *
+     * @throws ConfigurationError when [realmId] is not set.
+     * @throws ApiError           on any non-2xx response.
+     */
+    suspend fun mePermissions(accessToken: String): MePermissionsResponse {
+        val rid = realmId
+            ?: throw ConfigurationError("realmId is required for mePermissions")
+        return httpClient.get(
+            url = "$issuerUrl/v1/me/permissions",
+            headers = mapOf(
+                "Authorization" to "Bearer $accessToken",
+                "X-Realm-ID" to rid,
+            ),
+        )
+    }
+
+    // ── WebAuthn ───────────────────────────────────────────────────────────────
+
+    /**
+     * Begins a WebAuthn passkey registration ceremony (`POST /webauthn/register/begin`).
+     *
+     * Returns `PublicKeyCredentialCreationOptions` for the browser's
+     * `navigator.credentials.create()` call. [accessToken] identifies the user whose
+     * account the credential will be bound to.
+     */
+    suspend fun startWebAuthnRegistration(
+        accessToken: String,
+    ): WebAuthnRegistrationBeginResponse =
+        httpClient.post(
+            url = "$issuerUrl/webauthn/register/begin",
+            payload = emptyMap<String, String>(),
+            headers = buildMap {
+                put("Authorization", "Bearer $accessToken")
+                realmId?.let { put("X-Realm-ID", it) }
+            },
+        )
+
+    /**
+     * Completes a WebAuthn passkey registration ceremony (`POST /webauthn/register/complete`).
+     *
+     * Send the attestation response from `navigator.credentials.create()` in [request].
+     * [accessToken] must be the same session token used in [startWebAuthnRegistration].
+     */
+    suspend fun finishWebAuthnRegistration(
+        accessToken: String,
+        request: WebAuthnRegistrationCompleteRequest,
+    ): WebAuthnRegistrationCompleteResponse =
+        httpClient.post(
+            url = "$issuerUrl/webauthn/register/complete",
+            payload = request,
+            headers = buildMap {
+                put("Authorization", "Bearer $accessToken")
+                realmId?.let { put("X-Realm-ID", it) }
+            },
+        )
+
+    /**
+     * Begins a WebAuthn passkey authentication ceremony (`POST /webauthn/auth/begin`).
+     *
+     * Returns `PublicKeyCredentialRequestOptions` for the browser's
+     * `navigator.credentials.get()` call. [userId] is optional; pass `null` for a
+     * discoverable-credential (resident-key) flow. When provided, the server constrains
+     * `allow_credentials` to that user's registered passkeys.
+     *
+     * No bearer token is required — this is a public endpoint.
+     */
+    suspend fun startWebAuthnAuthentication(
+        userId: String? = null,
+    ): WebAuthnAuthenticationBeginResponse {
+        val body: Map<String, String> = if (userId != null) mapOf("user_id" to userId) else emptyMap()
+        return httpClient.post(
+            url = "$issuerUrl/webauthn/auth/begin",
+            payload = body,
+            headers = buildMap { realmId?.let { put("X-Realm-ID", it) } },
+        )
+    }
+
+    /**
+     * Completes a WebAuthn passkey authentication ceremony (`POST /webauthn/auth/complete`).
+     *
+     * Send the assertion response from `navigator.credentials.get()` in [request].
+     * Returns a full [TokenResponse] (access + refresh tokens) on success.
+     *
+     * No bearer token is required — the credential assertion proves identity.
+     */
+    suspend fun finishWebAuthnAuthentication(
+        request: WebAuthnAuthenticationCompleteRequest,
+    ): TokenResponse =
+        httpClient.post(
+            url = "$issuerUrl/webauthn/auth/complete",
+            payload = request,
+            headers = buildMap { realmId?.let { put("X-Realm-ID", it) } },
+        )
+
     // ── UserInfo ───────────────────────────────────────────────────────────────
 
     /**
