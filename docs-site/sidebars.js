@@ -84,7 +84,11 @@ const sidebars = {
       link: { type: 'doc', id: 'sdks/overview' },
       items: [
         'sdks/typescript',
+        'sdks/node',
         'sdks/go',
+        'sdks/python',
+        'sdks/rust',
+        'sdks/php',
         'sdks/migration-from-keycloak',
       ],
     },
