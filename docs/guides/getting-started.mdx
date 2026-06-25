@@ -1,0 +1,401 @@
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Getting Started with Hearth
+
+**Goal:** First authenticated request in your app. **Time:** ~5 minutes.
+
+**Prerequisites:** `docker` and a package manager for your stack (`npm` / Go toolchain / `pip`). For raw-HTTP examples you also need `curl` and `jq`.
+
+:::tip[SDK reference]
+Step 3 below includes quickstart snippets for TypeScript, Go, and Python. For deeper coverage — RBAC hooks, middleware patterns, and the Admin API — see the [SDK quickstarts](/docs/sdks/overview).
+:::
+
+---
+
+## 1. Run Hearth
+
+```bash
+docker run --rm -p 8420:8420 ghcr.io/hearth-auth/hearth:latest serve --dev --bind 0.0.0.0
+```
+
+`--dev` uses in-memory storage, enables the bootstrap endpoint, and starts the built-in **mailcatcher** (captured email at `http://127.0.0.1:8420/dev/mail`). **Data does not persist across restarts.**
+
+Confirm it is up:
+
+```bash
+curl -fsS http://127.0.0.1:8420/health
+# → {"status":"ok"}
+```
+
+:::tip[From source]
+`make dev` or `cargo run -- serve --dev` — same flags, no Docker required. Rust toolchain must be installed.
+:::
+
+:::tip[Production deployment]
+For Docker Compose, systemd, or Helm, see [`deploy/README.md`](../../deploy/README.md).
+:::
+
+---
+
+## 2. Bootstrap a realm and admin token
+
+```bash
+BOOTSTRAP=$(curl -fsS -X POST http://127.0.0.1:8420/admin/bootstrap)
+REALM_ID=$(echo "$BOOTSTRAP" | jq -r .realm_id)
+USER_ID=$(echo "$BOOTSTRAP"  | jq -r .user_id)
+ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r .access_token)
+```
+
+The response contains `realm_id`, `user_id`, `access_token`, and `refresh_token`. Keep `ADMIN_TOKEN` — you need it to register a client in step 3.
+
+:::warning[Dev-only endpoint]
+`/admin/bootstrap` returns `404 Not Found` outside `--dev` mode. In production, create realms via `hearth.yaml` and issue credentials through normal OAuth flows.
+:::
+
+---
+
+## 3. Install the SDK and run the PKCE flow
+
+Install the SDK for your stack, then run the snippet. Each tab:
+
+1. Registers a test OAuth client with your realm
+2. Generates a PKCE code verifier and challenge (RFC 7636)
+3. Requests an authorization code (dev mode: `user_id` bypasses the browser login page)
+4. Exchanges the code for an access token
+5. Verifies a permission from the token's claims
+
+All tabs target `http://127.0.0.1:8420` with the `REALM_ID`, `USER_ID`, and `ADMIN_TOKEN` from step 2.
+
+<Tabs groupId="lang">
+<TabItem value="ts" label="TypeScript" default>
+
+```bash
+npm install @hearth-auth/sdk
+```
+
+```ts
+import { HearthApiClient, generateCodeVerifier, generateCodeChallenge } from '@hearth-auth/sdk';
+
+const HEARTH_URL  = 'http://localhost:8420';
+const REALM_ID    = '<realm-id>';      // from bootstrap
+const USER_ID     = '<user-id>';       // from bootstrap
+const ADMIN_TOKEN = '<access-token>';  // from bootstrap
+
+const client = new HearthApiClient({ baseUrl: HEARTH_URL, realmId: REALM_ID });
+
+// 1. Register a public client (no client_secret — PKCE provides the security)
+const app = await client.registerClient({
+  clientName: 'quickstart',
+  redirectUris: ['http://localhost:3000/callback'],
+});
+
+// 2. PKCE (RFC 7636)
+const verifier   = generateCodeVerifier();
+const challenge  = await generateCodeChallenge(verifier);
+
+// 3. Authorize — dev mode: user_id bypasses the browser login page
+const { code } = await client.authorize({
+  clientId: app.client_id,
+  redirectUri: 'http://localhost:3000/callback',
+  codeChallenge: challenge,
+  codeChallengeMethod: 'S256',
+  userId: USER_ID,           // omit in production; Hearth redirects to login page instead
+});
+
+// 4. Exchange code → tokens
+const tokens = await client.exchangeCode({
+  clientId: app.client_id,
+  code,
+  redirectUri: 'http://localhost:3000/callback',
+  codeVerifier: verifier,
+});
+
+// 5. Verify a permission (local decode — no network call)
+const { permissions } = await client.permissions(tokens.access_token);
+console.log('has hearth.admin:', permissions.includes('hearth.admin')); // → true
+```
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+```bash
+go get github.com/hearth-auth/hearth/sdks/go/hearth
+```
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+func main() {
+    ctx := context.Background()
+
+    const (
+        hearthURL  = "http://localhost:8420"
+        realmID    = "<realm-id>"    // from bootstrap
+        userID     = "<user-id>"     // from bootstrap
+    )
+
+    client := hearth.NewClient(hearthURL, realmID)
+
+    // 1. Register a public client (no secret — PKCE provides the security)
+    app, _ := client.RegisterClient(ctx, hearth.RegisterClientRequest{
+        ClientName:   "quickstart",
+        RedirectURIs: []string{"http://localhost:3000/callback"},
+    })
+
+    // 2. PKCE (RFC 7636)
+    pkce, _ := hearth.GeneratePKCE()
+
+    // 3. Authorize — dev mode: UserID bypasses the browser login page
+    auth, _ := client.Authorize(ctx, hearth.AuthorizeRequest{
+        ClientID:            app.ClientID,
+        RedirectURI:         "http://localhost:3000/callback",
+        CodeChallenge:       pkce.Challenge,
+        CodeChallengeMethod: pkce.Method,
+        UserID:              userID, // omit in production
+    })
+
+    // 4. Exchange code → tokens
+    tokens, _ := client.ExchangeCode(ctx, hearth.TokenRequest{
+        ClientID:     app.ClientID,
+        Code:         auth.Code,
+        RedirectURI:  "http://localhost:3000/callback",
+        CodeVerifier: pkce.Verifier,
+    })
+
+    // 5. Verify a permission (local JWT decode — no network call)
+    fmt.Println("has hearth.admin:", client.HasPermission(tokens.AccessToken, "hearth.admin"))
+    // → has hearth.admin: true
+}
+```
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```bash
+pip install hearth-sdk
+```
+
+```python
+import secrets, hashlib, base64
+import httpx
+from hearth import HearthClient, RegisterClientRequest
+
+HEARTH_URL  = 'http://localhost:8420'
+REALM_ID    = '<realm-id>'     # from bootstrap
+USER_ID     = '<user-id>'      # from bootstrap
+ADMIN_TOKEN = '<access-token>' # from bootstrap
+
+client = HearthClient(HEARTH_URL, REALM_ID)
+
+# 1. Register a public client
+app = client.register_client(RegisterClientRequest(
+    name='quickstart',
+    redirect_uris=['http://localhost:3000/callback'],
+))
+
+# 2. PKCE (RFC 7636) — Python SDK has no helper; use stdlib
+raw      = secrets.token_bytes(32)
+verifier = base64.urlsafe_b64encode(raw).rstrip(b'=').decode()
+digest   = hashlib.sha256(verifier.encode()).digest()
+challenge = base64.urlsafe_b64encode(digest).rstrip(b'=').decode()
+
+# 3. Authorize — dev mode: user_id bypasses the browser login page
+#    HearthClient.authorize() is for browser redirect flows; use httpx directly here.
+r = httpx.post(f'{HEARTH_URL}/authorize',
+    headers={'X-Realm-ID': REALM_ID},
+    json={
+        'client_id': app.id,
+        'redirect_uri': 'http://localhost:3000/callback',
+        'response_type': 'code',
+        'code_challenge': challenge,
+        'code_challenge_method': 'S256',
+        'user_id': USER_ID,  # dev mode only — omit in production
+    })
+code = r.json()['code']
+
+# 4. Exchange code → tokens (app.secret is None for public clients)
+tokens = client.exchange_code(code, app.id, app.secret or '',
+                               'http://localhost:3000/callback', verifier)
+
+# 5. Verify a permission (local JWT decode — no network call)
+print('has hearth.admin:', HearthClient.has_permission(tokens.access_token, 'hearth.admin'))
+# → has hearth.admin: True
+```
+
+:::note[Python SDK and browser flows]
+`HearthClient.authorize()` is designed for production browser-redirect flows. The `httpx.post()` call above is a dev-mode shortcut that passes `user_id` directly. In a real web app, Hearth redirects the user's browser to the login page instead.
+:::
+
+</TabItem>
+<TabItem value="curl" label="curl">
+
+No SDK required — `curl`, `openssl`, and `jq` only.
+
+```bash
+# Paste REALM_ID, USER_ID, and ADMIN_TOKEN from the bootstrap step above.
+
+# 1. Register a public client
+CLIENT=$(curl -fsS -X POST http://127.0.0.1:8420/clients \
+  -H "X-Realm-ID: $REALM_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"client_name":"quickstart","redirect_uris":["http://localhost:3000/callback"]}')
+CLIENT_ID=$(echo "$CLIENT" | jq -r .client_id)
+
+# 2. PKCE (RFC 7636)
+CODE_VERIFIER=$(openssl rand -hex 32)
+CODE_CHALLENGE=$(printf '%s' "$CODE_VERIFIER" \
+  | openssl dgst -sha256 -binary \
+  | openssl base64 -A \
+  | tr '+/' '-_' \
+  | tr -d '=')
+
+# 3. Authorize — dev mode: user_id bypasses the browser login page
+CODE=$(curl -fsS -X POST http://127.0.0.1:8420/authorize \
+  -H "X-Realm-ID: $REALM_ID" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"client_id\":             \"$CLIENT_ID\",
+    \"redirect_uri\":          \"http://localhost:3000/callback\",
+    \"response_type\":         \"code\",
+    \"code_challenge\":        \"$CODE_CHALLENGE\",
+    \"code_challenge_method\": \"S256\",
+    \"user_id\":               \"$USER_ID\"
+  }" | jq -r .code)
+
+# 4. Exchange code → tokens
+ACCESS_TOKEN=$(curl -fsS -X POST http://127.0.0.1:8420/token \
+  -H "X-Realm-ID: $REALM_ID" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "grant_type=authorization_code" \
+  --data-urlencode "code=$CODE" \
+  --data-urlencode "client_id=$CLIENT_ID" \
+  --data-urlencode "redirect_uri=http://localhost:3000/callback" \
+  --data-urlencode "code_verifier=$CODE_VERIFIER" | jq -r .access_token)
+
+echo "access_token: $ACCESS_TOKEN"
+
+# 5. Inspect permissions (local decode — no signature verification)
+echo "$ACCESS_TOKEN" \
+  | cut -d. -f2 \
+  | tr '_-' '/+' \
+  | awk '{pad=(4-length($0)%4)%4; for(i=0;i<pad;i++) $0=$0"="; print}' \
+  | base64 -d \
+  | jq '.permissions'
+# → ["hearth.admin","realm.read","realm.write","realm.admin"]
+```
+
+</TabItem>
+</Tabs>
+
+All tabs produce an access token signed with your realm's Ed25519 key. The `permissions` array is resolved at issue time — no network call needed to check it at request time.
+
+---
+
+## 4. Protect a route in your app
+
+Fetch Hearth's public signing keys from the JWKS endpoint and verify incoming Bearer tokens cryptographically. The Hearth SDKs provide middleware for the most common frameworks.
+
+The following examples guard a route and check that the caller has the `hearth.admin` permission.
+
+<Tabs groupId="lang">
+<TabItem value="ts" label="TypeScript" default>
+
+```bash
+npm install @hearth-auth/sdk jose
+```
+
+```ts
+import { requirePermission } from '@hearth-auth/sdk';
+import express from 'express';
+
+const app = express();
+
+app.get('/admin/data', requirePermission('hearth.admin', {
+  issuerUrl: process.env.HEARTH_URL!,       // e.g. https://auth.example.com
+  realmId:   process.env.HEARTH_REALM_ID!,
+}), (req, res) => {
+  res.json({ message: 'authorized', user: req.user });
+});
+```
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+```go
+import (
+    "net/http"
+    "strings"
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+client := hearth.NewClient(hearthURL, realmID)
+
+func adminOnly(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+        if !client.HasPermission(token, "hearth.admin") {
+            http.Error(w, "Forbidden", http.StatusForbidden)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+```
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```python
+from hearth import HearthClient
+
+def require_permission(permission: str):
+    """FastAPI / Flask dependency — checks permission from the JWT claim set."""
+    def check(authorization: str):
+        token = authorization.removeprefix("Bearer ")
+        if not HearthClient.has_permission(token, permission):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return token
+    return check
+```
+
+</TabItem>
+<TabItem value="curl" label="curl">
+
+```bash
+# Verify the token signature against the realm's JWKS endpoint
+curl -fsS http://127.0.0.1:8420/jwks -H "X-Realm-ID: $REALM_ID" | jq .
+
+# For production, use a JWT library — never skip signature verification.
+# The decode in step 3 above is for inspection only.
+```
+
+</TabItem>
+</Tabs>
+
+`HasPermission` / `has_permission` / `requirePermission` all decode the JWT locally (no network call). The `permissions` array is embedded in the token at issue time by Hearth's RBAC engine, so route checks are zero-latency.
+
+For browser SPA and BFF token-storage patterns, see [Browser / SPA token handling](browser-spa-tokens.md).
+
+---
+
+## Next steps
+
+| Topic | Guide |
+|---|---|
+| Browser / SPA token storage (XSS vs CSRF trade-offs) | [Browser / SPA token handling](browser-spa-tokens.md) |
+| Local dev, mailcatcher email inbox | [Local dev guide](local-dev.md) |
+| Realms, RBAC, and token lifecycle explained | [Conceptual model](concepts.md) |
+| Create roles, assign permissions, manage groups | [RBAC guide](rbac.md) |
+| B2B multi-tenancy within a realm | [Organizations guide](organizations.md) |
+| Production config, TLS, email | [Configuration reference](../../README.md#configuration) |
+| Import from Keycloak | [Migration guide](migrating-from-keycloak.md) |
+| Client SDKs (TypeScript, Go, PHP, Python, Rust) | [SDK overview](/docs/sdks/overview) |
+| REST API reference (OpenAPI) | [API reference guide](api-reference.md) |

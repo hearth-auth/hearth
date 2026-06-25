@@ -223,7 +223,7 @@ The following Keycloak features do not migrate automatically. They require manua
 The importer skips four categories of Keycloak data that have no direct equivalent in Hearth's current data model. Each gap lists what Keycloak stores, why Hearth does not import it, and what to do after migration.
 
 :::note[See also]
-The [SDK migration guide](../../docs-site/docs/sdks/migration-from-keycloak.md) covers the same gaps from a code and SDK-swap perspective.
+The [SDK migration guide](/docs/sdks/migration-from-keycloak) covers the same gaps from a code and SDK-swap perspective.
 :::
 
 ### Client roles

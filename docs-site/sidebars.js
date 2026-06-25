@@ -64,6 +64,16 @@ const sidebars = {
     },
     {
       type: 'category',
+      label: 'SDKs',
+      link: { type: 'doc', id: 'sdks/overview' },
+      items: [
+        'sdks/typescript',
+        'sdks/go',
+        'sdks/migration-from-keycloak',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Migration',
       items: [
         'migrating-from-keycloak',
