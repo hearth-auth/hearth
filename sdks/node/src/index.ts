@@ -52,7 +52,13 @@ export {
   RequiredActionError,
   AdminHttpError,
   OAuthFlowError,
+  SessionVersionRevokedError,
+  SessionVersionCacheStaleError,
 } from "./errors.js";
+
+// §8 — Managed session-version cache (C-20, RFC HEA-930)
+export { SessionVersionCache } from "./session-version-cache.js";
+export type { SessionVersionConfig } from "./session-version-cache.js";
 
 // §6 — Middleware
 export { hearthMiddleware, hearthFastifyHook } from "./middleware.js";

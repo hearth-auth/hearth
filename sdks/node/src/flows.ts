@@ -237,6 +237,29 @@ export class OAuthFlowsClient {
   }
 
   /**
+   * Exchange a refresh token for a fresh access token (RFC 6749 §6).
+   *
+   * Posts `grant_type=refresh_token` to the discovered token endpoint with the
+   * confidential client's credentials in the body (never the URL). The server may
+   * return a rotated `refresh_token` — callers must replace the stored token with
+   * the one in the response when present.
+   *
+   * @param refreshToken - The refresh token previously issued to this client.
+   * @param scope - Optional space-delimited scope string (must not widen the grant).
+   */
+  async refreshTokens(refreshToken: string, scope?: string): Promise<TokenResponse> {
+    const endpoint = await this.getTokenEndpoint();
+    const params: Record<string, string> = {
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: this.config.client_id,
+      client_secret: this.config.client_secret,
+    };
+    if (scope) params.scope = scope;
+    return this.postForm<TokenResponse>(endpoint, params);
+  }
+
+  /**
    * Obtain a token using the Client Credentials grant (RFC 6749 §4.4).
    *
    * Required for M2M authentication (services, daemons, admin tooling acting as

@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **SDK parity — residual gaps closed (HEA-1552)** — final cells in the cross-SDK capability
+  matrix (`docs/specs/SDK_SURFACE.md` §7) filled:
+  - **Node `refreshTokens()`** — `OAuthFlowsClient.refreshTokens(refreshToken, scope?)` and
+    `HearthClient.refreshTokens()` perform the RFC 6749 §6 refresh-token grant (credentials in
+    body, honors rotated `refresh_token` in the response). Closes the C-09 gap where Node could
+    exchange an auth code but not refresh.
+  - **TypeScript WebAuthn helpers** — `HearthApiClient` gains `startWebAuthnRegistration()`,
+    `finishWebAuthnRegistration()`, `startWebAuthnAuthentication()`, and
+    `finishWebAuthnAuthentication()` (C-21), with the `WebAuthn*` request/response types. The
+    browser SDK is the natural home for `navigator.credentials` ceremonies.
+  - **Node managed `SessionVersionCache`** — `start()`/`stop()`/`validateSv()`/`age()` background-poll
+    facade plus `SessionVersionConfig`, `SessionVersionRevokedError`, and
+    `SessionVersionCacheStaleError` (C-20, RFC HEA-930), bringing Node to parity with TS/Go/Kotlin
+    for zero-network session-revocation checks in middleware.
 - **TypeScript SDK C2 surface** — `@hearth-auth/sdk` now exposes the full canonical SDK surface (HEA-1557):
   `verifyToken()` (full EdDSA/Ed25519 JWKS-backed local signature verification, all five spec §2 steps);
   `clientCredentials()` (RFC 6749 §4.4 M2M grant, credentials in body);

@@ -93,6 +93,12 @@ export type {
   UpdateUserParams,
   User,
   UserInfoResponse,
+  WebAuthnAllowCredential,
+  WebAuthnRegistrationBeginResponse,
+  WebAuthnRegistrationCompleteRequest,
+  WebAuthnRegistrationCompleteResponse,
+  WebAuthnAuthenticationBeginResponse,
+  WebAuthnAuthenticationCompleteRequest,
 } from "./types.js";
 export { SessionVersionCache } from "./session-version-cache.js";
 

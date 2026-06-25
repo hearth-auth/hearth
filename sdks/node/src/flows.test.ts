@@ -104,6 +104,70 @@ describe("OAuthFlowsClient.exchangeCode", () => {
   });
 });
 
+// ── refreshTokens ──────────────────────────────────────────────────────────────
+
+describe("OAuthFlowsClient.refreshTokens", () => {
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("POSTs refresh_token grant to discovered token_endpoint with credentials in body", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse(TOKEN_RESPONSE));
+
+    await client.refreshTokens("refresh-token-abc");
+
+    expect(fetch).toHaveBeenCalledOnce();
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(DISCOVERY.token_endpoint);
+    expect(init.method).toBe("POST");
+    const body = new URLSearchParams(init.body as string);
+    expect(body.get("grant_type")).toBe("refresh_token");
+    expect(body.get("refresh_token")).toBe("refresh-token-abc");
+    expect(body.get("client_id")).toBe("client1");
+    expect(body.get("client_secret")).toBe("secret1");
+    // refresh token must NOT leak into the URL
+    expect(url).not.toContain("refresh-token-abc");
+  });
+
+  it("includes scope when provided", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse(TOKEN_RESPONSE));
+
+    await client.refreshTokens("rt", "openid profile");
+
+    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.get("scope")).toBe("openid profile");
+  });
+
+  it("omits scope when not provided", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse(TOKEN_RESPONSE));
+
+    await client.refreshTokens("rt");
+
+    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.get("scope")).toBeNull();
+  });
+
+  it("returns a typed TokenResponse (including rotated refresh_token)", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(
+      mockResponse({ ...TOKEN_RESPONSE, refresh_token: "rotated-rt" }),
+    );
+
+    const result = await client.refreshTokens("rt");
+    expect(result.access_token).toBe(TOKEN_RESPONSE.access_token);
+    expect(result.refresh_token).toBe("rotated-rt");
+  });
+
+  it("throws OAuthFlowError on non-200 (e.g. revoked/expired refresh token)", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse({ error: "invalid_grant" }, 400));
+
+    await expect(client.refreshTokens("revoked")).rejects.toBeInstanceOf(OAuthFlowError);
+  });
+});
+
 // ── clientCredentials ─────────────────────────────────────────────────────────
 
 describe("OAuthFlowsClient.clientCredentials", () => {

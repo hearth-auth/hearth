@@ -207,3 +207,35 @@ export class OAuthFlowError extends HearthError {
     this.statusCode = statusCode;
   }
 }
+
+/**
+ * Thrown by {@link SessionVersionCache.validateSv} when a token's `sv` claim is
+ * below the minimum accepted version for its session (RFC HEA-930). Resource
+ * servers should translate this into an HTTP 401.
+ */
+export class SessionVersionRevokedError extends HearthError {
+  constructor(
+    readonly sessionId: string,
+    readonly tokenSv: bigint,
+    readonly minSv: bigint,
+    message = `Session version revoked: sid=${sessionId}, sv=${tokenSv} < min=${minSv}`,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Thrown when the session-version cache has not refreshed within
+ * `staleThresholdMs` (RFC HEA-930 § 8.1). When `onStale` is `"reject"`, emit an
+ * HTTP 401; when `"introspect"`, catch this and fall back to introspection.
+ */
+export class SessionVersionCacheStaleError extends HearthError {
+  constructor(
+    /** Cache age in milliseconds, or -1 if the cache has never been seeded. */
+    readonly ageMs: number,
+    readonly onStale: "reject" | "introspect" = "reject",
+    message = `Session version cache stale: age=${ageMs < 0 ? "never seeded" : `${ageMs}ms`}`,
+  ) {
+    super(message);
+  }
+}

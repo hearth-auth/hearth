@@ -101,6 +101,17 @@ export class HearthClient {
   }
 
   /**
+   * Exchange a refresh token for a fresh access token (RFC 6749 §6).
+   * The response may carry a rotated `refresh_token`; persist it when present.
+   *
+   * @param refreshToken - Refresh token previously issued to this client.
+   * @param scope - Optional space-delimited scope string.
+   */
+  async refreshTokens(refreshToken: string, scope?: string): Promise<TokenResponse> {
+    return this.flows.refreshTokens(refreshToken, scope);
+  }
+
+  /**
    * Obtain a token using the Client Credentials grant (RFC 6749 §4.4).
    * Required for M2M authentication (services, daemons, admin tooling).
    *
