@@ -3,7 +3,7 @@
 **Who this is for:** Integrators building against the Hearth REST API, and contributors
 who add or change HTTP endpoints.
 
-**Prerequisites:** A running Hearth server (see [Getting Started](getting-started.md)) or the
+**Prerequisites:** A running Hearth server (see [Getting Started](getting-started.mdx)) or the
 static spec files in `docs/api/`.
 
 ---
