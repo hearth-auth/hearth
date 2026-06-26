@@ -21,6 +21,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`hearth-ktor` subproject** — Ktor authentication provider (`HearthAuthProvider`, `HearthPrincipal`,
+  `HearthAuthConfig`). Registers via `install(Authentication) { hearth("name") { … } }` and guards
+  routes with `authenticate("name") { … }`. Exposes `call.principal<HearthPrincipal>()` with
+  full access to verified JWT claims (sub, roles, permissions, groups, org) (HEA-1601).
 - **`hearth-spring` subproject** — Spring Security filter adapter (`HearthJwtAuthenticationFilter`,
   `HearthAuthentication`, `HearthSecurityAutoConfiguration`, `HearthSecurityProperties`).
   Validates Hearth JWTs and populates the Spring `SecurityContextHolder` with verified claims.
