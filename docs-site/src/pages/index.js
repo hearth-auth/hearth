@@ -586,7 +586,11 @@ function QuickstartTeaser() {
                 </TabItem>
               </Tabs>
               <p style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
-                <Link to="/docs/sdks/kotlin">Kotlin SDK →</Link>
+                <Link to="/docs/sdks/kotlin">Kotlin SDK</Link>
+                {' · '}
+                <Link to="/docs/sdks/kotlin-ktor">Ktor</Link>
+                {' · '}
+                <Link to="/docs/sdks/kotlin-spring">Spring Boot →</Link>
               </p>
             </TabItem>
 
