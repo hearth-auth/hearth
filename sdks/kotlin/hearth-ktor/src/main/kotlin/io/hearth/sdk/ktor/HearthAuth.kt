@@ -60,9 +60,9 @@ class HearthAuthProvider(config: HearthAuthConfig) : AuthenticationProvider(conf
             ?.ifBlank { null }
 
         if (token == null) {
-            context.challenge(HEARTH_AUTH_KEY, AuthenticationFailedCause.NoCredentials) {
+            context.challenge(HEARTH_AUTH_KEY, AuthenticationFailedCause.NoCredentials) { challenge, _ ->
                 call.respond(HttpStatusCode.Unauthorized)
-                it.complete()
+                challenge.complete()
             }
             return
         }
@@ -72,15 +72,15 @@ class HearthAuthProvider(config: HearthAuthConfig) : AuthenticationProvider(conf
             context.principal(HearthPrincipal(rawToken = token, claims = claims))
         } catch (ex: HearthException) {
             log.debug("Hearth JWT verification failed: {}", ex.message)
-            context.challenge(HEARTH_AUTH_KEY, AuthenticationFailedCause.InvalidCredentials) {
+            context.challenge(HEARTH_AUTH_KEY, AuthenticationFailedCause.InvalidCredentials) { challenge, _ ->
                 call.respond(HttpStatusCode.Unauthorized)
-                it.complete()
+                challenge.complete()
             }
         } catch (ex: Exception) {
             log.debug("Unexpected error during Hearth JWT verification: {}", ex.message)
-            context.challenge(HEARTH_AUTH_KEY, AuthenticationFailedCause.InvalidCredentials) {
+            context.challenge(HEARTH_AUTH_KEY, AuthenticationFailedCause.InvalidCredentials) { challenge, _ ->
                 call.respond(HttpStatusCode.Unauthorized)
-                it.complete()
+                challenge.complete()
             }
         }
     }
