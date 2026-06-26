@@ -292,6 +292,9 @@ The following examples guard a route and check that the caller has the `hearth.a
 npm install @hearth-auth/sdk jose
 ```
 
+<Tabs groupId="framework">
+<TabItem value="express" label="Express" default>
+
 ```ts
 import { requirePermission } from '@hearth-auth/sdk';
 import express from 'express';
@@ -307,11 +310,32 @@ app.get('/admin/data', requirePermission('hearth.admin', {
 ```
 
 </TabItem>
+<TabItem value="react" label="React (client)">
+
+```tsx
+import { useHasPermission } from '@hearth-auth/sdk';
+
+// Reads permissions from the JWT in context — no network call.
+// Pair with server-side protection above for full security.
+function AdminPanel() {
+  const canAdmin = useHasPermission('hearth.admin');
+  if (!canAdmin) return null;
+  return <div>Admin content visible to admins only.</div>;
+}
+```
+
+</TabItem>
+</Tabs>
+
+</TabItem>
 <TabItem value="node" label="Node">
 
 ```bash
 npm install @hearth-auth/node
 ```
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw" default>
 
 ```ts
 import { HearthClient } from '@hearth-auth/node';
@@ -321,15 +345,67 @@ const client = new HearthClient({
   realm_id:   process.env.HEARTH_REALM_ID!,
 });
 
-// In your Express / Fastify handler — `bearer` is the Authorization token:
-const token = await client.verifyToken(bearer);   // verifies the Ed25519 signature via cached JWKS
+// In any Node.js handler — `bearer` is the Authorization header value:
+const token = await client.verifyToken(bearer);   // verifies Ed25519 via cached JWKS
 if (!token.hasPermission('hearth.admin')) {
   res.status(403).end();
 }
 ```
 
 </TabItem>
+<TabItem value="express" label="Express">
+
+```ts
+import { hearthMiddleware } from '@hearth-auth/node';
+import express from 'express';
+
+const app = express();
+
+// Require a permission on a route — 401 on missing token, 403 on denied
+app.get('/admin/data', hearthMiddleware({
+  issuer_url:         process.env.HEARTH_URL!,
+  expectedMode:       'embedded',
+  requiredPermission: 'hearth.admin',
+}), (req, res) => {
+  res.json({ sub: req.hearthToken?.subject() });
+});
+```
+
+See the [Node SDK guide](/docs/sdks/node) for Fastify hook usage.
+
+</TabItem>
+<TabItem value="nextjs" label="Next.js">
+
+```ts
+// middleware.ts — runs in the Edge Runtime (V8 isolate, no Node.js APIs needed)
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import { hearthEdgeMiddleware } from '@hearth-auth/node/nextjs/edge';
+
+const guard = hearthEdgeMiddleware({
+  issuerUrl: process.env.HEARTH_ISSUER_URL!,
+  jwksUri:   `${process.env.HEARTH_ISSUER_URL}/.well-known/jwks.json`,
+});
+
+export async function middleware(request: NextRequest) {
+  const result = await guard(request);
+  if (result) return result;   // 401 or 403 — return to client
+  return NextResponse.next();
+}
+
+export const config = { matcher: ['/api/:path*'] };
+```
+
+See the [Next.js adapter guide](/docs/sdks/node-nextjs) for App Router and Pages Router patterns.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
 <TabItem value="go" label="Go">
+
+<Tabs groupId="framework">
+<TabItem value="nethttp" label="net/http" default>
 
 ```go
 import (
@@ -353,13 +429,65 @@ func adminOnly(next http.Handler) http.Handler {
 ```
 
 </TabItem>
+<TabItem value="gin" label="Gin">
+
+```go
+import (
+    hearth    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/hearth/gin"
+    "github.com/gin-gonic/gin"
+)
+
+client := hearth.NewClient(hearthURL, realmID)
+r := gin.Default()
+r.Use(hearthgin.HearthMiddleware(client))
+
+// RequirePermission decodes claims locally from the stored JWT — no network call
+admin := r.Group("/admin", hearthgin.RequirePermission("hearth.admin"))
+admin.GET("/data", func(c *gin.Context) {
+    c.JSON(200, gin.H{"token": hearthgin.GetToken(c)})
+})
+```
+
+See the [Gin adapter guide](/docs/sdks/go-gin) for per-route and per-group patterns.
+
+</TabItem>
+<TabItem value="echo" label="Echo">
+
+```go
+import (
+    hearth      "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/hearth/echo"
+    "github.com/labstack/echo/v4"
+)
+
+client := hearth.NewClient(hearthURL, realmID)
+e := echo.New()
+e.Use(hearthecho.HearthMiddleware(client))
+
+// RequirePermission decodes claims locally from the stored JWT — no network call
+admin := e.Group("/admin", hearthecho.RequirePermission("hearth.admin"))
+admin.GET("/data", func(c echo.Context) error {
+    return c.JSON(200, map[string]any{"token": hearthecho.GetToken(c)})
+})
+```
+
+See the [Echo adapter guide](/docs/sdks/go-echo) for group middleware and error handling.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
 <TabItem value="python" label="Python">
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw" default>
 
 ```python
 from hearth import HearthClient
 
 def require_permission(permission: str):
-    """FastAPI / Flask dependency — checks permission from the JWT claim set."""
+    """Generic dependency — checks permission from the JWT claim set."""
     def check(authorization: str):
         token = authorization.removeprefix("Bearer ")
         if not HearthClient.has_permission(token, permission):
@@ -369,16 +497,68 @@ def require_permission(permission: str):
 ```
 
 </TabItem>
+<TabItem value="fastapi" label="FastAPI">
+
+```python
+from hearth import HearthClient
+from hearth.fastapi import HearthFastAPIDep, require_permission
+from fastapi import FastAPI
+
+client    = HearthClient(base_url=os.environ['HEARTH_BASE_URL'], realm_id=os.environ['HEARTH_REALM_ID'])
+auth      = HearthFastAPIDep(client=client)
+AdminOnly = require_permission('hearth.admin', dep=auth)
+
+@app.get('/admin/data')
+def admin_data(claims: AdminOnly):   # 401/403 raised automatically before handler runs
+    return {'sub': claims.sub, 'permissions': claims.permissions}
+```
+
+See the [FastAPI adapter guide](/docs/sdks/python-fastapi) for `VerifiedClaims`, pydantic-settings configuration, and permission delivery modes.
+
+</TabItem>
+<TabItem value="django" label="Django">
+
+```python
+# settings.py — install the middleware once
+from hearth import HearthClient
+
+HEARTH_CLIENT = HearthClient(
+    base_url=os.environ['HEARTH_BASE_URL'],
+    realm_id=os.environ['HEARTH_REALM_ID'],
+)
+MIDDLEWARE = [
+    # ... existing middleware ...
+    'hearth.django.HearthDjangoMiddleware',
+]
+
+# views.py — gate a view on a permission
+from hearth.django import require_permission
+from django.http import JsonResponse
+
+@require_permission('hearth.admin')
+def admin_data(request):
+    return JsonResponse({'ok': True})
+```
+
+See the [Django adapter guide](/docs/sdks/python-django) for class-based views and optional-auth patterns.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
 <TabItem value="php" label="PHP">
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw" default>
 
 ```php
 use Hearth\HearthClient;
 
 $hearth = new HearthClient(issuerUrl: $hearthUrl);
 
-// In your PSR-15 / Laravel middleware:
+// In any PSR-15 middleware or route handler:
 $token  = str_replace('Bearer ', '', $_SERVER['HTTP_AUTHORIZATION'] ?? '');
-$claims = $hearth->verifyToken($token);   // verifies the Ed25519 signature via cached JWKS
+$claims = $hearth->verifyToken($token);   // verifies Ed25519 via cached JWKS
 
 if (!$claims->hasPermission('hearth.admin')) {
     http_response_code(403);
@@ -387,7 +567,35 @@ if (!$claims->hasPermission('hearth.admin')) {
 ```
 
 </TabItem>
+<TabItem value="laravel" label="Laravel">
+
+```php
+// .env
+// HEARTH_ISSUER_URL=https://hearth.example.com
+// HEARTH_CLIENT_ID=<client_id>
+
+// routes/api.php — apply hearth.auth to a route group
+Route::middleware('hearth.auth')->group(function () {
+    Route::get('/admin/data', [AdminController::class, 'data']);
+});
+
+// app/Http/Controllers/AdminController.php — read verified claims
+public function data(Request $request): JsonResponse {
+    $claims = $request->attributes->get('hearth_claims');
+    return response()->json(['sub' => $claims->sub]);
+}
+```
+
+See the [Laravel adapter guide](/docs/sdks/php-laravel) for service-provider setup and per-route permission checks.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
 <TabItem value="rust" label="Rust">
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw" default>
 
 ```rust
 use hearth_sdk::HearthClient;
@@ -397,6 +605,28 @@ if !HearthClient::has_permission(token, "hearth.admin")? {
     // reject with 403 Forbidden
 }
 ```
+
+</TabItem>
+<TabItem value="actix" label="Actix-web">
+
+```rust
+use hearth_sdk::{AccessTokenAuthorization, HearthClient};
+use hearth_sdk::actix::{HearthActixMiddleware, RequirePermission};
+use actix_web::{web, App, HttpServer};
+
+let client = HearthClient::new("https://hearth.example.com", "<realm-id>");
+
+// Wrap a scope — HearthActixMiddleware validates the token, RequirePermission checks claims
+web::scope("/admin")
+    .wrap(HearthActixMiddleware::new(client.clone(), AccessTokenAuthorization::Embedded))
+    .wrap(RequirePermission::new("hearth.admin"))
+    .route("/data", web::get().to(handler))
+```
+
+See the [Actix-web adapter guide](/docs/sdks/rust-actix) for `RequirePermission` extractor and permission delivery modes.
+
+</TabItem>
+</Tabs>
 
 </TabItem>
 </Tabs>
