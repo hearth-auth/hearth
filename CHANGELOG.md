@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Rust SDK Actix-web middleware adapter (HEA-1602)** — `hearth-sdk` gains an optional
+  `actix-middleware` feature that provides `HearthActixMiddleware` (implements Actix-web 4's
+  `Transform`/`Service` traits), the `RequirePermission` extractor (reads verified `Claims` from
+  request extensions), and `HearthActixError` (implements `actix_web::ResponseError` for idiomatic
+  `?`-operator error propagation). Supports all three authorization modes (`Embedded`,
+  `Introspection`, `Decision`) with fail-closed semantics matching the Tower middleware.
+  Enable with `hearth-sdk = { features = ["actix-middleware"] }` (HEA-1602).
 - **Python SDK Django middleware adapter (HEA-1600)** — `hearth.django` provides
   `HearthDjangoMiddleware` for installation via Django's `MIDDLEWARE` setting (new-style
   `__init__(get_response)` / `__call__(request)` class interface). The middleware extracts the
