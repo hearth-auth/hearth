@@ -69,6 +69,12 @@ $tokens = $hearth->completeLogin(
 // $tokens->accessToken, $tokens->refreshToken, $tokens->expiresIn
 ```
 
+:::tip[Where should the access token live?]
+If your frontend is a browser SPA, consider the **Backend for Frontend (BFF)** pattern: your PHP server completes the OAuth callback, stores the access and refresh tokens server-side (session or a short-lived store), and issues the browser an `HttpOnly; Secure; SameSite=Strict` session cookie. The browser never receives an OAuth token directly.
+
+This eliminates the XSS risk of browser-side token storage. See [Browser SPA Token Handling](../browser-spa-tokens.md) for a full comparison of storage options and the BFF flow diagram.
+:::
+
 ## Verify tokens and check RBAC
 
 ```php

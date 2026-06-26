@@ -70,6 +70,12 @@ app.get("/callback", async (req, res) => {
 If your PKCE flow runs in the browser (React SPA, Next.js client components), use the [TypeScript SDK](./typescript.md) `startLogin()` instead. Your Node.js server then only needs `verifyToken()` on incoming Bearer tokens.
 :::
 
+:::tip[Where should the access token live?]
+If your frontend is a browser SPA, consider the **Backend for Frontend (BFF)** pattern: your Node.js server completes the OAuth callback, stores the access and refresh tokens server-side, and issues the browser an `HttpOnly; Secure; SameSite=Strict` session cookie. The browser never sees a token at all.
+
+This is the most XSS-resistant architecture for SPAs. See [Browser SPA Token Handling](../browser-spa-tokens.md) for a full comparison of storage options and the BFF flow diagram.
+:::
+
 ## Verify tokens
 
 ```typescript

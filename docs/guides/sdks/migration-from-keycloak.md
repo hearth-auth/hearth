@@ -145,7 +145,9 @@ await kc.updateToken(60);
 ```typescript
 import {
   HearthClient,
+  HearthApiClient,
   createHearth,
+  createHearthAuth,
   HearthProvider,
   useHasRole,
   useHasPermission,
@@ -158,11 +160,19 @@ const client = new HearthClient({
 });
 const claims = await client.verifyToken(accessToken);
 
+// Browser-side RBAC — access token stays in memory via createHearthAuth
+// Never store access tokens in localStorage or sessionStorage — see /docs/guides/browser-spa-tokens
+const apiClient = new HearthApiClient({ baseUrl: "https://hearth.example.com", realmId: "<realm_id>" });
+const auth = createHearthAuth(apiClient, {
+  clientId:    "<client_id>",
+  redirectUri: "https://myapp.example.com/callback",
+});
+
 // RBAC — synchronous local checks from JWT claims
 const hearth = createHearth({
   baseUrl: "https://hearth.example.com",
   realmId: "<realm_id>",
-  getToken: () => localStorage.getItem("access_token"),
+  getToken: () => auth.getAccessToken(), // in-memory — never localStorage or sessionStorage
 });
 
 if (hearth.hasRole("admin")) { ... }
