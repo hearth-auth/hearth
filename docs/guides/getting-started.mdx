@@ -70,7 +70,7 @@ Your app (step 3) needs three values: the **realm slug** — `dev-realm` in `--d
 
 ## 3. Add login to your app
 
-Logging a user in is the OAuth 2.0 authorization-code + PKCE flow: send the user to Hearth to authenticate, then exchange the returned `code` for tokens on your callback route. The TypeScript SDK wraps both halves in one `createHearthAuth` helper; the other SDKs build the redirect URL and call `exchangeCode` directly. Every tab uses the realm slug `dev-realm`, the `CLIENT_ID` from step 2, redirect URI `http://localhost:3000/callback`, and server `http://localhost:8420`.
+Logging a user in is the OAuth 2.0 authorization-code + PKCE flow: send the user to Hearth to authenticate, then exchange the returned `code` for tokens on your callback route. The TypeScript SDK uses the `createHearthAuth` browser facade; every server SDK uses `beginLogin` to build the redirect URL and `completeLogin` to exchange the code. Every tab uses the realm slug `dev-realm`, the `CLIENT_ID` from step 2, redirect URI `http://localhost:3000/callback`, and server `http://localhost:8420`.
 
 <Tabs groupId="lang">
 <TabItem value="ts" label="TypeScript" default>
@@ -113,37 +113,29 @@ go get github.com/hearth-auth/hearth/sdks/go
 
 ```go
 import (
-    "fmt"
+    "context"
     "net/http"
-    "net/url"
 
     "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
-const (
-    hearthURL   = "http://localhost:8420"
-    realmSlug   = "dev-realm"
-    clientID    = "<client-id>"
-    redirectURI = "http://localhost:3000/callback"
+client := hearth.NewClient("http://localhost:8420", "<realm-id>",
+    hearth.WithClientCredentials("<client-id>", ""),
 )
 
-client := hearth.NewClient(hearthURL, "<realm-id>")
+// 1. "Log in" handler — generate PKCE and build the authorization URL.
+result, _ := client.BeginLogin(ctx, "http://localhost:3000/callback", "openid")
+// Store result.State + result.CodeVerifier in your session (one line you own).
+setSession(r, "state", result.State)
+setSession(r, "code_verifier", result.CodeVerifier)
+http.Redirect(w, r, result.AuthorizationURL, http.StatusFound)
 
-// 1. "Log in" handler — build the URL and redirect (store pkce.Verifier + state in the session).
-pkce, _ := hearth.GeneratePKCE()
-authURL := fmt.Sprintf(
-    "%s/realms/%s/authorize?response_type=code&client_id=%s&redirect_uri=%s"+
-        "&scope=openid&state=%s&code_challenge=%s&code_challenge_method=S256",
-    hearthURL, realmSlug, clientID, url.QueryEscape(redirectURI), state, pkce.Challenge)
-http.Redirect(w, r, authURL, http.StatusFound)
-
-// 2. /callback handler — exchange the code (verifier loaded from the session).
-tokens, _ := client.ExchangeCode(ctx, hearth.TokenRequest{
-    ClientID:     clientID,
-    Code:         r.URL.Query().Get("code"),
-    RedirectURI:  redirectURI,
-    CodeVerifier: verifier,
-})
+// 2. /callback handler — exchange the code.
+tokens, _ := client.CompleteLogin(ctx,
+    r.URL.Query().Get("code"),
+    getSession(r, "code_verifier"),
+    "http://localhost:3000/callback",
+)
 ```
 
 </TabItem>
@@ -154,26 +146,27 @@ pip install hearth-sdk
 ```
 
 ```python
-import secrets, urllib.parse
 from hearth import HearthClient
-from hearth.pkce import generate_pkce_pair
 
-HEARTH_URL, REALM_SLUG = "http://localhost:8420", "dev-realm"
-CLIENT_ID, REDIRECT_URI = "<client-id>", "http://localhost:3000/callback"
+client = HearthClient(
+    base_url="http://localhost:8420",
+    realm_id="<realm-id>",
+    client_id="<client-id>",
+)
 
-client = HearthClient(HEARTH_URL, "<realm-id>")
+# 1. "Log in" view — generate PKCE and build the authorization URL.
+result = client.begin_login("http://localhost:3000/callback", scopes="openid")
+# Store result.state + result.code_verifier in your session (one line you own).
+session["oauth_state"]   = result.state
+session["code_verifier"] = result.code_verifier
+return redirect(result.authorization_url)
 
-# 1. "Log in" view — generate PKCE pair and redirect to Hearth.
-pkce  = generate_pkce_pair()
-state = secrets.token_hex(16)  # CSRF token
-# store pkce.code_verifier + state in the session
-auth_url = (f"{HEARTH_URL}/realms/{REALM_SLUG}/authorize?response_type=code"
-            f"&client_id={CLIENT_ID}&redirect_uri={urllib.parse.quote(REDIRECT_URI)}&scope=openid"
-            f"&state={state}&code_challenge={pkce.code_challenge}&code_challenge_method=S256")
-return redirect(auth_url)
-
-# 2. /callback view — exchange the code ("" = no secret for a public client).
-tokens = client.exchange_code(code, CLIENT_ID, "", REDIRECT_URI, code_verifier=session["pkce_verifier"])
+# 2. /callback view — exchange the code.
+tokens = client.complete_login(
+    code=request.args["code"],
+    code_verifier=session["code_verifier"],
+    redirect_uri="http://localhost:3000/callback",
+)
 ```
 
 </TabItem>
@@ -186,28 +179,25 @@ composer require hearth-auth/php-sdk:^1.0
 ```php
 use Hearth\HearthClient;
 
-$hearthUrl   = 'http://localhost:8420';
-$realmSlug   = 'dev-realm';
-$clientId    = '<client-id>';
-$redirectUri = 'http://localhost:3000/callback';
+$hearth = new HearthClient(
+    issuerUrl: 'http://localhost:8420/realms/dev-realm',
+    clientId:  '<client-id>',
+);
 
-$hearth = new HearthClient(issuerUrl: "{$hearthUrl}/realms/{$realmSlug}", clientId: $clientId);
-
-// 1. "Log in" — generatePkce() returns codeVerifier + S256 codeChallenge.
-$pkce  = HearthClient::generatePkce();
-$state = bin2hex(random_bytes(16)); // CSRF token
-$_SESSION['pkce_verifier'] = $pkce->codeVerifier;
-
-header('Location: ' . $hearth->buildAuthorizeUrl(
-    redirectUri: $redirectUri,
-    state:       $state,
-    scope:       'openid',
-    pkce:        $pkce,
-));
+// 1. "Log in" — generate PKCE and build the authorization URL.
+$result = $hearth->beginLogin('http://localhost:3000/callback', 'openid');
+// Store state + codeVerifier in your session (one line you own).
+$_SESSION['oauth_state']   = $result->state;
+$_SESSION['code_verifier'] = $result->codeVerifier;
+header('Location: ' . $result->authorizationUrl);
 exit;
 
 // 2. /callback — exchange the code for tokens.
-$tokens = $hearth->exchangeCode($_GET['code'], $redirectUri, $_SESSION['pkce_verifier']);
+$tokens = $hearth->completeLogin(
+    $_GET['code'],
+    $_SESSION['code_verifier'],
+    'http://localhost:3000/callback',
+);
 ```
 
 </TabItem>
@@ -219,23 +209,20 @@ hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", pa
 ```
 
 ```rust
-use hearth_sdk::{HearthClient, pkce::generate_pkce_pair};
+use hearth_sdk::HearthClientBuilder;
 
-let client = HearthClient::new("http://localhost:8420", "<realm-id>");
+let client = HearthClientBuilder::new("http://localhost:8420")
+    .client_id("<client-id>")
+    .build();
 
-// 1. "Log in" handler — generate PKCE pair and redirect to Hearth.
-let pkce = generate_pkce_pair(); // verifier + S256 challenge, no manual crypto
-// store pkce.verifier + state in the session
-let auth_url = format!(
-    "http://localhost:8420/realms/dev-realm/authorize?response_type=code\
-     &client_id=<client-id>&redirect_uri=http://localhost:3000/callback&scope=openid\
-     &state={state}&code_challenge={}&code_challenge_method=S256",
-    pkce.challenge);
-// redirect the browser to `auth_url` with your framework (axum, actix, …).
+// 1. "Log in" handler — generate PKCE and build the authorization URL.
+let result = client.begin_login("http://localhost:3000/callback", Some("openid")).await?;
+// Store result.state + result.code_verifier in your session (one line you own).
+// Redirect the browser to result.authorization_url.
 
-// 2. /callback handler — exchange the code ("" = no secret for a public client).
+// 2. /callback handler — exchange the code.
 let tokens = client
-    .exchange_code(&code, "<client-id>", "", "http://localhost:3000/callback", Some(&pkce.verifier))
+    .complete_login(&code, &session_code_verifier, "http://localhost:3000/callback")
     .await?;
 ```
 
@@ -262,12 +249,12 @@ curl -fsS -X POST http://localhost:8420/token -H "X-Realm-ID: $REALM_ID" \
 
 The access token is signed with your realm's Ed25519 key, and its `permissions` are resolved at issue time — checking them needs no network call (step 4).
 
-:::tip[TypeScript logs in with one call]
-Only the TypeScript SDK ships the `createHearthAuth` facade today — it hides PKCE, token storage, and silent refresh, and powers the [`full-stack-demo`](https://github.com/hearth-auth/hearth/tree/main/examples/full-stack-demo) Vite + React app. One-call login facades for the other SDKs are on the roadmap; until then the explicit redirect → `exchangeCode` flow above is the supported pattern.
+:::tip[TypeScript vs server SDKs]
+The TypeScript SDK ships `createHearthAuth` — a **stateful browser facade** that stores tokens in `sessionStorage` and handles silent refresh. Every server SDK (Node, Go, Python, PHP, Rust, Kotlin) ships **stateless** `beginLogin`/`completeLogin` helpers: `beginLogin` returns the values you persist in your session, `completeLogin` exchanges the code. See the [`full-stack-demo`](https://github.com/hearth-auth/hearth/tree/main/examples/full-stack-demo) for a complete Vite + React + Node example.
 :::
 
-:::note[Node is server-side only]
-`@hearth-auth/node` verifies tokens — it does not initiate login. Run the browser login with one of the SDKs above (or your own redirect), then verify the resulting tokens with Node in step 4. See the [Node SDK](/docs/sdks/node).
+:::note[Node server handling the callback?]
+If your Node.js server owns the OAuth callback route (Next.js API routes, Express, Fastify), use `client.beginLogin()` / `client.completeLogin()` — see the [Node SDK](/docs/sdks/node). For browser-hosted login (React SPA, Next.js client components), use the TypeScript SDK tab above.
 :::
 
 ---
