@@ -22,6 +22,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `hearth.issuer-url` with no `@Import` required. Access verified claims in controllers via
   `@AuthenticationPrincipal HearthAuthentication auth`. Roles map to `ROLE_<role>` authorities;
   permissions are granted verbatim for `hasAuthority()` guards.
+- **Go SDK Echo middleware adapter (HEA-1599)** — `hearth/echo` package (`package hearthecho`) provides
+  `HearthMiddleware(client, opts...)` that extracts the bearer token and stores it in the Echo context,
+  `GetToken(c)` for downstream handlers, and `RequirePermission("perm")` for group-level permission
+  guards via `e.Use()` or `g.Use()`. Supports `WithTokenExtractor` and `WithOnUnauthorized` customisation hooks.
+  Install: `go get github.com/hearth-auth/hearth/sdks/go/hearth/echo`.
 - **Go SDK Gin middleware adapter (HEA-1595)** — `hearth/gin` package (`package hearthgin`) provides
   `HearthMiddleware(client, opts...)` that extracts the bearer token and stores it in the Gin context,
   `GetToken(c)` for downstream handlers, and `RequirePermission("perm")` for group-level permission
