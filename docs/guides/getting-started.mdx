@@ -109,6 +109,112 @@ await auth.handleCallback(p.get('code')!, p.get('state')!);
 ```
 
 </TabItem>
+<TabItem value="node" label="Node">
+
+```bash
+npm install @hearth-auth/node
+```
+
+The Node SDK ships stateless `beginLogin` / `completeLogin` helpers. Choose the framework tab that matches your stack.
+
+<Tabs groupId="framework">
+<TabItem value="express" label="Express" default>
+
+**Login route** — generate PKCE and redirect to Hearth:
+
+```ts
+import { HearthClient } from '@hearth-auth/node';
+import { Router } from 'express';
+
+const client = new HearthClient({
+  issuer_url: 'http://localhost:8420',
+  realm_id:   '<realm-id>',
+  client_id:  '<client-id>',
+});
+
+const router = Router();
+
+router.get('/login', async (req, res) => {
+  const result = await client.beginLogin('http://localhost:3000/callback', 'openid');
+  // Store PKCE values server-side — never expose codeVerifier to the browser
+  req.session.oauthState   = result.state;
+  req.session.codeVerifier = result.codeVerifier;
+  res.redirect(result.authorizationUrl);
+});
+```
+
+**Callback route** — exchange the code for tokens:
+
+```ts
+router.get('/callback', async (req, res) => {
+  const tokens = await client.completeLogin(
+    req.query.code as string,
+    req.session.codeVerifier,
+    'http://localhost:3000/callback',
+  );
+  req.session.accessToken = tokens.accessToken;
+  res.redirect('/dashboard');
+});
+```
+
+See the [Node SDK guide](/docs/sdks/node) for Fastify and session-storage patterns.
+
+</TabItem>
+<TabItem value="nextjs" label="Next.js">
+
+**Login route handler** (`app/auth/login/route.ts`):
+
+```ts
+import { HearthClient } from '@hearth-auth/node';
+import { redirect } from 'next/navigation';
+import { cookies } from 'next/headers';
+
+const client = new HearthClient({
+  issuer_url: process.env.HEARTH_URL!,
+  realm_id:   process.env.HEARTH_REALM_ID!,
+  client_id:  process.env.HEARTH_CLIENT_ID!,
+});
+
+export async function GET() {
+  const result = await client.beginLogin(
+    `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`,
+    'openid',
+  );
+  const jar = await cookies();
+  jar.set('oauth_state',   result.state,        { httpOnly: true, sameSite: 'lax' });
+  jar.set('code_verifier', result.codeVerifier, { httpOnly: true, sameSite: 'lax' });
+  redirect(result.authorizationUrl);
+}
+```
+
+**Callback route handler** (`app/auth/callback/route.ts`):
+
+```ts
+import { NextRequest } from 'next/server';
+import { redirect } from 'next/navigation';
+import { cookies } from 'next/headers';
+
+export async function GET(request: NextRequest) {
+  const code = request.nextUrl.searchParams.get('code')!;
+  const jar  = await cookies();
+  const tokens = await client.completeLogin(
+    code,
+    jar.get('code_verifier')!.value,
+    `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`,
+  );
+  jar.set('access_token', tokens.accessToken, { httpOnly: true, sameSite: 'lax' });
+  jar.delete('oauth_state');
+  jar.delete('code_verifier');
+  redirect('/dashboard');
+}
+```
+
+See the [Next.js adapter guide](/docs/sdks/node-nextjs) for Pages Router and Edge Middleware patterns.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
 <TabItem value="go" label="Go">
 
 ```bash
