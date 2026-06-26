@@ -79,15 +79,17 @@ Logging a user in is the OAuth 2.0 authorization-code + PKCE flow: send the user
 npm install @hearth-auth/sdk
 ```
 
+**Login page** — redirect the browser to Hearth:
+
 ```ts
 import { HearthApiClient, createHearthAuth } from '@hearth-auth/sdk';
 
 const client = new HearthApiClient({
-  baseUrl: 'http://localhost:8420/realms/dev-realm',  // {hearthUrl}/realms/{realmSlug}
+  baseUrl: 'http://localhost:8420/realms/dev-realm',
   realmId: '<realm-id>',
 });
 
-// createHearthAuth runs the full PKCE handshake, stores tokens, and auto-refreshes.
+// createHearthAuth handles PKCE, stores tokens, and auto-refreshes.
 const auth = createHearthAuth(client, {
   clientId:    '<client-id>',
   redirectUri: 'http://localhost:3000/callback',
@@ -95,10 +97,12 @@ const auth = createHearthAuth(client, {
   realmSlug:   'dev-realm',
 });
 
-// "Log in" button →
 await auth.startLogin();
+```
 
-// /callback route →
+**Callback page** — exchange the code and store tokens:
+
+```ts
 const p = new URLSearchParams(window.location.search);
 await auth.handleCallback(p.get('code')!, p.get('state')!);
 // Tokens are now stored and auto-refreshed.
@@ -110,6 +114,8 @@ await auth.handleCallback(p.get('code')!, p.get('state')!);
 ```bash
 go get github.com/hearth-auth/hearth/sdks/go
 ```
+
+**Login route** — generate PKCE and redirect the browser to Hearth:
 
 ```go
 import (
@@ -123,14 +129,16 @@ client := hearth.NewClient("http://localhost:8420", "<realm-id>",
     hearth.WithClientCredentials("<client-id>", ""),
 )
 
-// 1. "Log in" handler — generate PKCE and build the authorization URL.
 result, _ := client.BeginLogin(ctx, "http://localhost:3000/callback", "openid")
 // Store result.State + result.CodeVerifier in your session (one line you own).
 setSession(r, "state", result.State)
 setSession(r, "code_verifier", result.CodeVerifier)
 http.Redirect(w, r, result.AuthorizationURL, http.StatusFound)
+```
 
-// 2. /callback handler — exchange the code.
+**Callback route** — exchange the code for tokens:
+
+```go
 tokens, _ := client.CompleteLogin(ctx,
     r.URL.Query().Get("code"),
     getSession(r, "code_verifier"),
@@ -145,6 +153,8 @@ tokens, _ := client.CompleteLogin(ctx,
 pip install hearth-sdk
 ```
 
+**Login route** — generate PKCE and redirect the browser to Hearth:
+
 ```python
 from hearth import HearthClient
 
@@ -154,14 +164,16 @@ client = HearthClient(
     client_id="<client-id>",
 )
 
-# 1. "Log in" view — generate PKCE and build the authorization URL.
 result = client.begin_login("http://localhost:3000/callback", scopes="openid")
 # Store result.state + result.code_verifier in your session (one line you own).
 session["oauth_state"]   = result.state
 session["code_verifier"] = result.code_verifier
 return redirect(result.authorization_url)
+```
 
-# 2. /callback view — exchange the code.
+**Callback route** — exchange the code for tokens:
+
+```python
 tokens = client.complete_login(
     code=request.args["code"],
     code_verifier=session["code_verifier"],
@@ -176,6 +188,8 @@ tokens = client.complete_login(
 composer require hearth-auth/php-sdk:^1.0
 ```
 
+**Login route** — generate PKCE and redirect the browser to Hearth:
+
 ```php
 use Hearth\HearthClient;
 
@@ -184,15 +198,17 @@ $hearth = new HearthClient(
     clientId:  '<client-id>',
 );
 
-// 1. "Log in" — generate PKCE and build the authorization URL.
 $result = $hearth->beginLogin('http://localhost:3000/callback', 'openid');
 // Store state + codeVerifier in your session (one line you own).
 $_SESSION['oauth_state']   = $result->state;
 $_SESSION['code_verifier'] = $result->codeVerifier;
 header('Location: ' . $result->authorizationUrl);
 exit;
+```
 
-// 2. /callback — exchange the code for tokens.
+**Callback route** — exchange the code for tokens:
+
+```php
 $tokens = $hearth->completeLogin(
     $_GET['code'],
     $_SESSION['code_verifier'],
@@ -208,6 +224,8 @@ $tokens = $hearth->completeLogin(
 hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", package = "hearth-sdk" }
 ```
 
+**Login route** — generate PKCE and redirect the browser to Hearth:
+
 ```rust
 use hearth_sdk::HearthClientBuilder;
 
@@ -215,12 +233,14 @@ let client = HearthClientBuilder::new("http://localhost:8420")
     .client_id("<client-id>")
     .build();
 
-// 1. "Log in" handler — generate PKCE and build the authorization URL.
 let result = client.begin_login("http://localhost:3000/callback", Some("openid")).await?;
 // Store result.state + result.code_verifier in your session (one line you own).
 // Redirect the browser to result.authorization_url.
+```
 
-// 2. /callback handler — exchange the code.
+**Callback route** — exchange the code for tokens:
+
+```rust
 let tokens = client
     .complete_login(&code, &session_code_verifier, "http://localhost:3000/callback")
     .await?;
