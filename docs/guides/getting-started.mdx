@@ -115,13 +115,16 @@ await auth.handleCallback(p.get('code')!, p.get('state')!);
 go get github.com/hearth-auth/hearth/sdks/go
 ```
 
-**Login route** — generate PKCE and redirect the browser to Hearth:
+The login handler generates PKCE and redirects the browser to Hearth; the callback exchanges the code for tokens. The core `BeginLogin`/`CompleteLogin` calls are identical across all frameworks — the tabs below show how to wire them into each router's handler style.
+
+<Tabs groupId="framework">
+<TabItem value="nethttp" label="net/http" default>
+
+**Login route:**
 
 ```go
 import (
-    "context"
     "net/http"
-
     "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
@@ -129,22 +132,99 @@ client := hearth.NewClient("http://localhost:8420", "<realm-id>",
     hearth.WithClientCredentials("<client-id>", ""),
 )
 
-result, _ := client.BeginLogin(ctx, "http://localhost:3000/callback", "openid")
-// Store result.State + result.CodeVerifier in your session (one line you own).
-setSession(r, "state", result.State)
-setSession(r, "code_verifier", result.CodeVerifier)
-http.Redirect(w, r, result.AuthorizationURL, http.StatusFound)
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+    result, _ := client.BeginLogin(r.Context(), "http://localhost:3000/callback", "openid")
+    setSession(r, "state", result.State)
+    setSession(r, "code_verifier", result.CodeVerifier)
+    http.Redirect(w, r, result.AuthorizationURL, http.StatusFound)
+}
 ```
 
-**Callback route** — exchange the code for tokens:
+**Callback route:**
 
 ```go
-tokens, _ := client.CompleteLogin(ctx,
-    r.URL.Query().Get("code"),
-    getSession(r, "code_verifier"),
-    "http://localhost:3000/callback",
-)
+func callbackHandler(w http.ResponseWriter, r *http.Request) {
+    tokens, _ := client.CompleteLogin(r.Context(),
+        r.URL.Query().Get("code"),
+        getSession(r, "code_verifier"),
+        "http://localhost:3000/callback",
+    )
+    // use tokens.AccessToken
+}
 ```
+
+</TabItem>
+<TabItem value="gin" label="Gin">
+
+```go
+import (
+    hearth    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/hearth/gin"
+    "github.com/gin-gonic/gin"
+    "net/http"
+)
+
+client := hearth.NewClient("http://localhost:8420", "<realm-id>",
+    hearth.WithClientCredentials("<client-id>", ""),
+)
+r := gin.Default()
+r.Use(hearthgin.HearthMiddleware(client))
+
+r.GET("/login", func(c *gin.Context) {
+    result, _ := client.BeginLogin(c.Request.Context(), "http://localhost:3000/callback", "openid")
+    c.SetCookie("state", result.State, 300, "/", "", false, true)
+    c.SetCookie("code_verifier", result.CodeVerifier, 300, "/", "", false, true)
+    c.Redirect(http.StatusFound, result.AuthorizationURL)
+})
+
+r.GET("/callback", func(c *gin.Context) {
+    cv, _ := c.Cookie("code_verifier")
+    tokens, _ := client.CompleteLogin(c.Request.Context(),
+        c.Query("code"), cv, "http://localhost:3000/callback",
+    )
+    c.JSON(200, gin.H{"access_token": tokens.AccessToken})
+})
+```
+
+See the [Gin adapter guide](/docs/sdks/go-gin) for per-route and per-group permission checks.
+
+</TabItem>
+<TabItem value="echo" label="Echo">
+
+```go
+import (
+    hearth      "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/hearth/echo"
+    "github.com/labstack/echo/v4"
+    "net/http"
+)
+
+client := hearth.NewClient("http://localhost:8420", "<realm-id>",
+    hearth.WithClientCredentials("<client-id>", ""),
+)
+e := echo.New()
+e.Use(hearthecho.HearthMiddleware(client))
+
+e.GET("/login", func(c echo.Context) error {
+    result, _ := client.BeginLogin(c.Request().Context(), "http://localhost:3000/callback", "openid")
+    c.SetCookie(&http.Cookie{Name: "state", Value: result.State, Path: "/", HttpOnly: true})
+    c.SetCookie(&http.Cookie{Name: "code_verifier", Value: result.CodeVerifier, Path: "/", HttpOnly: true})
+    return c.Redirect(http.StatusFound, result.AuthorizationURL)
+})
+
+e.GET("/callback", func(c echo.Context) error {
+    cv, _ := c.Cookie("code_verifier")
+    tokens, _ := client.CompleteLogin(c.Request().Context(),
+        c.QueryParam("code"), cv.Value, "http://localhost:3000/callback",
+    )
+    return c.JSON(200, map[string]any{"access_token": tokens.AccessToken})
+})
+```
+
+See the [Echo adapter guide](/docs/sdks/go-echo) for group middleware and error handling.
+
+</TabItem>
+</Tabs>
 
 </TabItem>
 <TabItem value="python" label="Python">
@@ -153,9 +233,88 @@ tokens, _ := client.CompleteLogin(ctx,
 pip install hearth-sdk
 ```
 
-**Login route** — generate PKCE and redirect the browser to Hearth:
+The login view generates PKCE and redirects the browser to Hearth; the callback view exchanges the code for tokens. The core `begin_login`/`complete_login` calls are the same across all frameworks — the tabs show how to declare the views in each.
+
+<Tabs groupId="framework">
+<TabItem value="flask" label="Flask" default>
+
+**Login route:**
 
 ```python
+from flask import Flask, redirect, session
+from hearth import HearthClient
+
+app = Flask(__name__)
+client = HearthClient(
+    base_url="http://localhost:8420",
+    realm_id="<realm-id>",
+    client_id="<client-id>",
+)
+
+@app.route("/login")
+def login():
+    result = client.begin_login("http://localhost:3000/callback", scopes="openid")
+    session["oauth_state"]   = result.state
+    session["code_verifier"] = result.code_verifier
+    return redirect(result.authorization_url)
+```
+
+**Callback route:**
+
+```python
+from flask import request
+
+@app.route("/callback")
+def callback():
+    tokens = client.complete_login(
+        code=request.args["code"],
+        code_verifier=session["code_verifier"],
+        redirect_uri="http://localhost:3000/callback",
+    )
+    return {"access_token": tokens.access_token}
+```
+
+</TabItem>
+<TabItem value="fastapi" label="FastAPI">
+
+```python
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse, JSONResponse
+from hearth import HearthClient
+
+app = FastAPI()
+client = HearthClient(
+    base_url="http://localhost:8420",
+    realm_id="<realm-id>",
+    client_id="<client-id>",
+)
+
+@app.get("/login")
+async def login(request: Request):
+    result = client.begin_login("http://localhost:3000/callback", scopes="openid")
+    request.session["oauth_state"]   = result.state
+    request.session["code_verifier"] = result.code_verifier
+    return RedirectResponse(result.authorization_url)
+
+@app.get("/callback")
+async def callback(request: Request, code: str):
+    tokens = client.complete_login(
+        code=code,
+        code_verifier=request.session["code_verifier"],
+        redirect_uri="http://localhost:3000/callback",
+    )
+    return JSONResponse({"access_token": tokens.access_token})
+```
+
+See the [FastAPI adapter guide](/docs/sdks/python-fastapi) for `Depends()` injection and typed claims.
+
+</TabItem>
+<TabItem value="django" label="Django">
+
+```python
+# views.py
+from django.shortcuts import redirect
+from django.http import JsonResponse
 from hearth import HearthClient
 
 client = HearthClient(
@@ -164,22 +323,25 @@ client = HearthClient(
     client_id="<client-id>",
 )
 
-result = client.begin_login("http://localhost:3000/callback", scopes="openid")
-# Store result.state + result.code_verifier in your session (one line you own).
-session["oauth_state"]   = result.state
-session["code_verifier"] = result.code_verifier
-return redirect(result.authorization_url)
+def login(request):
+    result = client.begin_login("http://localhost:3000/callback", scopes="openid")
+    request.session["oauth_state"]   = result.state
+    request.session["code_verifier"] = result.code_verifier
+    return redirect(result.authorization_url)
+
+def callback(request):
+    tokens = client.complete_login(
+        code=request.GET["code"],
+        code_verifier=request.session["code_verifier"],
+        redirect_uri="http://localhost:3000/callback",
+    )
+    return JsonResponse({"access_token": tokens.access_token})
 ```
 
-**Callback route** — exchange the code for tokens:
+See the [Django adapter guide](/docs/sdks/python-django) for `MIDDLEWARE` wiring and `@require_permission`.
 
-```python
-tokens = client.complete_login(
-    code=request.args["code"],
-    code_verifier=session["code_verifier"],
-    redirect_uri="http://localhost:3000/callback",
-)
-```
+</TabItem>
+</Tabs>
 
 </TabItem>
 <TabItem value="php" label="PHP">
@@ -188,33 +350,88 @@ tokens = client.complete_login(
 composer require hearth-auth/php-sdk:^1.0
 ```
 
-**Login route** — generate PKCE and redirect the browser to Hearth:
+The login route generates PKCE and redirects to Hearth; the callback exchanges the code for tokens. Both frameworks use the same `beginLogin`/`completeLogin` SDK calls — the tabs show how to declare the routes in each.
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw PHP" default>
+
+**Login route:**
 
 ```php
 use Hearth\HearthClient;
 
+session_start();
 $hearth = new HearthClient(
     issuerUrl: 'http://localhost:8420/realms/dev-realm',
     clientId:  '<client-id>',
 );
 
 $result = $hearth->beginLogin('http://localhost:3000/callback', 'openid');
-// Store state + codeVerifier in your session (one line you own).
 $_SESSION['oauth_state']   = $result->state;
 $_SESSION['code_verifier'] = $result->codeVerifier;
 header('Location: ' . $result->authorizationUrl);
 exit;
 ```
 
-**Callback route** — exchange the code for tokens:
+**Callback route:**
 
 ```php
+session_start();
 $tokens = $hearth->completeLogin(
     $_GET['code'],
     $_SESSION['code_verifier'],
     'http://localhost:3000/callback',
 );
+// use $tokens->accessToken
 ```
+
+</TabItem>
+<TabItem value="laravel" label="Laravel">
+
+```php
+// routes/web.php
+Route::get('/login', [AuthController::class, 'login'])->name('auth.login');
+Route::get('/callback', [AuthController::class, 'callback'])->name('auth.callback');
+```
+
+```php
+// app/Http/Controllers/AuthController.php
+use Hearth\HearthClient;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+
+class AuthController extends Controller
+{
+    public function __construct(private readonly HearthClient $hearth) {}
+
+    public function login(): RedirectResponse
+    {
+        $result = $this->hearth->beginLogin(
+            redirectUri: route('auth.callback'),
+            scopes:      'openid',
+        );
+        session(['oauth_state' => $result->state, 'code_verifier' => $result->codeVerifier]);
+        return redirect($result->authorizationUrl);
+    }
+
+    public function callback(Request $request): RedirectResponse
+    {
+        $tokens = $this->hearth->completeLogin(
+            code:         $request->query('code'),
+            codeVerifier: session('code_verifier'),
+            redirectUri:  route('auth.callback'),
+        );
+        session(['access_token' => $tokens->accessToken]);
+        session()->forget(['oauth_state', 'code_verifier']);
+        return redirect('/dashboard');
+    }
+}
+```
+
+See the [Laravel adapter guide](/docs/sdks/php-laravel) for service-provider setup and `hearth.auth` middleware.
+
+</TabItem>
+</Tabs>
 
 </TabItem>
 <TabItem value="rust" label="Rust">
@@ -224,27 +441,74 @@ $tokens = $hearth->completeLogin(
 hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", package = "hearth-sdk" }
 ```
 
-**Login route** — generate PKCE and redirect the browser to Hearth:
+The login handler generates PKCE and redirects the browser to Hearth; the callback handler exchanges the code for tokens. The core SDK calls are the same across Axum and Actix-web — the tabs show handler wiring for each.
+
+<Tabs groupId="framework">
+<TabItem value="axum" label="Axum" default>
 
 ```rust
+use axum::{extract::Query, response::Redirect, routing::get, Router};
+use hearth_sdk::HearthClientBuilder;
+use std::collections::HashMap;
+
+let client = HearthClientBuilder::new("http://localhost:8420")
+    .client_id("<client-id>")
+    .build();
+
+async fn login(session: Session, client: axum::Extension<HearthClient>) -> Redirect {
+    let result = client.begin_login("http://localhost:3000/callback", Some("openid")).await.unwrap();
+    session.insert("state", &result.state).unwrap();
+    session.insert("code_verifier", &result.code_verifier).unwrap();
+    Redirect::temporary(&result.authorization_url)
+}
+
+async fn callback(
+    session: Session,
+    Query(params): Query<HashMap<String, String>>,
+    client: axum::Extension<HearthClient>,
+) -> impl axum::response::IntoResponse {
+    let cv = session.get::<String>("code_verifier").unwrap().unwrap_or_default();
+    let tokens = client.complete_login(&params["code"], &cv, "http://localhost:3000/callback").await.unwrap();
+    axum::Json(tokens)
+}
+```
+
+</TabItem>
+<TabItem value="actix" label="Actix-web">
+
+```rust
+use actix_web::{web, HttpResponse, Responder};
+use actix_session::Session;
 use hearth_sdk::HearthClientBuilder;
 
 let client = HearthClientBuilder::new("http://localhost:8420")
     .client_id("<client-id>")
     .build();
 
-let result = client.begin_login("http://localhost:3000/callback", Some("openid")).await?;
-// Store result.state + result.code_verifier in your session (one line you own).
-// Redirect the browser to result.authorization_url.
+async fn login(session: Session, client: web::Data<HearthClient>) -> impl Responder {
+    let result = client.begin_login("http://localhost:3000/callback", Some("openid")).await.unwrap();
+    session.insert("state", &result.state).unwrap();
+    session.insert("code_verifier", &result.code_verifier).unwrap();
+    HttpResponse::Found()
+        .insert_header(("Location", result.authorization_url))
+        .finish()
+}
+
+async fn callback(
+    session: Session,
+    query: web::Query<std::collections::HashMap<String, String>>,
+    client: web::Data<HearthClient>,
+) -> impl Responder {
+    let cv = session.get::<String>("code_verifier").unwrap().unwrap_or_default();
+    let tokens = client.complete_login(&query["code"], &cv, "http://localhost:3000/callback").await.unwrap();
+    HttpResponse::Ok().json(tokens)
+}
 ```
 
-**Callback route** — exchange the code for tokens:
+See the [Actix-web adapter guide](/docs/sdks/rust-actix) for `RequirePermission` extractor and scoped route guards.
 
-```rust
-let tokens = client
-    .complete_login(&code, &session_code_verifier, "http://localhost:3000/callback")
-    .await?;
-```
+</TabItem>
+</Tabs>
 
 </TabItem>
 <TabItem value="curl" label="curl">

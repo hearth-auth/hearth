@@ -1,15 +1,18 @@
 ---
 title: Python SDK quickstart
 sidebar_label: Python
-description: Verify Hearth tokens and enforce RBAC in a Python service in under 5 minutes. Covers Flask, Starlette, WSGI/ASGI middleware, and the auth code + PKCE callback.
+description: Verify Hearth tokens and enforce RBAC in a Python service in under 5 minutes. Covers Flask, FastAPI, Django, Starlette, WSGI/ASGI middleware, and the auth code + PKCE callback.
 ---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
 
 # Python SDK quickstart
 
 Add token verification and permission checks to a Python service in under 5 minutes using `hearth-sdk`.
 
 :::note[Dedicated framework adapters]
-`hearth-sdk` ships dedicated adapters for **FastAPI** and **Django** that integrate with each framework's native conventions. This page covers the generic `hearth.middleware` layer (Flask, Starlette) and the core `HearthClient` API.
+`hearth-sdk` ships dedicated adapters for **FastAPI** and **Django** that integrate with each framework's native conventions. This page covers the core `HearthClient` API and shows how to wire it into Flask, FastAPI, and Django.
 
 - [FastAPI adapter](./python-fastapi.md) — `Depends()` injection, `VerifiedClaims`, `require_permission()` type alias
 - [Django adapter](./python-django.md) — `MIDDLEWARE` list integration, `request.hearth_token`, `@require_permission` decorator
@@ -34,9 +37,95 @@ curl -X POST http://127.0.0.1:8420/admin/bootstrap
 
 ## Auth code flow with PKCE
 
-Use `begin_login` / `complete_login` to handle the OAuth callback in two calls:
+Use `begin_login` / `complete_login` to handle the OAuth callback in two calls. The core SDK calls are identical across frameworks — the tabs show how to declare the routes in each.
+
+<Tabs groupId="framework">
+<TabItem value="flask" label="Flask" default>
 
 ```python
+from flask import Flask, redirect, request, session
+from hearth import HearthClient
+
+app = Flask(__name__)
+app.secret_key = "your-secret-key"
+
+client = HearthClient(
+    base_url="https://hearth.example.com",
+    realm_id="<realm_id>",
+    client_id="<client_id>",
+    client_secret="<client_secret>",
+)
+
+@app.route("/login")
+def login():
+    result = client.begin_login(
+        redirect_uri="https://myapp.example.com/callback",
+        scopes="openid profile email",
+    )
+    session["oauth_state"]   = result.state
+    session["code_verifier"] = result.code_verifier
+    return redirect(result.authorization_url)
+
+@app.route("/callback")
+def callback():
+    if request.args["state"] != session["oauth_state"]:
+        return "state mismatch", 400
+    tokens = client.complete_login(
+        code=request.args["code"],
+        code_verifier=session["code_verifier"],
+        redirect_uri="https://myapp.example.com/callback",
+    )
+    # tokens.access_token, tokens.refresh_token, tokens.expires_in
+    return {"access_token": tokens.access_token}
+```
+
+</TabItem>
+<TabItem value="fastapi" label="FastAPI">
+
+```python
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse, JSONResponse
+from hearth import HearthClient
+
+app = FastAPI()
+client = HearthClient(
+    base_url="https://hearth.example.com",
+    realm_id="<realm_id>",
+    client_id="<client_id>",
+    client_secret="<client_secret>",
+)
+
+@app.get("/login")
+async def login(request: Request):
+    result = client.begin_login(
+        redirect_uri="https://myapp.example.com/callback",
+        scopes="openid profile email",
+    )
+    request.session["oauth_state"]   = result.state
+    request.session["code_verifier"] = result.code_verifier
+    return RedirectResponse(result.authorization_url)
+
+@app.get("/callback")
+async def callback(request: Request, code: str, state: str):
+    if state != request.session.get("oauth_state"):
+        return JSONResponse({"error": "state mismatch"}, status_code=400)
+    tokens = client.complete_login(
+        code=code,
+        code_verifier=request.session["code_verifier"],
+        redirect_uri="https://myapp.example.com/callback",
+    )
+    return {"access_token": tokens.access_token}
+```
+
+See the [FastAPI adapter guide](./python-fastapi.md) for `Depends()` injection, `VerifiedClaims`, and pydantic-settings configuration.
+
+</TabItem>
+<TabItem value="django" label="Django">
+
+```python
+# views.py
+from django.shortcuts import redirect
+from django.http import JsonResponse
 from hearth import HearthClient
 
 client = HearthClient(
@@ -46,30 +135,30 @@ client = HearthClient(
     client_secret="<client_secret>",
 )
 
-# Login route — generate PKCE and build the authorization URL
-@app.route("/login")
-def login():
+def login(request):
     result = client.begin_login(
         redirect_uri="https://myapp.example.com/callback",
         scopes="openid profile email",
     )
-    # Persist state + code_verifier in your session (one line you own)
-    session["oauth_state"]   = result.state
-    session["code_verifier"] = result.code_verifier
+    request.session["oauth_state"]   = result.state
+    request.session["code_verifier"] = result.code_verifier
     return redirect(result.authorization_url)
 
-# Callback route — exchange the code for tokens
-@app.route("/callback")
-def callback():
-    if request.args["state"] != session["oauth_state"]:
-        abort(400, "state mismatch")
+def callback(request):
+    if request.GET.get("state") != request.session.get("oauth_state"):
+        return JsonResponse({"error": "state mismatch"}, status=400)
     tokens = client.complete_login(
-        code=request.args["code"],
-        code_verifier=session["code_verifier"],
+        code=request.GET["code"],
+        code_verifier=request.session["code_verifier"],
         redirect_uri="https://myapp.example.com/callback",
     )
-    # tokens.access_token, tokens.refresh_token, tokens.expires_in
+    return JsonResponse({"access_token": tokens.access_token})
 ```
+
+See the [Django adapter guide](./python-django.md) for `MIDDLEWARE` wiring, `request.hearth_token`, and `@require_permission` view decorator.
+
+</TabItem>
+</Tabs>
 
 :::tip[Where should the access token live?]
 If your frontend is a browser SPA, consider the **Backend for Frontend (BFF)** pattern: your Python server completes the OAuth callback, stores the access and refresh tokens server-side, and issues the browser an `HttpOnly; Secure; SameSite=Strict` session cookie. The browser never receives an OAuth token directly.
@@ -121,7 +210,10 @@ if claims.in_group("engineering"):
 
 ## Middleware
 
-### WSGI — Flask
+Apply token verification to incoming requests using the middleware layer for your framework. All adapters return `401` on a missing or invalid token and `403` on a permission failure.
+
+<Tabs groupId="framework">
+<TabItem value="flask" label="Flask (WSGI)" default>
 
 Use `WsgiPermissionMiddleware` to protect a Flask app. It wraps the WSGI callable, extracts the Bearer token, and enforces a permission before the request reaches your view functions.
 
@@ -152,11 +244,76 @@ def create_doc():
 
 To enforce different permissions on different routes, instantiate the middleware per blueprint or create a per-route decorator using `client.verify_token()` directly.
 
-:::note[Django has a dedicated adapter]
-For Django, use [`HearthDjangoMiddleware`](./python-django.md) instead — it reads from Django's `settings.py` and supports the `@require_permission` view decorator.
-:::
+</TabItem>
+<TabItem value="fastapi" label="FastAPI">
 
-### ASGI — Starlette
+Use `HearthFastAPIDep` with FastAPI's `Depends()` system. This integrates natively with OpenAPI schema generation and provides typed `VerifiedClaims` objects.
+
+```python
+import os
+from fastapi import FastAPI
+from hearth import HearthClient
+from hearth.fastapi import HearthFastAPIDep, require_permission
+
+client = HearthClient(
+    base_url=os.environ["HEARTH_BASE_URL"],
+    realm_id=os.environ["HEARTH_REALM_ID"],
+)
+
+app = FastAPI()
+auth = HearthFastAPIDep(client=client)
+
+# Per-route permission guard via type alias
+AdminOnly = require_permission("admin.write", dep=auth)
+DocsWriter = require_permission("docs.write", dep=auth)
+
+@app.get("/admin/users")
+def list_users(claims: AdminOnly):
+    return {"user": claims.sub, "permissions": claims.permissions}
+
+@app.post("/docs")
+def create_doc(claims: DocsWriter):
+    return {"created": True, "by": claims.sub}
+```
+
+See the [FastAPI adapter guide](./python-fastapi.md) for `VerifiedClaims`, pydantic-settings configuration, and all three permission delivery modes.
+
+</TabItem>
+<TabItem value="django" label="Django">
+
+Use `HearthDjangoMiddleware` in Django's `MIDDLEWARE` setting, then use `@require_permission` on individual views.
+
+```python
+# settings.py
+from hearth import HearthClient
+import os
+
+HEARTH_CLIENT = HearthClient(
+    base_url=os.environ["HEARTH_BASE_URL"],
+    realm_id=os.environ["HEARTH_REALM_ID"],
+)
+MIDDLEWARE = [
+    # ... existing middleware ...
+    "hearth.django.HearthDjangoMiddleware",
+]
+
+# views.py
+from hearth.django import require_permission
+from django.http import JsonResponse
+
+@require_permission("docs.write")
+def create_doc(request):
+    return JsonResponse({"created": True, "by": request.hearth_token.sub})
+
+@require_permission("admin.write")
+def admin_users(request):
+    return JsonResponse({"user": request.hearth_token.sub})
+```
+
+See the [Django adapter guide](./python-django.md) for class-based views, optional-auth patterns, and all three permission delivery modes.
+
+</TabItem>
+<TabItem value="starlette" label="Starlette (ASGI)">
 
 Use `RequirePermissionMiddleware` to protect a Starlette app. Non-HTTP connections (WebSocket, lifespan) pass through without checks.
 
@@ -187,13 +344,11 @@ app = RequirePermissionMiddleware(
 ```
 
 :::note[FastAPI has a dedicated adapter]
-For FastAPI, use [`HearthFastAPIDep`](./python-fastapi.md) instead — it integrates with `Depends()` injection and types verified claims into FastAPI's OpenAPI schema.
+For FastAPI, use `HearthFastAPIDep` (the FastAPI tab above) instead — it integrates with `Depends()` injection and types verified claims into FastAPI's OpenAPI schema.
 :::
 
-Both middleware types respond:
-- `401 Unauthorized` — token missing or cryptographically invalid.
-- `401 Unauthorized` (`error="required_action"`) — token has `token_type: "required_action"`.
-- `403 Forbidden` — token valid but lacks the required permission.
+</TabItem>
+</Tabs>
 
 ## Permission delivery modes
 

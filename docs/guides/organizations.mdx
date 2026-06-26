@@ -1,3 +1,12 @@
+---
+title: Organizations guide
+sidebar_label: Organizations
+description: Build B2B multi-tenancy with Hearth organizations — membership, org-scoped RBAC, invitations, and SDK calls.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Organizations Guide
 
 **Audience:** developers and operators building B2B SaaS products where end customers are companies, teams, or tenants that each need their own membership, roles, and access boundaries within a shared realm.
@@ -25,7 +34,7 @@ Every member has exactly one **organization role**:
 | `Admin` | Manage members and settings; cannot delete the org. |
 | `Member` | Basic membership; access to org resources. |
 
-In addition, members may have **additional RBAC roles** scoped to the organization (see [RBAC: org-scoped assignments](rbac.md#5-assign-a-role-to-a-user-or-group)).
+In addition, members may have **additional RBAC roles** scoped to the organization (see [RBAC: org-scoped assignments](rbac.mdx#5-assign-a-role-to-a-user-or-group)).
 
 ## Declaring organizations in config
 
@@ -80,6 +89,11 @@ When a user belongs to an organization, you can assign RBAC roles that are valid
 
 ### Assign a role scoped to an organization
 
+The following examples assign an RBAC role to a user scoped to a specific organization:
+
+<Tabs groupId="lang">
+<TabItem value="curl" label="curl" default>
+
 ```bash
 HEARTH_ADMIN="Authorization: Bearer <admin-token>"
 REALM="X-Realm-ID: <realm-uuid>"
@@ -93,11 +107,70 @@ curl -X POST http://127.0.0.1:8420/admin/users/<user-id>/roles \
   }'
 ```
 
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```typescript
+import { AdminClient } from '@hearth-auth/node';
+
+const admin = new AdminClient({
+  base_url:     'https://hearth.example.com',
+  realm_id:     '<realm-id>',
+  access_token: adminToken,
+});
+
+await admin.assignRole({
+  user_id: '<user-id>',
+  role_id: '<role-id>',
+  scope:   { type: 'org', org_id: 'org_<uuid>' },
+});
+```
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+```go
+import "github.com/hearth-auth/hearth/sdks/go/hearth"
+
+admin := client.Admin(adminToken)
+
+err := admin.AssignRole(ctx, hearth.AssignRoleRequest{
+    UserID: "<user-id>",
+    RoleID: "<role-id>",
+    Scope: &hearth.OrgScope{
+        Type:  "org",
+        OrgID: "org_<uuid>",
+    },
+})
+```
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```python
+from hearth import HearthClient
+
+client = HearthClient(base_url=HEARTH_URL, realm_id=REALM_ID)
+admin = client.admin(admin_token)
+
+admin.assign_role(
+    user_id="<user-id>",
+    role_id="<role-id>",
+    scope={"type": "org", "org_id": "org_<uuid>"},
+)
+```
+
+</TabItem>
+</Tabs>
+
 The `org_id` value is the full `org_`-prefixed organization ID (e.g., `org_550e8400-e29b-41d4-a716-446655440000`).
 
 ### Inspect org-scoped permissions for a user
 
 The `GET /v1/me/permissions` endpoint resolves a user's effective roles, groups, and permissions and accepts an `org_id` query parameter to include org-scoped assignments:
+
+<Tabs groupId="lang">
+<TabItem value="curl" label="curl" default>
 
 ```bash
 curl "http://127.0.0.1:8420/v1/me/permissions?org_id=<org-uuid>" \
@@ -111,6 +184,43 @@ For the admin debug view:
 curl "http://127.0.0.1:8420/admin/users/<user-id>/effective-permissions?org_id=<org-uuid>" \
   -H "$HEARTH_ADMIN" -H "$REALM"
 ```
+
+</TabItem>
+<TabItem value="ts" label="TypeScript">
+
+```typescript
+import { HearthClient } from '@hearth-auth/node';
+
+const client = new HearthClient({ issuer_url: process.env.HEARTH_ISSUER_URL! });
+
+// Fetch permissions including org-scoped assignments
+const perms = await client.mePermissions(accessToken, { org_id: '<org-uuid>' });
+// perms.roles, perms.groups, perms.permissions — includes org-scoped entries
+```
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+```go
+perms, err := client.Permissions(ctx, accessToken,
+    hearth.WithOrgID("org_<uuid>"),
+)
+if err != nil {
+    return err
+}
+// perms.Roles, perms.Groups, perms.Permissions — includes org-scoped entries
+```
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```python
+perms = client.me_permissions(access_token, org_id="org_<uuid>")
+# perms.roles, perms.groups, perms.permissions — includes org-scoped entries
+```
+
+</TabItem>
+</Tabs>
 
 See [AUTHORIZATION.md §2.4](../specs/AUTHORIZATION.md) for the full org-scoped permission resolution algorithm and the `oid` JWT claim specification.
 
@@ -160,7 +270,7 @@ The following webhook event types are emitted for organization lifecycle changes
 | `org_updated` | Organization name, description, or config changed |
 | `org_deleted` | Organization deleted |
 
-Subscribe to these events via the [Webhooks guide](webhooks.md).
+Subscribe to these events via the [Webhooks guide](webhooks.mdx).
 
 ## Custom attributes
 

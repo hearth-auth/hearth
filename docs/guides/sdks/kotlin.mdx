@@ -1,0 +1,454 @@
+---
+title: Kotlin SDK quickstart
+sidebar_label: Kotlin
+description: Verify Hearth tokens and enforce RBAC in a Kotlin/JVM service. Covers coroutines, Spring WebFlux, Ktor, and the full C8 surface.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Kotlin SDK quickstart
+
+Add token verification and RBAC to a Kotlin/JVM application using the Hearth Kotlin SDK.
+
+## Install
+
+Add to your `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("io.hearth-auth:hearth-sdk:1.0.0")
+}
+```
+
+Or Maven:
+
+```xml
+<dependency>
+    <groupId>io.hearth-auth</groupId>
+    <artifactId>hearth-sdk</artifactId>
+    <version>1.0.0</version>
+</dependency>
+```
+
+**Requirements:** JVM 17+, Kotlin 1.9+, `kotlinx.coroutines` 1.7+, OkHttp 4.x.
+
+## Start Hearth locally
+
+```bash
+make dev
+# → binds http://127.0.0.1:8420
+
+curl -X POST http://127.0.0.1:8420/admin/bootstrap
+# → { "realm_id": "…", "access_token": "…" }
+```
+
+## Initialize the client
+
+```kotlin
+import io.hearth.sdk.HearthClient
+
+val client = HearthClient(
+    issuerUrl    = "http://127.0.0.1:8420",  // server base URL
+    realmId      = "<realm_id>",             // UUID sent as X-Realm-ID on scoped endpoints
+    clientId     = "<client_id>",
+    clientSecret = "<client_secret>",        // optional — required for M2M/introspection
+)
+```
+
+All endpoint URLs are auto-discovered from `{issuerUrl}/.well-known/openid-configuration`
+on first use. `HearthClient` is coroutine-safe and designed to be created once and shared.
+
+## Auth code flow with PKCE
+
+Use `beginLogin` / `completeLogin` to handle the OAuth callback in two calls. The core SDK calls are identical across frameworks — the tabs show how to wire the login and callback routes into each framework's handler style.
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw Kotlin" default>
+
+```kotlin
+import io.hearth.sdk.HearthClient
+
+val client = HearthClient(
+    issuerUrl    = "https://hearth.example.com",
+    clientId     = "<client_id>",
+    clientSecret = "<client_secret>",
+    realmId      = "<realm_id>",
+)
+
+// Login handler — generate PKCE and build the authorization URL
+suspend fun handleLogin(session: YourSessionStore): String {
+    val result = client.beginLogin(
+        redirectUri = "http://localhost:8080/callback",
+        scopes      = "openid profile email",
+    )
+    // Persist state + codeVerifier in your session (one line you own)
+    session["state"]        = result.state
+    session["codeVerifier"] = result.codeVerifier
+    return result.authorizationUrl  // redirect the browser here
+}
+
+// Callback handler — exchange the code for tokens
+suspend fun handleCallback(code: String, returnedState: String, session: YourSessionStore): TokenResponse {
+    check(returnedState == session["state"]) { "state mismatch" }
+    return client.completeLogin(
+        code         = code,
+        codeVerifier = session["codeVerifier"]!!,
+        redirectUri  = "http://localhost:8080/callback",
+    )
+    // tokens.accessToken, tokens.refreshToken, tokens.expiresIn
+}
+```
+
+</TabItem>
+<TabItem value="ktor" label="Ktor">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+import io.hearth.sdk.ktor.hearth
+import io.ktor.server.application.*
+import io.ktor.server.auth.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import io.ktor.server.sessions.*
+
+val client = HearthClient(
+    issuerUrl    = "https://hearth.example.com",
+    clientId     = "<client_id>",
+    clientSecret = "<client_secret>",
+    realmId      = "<realm_id>",
+)
+
+fun Application.configureAuth() {
+    install(Sessions) { cookie<UserSession>("SESSION") }
+
+    install(Authentication) {
+        hearth("hearth") {
+            hearthClient = client
+        }
+    }
+}
+
+fun Application.configureRouting() {
+    routing {
+        get("/login") {
+            val result = client.beginLogin("http://localhost:8080/callback", "openid profile email")
+            call.sessions.set(OAuthState(result.state, result.codeVerifier))
+            call.respondRedirect(result.authorizationUrl)
+        }
+
+        get("/callback") {
+            val state = call.sessions.get<OAuthState>() ?: return@get call.respond(400, "no session")
+            val tokens = client.completeLogin(
+                code         = call.request.queryParameters["code"]!!,
+                codeVerifier = state.codeVerifier,
+                redirectUri  = "http://localhost:8080/callback",
+            )
+            call.respond(mapOf("access_token" to tokens.accessToken))
+        }
+
+        authenticate("hearth") {
+            get("/protected") {
+                val principal = call.principal<HearthPrincipal>()!!
+                call.respond(mapOf("user" to principal.claims.subject()))
+            }
+        }
+    }
+}
+```
+
+See the [Ktor adapter guide](./kotlin-ktor.md) for `HearthPrincipal`, per-route `authenticate` blocks, and permission decorators.
+
+</TabItem>
+<TabItem value="spring" label="Spring Boot">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+import io.hearth.sdk.spring.HearthJwtAuthenticationFilter
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Configuration
+import org.springframework.security.config.annotation.web.builders.HttpSecurity
+import org.springframework.security.web.SecurityFilterChain
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
+import org.springframework.web.bind.annotation.*
+
+@Configuration
+class HearthSecurityConfig(private val hearthFilter: HearthJwtAuthenticationFilter) {
+    @Bean
+    fun securityFilterChain(http: HttpSecurity): SecurityFilterChain {
+        http
+            .csrf { it.disable() }
+            .authorizeHttpRequests { auth ->
+                auth
+                    .requestMatchers("/login", "/callback").permitAll()
+                    .anyRequest().authenticated()
+            }
+            .addFilterBefore(hearthFilter, UsernamePasswordAuthenticationFilter::class.java)
+        return http.build()
+    }
+}
+
+@RestController
+class AuthController(private val client: HearthClient) {
+
+    @GetMapping("/login")
+    fun login(session: HttpSession): ResponseEntity<Void> {
+        val result = runBlocking { client.beginLogin("http://localhost:8080/callback", "openid profile email") }
+        session.setAttribute("state", result.state)
+        session.setAttribute("codeVerifier", result.codeVerifier)
+        return ResponseEntity.status(302).location(URI(result.authorizationUrl)).build()
+    }
+
+    @GetMapping("/callback")
+    suspend fun callback(@RequestParam code: String, @RequestParam state: String, session: HttpSession): Map<String, Any> {
+        check(state == session.getAttribute("state")) { "state mismatch" }
+        val tokens = client.completeLogin(
+            code         = code,
+            codeVerifier = session.getAttribute("codeVerifier") as String,
+            redirectUri  = "http://localhost:8080/callback",
+        )
+        return mapOf("access_token" to tokens.accessToken)
+    }
+}
+
+@RestController
+@RequestMapping("/protected")
+class ProtectedController {
+    @GetMapping
+    fun get(@AuthenticationPrincipal auth: HearthAuthentication): Map<String, Any> {
+        return mapOf("user" to auth.claims.subject())
+    }
+}
+```
+
+See the [Spring Security adapter guide](./kotlin-spring.md) for auto-configuration, `@AuthenticationPrincipal`, and WebFlux support.
+
+</TabItem>
+</Tabs>
+
+All three paths use the same `beginLogin`/`completeLogin` calls; only the handler and session-storage style differ.
+
+## Verify tokens
+
+`verifyToken` performs full Ed25519/EdDSA local signature verification with JWKS caching:
+
+```kotlin
+import io.hearth.sdk.errors.TokenExpiredError
+import io.hearth.sdk.errors.TokenInvalidError
+
+try {
+    val claims = client.verifyToken(accessToken)
+    println("user: ${claims.subject()}")
+    println("roles: ${claims.roles()}")
+} catch (e: TokenExpiredError) {
+    // 401 — ask the client to refresh
+} catch (e: TokenInvalidError) {
+    // 401 — reject the request
+}
+```
+
+JWKS keys are cached by `kid`; a cache miss triggers one re-fetch before
+failing (transparent key rotation). `verifyToken` never falls back to introspection.
+
+## Synchronous RBAC checks
+
+```kotlin
+// Reads embedded JWT claims — no network call
+val isAdmin = client.hasRole(accessToken, "admin")
+val canWrite = claims.hasPermission("documents.write")
+val inEng = claims.inGroup("engineering")
+```
+
+## Live permission refresh
+
+```kotlin
+// Hits GET /v1/me/permissions — reflects role/group changes since token issuance
+val perms = client.mePermissions(accessToken)
+// perms.roles, perms.groups, perms.permissions
+```
+
+## Machine-to-machine (client credentials)
+
+```kotlin
+val tokens = client.clientCredentials(scope = "read:reports")
+// tokens.accessToken, tokens.expiresIn
+```
+
+## Device authorization flow
+
+> **Platform note:** The Kotlin SDK uses `deviceAuthorization()` instead of `startDeviceFlow()`.
+> `pollDeviceToken()` does not accept an interval parameter — manage the sleep loop yourself.
+> See [§2.5 platform exceptions](../../specs/SDK.md#platform-exceptions).
+
+```kotlin
+import io.hearth.sdk.errors.TokenExpiredError
+
+val resp = client.deviceAuthorization(scope = "openid")
+println("Visit: ${resp.verificationUri}")
+println("Code:  ${resp.userCode}")
+
+var intervalMs = resp.interval * 1000L
+var tokens: TokenResponse? = null
+while (tokens == null) {
+    delay(intervalMs)
+    try {
+        tokens = client.pollDeviceToken(resp.deviceCode)
+        // null means authorization_pending or slow_down — increase interval and retry
+        if (tokens == null) intervalMs += 5_000L
+    } catch (e: TokenExpiredError) {
+        error("device code expired before user approved")
+    }
+}
+```
+
+## Magic-link (passwordless)
+
+> **Platform note:** The Kotlin SDK does not yet expose magic-link **initiation**.
+> Use a raw HTTP POST until the method is added. For **completing** the flow once
+> the user clicks the link and is redirected back with a magic token:
+
+```kotlin
+// Complete the flow after the user clicks the link:
+val tokens = client.exchangeMagicLink(magicToken)
+// tokens.accessToken, tokens.expiresIn
+```
+
+## Session-version revocation
+
+The Kotlin SDK includes `SessionVersionCache` — a coroutine-backed delta-feed
+poller that enables sub-second session revocation on the hot path:
+
+```kotlin
+import io.hearth.sdk.SessionVersionCache
+
+val svCache = SessionVersionCache(
+    client    = client,
+    accessToken = serviceToken,
+)
+svCache.start()  // starts background coroutine
+
+// On every request (hot path — no network):
+val isRevoked = !svCache.check(sessionId, sessionVersion)
+```
+
+`check()` is synchronous and uses `ConcurrentHashMap`. The background coroutine
+calls the session-version delta feed every `pollIntervalMs` (default: 30 s)
+and fails closed on staleness.
+
+## Framework middleware
+
+Apply token verification and permission checks using the adapter for your framework. Both adapters handle token extraction and `401`/`403` responses automatically.
+
+<Tabs groupId="framework">
+<TabItem value="ktor" label="Ktor" default>
+
+Install the `hearth-ktor` plugin once; then use `authenticate("hearth")` on any route group. The `HearthPrincipal` carries the verified `Claims` object.
+
+```kotlin
+import io.hearth.sdk.ktor.hearth
+import io.ktor.server.auth.*
+import io.ktor.server.application.*
+import io.ktor.server.routing.*
+
+install(Authentication) {
+    hearth("hearth") {
+        hearthClient   = client
+        expectedMode   = AccessTokenAuthorizationMode.EMBEDDED
+        // requiredPermission = "docs.write"  // enforce globally on this provider
+    }
+}
+
+routing {
+    authenticate("hearth") {
+        get("/docs") {
+            val principal = call.principal<HearthPrincipal>()!!
+            // principal.claims.hasPermission("docs.write")
+            call.respond(mapOf("user" to principal.claims.subject()))
+        }
+    }
+}
+```
+
+See the [Ktor adapter guide](./kotlin-ktor.md) for per-route `requirePermission`, the `hearthClaims` extension, and WebSocket support.
+
+</TabItem>
+<TabItem value="spring" label="Spring Boot">
+
+Register `HearthJwtAuthenticationFilter` as a Spring Security filter. It extracts the Bearer token, calls `verifyToken()`, and sets `HearthAuthentication` on the `SecurityContext`.
+
+```kotlin
+import io.hearth.sdk.spring.HearthJwtAuthenticationFilter
+import org.springframework.context.annotation.Bean
+import org.springframework.context.annotation.Configuration
+import org.springframework.security.config.annotation.web.builders.HttpSecurity
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
+
+@Configuration
+class SecurityConfig(private val hearthFilter: HearthJwtAuthenticationFilter) {
+    @Bean
+    fun securityFilterChain(http: HttpSecurity) = http
+        .csrf { it.disable() }
+        .authorizeHttpRequests { auth ->
+            auth.requestMatchers("/public/**").permitAll()
+                .anyRequest().authenticated()
+        }
+        .addFilterBefore(hearthFilter, UsernamePasswordAuthenticationFilter::class.java)
+        .build()!!
+}
+
+// In a controller, read the verified claims:
+@GetMapping("/docs")
+fun docs(@AuthenticationPrincipal auth: HearthAuthentication): Map<String, Any> {
+    if (!auth.claims.hasPermission("docs.write")) {
+        throw ResponseStatusException(HttpStatus.FORBIDDEN)
+    }
+    return mapOf("user" to auth.claims.subject())
+}
+```
+
+See the [Spring Security adapter guide](./kotlin-spring.md) for auto-configuration, `@HearthPermission` annotation, and WebFlux reactive support.
+
+</TabItem>
+</Tabs>
+
+## Admin API
+
+```kotlin
+import io.hearth.sdk.AdminClient
+
+val admin = AdminClient(
+    baseUrl     = "http://127.0.0.1:8420",
+    realmId     = "<realm_id>",
+    accessToken = adminToken,
+)
+
+val user = admin.createUser(CreateUserRequest(
+    email = "alice@example.com",
+    displayName = "Alice",
+))
+
+val page = admin.listUsers(limit = 50)
+// page.items: List<User>, page.nextCursor: String?
+```
+
+## Error types
+
+| Error | When thrown |
+|-------|-------------|
+| `ConfigurationError` | Missing or invalid config (e.g. blank `issuerUrl`) |
+| `DiscoveryError` | OIDC discovery endpoint unreachable or invalid |
+| `JWKSFetchError` | JWKS endpoint unreachable |
+| `TokenExpiredError` | `exp` claim is in the past |
+| `TokenInvalidError` | Signature invalid, malformed JWT, or algorithm mismatch |
+| `TokenIssuerError` | `iss` does not match configured issuer |
+| `TokenAudienceError` | `aud` does not contain expected audience |
+| `IntrospectionError` | Introspection endpoint error |
+| `RequiredActionError` | Token type is `required_action` — user must complete actions |
+
+## Next steps
+
+- [Ktor adapter](./kotlin-ktor.md) — per-route `authenticate("hearth")` and `HearthPrincipal`
+- [Spring Security adapter](./kotlin-spring.md) — filter and auto-config for Spring Boot 3
+- [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
+- [SDK migration from Keycloak](./migration-from-keycloak.md) — side-by-side code comparisons
+- [Kotlin SDK README](https://github.com/hearth-auth/hearth/blob/main/sdks/kotlin/README.md) — full API surface
