@@ -14,6 +14,14 @@ try:
     _FASTAPI_AVAILABLE = True
 except ImportError:
     _FASTAPI_AVAILABLE = False
+
+# Django adapter — only importable when django is installed.
+# Access via: from hearth.django import HearthDjangoMiddleware, require_permission
+try:
+    from .django import HearthDjangoMiddleware
+    _DJANGO_AVAILABLE = True
+except ImportError:
+    _DJANGO_AVAILABLE = False
 from .errors import (
     HearthError,
     HearthSdkError,

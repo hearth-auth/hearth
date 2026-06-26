@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Python SDK Django middleware adapter (HEA-1600)** — `hearth.django` provides
+  `HearthDjangoMiddleware` for installation via Django's `MIDDLEWARE` setting (new-style
+  `__init__(get_response)` / `__call__(request)` class interface). The middleware extracts the
+  Bearer token from every request and sets `request.hearth_token` for downstream views. A global
+  permission gate can be configured via `HEARTH_PERMISSION`. Also provides `@require_permission`
+  as a per-view decorator supporting all three modes (`embedded`, `introspection`, `decision`).
+  Django is an optional dependency: `pip install hearth-sdk[django]` (HEA-1600).
 - **Node SDK Next.js adapter (HEA-1598)** — `@hearth-auth/node/nextjs` provides
   `withHearthAuth(handler, options)` for Pages Router API routes (attaches `req.hearthToken`) and
   `getHearthToken(req, config)` for App Router Route Handlers (returns `VerifiedToken | null`).
