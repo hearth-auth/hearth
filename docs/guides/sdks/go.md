@@ -247,27 +247,61 @@ if err != nil {
 // perms.Permissions []string
 ```
 
-## HTTP middleware pattern
+## Framework adapters
 
-Use the synchronous helpers to build composable Gin (or `net/http`) middleware:
+The SDK ships dedicated middleware adapters for Gin and Echo that integrate with each framework's native context and error types:
+
+| Framework | Sub-package | Key export |
+|-----------|-------------|------------|
+| [Gin](./go-gin.md) | `hearth/gin` | `hearthgin.HearthMiddleware`, `hearthgin.RequirePermission` |
+| [Echo v4](./go-echo.md) | `hearth/echo` | `hearthecho.HearthMiddleware`, `hearthecho.RequirePermission` |
+
+For `ServeMux`, Gorilla Mux, Chi, or any `http.Handler`-compatible router, use the generic `hearth.RequirePermission` middleware described in the next section.
+
+## net/http middleware {#nethttp-middleware}
+
+Use `hearth.RequirePermission` with standard `http.Handler` middleware chains. The function returns a `func(http.Handler) http.Handler` you can wrap around any handler or pass to a compatible router.
+
+`MiddlewareConfig.ExpectedMode` is required — the middleware never auto-detects the mode from JWT claims:
 
 ```go
-func requirePermission(client *hearth.Client, perm string) gin.HandlerFunc {
-    return func(c *gin.Context) {
-        token := bearerToken(c)
-        if !client.HasPermission(token, perm) {
-            c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-                "error":              "forbidden",
-                "required_permission": perm,
-            })
-            return
-        }
-        c.Next()
-    }
-}
+import (
+    "net/http"
 
-// Usage
-r.GET("/admin", requirePermission(client, "hearth.admin"), handleAdmin)
+    hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+client := hearth.NewClient("https://hearth.example.com", "<realm-id>")
+
+// Embedded mode — decodes JWT locally, no network call
+requireAdmin := hearth.RequirePermission(client, "admin.write", hearth.MiddlewareConfig{
+    ExpectedMode: hearth.ModeEmbedded,
+})
+
+mux := http.NewServeMux()
+mux.Handle("/admin/users", requireAdmin(http.HandlerFunc(handleAdminUsers)))
+http.ListenAndServe(":8080", mux)
+```
+
+`MiddlewareConfig` fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ExpectedMode` | `AccessTokenAuthorizationMode` | **required** | `ModeEmbedded`, `ModeIntrospection`, or `ModeDecision` |
+| `TokenExtractor` | `func(*http.Request) string` | `Authorization: Bearer` header | Custom token source |
+| `OnDenied` | `func(w, r)` | `HTTP 403` | Called on permission failure |
+| `OnUnauthorized` | `func(w, r)` | `HTTP 401` | Called on missing/invalid token |
+| `OnRequiredAction` | `func(w, r, *RequiredActionError)` | falls back to `OnUnauthorized` | Called when token has `token_type: "required_action"` |
+| `ClientID` | `string` | — | Required when `ExpectedMode` is `ModeIntrospection` |
+| `ClientSecret` | `string` | — | Optional client secret for introspection |
+
+Example with introspection mode:
+
+```go
+requireRead := hearth.RequirePermission(client, "docs.read", hearth.MiddlewareConfig{
+    ExpectedMode: hearth.ModeIntrospection,
+    ClientID:     "<resource-server-client-id>",
+})
 ```
 
 ## Error handling
@@ -321,6 +355,8 @@ dev bootstrap flow — all runnable with `go run .`.
 
 ## Next steps
 
+- [Gin adapter](./go-gin.md) — dedicated `hearthgin` middleware for Gin applications
+- [Echo adapter](./go-echo.md) — dedicated `hearthecho` middleware for Echo v4 applications
 - [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
 - [Admin API guide](/docs/admin-api) — managing users and clients programmatically
 - [Go type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/go/README.md) — full type list

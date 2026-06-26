@@ -12,6 +12,8 @@ Add token verification and permission checks to a Node.js server in under 5 minu
 This is the **server-side** SDK. Use it to handle the OAuth callback route, verify incoming Bearer tokens, protect Express/Fastify routes, and call the Admin API.
 
 For **browser or React** — `HearthProvider`, `useHasPermission` hooks, and browser-hosted PKCE — use the [TypeScript SDK](./typescript.md) instead.
+
+For **Next.js** — dedicated adapter with Edge Runtime support, `withHearthAuth` for Pages Router, and `getHearthToken` for App Router — see the [Next.js adapter](./node-nextjs.md).
 :::
 
 ## Install
@@ -294,6 +296,7 @@ try {
 
 ## Next steps
 
+- [Next.js adapter](./node-nextjs.md) — dedicated adapter with Edge Runtime middleware, App Router, and Pages Router support
 - [TypeScript SDK](./typescript.md) — browser PKCE flow, React hooks, and the counterpart to this server SDK
 - [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
 - [Admin API guide](/docs/admin-api) — managing users and clients programmatically

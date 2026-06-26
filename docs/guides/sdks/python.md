@@ -1,12 +1,19 @@
 ---
 title: Python SDK quickstart
 sidebar_label: Python
-description: Verify Hearth tokens and enforce RBAC in a Python service in under 5 minutes. Covers Flask, FastAPI/Starlette, WSGI/ASGI middleware, and the auth code + PKCE callback.
+description: Verify Hearth tokens and enforce RBAC in a Python service in under 5 minutes. Covers Flask, Starlette, WSGI/ASGI middleware, and the auth code + PKCE callback.
 ---
 
 # Python SDK quickstart
 
 Add token verification and permission checks to a Python service in under 5 minutes using `hearth-sdk`.
+
+:::note[Dedicated framework adapters]
+`hearth-sdk` ships dedicated adapters for **FastAPI** and **Django** that integrate with each framework's native conventions. This page covers the generic `hearth.middleware` layer (Flask, Starlette) and the core `HearthClient` API.
+
+- [FastAPI adapter](./python-fastapi.md) — `Depends()` injection, `VerifiedClaims`, `require_permission()` type alias
+- [Django adapter](./python-django.md) — `MIDDLEWARE` list integration, `request.hearth_token`, `@require_permission` decorator
+:::
 
 ## Install
 
@@ -114,35 +121,79 @@ if claims.in_group("engineering"):
 
 ## Middleware
 
-### WSGI (Flask, Django)
+### WSGI — Flask
+
+Use `WsgiPermissionMiddleware` to protect a Flask app. It wraps the WSGI callable, extracts the Bearer token, and enforces a permission before the request reaches your view functions.
 
 ```python
+from flask import Flask
+from hearth import HearthClient
 from hearth.middleware import WsgiPermissionMiddleware
 
-# Flask example — wraps the WSGI app
+client = HearthClient(
+    base_url="https://hearth.example.com",
+    realm_id="<realm-id>",
+)
+
+app = Flask(__name__)
+
+# Wrap the WSGI app — enforces docs.write on every request
 app.wsgi_app = WsgiPermissionMiddleware(
     app.wsgi_app,
     client=client,
     permission="docs.write",
     mode="embedded",
 )
+
+@app.route("/docs", methods=["POST"])
+def create_doc():
+    return {"created": True}
 ```
 
-### ASGI (FastAPI, Starlette)
+To enforce different permissions on different routes, instantiate the middleware per blueprint or create a per-route decorator using `client.verify_token()` directly.
+
+:::note[Django has a dedicated adapter]
+For Django, use [`HearthDjangoMiddleware`](./python-django.md) instead — it reads from Django's `settings.py` and supports the `@require_permission` view decorator.
+:::
+
+### ASGI — Starlette
+
+Use `RequirePermissionMiddleware` to protect a Starlette app. Non-HTTP connections (WebSocket, lifespan) pass through without checks.
 
 ```python
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+from hearth import HearthClient
 from hearth.middleware import RequirePermissionMiddleware
 
-# FastAPI / Starlette example
+client = HearthClient(
+    base_url="https://hearth.example.com",
+    realm_id="<realm-id>",
+)
+
+async def homepage(request):
+    return JSONResponse({"ok": True})
+
+app = Starlette(routes=[Route("/", homepage)])
+
+# Wrap the ASGI app — enforces docs.read on every HTTP request
 app = RequirePermissionMiddleware(
     app,
     client=client,
-    permission="docs.write",
+    permission="docs.read",
     mode="embedded",
 )
 ```
 
-Both middleware types respond `401 Unauthorized` on missing/invalid tokens and `403 Forbidden` on permission failures.
+:::note[FastAPI has a dedicated adapter]
+For FastAPI, use [`HearthFastAPIDep`](./python-fastapi.md) instead — it integrates with `Depends()` injection and types verified claims into FastAPI's OpenAPI schema.
+:::
+
+Both middleware types respond:
+- `401 Unauthorized` — token missing or cryptographically invalid.
+- `401 Unauthorized` (`error="required_action"`) — token has `token_type: "required_action"`.
+- `403 Forbidden` — token valid but lacks the required permission.
 
 ## Permission delivery modes
 
@@ -238,6 +289,8 @@ client.request_magic_link("user@example.com")
 
 ## Next steps
 
+- [FastAPI adapter](./python-fastapi.md) — `Depends()` injection, `VerifiedClaims`, and `require_permission()` type alias
+- [Django adapter](./python-django.md) — `MIDDLEWARE` list integration and `@require_permission` view decorator
 - [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
 - [Admin API guide](/docs/admin-api) — managing users and clients programmatically
 - [Python type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/python/README.md) — full API surface

@@ -200,9 +200,17 @@ let allowed = client.check_permission(
 ).await?;
 ```
 
-## Tower middleware (Axum)
+## Tower middleware (Axum / Tonic) {#tower-middleware-axum}
 
-Enable the `tower-middleware` feature, then apply `RequirePermissionLayer` to any Axum router:
+Enable the `tower-middleware` feature, then apply `RequirePermissionLayer` to any Tower-compatible
+framework (Axum, Tonic, or any service using the `tower` crate):
+
+:::note[Actix-web]
+If you are using **Actix-web**, use the dedicated adapter instead — see
+[Authenticate an Actix-web app with Hearth](./rust-actix.md).
+:::
+
+Enable the feature and apply the layer to an Axum router:
 
 ```toml
 hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", features = ["tower-middleware"] }
@@ -272,8 +280,16 @@ let app = axum::Router::new()
 | `ModeMismatch` | Server echoed a different mode than configured |
 | `AuthorizationFailed` | Decision endpoint error (fail-closed) |
 
+## Per-framework adapters
+
+| Framework | Middleware module | Feature flag | Guide |
+|-----------|------------------|--------------|-------|
+| Axum / Tonic (Tower) | `hearth_sdk::middleware::RequirePermissionLayer` | `tower-middleware` | [above](#tower-middleware-axum) |
+| Actix-web | `hearth_sdk::actix::HearthActixMiddleware` | `actix-middleware` | [Actix-web guide](./rust-actix.md) |
+
 ## Next steps
 
+- [Actix-web guide](./rust-actix.md) — dedicated Actix-web adapter, `RequirePermission` extractor, scope protection
 - [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
 - [Admin API guide](/docs/admin-api) — managing users and clients programmatically
 - [Rust crate reference](https://github.com/hearth-auth/hearth/blob/main/sdks/rust/README.md) — full API surface
