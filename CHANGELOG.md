@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Kotlin SDK Spring Security adapter (HEA-1597)** — new `hearth-spring` Gradle subproject provides
+  `HearthJwtAuthenticationFilter` (extends `OncePerRequestFilter`), `HearthAuthentication` (implements
+  `Authentication`), `HearthSecurityAutoConfiguration` (`@AutoConfiguration`) and
+  `HearthSecurityProperties` (`@ConfigurationProperties("hearth")`). Auto-configures from
+  `hearth.issuer-url` with no `@Import` required. Access verified claims in controllers via
+  `@AuthenticationPrincipal HearthAuthentication auth`. Roles map to `ROLE_<role>` authorities;
+  permissions are granted verbatim for `hasAuthority()` guards.
 - **Go SDK Gin middleware adapter (HEA-1595)** — `hearth/gin` package (`package hearthgin`) provides
   `HearthMiddleware(client, opts...)` that extracts the bearer token and stores it in the Gin context,
   `GetToken(c)` for downstream handlers, and `RequirePermission("perm")` for group-level permission
