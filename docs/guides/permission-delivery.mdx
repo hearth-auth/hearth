@@ -120,6 +120,36 @@ if !allowed {
 ```
 
 </TabItem>
+<TabItem value="node" label="Node">
+
+```typescript
+import { HearthClient } from '@hearth-auth/node';
+
+const client = new HearthClient({ issuer_url: process.env.HEARTH_ISSUER_URL! });
+
+// After verifyToken() — reads embedded JWT claims locally, no network call
+const token = await client.verifyToken(bearerToken);
+if (!token.hasPermission('docs.edit')) {
+  res.status(403).end();
+}
+```
+
+</TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+
+val client = HearthClient(issuerUrl = System.getenv("HEARTH_URL"))
+
+// Reads embedded JWT claims locally — no network call
+val claims = client.verifyToken(accessToken)
+if (!claims.hasPermission("docs.edit")) {
+    throw ResponseStatusException(HttpStatus.FORBIDDEN)
+}
+```
+
+</TabItem>
 </Tabs>
 
 ### `introspection`
@@ -208,6 +238,34 @@ if !result.permissions.contains(&"docs.edit".to_string()) {
 ```
 
 </TabItem>
+<TabItem value="node" label="Node">
+
+```typescript
+import { HearthClient } from '@hearth-auth/node';
+
+const client = new HearthClient({
+  issuer_url:    process.env.HEARTH_ISSUER_URL!,
+  client_id:     '<resource-server-client-id>',
+  client_secret: '<secret>',
+});
+
+const result = await client.introspect(rawBearerToken);
+if (!result.active) { res.status(401).end(); return; }
+if (!result.permissions?.includes('docs.edit')) { res.status(403).end(); return; }
+```
+
+</TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+
+val result = client.introspect(accessToken, clientSecret = System.getenv("HEARTH_CLIENT_SECRET"))
+if (!result.active) throw ResponseStatusException(HttpStatus.UNAUTHORIZED)
+if (!result.permissions.contains("docs.edit")) throw ResponseStatusException(HttpStatus.FORBIDDEN)
+```
+
+</TabItem>
 </Tabs>
 
 Hearth includes RBAC claims in introspection responses **only** when the requesting client has `access_token_authorization: introspection` configured. See [Configuring the mode](#configuring-the-mode).
@@ -281,6 +339,30 @@ let allowed = client.check_permission(
 if !allowed {
     return StatusCode::FORBIDDEN.into_response();
 }
+```
+
+</TabItem>
+<TabItem value="node" label="Node">
+
+```typescript
+import { hearthMiddleware } from '@hearth-auth/node';
+
+app.get('/docs', hearthMiddleware({
+  issuer_url:         process.env.HEARTH_ISSUER_URL!,
+  expectedMode:       'decision',
+  requiredPermission: 'docs.edit',
+}), handler);
+```
+
+</TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+import io.hearth.sdk.AccessTokenAuthorization
+
+val result = client.checkPermission(accessToken, "docs.edit", AccessTokenAuthorization.Decision)
+if (!result.allowed) throw ResponseStatusException(HttpStatus.FORBIDDEN)
 ```
 
 </TabItem>

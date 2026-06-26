@@ -237,6 +237,26 @@ if !allowed {
 ```
 
 </TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+
+val client = HearthClient(
+    issuerUrl = System.getenv("HEARTH_URL"),
+    clientId  = System.getenv("HEARTH_CLIENT_ID"),
+)
+
+// Reads embedded JWT claims locally — no network call
+val claims = client.verifyToken(accessToken)
+if (!claims.hasPermission("docs.edit")) {
+    throw ResponseStatusException(HttpStatus.FORBIDDEN, "Forbidden")
+}
+```
+
+For Ktor, use `call.principal<HearthPrincipal>()!!.claims.hasPermission("docs.edit")` inside an `authenticate("api")` block. For Spring Boot, annotate the handler with `@PreAuthorize("hasAuthority('docs.edit')")` — see the [Kotlin SDK guide](/docs/sdks/kotlin) for setup.
+
+</TabItem>
 </Tabs>
 
 All checks above read from the `permissions` array embedded in the JWT at issuance time — no network call is needed. If you need permissions that reflect role changes made after the token was issued, use the live permission check below.
