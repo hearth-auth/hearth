@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Go SDK Gin middleware adapter (HEA-1595)** — `hearth/gin` package (`package hearthgin`) provides
+  `HearthMiddleware(client, opts...)` that extracts the bearer token and stores it in the Gin context,
+  `GetToken(c)` for downstream handlers, and `RequirePermission("perm")` for group-level permission
+  guards via `router.Use()`. Supports `WithTokenExtractor` and `WithOnUnauthorized` customisation hooks.
+  Install: `go get github.com/hearth-auth/hearth/sdks/go/hearth/gin`.
 - **Python SDK FastAPI adapter (HEA-1596)** — `hearth.fastapi` module provides `HearthFastAPIDep`
   (a `Depends()`-compatible callable that verifies a Bearer JWT and returns `VerifiedClaims`),
   `require_permission("docs.write", dep=auth)` shorthand returning `Annotated[VerifiedClaims, Depends(...)]`
