@@ -336,6 +336,40 @@ let app = Router::new().route("/hearth-events", post(hearth_events));
 ```
 
 </TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+```kotlin
+import jakarta.crypto.Mac
+import jakarta.crypto.spec.SecretKeySpec
+import org.springframework.web.bind.annotation.PostMapping
+import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.RequestHeader
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+class WebhookController {
+
+    private val secret = System.getenv("WEBHOOK_SECRET").toByteArray()
+
+    @PostMapping("/hearth-events")
+    fun hearthEvents(
+        @RequestHeader("X-Hearth-Signature-256") signature: String,
+        @RequestBody body: ByteArray,
+    ) {
+        val mac = Mac.getInstance("HmacSHA256").apply {
+            init(SecretKeySpec(secret, "HmacSHA256"))
+        }
+        val expected = "sha256=" + mac.doFinal(body).joinToString("") { "%02x".format(it) }
+        // Constant-time comparison to prevent timing attacks
+        if (!expected.equals(signature, ignoreCase = false)) {
+            throw ResponseStatusException(HttpStatus.UNAUTHORIZED)
+        }
+        // Process event (parse body as JSON)
+    }
+}
+```
+
+</TabItem>
 </Tabs>
 
 ---

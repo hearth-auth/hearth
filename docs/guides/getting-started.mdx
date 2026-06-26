@@ -109,6 +109,112 @@ await auth.handleCallback(p.get('code')!, p.get('state')!);
 ```
 
 </TabItem>
+<TabItem value="node" label="Node">
+
+```bash
+npm install @hearth-auth/node
+```
+
+The Node SDK ships stateless `beginLogin` / `completeLogin` helpers. Choose the framework tab that matches your stack.
+
+<Tabs groupId="framework">
+<TabItem value="express" label="Express" default>
+
+**Login route** — generate PKCE and redirect to Hearth:
+
+```ts
+import { HearthClient } from '@hearth-auth/node';
+import { Router } from 'express';
+
+const client = new HearthClient({
+  issuer_url: 'http://localhost:8420',
+  realm_id:   '<realm-id>',
+  client_id:  '<client-id>',
+});
+
+const router = Router();
+
+router.get('/login', async (req, res) => {
+  const result = await client.beginLogin('http://localhost:3000/callback', 'openid');
+  // Store PKCE values server-side — never expose codeVerifier to the browser
+  req.session.oauthState   = result.state;
+  req.session.codeVerifier = result.codeVerifier;
+  res.redirect(result.authorizationUrl);
+});
+```
+
+**Callback route** — exchange the code for tokens:
+
+```ts
+router.get('/callback', async (req, res) => {
+  const tokens = await client.completeLogin(
+    req.query.code as string,
+    req.session.codeVerifier,
+    'http://localhost:3000/callback',
+  );
+  req.session.accessToken = tokens.accessToken;
+  res.redirect('/dashboard');
+});
+```
+
+See the [Node SDK guide](/docs/sdks/node) for Fastify and session-storage patterns.
+
+</TabItem>
+<TabItem value="nextjs" label="Next.js">
+
+**Login route handler** (`app/auth/login/route.ts`):
+
+```ts
+import { HearthClient } from '@hearth-auth/node';
+import { redirect } from 'next/navigation';
+import { cookies } from 'next/headers';
+
+const client = new HearthClient({
+  issuer_url: process.env.HEARTH_URL!,
+  realm_id:   process.env.HEARTH_REALM_ID!,
+  client_id:  process.env.HEARTH_CLIENT_ID!,
+});
+
+export async function GET() {
+  const result = await client.beginLogin(
+    `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`,
+    'openid',
+  );
+  const jar = await cookies();
+  jar.set('oauth_state',   result.state,        { httpOnly: true, sameSite: 'lax' });
+  jar.set('code_verifier', result.codeVerifier, { httpOnly: true, sameSite: 'lax' });
+  redirect(result.authorizationUrl);
+}
+```
+
+**Callback route handler** (`app/auth/callback/route.ts`):
+
+```ts
+import { NextRequest } from 'next/server';
+import { redirect } from 'next/navigation';
+import { cookies } from 'next/headers';
+
+export async function GET(request: NextRequest) {
+  const code = request.nextUrl.searchParams.get('code')!;
+  const jar  = await cookies();
+  const tokens = await client.completeLogin(
+    code,
+    jar.get('code_verifier')!.value,
+    `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`,
+  );
+  jar.set('access_token', tokens.accessToken, { httpOnly: true, sameSite: 'lax' });
+  jar.delete('oauth_state');
+  jar.delete('code_verifier');
+  redirect('/dashboard');
+}
+```
+
+See the [Next.js adapter guide](/docs/sdks/node-nextjs) for Pages Router and Edge Middleware patterns.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
 <TabItem value="go" label="Go">
 
 ```bash
@@ -761,6 +867,35 @@ def require_permission(permission: str):
 ```
 
 </TabItem>
+<TabItem value="flask" label="Flask">
+
+```python
+from functools import wraps
+from flask import request, abort, g
+from hearth import HearthClient
+
+client = HearthClient(base_url=os.environ['HEARTH_BASE_URL'], realm_id=os.environ['HEARTH_REALM_ID'])
+
+def require_permission(permission: str):
+    def decorator(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            token = request.headers.get('Authorization', '').removeprefix('Bearer ')
+            claims = client.verify_token(token)
+            if not claims.has_permission(permission):
+                abort(403)
+            g.hearth_claims = claims
+            return f(*args, **kwargs)
+        return wrapped
+    return decorator
+
+@app.route('/admin/data')
+@require_permission('hearth.admin')
+def admin_data():
+    return {'sub': g.hearth_claims.sub}
+```
+
+</TabItem>
 <TabItem value="fastapi" label="FastAPI">
 
 ```python
@@ -888,6 +1023,91 @@ web::scope("/admin")
 ```
 
 See the [Actix-web adapter guide](/docs/sdks/rust-actix) for `RequirePermission` extractor and permission delivery modes.
+
+</TabItem>
+<TabItem value="axum" label="Axum">
+
+```rust
+use hearth_sdk::{HearthClient, AccessTokenAuthorization};
+use hearth_sdk::tower::RequirePermissionLayer;
+use axum::{routing::get, Router};
+
+let client = HearthClient::new("https://hearth.example.com", "<realm-id>");
+
+let app = Router::new()
+    .route("/admin/data", get(handler))
+    .layer(RequirePermissionLayer::new(
+        client,
+        "hearth.admin",
+        AccessTokenAuthorization::Embedded,
+    ));
+```
+
+See the [Rust SDK guide](/docs/sdks/rust) for Tower middleware and Axum extractor patterns.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+<Tabs groupId="framework">
+<TabItem value="ktor" label="Ktor" default>
+
+```kotlin
+import io.hearth.sdk.ktor.HearthAuth
+import io.hearth.sdk.ktor.HearthPrincipal
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.*
+import io.ktor.server.auth.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+
+install(Authentication) {
+    hearth("api") {
+        issuerUrl = System.getenv("HEARTH_URL")
+        clientId  = System.getenv("HEARTH_CLIENT_ID")
+    }
+}
+
+routing {
+    authenticate("api") {
+        get("/admin/data") {
+            val principal = call.principal<HearthPrincipal>()!!
+            if (!principal.claims.hasPermission("hearth.admin")) {
+                call.respond(HttpStatusCode.Forbidden); return@get
+            }
+            call.respond(mapOf("sub" to principal.claims.subject()))
+        }
+    }
+}
+```
+
+See the [Ktor adapter guide](/docs/sdks/kotlin-ktor) for route-level authentication and principal access.
+
+</TabItem>
+<TabItem value="spring" label="Spring Boot">
+
+```kotlin
+import io.hearth.sdk.spring.HearthAuthentication
+import org.springframework.security.access.prepost.PreAuthorize
+import org.springframework.security.core.annotation.AuthenticationPrincipal
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+@RequestMapping("/admin")
+class AdminController {
+
+    @GetMapping("/data")
+    @PreAuthorize("hasAuthority('hearth.admin')")
+    fun data(@AuthenticationPrincipal auth: HearthAuthentication): Map<String, Any> =
+        mapOf("sub" to auth.claims.subject())
+}
+```
+
+See the [Spring Boot adapter guide](/docs/sdks/kotlin-spring) for auto-configuration and `HearthSecurityProperties`.
 
 </TabItem>
 </Tabs>
