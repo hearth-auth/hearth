@@ -27,7 +27,7 @@ import org.springframework.web.filter.OncePerRequestFilter
  *         .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
  *         .addFilterBefore(filter, UsernamePasswordAuthenticationFilter::class.java)
  *         .authorizeHttpRequests { auth ->
- *             auth.requestMatchers("/public/*").permitAll()
+ *             auth.requestMatchers("/health", "/public").permitAll()
  *             auth.anyRequest().authenticated()
  *         }
  *     return http.build()
