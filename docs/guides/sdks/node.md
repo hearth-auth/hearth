@@ -9,9 +9,9 @@ description: Verify Hearth tokens and enforce RBAC in a Node.js server in under 
 Add token verification and permission checks to a Node.js server in under 5 minutes using `@hearth-auth/node`.
 
 :::note[Node.js vs TypeScript SDK]
-This is the **server-side** SDK. Use it to verify incoming Bearer tokens, protect Express/Fastify routes, and call the Admin API.
+This is the **server-side** SDK. Use it to handle the OAuth callback route, verify incoming Bearer tokens, protect Express/Fastify routes, and call the Admin API.
 
-If you need a **browser or React** integration — PKCE authorization-code flow, `HearthProvider`, or `useHasPermission` hooks — use the [TypeScript SDK](./typescript.md) instead.
+For **browser or React** — `HearthProvider`, `useHasPermission` hooks, and browser-hosted PKCE — use the [TypeScript SDK](./typescript.md) instead.
 :::
 
 ## Install
@@ -29,9 +29,48 @@ Ships `jose` as a direct dependency — no peer deps required.
 
 ## Auth code flow with PKCE
 
-The Node.js SDK is a **resource-server** library — it verifies tokens issued by the browser-side PKCE flow. It does not initiate the authorization redirect.
+For Node.js servers that handle the OAuth callback (Express, Fastify, Next.js API routes), use `beginLogin` / `completeLogin`:
 
-The authorization-code + PKCE flow lives in the browser client (TypeScript SDK or any OIDC library). Your Node.js server receives the resulting access token in the `Authorization: Bearer` header and calls `verifyToken`:
+```typescript
+import { HearthClient } from "@hearth-auth/node";
+
+const client = new HearthClient({
+  issuer_url:    "https://hearth.example.com",
+  client_id:     process.env.HEARTH_CLIENT_ID,
+  client_secret: process.env.HEARTH_CLIENT_SECRET,
+});
+
+// Login route — generate PKCE and build the authorization URL
+app.get("/login", async (req, res) => {
+  const { authorizationUrl, state, codeVerifier } = await client.beginLogin(
+    "https://myapp.example.com/callback",
+    "openid profile email",
+  );
+  // Persist state + codeVerifier in your session (one line you own)
+  req.session.oauthState   = state;
+  req.session.codeVerifier = codeVerifier;
+  res.redirect(authorizationUrl);
+});
+
+// Callback route — exchange the code for tokens
+app.get("/callback", async (req, res) => {
+  if (req.query.state !== req.session.oauthState) {
+    return res.status(400).send("state mismatch");
+  }
+  const tokens = await client.completeLogin(
+    req.query.code as string,
+    req.session.codeVerifier,
+    "https://myapp.example.com/callback",
+  );
+  // tokens.access_token, tokens.refresh_token, tokens.expires_in
+});
+```
+
+:::tip[PKCE in the browser?]
+If your PKCE flow runs in the browser (React SPA, Next.js client components), use the [TypeScript SDK](./typescript.md) `startLogin()` instead. Your Node.js server then only needs `verifyToken()` on incoming Bearer tokens.
+:::
+
+## Verify tokens
 
 ```typescript
 import { HearthClient, TokenExpiredError, TokenInvalidError } from "@hearth-auth/node";

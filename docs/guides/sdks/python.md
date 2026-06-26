@@ -27,58 +27,41 @@ curl -X POST http://127.0.0.1:8420/admin/bootstrap
 
 ## Auth code flow with PKCE
 
-Python apps typically run the PKCE callback server-side. The browser redirects to your Python server with `?code=…`; your server exchanges the code for tokens.
-
-### Step 1 — Redirect the browser
-
-Build the authorization URL and redirect the user:
-
-```python
-import secrets, urllib.parse
-from hearth.pkce import generate_pkce_pair
-
-HEARTH_URL = "https://hearth.example.com"
-REALM_ID   = "<realm_id>"
-CLIENT_ID  = "<client_id>"
-
-# PKCE pair — verifier + S256 challenge in one call (RFC 7636)
-pkce  = generate_pkce_pair()
-state = secrets.token_hex(16)  # CSRF token
-
-params = {
-    "response_type":          "code",
-    "client_id":              CLIENT_ID,
-    "redirect_uri":           "https://myapp.example.com/callback",
-    "scope":                  "openid profile email",
-    "state":                  state,
-    "code_challenge":         pkce.code_challenge,
-    "code_challenge_method":  "S256",
-}
-auth_url = f"{HEARTH_URL}/realms/{REALM_ID}/authorize?" + urllib.parse.urlencode(params)
-# store pkce.code_verifier + state in session, then redirect to auth_url
-```
-
-### Step 2 — Exchange the code
-
-In your callback handler:
+Use `begin_login` / `complete_login` to handle the OAuth callback in two calls:
 
 ```python
 from hearth import HearthClient
 
 client = HearthClient(
-    issuer_url="https://hearth.example.com",
-    client_id=CLIENT_ID,
+    base_url="https://hearth.example.com",
+    realm_id="<realm_id>",
+    client_id="<client_id>",
+    client_secret="<client_secret>",
 )
 
-# verify request.args["state"] == session["state"] first
-tokens = client.exchange_code(
-    code=request.args["code"],
-    client_id=CLIENT_ID,
-    client_secret="",  # public client — no secret
-    redirect_uri="https://myapp.example.com/callback",
-    code_verifier=session["pkce_verifier"],
-)
-# tokens.access_token, tokens.refresh_token, tokens.expires_in
+# Login route — generate PKCE and build the authorization URL
+@app.route("/login")
+def login():
+    result = client.begin_login(
+        redirect_uri="https://myapp.example.com/callback",
+        scopes="openid profile email",
+    )
+    # Persist state + code_verifier in your session (one line you own)
+    session["oauth_state"]   = result.state
+    session["code_verifier"] = result.code_verifier
+    return redirect(result.authorization_url)
+
+# Callback route — exchange the code for tokens
+@app.route("/callback")
+def callback():
+    if request.args["state"] != session["oauth_state"]:
+        abort(400, "state mismatch")
+    tokens = client.complete_login(
+        code=request.args["code"],
+        code_verifier=session["code_verifier"],
+        redirect_uri="https://myapp.example.com/callback",
+    )
+    # tokens.access_token, tokens.refresh_token, tokens.expires_in
 ```
 
 ## Initialize the client

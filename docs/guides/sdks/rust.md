@@ -42,34 +42,43 @@ All endpoint URLs are auto-discovered from `{issuer_url}/.well-known/openid-conf
 
 ## Auth code flow with PKCE
 
-The Rust SDK handles both the OAuth client-side (initiating authorization) and server-side (verifying incoming tokens). For a backend service that receives tokens from a browser, jump straight to [Verify tokens](#verify-tokens).
-
-For a Rust CLI or desktop app that initiates the PKCE flow:
+Use `begin_login` / `complete_login` to handle the OAuth callback in two calls:
 
 ```rust
-use hearth_sdk::{HearthClientBuilder, pkce::generate_pkce_pair};
+use hearth_sdk::HearthClientBuilder;
 
 let client = HearthClientBuilder::new("https://hearth.example.com")
     .client_id("my-app")
+    .client_secret("s3cr3t")
     .build();
 
-let pkce = generate_pkce_pair();
+// Login handler — generate PKCE and build the authorization URL
+async fn handle_login(client: &HearthClient, session: &mut Session) -> Result<String, HearthError> {
+    let result = client.begin_login("http://localhost:8080/callback", None).await?;
+    // Persist state + code_verifier in your session (one line you own)
+    session.insert("state", &result.state);
+    session.insert("code_verifier", &result.code_verifier);
+    Ok(result.authorization_url)  // redirect the browser here
+}
 
-// 1. Build the authorization URL (get authorization_endpoint from discovery)
-let discovery = client.discovery().await?;
-// ... build URL with pkce.challenge and redirect user ...
-
-// 2. Exchange the code for tokens (on callback)
-let tokens = client.exchange_code(hearth_sdk::TokenRequest {
-    client_id:     "my-app".into(),
-    code:          callback_code,
-    redirect_uri:  "http://localhost:8080/callback".into(),
-    code_verifier: Some(pkce.verifier),
-}).await?;
-
-// 3. Refresh before expiry
-let refreshed = client.refresh_tokens("my-app", &tokens.refresh_token.unwrap()).await?;
+// Callback handler — exchange the code for tokens
+async fn handle_callback(
+    client: &HearthClient,
+    code: &str,
+    returned_state: &str,
+    session: &Session,
+) -> Result<TokenResponse, HearthError> {
+    assert_eq!(returned_state, session.get("state"), "state mismatch");
+    client.complete_login(
+        code,
+        session.get("code_verifier"),
+        "http://localhost:8080/callback",
+    ).await
+    // tokens.access_token, tokens.refresh_token, tokens.expires_in
+}
 ```
+
+For pure resource servers that only verify tokens from a browser SPA, skip to [Verify tokens](#verify-tokens).
 
 ## Verify tokens
 

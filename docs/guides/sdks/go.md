@@ -38,61 +38,52 @@ requests.
 
 ## Auth code flow with PKCE
 
-Hearth implements standard OIDC authorization code flow with mandatory PKCE.
-Generate a verifier and challenge, then exchange the authorization code for
-tokens:
+Use `BeginLogin` / `CompleteLogin` to handle the OAuth callback in two calls:
 
 ```go
-package main
-
 import (
     "context"
     "fmt"
+    "net/http"
 
     "github.com/hearth-auth/hearth/sdks/go/hearth"
 )
 
-func main() {
+client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
+    hearth.WithClientCredentials("<client_id>", "<client_secret>"),
+)
+
+// Login handler — generate PKCE and build the authorization URL
+func loginHandler(w http.ResponseWriter, r *http.Request) {
     ctx := context.Background()
-    client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>")
-
-    // 1. Generate PKCE pair — verifier + S256 challenge, no manual crypto needed
-    pkce, err := hearth.GeneratePKCE()
+    result, err := client.BeginLogin(ctx, "http://localhost:8080/callback", "openid profile email")
     if err != nil {
-        panic(err)
+        http.Error(w, err.Error(), 500)
+        return
     }
+    // Persist result.State and result.CodeVerifier in your session (one line you own)
+    setSession(r, "state", result.State)
+    setSession(r, "code_verifier", result.CodeVerifier)
+    http.Redirect(w, r, result.AuthorizationURL, http.StatusFound)
+}
 
-    // 2. Start authorization — pass the PKCE challenge
-    authResp, err := client.Authorize(ctx, hearth.AuthorizeRequest{
-        ClientID:            "<client_id>",
-        RedirectURI:         "http://localhost:8080/callback",
-        Scope:               "openid profile email",
-        State:               "random-csrf-token",
-        UserID:              "<user_uuid>", // authenticated user on your backend
-        CodeChallenge:       pkce.Challenge,
-        CodeChallengeMethod: pkce.Method,
-    })
+// Callback handler — exchange the code for tokens
+func callbackHandler(w http.ResponseWriter, r *http.Request) {
+    ctx := context.Background()
+    if r.URL.Query().Get("state") != getSession(r, "state") {
+        http.Error(w, "state mismatch", 400)
+        return
+    }
+    tokens, err := client.CompleteLogin(ctx,
+        r.URL.Query().Get("code"),
+        getSession(r, "code_verifier"),
+        "http://localhost:8080/callback",
+    )
     if err != nil {
-        panic(err)
+        http.Error(w, err.Error(), 500)
+        return
     }
-
-    // 3. Exchange the code for tokens — pass the matching PKCE verifier
-    tokens, err := client.ExchangeCode(ctx, hearth.TokenRequest{
-        ClientID:     "<client_id>",
-        Code:         authResp.Code,
-        RedirectURI:  "http://localhost:8080/callback",
-        CodeVerifier: pkce.Verifier,
-    })
-    if err != nil {
-        panic(err)
-    }
-
-    fmt.Println("access_token:", tokens.AccessToken)
-    fmt.Println("expires_in:  ", tokens.ExpiresIn)
-
-    // 4. Refresh before expiry
-    refreshed, err := client.RefreshTokens(ctx, "<client_id>", tokens.RefreshToken)
-    _ = refreshed
+    fmt.Fprintln(w, "access_token:", tokens.AccessToken)
 }
 ```
 

@@ -58,33 +58,40 @@ on first use. `HearthClient` is coroutine-safe and designed to be created once a
 
 ## Auth code flow with PKCE
 
+Use `beginLogin` / `completeLogin` to handle the OAuth callback in two calls:
+
 ```kotlin
-import io.hearth.sdk.Pkce
 import io.hearth.sdk.HearthClient
 
-val pkce = Pkce.generate()  // PkceResult with verifier + challenge
-
-// 1. Build authorization URL
-val discovery = client.discover()
-val authUrl = buildString {
-    append(discovery["authorization_endpoint"]!!.jsonPrimitive.content)
-    append("?response_type=code")
-    append("&client_id=<client_id>")
-    append("&redirect_uri=http://localhost:8080/callback")
-    append("&scope=openid%20profile%20email")
-    append("&code_challenge=${pkce.challenge}")
-    append("&code_challenge_method=S256")
-}
-// Redirect the user to authUrl
-
-// 2. Exchange code for tokens (in your callback handler)
-val tokens = client.exchangeCode(
+val client = HearthClient(
+    issuerUrl    = "https://hearth.example.com",
     clientId     = "<client_id>",
-    code         = callbackCode,
-    redirectUri  = "http://localhost:8080/callback",
-    codeVerifier = pkce.verifier,
+    clientSecret = "<client_secret>",
+    realmId      = "<realm_id>",
 )
-// tokens.accessToken, tokens.refreshToken, tokens.expiresIn
+
+// Login handler — generate PKCE and build the authorization URL
+suspend fun handleLogin(session: YourSessionStore): String {
+    val result = client.beginLogin(
+        redirectUri = "http://localhost:8080/callback",
+        scopes      = "openid profile email",
+    )
+    // Persist state + codeVerifier in your session (one line you own)
+    session["state"]        = result.state
+    session["codeVerifier"] = result.codeVerifier
+    return result.authorizationUrl  // redirect the browser here
+}
+
+// Callback handler — exchange the code for tokens
+suspend fun handleCallback(code: String, returnedState: String, session: YourSessionStore): TokenResponse {
+    check(returnedState == session["state"]) { "state mismatch" }
+    return client.completeLogin(
+        code         = code,
+        codeVerifier = session["codeVerifier"]!!,
+        redirectUri  = "http://localhost:8080/callback",
+    )
+    // tokens.accessToken, tokens.refreshToken, tokens.expiresIn
+}
 ```
 
 ## Verify tokens

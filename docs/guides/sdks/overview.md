@@ -40,7 +40,8 @@ All SDKs expose the same surface (method names vary by language convention). See
 
 | Pattern | TypeScript | Node.js | Go | Python | Rust | PHP | Kotlin |
 |---------|-----------|---------|-----|--------|------|-----|--------|
-| Auth code + PKCE | `startLogin()` | — (resource-server) | `client.ExchangeCode()` | `client.exchange_code()` | `client.exchange_code().await` | `$client->exchangeCode()` | `client.exchangeCode()` |
+| Auth code + PKCE — begin | `startLogin()` | `client.beginLogin()` | `client.BeginLogin()` | `client.begin_login()` | `client.begin_login().await` | `$client->beginLogin()` | `client.beginLogin()` |
+| Auth code + PKCE — complete | — (browser flow) | `client.completeLogin()` | `client.CompleteLogin()` | `client.complete_login()` | `client.complete_login().await` | `$client->completeLogin()` | `client.completeLogin()` |
 | Verify token (EdDSA) | `client.verifyToken()` | `client.verifyToken()` | `client.VerifyToken()` | `client.verify_token()` | `client.verify_token().await` | `$client->verifyToken()` | `client.verifyToken()` |
 | M2M (client credentials) | `client.clientCredentials()` | `client.clientCredentials()` | `client.ClientCredentials()` | `client.client_credentials()` | `client.client_credentials().await` | `$client->clientCredentials()` | `client.clientCredentials()` |
 | Device flow — start | `client.startDeviceFlow()` | `client.startDeviceFlow()` | `client.StartDeviceFlow()` | `client.start_device_flow()` | `client.start_device_flow().await` | `$client->startDeviceFlow()` | `client.deviceAuthorization()` ⚠ |
