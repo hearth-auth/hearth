@@ -264,8 +264,58 @@ val page = admin.listUsers(limit = 50)
 | Client roles | Included in `roles` claim; use `hasRole()` |
 | Groups | `claims.inGroup("engineering")` — reads `groups` claim |
 
+## Permission-checking middleware
+
+For frameworks without a dedicated adapter, use `requirePermission()` from `hearth-core` to build
+a reusable, mode-aware permission gate. The function returns a `PermissionChecker` — a single-method
+interface you call with a bearer token string:
+
+```kotlin
+import io.hearth.sdk.AccessTokenAuthorizationMode
+import io.hearth.sdk.RequirePermissionOptions
+import io.hearth.sdk.requirePermission
+
+val docsReadChecker = requirePermission(
+    "docs.read",
+    RequirePermissionOptions(
+        mode   = AccessTokenAuthorizationMode.EMBEDDED,
+        client = client,
+    ),
+)
+
+// In any suspend context — Ktor handler, WebFlux HandlerFilterFunction, etc.
+val token = request.headers["Authorization"]?.removePrefix("Bearer ") ?: ""
+if (!docsReadChecker.check(token)) {
+    // respond 403 Forbidden
+}
+```
+
+Behavior by mode:
+
+| Mode | `AccessTokenAuthorizationMode` | How it works |
+|------|-------------------------------|--------------|
+| Embedded (default) | `EMBEDDED` | Decodes `permissions[]` claim locally. Zero network calls. Returns `false` when the claim is absent — never auto-falls-back to a network call. |
+| Decision | `DECISION` | Calls `POST /oauth/authorize`. Fail-closed: network errors return `false`. |
+| Introspection | `INTROSPECTION` | Calls `POST /realms/{id}/introspect` (RFC 7662). Validates the echoed `mode` field; throws `AuthorizationModeMismatchError` on mismatch. |
+
+`PermissionChecker` is a `fun interface` — create one per permission, share it as a singleton, and
+call `.check(token)` on the hot path. For Ktor and Spring Boot, prefer the dedicated adapters below
+which handle token extraction and 401/403 responses automatically.
+
+## Framework adapters
+
+| Framework | Module | What it provides |
+|-----------|--------|-----------------|
+| Ktor | `hearth-ktor` | `hearth { }` DSL, `HearthPrincipal`, `authenticate` block integration |
+| Spring Boot (Servlet) | `hearth-spring` | `HearthJwtAuthenticationFilter`, `HearthAuthentication`, Spring Boot auto-configuration |
+
+- [Ktor adapter](./kotlin-ktor.md) — per-route `authenticate("hearth")` and `HearthPrincipal`
+- [Spring Security adapter](./kotlin-spring.md) — `HearthJwtAuthenticationFilter` and `@AuthenticationPrincipal`
+
 ## Next steps
 
+- [Ktor adapter](./kotlin-ktor.md) — `hearth {}` plugin and `HearthPrincipal` for Ktor
+- [Spring Security adapter](./kotlin-spring.md) — filter and auto-config for Spring Boot 3
 - [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
 - [SDK migration from Keycloak](./migration-from-keycloak.md) — side-by-side code comparisons
-- [Kotlin type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/kotlin/README.md) — full API surface
+- [Kotlin SDK README](https://github.com/hearth-auth/hearth/blob/main/sdks/kotlin/README.md) — full API surface

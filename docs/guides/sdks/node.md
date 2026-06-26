@@ -12,6 +12,8 @@ Add token verification and permission checks to a Node.js server in under 5 minu
 This is the **server-side** SDK. Use it to handle the OAuth callback route, verify incoming Bearer tokens, protect Express/Fastify routes, and call the Admin API.
 
 For **browser or React** — `HearthProvider`, `useHasPermission` hooks, and browser-hosted PKCE — use the [TypeScript SDK](./typescript.md) instead.
+
+For **Next.js** — dedicated adapter with Edge Runtime support, `withHearthAuth` for Pages Router, and `getHearthToken` for App Router — see the [Next.js adapter](./node-nextjs.md).
 :::
 
 ## Install
@@ -68,6 +70,12 @@ app.get("/callback", async (req, res) => {
 
 :::tip[PKCE in the browser?]
 If your PKCE flow runs in the browser (React SPA, Next.js client components), use the [TypeScript SDK](./typescript.md) `startLogin()` instead. Your Node.js server then only needs `verifyToken()` on incoming Bearer tokens.
+:::
+
+:::tip[Where should the access token live?]
+If your frontend is a browser SPA, consider the **Backend for Frontend (BFF)** pattern: your Node.js server completes the OAuth callback, stores the access and refresh tokens server-side, and issues the browser an `HttpOnly; Secure; SameSite=Strict` session cookie. The browser never sees a token at all.
+
+This is the most XSS-resistant architecture for SPAs. See [Browser SPA Token Handling](../browser-spa-tokens.md) for a full comparison of storage options and the BFF flow diagram.
 :::
 
 ## Verify tokens
@@ -288,6 +296,7 @@ try {
 
 ## Next steps
 
+- [Next.js adapter](./node-nextjs.md) — dedicated adapter with Edge Runtime middleware, App Router, and Pages Router support
 - [TypeScript SDK](./typescript.md) — browser PKCE flow, React hooks, and the counterpart to this server SDK
 - [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
 - [Admin API guide](/docs/admin-api) — managing users and clients programmatically

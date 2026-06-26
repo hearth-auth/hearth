@@ -144,16 +144,26 @@ zero-network** — they decode the JWT in memory.
 ```tsx
 import {
   createHearth,
+  createHearthAuth,
+  HearthApiClient,
   HearthProvider,
   useHasPermission,
   useHasRole,
   useInGroup,
 } from "@hearth-auth/sdk";
 
+// Initialize once at app startup — handles PKCE, in-memory token storage, and silent refresh.
+// Never store access tokens in localStorage or sessionStorage — see /docs/guides/browser-spa-tokens
+const apiClient = new HearthApiClient({ baseUrl: "http://127.0.0.1:8420", realmId: "<realm_id>" });
+const auth = createHearthAuth(apiClient, {
+  clientId:    "<client_id>",
+  redirectUri: "http://localhost:3000/callback",
+});
+
 const hearth = createHearth({
   baseUrl: "http://127.0.0.1:8420",
   realmId: "<realm_id>",
-  getToken: () => localStorage.getItem("access_token"),
+  getToken: () => auth.getAccessToken(), // in-memory — never localStorage or sessionStorage
 });
 
 function App() {
@@ -182,12 +192,18 @@ function NavBar() {
 ### Non-React (synchronous facade)
 
 ```typescript
-import { createHearth } from "@hearth-auth/sdk";
+import { createHearth, createHearthAuth, HearthApiClient } from "@hearth-auth/sdk";
+
+const apiClient = new HearthApiClient({ baseUrl: "http://127.0.0.1:8420", realmId: "<realm_id>" });
+const auth = createHearthAuth(apiClient, {
+  clientId:    "<client_id>",
+  redirectUri: "http://localhost:3000/callback",
+});
 
 const hearth = createHearth({
   baseUrl: "http://127.0.0.1:8420",
   realmId: "<realm_id>",
-  getToken: () => sessionStorage.getItem("access_token"),
+  getToken: () => auth.getAccessToken(), // in-memory — never localStorage or sessionStorage
 });
 
 if (hearth.hasPermission("invoices.write")) {

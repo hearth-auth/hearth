@@ -69,14 +69,19 @@ $tokens = $hearth->completeLogin(
 // $tokens->accessToken, $tokens->refreshToken, $tokens->expiresIn
 ```
 
+:::tip[Where should the access token live?]
+If your frontend is a browser SPA, consider the **Backend for Frontend (BFF)** pattern: your PHP server completes the OAuth callback, stores the access and refresh tokens server-side (session or a short-lived store), and issues the browser an `HttpOnly; Secure; SameSite=Strict` session cookie. The browser never receives an OAuth token directly.
+
+This eliminates the XSS risk of browser-side token storage. See [Browser SPA Token Handling](../browser-spa-tokens.md) for a full comparison of storage options and the BFF flow diagram.
+:::
+
 ## Verify tokens and check RBAC
 
 ```php
-use HearthAuth\HearthClient;
+use Hearth\HearthClient;
 
 $hearth = new HearthClient(
     issuerUrl: 'https://hearth.example.com',
-    realmId:   '<realm_id>',
     clientId:  '<client_id>',
 );
 
@@ -109,7 +114,6 @@ For service-to-service calls where your server authenticates as its own principa
 ```php
 $hearth = new HearthClient(
     issuerUrl:    'https://hearth.example.com',
-    realmId:      '<realm_id>',
     clientId:     '<service-client-id>',
     clientSecret: '<service-client-secret>',
 );
@@ -153,80 +157,193 @@ $hearth->requestMagicLink('user@example.com');
 // (enumeration resistance). HTTP 429 throws RateLimitException.
 ```
 
-## PSR-15 middleware (plain PHP)
+## PSR-15 frameworks
+
+### Slim
+
+Slim 4 is PSR-15 native — add `HearthMiddleware` to the application or to a route group:
 
 ```php
-use HearthAuth\HearthClient;
-use HearthAuth\Middleware\RequirePermission;
+use GuzzleHttp\Psr7\HttpFactory;
+use Hearth\HearthClient;
+use Hearth\Middleware\HearthMiddleware;
+use Slim\Factory\AppFactory;
 
-$hearth = new HearthClient(/* … */);
+$app = AppFactory::create();
 
-$middleware = new RequirePermission(
-    client:     $hearth,
-    permission: 'documents:write',
+$hearth = new HearthClient(
+    issuerUrl: 'https://hearth.example.com',
+    clientId:  '<client_id>',
 );
 
-// Use with any PSR-15 compatible framework (Slim, Mezzio, etc.)
-$app->add($middleware);
-```
+// Apply globally — all routes require a valid Bearer token
+$app->add(new HearthMiddleware(
+    tokenVerifier:   $hearth->getTokenVerifier(),
+    responseFactory: new HttpFactory(),
+));
 
-## Laravel quickstart
-
-### 1. Publish the config
-
-```bash
-php artisan vendor:publish --tag=hearth-config
-```
-
-### 2. Configure `.env`
-
-```env
-HEARTH_ISSUER_URL=https://hearth.example.com
-HEARTH_REALM_ID=<realm_id>
-HEARTH_CLIENT_ID=<client_id>
-HEARTH_CLIENT_SECRET=<client_secret>
-HEARTH_JWKS_TTL=3600
-HEARTH_REQUIRE_AUTH=true
-```
-
-### 3. Protect routes
-
-```php
-// routes/api.php
-Route::middleware('hearth.auth')->group(function () {
-    Route::get('/profile', [ProfileController::class, 'show']);
+// Read verified claims inside a route handler
+$app->get('/profile', function ($request, $response) {
+    $claims = $request->getAttribute(HearthMiddleware::CLAIMS_ATTRIBUTE);
+    $data   = ['sub' => $claims->subject(), 'roles' => $claims->roles()];
+    $response->getBody()->write(json_encode($data));
+    return $response->withHeader('Content-Type', 'application/json');
 });
 
-// Require a specific permission on a route
-Route::post('/docs', [DocsController::class, 'create'])
-     ->middleware('hearth.auth:documents.write');
+$app->run();
 ```
 
-### 4. Access verified claims
+To protect only a subset of routes, apply middleware to a route group instead:
 
 ```php
-// In a controller, access claims from the request attribute:
-public function show(Request $request): JsonResponse
-{
-    $claims = $request->attributes->get('hearth.claims');
+$app->group('/api', function ($group) {
+    $group->get('/profile', ProfileHandler::class);
+    $group->post('/documents', DocumentHandler::class);
+})->add(new HearthMiddleware(
+    tokenVerifier:   $hearth->getTokenVerifier(),
+    responseFactory: new HttpFactory(),
+));
+```
 
-    return response()->json([
-        'sub'  => $claims->sub,
-        'roles' => $claims->roles,
-    ]);
+`HearthMiddleware::CLAIMS_ATTRIBUTE` resolves to the string `'hearth_claims'`.
+
+### Symfony
+
+Symfony uses a `KernelEvents::REQUEST` subscriber. The subscriber extracts the Bearer token, calls `verifyToken()`, and sets the verified `Claims` on the Symfony request attributes under the same `hearth_claims` key.
+
+```php
+// src/EventSubscriber/HearthAuthSubscriber.php
+namespace App\EventSubscriber;
+
+use Hearth\Claims;
+use Hearth\Exceptions\HearthException;
+use Hearth\HearthClient;
+use Symfony\Component\EventDispatcher\EventSubscriberInterface;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpKernel\Event\RequestEvent;
+use Symfony\Component\HttpKernel\KernelEvents;
+
+final class HearthAuthSubscriber implements EventSubscriberInterface
+{
+    public function __construct(private readonly HearthClient $hearth) {}
+
+    public static function getSubscribedEvents(): array
+    {
+        return [KernelEvents::REQUEST => ['onKernelRequest', 10]];
+    }
+
+    public function onKernelRequest(RequestEvent $event): void
+    {
+        if (!$event->isMainRequest()) {
+            return;
+        }
+
+        $header = (string) $event->getRequest()->headers->get('Authorization', '');
+        if (!str_starts_with($header, 'Bearer ')) {
+            $event->setResponse(new JsonResponse(
+                ['error' => 'unauthorized'],
+                401,
+                ['WWW-Authenticate' => 'Bearer realm="hearth"'],
+            ));
+            return;
+        }
+
+        try {
+            $claims = $this->hearth->verifyToken(substr($header, 7));
+            $event->getRequest()->attributes->set('hearth_claims', $claims);
+        } catch (HearthException) {
+            $event->setResponse(new JsonResponse(['error' => 'unauthorized'], 401));
+        }
+    }
 }
 ```
 
-### 5. Facade and injection
+Register `HearthClient` and the subscriber in `config/services.yaml`:
+
+```yaml
+# config/services.yaml
+services:
+    hearth.client:
+        class: Hearth\HearthClient
+        arguments:
+            $issuerUrl: '%env(HEARTH_ISSUER_URL)%'
+            $clientId:  '%env(HEARTH_CLIENT_ID)%'
+
+    App\EventSubscriber\HearthAuthSubscriber:
+        arguments: ['@hearth.client']
+        tags: [{ name: kernel.event_subscriber }]
+```
+
+```env
+# .env
+HEARTH_ISSUER_URL=https://hearth.example.com
+HEARTH_CLIENT_ID=<client_id>
+```
+
+In a controller, read the claims from request attributes:
 
 ```php
-use HearthAuth\Laravel\Facades\Hearth;
+use Hearth\Claims;
+use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
 
-// Facade
-$claims = Hearth::verifyToken($bearerToken);
+class ProfileController extends AbstractController
+{
+    public function profile(Request $request): JsonResponse
+    {
+        /** @var Claims $claims */
+        $claims = $request->attributes->get('hearth_claims');
+        return $this->json([
+            'sub'   => $claims->subject(),
+            'roles' => $claims->roles(),
+        ]);
+    }
+}
+```
 
-// Or inject HearthClient directly
-public function __construct(private HearthClient $hearth) {}
+## Laravel
+
+The PHP SDK ships a dedicated Laravel adapter with auto-discovered service provider and a `hearth.auth` middleware alias. See the full guide: [Authenticate a Laravel app with Hearth](./php-laravel.md).
+
+### Quick reference
+
+```bash
+# 1. Publish the config
+php artisan vendor:publish --tag=hearth-config
+```
+
+```env
+# 2. Configure .env
+HEARTH_ISSUER_URL=https://hearth.example.com
+HEARTH_CLIENT_ID=<client_id>
+HEARTH_REQUIRE_AUTH=true
+```
+
+```php
+// 3. Protect routes
+Route::middleware('hearth.auth')->group(function () {
+    Route::get('/profile', [ProfileController::class, 'show']);
+});
+```
+
+```php
+// 4. Read verified claims in a controller
+use Hearth\Claims;
+
+/** @var Claims $claims */
+$claims = $request->attributes->get('hearth_claims');
+
+if (!$claims->hasPermission('documents:write')) {
+    return response()->json(['error' => 'forbidden'], 403);
+}
+```
+
+```php
+// 5. Facade (for verification outside of middleware)
+use Hearth\Laravel\Facades\Hearth;
+
+$claims = Hearth::verifyToken($rawBearerToken);
 ```
 
 ## Error handling
@@ -237,12 +354,12 @@ public function __construct(private HearthClient $hearth) {}
 | `TokenInvalidException` | Signature invalid or malformed JWT |
 | `TokenIssuerException` | `iss` mismatch |
 | `TokenAudienceException` | `aud` mismatch |
-| `JWKSException` | JWKS endpoint unreachable |
+| `JWKSFetchException` | JWKS endpoint unreachable |
 | `ConfigurationException` | Missing required config |
 
 ```php
-use HearthAuth\Exceptions\TokenExpiredException;
-use HearthAuth\Exceptions\TokenInvalidException;
+use Hearth\Exceptions\TokenExpiredException;
+use Hearth\Exceptions\TokenInvalidException;
 
 try {
     $claims = $hearth->verifyToken($bearerToken);
@@ -267,10 +384,11 @@ try {
 
 **`ConfigurationException: introspection requires client secret`** — add `HEARTH_CLIENT_SECRET` to `.env` when using introspection or decision mode.
 
-**Laravel: `hearth.claims` attribute is null** — ensure the route is inside the `hearth.auth` middleware group, or that the middleware is applied before your controller resolves the attribute.
+**Laravel: `hearth_claims` attribute is `null`** — ensure the route is inside the `hearth.auth` middleware group, or that the middleware is applied before your controller resolves the attribute.
 
 ## Next steps
 
+- [Authenticate a Laravel app with Hearth](./php-laravel.md) — full Laravel adapter guide: PKCE login, optional-auth, facades, token modes
 - [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
 - [Admin API guide](/docs/admin-api) — managing users and clients programmatically
 - [PHP type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/php/README.md) — full API surface

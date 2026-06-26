@@ -33,6 +33,7 @@
 //! | Feature | What it adds |
 //! |---------|--------------|
 //! | `tower-middleware` | [`middleware::RequirePermissionLayer`] — Tower layer for mode-aware permission enforcement |
+//! | `actix-middleware` | [`actix::HearthActixMiddleware`] + [`actix::RequirePermission`] extractor — Actix-web 4 middleware |
 
 mod admin;
 mod claims;
@@ -45,6 +46,9 @@ pub mod pkce;
 
 #[cfg(feature = "tower-middleware")]
 pub mod middleware;
+
+#[cfg(feature = "actix-middleware")]
+pub mod actix;
 
 pub use admin::AdminClient;
 pub use claims::Claims;

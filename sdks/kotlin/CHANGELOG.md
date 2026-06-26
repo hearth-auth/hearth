@@ -21,6 +21,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`hearth-ktor` subproject** — Ktor authentication provider (`HearthAuthProvider`, `HearthPrincipal`,
+  `HearthAuthConfig`). Registers via `install(Authentication) { hearth("name") { … } }` and guards
+  routes with `authenticate("name") { … }`. Exposes `call.principal<HearthPrincipal>()` with
+  full access to verified JWT claims (sub, roles, permissions, groups, org) (HEA-1601).
+- **`hearth-spring` subproject** — Spring Security filter adapter (`HearthJwtAuthenticationFilter`,
+  `HearthAuthentication`, `HearthSecurityAutoConfiguration`, `HearthSecurityProperties`).
+  Validates Hearth JWTs and populates the Spring `SecurityContextHolder` with verified claims.
+  Spring Boot 3.x auto-configuration activates when `hearth.issuer-url` is set (HEA-1597).
 - **PKCE generation helper** (`generatePkce()`) — returns a `PkceResult` with a 32-byte CSPRNG
   verifier (base64url, no padding) and its S256 challenge. Hearth mandates PKCE for all
   authorization-code flows (RFC 9700 §2.1.1) (HEA-1565).

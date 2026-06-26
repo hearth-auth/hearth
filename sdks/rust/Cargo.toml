@@ -14,6 +14,10 @@ documentation = "https://docs.rs/hearth-sdk"
 ## Enables the Tower middleware ([`middleware::RequirePermissionLayer`]).
 ## Adds `tower` and `http` as dependencies.
 tower-middleware = ["dep:tower", "dep:http"]
+## Enables the Actix-web middleware ([`actix::HearthActixMiddleware`]) and
+## [`actix::RequirePermission`] extractor.
+## Adds `actix-web` as a dependency.
+actix-middleware = ["dep:actix-web"]
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -28,7 +32,9 @@ rand = "0.8"
 tokio = { version = "1", features = ["sync", "time"] }
 tower = { version = "0.4", optional = true }
 http = { version = "1", optional = true }
+actix-web = { version = "4", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 ring = "0.17"
+actix-web = "4"

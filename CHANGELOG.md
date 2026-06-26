@@ -7,6 +7,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Rust SDK Actix-web middleware adapter (HEA-1602)** — `hearth-sdk` gains an optional
+  `actix-middleware` feature that provides `HearthActixMiddleware` (implements Actix-web 4's
+  `Transform`/`Service` traits), the `RequirePermission` extractor (reads verified `Claims` from
+  request extensions), and `HearthActixError` (implements `actix_web::ResponseError` for idiomatic
+  `?`-operator error propagation). Supports all three authorization modes (`Embedded`,
+  `Introspection`, `Decision`) with fail-closed semantics matching the Tower middleware.
+  Enable with `hearth-sdk = { features = ["actix-middleware"] }` (HEA-1602).
+- **Python SDK Django middleware adapter (HEA-1600)** — `hearth.django` provides
+  `HearthDjangoMiddleware` for installation via Django's `MIDDLEWARE` setting (new-style
+  `__init__(get_response)` / `__call__(request)` class interface). The middleware extracts the
+  Bearer token from every request and sets `request.hearth_token` for downstream views. A global
+  permission gate can be configured via `HEARTH_PERMISSION`. Also provides `@require_permission`
+  as a per-view decorator supporting all three modes (`embedded`, `introspection`, `decision`).
+  Django is an optional dependency: `pip install hearth-sdk[django]` (HEA-1600).
+- **Node SDK Next.js adapter (HEA-1598)** — `@hearth-auth/node/nextjs` provides
+  `withHearthAuth(handler, options)` for Pages Router API routes (attaches `req.hearthToken`) and
+  `getHearthToken(req, config)` for App Router Route Handlers (returns `VerifiedToken | null`).
+  `@hearth-auth/node/nextjs/edge` provides `hearthEdgeMiddleware(options)` — an Edge Runtime-safe
+  middleware factory that uses Web Crypto (`crypto.subtle` via `jose`) instead of `node:crypto`, safe
+  for Next.js `middleware.ts` running in the V8 Isolate Edge Runtime. `requirePermission(perm)` is a
+  composable predicate guard compatible with both `EdgeToken` and `VerifiedToken`. Next.js is an
+  optional peer dependency.
+- **Kotlin SDK Spring Security adapter (HEA-1597)** — new `hearth-spring` Gradle subproject provides
+  `HearthJwtAuthenticationFilter` (extends `OncePerRequestFilter`), `HearthAuthentication` (implements
+  `Authentication`), `HearthSecurityAutoConfiguration` (`@AutoConfiguration`) and
+  `HearthSecurityProperties` (`@ConfigurationProperties("hearth")`). Auto-configures from
+  `hearth.issuer-url` with no `@Import` required. Access verified claims in controllers via
+  `@AuthenticationPrincipal HearthAuthentication auth`. Roles map to `ROLE_<role>` authorities;
+  permissions are granted verbatim for `hasAuthority()` guards.
+- **Go SDK Echo middleware adapter (HEA-1599)** — `hearth/echo` package (`package hearthecho`) provides
+  `HearthMiddleware(client, opts...)` that extracts the bearer token and stores it in the Echo context,
+  `GetToken(c)` for downstream handlers, and `RequirePermission("perm")` for group-level permission
+  guards via `e.Use()` or `g.Use()`. Supports `WithTokenExtractor` and `WithOnUnauthorized` customisation hooks.
+  Install: `go get github.com/hearth-auth/hearth/sdks/go/hearth/echo`.
+- **Go SDK Gin middleware adapter (HEA-1595)** — `hearth/gin` package (`package hearthgin`) provides
+  `HearthMiddleware(client, opts...)` that extracts the bearer token and stores it in the Gin context,
+  `GetToken(c)` for downstream handlers, and `RequirePermission("perm")` for group-level permission
+  guards via `router.Use()`. Supports `WithTokenExtractor` and `WithOnUnauthorized` customisation hooks.
+  Install: `go get github.com/hearth-auth/hearth/sdks/go/hearth/gin`.
+- **Python SDK FastAPI adapter (HEA-1596)** — `hearth.fastapi` module provides `HearthFastAPIDep`
+  (a `Depends()`-compatible callable that verifies a Bearer JWT and returns `VerifiedClaims`),
+  `require_permission("docs.write", dep=auth)` shorthand returning `Annotated[VerifiedClaims, Depends(...)]`
+  for per-route permission gating, and optional `HearthSettings` for `pydantic-settings`/env-var
+  configuration (`HEARTH_BASE_URL`, `HEARTH_REALM_ID`, `HEARTH_CLIENT_ID`). Installs via
+  `pip install hearth-sdk[fastapi]`.
 - **Stateless `beginLogin`/`completeLogin` helpers across all 6 server SDKs (HEA-1592)** — collapses
   the ~5-step authorization-code ceremony into 2 SDK calls + 1 developer-owned session-persist line:
   `beginLogin(redirectUri, scopes?)` generates PKCE, builds the authorization URL, and returns

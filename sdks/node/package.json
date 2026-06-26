@@ -16,6 +16,14 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./nextjs": {
+      "types": "./dist/nextjs/index.d.ts",
+      "import": "./dist/nextjs/index.js"
+    },
+    "./nextjs/edge": {
+      "types": "./dist/nextjs/edge.d.ts",
+      "import": "./dist/nextjs/edge.js"
     }
   },
   "files": [
@@ -29,6 +37,14 @@
   },
   "dependencies": {
     "jose": "5.9.6"
+  },
+  "peerDependencies": {
+    "next": ">=14.0.0"
+  },
+  "peerDependenciesMeta": {
+    "next": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
