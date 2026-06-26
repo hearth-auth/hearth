@@ -371,3 +371,20 @@ type APIError struct {
 func (e *APIError) Error() string {
 	return e.Message
 }
+
+// BeginLoginResult is returned by [Client.BeginLogin].
+//
+// Redirect the browser to AuthorizationURL, then persist State and CodeVerifier
+// in the server session so they can be verified and supplied to [Client.CompleteLogin]
+// on the callback route.
+type BeginLoginResult struct {
+	// AuthorizationURL is the fully-constructed PKCE authorization URL.
+	// Redirect the browser here.
+	AuthorizationURL string
+	// State is a random CSRF-protection value.
+	// Persist it in session storage and verify it matches the callback parameter.
+	State string
+	// CodeVerifier is the PKCE verifier.
+	// Persist it in session storage and pass it to CompleteLogin.
+	CodeVerifier string
+}

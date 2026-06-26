@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Stateless `beginLogin`/`completeLogin` helpers across all 6 server SDKs (HEA-1592)** — collapses
+  the ~5-step authorization-code ceremony into 2 SDK calls + 1 developer-owned session-persist line:
+  `beginLogin(redirectUri, scopes?)` generates PKCE, builds the authorization URL, and returns
+  `{ authorizationUrl, state, codeVerifier }` (language-idiomatic casing);
+  `completeLogin(code, codeVerifier, redirectUri)` wraps `exchangeCode`. Uniform shape across
+  **Node** (`OAuthFlowsClient` + `HearthClient`), **Go** (`BeginLogin`/`CompleteLogin`),
+  **Rust** (`begin_login`/`complete_login`), **Python** (`begin_login`/`complete_login`),
+  **PHP** (`beginLogin`/`completeLogin`), and **Kotlin** (`beginLogin`/`completeLogin`).
+  The TypeScript browser SDK retains its existing stateful `createHearthAuth` facade.
 - **SDK parity — residual gaps closed (HEA-1552)** — final cells in the cross-SDK capability
   matrix (`docs/specs/SDK_SURFACE.md` §7) filled:
   - **Node `refreshTokens()`** — `OAuthFlowsClient.refreshTokens(refreshToken, scope?)` and

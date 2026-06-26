@@ -23,6 +23,7 @@ const DISCOVERY: OidcDiscovery = {
   issuer: "https://auth.example.com",
   jwks_uri: "https://auth.example.com/.well-known/jwks.json",
   token_endpoint: "https://auth.example.com/token",
+  authorization_endpoint: "https://auth.example.com/authorize",
   device_authorization_endpoint: "https://auth.example.com/device/authorize",
   userinfo_endpoint: "https://auth.example.com/userinfo",
 };
@@ -528,5 +529,84 @@ describe("OAuthFlowsClient.svDelta", () => {
 
     const result = await client.svDelta("tok", 5);
     expect(result).toBeNull();
+  });
+});
+
+// ── beginLogin ────────────────────────────────────────────────────────────────
+
+describe("OAuthFlowsClient.beginLogin", () => {
+  it("returns authorizationUrl with code_challenge derived from codeVerifier", async () => {
+    const { client } = makeClient();
+    const result = await client.beginLogin("https://app.example.com/callback");
+    const url = new URL(result.authorizationUrl);
+    const challenge = url.searchParams.get("code_challenge");
+    expect(challenge).toBeTruthy();
+    // SHA-256(verifier) base64url should equal the challenge
+    const { createHash } = await import("node:crypto");
+    const expectedChallenge = createHash("sha256")
+      .update(result.codeVerifier)
+      .digest("base64url");
+    expect(challenge).toBe(expectedChallenge);
+  });
+
+  it("returns non-empty state that appears in the URL", async () => {
+    const { client } = makeClient();
+    const result = await client.beginLogin("https://app.example.com/callback");
+    expect(result.state).toBeTruthy();
+    const url = new URL(result.authorizationUrl);
+    expect(url.searchParams.get("state")).toBe(result.state);
+  });
+
+  it("includes required PKCE, redirect_uri, client_id, and response_type params", async () => {
+    const { client } = makeClient();
+    const result = await client.beginLogin("https://app.example.com/callback", "openid profile");
+    const url = new URL(result.authorizationUrl);
+    expect(url.searchParams.get("response_type")).toBe("code");
+    expect(url.searchParams.get("client_id")).toBe("client1");
+    expect(url.searchParams.get("redirect_uri")).toBe("https://app.example.com/callback");
+    expect(url.searchParams.get("scope")).toBe("openid profile");
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+  });
+
+  it("defaults scope to openid when not provided", async () => {
+    const { client } = makeClient();
+    const result = await client.beginLogin("https://app.example.com/callback");
+    const url = new URL(result.authorizationUrl);
+    expect(url.searchParams.get("scope")).toBe("openid");
+  });
+
+  it("throws ConfigurationError when authorization_endpoint is absent from discovery", async () => {
+    const getDiscovery = vi.fn().mockResolvedValue({ ...DISCOVERY, authorization_endpoint: undefined });
+    const client = new OAuthFlowsClient(BASE_CONFIG, getDiscovery);
+    await expect(client.beginLogin("https://app.example.com/callback"))
+      .rejects.toBeInstanceOf(ConfigurationError);
+  });
+});
+
+// ── completeLogin ─────────────────────────────────────────────────────────────
+
+describe("OAuthFlowsClient.completeLogin", () => {
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn()); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("calls exchangeCode with the supplied codeVerifier", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse(TOKEN_RESPONSE));
+
+    await client.completeLogin("auth-code-xyz", "my-verifier-abc", "https://app.example.com/callback");
+
+    const body = new URLSearchParams((vi.mocked(fetch).mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body.get("code_verifier")).toBe("my-verifier-abc");
+    expect(body.get("code")).toBe("auth-code-xyz");
+    expect(body.get("redirect_uri")).toBe("https://app.example.com/callback");
+    expect(body.get("grant_type")).toBe("authorization_code");
+  });
+
+  it("returns TokenResponse on success", async () => {
+    const { client } = makeClient();
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse(TOKEN_RESPONSE));
+
+    const result = await client.completeLogin("code", "verifier", "https://app.example.com/cb");
+    expect(result.access_token).toBe(TOKEN_RESPONSE.access_token);
   });
 });

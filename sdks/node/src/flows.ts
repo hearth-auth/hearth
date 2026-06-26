@@ -3,9 +3,11 @@
  * magic-link, userinfo, /me/permissions, and session-version feed.
  */
 
+import { randomBytes } from "node:crypto";
 import { ConfigurationError, OAuthFlowError, TokenExpiredError } from "./errors.js";
 import type { ResolvedConfig } from "./config.js";
 import type { OidcDiscovery } from "./discovery.js";
+import { generatePkce } from "./pkce.js";
 
 // ── Response type definitions ─────────────────────────────────────────────────
 
@@ -80,6 +82,22 @@ export interface ExchangeCodeOptions {
   codeVerifier?: string;
 }
 
+/**
+ * Result of {@link OAuthFlowsClient.beginLogin}.
+ *
+ * Redirect the browser to `authorizationUrl`, then persist `state` and
+ * `codeVerifier` in the server session so they can be verified and supplied
+ * to {@link OAuthFlowsClient.completeLogin} on the callback route.
+ */
+export interface LoginBeginResult {
+  /** Full authorization URL — redirect the browser here. */
+  authorizationUrl: string;
+  /** Random CSRF-protection value — verify it matches the `state` in the callback. */
+  state: string;
+  /** PKCE code verifier — pass to `completeLogin` on the callback route. */
+  codeVerifier: string;
+}
+
 // ── OAuthFlowsClient ──────────────────────────────────────────────────────────
 
 /**
@@ -105,6 +123,14 @@ export class OAuthFlowsClient {
       throw new ConfigurationError("token_endpoint not found in OIDC discovery document");
     }
     return doc.token_endpoint;
+  }
+
+  private async getAuthorizationEndpoint(): Promise<string> {
+    const doc = await this.getDiscovery();
+    if (!doc.authorization_endpoint) {
+      throw new ConfigurationError("authorization_endpoint not found in OIDC discovery document");
+    }
+    return doc.authorization_endpoint;
   }
 
   private async getDeviceAuthEndpoint(): Promise<string> {
@@ -475,6 +501,45 @@ export class OAuthFlowsClient {
     const result = await this.getWithBearer<SvSnapshotResponse>(url, token);
     if (!result) throw new OAuthFlowError(204, "svSnapshot returned 204 No Content");
     return result;
+  }
+
+  /**
+   * Begin an authorization-code login: generate PKCE, build the authorization URL,
+   * and return the values the developer must persist before redirecting the browser.
+   *
+   * Developer flow:
+   * 1. Call `beginLogin(redirectUri)` — get `{ authorizationUrl, state, codeVerifier }`.
+   * 2. Persist `state` and `codeVerifier` in session storage (one line you own).
+   * 3. Redirect the user to `authorizationUrl`.
+   * 4. On the callback route, call `completeLogin(code, codeVerifier, redirectUri)`.
+   *
+   * @param redirectUri - Callback URL registered with the authorization server.
+   * @param scopes - Space-delimited scope string (defaults to `"openid"`).
+   */
+  async beginLogin(redirectUri: string, scopes?: string): Promise<LoginBeginResult> {
+    const endpoint = await this.getAuthorizationEndpoint();
+    const { verifier, challenge } = generatePkce();
+    const state = randomBytes(16).toString("base64url");
+    const url = new URL(endpoint);
+    url.searchParams.set("response_type", "code");
+    url.searchParams.set("client_id", this.config.client_id);
+    url.searchParams.set("redirect_uri", redirectUri);
+    url.searchParams.set("scope", scopes ?? "openid");
+    url.searchParams.set("state", state);
+    url.searchParams.set("code_challenge", challenge);
+    url.searchParams.set("code_challenge_method", "S256");
+    return { authorizationUrl: url.toString(), state, codeVerifier: verifier };
+  }
+
+  /**
+   * Complete an authorization-code login: exchange the callback code for tokens.
+   *
+   * @param code - Authorization code from the callback URL `code` query parameter.
+   * @param codeVerifier - PKCE verifier returned by {@link beginLogin}.
+   * @param redirectUri - Same `redirectUri` used in {@link beginLogin}.
+   */
+  async completeLogin(code: string, codeVerifier: string, redirectUri: string): Promise<TokenResponse> {
+    return this.exchangeCode(code, redirectUri, { codeVerifier });
   }
 
   /**

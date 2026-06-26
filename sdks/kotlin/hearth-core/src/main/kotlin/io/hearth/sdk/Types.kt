@@ -4,6 +4,24 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
+// ── Browser login helpers (HEA-1592) ─────────────────────────────────────────
+
+/**
+ * Result of [HearthClient.beginLogin].
+ *
+ * Redirect the browser to [authorizationUrl], then persist [state] and
+ * [codeVerifier] in your session storage so they can be verified and supplied
+ * to [HearthClient.completeLogin] on the callback route.
+ */
+data class LoginBeginResult(
+    /** Full PKCE authorization URL — redirect the browser here. */
+    val authorizationUrl: String,
+    /** Random CSRF-protection value — verify against the callback `state` parameter. */
+    val state: String,
+    /** PKCE code verifier — pass to [HearthClient.completeLogin] on the callback route. */
+    val codeVerifier: String,
+)
+
 // ── OAuth / Token types ──────────────────────────────────────────────────────
 
 @Serializable

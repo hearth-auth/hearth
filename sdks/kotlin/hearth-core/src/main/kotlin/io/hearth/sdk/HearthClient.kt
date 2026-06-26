@@ -256,6 +256,56 @@ class HearthClient(
     }
 
     /**
+     * Begin an authorization-code login: generate PKCE, build the authorization URL.
+     *
+     * Developer flow:
+     * 1. Call `beginLogin(redirectUri)` — receive a [LoginBeginResult].
+     * 2. Persist [LoginBeginResult.state] and [LoginBeginResult.codeVerifier] in session storage.
+     * 3. Redirect the browser to [LoginBeginResult.authorizationUrl].
+     * 4. On the callback route, call [completeLogin].
+     *
+     * @param redirectUri Callback URL registered with the authorization server.
+     * @param scopes Space-delimited scope string (defaults to `"openid"`).
+     * @throws ConfigurationError when [clientId] is not set.
+     * @throws DiscoveryError when the OIDC discovery document is missing `authorization_endpoint`.
+     */
+    suspend fun beginLogin(redirectUri: String, scopes: String? = null): LoginBeginResult {
+        val cId = clientId ?: throw ConfigurationError("clientId is required for beginLogin")
+        val endpoint = authorizationEndpoint()
+        val pkce = generatePkce()
+        val state = generateRandomState()
+        val params = mapOf(
+            "response_type" to "code",
+            "client_id" to cId,
+            "redirect_uri" to redirectUri,
+            "scope" to (scopes ?: "openid"),
+            "state" to state,
+            "code_challenge" to pkce.challenge,
+            "code_challenge_method" to "S256",
+        )
+        val query = params.entries.joinToString("&") { (k, v) ->
+            "${java.net.URLEncoder.encode(k, "UTF-8")}=${java.net.URLEncoder.encode(v, "UTF-8")}"
+        }
+        val authorizationUrl = "$endpoint?$query"
+        return LoginBeginResult(
+            authorizationUrl = authorizationUrl,
+            state = state,
+            codeVerifier = pkce.verifier,
+        )
+    }
+
+    /**
+     * Complete an authorization-code login: exchange the callback code for tokens.
+     *
+     * @param code          Authorization code from the callback `code` query parameter.
+     * @param codeVerifier  PKCE verifier returned by [beginLogin].
+     * @param redirectUri   Same redirect URI used in [beginLogin].
+     * @throws ConfigurationError when [clientId] is not set.
+     */
+    suspend fun completeLogin(code: String, codeVerifier: String, redirectUri: String): TokenResponse =
+        exchangeCode(code = code, redirectUri = redirectUri, codeVerifier = codeVerifier)
+
+    /**
      * Exchanges an authorization code for tokens (Authorization Code Flow).
      */
     suspend fun exchangeCode(
@@ -575,6 +625,12 @@ class HearthClient(
         decodeLocalClaims(token)?.get("roles")
             ?.let { it as? List<*> }
             ?.contains(role) == true
+
+    private fun generateRandomState(): String {
+        val bytes = ByteArray(16)
+        java.security.SecureRandom().nextBytes(bytes)
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+    }
 
     private fun decodeLocalClaims(token: String): Map<String, Any?>? {
         if (token.isBlank()) return null

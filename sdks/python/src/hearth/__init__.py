@@ -28,6 +28,7 @@ from .jwks import JwksCache
 from .types import (
     AccessTokenAuthorizationMode,
     BootstrapResponse,
+    LoginBeginResult,
     User,
     CreateUserRequest,
     UpdateUserRequest,
@@ -72,6 +73,8 @@ __all__ = [
     # PKCE
     "PkcePair",
     "generate_pkce_pair",
+    # Login helpers
+    "LoginBeginResult",
     # JWKS cache
     "JwksCache",
     # Errors

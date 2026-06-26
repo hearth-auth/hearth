@@ -14,6 +14,7 @@ use Hearth\Exceptions\TokenExpiredException;
 use Hearth\Types\BootstrapResponse;
 use Hearth\Types\ClientRegistrationResponse;
 use Hearth\Types\DeviceAuthorizationResponse;
+use Hearth\Types\LoginBeginResult;
 use Hearth\Types\PermissionsResponse;
 use Hearth\Types\PkceChallenge;
 use Hearth\Types\TokenResponse;
@@ -97,6 +98,53 @@ final class HearthClient
     public static function generatePkce(): PkceChallenge
     {
         return PkceChallenge::generate();
+    }
+
+    // =========================================================================
+    // Browser login helpers (§HEA-1592)
+    // =========================================================================
+
+    /**
+     * Begin an authorization-code login: generate PKCE, build the authorization URL.
+     *
+     * Developer flow:
+     * 1. Call `beginLogin($redirectUri)` — receive a `LoginBeginResult`.
+     * 2. Persist `$result->state` and `$result->codeVerifier` in `$_SESSION`.
+     * 3. Redirect the browser to `$result->authorizationUrl`.
+     * 4. On the callback route, call `completeLogin($code, $codeVerifier, $redirectUri)`.
+     *
+     * @param string      $redirectUri Callback URL registered with the authorization server.
+     * @param string|null $scopes      Space-delimited scope string; defaults to "openid".
+     *
+     * @throws \Hearth\Exceptions\NetworkException       When discovery is unreachable.
+     * @throws \Hearth\Exceptions\ConfigurationException When the authorization endpoint is absent.
+     */
+    public function beginLogin(string $redirectUri, ?string $scopes = null): LoginBeginResult
+    {
+        $pkce  = static::generatePkce();
+        $state = bin2hex(random_bytes(16));
+        $url   = $this->buildAuthorizeUrl($redirectUri, $state, null, $scopes ?? 'openid', $pkce);
+
+        return new LoginBeginResult(
+            authorizationUrl: $url,
+            state:            $state,
+            codeVerifier:     $pkce->codeVerifier,
+        );
+    }
+
+    /**
+     * Complete an authorization-code login: exchange the callback code for tokens.
+     *
+     * @param string $code          Authorization code from the callback `code` query parameter.
+     * @param string $codeVerifier  PKCE verifier returned by {@see beginLogin()}.
+     * @param string $redirectUri   Same redirect URI used in {@see beginLogin()}.
+     *
+     * @throws \Hearth\Exceptions\NetworkException When the token endpoint is unreachable.
+     * @throws \RuntimeException                   When the server returns an error response.
+     */
+    public function completeLogin(string $code, string $codeVerifier, string $redirectUri): TokenResponse
+    {
+        return $this->exchangeCode($code, $redirectUri, $codeVerifier);
     }
 
     // =========================================================================

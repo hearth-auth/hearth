@@ -17,6 +17,7 @@ import type {
   SvSnapshotResponse,
   SvDeltaResponse,
   ExchangeCodeOptions,
+  LoginBeginResult,
 } from "./flows.js";
 import type { VerifiedToken } from "./token.js";
 
@@ -159,6 +160,32 @@ export class HearthClient {
    */
   async requestMagicLink(email: string): Promise<void> {
     return this.flows.requestMagicLink(email);
+  }
+
+  /**
+   * Begin an authorization-code login — generate PKCE, build the authorization URL,
+   * and return the three values the developer must persist before redirecting.
+   *
+   * Persist `state` and `codeVerifier` in session storage (one line you own),
+   * then redirect the user to `authorizationUrl`. On the callback route, call
+   * `completeLogin(code, codeVerifier, redirectUri)` to exchange for tokens.
+   *
+   * @param redirectUri - Callback URL registered with the authorization server.
+   * @param scopes - Space-delimited scope string (defaults to `"openid"`).
+   */
+  async beginLogin(redirectUri: string, scopes?: string): Promise<LoginBeginResult> {
+    return this.flows.beginLogin(redirectUri, scopes);
+  }
+
+  /**
+   * Complete an authorization-code login — exchange the callback code for tokens.
+   *
+   * @param code - Authorization code from the callback `code` query parameter.
+   * @param codeVerifier - PKCE verifier returned by {@link beginLogin}.
+   * @param redirectUri - Same `redirectUri` used in {@link beginLogin}.
+   */
+  async completeLogin(code: string, codeVerifier: string, redirectUri: string): Promise<TokenResponse> {
+    return this.flows.completeLogin(code, codeVerifier, redirectUri);
   }
 
   /**
