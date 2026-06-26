@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Python SDK FastAPI adapter (HEA-1596)** — `hearth.fastapi` module provides `HearthFastAPIDep`
+  (a `Depends()`-compatible callable that verifies a Bearer JWT and returns `VerifiedClaims`),
+  `require_permission("docs.write", dep=auth)` shorthand returning `Annotated[VerifiedClaims, Depends(...)]`
+  for per-route permission gating, and optional `HearthSettings` for `pydantic-settings`/env-var
+  configuration (`HEARTH_BASE_URL`, `HEARTH_REALM_ID`, `HEARTH_CLIENT_ID`). Installs via
+  `pip install hearth-sdk[fastapi]`.
 - **Stateless `beginLogin`/`completeLogin` helpers across all 6 server SDKs (HEA-1592)** — collapses
   the ~5-step authorization-code ceremony into 2 SDK calls + 1 developer-owned session-persist line:
   `beginLogin(redirectUri, scopes?)` generates PKCE, builds the authorization URL, and returns
