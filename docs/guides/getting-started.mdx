@@ -390,25 +390,42 @@ $tokens = $hearth->completeLogin(
 
 ```php
 // routes/web.php
+Route::get('/login', [AuthController::class, 'login'])->name('auth.login');
+Route::get('/callback', [AuthController::class, 'callback'])->name('auth.callback');
+```
+
+```php
+// app/Http/Controllers/AuthController.php
 use Hearth\HearthClient;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 
-$hearth = app(HearthClient::class); // registered via service provider
+class AuthController extends Controller
+{
+    public function __construct(private readonly HearthClient $hearth) {}
 
-Route::get('/login', function () use ($hearth) {
-    $result = $hearth->beginLogin('http://localhost:3000/callback', 'openid');
-    session(['oauth_state' => $result->state, 'code_verifier' => $result->codeVerifier]);
-    return redirect($result->authorizationUrl);
-});
+    public function login(): RedirectResponse
+    {
+        $result = $this->hearth->beginLogin(
+            redirectUri: route('auth.callback'),
+            scopes:      'openid',
+        );
+        session(['oauth_state' => $result->state, 'code_verifier' => $result->codeVerifier]);
+        return redirect($result->authorizationUrl);
+    }
 
-Route::get('/callback', function (Request $request) use ($hearth) {
-    $tokens = $hearth->completeLogin(
-        $request->code,
-        session('code_verifier'),
-        'http://localhost:3000/callback',
-    );
-    return response()->json(['access_token' => $tokens->accessToken]);
-});
+    public function callback(Request $request): RedirectResponse
+    {
+        $tokens = $this->hearth->completeLogin(
+            code:         $request->query('code'),
+            codeVerifier: session('code_verifier'),
+            redirectUri:  route('auth.callback'),
+        );
+        session(['access_token' => $tokens->accessToken]);
+        session()->forget(['oauth_state', 'code_verifier']);
+        return redirect('/dashboard');
+    }
+}
 ```
 
 See the [Laravel adapter guide](/docs/sdks/php-laravel) for service-provider setup and `hearth.auth` middleware.
