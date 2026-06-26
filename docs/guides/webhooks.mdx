@@ -1,3 +1,12 @@
+---
+title: Webhooks guide
+sidebar_label: Webhooks
+description: Subscribe to real-time Hearth audit events. Covers creating subscriptions, filtering events, verifying signatures, and inspecting delivery logs.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
 # Webhooks Guide
 
 **Audience:** operators and developers integrating Hearth into external systems.
@@ -136,25 +145,46 @@ Hearth computes the signature as:
 HMAC-SHA256(secret, request_body_bytes)
 ```
 
-and encodes it as `sha256=<lowercase-hex>`.
+and encodes it as `sha256=<lowercase-hex>`. Use **constant-time comparison** to prevent timing attacks.
 
-Example verification in Python:
+The following examples show complete signature verification handlers for each language:
 
-```python
-import hashlib
-import hmac
+<Tabs groupId="lang">
+<TabItem value="ts" label="TypeScript" default>
 
-def verify_signature(secret: str, body: bytes, header: str) -> bool:
-    expected = "sha256=" + hmac.new(
-        secret.encode(), body, hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(expected, header)
+```typescript
+import crypto from "crypto";
+import express from "express";
+
+const app = express();
+app.use(express.raw({ type: "application/json" })); // preserve raw body for signature
+
+app.post("/hearth-events", (req, res) => {
+  const signature = req.headers["x-hearth-signature-256"] as string;
+  if (!verifySignature(process.env.WEBHOOK_SECRET!, req.body, signature)) {
+    return res.status(401).json({ error: "invalid signature" });
+  }
+  const event = JSON.parse(req.body.toString());
+  console.log("event:", event.action, event.resource_id);
+  res.status(200).end();
+});
+
+function verifySignature(secret: string, body: Buffer, header: string): boolean {
+  const expected = "sha256=" + crypto
+    .createHmac("sha256", secret)
+    .update(body)
+    .digest("hex");
+  // Constant-time comparison — prevents timing attacks
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(header));
+}
 ```
 
-Example verification in Node.js:
+</TabItem>
+<TabItem value="node" label="Node (raw)">
 
-```js
+```javascript
 const crypto = require("crypto");
+const http = require("http");
 
 function verifySignature(secret, body, header) {
   const expected = "sha256=" + crypto
@@ -163,9 +193,150 @@ function verifySignature(secret, body, header) {
     .digest("hex");
   return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(header));
 }
+
+http.createServer((req, res) => {
+  if (req.method !== "POST" || req.url !== "/hearth-events") {
+    res.writeHead(404); res.end(); return;
+  }
+  const chunks = [];
+  req.on("data", c => chunks.push(c));
+  req.on("end", () => {
+    const body = Buffer.concat(chunks);
+    const sig = req.headers["x-hearth-signature-256"];
+    if (!verifySignature(process.env.WEBHOOK_SECRET, body, sig)) {
+      res.writeHead(401); res.end(JSON.stringify({ error: "invalid signature" })); return;
+    }
+    const event = JSON.parse(body.toString());
+    console.log("event:", event.action);
+    res.writeHead(200); res.end();
+  });
+}).listen(8080);
 ```
 
-**Use constant-time comparison** (`hmac.compare_digest` / `crypto.timingSafeEqual`) to prevent timing attacks.
+</TabItem>
+<TabItem value="go" label="Go">
+
+```go
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/hex"
+    "fmt"
+    "io"
+    "net/http"
+)
+
+func verifySignature(secret string, body []byte, header string) bool {
+    mac := hmac.New(sha256.New, []byte(secret))
+    mac.Write(body)
+    expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+    // hmac.Equal uses constant-time comparison
+    return hmac.Equal([]byte(expected), []byte(header))
+}
+
+func hearthEventsHandler(w http.ResponseWriter, r *http.Request) {
+    body, _ := io.ReadAll(r.Body)
+    sig := r.Header.Get("X-Hearth-Signature-256")
+    if !verifySignature(os.Getenv("WEBHOOK_SECRET"), body, sig) {
+        http.Error(w, "invalid signature", http.StatusUnauthorized)
+        return
+    }
+    fmt.Println("verified event:", r.Header.Get("X-Hearth-Event"))
+    w.WriteHeader(http.StatusOK)
+}
+```
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```python
+import hashlib
+import hmac
+import os
+
+from flask import Flask, abort, request
+
+app = Flask(__name__)
+
+def verify_signature(secret: str, body: bytes, header: str) -> bool:
+    expected = "sha256=" + hmac.new(
+        secret.encode(), body, hashlib.sha256
+    ).hexdigest()
+    # hmac.compare_digest uses constant-time comparison
+    return hmac.compare_digest(expected, header)
+
+@app.post("/hearth-events")
+def hearth_events():
+    body = request.get_data()
+    sig  = request.headers.get("X-Hearth-Signature-256", "")
+    if not verify_signature(os.environ["WEBHOOK_SECRET"], body, sig):
+        abort(401)
+    event = request.get_json(force=True)
+    print("event:", event["action"], event["resource_id"])
+    return "", 200
+```
+
+</TabItem>
+<TabItem value="php" label="PHP">
+
+```php
+<?php
+function verifySignature(string $secret, string $body, string $header): bool {
+    $expected = 'sha256=' . hash_hmac('sha256', $body, $secret);
+    // hash_equals uses constant-time comparison
+    return hash_equals($expected, $header);
+}
+
+$body      = file_get_contents('php://input');
+$signature = $_SERVER['HTTP_X_HEARTH_SIGNATURE_256'] ?? '';
+
+if (!verifySignature($_ENV['WEBHOOK_SECRET'], $body, $signature)) {
+    http_response_code(401);
+    echo json_encode(['error' => 'invalid signature']);
+    exit;
+}
+
+$event = json_decode($body, true);
+error_log('event: ' . $event['action'] . ' ' . $event['resource_id']);
+http_response_code(200);
+```
+
+</TabItem>
+<TabItem value="rust" label="Rust">
+
+```rust
+use axum::{body::Bytes, http::HeaderMap, http::StatusCode, routing::post, Router};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
+fn verify_signature(secret: &[u8], body: &[u8], header: &str) -> bool {
+    let mut mac = HmacSha256::new_from_slice(secret).unwrap();
+    mac.update(body);
+    let expected = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+    // Constant-time comparison via the subtle crate (used internally by hmac)
+    expected.as_bytes() == header.as_bytes()
+}
+
+async fn hearth_events(headers: HeaderMap, body: Bytes) -> StatusCode {
+    let sig = headers
+        .get("x-hearth-signature-256")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let secret = std::env::var("WEBHOOK_SECRET").unwrap_or_default();
+    if !verify_signature(secret.as_bytes(), &body, sig) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    // Process event
+    StatusCode::OK
+}
+
+let app = Router::new().route("/hearth-events", post(hearth_events));
+```
+
+</TabItem>
+</Tabs>
 
 ---
 

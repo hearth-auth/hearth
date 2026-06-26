@@ -1,15 +1,18 @@
 ---
 title: Node.js SDK quickstart
 sidebar_label: Node.js
-description: Verify Hearth tokens and enforce RBAC in a Node.js server in under 5 minutes. Covers Express and Fastify middleware, JWKS caching, and the Admin API.
+description: Verify Hearth tokens and enforce RBAC in a Node.js server in under 5 minutes. Covers Express, Fastify, and Next.js middleware, JWKS caching, and the Admin API.
 ---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
 
 # Node.js SDK quickstart
 
 Add token verification and permission checks to a Node.js server in under 5 minutes using `@hearth-auth/node`.
 
 :::note[Node.js vs TypeScript SDK]
-This is the **server-side** SDK. Use it to handle the OAuth callback route, verify incoming Bearer tokens, protect Express/Fastify routes, and call the Admin API.
+This is the **server-side** SDK. Use it to handle the OAuth callback route, verify incoming Bearer tokens, protect Express/Fastify/Next.js routes, and call the Admin API.
 
 For **browser or React** — `HearthProvider`, `useHasPermission` hooks, and browser-hosted PKCE — use the [TypeScript SDK](./typescript.md) instead.
 
@@ -31,11 +34,16 @@ Ships `jose` as a direct dependency — no peer deps required.
 
 ## Auth code flow with PKCE
 
-For Node.js servers that handle the OAuth callback (Express, Fastify, Next.js API routes), use `beginLogin` / `completeLogin`:
+For Node.js servers that handle the OAuth callback, use `beginLogin` / `completeLogin`. The core SDK calls are the same across frameworks — the tabs show how to declare the routes in each.
+
+<Tabs groupId="framework">
+<TabItem value="express" label="Express" default>
 
 ```typescript
+import express from "express";
 import { HearthClient } from "@hearth-auth/node";
 
+const app = express();
 const client = new HearthClient({
   issuer_url:    "https://hearth.example.com",
   client_id:     process.env.HEARTH_CLIENT_ID,
@@ -65,8 +73,101 @@ app.get("/callback", async (req, res) => {
     "https://myapp.example.com/callback",
   );
   // tokens.access_token, tokens.refresh_token, tokens.expires_in
+  res.json({ access_token: tokens.access_token });
 });
 ```
+
+</TabItem>
+<TabItem value="fastify" label="Fastify">
+
+```typescript
+import Fastify from "fastify";
+import { HearthClient } from "@hearth-auth/node";
+
+const app = Fastify();
+const client = new HearthClient({
+  issuer_url:    "https://hearth.example.com",
+  client_id:     process.env.HEARTH_CLIENT_ID,
+  client_secret: process.env.HEARTH_CLIENT_SECRET,
+});
+
+app.get("/login", async (request, reply) => {
+  const { authorizationUrl, state, codeVerifier } = await client.beginLogin(
+    "https://myapp.example.com/callback",
+    "openid profile email",
+  );
+  request.session.oauthState   = state;
+  request.session.codeVerifier = codeVerifier;
+  return reply.redirect(authorizationUrl);
+});
+
+app.get("/callback", async (request, reply) => {
+  const { code, state } = request.query as { code: string; state: string };
+  if (state !== request.session.oauthState) {
+    return reply.status(400).send("state mismatch");
+  }
+  const tokens = await client.completeLogin(
+    code,
+    request.session.codeVerifier,
+    "https://myapp.example.com/callback",
+  );
+  return reply.send({ access_token: tokens.access_token });
+});
+```
+
+</TabItem>
+<TabItem value="nextjs" label="Next.js">
+
+```typescript
+// app/api/auth/login/route.ts — App Router
+import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
+import { HearthClient } from "@hearth-auth/node";
+
+const client = new HearthClient({
+  issuer_url:    process.env.HEARTH_ISSUER_URL!,
+  client_id:     process.env.HEARTH_CLIENT_ID!,
+  client_secret: process.env.HEARTH_CLIENT_SECRET!,
+});
+
+export async function GET() {
+  const { authorizationUrl, state, codeVerifier } = await client.beginLogin(
+    `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/callback`,
+    "openid profile email",
+  );
+  const cookieStore = cookies();
+  cookieStore.set("oauth_state",    state,        { httpOnly: true, sameSite: "lax" });
+  cookieStore.set("code_verifier",  codeVerifier, { httpOnly: true, sameSite: "lax" });
+  redirect(authorizationUrl);
+}
+```
+
+```typescript
+// app/api/auth/callback/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { cookies } from "next/headers";
+import { HearthClient } from "@hearth-auth/node";
+
+const client = new HearthClient({ issuer_url: process.env.HEARTH_ISSUER_URL! });
+
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const cookieStore = cookies();
+  const tokens = await client.completeLogin(
+    searchParams.get("code")!,
+    cookieStore.get("code_verifier")!.value,
+    `${process.env.NEXT_PUBLIC_APP_URL}/api/auth/callback`,
+  );
+  const response = NextResponse.redirect(new URL("/", request.url));
+  response.cookies.set("access_token", tokens.access_token, { httpOnly: true });
+  return response;
+}
+```
+
+See the [Next.js adapter guide](./node-nextjs.md) for Edge Runtime middleware, Pages Router patterns, and `getHearthToken` for Server Components.
+
+</TabItem>
+</Tabs>
 
 :::tip[PKCE in the browser?]
 If your PKCE flow runs in the browser (React SPA, Next.js client components), use the [TypeScript SDK](./typescript.md) `startLogin()` instead. Your Node.js server then only needs `verifyToken()` on incoming Bearer tokens.
@@ -113,7 +214,12 @@ try {
 Always supply `client_id`. Without it the SDK cannot compare the JWT `aud` claim, which opens the server to token-confusion attacks (RFC 7519 §4.1.3). Omit only for pure gateways that intentionally accept tokens for any client.
 :::
 
-## Express middleware
+## Framework middleware
+
+Apply token verification and permission checks to your routes. All three adapters respond `401` on a missing or invalid token and `403` on a permission failure.
+
+<Tabs groupId="framework">
+<TabItem value="express" label="Express" default>
 
 ```typescript
 import express from "express";
@@ -148,7 +254,8 @@ app.post(
 
 The middleware responds `401 Unauthorized` (`WWW-Authenticate: Bearer realm="hearth"`) on missing or invalid tokens, and `403 Forbidden` on permission failures. It never calls `next` on auth failure.
 
-## Fastify hook
+</TabItem>
+<TabItem value="fastify" label="Fastify">
 
 ```typescript
 import Fastify from "fastify";
@@ -169,6 +276,36 @@ app.get("/docs", async (request, reply) => {
   return { sub: request.hearthToken?.subject() };
 });
 ```
+
+`hearthFastifyHook` integrates with Fastify's `preHandler` lifecycle. Non-HTTP connections (WebSocket) pass through without token checks.
+
+</TabItem>
+<TabItem value="nextjs" label="Next.js">
+
+```typescript
+// middleware.ts — runs in the Edge Runtime (V8 isolate, no Node.js APIs needed)
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { hearthEdgeMiddleware } from "@hearth-auth/node/nextjs/edge";
+
+const guard = hearthEdgeMiddleware({
+  issuerUrl: process.env.HEARTH_ISSUER_URL!,
+  jwksUri:   `${process.env.HEARTH_ISSUER_URL}/.well-known/jwks.json`,
+});
+
+export async function middleware(request: NextRequest) {
+  const result = await guard(request);
+  if (result) return result;   // 401 or 403 — return to client
+  return NextResponse.next();
+}
+
+export const config = { matcher: ["/api/:path*"] };
+```
+
+See the [Next.js adapter guide](./node-nextjs.md) for App Router Server Components, Pages Router `withHearthAuth`, and per-route permission guards.
+
+</TabItem>
+</Tabs>
 
 ## Permission delivery modes
 
