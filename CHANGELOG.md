@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Node SDK Next.js adapter (HEA-1598)** — `@hearth-auth/node/nextjs` provides
+  `withHearthAuth(handler, options)` for Pages Router API routes (attaches `req.hearthToken`) and
+  `getHearthToken(req, config)` for App Router Route Handlers (returns `VerifiedToken | null`).
+  `@hearth-auth/node/nextjs/edge` provides `hearthEdgeMiddleware(options)` — an Edge Runtime-safe
+  middleware factory that uses Web Crypto (`crypto.subtle` via `jose`) instead of `node:crypto`, safe
+  for Next.js `middleware.ts` running in the V8 Isolate Edge Runtime. `requirePermission(perm)` is a
+  composable predicate guard compatible with both `EdgeToken` and `VerifiedToken`. Next.js is an
+  optional peer dependency.
 - **Kotlin SDK Spring Security adapter (HEA-1597)** — new `hearth-spring` Gradle subproject provides
   `HearthJwtAuthenticationFilter` (extends `OncePerRequestFilter`), `HearthAuthentication` (implements
   `Authentication`), `HearthSecurityAutoConfiguration` (`@AutoConfiguration`) and
