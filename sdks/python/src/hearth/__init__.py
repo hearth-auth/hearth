@@ -6,6 +6,14 @@ Provides HearthClient (auth flows, RBAC predicates), AdminClient
 
 from .client import HearthClient
 from .admin import AdminClient
+
+# FastAPI adapter — only importable when fastapi/starlette are installed.
+# Access via: from hearth.fastapi import HearthFastAPIDep, require_permission, ...
+try:
+    from .fastapi import HearthFastAPIDep, HearthSettings, VerifiedClaims, require_permission
+    _FASTAPI_AVAILABLE = True
+except ImportError:
+    _FASTAPI_AVAILABLE = False
 from .errors import (
     HearthError,
     HearthSdkError,
