@@ -367,6 +367,21 @@ pub struct UpdateOrgMemberRequest {
     pub role: Option<String>,
 }
 
+/// Result of [`crate::HearthClient::begin_login`].
+///
+/// Redirect the browser to `authorization_url`, then persist `state` and
+/// `code_verifier` in session storage so they can be verified and supplied to
+/// [`crate::HearthClient::complete_login`] on the callback route.
+#[derive(Debug, Clone)]
+pub struct LoginBeginResult {
+    /// Full PKCE authorization URL — redirect the browser here.
+    pub authorization_url: String,
+    /// Random CSRF-protection value — persist and verify against the callback `state` param.
+    pub state: String,
+    /// PKCE code verifier — persist and pass to `complete_login`.
+    pub code_verifier: String,
+}
+
 // ── §4.5.2 Device Authorization Flow (RFC 8628) ──────────────────────────────
 
 /// Response from the device authorization endpoint (RFC 8628 §3.2).

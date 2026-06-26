@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use rand::RngCore;
 use reqwest::header;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -602,6 +603,67 @@ impl HearthClient {
         Ok(resp.json().await?)
     }
 
+    /// Begin an authorization-code login: generate PKCE, build the authorization URL,
+    /// and return the values that must be persisted before redirecting the browser.
+    ///
+    /// # Developer flow
+    /// 1. Call `begin_login(redirect_uri, scopes)` — receive `LoginBeginResult`.
+    /// 2. Persist `result.state` and `result.code_verifier` in session storage.
+    /// 3. Redirect the browser to `result.authorization_url`.
+    /// 4. On the callback route, call `complete_login(code, code_verifier, redirect_uri)`.
+    ///
+    /// `scopes` defaults to `"openid"` when `None`.
+    pub async fn begin_login(
+        &self,
+        redirect_uri: &str,
+        scopes: Option<&str>,
+    ) -> Result<LoginBeginResult, HearthError> {
+        let client_id = self.client_id.as_deref().ok_or_else(|| {
+            HearthError::ConfigurationError {
+                message: "client_id is required for begin_login".into(),
+            }
+        })?;
+
+        let pkce = crate::pkce::generate_pkce_pair();
+        let state = Self::generate_state();
+
+        let auth_base = format!("{}/authorize", self.base_url);
+        let mut url = reqwest::Url::parse(&auth_base).map_err(|e| {
+            HearthError::Other(format!("invalid base_url for begin_login: {e}"))
+        })?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("response_type", "code");
+            pairs.append_pair("client_id", client_id);
+            pairs.append_pair("redirect_uri", redirect_uri);
+            pairs.append_pair("scope", scopes.unwrap_or("openid"));
+            pairs.append_pair("state", &state);
+            pairs.append_pair("code_challenge", &pkce.challenge);
+            pairs.append_pair("code_challenge_method", pkce.method);
+        }
+
+        Ok(LoginBeginResult {
+            authorization_url: url.to_string(),
+            state,
+            code_verifier: pkce.verifier,
+        })
+    }
+
+    /// Complete an authorization-code login: exchange the callback code for tokens.
+    ///
+    /// `code_verifier` must be the value returned by [`HearthClient::begin_login`].
+    pub async fn complete_login(
+        &self,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<TokenResponse, HearthError> {
+        let client_id = self.client_id.as_deref().unwrap_or("");
+        let client_secret = self.client_secret.as_deref().unwrap_or("");
+        self.exchange_code(code, client_id, client_secret, redirect_uri, Some(code_verifier))
+            .await
+    }
+
     pub async fn exchange_code(
         &self,
         code: &str,
@@ -836,6 +898,13 @@ impl HearthClient {
     pub fn in_org(token: &str, org_id: &str) -> Result<bool, HearthError> {
         let claims = Self::decode_claims(token)?;
         Ok(claims.get("oid").and_then(|v| v.as_str()) == Some(org_id))
+    }
+
+    fn generate_state() -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let mut bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        URL_SAFE_NO_PAD.encode(bytes)
     }
 
     fn decode_claims(token: &str) -> Result<Value, HearthError> {
@@ -1293,6 +1362,134 @@ mod tests {
         let resp: TokenResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.access_token, "eyJ...");
         assert!(resp.refresh_token.is_none(), "client_credentials response has no refresh_token");
+    }
+
+    // ── begin_login / complete_login ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn begin_login_returns_well_formed_url() {
+        let client = HearthClientBuilder::new("https://auth.example.com")
+            .client_id("my-app")
+            .client_secret("s3cr3t")
+            .build();
+
+        let result = client
+            .begin_login("https://app.example.com/callback", None)
+            .await
+            .expect("begin_login");
+
+        let url = reqwest::Url::parse(&result.authorization_url).expect("valid URL");
+        let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(params.get("response_type").map(|v| v.as_ref()), Some("code"));
+        assert_eq!(params.get("client_id").map(|v| v.as_ref()), Some("my-app"));
+        assert_eq!(
+            params.get("redirect_uri").map(|v| v.as_ref()),
+            Some("https://app.example.com/callback")
+        );
+        assert_eq!(
+            params.get("code_challenge_method").map(|v| v.as_ref()),
+            Some("S256")
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_login_code_challenge_matches_verifier() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        use sha2::{Digest, Sha256};
+
+        let client = HearthClientBuilder::new("https://auth.example.com")
+            .client_id("my-app")
+            .build();
+
+        let result = client
+            .begin_login("https://app.example.com/callback", None)
+            .await
+            .expect("begin_login");
+
+        let url = reqwest::Url::parse(&result.authorization_url).expect("valid URL");
+        let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        let challenge = params
+            .get("code_challenge")
+            .expect("code_challenge in URL")
+            .to_string();
+
+        let mut hasher = Sha256::new();
+        hasher.update(result.code_verifier.as_bytes());
+        let expected = URL_SAFE_NO_PAD.encode(hasher.finalize());
+        assert_eq!(challenge, expected, "code_challenge must be BASE64URL(SHA256(code_verifier))");
+    }
+
+    #[tokio::test]
+    async fn begin_login_state_is_non_empty_and_in_url() {
+        let client = HearthClientBuilder::new("https://auth.example.com")
+            .client_id("my-app")
+            .build();
+
+        let result = client
+            .begin_login("https://app.example.com/callback", None)
+            .await
+            .expect("begin_login");
+
+        assert!(!result.state.is_empty(), "state must not be empty");
+        let url = reqwest::Url::parse(&result.authorization_url).expect("valid URL");
+        let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        assert_eq!(
+            params.get("state").map(|v| v.as_ref()),
+            Some(result.state.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_login_requires_client_id() {
+        let client = HearthClientBuilder::new("https://auth.example.com").build();
+        let err = client
+            .begin_login("https://app.example.com/callback", None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, HearthError::ConfigurationError { .. }),
+            "expected ConfigurationError, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_login_posts_code_verifier_to_token_endpoint() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = r#"{"access_token":"at","token_type":"Bearer","expires_in":3600}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+            req
+        });
+
+        let client = HearthClient::new(base, "realm-1");
+        let resp = client
+            .complete_login("auth-code-xyz", "my-verifier-abc", "https://app.example.com/callback")
+            .await
+            .expect("complete_login");
+        assert_eq!(resp.access_token, "at");
+
+        let req = server.await.unwrap();
+        let (_head, body) = req.split_once("\r\n\r\n").unwrap_or((&req, ""));
+        assert!(
+            body.contains("code_verifier=my-verifier-abc"),
+            "code_verifier missing from request body: {body}"
+        );
+        assert!(body.contains("code=auth-code-xyz"), "code missing: {body}");
     }
 
     // ── exchange_magic_link (C-12) ────────────────────────────────────────

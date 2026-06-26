@@ -24,6 +24,7 @@ from .types import (
     BootstrapResponse,
     AuthorizeResponse,
     DeviceAuthorizationResponse,
+    LoginBeginResult,
     SvDeltaResponse,
     SvSnapshotResponse,
     TokenResponse,
@@ -85,6 +86,72 @@ class HearthClient:
     # ------------------------------------------------------------------
     # OAuth flows
     # ------------------------------------------------------------------
+
+    def begin_login(
+        self,
+        redirect_uri: str,
+        scopes: Optional[str] = None,
+    ) -> LoginBeginResult:
+        """Begin an authorization-code login: generate PKCE, build the authorization URL.
+
+        Developer flow:
+
+        1. Call ``begin_login(redirect_uri)`` — receive a :class:`LoginBeginResult`.
+        2. Persist ``result.state`` and ``result.code_verifier`` in session storage.
+        3. Redirect the browser to ``result.authorization_url``.
+        4. On the callback route, call ``complete_login(code, code_verifier, redirect_uri)``.
+
+        :param redirect_uri: Callback URL registered with the authorization server.
+        :param scopes: Space-delimited scope string (defaults to ``"openid"``).
+        :raises ConfigurationError: if ``client_id`` is not set.
+        """
+        import secrets
+        import urllib.parse
+        from .pkce import generate_pkce_pair
+
+        if not self._client_id:
+            raise ConfigurationError("client_id is required for begin_login")
+
+        pkce = generate_pkce_pair()
+        state = secrets.token_urlsafe(16)
+
+        params = {
+            "response_type": "code",
+            "client_id": self._client_id,
+            "redirect_uri": redirect_uri,
+            "scope": scopes or "openid",
+            "state": state,
+            "code_challenge": pkce.code_challenge,
+            "code_challenge_method": "S256",
+        }
+        authorization_url = f"{self._base}/authorize?" + urllib.parse.urlencode(params)
+        return LoginBeginResult(
+            authorization_url=authorization_url,
+            state=state,
+            code_verifier=pkce.code_verifier,
+        )
+
+    def complete_login(
+        self,
+        code: str,
+        code_verifier: str,
+        redirect_uri: str,
+    ) -> TokenResponse:
+        """Complete an authorization-code login: exchange the callback code for tokens.
+
+        :param code: Authorization code from the callback ``code`` query parameter.
+        :param code_verifier: PKCE verifier returned by :meth:`begin_login`.
+        :param redirect_uri: Same ``redirect_uri`` used in :meth:`begin_login`.
+        :raises ConfigurationError: if ``client_id`` or ``client_secret`` are not set.
+        :raises HearthError: on non-200 HTTP responses.
+        """
+        if not self._client_id or not self._client_secret:
+            raise ConfigurationError(
+                "client_id and client_secret are required for complete_login"
+            )
+        return self.exchange_code(
+            code, self._client_id, self._client_secret, redirect_uri, code_verifier
+        )
 
     def authorize(
         self,

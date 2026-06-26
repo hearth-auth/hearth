@@ -26,6 +26,7 @@ export type {
   SvDeltaResponse,
   SvSnapshotResponse,
   ExchangeCodeOptions,
+  LoginBeginResult,
 } from "./flows.js";
 
 // §PKCE — RFC 7636 code verifier + challenge generation

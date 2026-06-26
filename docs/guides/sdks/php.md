@@ -30,61 +30,42 @@ Laravel 10/11/12 auto-discovers the service provider — no manual registration 
 
 ## Auth code flow with PKCE
 
-### Step 1 — Build the authorization URL
-
-Generate a PKCE pair, store the verifier in the session, and redirect:
+Use `beginLogin` / `completeLogin` to handle the OAuth callback in two calls:
 
 ```php
-use HearthAuth\HearthClient;
+use Hearth\HearthClient;
 
 session_start();
 
 $hearth = new HearthClient(
-    issuerUrl: 'https://hearth.example.com',
-    realmId:   '<realm_id>',
-    clientId:  '<client_id>',
+    issuerUrl:    'https://hearth.example.com',
+    clientId:     '<client_id>',
+    clientSecret: '<client_secret>',
 );
 
-// generatePkce() returns a PkceChallenge with codeVerifier + S256 codeChallenge
-$pkce  = HearthClient::generatePkce();
-$state = bin2hex(random_bytes(16)); // CSRF token
-
-$_SESSION['pkce_verifier'] = $pkce->codeVerifier;
-$_SESSION['oauth_state']   = $state;
-
-// buildAuthorizeUrl() discovers the authorization endpoint and builds the full URL
-header('Location: ' . $hearth->buildAuthorizeUrl(
-    redirectUri: 'https://myapp.example.com/callback',
-    state:       $state,
-    scope:       'openid profile email',
-    pkce:        $pkce,
-));
+// Login route — generate PKCE and build the authorization URL
+$result = $hearth->beginLogin('https://myapp.example.com/callback', 'openid profile email');
+// Persist state + codeVerifier in your session (one line you own)
+$_SESSION['oauth_state']   = $result->state;
+$_SESSION['code_verifier'] = $result->codeVerifier;
+header('Location: ' . $result->authorizationUrl);
 exit;
 ```
 
-### Step 2 — Exchange the code (callback handler)
-
 ```php
-use HearthAuth\HearthClient;
+// Callback handler — exchange the code for tokens
+session_start();
 
-$hearth = new HearthClient(
-    issuerUrl: 'https://hearth.example.com',
-    realmId:   '<realm_id>',
-    clientId:  '<client_id>',
-);
-
-// Verify state before proceeding
 if ($_GET['state'] !== $_SESSION['oauth_state']) {
     http_response_code(400);
-    exit('State mismatch');
+    exit('state mismatch');
 }
 
-$tokens = $hearth->exchangeCode(
+$tokens = $hearth->completeLogin(
     code:         $_GET['code'],
+    codeVerifier: $_SESSION['code_verifier'],
     redirectUri:  'https://myapp.example.com/callback',
-    codeVerifier: $_SESSION['pkce_verifier'],
 );
-
 // $tokens->accessToken, $tokens->refreshToken, $tokens->expiresIn
 ```
 

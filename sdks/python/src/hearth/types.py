@@ -74,6 +74,22 @@ class AuthorizeResponse(BaseModel):
     redirect_uri: Optional[str] = None
 
 
+class LoginBeginResult(BaseModel):
+    """Result of :meth:`~hearth.HearthClient.begin_login`.
+
+    Redirect the browser to ``authorization_url``, then persist ``state`` and
+    ``code_verifier`` in your session so they can be verified and supplied to
+    :meth:`~hearth.HearthClient.complete_login` on the callback route.
+    """
+
+    authorization_url: str
+    """Full PKCE authorization URL — redirect the browser here."""
+    state: str
+    """Random CSRF-protection value — verify against the callback ``state`` param."""
+    code_verifier: str
+    """PKCE code verifier — pass to ``complete_login`` on the callback route."""
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
