@@ -2,13 +2,21 @@ import {
   AuthorizationModeMismatchError,
   ConfigurationError,
   DiscoveryError,
+  OAuthFlowError,
+  TokenExpiredError,
 } from "./errors.js";
 import { JwksClient } from "./jwks-client.js";
 import {
   IntrospectionClient,
   type IntrospectionResult,
 } from "./introspection-client.js";
-import type { AccessTokenAuthorizationMode, AuthorizePermissionOptions } from "./types.js";
+import type {
+  AccessTokenAuthorizationMode,
+  AuthorizePermissionOptions,
+  DeviceAuthorizationResponse,
+  TokenResponse,
+} from "./types.js";
+import { Claims } from "./claims.js";
 
 /** Configuration for {@link HearthClient}. */
 export interface HearthClientConfig {
@@ -284,5 +292,213 @@ export class HearthClient {
       );
     }
     return result;
+  }
+
+  // ── §2 — Token Verification (EdDSA/Ed25519) ─────────────────────────────
+
+  /**
+   * Verify a JWT using JWKS-backed EdDSA/Ed25519 local signature verification (spec §2).
+   *
+   * Performs all five mandatory validation steps in order:
+   * 1. Signature against the JWKS endpoint (EdDSA/OKP/Ed25519 required; RS256/ES256 accepted).
+   * 2. `exp` claim (rejects expired tokens).
+   * 3. `iss` claim (must match configured `issuerUrl`).
+   * 4. `aud` claim (validated when `clientId` is set in config).
+   * 5. `iat` claim (within 60-second clock skew tolerance).
+   *
+   * @throws {@link TokenExpiredError} — token is expired.
+   * @throws {@link TokenInvalidError} — signature invalid or JWT malformed.
+   * @throws {@link TokenIssuerError} — issuer does not match `issuerUrl`.
+   * @throws {@link TokenAudienceError} — audience does not include `clientId`.
+   * @throws {@link JWKSFetchError} — JWKS endpoint unreachable.
+   */
+  async verifyToken(token: string): Promise<Claims> {
+    const jc = await this.jwksClient();
+    return jc.verify(token, {
+      issuer: this.issuerUrl,
+      audience: this.clientId,
+    });
+  }
+
+  // ── §4.5 — OAuth Flows ───────────────────────────────────────────────────
+
+  /**
+   * Obtain a token via the Client Credentials grant (RFC 6749 §4.4).
+   *
+   * Sends `client_id` and `client_secret` as `application/x-www-form-urlencoded`
+   * body fields — NEVER as URL query parameters. The token endpoint is discovered
+   * from the OIDC discovery document.
+   *
+   * @throws {@link OAuthFlowError} on any non-2xx response.
+   */
+  async clientCredentials(scope?: string): Promise<TokenResponse> {
+    const doc = await this.discover();
+    const tokenEndpoint = (doc as Record<string, unknown>)["token_endpoint"] as string | undefined;
+    if (!tokenEndpoint) {
+      throw new ConfigurationError("token_endpoint not found in OIDC discovery document");
+    }
+    const params: Record<string, string> = {
+      grant_type: "client_credentials",
+      client_id: this.clientId ?? "",
+      client_secret: this.clientSecret ?? "",
+    };
+    if (scope !== undefined) params.scope = scope;
+    return this.postForm<TokenResponse>(tokenEndpoint, params);
+  }
+
+  /**
+   * Begin a Device Authorization Flow (RFC 8628 §3.1).
+   *
+   * Returns the `device_code`, `user_code`, `verification_uri`, and polling `interval`.
+   * Pass the returned `device_code` and `interval` to `pollDeviceToken()` to await approval.
+   *
+   * @throws {@link ConfigurationError} when `device_authorization_endpoint` is absent.
+   * @throws {@link OAuthFlowError} on any non-2xx response.
+   */
+  async startDeviceFlow(scope?: string): Promise<DeviceAuthorizationResponse> {
+    const doc = await this.discover();
+    const deviceEndpoint = (doc as Record<string, unknown>)["device_authorization_endpoint"] as string | undefined;
+    if (!deviceEndpoint) {
+      throw new ConfigurationError(
+        "device_authorization_endpoint not found in OIDC discovery document",
+      );
+    }
+    const params: Record<string, string> = { client_id: this.clientId ?? "" };
+    if (scope !== undefined) params.scope = scope;
+    return this.postForm<DeviceAuthorizationResponse>(deviceEndpoint, params);
+  }
+
+  /**
+   * Poll the token endpoint until the device flow completes (RFC 8628 §3.5).
+   *
+   * Handles `authorization_pending` by continuing to poll transparently.
+   * Handles `slow_down` by increasing the interval by 5 s per occurrence.
+   * Throws `TokenExpiredError` when the device code expires (`expired_token`).
+   *
+   * @param deviceCode - The `device_code` from `startDeviceFlow()`.
+   * @param intervalSeconds - Initial polling interval (from `startDeviceFlow().interval`).
+   * @throws {@link TokenExpiredError} — device code has expired.
+   * @throws {@link OAuthFlowError} — non-recoverable error from the server.
+   */
+  async pollDeviceToken(deviceCode: string, intervalSeconds: number): Promise<TokenResponse> {
+    const doc = await this.discover();
+    const tokenEndpoint = (doc as Record<string, unknown>)["token_endpoint"] as string | undefined;
+    if (!tokenEndpoint) {
+      throw new ConfigurationError("token_endpoint not found in OIDC discovery document");
+    }
+    let currentIntervalMs = intervalSeconds * 1000;
+
+    // Use while(true) + await-setTimeout so Vitest fake timers can control polling in tests.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      await new Promise<void>((res) => setTimeout(res, currentIntervalMs));
+
+      const body = new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceCode,
+        client_id: this.clientId ?? "",
+      }).toString();
+
+      const resp = await fetch(tokenEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      });
+
+      if (resp.ok) {
+        return resp.json() as Promise<TokenResponse>;
+      }
+
+      let errorCode = "unknown";
+      try {
+        const parsed = (await resp.json()) as Record<string, unknown>;
+        errorCode = typeof parsed["error"] === "string" ? parsed["error"] : "unknown";
+      } catch { /* ignore parse failures */ }
+
+      if (errorCode === "authorization_pending") {
+        continue;
+      } else if (errorCode === "slow_down") {
+        currentIntervalMs += 5000;
+        continue;
+      } else if (errorCode === "expired_token") {
+        throw new TokenExpiredError(new Date());
+      } else {
+        throw new OAuthFlowError(resp.status, errorCode);
+      }
+    }
+  }
+
+  /**
+   * Request a magic-link / passwordless authentication email (spec §4.5.3).
+   *
+   * Always resolves silently on HTTP 202 — per enumeration-resistance requirements,
+   * the server always returns 202 whether or not the email is registered.
+   * HTTP 429 (rate limit) and other non-2xx responses throw `OAuthFlowError`.
+   *
+   * Requires `realmId` in `HearthClientConfig`.
+   *
+   * @throws {@link ConfigurationError} when `realmId` is absent.
+   * @throws {@link OAuthFlowError} on non-2xx response.
+   */
+  async requestMagicLink(email: string): Promise<void> {
+    if (!this.realmId) {
+      throw new ConfigurationError("realmId is required for requestMagicLink");
+    }
+    const url = `${this.issuerUrl}/v1/${this.realmId}/auth/magic-link`;
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+      signal: AbortSignal.timeout(this.httpTimeout),
+    });
+    if (resp.status === 202) return;
+    if (!resp.ok) {
+      throw new OAuthFlowError(resp.status, `HTTP ${resp.status}`);
+    }
+  }
+
+  /**
+   * Exchange a magic-link token for tokens (spec §4.5.3 / §7.2 C-12).
+   *
+   * Completes the passwordless flow started by {@link requestMagicLink}: posts
+   * `grant_type=urn:hearth:grant-type:magic-link` with the opaque `token` from
+   * the magic-link URL to the discovered token endpoint. The `token` is sent in
+   * the body, never the URL.
+   *
+   * @param token - The opaque magic-link token from the email/redirect URL.
+   * @throws {@link OAuthFlowError} on any non-2xx response (e.g. expired/used token).
+   */
+  async exchangeMagicLink(token: string): Promise<TokenResponse> {
+    const doc = await this.discover();
+    const tokenEndpoint = (doc as Record<string, unknown>)["token_endpoint"] as string | undefined;
+    if (!tokenEndpoint) {
+      throw new ConfigurationError("token_endpoint not found in OIDC discovery document");
+    }
+    const params: Record<string, string> = {
+      grant_type: "urn:hearth:grant-type:magic-link",
+      token,
+    };
+    if (this.clientId) params.client_id = this.clientId;
+    return this.postForm<TokenResponse>(tokenEndpoint, params);
+  }
+
+  // ── Private helpers ──────────────────────────────────────────────────────
+
+  private async postForm<T>(endpoint: string, params: Record<string, string>): Promise<T> {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(params).toString(),
+      signal: AbortSignal.timeout(this.httpTimeout),
+    });
+    if (!resp.ok) {
+      let errorCode = `HTTP ${resp.status}`;
+      try {
+        const parsed = (await resp.json()) as Record<string, unknown>;
+        if (typeof parsed["error"] === "string") errorCode = parsed["error"];
+      } catch { /* ignore */ }
+      throw new OAuthFlowError(resp.status, errorCode);
+    }
+    return resp.json() as Promise<T>;
   }
 }

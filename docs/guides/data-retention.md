@@ -1,8 +1,11 @@
 # Hearth — Data Retention Guide
 
-This guide is the authoritative reference for operators with compliance obligations (SOC 2, ISO 27001, GDPR, HIPAA, CCPA). It describes every data category Hearth stores, its default retention window, how to configure it, and which compliance frameworks impose minimum-retention requirements that differ from the default.
+**Audience:** operators with compliance obligations (SOC 2, ISO 27001, GDPR, HIPAA, CCPA).
+**Goal:** Understand every data category Hearth stores, its default retention window, how to configure it, and the minimum-retention requirements your compliance framework may impose.
 
-> **Related docs:** [Privacy Data Catalog](privacy.md) — storage locations and PII handling. [Audit Log Guide](auditing.md) — querying, exporting, and managing audit events. [Security Hardening](security-hardening.md) — at-rest encryption and key management.
+:::note[Related docs]
+[Privacy Data Catalog](privacy.md) — storage locations and PII handling. [Audit Log Guide](auditing.md) — querying, exporting, and managing audit events. [Security Hardening](security-hardening.md) — at-rest encryption and key management.
+:::
 
 ---
 
@@ -83,7 +86,9 @@ curl -X POST https://auth.example.com/admin/api/realms/{realm}/audit/prune \
 | HIPAA | 6 years from date of creation | `"retention_days": 0` + external archive |
 | GDPR | No fixed minimum — retain only as long as necessary | Document your lawful basis in the privacy notice |
 
-> **HIPAA note:** 6-year retention exceeds what is practical to store entirely in the Hearth engine. Set `retention_days: 0` to disable pruning, and implement a scheduled export to long-term cold storage (S3 Glacier, Azure Archive, etc.). See [Audit Log Guide → Exporting events](auditing.md#exporting-events) for the NDJSON export endpoint.
+:::note[HIPAA]
+6-year retention exceeds what is practical to store entirely in the Hearth engine. Set `retention_days: 0` to disable pruning, and implement a scheduled export to long-term cold storage (S3 Glacier, Azure Archive, etc.). See [Audit Log Guide → Exporting events](auditing.md#exporting-events) for the NDJSON export endpoint.
+:::
 
 ### Per-realm vs. global
 
@@ -220,7 +225,9 @@ Operators subject to GDPR or CCPA must document this behavior in their privacy n
 
 ## 6. Audit log on realm deletion
 
-> **Warning: realm deletion permanently destroys the audit log for that realm. There is no recovery path.**
+:::danger
+Realm deletion permanently destroys the audit log for that realm. There is no recovery path.
+:::
 
 When `DELETE /admin/api/realms/{realm_id}` is called, Hearth performs a cascading delete that includes all audit log events for the realm. This is by design — the audit chain is realm-scoped and has no meaning independent of its realm.
 
@@ -352,4 +359,6 @@ curl -sf "https://auth.example.com/admin/realms/${REALM}/audit/export" \
 # aws s3 cp "${ARCHIVE_DIR}/audit-${DATE}.ndjson" s3://your-audit-bucket/hearth/${REALM}/
 ```
 
-> Set `retention_days` to `0` (unlimited) while exporting to an external archive, then reduce it once you have confirmed the archive pipeline is healthy.
+:::tip
+Set `retention_days` to `0` (unlimited) while standing up an external archive pipeline, then reduce it once you have confirmed the pipeline is healthy and data is flowing correctly.
+:::

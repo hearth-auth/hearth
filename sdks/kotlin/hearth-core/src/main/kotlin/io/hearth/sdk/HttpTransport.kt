@@ -94,6 +94,29 @@ internal suspend inline fun <reified Req, reified Res> OkHttpClient.put(
 }
 
 /**
+ * Executes a POST request to [url] with JSON-encoded [payload], discarding the
+ * response body. Tolerates empty/no-content success responses (e.g. HTTP 202).
+ */
+internal suspend inline fun <reified Req> OkHttpClient.postNoContent(
+    url: String,
+    payload: Req,
+    headers: Map<String, String> = emptyMap(),
+) {
+    val body = JSON.encodeToString(payload).toRequestBody(JSON_MEDIA_TYPE)
+    val request = Request.Builder().url(url).apply {
+        headers.forEach { (k, v) -> addHeader(k, v) }
+        post(body)
+    }.build()
+
+    executeAsync(request).use { resp ->
+        if (!resp.isSuccessful) {
+            val bodyStr = resp.body?.string() ?: ""
+            throw ApiError(resp.code, "HTTP ${resp.code}: $bodyStr")
+        }
+    }
+}
+
+/**
  * Executes a DELETE request to [url] with optional [headers].
  */
 internal suspend fun OkHttpClient.delete(

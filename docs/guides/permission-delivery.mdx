@@ -1,0 +1,445 @@
+---
+title: Permission delivery modes
+sidebar_label: Permission delivery
+description: Compare embedded, introspection, and decision modes. Understand the latency, consistency, and configuration trade-offs for each permission delivery mode.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Permission-delivery modes
+
+Hearth supports three modes that control how permissions are delivered to resource servers. Each is a different point on the **latency vs consistency** spectrum.
+
+## Quick-choice guide
+
+| Scenario | Recommended mode |
+|----------|-----------------|
+| Most services — fast and scalable | `embedded` (default) |
+| Post-issuance role changes must take effect immediately | `decision` |
+| Stateless resource server that delegates trust | `introspection` |
+| Offline token validation / mobile clients | `embedded` |
+
+## Decision tree
+
+```
+Is sub-second permission freshness required?
+├── No  → embedded (default)
+└── Yes → Is the service stateful (can it call Hearth per request)?
+           ├── Yes → decision
+           └── No  → introspection
+```
+
+## Latency tradeoff
+
+| Mode | Hot path latency | Permission freshness |
+|------|-----------------|---------------------|
+| `embedded` | 0 ms — JWT decoded locally | Stale until token expires (default 15 min) |
+| `introspection` | +5–15 ms — one network call to Hearth | Fresh on each introspect call |
+| `decision` | +5–15 ms — one network call to Hearth | Real-time |
+
+## Mode details
+
+### `embedded` (default)
+
+Hearth resolves the user's effective roles, groups, and permissions at token issuance time and embeds them as JWT claims (`roles`, `groups`, `permissions`). Resource servers decode the JWT locally — no network call.
+
+**Token payload excerpt:**
+```json
+{
+  "sub": "user_01HXYZ...",
+  "permissions": ["docs.view", "docs.edit"],
+  "roles": ["docs-admin"],
+  "groups": ["leads"],
+  "exp": 1700000900
+}
+```
+
+**Reading permissions from the token:**
+
+<Tabs groupId="lang">
+<TabItem value="ts" label="TypeScript" default>
+
+```ts
+import { useHasPermission } from '@hearth-auth/sdk';
+
+// React hook — reads from JWT in context, no network call
+const canEdit = useHasPermission('docs.edit');
+```
+
+```typescript
+// Node.js — after verifyToken()
+const token = await client.verifyToken(bearer);
+if (!token.hasPermission('docs.edit')) {
+  res.status(403).end();
+}
+```
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+```go
+// Synchronous, no network call — reads from JWT claims
+if !client.HasPermission(accessToken, "docs.edit") {
+    http.Error(w, "Forbidden", http.StatusForbidden)
+    return
+}
+```
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```python
+# Synchronous, no network call — reads from JWT claims
+claims = client.verify_token(access_token)
+if not claims.has_permission("docs.edit"):
+    raise HTTPException(status_code=403)
+```
+
+</TabItem>
+<TabItem value="php" label="PHP">
+
+```php
+// Synchronous, no network call — reads from JWT claims
+$claims = $hearth->verifyToken($bearerToken);
+if (!$claims->hasPermission('docs.edit')) {
+    http_response_code(403);
+    exit;
+}
+```
+
+</TabItem>
+<TabItem value="rust" label="Rust">
+
+```rust
+// Synchronous, no network call — reads from JWT claims
+let allowed = HearthClient::has_permission(&access_token, "docs.edit")?;
+if !allowed {
+    return StatusCode::FORBIDDEN.into_response();
+}
+```
+
+</TabItem>
+<TabItem value="node" label="Node">
+
+```typescript
+import { HearthClient } from '@hearth-auth/node';
+
+const client = new HearthClient({ issuer_url: process.env.HEARTH_ISSUER_URL! });
+
+// After verifyToken() — reads embedded JWT claims locally, no network call
+const token = await client.verifyToken(bearerToken);
+if (!token.hasPermission('docs.edit')) {
+  res.status(403).end();
+}
+```
+
+</TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+
+val client = HearthClient(issuerUrl = System.getenv("HEARTH_URL"))
+
+// Reads embedded JWT claims locally — no network call
+val claims = client.verifyToken(accessToken)
+if (!claims.hasPermission("docs.edit")) {
+    throw ResponseStatusException(HttpStatus.FORBIDDEN)
+}
+```
+
+</TabItem>
+</Tabs>
+
+### `introspection`
+
+The JWT carries only identity claims (`sub`, `tid`, etc.). Resource servers call `POST /realms/{realm}/introspect` with the bearer token to get the live RBAC claim set.
+
+**Introspection call:**
+
+<Tabs groupId="lang">
+<TabItem value="ts" label="TypeScript" default>
+
+```typescript
+import { HearthClient } from '@hearth-auth/node';
+
+const client = new HearthClient({
+  issuer_url:    process.env.HEARTH_ISSUER_URL!,
+  client_id:     '<resource-server-client-id>',
+  client_secret: '<secret>',
+});
+
+const result = await client.introspect(rawBearerToken);
+if (!result.active) return res.status(401).end();
+if (!result.permissions?.includes('docs.edit')) return res.status(403).end();
+```
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+```go
+import hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
+
+result, err := client.Introspect(ctx, accessToken)
+if err != nil || !result.Active {
+    http.Error(w, "Unauthorized", http.StatusUnauthorized)
+    return
+}
+hasDocsEdit := false
+for _, p := range result.Permissions {
+    if p == "docs.edit" { hasDocsEdit = true; break }
+}
+if !hasDocsEdit {
+    http.Error(w, "Forbidden", http.StatusForbidden)
+    return
+}
+```
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```python
+from hearth.errors import AuthorizationModeMismatchError
+
+resp = client.introspect(access_token, client_id="<cid>", client_secret="<sec>")
+if not resp.active:
+    raise HTTPException(status_code=401)
+if resp.mode != "introspection":
+    raise AuthorizationModeMismatchError("introspection", resp.mode or "embedded")
+if "docs.edit" not in (resp.permissions or []):
+    raise HTTPException(status_code=403)
+```
+
+</TabItem>
+<TabItem value="php" label="PHP">
+
+```php
+$result = $hearth->introspect($bearerToken, clientId: '<cid>', clientSecret: '<sec>');
+if (!$result->active) {
+    http_response_code(401); exit;
+}
+if (!in_array('docs.edit', $result->permissions ?? [], strict: true)) {
+    http_response_code(403); exit;
+}
+```
+
+</TabItem>
+<TabItem value="rust" label="Rust">
+
+```rust
+let result = client.introspect(&access_token).await?;
+if !result.active {
+    return StatusCode::UNAUTHORIZED.into_response();
+}
+if !result.permissions.contains(&"docs.edit".to_string()) {
+    return StatusCode::FORBIDDEN.into_response();
+}
+```
+
+</TabItem>
+<TabItem value="node" label="Node">
+
+```typescript
+import { HearthClient } from '@hearth-auth/node';
+
+const client = new HearthClient({
+  issuer_url:    process.env.HEARTH_ISSUER_URL!,
+  client_id:     '<resource-server-client-id>',
+  client_secret: '<secret>',
+});
+
+const result = await client.introspect(rawBearerToken);
+if (!result.active) { res.status(401).end(); return; }
+if (!result.permissions?.includes('docs.edit')) { res.status(403).end(); return; }
+```
+
+</TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+
+val result = client.introspect(accessToken, clientSecret = System.getenv("HEARTH_CLIENT_SECRET"))
+if (!result.active) throw ResponseStatusException(HttpStatus.UNAUTHORIZED)
+if (!result.permissions.contains("docs.edit")) throw ResponseStatusException(HttpStatus.FORBIDDEN)
+```
+
+</TabItem>
+</Tabs>
+
+Hearth includes RBAC claims in introspection responses **only** when the requesting client has `access_token_authorization: introspection` configured. See [Configuring the mode](#configuring-the-mode).
+
+### `decision`
+
+The JWT carries only identity claims. Resource servers call `POST /oauth/authorize` with the bearer token and the required permission. Hearth evaluates the permission in real time and responds with `allowed: true/false`. Fail-closed: network errors return `false`.
+
+**Decision call:**
+
+<Tabs groupId="lang">
+<TabItem value="ts" label="TypeScript" default>
+
+```typescript
+// Use the middleware with expectedMode: 'decision'
+import { hearthMiddleware } from '@hearth-auth/node';
+
+app.get('/docs', hearthMiddleware({
+  issuer_url:         process.env.HEARTH_ISSUER_URL!,
+  expectedMode:       'decision',
+  requiredPermission: 'docs.edit',
+}), handler);
+```
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+```go
+import hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
+
+result, err := client.CheckPermission(ctx, accessToken, "docs.edit",
+    hearth.AccessTokenAuthorizationDecision,
+)
+if err != nil || !result.Allowed {
+    http.Error(w, "Forbidden", http.StatusForbidden)
+    return
+}
+```
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```python
+result = client.check_permission(access_token, "docs.edit", mode="decision")
+if not result.allowed:
+    raise HTTPException(status_code=403, detail="Forbidden")
+```
+
+</TabItem>
+<TabItem value="php" label="PHP">
+
+```php
+$result = $hearth->checkPermission($bearerToken, 'docs.edit', mode: 'decision');
+if (!$result->allowed) {
+    http_response_code(403); exit;
+}
+```
+
+</TabItem>
+<TabItem value="rust" label="Rust">
+
+```rust
+use hearth_sdk::{AccessTokenAuthorization, CheckPermissionOpts};
+
+let allowed = client.check_permission(
+    &access_token,
+    "docs.edit",
+    AccessTokenAuthorization::Decision,
+    CheckPermissionOpts::default(),
+).await?;
+if !allowed {
+    return StatusCode::FORBIDDEN.into_response();
+}
+```
+
+</TabItem>
+<TabItem value="node" label="Node">
+
+```typescript
+import { hearthMiddleware } from '@hearth-auth/node';
+
+app.get('/docs', hearthMiddleware({
+  issuer_url:         process.env.HEARTH_ISSUER_URL!,
+  expectedMode:       'decision',
+  requiredPermission: 'docs.edit',
+}), handler);
+```
+
+</TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+import io.hearth.sdk.AccessTokenAuthorization
+
+val result = client.checkPermission(accessToken, "docs.edit", AccessTokenAuthorization.Decision)
+if (!result.allowed) throw ResponseStatusException(HttpStatus.FORBIDDEN)
+```
+
+</TabItem>
+</Tabs>
+
+## Refresh-token revocation caveat
+
+In `embedded` mode, revoking a session or role takes effect only after the access token expires (default 15 minutes). If you need immediate revocation:
+
+- Use `decision` or `introspection` mode on affected clients, or
+- Shorten the access token TTL (`access_token_ttl` in client config), or
+- Use the session-version revocation mechanism (Kotlin SDK: `SessionVersionCache`; Node/Go: subscribe to `session_revoked` webhooks and maintain a local blocklist).
+
+## Configuring the mode
+
+Set `access_token_authorization` when registering or updating a client via the Admin API.
+
+**Register a new client with `decision` mode:**
+```bash
+curl -X POST http://127.0.0.1:8420/admin/clients \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "X-Realm-ID: <realm-uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "Docs Service",
+    "redirect_uris": ["https://docs.example.com/callback"],
+    "grant_types": ["authorization_code"],
+    "access_token_authorization": "decision"
+  }'
+```
+
+**Update an existing client to `introspection` mode:**
+```bash
+curl -X PATCH http://127.0.0.1:8420/admin/clients/<client-id> \
+  -H "Authorization: Bearer <admin-token>" \
+  -H "X-Realm-ID: <realm-uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{ "access_token_authorization": "introspection" }'
+```
+
+Valid values: `"embedded"` (default), `"introspection"`, `"decision"`.
+
+Existing clients without an explicit mode default to `"embedded"` for full backward
+compatibility.
+
+## Keycloak comparison
+
+| Keycloak concept | Hearth equivalent |
+|-----------------|-------------------|
+| Realm roles in JWT | `embedded` mode — `roles` claim |
+| UMA/RPT token | `decision` mode — per-request `POST /oauth/authorize` |
+| Token introspection (RFC 7662) | `introspection` mode — `POST /realms/{realm}/introspect` |
+| Fine-grained authorization (FGA) | `decision` mode with Hearth's permission string model |
+
+## Org-scoped permission checks
+
+When a user is acting in an org context, include `org_id` in the token request to scope permissions to that organization:
+
+```bash
+# Token request with org context
+curl -X POST http://127.0.0.1:8420/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=authorization_code&code=<code>&org_id=org_<uuid>"
+```
+
+The resulting token's `permissions` claim reflects only org-scoped assignments for that organization plus any realm-scoped assignments. The `oid` claim is set to the org ID.
+
+## SDK cross-references
+
+- [Go SDK](sdks/go.mdx) — `HasPermission`, `RequirePermission` middleware, `ModeEmbedded`/`ModeIntrospection`/`ModeDecision`
+- [Node.js SDK](sdks/node.mdx) — `hearthMiddleware({ expectedMode })`, `introspect()`
+- [Python SDK](sdks/python.mdx) — `verify_token()`, `introspect()`, `check_permission()`
+- [PHP SDK](sdks/php.mdx) — `verifyToken()`, `introspect()`, `checkPermission()`
+- [Kotlin SDK](sdks/kotlin.mdx) — `verifyToken()`, `mePermissions()`, `RequirePermissionOptions(mode)`
+- [Rust SDK](sdks/rust.mdx) — `check_permission()`, `AccessTokenAuthorization::Embedded/Introspection/Decision`
+
+## Reference
+
+- [RBAC guide](rbac.mdx) — roles, groups, permission strings, and token authorization modes
+- [AUTHORIZATION.md](../specs/AUTHORIZATION.md) — normative specification for RBAC and token claims

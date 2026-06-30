@@ -50,7 +50,70 @@ type TokenResponse struct {
 	IDToken      string `json:"id_token,omitempty"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in,omitempty"`
-	RefreshToken string `json:"refresh_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	Scope        string `json:"scope,omitempty"`
+}
+
+// DeviceAuthorizationResponse is returned by the device authorization endpoint (RFC 8628).
+type DeviceAuthorizationResponse struct {
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"`
+	VerificationURI         string `json:"verification_uri"`
+	VerificationURIComplete string `json:"verification_uri_complete,omitempty"`
+	ExpiresIn               int    `json:"expires_in"`
+	Interval                int    `json:"interval"`
+}
+
+// WebAuthnAllowCredential is an entry in the allow_credentials list during authentication.
+type WebAuthnAllowCredential struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// WebAuthnRegistrationBeginResponse holds PublicKeyCredentialCreationOptions from the server.
+type WebAuthnRegistrationBeginResponse struct {
+	Challenge       string `json:"challenge"`
+	RPID            string `json:"rp_id"`
+	RPName          string `json:"rp_name"`
+	UserID          string `json:"user_id"`
+	UserName        string `json:"user_name"`
+	UserDisplayName string `json:"user_display_name"`
+	Attestation     string `json:"attestation"`
+	Timeout         uint64 `json:"timeout"`
+}
+
+// WebAuthnRegistrationCompleteRequest carries the browser credential attestation to the server.
+type WebAuthnRegistrationCompleteRequest struct {
+	ClientDataJSON    string `json:"client_data_json"`
+	AttestationObject string `json:"attestation_object"`
+	Origin            string `json:"origin"`
+	Discoverable      bool   `json:"discoverable,omitempty"`
+}
+
+// WebAuthnRegistrationCompleteResponse is returned after successful credential registration.
+type WebAuthnRegistrationCompleteResponse struct {
+	CredentialID string `json:"credential_id"`
+	Algorithm    int64  `json:"algorithm"`
+	Discoverable bool   `json:"discoverable"`
+}
+
+// WebAuthnAuthenticationBeginResponse holds PublicKeyCredentialRequestOptions from the server.
+type WebAuthnAuthenticationBeginResponse struct {
+	Challenge          string                    `json:"challenge"`
+	RPID               string                    `json:"rp_id"`
+	AllowCredentials   []WebAuthnAllowCredential `json:"allow_credentials"`
+	UserVerification   string                    `json:"user_verification"`
+	Timeout            uint64                    `json:"timeout"`
+}
+
+// WebAuthnAuthenticationCompleteRequest carries the browser-signed assertion to the server.
+type WebAuthnAuthenticationCompleteRequest struct {
+	CredentialID      string `json:"credential_id"`
+	ClientDataJSON    string `json:"client_data_json"`
+	AuthenticatorData string `json:"authenticator_data"`
+	Signature         string `json:"signature"`
+	UserHandle        string `json:"user_handle,omitempty"`
+	Origin            string `json:"origin"`
 }
 
 // UserInfoResponse is returned by the userinfo endpoint.
@@ -307,4 +370,21 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return e.Message
+}
+
+// BeginLoginResult is returned by [Client.BeginLogin].
+//
+// Redirect the browser to AuthorizationURL, then persist State and CodeVerifier
+// in the server session so they can be verified and supplied to [Client.CompleteLogin]
+// on the callback route.
+type BeginLoginResult struct {
+	// AuthorizationURL is the fully-constructed PKCE authorization URL.
+	// Redirect the browser here.
+	AuthorizationURL string
+	// State is a random CSRF-protection value.
+	// Persist it in session storage and verify it matches the callback parameter.
+	State string
+	// CodeVerifier is the PKCE verifier.
+	// Persist it in session storage and pass it to CompleteLogin.
+	CodeVerifier string
 }

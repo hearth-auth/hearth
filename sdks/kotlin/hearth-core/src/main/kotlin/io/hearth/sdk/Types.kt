@@ -4,6 +4,24 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
+// ── Browser login helpers (HEA-1592) ─────────────────────────────────────────
+
+/**
+ * Result of [HearthClient.beginLogin].
+ *
+ * Redirect the browser to [authorizationUrl], then persist [state] and
+ * [codeVerifier] in your session storage so they can be verified and supplied
+ * to [HearthClient.completeLogin] on the callback route.
+ */
+data class LoginBeginResult(
+    /** Full PKCE authorization URL — redirect the browser here. */
+    val authorizationUrl: String,
+    /** Random CSRF-protection value — verify against the callback `state` parameter. */
+    val state: String,
+    /** PKCE code verifier — pass to [HearthClient.completeLogin] on the callback route. */
+    val codeVerifier: String,
+)
+
 // ── OAuth / Token types ──────────────────────────────────────────────────────
 
 @Serializable
@@ -63,6 +81,12 @@ data class TokenResponse(
 data class DeviceAuthorizationRequest(
     @SerialName("client_id") val clientId: String,
     val scope: String? = null,
+)
+
+/** Body for the magic-link send (initiation) request — `POST /v1/{realm}/auth/magic-link`. */
+@Serializable
+data class MagicLinkRequest(
+    val email: String,
 )
 
 @Serializable
@@ -285,4 +309,64 @@ data class CheckPermissionRequest(
 @Serializable
 data class CheckPermissionResponse(
     val allowed: Boolean,
+)
+
+// ── WebAuthn ──────────────────────────────────────────────────────────────────
+
+/** Server-issued `PublicKeyCredentialCreationOptions` for passkey registration. */
+@Serializable
+data class WebAuthnRegistrationBeginResponse(
+    val challenge: String,
+    @SerialName("rp_id") val rpId: String,
+    @SerialName("rp_name") val rpName: String,
+    @SerialName("user_id") val userId: String,
+    @SerialName("user_name") val userName: String,
+    @SerialName("user_display_name") val userDisplayName: String,
+    val attestation: String,
+    val timeout: Long,
+)
+
+/** Browser attestation result sent to `POST /webauthn/register/complete`. */
+@Serializable
+data class WebAuthnRegistrationCompleteRequest(
+    @SerialName("client_data_json") val clientDataJson: String,
+    @SerialName("attestation_object") val attestationObject: String,
+    val origin: String,
+    val discoverable: Boolean = false,
+)
+
+/** Returned after a successful passkey registration. */
+@Serializable
+data class WebAuthnRegistrationCompleteResponse(
+    @SerialName("credential_id") val credentialId: String,
+    val algorithm: Long,
+    val discoverable: Boolean,
+)
+
+/** An entry in the `allow_credentials` list during a WebAuthn authentication ceremony. */
+@Serializable
+data class WebAuthnAllowCredential(
+    val id: String,
+    val type: String,
+)
+
+/** Server-issued `PublicKeyCredentialRequestOptions` for passkey authentication. */
+@Serializable
+data class WebAuthnAuthenticationBeginResponse(
+    val challenge: String,
+    @SerialName("rp_id") val rpId: String,
+    @SerialName("allow_credentials") val allowCredentials: List<WebAuthnAllowCredential>,
+    @SerialName("user_verification") val userVerification: String,
+    val timeout: Long,
+)
+
+/** Browser-signed assertion sent to `POST /webauthn/auth/complete`. */
+@Serializable
+data class WebAuthnAuthenticationCompleteRequest(
+    @SerialName("credential_id") val credentialId: String,
+    @SerialName("client_data_json") val clientDataJson: String,
+    @SerialName("authenticator_data") val authenticatorData: String,
+    val signature: String,
+    @SerialName("user_handle") val userHandle: String? = null,
+    val origin: String,
 )

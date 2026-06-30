@@ -8,6 +8,7 @@ export interface OidcDiscovery {
   introspection_endpoint?: string;
   authorization_endpoint?: string;
   token_endpoint?: string;
+  device_authorization_endpoint?: string;
   userinfo_endpoint?: string;
   [key: string]: unknown;
 }

@@ -297,6 +297,68 @@ email:
     support_email: "support@example.com"
 ```
 
+### `sms`
+
+Outbound SMS delivery for one-time passwords (OTPs). Required when SMS MFA is enabled in any
+realm. Defaults to the `log` transport, which writes OTP bodies to the structured log — use
+only in development.
+
+> **Environment variable:** `HEARTH_SMS_OTP_HMAC_KEY` must be set when `transport` is not
+> `log` or when running outside `--dev` mode. Generate with `openssl rand -hex 32`. Must be
+> at least 32 characters. Set in the process environment only — never in `hearth.yaml`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `transport` | string | `"log"` | SMS delivery backend. One of: `log`, `twilio`, `awssns`. |
+| `twilio` | object | — | Twilio settings. **Required** when `transport: twilio`. |
+| `aws_sns` | object | — | AWS SNS settings. **Required** when `transport: awssns`. |
+
+#### `sms.twilio`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `account_sid` | string | *required* | Twilio Account SID (e.g. `ACxxxxxxxx…`). |
+| `auth_token` | string | *required* | Twilio Auth Token. Use `${VAR}` substitution — never hardcode. |
+| `from` | string | *required* | Sender in E.164 format (e.g. `+15550001111`), short code, toll-free number, or Messaging Service SID. |
+
+#### `sms.aws_sns`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `region` | string | *required* | AWS region for SNS calls (e.g. `us-east-1`). |
+| `access_key_id` | string | *required* | AWS Access Key ID. Use `${VAR}` substitution. |
+| `secret_access_key` | string | *required* | AWS Secret Access Key. Use `${VAR}` substitution. |
+| `sender_id` | string | — | Alphanumeric sender ID shown on recipient devices in supported markets (max 11 chars, optional). |
+
+> **AWS SNS credential chain:** Hearth does not use the AWS SDK credential chain (instance
+> roles, `~/.aws/credentials`, etc.) for the SNS transport. `access_key_id` and
+> `secret_access_key` must be supplied explicitly, using `${VAR}` substitution from
+> environment variables.
+
+```yaml
+# Twilio
+sms:
+  transport: twilio
+  twilio:
+    account_sid: "${TWILIO_ACCOUNT_SID}"
+    auth_token: "${TWILIO_AUTH_TOKEN}"
+    from: "+15005550006"
+
+# AWS SNS
+# sms:
+#   transport: awssns
+#   aws_sns:
+#     region: "us-east-1"
+#     access_key_id: "${AWS_ACCESS_KEY_ID}"
+#     secret_access_key: "${AWS_SECRET_ACCESS_KEY}"
+#     sender_id: "MyBrand"    # optional
+```
+
+See the [SMS MFA deployment guide](../guides/sms-mfa-deployment.md) for carrier registration
+requirements, per-region setup, and the production readiness checklist.
+
+---
+
 ### `oidc`
 
 OIDC Discovery metadata and authorization code behavior.
@@ -593,25 +655,25 @@ security:
 
 ### `agent_auth`
 
-Staged capability gate for agent authentication. Features are enabled per-capability rather than as a single binary switch — set only the capabilities whose implementation phase has shipped.
+Staged capability gate for agent authentication. Features are enabled per-capability rather than as a single binary switch — set only the capabilities whose implementation phase has shipped. Enabling a phase without its required predecessor is rejected at startup.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `capabilities.identity` | bool | `false` | Enables the M1 agent identity surface: `POST/GET/PATCH/DELETE /v1/agents`, `POST /v1/agents/{id}/credentials/keys`, `GET /v1/agents/{id}/credentials`, `DELETE /v1/agents/{id}/credentials/{cred_id}`, `GET /.well-known/agent.json`, `GET /realms/{name}/.well-known/agent.json`, and gRPC agent methods on `IdentityAdminService`. Set to `true` once M1 is deployed. |
-| `capabilities.delegation` | bool | `false` | **Not yet implemented (M3).** Setting to `true` is a startup error. Enables act-as delegation chains and Agent Authorization Tokens (AATs). |
-| `capabilities.mcp` | bool | `false` | **Not yet implemented (M2).** Setting to `true` is a startup error. Enables MCP authorization server and protected-resource surfaces. |
+| `capabilities.identity` | bool | `false` | **Phase A.** Agent identity surface: `POST/GET/PATCH/DELETE /v1/agents`, credential management (`/v1/agents/{id}/credentials/keys`, `/v1/agents/{id}/credentials`), `GET /.well-known/agent.json`, and gRPC agent methods on `IdentityAdminService`. |
+| `capabilities.approval` | bool | `false` | **Phase B+C.** Approval request lifecycle and tool-level permissions. Adds `POST/GET /v1/approval-requests`, `POST /v1/approval-requests/{id}/approve`, `POST /v1/approval-requests/{id}/deny`, and `POST /v1/tools/invoke`. Requires `identity: true`. |
+| `capabilities.advanced` | bool | `false` | **Phase D.** Attenuating Authorization Tokens (AATs), transaction tokens, cross-realm trust policies, and SPIFFE/mTLS workload identity. Adds `/v1/aats`, `/v1/transaction-tokens`, `/v1/spiffe-mappings`, `/v1/cross-realm-policies`. Requires `identity: true`. |
+
+All three capabilities default to `false` and all routes in each group return 404 (not 401) when the capability is disabled, preventing route fingerprinting (HEA-1138).
 
 ```yaml
 agent_auth:
   capabilities:
-    identity: true   # enables /v1/agents, /.well-known/agent.json, gRPC stubs
-
-# Future phases (not yet implemented — setting these is a startup error):
-#   delegation: false  # Phase C: act-as delegation + AATs
-#   mcp: false         # Phase B: MCP authorization server + protected resources
+    identity: true    # Phase A — /v1/agents, /.well-known/agent.json
+    # approval: true  # Phase B+C — /v1/approval-requests, /v1/tools/invoke
+    # advanced: true  # Phase D — /v1/aats, /v1/transaction-tokens, SPIFFE, cross-realm
 ```
 
-> **Note:** Capabilities not listed here (delegation, mcp, approval, aat) are refused at startup with a descriptive error. See `docs/specs/AGENT_AUTH.md` for the full milestone map.
+> **See also:** `docs/specs/AGENT_AUTH.md` for the full milestone map, normative phase definitions, and current implementation status.
 
 ---
 
@@ -669,7 +731,7 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 |-------|------|---------|-------------|
 | `mfa_required` | bool | `false` | Whether MFA is required for all users in this realm. |
 | `passkey_requires_mfa` | bool | `false` | Whether passkey (WebAuthn) login still requires a TOTP challenge. Passkeys are inherently multi-factor, but regulated environments (healthcare, finance) may require an additional TOTP step. When `true` and the user has TOTP enrolled, passkey login redirects to the MFA challenge page. When `true` but the user has no TOTP enrolled, login proceeds normally. |
-| `mfa_methods` | list | — | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`. When set, only the listed methods are offered for enrollment and challenge; methods not in the list are rejected. Absent = all methods allowed. |
+| `mfa_methods` | list | — | Allowed MFA methods: `"totp"`, `"webauthn"`, `"email_otp"`, `"sms"`. When set, only the listed methods are offered for enrollment and challenge; methods not in the list are rejected. Absent = all methods allowed. `"sms"` requires a working `sms:` transport block and `HEARTH_SMS_OTP_HMAC_KEY`. |
 | `allowed_auth_methods` | list | — | Allowed login methods: `"password"`, `"magic_link"`, `"passkey"`. |
 | `password_policy` | object | — | Password complexity requirements (see below). |
 | `token` | object | — | Per-realm token TTL overrides. |

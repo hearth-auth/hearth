@@ -7,6 +7,142 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Rust SDK Actix-web middleware adapter (HEA-1602)** — `hearth-sdk` gains an optional
+  `actix-middleware` feature that provides `HearthActixMiddleware` (implements Actix-web 4's
+  `Transform`/`Service` traits), the `RequirePermission` extractor (reads verified `Claims` from
+  request extensions), and `HearthActixError` (implements `actix_web::ResponseError` for idiomatic
+  `?`-operator error propagation). Supports all three authorization modes (`Embedded`,
+  `Introspection`, `Decision`) with fail-closed semantics matching the Tower middleware.
+  Enable with `hearth-sdk = { features = ["actix-middleware"] }` (HEA-1602).
+- **Python SDK Django middleware adapter (HEA-1600)** — `hearth.django` provides
+  `HearthDjangoMiddleware` for installation via Django's `MIDDLEWARE` setting (new-style
+  `__init__(get_response)` / `__call__(request)` class interface). The middleware extracts the
+  Bearer token from every request and sets `request.hearth_token` for downstream views. A global
+  permission gate can be configured via `HEARTH_PERMISSION`. Also provides `@require_permission`
+  as a per-view decorator supporting all three modes (`embedded`, `introspection`, `decision`).
+  Django is an optional dependency: `pip install hearth-sdk[django]` (HEA-1600).
+- **Node SDK Next.js adapter (HEA-1598)** — `@hearth-auth/node/nextjs` provides
+  `withHearthAuth(handler, options)` for Pages Router API routes (attaches `req.hearthToken`) and
+  `getHearthToken(req, config)` for App Router Route Handlers (returns `VerifiedToken | null`).
+  `@hearth-auth/node/nextjs/edge` provides `hearthEdgeMiddleware(options)` — an Edge Runtime-safe
+  middleware factory that uses Web Crypto (`crypto.subtle` via `jose`) instead of `node:crypto`, safe
+  for Next.js `middleware.ts` running in the V8 Isolate Edge Runtime. `requirePermission(perm)` is a
+  composable predicate guard compatible with both `EdgeToken` and `VerifiedToken`. Next.js is an
+  optional peer dependency.
+- **Kotlin SDK Spring Security adapter (HEA-1597)** — new `hearth-spring` Gradle subproject provides
+  `HearthJwtAuthenticationFilter` (extends `OncePerRequestFilter`), `HearthAuthentication` (implements
+  `Authentication`), `HearthSecurityAutoConfiguration` (`@AutoConfiguration`) and
+  `HearthSecurityProperties` (`@ConfigurationProperties("hearth")`). Auto-configures from
+  `hearth.issuer-url` with no `@Import` required. Access verified claims in controllers via
+  `@AuthenticationPrincipal HearthAuthentication auth`. Roles map to `ROLE_<role>` authorities;
+  permissions are granted verbatim for `hasAuthority()` guards.
+- **Go SDK Echo middleware adapter (HEA-1599)** — `hearth/echo` package (`package hearthecho`) provides
+  `HearthMiddleware(client, opts...)` that extracts the bearer token and stores it in the Echo context,
+  `GetToken(c)` for downstream handlers, and `RequirePermission("perm")` for group-level permission
+  guards via `e.Use()` or `g.Use()`. Supports `WithTokenExtractor` and `WithOnUnauthorized` customisation hooks.
+  Install: `go get github.com/hearth-auth/hearth/sdks/go/hearth/echo`.
+- **Go SDK Gin middleware adapter (HEA-1595)** — `hearth/gin` package (`package hearthgin`) provides
+  `HearthMiddleware(client, opts...)` that extracts the bearer token and stores it in the Gin context,
+  `GetToken(c)` for downstream handlers, and `RequirePermission("perm")` for group-level permission
+  guards via `router.Use()`. Supports `WithTokenExtractor` and `WithOnUnauthorized` customisation hooks.
+  Install: `go get github.com/hearth-auth/hearth/sdks/go/hearth/gin`.
+- **Python SDK FastAPI adapter (HEA-1596)** — `hearth.fastapi` module provides `HearthFastAPIDep`
+  (a `Depends()`-compatible callable that verifies a Bearer JWT and returns `VerifiedClaims`),
+  `require_permission("docs.write", dep=auth)` shorthand returning `Annotated[VerifiedClaims, Depends(...)]`
+  for per-route permission gating, and optional `HearthSettings` for `pydantic-settings`/env-var
+  configuration (`HEARTH_BASE_URL`, `HEARTH_REALM_ID`, `HEARTH_CLIENT_ID`). Installs via
+  `pip install hearth-sdk[fastapi]`.
+- **Stateless `beginLogin`/`completeLogin` helpers across all 6 server SDKs (HEA-1592)** — collapses
+  the ~5-step authorization-code ceremony into 2 SDK calls + 1 developer-owned session-persist line:
+  `beginLogin(redirectUri, scopes?)` generates PKCE, builds the authorization URL, and returns
+  `{ authorizationUrl, state, codeVerifier }` (language-idiomatic casing);
+  `completeLogin(code, codeVerifier, redirectUri)` wraps `exchangeCode`. Uniform shape across
+  **Node** (`OAuthFlowsClient` + `HearthClient`), **Go** (`BeginLogin`/`CompleteLogin`),
+  **Rust** (`begin_login`/`complete_login`), **Python** (`begin_login`/`complete_login`),
+  **PHP** (`beginLogin`/`completeLogin`), and **Kotlin** (`beginLogin`/`completeLogin`).
+  The TypeScript browser SDK retains its existing stateful `createHearthAuth` facade.
+- **SDK parity — residual gaps closed (HEA-1552)** — final cells in the cross-SDK capability
+  matrix (`docs/specs/SDK_SURFACE.md` §7) filled:
+  - **Node `refreshTokens()`** — `OAuthFlowsClient.refreshTokens(refreshToken, scope?)` and
+    `HearthClient.refreshTokens()` perform the RFC 6749 §6 refresh-token grant (credentials in
+    body, honors rotated `refresh_token` in the response). Closes the C-09 gap where Node could
+    exchange an auth code but not refresh.
+  - **TypeScript WebAuthn helpers** — `HearthApiClient` gains `startWebAuthnRegistration()`,
+    `finishWebAuthnRegistration()`, `startWebAuthnAuthentication()`, and
+    `finishWebAuthnAuthentication()` (C-21), with the `WebAuthn*` request/response types. The
+    browser SDK is the natural home for `navigator.credentials` ceremonies.
+  - **Node managed `SessionVersionCache`** — `start()`/`stop()`/`validateSv()`/`age()` background-poll
+    facade plus `SessionVersionConfig`, `SessionVersionRevokedError`, and
+    `SessionVersionCacheStaleError` (C-20, RFC HEA-930), bringing Node to parity with TS/Go/Kotlin
+    for zero-network session-revocation checks in middleware.
+  - **Magic-link send + exchange in every SDK (C-12)** — the canonical surface now requires *both*
+    halves of the passwordless flow. Added the **exchange** step to the six SDKs that only had *send*:
+    `exchangeMagicLink(token)` (TS browser `HearthClient`, Node `HearthClient`/`OAuthFlowsClient`,
+    PHP), `ExchangeMagicLink(ctx, token)` (Go), `exchange_magic_link(token[, client_id])`
+    (Python, Rust) — each posts `grant_type=urn:hearth:grant-type:magic-link` and returns the token
+    response. Added the **send** step `requestMagicLink(email)` to the Kotlin SDK (which previously
+    had only exchange). All 7 SDKs now expose the full send→exchange magic-link flow.
+- **TypeScript SDK C2 surface** — `@hearth-auth/sdk` now exposes the full canonical SDK surface (HEA-1557):
+  `verifyToken()` (full EdDSA/Ed25519 JWKS-backed local signature verification, all five spec §2 steps);
+  `clientCredentials()` (RFC 6749 §4.4 M2M grant, credentials in body);
+  `startDeviceFlow()` / `pollDeviceToken()` (RFC 8628, transparent `authorization_pending`,
+  `slow_down` back-off, `TokenExpiredError` on expiry);
+  `requestMagicLink()` (enumeration-resistant, 429 → `OAuthFlowError`).
+  Admin CRUD extended with Clients, Roles, Groups, and Org member management.
+  New error `OAuthFlowError` with `statusCode`/`errorCode` for token-endpoint failures.
+  New type `DeviceAuthorizationResponse`. `JwksClient.verify()` uses
+  `fetchKeys()` + `createLocalJWKSet` so JWKS fetches go through global `fetch`
+  (mockable in tests).
+- **Node SDK C3 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1558):
+  `exchangeCode()` (authorization code → tokens, PKCE verifier support);
+  `clientCredentials()` (RFC 6749 §4.4 M2M token grant, credentials in body never URL);
+  `startDeviceFlow()` / `pollDeviceToken()` (RFC 8628, `authorization_pending` transparent,
+  `slow_down` increases interval by 5 s per occurrence, `expired_token` raises `TokenExpiredError`);
+  `requestMagicLink()` (enumeration-resistant passwordless initiation, 429 → `OAuthFlowError`);
+  `userinfo()` (OIDC userinfo endpoint, endpoint discovered); `mePermissions()` (`GET /v1/me/permissions`,
+  live RBAC state); `svSnapshot()` / `svDelta()` (session-version feed HEA-930).
+  New standalone `generatePkce()` helper (`PkcePair` with verifier/challenge/method, RFC 7636 S256).
+  New error: `OAuthFlowError` with `statusCode` for OAuth endpoint HTTP errors.
+  New types: `TokenResponse`, `DeviceAuthorizationResponse`, `UserInfoResponse`,
+  `MePermissionsResponse`, `SvDeltaEntry`, `SvDeltaResponse`, `SvSnapshotResponse`, `ExchangeCodeOptions`.
+  `OAuthFlowsClient` is exported as a standalone class for composition.
+  `verifyToken()` already supported full Ed25519/EdDSA via `jose` (EdDSA in algorithm list since initial ship).
+- **Rust SDK C7 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1562):
+  `verify_token()` (full Ed25519/EdDSA local signature verification via JWKS cache with TTL,
+  all five spec §2 validation steps, typed `HearthError` variants per §5);
+  `client_credentials()` (RFC 6749 §4.4 form-encoded, no refresh token);
+  `start_device_flow()` / `poll_device_token()` (RFC 8628 with `authorization_pending`
+  and `slow_down` handling); `initiate_magic_link()` (passwordless initiation);
+  `session_version_snapshot()` / `session_version_delta()` (session-version polling);
+  `HearthClientBuilder` (spec §1 config table: `issuer_url`, `client_id`, `client_secret`,
+  `jwks_ttl`, `http_timeout`); `JwksCache` (standalone TTL cache, Cache-Control-aware,
+  24h max, kid-indexed, keys never evicted). New module `hearth_sdk::pkce` exposes
+  `PkcePair` + `generate_pkce_pair()` (RFC 7636 S256). `TokenResponse.refresh_token`
+  is now `Option<String>` (absent on client_credentials responses). New types:
+  `DeviceAuthorizationResponse`, `SvDeltaEntry`, `SvDeltaResponse`, `SvSnapshotResponse`.
+  `authorize()` gains optional `code_challenge` / `code_challenge_method` PKCE parameters.
+  `Claims` now implements `Debug` (redacts payload, exposes only `sub`+`iss`).
+- **Go SDK C4 surface** — `Client` now exposes the full canonical SDK surface (HEA-1559):
+  `VerifyToken()` (full Ed25519/EdDSA local signature verification via JWKS cache),
+  `ClientCredentials()` (RFC 6749 §4.4 client credentials grant, form-encoded),
+  `StartDeviceFlow()` / `PollDeviceToken()` (RFC 8628 device authorization, with
+  `authorization_pending` and `slow_down` handling),
+  `RequestMagicLink()` (enumeration-resistant magic-link initiation),
+  `StartWebAuthnRegistration()` / `FinishWebAuthnRegistration()` /
+  `StartWebAuthnAuthentication()` / `FinishWebAuthnAuthentication()` (WebAuthn passkey ceremonies).
+  New types: `DeviceAuthorizationResponse`, `WebAuthnRegistrationBeginResponse`,
+  `WebAuthnRegistrationCompleteRequest`, `WebAuthnRegistrationCompleteResponse`,
+  `WebAuthnAuthenticationBeginResponse`, `WebAuthnAuthenticationCompleteRequest`,
+  `WebAuthnAllowCredential`. New options: `WithClientCredentials()`, `WithJWKSTTL()`.
+  `TokenResponse` gains a `Scope` field.
+- **PHP SDK C5 surface** — `HearthClient` now exposes the full canonical SDK surface (HEA-1560):
+  `generatePkce()`, `buildAuthorizeUrl()`, `refreshToken()`, `clientCredentials()`,
+  `startDeviceFlow()` / `pollDeviceToken()` (with `slow_down` + `authorization_pending` handling),
+  `requestMagicLink()`, `registerClient()`, `getMyPermissions()`, `checkDecision()`,
+  `startWebAuthnRegistration()` / `finishWebAuthnRegistration()` / `startWebAuthnAuthentication()` / `finishWebAuthnAuthentication()`,
+  `getSessionVersion()`, and `bootstrap()`. New types: `PkceChallenge`, `DeviceAuthorizationResponse`,
+  `PermissionsResponse`, `ClientRegistrationResponse`, `WebAuthnOptions`, `BootstrapResponse`,
+  `RateLimitException`.
 - **Continuous deployment via semantic-release** — merging a `fix:` or `feat:` PR to `main`
   now automatically computes the next semver version, updates CHANGELOGs, bumps version files,
   pushes a git tag, and fires the downstream publish workflows (binaries, Helm, SDKs). Each
@@ -46,8 +182,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   now carry PKCE parameters. Required to complete the authorization-code flow, which the server
   mandates for public clients (RFC 9700 §2.1.1).
 
+### Fixed
+- **`sms` now accepted as a valid `mfa_methods` value** — `hearth config validate` previously
+  rejected `sms` with "unknown MFA method sms; valid methods are: totp, webauthn". Added `sms`
+  to the allowlist and added a cross-validation error when `sms` appears in `mfa_methods` but
+  `sms.transport` is `log` (which cannot deliver real OTPs). Also, `config validate` now checks
+  `HEARTH_SMS_OTP_HMAC_KEY` for non-log transports so misconfigured deployments are caught at
+  validate time rather than startup (HEA-1542).
+- **Deploy assets corrected to canonical `hearth-auth` GitHub org** — `deploy/helm/hearth/values.yaml`,
+  `values-prod.yaml`, `Chart.yaml`, Helm test fixtures, `deploy/docker-compose.yml`,
+  `deploy/systemd/hearth.service`, and `deploy/README.md` all referenced `ghcr.io/hearth-rs/hearth`
+  and `github.com/hearth-rs/hearth`; corrected to `hearth-auth`, which is the org the Docker
+  publishing workflow actually pushes to (HEA-1537).
+- **SDK manifest versions bumped to `1.0.0`** — `sdks/typescript/package.json` (was `0.0.1`),
+  `sdks/python/pyproject.toml` (was `0.1.0`), and `sdks/rust/Cargo.toml` (was `0.2.0`) now
+  reflect the `1.0.0` tags that have been released (HEA-1537).
+
 ### Security
 
+- **`jsonwebtoken` bumped to 10.4.0 in Rust SDK (type-confusion advisory)** — `jsonwebtoken@9.3.1`
+  in `sdks/rust/` was flagged by GitHub Advanced Security / Trivy for a type-confusion
+  vulnerability that could enable authorization bypass on the JWT verify path. Upgraded to
+  `jsonwebtoken = "10"` (resolves to 10.4.0) with the `rust_crypto` feature selected explicitly,
+  as v10 decoupled crypto backends from the default feature set. The EdDSA/Ed25519 verify path
+  is source-compatible; all 41 SDK unit tests remain green (HEA-1589).
 - **`quinn-proto` bumped to 0.11.15 (RUSTSEC-2026-0185)** — `quinn-proto@0.11.14` carried a
   high-severity advisory (CVSS 7.5). Bumped to 0.11.15 across `Cargo.lock`, `fuzz/Cargo.lock`,
   and `sdks/rust/Cargo.lock` via `cargo update -p quinn-proto` (HEA-1510).

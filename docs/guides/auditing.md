@@ -1,5 +1,9 @@
 # Audit Log Guide
 
+**Audience:** operators and security engineers responsible for compliance, incident investigation, or audit-trail management.
+**Goal:** Query, export, verify integrity of, and configure retention for the Hearth audit log on a realm.
+**Time to complete:** 15–20 min.
+
 Hearth records a tamper-evident audit log for every realm. Each event is appended to a SHA-256 hash chain so that truncation or modification is detectable. This guide covers how to query, export, and retain audit events.
 
 ---
@@ -186,7 +190,9 @@ If `retention_days` is `0` (unlimited), the endpoint returns `{"deleted": 0}` wi
 - Recovering disk space before a scheduled backup.
 - Testing retention behavior in staging without waiting for the background job.
 
-> **Hash chain note:** Pruning deletes events from the bottom of the hash chain. The remaining events are still internally consistent — each still links to its predecessor — but the chain no longer starts at genesis for the pruned realm. `POST /admin/realms/{realm}/audit/verify` reports the first surviving event as the new chain head; it does **not** flag pruned history as a tampering violation. If you require a continuous unbroken chain for compliance, export the events first, then prune.
+:::note[Hash chain integrity after pruning]
+Pruning deletes events from the bottom of the hash chain. The remaining events are still internally consistent — each still links to its predecessor — but the chain no longer starts at genesis for the pruned realm. `POST /admin/realms/{realm}/audit/verify` reports the first surviving event as the new chain head; it does **not** flag pruned history as a tampering violation. If you require a continuous unbroken chain for compliance, export the events first, then prune.
+:::
 
 ---
 

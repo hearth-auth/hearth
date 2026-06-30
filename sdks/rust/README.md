@@ -6,14 +6,21 @@ Rust SDK for the [Hearth](https://github.com/hearth-auth/hearth) identity platfo
 
 ## Installation
 
+> **crates.io status:** `hearth-sdk` is not yet published to crates.io (trusted-publishing
+> configuration pending, [HEA-1478](/HEA/issues/HEA-1478)). Install from git or a local path clone.
+
 Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hearth-sdk = { path = "../sdks/rust" }  # or from crates.io once published
+# Install from the git repository (recommended):
+hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", package = "hearth-sdk" }
+
+# Or from a local path clone of the monorepo:
+# hearth-sdk = { path = "/path/to/hearth/sdks/rust" }
 
 # Enable Tower middleware for resource-server use:
-# hearth-sdk = { path = "../sdks/rust", features = ["tower-middleware"] }
+# hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", features = ["tower-middleware"] }
 ```
 
 ## Quickstart

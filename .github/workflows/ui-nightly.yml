@@ -141,8 +141,7 @@ jobs:
           bash tests/ui/pw-run.sh test \
             --project=smoke \
             --project=flows \
-            --project=regression \
-            --browser=${{ steps.pw-browser.outputs.name }}
+            --project=regression
 
       # ── HTTPS / TLS path ────────────────────────────────────────────────────
 
@@ -186,7 +185,6 @@ jobs:
         env:
           HEARTH_URL: https://127.0.0.1:8443
           NODE_TLS_REJECT_UNAUTHORIZED: "0"
-          PLAYWRIGHT_CHROMIUM_EXTRA_ARGS: --ignore-certificate-errors
 
       # ── Reporting (all legs) ────────────────────────────────────────────────
 

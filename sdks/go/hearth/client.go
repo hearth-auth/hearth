@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,10 +20,53 @@ type Client struct {
 	realmID string
 	http    *http.Client
 	svCache *SessionVersionCache
+
+	// optional client credentials for client_credentials and device_flow grants.
+	clientID     string
+	clientSecret string
+
+	// jwksTTL overrides the default JWKS cache TTL.
+	jwksTTL time.Duration
+
+	// jwksURLOverride lets tests point the JWKS fetch at a different server.
+	jwksURLOverride string
+
+	// Lazy-initialised JWKS cache and discovery document.
+	jwksMu    sync.Mutex
+	jwksCache *JwksCache
+
+	discMu  sync.Mutex
+	discDoc *oidcDiscovery
+	discErr error
+}
+
+// oidcDiscovery holds the fields we need from the OIDC discovery document.
+type oidcDiscovery struct {
+	Issuer                      string `json:"issuer"`
+	JwksURI                     string `json:"jwks_uri"`
+	TokenEndpoint               string `json:"token_endpoint"`
+	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
 }
 
 // ClientOption is a functional option for NewClient.
 type ClientOption func(*Client)
+
+// WithClientCredentials configures client_id and client_secret for M2M flows.
+//
+// Required for ClientCredentials and StartDeviceFlow.
+func WithClientCredentials(clientID, clientSecret string) ClientOption {
+	return func(c *Client) {
+		c.clientID = clientID
+		c.clientSecret = clientSecret
+	}
+}
+
+// WithJWKSTTL overrides the default JWKS cache TTL.
+func WithJWKSTTL(ttl time.Duration) ClientOption {
+	return func(c *Client) {
+		c.jwksTTL = ttl
+	}
+}
 
 // WithSessionVersions attaches a session-version cache to the client.
 //

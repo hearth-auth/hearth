@@ -1,0 +1,451 @@
+---
+title: Python SDK quickstart
+sidebar_label: Python
+description: Verify Hearth tokens and enforce RBAC in a Python service in under 5 minutes. Covers Flask, FastAPI, Django, Starlette, WSGI/ASGI middleware, and the auth code + PKCE callback.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Python SDK quickstart
+
+Add token verification and permission checks to a Python service in under 5 minutes using `hearth-sdk`.
+
+:::note[Dedicated framework adapters]
+`hearth-sdk` ships dedicated adapters for **FastAPI** and **Django** that integrate with each framework's native conventions. This page covers the core `HearthClient` API and shows how to wire it into Flask, FastAPI, and Django.
+
+- [FastAPI adapter](./python-fastapi.md) — `Depends()` injection, `VerifiedClaims`, `require_permission()` type alias
+- [Django adapter](./python-django.md) — `MIDDLEWARE` list integration, `request.hearth_token`, `@require_permission` decorator
+:::
+
+## Install
+
+```bash
+pip install hearth-sdk
+```
+
+## Start Hearth locally
+
+```bash
+# from the hearth repo root
+make dev
+# → binds http://127.0.0.1:8420
+
+curl -X POST http://127.0.0.1:8420/admin/bootstrap
+# → { "realm_id": "…", "access_token": "…" }
+```
+
+## Auth code flow with PKCE
+
+Use `begin_login` / `complete_login` to handle the OAuth callback in two calls. The core SDK calls are identical across frameworks — the tabs show how to declare the routes in each.
+
+<Tabs groupId="framework">
+<TabItem value="flask" label="Flask" default>
+
+```python
+from flask import Flask, redirect, request, session
+from hearth import HearthClient
+
+app = Flask(__name__)
+app.secret_key = "your-secret-key"
+
+client = HearthClient(
+    base_url="https://hearth.example.com",
+    realm_id="<realm_id>",
+    client_id="<client_id>",
+    client_secret="<client_secret>",
+)
+
+@app.route("/login")
+def login():
+    result = client.begin_login(
+        redirect_uri="https://myapp.example.com/callback",
+        scopes="openid profile email",
+    )
+    session["oauth_state"]   = result.state
+    session["code_verifier"] = result.code_verifier
+    return redirect(result.authorization_url)
+
+@app.route("/callback")
+def callback():
+    if request.args["state"] != session["oauth_state"]:
+        return "state mismatch", 400
+    tokens = client.complete_login(
+        code=request.args["code"],
+        code_verifier=session["code_verifier"],
+        redirect_uri="https://myapp.example.com/callback",
+    )
+    # tokens.access_token, tokens.refresh_token, tokens.expires_in
+    return {"access_token": tokens.access_token}
+```
+
+</TabItem>
+<TabItem value="fastapi" label="FastAPI">
+
+```python
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse, JSONResponse
+from hearth import HearthClient
+
+app = FastAPI()
+client = HearthClient(
+    base_url="https://hearth.example.com",
+    realm_id="<realm_id>",
+    client_id="<client_id>",
+    client_secret="<client_secret>",
+)
+
+@app.get("/login")
+async def login(request: Request):
+    result = client.begin_login(
+        redirect_uri="https://myapp.example.com/callback",
+        scopes="openid profile email",
+    )
+    request.session["oauth_state"]   = result.state
+    request.session["code_verifier"] = result.code_verifier
+    return RedirectResponse(result.authorization_url)
+
+@app.get("/callback")
+async def callback(request: Request, code: str, state: str):
+    if state != request.session.get("oauth_state"):
+        return JSONResponse({"error": "state mismatch"}, status_code=400)
+    tokens = client.complete_login(
+        code=code,
+        code_verifier=request.session["code_verifier"],
+        redirect_uri="https://myapp.example.com/callback",
+    )
+    return {"access_token": tokens.access_token}
+```
+
+See the [FastAPI adapter guide](./python-fastapi.md) for `Depends()` injection, `VerifiedClaims`, and pydantic-settings configuration.
+
+</TabItem>
+<TabItem value="django" label="Django">
+
+```python
+# views.py
+from django.shortcuts import redirect
+from django.http import JsonResponse
+from hearth import HearthClient
+
+client = HearthClient(
+    base_url="https://hearth.example.com",
+    realm_id="<realm_id>",
+    client_id="<client_id>",
+    client_secret="<client_secret>",
+)
+
+def login(request):
+    result = client.begin_login(
+        redirect_uri="https://myapp.example.com/callback",
+        scopes="openid profile email",
+    )
+    request.session["oauth_state"]   = result.state
+    request.session["code_verifier"] = result.code_verifier
+    return redirect(result.authorization_url)
+
+def callback(request):
+    if request.GET.get("state") != request.session.get("oauth_state"):
+        return JsonResponse({"error": "state mismatch"}, status=400)
+    tokens = client.complete_login(
+        code=request.GET["code"],
+        code_verifier=request.session["code_verifier"],
+        redirect_uri="https://myapp.example.com/callback",
+    )
+    return JsonResponse({"access_token": tokens.access_token})
+```
+
+See the [Django adapter guide](./python-django.md) for `MIDDLEWARE` wiring, `request.hearth_token`, and `@require_permission` view decorator.
+
+</TabItem>
+</Tabs>
+
+:::tip[Where should the access token live?]
+If your frontend is a browser SPA, consider the **Backend for Frontend (BFF)** pattern: your Python server completes the OAuth callback, stores the access and refresh tokens server-side, and issues the browser an `HttpOnly; Secure; SameSite=Strict` session cookie. The browser never receives an OAuth token directly.
+
+This eliminates the XSS risk of browser-side token storage. See [Browser SPA Token Handling](../browser-spa-tokens.md) for a full comparison of storage options and the BFF flow diagram.
+:::
+
+## Initialize the client
+
+```python
+from hearth import HearthClient
+
+client = HearthClient(
+    issuer_url="https://hearth.example.com",
+    client_id="<your-client-id>",
+)
+```
+
+`HearthClient` auto-discovers endpoint URLs from the OIDC discovery document and caches the JWKS with auto-refresh on key miss.
+
+## Verify tokens
+
+```python
+from hearth.errors import TokenExpiredError, TokenInvalidError
+
+try:
+    claims = client.verify_token(access_token)
+    # claims.sub, claims.roles, claims.groups, claims.permissions
+except TokenExpiredError:
+    pass  # 401 — ask client to refresh
+except TokenInvalidError:
+    pass  # 401 — reject the request
+```
+
+## RBAC permission checks
+
+Permission checks are **synchronous and zero-network** — they read the embedded JWT claims:
+
+```python
+if claims.has_permission("invoices.write"):
+    render_invoice_form()
+
+if claims.has_role("billing-admin"):
+    render_billing_panel()
+
+if claims.in_group("engineering"):
+    render_internal_tooling()
+```
+
+## Middleware
+
+Apply token verification to incoming requests using the middleware layer for your framework. All adapters return `401` on a missing or invalid token and `403` on a permission failure.
+
+<Tabs groupId="framework">
+<TabItem value="flask" label="Flask (WSGI)" default>
+
+Use `WsgiPermissionMiddleware` to protect a Flask app. It wraps the WSGI callable, extracts the Bearer token, and enforces a permission before the request reaches your view functions.
+
+```python
+from flask import Flask
+from hearth import HearthClient
+from hearth.middleware import WsgiPermissionMiddleware
+
+client = HearthClient(
+    base_url="https://hearth.example.com",
+    realm_id="<realm-id>",
+)
+
+app = Flask(__name__)
+
+# Wrap the WSGI app — enforces docs.write on every request
+app.wsgi_app = WsgiPermissionMiddleware(
+    app.wsgi_app,
+    client=client,
+    permission="docs.write",
+    mode="embedded",
+)
+
+@app.route("/docs", methods=["POST"])
+def create_doc():
+    return {"created": True}
+```
+
+To enforce different permissions on different routes, instantiate the middleware per blueprint or create a per-route decorator using `client.verify_token()` directly.
+
+</TabItem>
+<TabItem value="fastapi" label="FastAPI">
+
+Use `HearthFastAPIDep` with FastAPI's `Depends()` system. This integrates natively with OpenAPI schema generation and provides typed `VerifiedClaims` objects.
+
+```python
+import os
+from fastapi import FastAPI
+from hearth import HearthClient
+from hearth.fastapi import HearthFastAPIDep, require_permission
+
+client = HearthClient(
+    base_url=os.environ["HEARTH_BASE_URL"],
+    realm_id=os.environ["HEARTH_REALM_ID"],
+)
+
+app = FastAPI()
+auth = HearthFastAPIDep(client=client)
+
+# Per-route permission guard via type alias
+AdminOnly = require_permission("admin.write", dep=auth)
+DocsWriter = require_permission("docs.write", dep=auth)
+
+@app.get("/admin/users")
+def list_users(claims: AdminOnly):
+    return {"user": claims.sub, "permissions": claims.permissions}
+
+@app.post("/docs")
+def create_doc(claims: DocsWriter):
+    return {"created": True, "by": claims.sub}
+```
+
+See the [FastAPI adapter guide](./python-fastapi.md) for `VerifiedClaims`, pydantic-settings configuration, and all three permission delivery modes.
+
+</TabItem>
+<TabItem value="django" label="Django">
+
+Use `HearthDjangoMiddleware` in Django's `MIDDLEWARE` setting, then use `@require_permission` on individual views.
+
+```python
+# settings.py
+from hearth import HearthClient
+import os
+
+HEARTH_CLIENT = HearthClient(
+    base_url=os.environ["HEARTH_BASE_URL"],
+    realm_id=os.environ["HEARTH_REALM_ID"],
+)
+MIDDLEWARE = [
+    # ... existing middleware ...
+    "hearth.django.HearthDjangoMiddleware",
+]
+
+# views.py
+from hearth.django import require_permission
+from django.http import JsonResponse
+
+@require_permission("docs.write")
+def create_doc(request):
+    return JsonResponse({"created": True, "by": request.hearth_token.sub})
+
+@require_permission("admin.write")
+def admin_users(request):
+    return JsonResponse({"user": request.hearth_token.sub})
+```
+
+See the [Django adapter guide](./python-django.md) for class-based views, optional-auth patterns, and all three permission delivery modes.
+
+</TabItem>
+<TabItem value="starlette" label="Starlette (ASGI)">
+
+Use `RequirePermissionMiddleware` to protect a Starlette app. Non-HTTP connections (WebSocket, lifespan) pass through without checks.
+
+```python
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+from hearth import HearthClient
+from hearth.middleware import RequirePermissionMiddleware
+
+client = HearthClient(
+    base_url="https://hearth.example.com",
+    realm_id="<realm-id>",
+)
+
+async def homepage(request):
+    return JSONResponse({"ok": True})
+
+app = Starlette(routes=[Route("/", homepage)])
+
+# Wrap the ASGI app — enforces docs.read on every HTTP request
+app = RequirePermissionMiddleware(
+    app,
+    client=client,
+    permission="docs.read",
+    mode="embedded",
+)
+```
+
+:::note[FastAPI has a dedicated adapter]
+For FastAPI, use `HearthFastAPIDep` (the FastAPI tab above) instead — it integrates with `Depends()` injection and types verified claims into FastAPI's OpenAPI schema.
+:::
+
+</TabItem>
+</Tabs>
+
+## Permission delivery modes
+
+| Mode | How it works | When to use |
+|------|-------------|-------------|
+| `embedded` (default) | Permissions baked into the JWT at issuance. Zero extra network calls. | Most services |
+| `decision` | Live per-request `POST /oauth/authorize`. Fail-closed on errors. | When post-issuance role changes must take effect immediately |
+| `introspection` | `POST /realms/{id}/introspect` (RFC 7662). Echoes a `mode` field that is validated. | Stateless resource servers |
+
+```python
+# Decision mode — direct call
+result = client.check_permission(access_token, "docs.write")
+if not result.allowed:
+    raise PermissionError("forbidden")
+
+# Introspection mode — direct call
+from hearth.errors import AuthorizationModeMismatchError
+
+resp = client.introspect(access_token, client_id="<cid>", client_secret="<sec>")
+if not resp.active:
+    raise PermissionError("inactive token")
+if resp.mode != "introspection":
+    raise AuthorizationModeMismatchError("introspection", resp.mode or "embedded")
+if "docs.write" not in (resp.permissions or []):
+    raise PermissionError("forbidden")
+```
+
+## Machine-to-machine (client credentials)
+
+For service-to-service calls where your server authenticates as its own principal:
+
+```python
+from hearth import HearthClient
+
+client = HearthClient(
+    issuer_url="https://hearth.example.com",
+    realm_id="<realm_id>",
+    client_id="<service-client-id>",
+    client_secret="<service-client-secret>",
+)
+
+tokens = client.client_credentials(scope="read:reports")
+# tokens.access_token, tokens.expires_in
+```
+
+## Device authorization flow
+
+For CLI tools or headless processes that need interactive user approval:
+
+```python
+import time
+
+resp = client.start_device_flow(scope="openid")
+print(f"Visit {resp.verification_uri}")
+print(f"Enter code: {resp.user_code}")
+
+# Poll until approved or expired
+interval = resp.interval
+tokens = None
+while True:
+    time.sleep(interval)
+    try:
+        result = client.poll_device_token(resp.device_code, interval)
+        if result is not None:
+            tokens = result
+            break
+        # None means authorization_pending or slow_down — keep polling
+    except TokenExpiredError:
+        raise RuntimeError("device code expired before user approved")
+```
+
+## Magic-link (passwordless) initiation
+
+```python
+client.request_magic_link("user@example.com")
+# Returns None whether or not the email is registered (enumeration resistance)
+# Raises OAuthFlowError on HTTP 429
+```
+
+## Error types
+
+| Error | When raised |
+|-------|-------------|
+| `TokenExpiredError` | `exp` in the past |
+| `TokenInvalidError` | Signature invalid or malformed JWT |
+| `TokenIssuerError` | `iss` mismatch |
+| `TokenAudienceError` | `aud` mismatch |
+| `DiscoveryError` | OIDC discovery unreachable |
+| `JWKSFetchError` | JWKS endpoint unreachable |
+| `OAuthFlowError` | OAuth endpoint error (client credentials, device flow, magic link) |
+| `AuthorizationModeMismatchError` | Server echoed a mode different from configured |
+| `IntrospectionError` | Introspection endpoint error |
+
+## Next steps
+
+- [FastAPI adapter](./python-fastapi.md) — `Depends()` injection, `VerifiedClaims`, and `require_permission()` type alias
+- [Django adapter](./python-django.md) — `MIDDLEWARE` list integration and `@require_permission` view decorator
+- [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
+- [Admin API guide](/docs/admin-api) — managing users and clients programmatically
+- [Python type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/python/README.md) — full API surface

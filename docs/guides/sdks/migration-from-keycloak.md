@@ -1,0 +1,316 @@
+---
+title: Migrating from Keycloak
+sidebar_label: Migrate from Keycloak
+description: Side-by-side recipe for moving from Keycloak to Hearth — data export, SDK swap, and RBAC mapping.
+---
+
+# Migrating from Keycloak
+
+This guide is a side-by-side recipe for teams moving from Keycloak to Hearth.
+It covers data migration, SDK swap, and authorization model translation.
+
+:::note[Version context]
+This guide was written against Keycloak 24.x and Hearth 1.0.0. Verify claim
+names against your specific Keycloak configuration.
+:::
+
+:::tip[Operator migration guide]
+For the full `hearth migrate keycloak` CLI walkthrough, data directory setup,
+post-migration checklist, and detailed migration gap rationale, see the
+[Migrating from Keycloak operator guide](/docs/migrating-from-keycloak).
+:::
+
+## Concept mapping
+
+| Keycloak | Hearth | Notes |
+|----------|--------|-------|
+| Realm | Realm | Same scope: a tenant boundary for users, clients, and roles |
+| Client | OAuth Client | Hearth uses `client_id` / `redirect_uris`; no client secrets for public clients |
+| Realm role | Role | Stored as `roles: string[]` in the JWT |
+| Composite role | Role with permissions | Hearth maps role → permission set at issuance time |
+| Group | Group | Stored as `groups: string[]` in the JWT |
+| Organization (Keycloak 24+) | Organization | `oid` JWT claim; Hearth B2B tenancy model |
+| UMA / fine-grained authz | Permission | Hearth uses a flat `permissions: string[]` claim in the JWT |
+| `preferred_username` | `sub` | Hearth's stable user identifier is always `sub` (UUID) |
+| Client scope | OAuth scope | Same OIDC semantics |
+| PKCE | PKCE | Hearth requires PKCE for all public clients |
+
+## Step 1 — Export your Keycloak realm
+
+In the Keycloak Admin Console:
+
+1. Open **Realm Settings → Action → Partial export**
+2. Enable **Export groups and roles** and **Export clients**
+3. Click **Export** to download `realm-export.json`
+
+Or via the Admin CLI:
+
+```bash
+/opt/keycloak/bin/kc.sh export \
+  --realm my-realm \
+  --users realm_file \
+  --file realm-export.json
+```
+
+## Step 2 — Import into Hearth
+
+Hearth includes a built-in Keycloak migration command that reads the export
+file and creates users, clients, and roles:
+
+```bash
+hearth migrate keycloak \
+  --file realm-export.json \
+  --data-dir /var/lib/hearth \
+  --dry-run  # preview without writing
+```
+
+Remove `--dry-run` to apply. The importer reports per-user success/failure:
+
+```
+Imported 1 248 users, 3 failed (see migration.log)
+```
+
+### What the importer handles
+
+- **Users and email addresses** — including inactive accounts
+- **Credential hashing** — Keycloak's PBKDF2-SHA256 credentials are imported
+  verbatim and verified natively; they upgrade to Argon2id on the user's next
+  password change (no forced re-authentication required)
+- **Realm roles** — mapped 1:1 to Hearth roles on the imported realm
+- **OAuth clients** — `client_id` and `redirect_uris` preserved
+
+### What needs manual follow-up
+
+- **Client roles** — Keycloak client-scoped roles are not imported; recreate as
+  realm roles with a naming convention such as `my-app:billing-admin`
+- **Composite-role parent links** — role composition hierarchies are not
+  imported; map roles to permission sets manually in
+  **Admin → Realms → \<realm\> → Roles → \<role\> → Permissions**
+- **Groups** — not imported because Keycloak groups serve dual purposes
+  (access control vs. B2B tenancy); recreate as Hearth RBAC groups or
+  Organizations after migration
+- **Required Actions** — pending `VERIFY_EMAIL`, `UPDATE_PASSWORD`,
+  `CONFIGURE_TOTP`, and similar flags are not preserved; see workarounds below
+- **Client secrets** — Keycloak exports do not include plaintext client secrets;
+  rotate them in Hearth after import
+- **Identity providers (IdP)** — SAML/OIDC IdP configurations are not imported;
+  reconfigure under Hearth's federation settings
+- **Fine-grained policies** — Keycloak UMA policies must be translated to
+  Hearth role→permission assignments manually
+- **TOTP / WebAuthn credentials** — authenticator registrations are not portable;
+  users re-enroll on next login
+
+### Required Actions workarounds
+
+Users with pending Required Actions in Keycloak arrive in Hearth with no forced
+next-login step. Handle each action type:
+
+| Keycloak Required Action | Post-migration step |
+|---|---|
+| `VERIFY_EMAIL` | `email_verified` is imported as-is; if `false`, trigger: `POST /admin/realms/<realm-id>/users/<user-id>/send-verification-email` |
+| `UPDATE_PASSWORD` | Disable the account and issue an admin password reset before re-enabling |
+| `CONFIGURE_TOTP` | If MFA is required by the realm policy, Hearth prompts enrollment at next login automatically |
+| `TERMS_AND_CONDITIONS` | No equivalent; implement acceptance tracking in your application layer |
+
+> For full gap rationale and step-by-step workarounds, see the
+> [Operator migration guide — Migration gaps](/docs/migrating-from-keycloak#migration-gaps).
+
+## Step 3 — Update your application code
+
+### TypeScript SDK
+
+**Before (Keycloak JS Adapter):**
+
+```typescript
+import Keycloak from "keycloak-js";
+
+const kc = new Keycloak({
+  url: "https://keycloak.example.com",
+  realm: "my-realm",
+  clientId: "my-app",
+});
+
+await kc.init({ onLoad: "login-required" });
+
+// RBAC — Keycloak adapter
+if (kc.hasRealmRole("admin")) { ... }
+if (kc.hasResourceRole("billing-admin", "my-app")) { ... }
+
+// Token refresh
+await kc.updateToken(60);
+```
+
+**After (Hearth SDK):**
+
+```typescript
+import {
+  HearthClient,
+  HearthApiClient,
+  createHearth,
+  createHearthAuth,
+  HearthProvider,
+  useHasRole,
+  useHasPermission,
+} from "@hearth-auth/sdk";
+
+// Server-side token verification
+const client = new HearthClient({
+  issuerUrl: "https://hearth.example.com",
+  clientId: "<client_id>",
+});
+const claims = await client.verifyToken(accessToken);
+
+// Browser-side RBAC — access token stays in memory via createHearthAuth
+// Never store access tokens in localStorage or sessionStorage — see /docs/guides/browser-spa-tokens
+const apiClient = new HearthApiClient({ baseUrl: "https://hearth.example.com", realmId: "<realm_id>" });
+const auth = createHearthAuth(apiClient, {
+  clientId:    "<client_id>",
+  redirectUri: "https://myapp.example.com/callback",
+});
+
+// RBAC — synchronous local checks from JWT claims
+const hearth = createHearth({
+  baseUrl: "https://hearth.example.com",
+  realmId: "<realm_id>",
+  getToken: () => auth.getAccessToken(), // in-memory — never localStorage or sessionStorage
+});
+
+if (hearth.hasRole("admin")) { ... }
+if (hearth.hasPermission("billing.read")) { ... }
+
+// Token refresh
+const legacyClient = new HearthApiClient({ baseUrl: "https://hearth.example.com", realmId: "<realm_id>" });
+const tokens = await legacyClient.refreshTokens("<client_id>", refreshToken);
+```
+
+**React hooks — before (Keycloak):**
+
+```tsx
+// Keycloak — no official hook; typically wrapped manually
+const isAdmin = keycloak.hasRealmRole("admin");
+```
+
+**React hooks — after (Hearth):**
+
+```tsx
+function AdminPanel() {
+  const isAdmin = useHasRole("admin"); // HearthProvider must be mounted above
+  return isAdmin ? <Admin /> : null;
+}
+```
+
+### Go SDK
+
+**Before (Keycloak Go middleware — common pattern):**
+
+```go
+import "github.com/Nerzal/gocloak/v13"
+
+client := gocloak.NewClient("https://keycloak.example.com")
+
+// Validate token against Keycloak introspect endpoint (network call on every request)
+result, err := client.RetrospectToken(ctx, token, clientID, clientSecret, realm)
+if !*result.Active {
+    return errors.New("token invalid")
+}
+
+// Role check — requires fetching user info
+userInfo, _ := client.GetRawUserInfo(ctx, token, realm)
+```
+
+**After (Hearth Go SDK):**
+
+```go
+import "github.com/hearth-auth/hearth/sdks/go/hearth"
+
+client := hearth.NewClient("https://hearth.example.com", "<realm_id>",
+    hearth.WithClientCredentials("<client_id>", ""),
+)
+
+// Validate token against JWKS (full Ed25519/EdDSA local verification)
+claims, err := client.VerifyToken(ctx, token)
+if err != nil {
+    // typed error: *hearth.TokenError
+}
+
+// Role and permission checks — synchronous, zero-network, no introspect call
+if client.HasRole(token, "admin") { ... }
+if client.HasPermission(token, "billing.read") { ... }
+```
+
+### Authorization model translation
+
+Keycloak's UMA fine-grained authorization requires a network round-trip to the
+policy enforcement point on every request. Hearth embeds all RBAC claims into
+the JWT at issuance time:
+
+| Keycloak pattern | Hearth equivalent |
+|-----------------|-------------------|
+| Realm role check via adapter | `hearth.hasRole("role")` or `HasRole(token, "role")` |
+| Resource role check | `hearth.hasPermission("resource.action")` |
+| UMA policy enforcement point | Local JWT claim — no PEP needed |
+| `realm_access.roles[]` in token | `roles: string[]` claim |
+| `resource_access.<client>.roles[]` | `permissions: string[]` claim |
+| Group membership via `/userinfo` | `groups: string[]` claim in JWT |
+
+## Step 4 — Update the discovery URL
+
+Replace the Keycloak OIDC discovery URL with Hearth's:
+
+```
+# Keycloak
+https://keycloak.example.com/realms/my-realm/.well-known/openid-configuration
+
+# Hearth — realm-scoped (use realm slug, not UUID)
+https://hearth.example.com/realms/<realm_slug>/.well-known/openid-configuration
+
+# Hearth — system-level (uses X-Realm-ID header; works with all Hearth SDKs)
+https://hearth.example.com/.well-known/openid-configuration
+```
+
+Any library that reads the discovery document (e.g., `openid-client`,
+`passport-openidconnect`, Go's `coreos/go-oidc`) will auto-configure from the
+new URL — no other changes needed for standard OIDC flows. Note: `<realm_slug>`
+is the human-readable realm name, not the UUID. Hearth SDKs use the system-level
+discovery URL by default (base URL only) and resolve realm context via `client_id`.
+
+## Step 5 — Verify in staging
+
+1. Deploy Hearth alongside Keycloak with the imported data
+2. Sign in with a migrated user — verify tokens contain expected roles and groups
+3. Check `GET /v1/me/permissions` returns the expected RBAC claim set
+4. Run your existing integration test suite against the Hearth endpoints
+5. Gradually route traffic using a feature flag or reverse-proxy weight
+
+## Common issues
+
+**"Token signature verification failed"**
+
+Your application is still pointing at Keycloak's JWKS URL. Update it to
+`https://hearth.example.com/.well-known/jwks.json` (system-level) or
+`https://hearth.example.com/realms/<realm_slug>/.well-known/jwks.json` (realm-scoped, use slug not UUID).
+
+**"Role X not found after migration"**
+
+Keycloak composite roles are not automatically decomposed into Hearth
+permissions. Map them manually in the admin UI:
+`Admin → Realms → <realm> → Roles → <role> → Permissions`.
+
+**"User can't log in after migration"**
+
+PBKDF2 credentials are imported and verified natively — they do not require a
+password reset. If login fails, check:
+- The user's account status (may be `inactive` if exported from Keycloak as disabled)
+- Whether TOTP was required in Keycloak (re-enrollment needed in Hearth)
+
+**"Client secret rejected"**
+
+Keycloak exports do not include plaintext secrets. Rotate the client secret in
+Hearth's admin UI and update your application's `HEARTH_CLIENT_SECRET`.
+
+## Further reading
+
+- [Operator migration guide](/docs/migrating-from-keycloak) — full CLI walkthrough, post-migration checklist, and migration gap details
+- [RBAC guide](/docs/rbac) — Hearth role/permission model in depth
+- [TypeScript SDK quickstart](./typescript.md)
+- [Go SDK quickstart](./go.md)

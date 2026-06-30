@@ -11,6 +11,11 @@ import type {
   TokenExchangeParams,
   TokenResponse,
   UserInfoResponse,
+  WebAuthnRegistrationBeginResponse,
+  WebAuthnRegistrationCompleteRequest,
+  WebAuthnRegistrationCompleteResponse,
+  WebAuthnAuthenticationBeginResponse,
+  WebAuthnAuthenticationCompleteRequest,
 } from "./types.js";
 
 /** Parameters for the PKCE authorization-code callback handler (spec §7). */
@@ -230,14 +235,72 @@ export class HearthApiClient {
     return new AdminClient(this.baseUrl, this.realmId, accessToken);
   }
 
+  // ── WebAuthn / passkeys (C-21) ──────────────────────────────────────────
+  // The begin/complete round-trips below are the portable primitive; the
+  // browser glue (`navigator.credentials.create()/get()`) wraps them. The
+  // browser SDK is the natural home for these ceremonies.
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  /**
+   * Begin a WebAuthn passkey registration ceremony.
+   * Returns `PublicKeyCredentialCreationOptions` for
+   * `navigator.credentials.create()`. `accessToken` is the authenticated
+   * user's bearer token so the server knows who is registering the credential.
+   */
+  async startWebAuthnRegistration(
+    accessToken: string,
+  ): Promise<WebAuthnRegistrationBeginResponse> {
+    return this.post("/webauthn/register/begin", {}, accessToken);
+  }
+
+  /**
+   * Complete a WebAuthn passkey registration ceremony. Send the attestation
+   * produced by `navigator.credentials.create()`. `accessToken` must be the
+   * same token used to begin the ceremony.
+   */
+  async finishWebAuthnRegistration(
+    accessToken: string,
+    request: WebAuthnRegistrationCompleteRequest,
+  ): Promise<WebAuthnRegistrationCompleteResponse> {
+    return this.post("/webauthn/register/complete", request, accessToken);
+  }
+
+  /**
+   * Begin a WebAuthn passkey authentication ceremony. Returns
+   * `PublicKeyCredentialRequestOptions` for `navigator.credentials.get()`.
+   * Omit `userId` for a discoverable-credential (resident-key) flow; when
+   * provided, the server constrains `allow_credentials` to that user's passkeys.
+   */
+  async startWebAuthnAuthentication(
+    userId?: string,
+  ): Promise<WebAuthnAuthenticationBeginResponse> {
+    const body = userId ? { user_id: userId } : {};
+    return this.post("/webauthn/auth/begin", body);
+  }
+
+  /**
+   * Complete a WebAuthn passkey authentication ceremony. Send the assertion
+   * produced by `navigator.credentials.get()`. Returns a full token response on
+   * success.
+   */
+  async finishWebAuthnAuthentication(
+    request: WebAuthnAuthenticationCompleteRequest,
+  ): Promise<TokenResponse> {
+    return this.post("/webauthn/auth/complete", request);
+  }
+
+  private async post<T>(
+    path: string,
+    body: unknown,
+    accessToken?: string,
+  ): Promise<T> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-Realm-ID": this.realmId,
+    };
+    if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
     const resp = await fetch(`${this.baseUrl}${path}`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Realm-ID": this.realmId,
-      },
+      headers,
       body: JSON.stringify(body),
     });
     if (!resp.ok) {

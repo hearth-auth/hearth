@@ -1,0 +1,509 @@
+---
+title: Go SDK quickstart
+sidebar_label: Go
+description: Add Hearth authentication and RBAC to a Go service in under 5 minutes.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Go SDK quickstart
+
+Get your first protected HTTP endpoint in under 5 minutes using the Hearth Go SDK.
+
+## Install
+
+```bash
+go get github.com/hearth-auth/hearth/sdks/go
+```
+
+## Start Hearth locally
+
+```bash
+# from the hearth repo root
+make dev
+# → binds http://127.0.0.1:8420
+
+curl -X POST http://127.0.0.1:8420/admin/bootstrap
+# → { "realm_id": "…", "access_token": "…", "refresh_token": "…" }
+```
+
+## Initialize the client
+
+```go
+import "github.com/hearth-auth/hearth/sdks/go/hearth"
+
+client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>")
+```
+
+`Client` is goroutine-safe and is designed to be created once and reused across
+requests.
+
+## Auth code flow with PKCE
+
+Use `BeginLogin` / `CompleteLogin` to handle the OAuth callback in two calls. The core SDK calls are identical across frameworks — the tabs below show how to wire them into each router's handler style.
+
+<Tabs groupId="framework">
+<TabItem value="nethttp" label="net/http" default>
+
+```go
+import (
+    "context"
+    "fmt"
+    "net/http"
+
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
+    hearth.WithClientCredentials("<client_id>", "<client_secret>"),
+)
+
+// Login handler — generate PKCE and build the authorization URL
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+    ctx := context.Background()
+    result, err := client.BeginLogin(ctx, "http://localhost:8080/callback", "openid profile email")
+    if err != nil {
+        http.Error(w, err.Error(), 500)
+        return
+    }
+    // Persist result.State and result.CodeVerifier in your session (one line you own)
+    setSession(r, "state", result.State)
+    setSession(r, "code_verifier", result.CodeVerifier)
+    http.Redirect(w, r, result.AuthorizationURL, http.StatusFound)
+}
+
+// Callback handler — exchange the code for tokens
+func callbackHandler(w http.ResponseWriter, r *http.Request) {
+    ctx := context.Background()
+    if r.URL.Query().Get("state") != getSession(r, "state") {
+        http.Error(w, "state mismatch", 400)
+        return
+    }
+    tokens, err := client.CompleteLogin(ctx,
+        r.URL.Query().Get("code"),
+        getSession(r, "code_verifier"),
+        "http://localhost:8080/callback",
+    )
+    if err != nil {
+        http.Error(w, err.Error(), 500)
+        return
+    }
+    fmt.Fprintln(w, "access_token:", tokens.AccessToken)
+}
+```
+
+</TabItem>
+<TabItem value="gin" label="Gin">
+
+```go
+import (
+    "net/http"
+
+    hearth    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/hearth/gin"
+    "github.com/gin-gonic/gin"
+)
+
+client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
+    hearth.WithClientCredentials("<client_id>", "<client_secret>"),
+)
+r := gin.Default()
+r.Use(hearthgin.HearthMiddleware(client))
+
+r.GET("/login", func(c *gin.Context) {
+    result, err := client.BeginLogin(c.Request.Context(), "http://localhost:8080/callback", "openid profile email")
+    if err != nil {
+        c.AbortWithError(500, err)
+        return
+    }
+    c.SetCookie("state", result.State, 300, "/", "", false, true)
+    c.SetCookie("code_verifier", result.CodeVerifier, 300, "/", "", false, true)
+    c.Redirect(http.StatusFound, result.AuthorizationURL)
+})
+
+r.GET("/callback", func(c *gin.Context) {
+    cv, _ := c.Cookie("code_verifier")
+    tokens, err := client.CompleteLogin(c.Request.Context(),
+        c.Query("code"), cv, "http://localhost:8080/callback",
+    )
+    if err != nil {
+        c.AbortWithError(500, err)
+        return
+    }
+    c.JSON(200, gin.H{"access_token": tokens.AccessToken})
+})
+```
+
+See the [Gin adapter guide](./go-gin.md) for per-route and per-group middleware patterns.
+
+</TabItem>
+<TabItem value="echo" label="Echo">
+
+```go
+import (
+    "net/http"
+
+    hearth      "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/hearth/echo"
+    "github.com/labstack/echo/v4"
+)
+
+client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
+    hearth.WithClientCredentials("<client_id>", "<client_secret>"),
+)
+e := echo.New()
+e.Use(hearthecho.HearthMiddleware(client))
+
+e.GET("/login", func(c echo.Context) error {
+    result, err := client.BeginLogin(c.Request().Context(), "http://localhost:8080/callback", "openid profile email")
+    if err != nil {
+        return err
+    }
+    c.SetCookie(&http.Cookie{Name: "state", Value: result.State, Path: "/", HttpOnly: true})
+    c.SetCookie(&http.Cookie{Name: "code_verifier", Value: result.CodeVerifier, Path: "/", HttpOnly: true})
+    return c.Redirect(http.StatusFound, result.AuthorizationURL)
+})
+
+e.GET("/callback", func(c echo.Context) error {
+    cv, _ := c.Cookie("code_verifier")
+    tokens, err := client.CompleteLogin(c.Request().Context(),
+        c.QueryParam("code"), cv.Value, "http://localhost:8080/callback",
+    )
+    if err != nil {
+        return err
+    }
+    return c.JSON(200, map[string]any{"access_token": tokens.AccessToken})
+})
+```
+
+See the [Echo adapter guide](./go-echo.md) for group middleware and error handling.
+
+</TabItem>
+</Tabs>
+
+All three paths use the same `BeginLogin`/`CompleteLogin` calls; only the handler signature and cookie/session access differ.
+
+## Verify tokens
+
+`VerifyToken` performs full Ed25519/EdDSA local signature verification with JWKS
+caching and key-rotation recovery:
+
+```go
+package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+func main() {
+    ctx := context.Background()
+    client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
+        hearth.WithClientCredentials("<client_id>", ""),
+    )
+
+    claims, err := client.VerifyToken(ctx, accessToken)
+    if err != nil {
+        var tokenErr *hearth.TokenError
+        if errors.As(err, &tokenErr) {
+            fmt.Println("token rejected:", tokenErr.Code) // "expired", "invalid", "issuer_mismatch", etc.
+        }
+        return
+    }
+
+    fmt.Println("user:", claims.Subject)
+    fmt.Println("roles:", claims.Roles)
+    fmt.Println("permissions:", claims.Permissions)
+}
+```
+
+`VerifyToken` validates signature, `exp`, `iss`, `aud` (when `client_id` is
+set), and `iat` in that order. Keys are cached; a `kid` miss triggers one
+re-fetch before failing (transparent key rotation). It never falls back to
+introspection.
+
+Pass additional audience values as variadic arguments:
+
+```go
+claims, err := client.VerifyToken(ctx, token, "other-service")
+```
+
+## Machine-to-machine (client credentials)
+
+For daemon-to-daemon calls where the service authenticates as its own principal:
+
+```go
+client := hearth.NewClient("http://127.0.0.1:8420", "<realm_id>",
+    hearth.WithClientCredentials("<service-client-id>", "<service-client-secret>"),
+)
+
+tokens, err := client.ClientCredentials(ctx)
+if err != nil {
+    panic(err)
+}
+fmt.Println("access_token:", tokens.AccessToken)
+// tokens.ExpiresIn — seconds until expiry
+```
+
+Pass optional scopes as variadic strings:
+
+```go
+tokens, err := client.ClientCredentials(ctx, "read:users", "write:reports")
+```
+
+## Device authorization flow
+
+For CLI tools or headless servers that need interactive user approval:
+
+```go
+resp, err := client.StartDeviceFlow(ctx)
+if err != nil {
+    panic(err)
+}
+fmt.Printf("Visit %s\nEnter code: %s\n", resp.VerificationURI, resp.UserCode)
+
+// Poll until the user approves. PollDeviceToken manages the interval internally.
+for {
+    tokens, err := client.PollDeviceToken(ctx, resp.DeviceCode)
+    if err != nil {
+        var tokenErr *hearth.TokenError
+        if errors.As(err, &tokenErr) && tokenErr.Code == "expired_token" {
+            fmt.Println("device code expired")
+            return
+        }
+        panic(err)
+    }
+    if tokens != nil {
+        // Approved
+        fmt.Println("access_token:", tokens.AccessToken)
+        break
+    }
+    // nil means authorization_pending or slow_down — sleep and retry
+    time.Sleep(time.Duration(resp.Interval) * time.Second)
+}
+```
+
+`PollDeviceToken` handles `authorization_pending` and `slow_down` by returning
+`nil` (the caller is responsible for the sleep loop). It raises a `TokenError`
+with `Code == "expired_token"` when the device code expires.
+
+## Magic-link (passwordless) initiation
+
+```go
+err := client.RequestMagicLink(ctx, "user@example.com")
+// err is nil whether or not the email is registered (enumeration resistance)
+```
+
+HTTP 429 is surfaced as `*hearth.APIError` with `StatusCode == 429`.
+
+## RBAC checks
+
+### Synchronous (zero-network) helpers
+
+These decode the JWT **locally** — no network call, no lock. They return
+`false` for an empty or malformed token.
+
+```go
+// Returns true if the JWT permissions claim contains this permission.
+if client.HasPermission(accessToken, "invoices.write") {
+    renderInvoiceForm()
+}
+
+// Returns true if the JWT roles claim contains this role.
+if client.HasRole(accessToken, "billing-admin") {
+    renderBillingPanel()
+}
+
+// Returns true if the JWT groups claim contains this slug.
+if client.InGroup(accessToken, "engineering") {
+    renderInternalTooling()
+}
+
+// Returns true if the JWT oid claim equals this org ID.
+if client.InOrg(accessToken, "org_acme") {
+    renderAcmeContent()
+}
+```
+
+### Live permission check (post-issuance)
+
+Call `Permissions` when you need claims that reflect role/group changes made
+after the JWT was issued (e.g., after an admin operation):
+
+```go
+perms, err := client.Permissions(ctx, accessToken)
+if err != nil {
+    return fmt.Errorf("permissions: %w", err)
+}
+// perms.Roles       []string
+// perms.Groups      []string
+// perms.Permissions []string
+```
+
+## Framework middleware
+
+Apply token verification and permission checks to your routes using the adapter that matches your router. All adapters validate the Bearer token, set the verified claims on the request context, and return `401`/`403` on failure.
+
+<Tabs groupId="framework">
+<TabItem value="nethttp" label="net/http" default>
+
+Use `hearth.RequirePermission` with standard `http.Handler` middleware chains. The function returns a `func(http.Handler) http.Handler` you can wrap around any handler or pass to a compatible router.
+
+`MiddlewareConfig.ExpectedMode` is required — the middleware never auto-detects the mode from JWT claims:
+
+```go
+import (
+    "net/http"
+
+    hearth "github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+client := hearth.NewClient("https://hearth.example.com", "<realm-id>")
+
+// Embedded mode — decodes JWT locally, no network call
+requireAdmin := hearth.RequirePermission(client, "admin.write", hearth.MiddlewareConfig{
+    ExpectedMode: hearth.ModeEmbedded,
+})
+
+mux := http.NewServeMux()
+mux.Handle("/admin/users", requireAdmin(http.HandlerFunc(handleAdminUsers)))
+http.ListenAndServe(":8080", mux)
+```
+
+`MiddlewareConfig` fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ExpectedMode` | `AccessTokenAuthorizationMode` | **required** | `ModeEmbedded`, `ModeIntrospection`, or `ModeDecision` |
+| `TokenExtractor` | `func(*http.Request) string` | `Authorization: Bearer` header | Custom token source |
+| `OnDenied` | `func(w, r)` | `HTTP 403` | Called on permission failure |
+| `OnUnauthorized` | `func(w, r)` | `HTTP 401` | Called on missing/invalid token |
+
+Example with introspection mode:
+
+```go
+requireRead := hearth.RequirePermission(client, "docs.read", hearth.MiddlewareConfig{
+    ExpectedMode: hearth.ModeIntrospection,
+    ClientID:     "<resource-server-client-id>",
+})
+```
+
+</TabItem>
+<TabItem value="gin" label="Gin">
+
+Use `hearthgin.HearthMiddleware` globally and `hearthgin.RequirePermission` on individual route groups. Both read the verified claims from the Gin context with `hearthgin.GetToken(c)`.
+
+```go
+import (
+    hearth    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/hearth/gin"
+    "github.com/gin-gonic/gin"
+)
+
+client := hearth.NewClient("https://hearth.example.com", "<realm-id>")
+r := gin.Default()
+
+// Global token verification — all routes require a valid Bearer token
+r.Use(hearthgin.HearthMiddleware(client))
+
+// Per-group permission check — decodes claims locally, no network call
+admin := r.Group("/admin", hearthgin.RequirePermission("admin.write"))
+admin.GET("/users", func(c *gin.Context) {
+    token := hearthgin.GetToken(c)   // *hearth.Claims
+    c.JSON(200, gin.H{"user": token.Subject})
+})
+```
+
+See the [Gin adapter guide](./go-gin.md) for per-route middleware, introspection mode, and custom error handlers.
+
+</TabItem>
+<TabItem value="echo" label="Echo">
+
+Use `hearthecho.HearthMiddleware` globally and `hearthecho.RequirePermission` on individual route groups. Verified claims are available via `hearthecho.GetToken(c)`.
+
+```go
+import (
+    hearth      "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/hearth/echo"
+    "github.com/labstack/echo/v4"
+)
+
+client := hearth.NewClient("https://hearth.example.com", "<realm-id>")
+e := echo.New()
+
+// Global token verification — all routes require a valid Bearer token
+e.Use(hearthecho.HearthMiddleware(client))
+
+// Per-group permission check — decodes claims locally, no network call
+admin := e.Group("/admin", hearthecho.RequirePermission("admin.write"))
+admin.GET("/users", func(c echo.Context) error {
+    token := hearthecho.GetToken(c)   // *hearth.Claims
+    return c.JSON(200, map[string]any{"user": token.Subject})
+})
+```
+
+See the [Echo adapter guide](./go-echo.md) for group middleware, error hooks, and introspection mode.
+
+</TabItem>
+</Tabs>
+
+## Error handling
+
+Non-2xx responses return `*hearth.APIError`:
+
+```go
+import (
+    "errors"
+    "fmt"
+
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+tokens, err := client.ExchangeCode(ctx, req)
+if err != nil {
+    var apiErr *hearth.APIError
+    if errors.As(err, &apiErr) {
+        fmt.Printf("HTTP %d: %s\n", apiErr.StatusCode, apiErr.Message)
+    } else {
+        return fmt.Errorf("exchange: %w", err)
+    }
+}
+```
+
+## UserInfo and Admin API
+
+```go
+// OIDC UserInfo — scope-filtered claims
+info, err := client.UserInfo(ctx, accessToken)
+// info.Sub, info.Name, info.Email, info.EmailVerified
+
+// Admin operations — requires hearth.admin permission
+admin := client.Admin(accessToken)
+
+user, err := admin.CreateUser(ctx, hearth.CreateUserRequest{
+    Email:       "alice@example.com",
+    DisplayName: "Alice",
+})
+
+page, err := admin.ListUsers(ctx, 50)
+// page.Items []hearth.User, page.NextCursor *string
+```
+
+## Runnable example
+
+A complete Go/Gin server lives at
+[`examples/go-gin/`](https://github.com/hearth-auth/hearth/tree/main/examples/go-gin).
+It demonstrates JWT middleware, RBAC route guards, automatic JWKS refresh, and a
+dev bootstrap flow — all runnable with `go run .`.
+
+## Next steps
+
+- [Gin adapter](./go-gin.md) — dedicated `hearthgin` middleware for Gin applications
+- [Echo adapter](./go-echo.md) — dedicated `hearthecho` middleware for Echo v4 applications
+- [RBAC guide](/docs/rbac) — roles, groups, permissions, and JWT claim structure
+- [Admin API guide](/docs/admin-api) — managing users and clients programmatically
+- [Go type reference](https://github.com/hearth-auth/hearth/blob/main/sdks/go/README.md) — full type list

@@ -118,6 +118,22 @@ export class IntrospectionError extends HearthSdkError {
 }
 
 /**
+ * Thrown when an OAuth 2.0 token-endpoint request (code exchange, client credentials,
+ * device flow, magic-link, etc.) returns a non-2xx HTTP response.
+ */
+export class OAuthFlowError extends HearthSdkError {
+  constructor(
+    /** HTTP status code returned by the server; 0 for network-level failures. */
+    public readonly statusCode: number,
+    /** OAuth error code from the response body, or a summary message. */
+    public readonly errorCode: string,
+    message = `OAuth flow error ${statusCode}: ${errorCode}`,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * Thrown when the `mode` field echoed in an introspection response does not
  * match the SDK's configured `expectedMode`.
  *

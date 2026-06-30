@@ -256,6 +256,56 @@ class HearthClient(
     }
 
     /**
+     * Begin an authorization-code login: generate PKCE, build the authorization URL.
+     *
+     * Developer flow:
+     * 1. Call `beginLogin(redirectUri)` — receive a [LoginBeginResult].
+     * 2. Persist [LoginBeginResult.state] and [LoginBeginResult.codeVerifier] in session storage.
+     * 3. Redirect the browser to [LoginBeginResult.authorizationUrl].
+     * 4. On the callback route, call [completeLogin].
+     *
+     * @param redirectUri Callback URL registered with the authorization server.
+     * @param scopes Space-delimited scope string (defaults to `"openid"`).
+     * @throws ConfigurationError when [clientId] is not set.
+     * @throws DiscoveryError when the OIDC discovery document is missing `authorization_endpoint`.
+     */
+    suspend fun beginLogin(redirectUri: String, scopes: String? = null): LoginBeginResult {
+        val cId = clientId ?: throw ConfigurationError("clientId is required for beginLogin")
+        val endpoint = authorizationEndpoint()
+        val pkce = generatePkce()
+        val state = generateRandomState()
+        val params = mapOf(
+            "response_type" to "code",
+            "client_id" to cId,
+            "redirect_uri" to redirectUri,
+            "scope" to (scopes ?: "openid"),
+            "state" to state,
+            "code_challenge" to pkce.challenge,
+            "code_challenge_method" to "S256",
+        )
+        val query = params.entries.joinToString("&") { (k, v) ->
+            "${java.net.URLEncoder.encode(k, "UTF-8")}=${java.net.URLEncoder.encode(v, "UTF-8")}"
+        }
+        val authorizationUrl = "$endpoint?$query"
+        return LoginBeginResult(
+            authorizationUrl = authorizationUrl,
+            state = state,
+            codeVerifier = pkce.verifier,
+        )
+    }
+
+    /**
+     * Complete an authorization-code login: exchange the callback code for tokens.
+     *
+     * @param code          Authorization code from the callback `code` query parameter.
+     * @param codeVerifier  PKCE verifier returned by [beginLogin].
+     * @param redirectUri   Same redirect URI used in [beginLogin].
+     * @throws ConfigurationError when [clientId] is not set.
+     */
+    suspend fun completeLogin(code: String, codeVerifier: String, redirectUri: String): TokenResponse =
+        exchangeCode(code = code, redirectUri = redirectUri, codeVerifier = codeVerifier)
+
+    /**
      * Exchanges an authorization code for tokens (Authorization Code Flow).
      */
     suspend fun exchangeCode(
@@ -358,6 +408,28 @@ class HearthClient(
     }
 
     /**
+     * Sends a magic-link email for passwordless sign-in (spec §4.5.3).
+     *
+     * Completes the *send* half of the magic-link flow that pairs with
+     * [exchangeMagicLink]. Per enumeration-resistance requirements, the server
+     * always returns 202 regardless of whether the email is registered, so this
+     * method succeeds silently on any 2xx and never surfaces "user not found".
+     *
+     * Requires [realmId] to be set on this client.
+     *
+     * @throws ConfigurationError when [realmId] is not set.
+     * @throws ApiError on any non-2xx response (e.g. HTTP 429 rate limit).
+     */
+    suspend fun requestMagicLink(email: String) {
+        val rid = realmId
+            ?: throw ConfigurationError("realmId is required for requestMagicLink")
+        httpClient.postNoContent(
+            url = "$issuerUrl/v1/$rid/auth/magic-link",
+            payload = MagicLinkRequest(email = email),
+        )
+    }
+
+    /**
      * Exchanges a Magic Link token for tokens.
      */
     suspend fun exchangeMagicLink(magicToken: String): TokenResponse {
@@ -380,6 +452,111 @@ class HearthClient(
             throw HearthException("Token endpoint returned HTTP ${e.statusCode}", e)
         }
     }
+
+    // ── /v1/me/permissions ─────────────────────────────────────────────────────
+
+    /**
+     * Fetches the freshly-resolved RBAC claim set for the bearer-token user via
+     * `GET /v1/me/permissions`.
+     *
+     * Unlike [hasPermission] and [hasRole] which decode claims locally from the JWT,
+     * this call returns what the server resolves right now — reflecting any role or
+     * group changes made since the token was issued.
+     *
+     * Requires [realmId] to be set on this client.
+     *
+     * @throws ConfigurationError when [realmId] is not set.
+     * @throws ApiError           on any non-2xx response.
+     */
+    suspend fun mePermissions(accessToken: String): MePermissionsResponse {
+        val rid = realmId
+            ?: throw ConfigurationError("realmId is required for mePermissions")
+        return httpClient.get(
+            url = "$issuerUrl/v1/me/permissions",
+            headers = mapOf(
+                "Authorization" to "Bearer $accessToken",
+                "X-Realm-ID" to rid,
+            ),
+        )
+    }
+
+    // ── WebAuthn ───────────────────────────────────────────────────────────────
+
+    /**
+     * Begins a WebAuthn passkey registration ceremony (`POST /webauthn/register/begin`).
+     *
+     * Returns `PublicKeyCredentialCreationOptions` for the browser's
+     * `navigator.credentials.create()` call. [accessToken] identifies the user whose
+     * account the credential will be bound to.
+     */
+    suspend fun startWebAuthnRegistration(
+        accessToken: String,
+    ): WebAuthnRegistrationBeginResponse =
+        httpClient.post(
+            url = "$issuerUrl/webauthn/register/begin",
+            payload = emptyMap<String, String>(),
+            headers = buildMap {
+                put("Authorization", "Bearer $accessToken")
+                realmId?.let { put("X-Realm-ID", it) }
+            },
+        )
+
+    /**
+     * Completes a WebAuthn passkey registration ceremony (`POST /webauthn/register/complete`).
+     *
+     * Send the attestation response from `navigator.credentials.create()` in [request].
+     * [accessToken] must be the same session token used in [startWebAuthnRegistration].
+     */
+    suspend fun finishWebAuthnRegistration(
+        accessToken: String,
+        request: WebAuthnRegistrationCompleteRequest,
+    ): WebAuthnRegistrationCompleteResponse =
+        httpClient.post(
+            url = "$issuerUrl/webauthn/register/complete",
+            payload = request,
+            headers = buildMap {
+                put("Authorization", "Bearer $accessToken")
+                realmId?.let { put("X-Realm-ID", it) }
+            },
+        )
+
+    /**
+     * Begins a WebAuthn passkey authentication ceremony (`POST /webauthn/auth/begin`).
+     *
+     * Returns `PublicKeyCredentialRequestOptions` for the browser's
+     * `navigator.credentials.get()` call. [userId] is optional; pass `null` for a
+     * discoverable-credential (resident-key) flow. When provided, the server constrains
+     * `allow_credentials` to that user's registered passkeys.
+     *
+     * No bearer token is required — this is a public endpoint.
+     */
+    suspend fun startWebAuthnAuthentication(
+        userId: String? = null,
+    ): WebAuthnAuthenticationBeginResponse {
+        val body: Map<String, String> = if (userId != null) mapOf("user_id" to userId) else emptyMap()
+        return httpClient.post(
+            url = "$issuerUrl/webauthn/auth/begin",
+            payload = body,
+            headers = buildMap { realmId?.let { put("X-Realm-ID", it) } },
+        )
+    }
+
+    /**
+     * Completes a WebAuthn passkey authentication ceremony (`POST /webauthn/auth/complete`).
+     *
+     * Send the assertion response from `navigator.credentials.get()` in [request].
+     * Returns a full [TokenResponse] (access + refresh tokens) on success.
+     *
+     * No bearer token is required — the credential assertion proves identity.
+     */
+    suspend fun finishWebAuthnAuthentication(
+        request: WebAuthnAuthenticationCompleteRequest,
+    ): TokenResponse =
+        httpClient.post(
+            url = "$issuerUrl/webauthn/auth/complete",
+            payload = request,
+            headers = buildMap { realmId?.let { put("X-Realm-ID", it) } },
+        )
 
     // ── UserInfo ───────────────────────────────────────────────────────────────
 
@@ -448,6 +625,12 @@ class HearthClient(
         decodeLocalClaims(token)?.get("roles")
             ?.let { it as? List<*> }
             ?.contains(role) == true
+
+    private fun generateRandomState(): String {
+        val bytes = ByteArray(16)
+        java.security.SecureRandom().nextBytes(bytes)
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+    }
 
     private fun decodeLocalClaims(token: String): Map<String, Any?>? {
         if (token.isBlank()) return null

@@ -1,0 +1,1138 @@
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Getting Started with Hearth
+
+**Goal:** First authenticated request in your app. **Time:** ~5 minutes.
+
+**Prerequisites:** `docker` and a package manager for your stack (`npm` / Go toolchain / `pip`). For the setup steps you also need `curl` and `jq`.
+
+:::tip[SDK reference]
+Step 3 adds browser login with the TypeScript SDK; step 4 checks permissions from TypeScript, Go, and Python backends. For deeper coverage — RBAC hooks, middleware patterns, and the Admin API — see the [SDK overview](/docs/sdks/overview).
+:::
+
+---
+
+## 1. Run Hearth
+
+```bash
+docker run --rm -p 8420:8420 ghcr.io/hearth-auth/hearth:latest serve --dev --bind 0.0.0.0
+```
+
+`--dev` uses in-memory storage, enables the bootstrap endpoint, and starts the built-in **mailcatcher** (captured email at `http://127.0.0.1:8420/dev/mail`). **Data does not persist across restarts.**
+
+Confirm it is up:
+
+```bash
+curl -fsS http://127.0.0.1:8420/health
+# → {"status":"ok"}
+```
+
+:::tip[From source]
+`make dev` or `cargo run -- serve --dev` — same flags, no Docker required. Rust toolchain must be installed.
+:::
+
+:::tip[Production deployment]
+For Docker Compose, systemd, or Helm, see [`deploy/README.md`](../../deploy/README.md).
+:::
+
+---
+
+## 2. Bootstrap a realm and register your app
+
+Create a dev realm with an admin token, then register a public OAuth client for your app. Both are one-time **setup** — not application code.
+
+```bash
+# Create the dev realm + an admin token
+BOOTSTRAP=$(curl -fsS -X POST http://127.0.0.1:8420/admin/bootstrap)
+REALM_ID=$(echo "$BOOTSTRAP" | jq -r .realm_id)
+ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r .access_token)
+
+# Register a public client (no secret — PKCE secures it)
+CLIENT_ID=$(curl -fsS -X POST http://127.0.0.1:8420/clients \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "X-Realm-ID: $REALM_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"client_name":"quickstart","redirect_uris":["http://localhost:3000/callback"]}' \
+  | jq -r .client_id)
+
+echo "REALM_ID:  $REALM_ID"
+echo "CLIENT_ID: $CLIENT_ID"
+```
+
+Your app (step 3) needs three values: the **realm slug** — `dev-realm` in `--dev` mode — the **`CLIENT_ID`** printed above, and the server URL `http://localhost:8420`.
+
+:::warning[Dev-only endpoint]
+`/admin/bootstrap` returns `404 Not Found` outside `--dev` mode. In production, create realms and register clients via `hearth.yaml` or the Admin API — never bootstrap.
+:::
+
+---
+
+## 3. Add login to your app
+
+Logging a user in is the OAuth 2.0 authorization-code + PKCE flow: send the user to Hearth to authenticate, then exchange the returned `code` for tokens on your callback route. The TypeScript SDK uses the `createHearthAuth` browser facade; every server SDK uses `beginLogin` to build the redirect URL and `completeLogin` to exchange the code. Every tab uses the realm slug `dev-realm`, the `CLIENT_ID` from step 2, redirect URI `http://localhost:3000/callback`, and server `http://localhost:8420`.
+
+<Tabs groupId="lang">
+<TabItem value="ts" label="TypeScript" default>
+
+```bash
+npm install @hearth-auth/sdk
+```
+
+**Login page** — redirect the browser to Hearth:
+
+```ts
+import { HearthApiClient, createHearthAuth } from '@hearth-auth/sdk';
+
+const client = new HearthApiClient({
+  baseUrl: 'http://localhost:8420/realms/dev-realm',
+  realmId: '<realm-id>',
+});
+
+// createHearthAuth handles PKCE, stores tokens, and auto-refreshes.
+const auth = createHearthAuth(client, {
+  clientId:    '<client-id>',
+  redirectUri: 'http://localhost:3000/callback',
+  hearthUrl:   'http://localhost:8420',
+  realmSlug:   'dev-realm',
+});
+
+await auth.startLogin();
+```
+
+**Callback page** — exchange the code and store tokens:
+
+```ts
+const p = new URLSearchParams(window.location.search);
+await auth.handleCallback(p.get('code')!, p.get('state')!);
+// Tokens are now stored and auto-refreshed.
+```
+
+</TabItem>
+<TabItem value="node" label="Node">
+
+```bash
+npm install @hearth-auth/node
+```
+
+The Node SDK ships stateless `beginLogin` / `completeLogin` helpers. Choose the framework tab that matches your stack.
+
+<Tabs groupId="framework">
+<TabItem value="express" label="Express" default>
+
+**Login route** — generate PKCE and redirect to Hearth:
+
+```ts
+import { HearthClient } from '@hearth-auth/node';
+import { Router } from 'express';
+
+const client = new HearthClient({
+  issuer_url: 'http://localhost:8420',
+  realm_id:   '<realm-id>',
+  client_id:  '<client-id>',
+});
+
+const router = Router();
+
+router.get('/login', async (req, res) => {
+  const result = await client.beginLogin('http://localhost:3000/callback', 'openid');
+  // Store PKCE values server-side — never expose codeVerifier to the browser
+  req.session.oauthState   = result.state;
+  req.session.codeVerifier = result.codeVerifier;
+  res.redirect(result.authorizationUrl);
+});
+```
+
+**Callback route** — exchange the code for tokens:
+
+```ts
+router.get('/callback', async (req, res) => {
+  const tokens = await client.completeLogin(
+    req.query.code as string,
+    req.session.codeVerifier,
+    'http://localhost:3000/callback',
+  );
+  req.session.accessToken = tokens.accessToken;
+  res.redirect('/dashboard');
+});
+```
+
+See the [Node SDK guide](/docs/sdks/node) for Fastify and session-storage patterns.
+
+</TabItem>
+<TabItem value="nextjs" label="Next.js">
+
+**Login route handler** (`app/auth/login/route.ts`):
+
+```ts
+import { HearthClient } from '@hearth-auth/node';
+import { redirect } from 'next/navigation';
+import { cookies } from 'next/headers';
+
+const client = new HearthClient({
+  issuer_url: process.env.HEARTH_URL!,
+  realm_id:   process.env.HEARTH_REALM_ID!,
+  client_id:  process.env.HEARTH_CLIENT_ID!,
+});
+
+export async function GET() {
+  const result = await client.beginLogin(
+    `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`,
+    'openid',
+  );
+  const jar = await cookies();
+  jar.set('oauth_state',   result.state,        { httpOnly: true, sameSite: 'lax' });
+  jar.set('code_verifier', result.codeVerifier, { httpOnly: true, sameSite: 'lax' });
+  redirect(result.authorizationUrl);
+}
+```
+
+**Callback route handler** (`app/auth/callback/route.ts`):
+
+```ts
+import { NextRequest } from 'next/server';
+import { redirect } from 'next/navigation';
+import { cookies } from 'next/headers';
+
+export async function GET(request: NextRequest) {
+  const code = request.nextUrl.searchParams.get('code')!;
+  const jar  = await cookies();
+  const tokens = await client.completeLogin(
+    code,
+    jar.get('code_verifier')!.value,
+    `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`,
+  );
+  jar.set('access_token', tokens.accessToken, { httpOnly: true, sameSite: 'lax' });
+  jar.delete('oauth_state');
+  jar.delete('code_verifier');
+  redirect('/dashboard');
+}
+```
+
+See the [Next.js adapter guide](/docs/sdks/node-nextjs) for Pages Router and Edge Middleware patterns.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+```bash
+go get github.com/hearth-auth/hearth/sdks/go
+```
+
+The login handler generates PKCE and redirects the browser to Hearth; the callback exchanges the code for tokens. The core `BeginLogin`/`CompleteLogin` calls are identical across all frameworks — the tabs below show how to wire them into each router's handler style.
+
+<Tabs groupId="framework">
+<TabItem value="nethttp" label="net/http" default>
+
+**Login route:**
+
+```go
+import (
+    "net/http"
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+client := hearth.NewClient("http://localhost:8420", "<realm-id>",
+    hearth.WithClientCredentials("<client-id>", ""),
+)
+
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+    result, _ := client.BeginLogin(r.Context(), "http://localhost:3000/callback", "openid")
+    setSession(r, "state", result.State)
+    setSession(r, "code_verifier", result.CodeVerifier)
+    http.Redirect(w, r, result.AuthorizationURL, http.StatusFound)
+}
+```
+
+**Callback route:**
+
+```go
+func callbackHandler(w http.ResponseWriter, r *http.Request) {
+    tokens, _ := client.CompleteLogin(r.Context(),
+        r.URL.Query().Get("code"),
+        getSession(r, "code_verifier"),
+        "http://localhost:3000/callback",
+    )
+    // use tokens.AccessToken
+}
+```
+
+</TabItem>
+<TabItem value="gin" label="Gin">
+
+```go
+import (
+    hearth    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/hearth/gin"
+    "github.com/gin-gonic/gin"
+    "net/http"
+)
+
+client := hearth.NewClient("http://localhost:8420", "<realm-id>",
+    hearth.WithClientCredentials("<client-id>", ""),
+)
+r := gin.Default()
+r.Use(hearthgin.HearthMiddleware(client))
+
+r.GET("/login", func(c *gin.Context) {
+    result, _ := client.BeginLogin(c.Request.Context(), "http://localhost:3000/callback", "openid")
+    c.SetCookie("state", result.State, 300, "/", "", false, true)
+    c.SetCookie("code_verifier", result.CodeVerifier, 300, "/", "", false, true)
+    c.Redirect(http.StatusFound, result.AuthorizationURL)
+})
+
+r.GET("/callback", func(c *gin.Context) {
+    cv, _ := c.Cookie("code_verifier")
+    tokens, _ := client.CompleteLogin(c.Request.Context(),
+        c.Query("code"), cv, "http://localhost:3000/callback",
+    )
+    c.JSON(200, gin.H{"access_token": tokens.AccessToken})
+})
+```
+
+See the [Gin adapter guide](/docs/sdks/go-gin) for per-route and per-group permission checks.
+
+</TabItem>
+<TabItem value="echo" label="Echo">
+
+```go
+import (
+    hearth      "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/hearth/echo"
+    "github.com/labstack/echo/v4"
+    "net/http"
+)
+
+client := hearth.NewClient("http://localhost:8420", "<realm-id>",
+    hearth.WithClientCredentials("<client-id>", ""),
+)
+e := echo.New()
+e.Use(hearthecho.HearthMiddleware(client))
+
+e.GET("/login", func(c echo.Context) error {
+    result, _ := client.BeginLogin(c.Request().Context(), "http://localhost:3000/callback", "openid")
+    c.SetCookie(&http.Cookie{Name: "state", Value: result.State, Path: "/", HttpOnly: true})
+    c.SetCookie(&http.Cookie{Name: "code_verifier", Value: result.CodeVerifier, Path: "/", HttpOnly: true})
+    return c.Redirect(http.StatusFound, result.AuthorizationURL)
+})
+
+e.GET("/callback", func(c echo.Context) error {
+    cv, _ := c.Cookie("code_verifier")
+    tokens, _ := client.CompleteLogin(c.Request().Context(),
+        c.QueryParam("code"), cv.Value, "http://localhost:3000/callback",
+    )
+    return c.JSON(200, map[string]any{"access_token": tokens.AccessToken})
+})
+```
+
+See the [Echo adapter guide](/docs/sdks/go-echo) for group middleware and error handling.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```bash
+pip install hearth-sdk
+```
+
+The login view generates PKCE and redirects the browser to Hearth; the callback view exchanges the code for tokens. The core `begin_login`/`complete_login` calls are the same across all frameworks — the tabs show how to declare the views in each.
+
+<Tabs groupId="framework">
+<TabItem value="flask" label="Flask" default>
+
+**Login route:**
+
+```python
+from flask import Flask, redirect, session
+from hearth import HearthClient
+
+app = Flask(__name__)
+client = HearthClient(
+    base_url="http://localhost:8420",
+    realm_id="<realm-id>",
+    client_id="<client-id>",
+)
+
+@app.route("/login")
+def login():
+    result = client.begin_login("http://localhost:3000/callback", scopes="openid")
+    session["oauth_state"]   = result.state
+    session["code_verifier"] = result.code_verifier
+    return redirect(result.authorization_url)
+```
+
+**Callback route:**
+
+```python
+from flask import request
+
+@app.route("/callback")
+def callback():
+    tokens = client.complete_login(
+        code=request.args["code"],
+        code_verifier=session["code_verifier"],
+        redirect_uri="http://localhost:3000/callback",
+    )
+    return {"access_token": tokens.access_token}
+```
+
+</TabItem>
+<TabItem value="fastapi" label="FastAPI">
+
+```python
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse, JSONResponse
+from hearth import HearthClient
+
+app = FastAPI()
+client = HearthClient(
+    base_url="http://localhost:8420",
+    realm_id="<realm-id>",
+    client_id="<client-id>",
+)
+
+@app.get("/login")
+async def login(request: Request):
+    result = client.begin_login("http://localhost:3000/callback", scopes="openid")
+    request.session["oauth_state"]   = result.state
+    request.session["code_verifier"] = result.code_verifier
+    return RedirectResponse(result.authorization_url)
+
+@app.get("/callback")
+async def callback(request: Request, code: str):
+    tokens = client.complete_login(
+        code=code,
+        code_verifier=request.session["code_verifier"],
+        redirect_uri="http://localhost:3000/callback",
+    )
+    return JSONResponse({"access_token": tokens.access_token})
+```
+
+See the [FastAPI adapter guide](/docs/sdks/python-fastapi) for `Depends()` injection and typed claims.
+
+</TabItem>
+<TabItem value="django" label="Django">
+
+```python
+# views.py
+from django.shortcuts import redirect
+from django.http import JsonResponse
+from hearth import HearthClient
+
+client = HearthClient(
+    base_url="http://localhost:8420",
+    realm_id="<realm-id>",
+    client_id="<client-id>",
+)
+
+def login(request):
+    result = client.begin_login("http://localhost:3000/callback", scopes="openid")
+    request.session["oauth_state"]   = result.state
+    request.session["code_verifier"] = result.code_verifier
+    return redirect(result.authorization_url)
+
+def callback(request):
+    tokens = client.complete_login(
+        code=request.GET["code"],
+        code_verifier=request.session["code_verifier"],
+        redirect_uri="http://localhost:3000/callback",
+    )
+    return JsonResponse({"access_token": tokens.access_token})
+```
+
+See the [Django adapter guide](/docs/sdks/python-django) for `MIDDLEWARE` wiring and `@require_permission`.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="php" label="PHP">
+
+```bash
+composer require hearth-auth/php-sdk:^1.0
+```
+
+The login route generates PKCE and redirects to Hearth; the callback exchanges the code for tokens. Both frameworks use the same `beginLogin`/`completeLogin` SDK calls — the tabs show how to declare the routes in each.
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw PHP" default>
+
+**Login route:**
+
+```php
+use Hearth\HearthClient;
+
+session_start();
+$hearth = new HearthClient(
+    issuerUrl: 'http://localhost:8420/realms/dev-realm',
+    clientId:  '<client-id>',
+);
+
+$result = $hearth->beginLogin('http://localhost:3000/callback', 'openid');
+$_SESSION['oauth_state']   = $result->state;
+$_SESSION['code_verifier'] = $result->codeVerifier;
+header('Location: ' . $result->authorizationUrl);
+exit;
+```
+
+**Callback route:**
+
+```php
+session_start();
+$tokens = $hearth->completeLogin(
+    $_GET['code'],
+    $_SESSION['code_verifier'],
+    'http://localhost:3000/callback',
+);
+// use $tokens->accessToken
+```
+
+</TabItem>
+<TabItem value="laravel" label="Laravel">
+
+```php
+// routes/web.php
+Route::get('/login', [AuthController::class, 'login'])->name('auth.login');
+Route::get('/callback', [AuthController::class, 'callback'])->name('auth.callback');
+```
+
+```php
+// app/Http/Controllers/AuthController.php
+use Hearth\HearthClient;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+
+class AuthController extends Controller
+{
+    public function __construct(private readonly HearthClient $hearth) {}
+
+    public function login(): RedirectResponse
+    {
+        $result = $this->hearth->beginLogin(
+            redirectUri: route('auth.callback'),
+            scopes:      'openid',
+        );
+        session(['oauth_state' => $result->state, 'code_verifier' => $result->codeVerifier]);
+        return redirect($result->authorizationUrl);
+    }
+
+    public function callback(Request $request): RedirectResponse
+    {
+        $tokens = $this->hearth->completeLogin(
+            code:         $request->query('code'),
+            codeVerifier: session('code_verifier'),
+            redirectUri:  route('auth.callback'),
+        );
+        session(['access_token' => $tokens->accessToken]);
+        session()->forget(['oauth_state', 'code_verifier']);
+        return redirect('/dashboard');
+    }
+}
+```
+
+See the [Laravel adapter guide](/docs/sdks/php-laravel) for service-provider setup and `hearth.auth` middleware.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="rust" label="Rust">
+
+```toml
+# Cargo.toml — see the Rust SDK page for the git dependency
+hearth-sdk = { git = "https://github.com/hearth-auth/hearth", tag = "v1.0.0", package = "hearth-sdk" }
+```
+
+The login handler generates PKCE and redirects the browser to Hearth; the callback handler exchanges the code for tokens. The core SDK calls are the same across Axum and Actix-web — the tabs show handler wiring for each.
+
+<Tabs groupId="framework">
+<TabItem value="axum" label="Axum" default>
+
+```rust
+use axum::{extract::Query, response::Redirect, routing::get, Router};
+use hearth_sdk::HearthClientBuilder;
+use std::collections::HashMap;
+
+let client = HearthClientBuilder::new("http://localhost:8420")
+    .client_id("<client-id>")
+    .build();
+
+async fn login(session: Session, client: axum::Extension<HearthClient>) -> Redirect {
+    let result = client.begin_login("http://localhost:3000/callback", Some("openid")).await.unwrap();
+    session.insert("state", &result.state).unwrap();
+    session.insert("code_verifier", &result.code_verifier).unwrap();
+    Redirect::temporary(&result.authorization_url)
+}
+
+async fn callback(
+    session: Session,
+    Query(params): Query<HashMap<String, String>>,
+    client: axum::Extension<HearthClient>,
+) -> impl axum::response::IntoResponse {
+    let cv = session.get::<String>("code_verifier").unwrap().unwrap_or_default();
+    let tokens = client.complete_login(&params["code"], &cv, "http://localhost:3000/callback").await.unwrap();
+    axum::Json(tokens)
+}
+```
+
+</TabItem>
+<TabItem value="actix" label="Actix-web">
+
+```rust
+use actix_web::{web, HttpResponse, Responder};
+use actix_session::Session;
+use hearth_sdk::HearthClientBuilder;
+
+let client = HearthClientBuilder::new("http://localhost:8420")
+    .client_id("<client-id>")
+    .build();
+
+async fn login(session: Session, client: web::Data<HearthClient>) -> impl Responder {
+    let result = client.begin_login("http://localhost:3000/callback", Some("openid")).await.unwrap();
+    session.insert("state", &result.state).unwrap();
+    session.insert("code_verifier", &result.code_verifier).unwrap();
+    HttpResponse::Found()
+        .insert_header(("Location", result.authorization_url))
+        .finish()
+}
+
+async fn callback(
+    session: Session,
+    query: web::Query<std::collections::HashMap<String, String>>,
+    client: web::Data<HearthClient>,
+) -> impl Responder {
+    let cv = session.get::<String>("code_verifier").unwrap().unwrap_or_default();
+    let tokens = client.complete_login(&query["code"], &cv, "http://localhost:3000/callback").await.unwrap();
+    HttpResponse::Ok().json(tokens)
+}
+```
+
+See the [Actix-web adapter guide](/docs/sdks/rust-actix) for `RequirePermission` extractor and scoped route guards.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="curl" label="curl">
+
+```bash
+# 1. Generate an S256 PKCE pair, then open the login URL in a browser.
+VERIFIER=$(openssl rand -hex 32)
+CHALLENGE=$(printf '%s' "$VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+echo "http://localhost:8420/realms/dev-realm/authorize?response_type=code&client_id=$CLIENT_ID&redirect_uri=http://localhost:3000/callback&scope=openid&state=xyz&code_challenge=$CHALLENGE&code_challenge_method=S256"
+
+# 2. After logging in, exchange the ?code= you were redirected with.
+curl -fsS -X POST http://localhost:8420/token -H "X-Realm-ID: $REALM_ID" \
+  --data-urlencode grant_type=authorization_code \
+  --data-urlencode code=$CODE \
+  --data-urlencode client_id=$CLIENT_ID \
+  --data-urlencode redirect_uri=http://localhost:3000/callback \
+  --data-urlencode code_verifier=$VERIFIER | jq -r .access_token
+```
+
+</TabItem>
+</Tabs>
+
+The access token is signed with your realm's Ed25519 key, and its `permissions` are resolved at issue time — checking them needs no network call (step 4).
+
+:::tip[TypeScript vs server SDKs]
+The TypeScript SDK ships `createHearthAuth` — a **stateful browser facade** that stores tokens in `sessionStorage` and handles silent refresh. Every server SDK (Node, Go, Python, PHP, Rust, Kotlin) ships **stateless** `beginLogin`/`completeLogin` helpers: `beginLogin` returns the values you persist in your session, `completeLogin` exchanges the code. See the [`full-stack-demo`](https://github.com/hearth-auth/hearth/tree/main/examples/full-stack-demo) for a complete Vite + React + Node example.
+:::
+
+:::note[Node server handling the callback?]
+If your Node.js server owns the OAuth callback route (Next.js API routes, Express, Fastify), use `client.beginLogin()` / `client.completeLogin()` — see the [Node SDK](/docs/sdks/node). For browser-hosted login (React SPA, Next.js client components), use the TypeScript SDK tab above.
+:::
+
+---
+
+## 4. Protect a route in your app
+
+Fetch Hearth's public signing keys from the JWKS endpoint and verify incoming Bearer tokens cryptographically. The Hearth SDKs provide middleware for the most common frameworks.
+
+The following examples guard a route and check that the caller has the `hearth.admin` permission.
+
+<Tabs groupId="lang">
+<TabItem value="ts" label="TypeScript" default>
+
+```bash
+npm install @hearth-auth/sdk jose
+```
+
+<Tabs groupId="framework">
+<TabItem value="express" label="Express" default>
+
+```ts
+import { requirePermission } from '@hearth-auth/sdk';
+import express from 'express';
+
+const app = express();
+
+app.get('/admin/data', requirePermission('hearth.admin', {
+  issuerUrl: process.env.HEARTH_URL!,       // e.g. https://auth.example.com
+  realmId:   process.env.HEARTH_REALM_ID!,
+}), (req, res) => {
+  res.json({ message: 'authorized', user: req.user });
+});
+```
+
+</TabItem>
+<TabItem value="react" label="React (client)">
+
+```tsx
+import { useHasPermission } from '@hearth-auth/sdk';
+
+// Reads permissions from the JWT in context — no network call.
+// Pair with server-side protection above for full security.
+function AdminPanel() {
+  const canAdmin = useHasPermission('hearth.admin');
+  if (!canAdmin) return null;
+  return <div>Admin content visible to admins only.</div>;
+}
+```
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="node" label="Node">
+
+```bash
+npm install @hearth-auth/node
+```
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw" default>
+
+```ts
+import { HearthClient } from '@hearth-auth/node';
+
+const client = new HearthClient({
+  issuer_url: process.env.HEARTH_URL!,       // e.g. https://auth.example.com
+  realm_id:   process.env.HEARTH_REALM_ID!,
+});
+
+// In any Node.js handler — `bearer` is the Authorization header value:
+const token = await client.verifyToken(bearer);   // verifies Ed25519 via cached JWKS
+if (!token.hasPermission('hearth.admin')) {
+  res.status(403).end();
+}
+```
+
+</TabItem>
+<TabItem value="express" label="Express">
+
+```ts
+import { hearthMiddleware } from '@hearth-auth/node';
+import express from 'express';
+
+const app = express();
+
+// Require a permission on a route — 401 on missing token, 403 on denied
+app.get('/admin/data', hearthMiddleware({
+  issuer_url:         process.env.HEARTH_URL!,
+  expectedMode:       'embedded',
+  requiredPermission: 'hearth.admin',
+}), (req, res) => {
+  res.json({ sub: req.hearthToken?.subject() });
+});
+```
+
+See the [Node SDK guide](/docs/sdks/node) for Fastify hook usage.
+
+</TabItem>
+<TabItem value="nextjs" label="Next.js">
+
+```ts
+// middleware.ts — runs in the Edge Runtime (V8 isolate, no Node.js APIs needed)
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+import { hearthEdgeMiddleware } from '@hearth-auth/node/nextjs/edge';
+
+const guard = hearthEdgeMiddleware({
+  issuerUrl: process.env.HEARTH_ISSUER_URL!,
+  jwksUri:   `${process.env.HEARTH_ISSUER_URL}/.well-known/jwks.json`,
+});
+
+export async function middleware(request: NextRequest) {
+  const result = await guard(request);
+  if (result) return result;   // 401 or 403 — return to client
+  return NextResponse.next();
+}
+
+export const config = { matcher: ['/api/:path*'] };
+```
+
+See the [Next.js adapter guide](/docs/sdks/node-nextjs) for App Router and Pages Router patterns.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+<Tabs groupId="framework">
+<TabItem value="nethttp" label="net/http" default>
+
+```go
+import (
+    "net/http"
+    "strings"
+    "github.com/hearth-auth/hearth/sdks/go/hearth"
+)
+
+client := hearth.NewClient(hearthURL, realmID)
+
+func adminOnly(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+        if !client.HasPermission(token, "hearth.admin") {
+            http.Error(w, "Forbidden", http.StatusForbidden)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
+}
+```
+
+</TabItem>
+<TabItem value="gin" label="Gin">
+
+```go
+import (
+    hearth    "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthgin "github.com/hearth-auth/hearth/sdks/go/hearth/gin"
+    "github.com/gin-gonic/gin"
+)
+
+client := hearth.NewClient(hearthURL, realmID)
+r := gin.Default()
+r.Use(hearthgin.HearthMiddleware(client))
+
+// RequirePermission decodes claims locally from the stored JWT — no network call
+admin := r.Group("/admin", hearthgin.RequirePermission("hearth.admin"))
+admin.GET("/data", func(c *gin.Context) {
+    c.JSON(200, gin.H{"token": hearthgin.GetToken(c)})
+})
+```
+
+See the [Gin adapter guide](/docs/sdks/go-gin) for per-route and per-group patterns.
+
+</TabItem>
+<TabItem value="echo" label="Echo">
+
+```go
+import (
+    hearth      "github.com/hearth-auth/hearth/sdks/go/hearth"
+    hearthecho  "github.com/hearth-auth/hearth/sdks/go/hearth/echo"
+    "github.com/labstack/echo/v4"
+)
+
+client := hearth.NewClient(hearthURL, realmID)
+e := echo.New()
+e.Use(hearthecho.HearthMiddleware(client))
+
+// RequirePermission decodes claims locally from the stored JWT — no network call
+admin := e.Group("/admin", hearthecho.RequirePermission("hearth.admin"))
+admin.GET("/data", func(c echo.Context) error {
+    return c.JSON(200, map[string]any{"token": hearthecho.GetToken(c)})
+})
+```
+
+See the [Echo adapter guide](/docs/sdks/go-echo) for group middleware and error handling.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw" default>
+
+```python
+from hearth import HearthClient
+
+def require_permission(permission: str):
+    """Generic dependency — checks permission from the JWT claim set."""
+    def check(authorization: str):
+        token = authorization.removeprefix("Bearer ")
+        if not HearthClient.has_permission(token, permission):
+            raise HTTPException(status_code=403, detail="Forbidden")
+        return token
+    return check
+```
+
+</TabItem>
+<TabItem value="flask" label="Flask">
+
+```python
+from functools import wraps
+from flask import request, abort, g
+from hearth import HearthClient
+
+client = HearthClient(base_url=os.environ['HEARTH_BASE_URL'], realm_id=os.environ['HEARTH_REALM_ID'])
+
+def require_permission(permission: str):
+    def decorator(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            token = request.headers.get('Authorization', '').removeprefix('Bearer ')
+            claims = client.verify_token(token)
+            if not claims.has_permission(permission):
+                abort(403)
+            g.hearth_claims = claims
+            return f(*args, **kwargs)
+        return wrapped
+    return decorator
+
+@app.route('/admin/data')
+@require_permission('hearth.admin')
+def admin_data():
+    return {'sub': g.hearth_claims.sub}
+```
+
+</TabItem>
+<TabItem value="fastapi" label="FastAPI">
+
+```python
+from hearth import HearthClient
+from hearth.fastapi import HearthFastAPIDep, require_permission
+from fastapi import FastAPI
+
+client    = HearthClient(base_url=os.environ['HEARTH_BASE_URL'], realm_id=os.environ['HEARTH_REALM_ID'])
+auth      = HearthFastAPIDep(client=client)
+AdminOnly = require_permission('hearth.admin', dep=auth)
+
+@app.get('/admin/data')
+def admin_data(claims: AdminOnly):   # 401/403 raised automatically before handler runs
+    return {'sub': claims.sub, 'permissions': claims.permissions}
+```
+
+See the [FastAPI adapter guide](/docs/sdks/python-fastapi) for `VerifiedClaims`, pydantic-settings configuration, and permission delivery modes.
+
+</TabItem>
+<TabItem value="django" label="Django">
+
+```python
+# settings.py — install the middleware once
+from hearth import HearthClient
+
+HEARTH_CLIENT = HearthClient(
+    base_url=os.environ['HEARTH_BASE_URL'],
+    realm_id=os.environ['HEARTH_REALM_ID'],
+)
+MIDDLEWARE = [
+    # ... existing middleware ...
+    'hearth.django.HearthDjangoMiddleware',
+]
+
+# views.py — gate a view on a permission
+from hearth.django import require_permission
+from django.http import JsonResponse
+
+@require_permission('hearth.admin')
+def admin_data(request):
+    return JsonResponse({'ok': True})
+```
+
+See the [Django adapter guide](/docs/sdks/python-django) for class-based views and optional-auth patterns.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="php" label="PHP">
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw" default>
+
+```php
+use Hearth\HearthClient;
+
+$hearth = new HearthClient(issuerUrl: $hearthUrl);
+
+// In any PSR-15 middleware or route handler:
+$token  = str_replace('Bearer ', '', $_SERVER['HTTP_AUTHORIZATION'] ?? '');
+$claims = $hearth->verifyToken($token);   // verifies Ed25519 via cached JWKS
+
+if (!$claims->hasPermission('hearth.admin')) {
+    http_response_code(403);
+    exit;
+}
+```
+
+</TabItem>
+<TabItem value="laravel" label="Laravel">
+
+```php
+// .env
+// HEARTH_ISSUER_URL=https://hearth.example.com
+// HEARTH_CLIENT_ID=<client_id>
+
+// routes/api.php — apply hearth.auth to a route group
+Route::middleware('hearth.auth')->group(function () {
+    Route::get('/admin/data', [AdminController::class, 'data']);
+});
+
+// app/Http/Controllers/AdminController.php — read verified claims
+public function data(Request $request): JsonResponse {
+    $claims = $request->attributes->get('hearth_claims');
+    return response()->json(['sub' => $claims->sub]);
+}
+```
+
+See the [Laravel adapter guide](/docs/sdks/php-laravel) for service-provider setup and per-route permission checks.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="rust" label="Rust">
+
+<Tabs groupId="framework">
+<TabItem value="raw" label="Raw" default>
+
+```rust
+use hearth_sdk::HearthClient;
+
+// `token: &str` is the Bearer value from the Authorization header.
+if !HearthClient::has_permission(token, "hearth.admin")? {
+    // reject with 403 Forbidden
+}
+```
+
+</TabItem>
+<TabItem value="actix" label="Actix-web">
+
+```rust
+use hearth_sdk::{AccessTokenAuthorization, HearthClient};
+use hearth_sdk::actix::{HearthActixMiddleware, RequirePermission};
+use actix_web::{web, App, HttpServer};
+
+let client = HearthClient::new("https://hearth.example.com", "<realm-id>");
+
+// Wrap a scope — HearthActixMiddleware validates the token, RequirePermission checks claims
+web::scope("/admin")
+    .wrap(HearthActixMiddleware::new(client.clone(), AccessTokenAuthorization::Embedded))
+    .wrap(RequirePermission::new("hearth.admin"))
+    .route("/data", web::get().to(handler))
+```
+
+See the [Actix-web adapter guide](/docs/sdks/rust-actix) for `RequirePermission` extractor and permission delivery modes.
+
+</TabItem>
+<TabItem value="axum" label="Axum">
+
+```rust
+use hearth_sdk::{HearthClient, AccessTokenAuthorization};
+use hearth_sdk::tower::RequirePermissionLayer;
+use axum::{routing::get, Router};
+
+let client = HearthClient::new("https://hearth.example.com", "<realm-id>");
+
+let app = Router::new()
+    .route("/admin/data", get(handler))
+    .layer(RequirePermissionLayer::new(
+        client,
+        "hearth.admin",
+        AccessTokenAuthorization::Embedded,
+    ));
+```
+
+See the [Rust SDK guide](/docs/sdks/rust) for Tower middleware and Axum extractor patterns.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+<Tabs groupId="framework">
+<TabItem value="ktor" label="Ktor" default>
+
+```kotlin
+import io.hearth.sdk.ktor.HearthAuth
+import io.hearth.sdk.ktor.HearthPrincipal
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.*
+import io.ktor.server.auth.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+
+install(Authentication) {
+    hearth("api") {
+        issuerUrl = System.getenv("HEARTH_URL")
+        clientId  = System.getenv("HEARTH_CLIENT_ID")
+    }
+}
+
+routing {
+    authenticate("api") {
+        get("/admin/data") {
+            val principal = call.principal<HearthPrincipal>()!!
+            if (!principal.claims.hasPermission("hearth.admin")) {
+                call.respond(HttpStatusCode.Forbidden); return@get
+            }
+            call.respond(mapOf("sub" to principal.claims.subject()))
+        }
+    }
+}
+```
+
+See the [Ktor adapter guide](/docs/sdks/kotlin-ktor) for route-level authentication and principal access.
+
+</TabItem>
+<TabItem value="spring" label="Spring Boot">
+
+```kotlin
+import io.hearth.sdk.spring.HearthAuthentication
+import org.springframework.security.access.prepost.PreAuthorize
+import org.springframework.security.core.annotation.AuthenticationPrincipal
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+@RequestMapping("/admin")
+class AdminController {
+
+    @GetMapping("/data")
+    @PreAuthorize("hasAuthority('hearth.admin')")
+    fun data(@AuthenticationPrincipal auth: HearthAuthentication): Map<String, Any> =
+        mapOf("sub" to auth.claims.subject())
+}
+```
+
+See the [Spring Boot adapter guide](/docs/sdks/kotlin-spring) for auto-configuration and `HearthSecurityProperties`.
+
+</TabItem>
+</Tabs>
+
+</TabItem>
+</Tabs>
+
+The local RBAC checks — `requirePermission` (TypeScript), `HasPermission` (Go), `has_permission` (Python, Rust) — read the `permissions` array embedded in the token at issue time by Hearth's RBAC engine, with no network call. The `verifyToken()` calls (Node, PHP) additionally validate the token's Ed25519 signature against the realm's cached JWKS before the check.
+
+Prefer no SDK? Verify tokens directly against the realm's JWKS endpoint — see [Token verification without an SDK](/docs/sdks/overview#token-verification-without-an-sdk).
+
+For browser SPA and BFF token-storage patterns, see [Browser / SPA token handling](browser-spa-tokens.md).
+
+---
+
+## Next steps
+
+| Topic | Guide |
+|---|---|
+| Browser / SPA token storage (XSS vs CSRF trade-offs) | [Browser / SPA token handling](browser-spa-tokens.md) |
+| Local dev, mailcatcher email inbox | [Local dev guide](local-dev.md) |
+| Realms, RBAC, and token lifecycle explained | [Conceptual model](concepts.md) |
+| Create roles, assign permissions, manage groups | [RBAC guide](rbac.md) |
+| B2B multi-tenancy within a realm | [Organizations guide](organizations.md) |
+| Production config, TLS, email | [Configuration reference](../../README.md#configuration) |
+| Import from Keycloak | [Migration guide](migrating-from-keycloak.md) |
+| Client SDKs (TypeScript, Go, PHP, Python, Rust) | [SDK overview](/docs/sdks/overview) |
+| REST API reference (OpenAPI) | [API reference guide](api-reference.md) |

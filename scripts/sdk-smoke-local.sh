@@ -85,25 +85,33 @@ NEXT_PUBLIC_HEARTH_REALM_ID="$HEARTH_REALM_ID" \
 echo "    tsc: OK"
 
 node - <<'JSEOF'
-const { HearthClient } = require("@hearth-auth/sdk");
+const { HearthClient, JwksClient } = require("@hearth-auth/sdk");
 
 (async () => {
+    // HearthClient takes issuerUrl (base URL) + optional realmId.
+    // clientCredentials/startDeviceFlow/pollDeviceToken resolve the realm from client_id;
+    // realmId is only required for requestMagicLink and decision-mode authorize().
     const client = new HearthClient({
-        baseUrl: process.env.HEARTH_BASE_URL,
+        issuerUrl: process.env.HEARTH_BASE_URL,
         realmId: process.env.HEARTH_REALM_ID,
     });
 
-    const discovery = await client.discovery();
+    // discover() (not discovery()) is the spec-compliant method.
+    const discovery = await client.discover();
     if (!discovery.authorization_endpoint) {
         throw new Error("discovery missing authorization_endpoint");
     }
     console.log("    OK: discovery endpoint verified");
 
-    const jwks = await client.jwks();
-    if (!jwks.keys || jwks.keys.length === 0) {
+    // Construct JwksClient directly with the local server URL to avoid following
+    // the jwks_uri from the discovery document, which points to the issuer from
+    // hearth.yaml (port 8420) rather than the randomly selected smoke-test port.
+    const jwksClient = new JwksClient({ jwksUri: `${process.env.HEARTH_BASE_URL}/.well-known/jwks.json` });
+    const keys = await jwksClient.fetchKeys();
+    if (!keys || keys.length === 0) {
         throw new Error("JWKS returned no keys");
     }
-    console.log("    OK: JWKS contains", jwks.keys.length, "key(s)");
+    console.log("    OK: JWKS contains", keys.length, "key(s)");
 
     console.log("    TypeScript SDK smoke: PASS");
 })().catch((err) => { console.error(err); process.exit(1); });

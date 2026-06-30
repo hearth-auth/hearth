@@ -74,11 +74,27 @@ class AuthorizeResponse(BaseModel):
     redirect_uri: Optional[str] = None
 
 
+class LoginBeginResult(BaseModel):
+    """Result of :meth:`~hearth.HearthClient.begin_login`.
+
+    Redirect the browser to ``authorization_url``, then persist ``state`` and
+    ``code_verifier`` in your session so they can be verified and supplied to
+    :meth:`~hearth.HearthClient.complete_login` on the callback route.
+    """
+
+    authorization_url: str
+    """Full PKCE authorization URL — redirect the browser here."""
+    state: str
+    """Random CSRF-protection value — verify against the callback ``state`` param."""
+    code_verifier: str
+    """PKCE code verifier — pass to ``complete_login`` on the callback route."""
+
+
 class TokenResponse(BaseModel):
     access_token: str
-    refresh_token: str
     token_type: str
     expires_in: int
+    refresh_token: Optional[str] = None
     scope: Optional[str] = None
     id_token: Optional[str] = None
 
@@ -249,3 +265,58 @@ class CheckPermissionResponse(BaseModel):
     allowed: bool
     sub: Optional[str] = None
     permission: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# PKCE (§7)
+# ---------------------------------------------------------------------------
+
+class PkcePair(BaseModel):
+    """RFC 7636 S256 PKCE pair — verifier is secret, challenge is sent to server."""
+
+    code_verifier: str
+    code_challenge: str
+
+
+# ---------------------------------------------------------------------------
+# Device Authorization Flow (§4.5.2)
+# ---------------------------------------------------------------------------
+
+class DeviceAuthorizationResponse(BaseModel):
+    """Response from the device authorization endpoint (RFC 8628)."""
+
+    device_code: str
+    user_code: str
+    verification_uri: str
+    expires_in: int
+    interval: int = 5
+    verification_uri_complete: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Session-version feed (HEA-930)
+# ---------------------------------------------------------------------------
+
+class SvDeltaEntry(BaseModel):
+    """A single session-version bump event."""
+
+    seq: int
+    session_id: str
+    min_sv: int
+    bumped_at: Optional[int] = None
+
+
+class SvDeltaResponse(BaseModel):
+    """Response from GET /oauth/session-versions?since=<seq>."""
+
+    realm: str
+    next_seq: int
+    deltas: List[SvDeltaEntry]
+
+
+class SvSnapshotResponse(BaseModel):
+    """Response from GET /oauth/session-versions/snapshot."""
+
+    realm: str
+    current_seq: int
+    versions: Any  # dict[session_id → min_sv]

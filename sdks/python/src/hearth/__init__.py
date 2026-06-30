@@ -6,6 +6,22 @@ Provides HearthClient (auth flows, RBAC predicates), AdminClient
 
 from .client import HearthClient
 from .admin import AdminClient
+
+# FastAPI adapter — only importable when fastapi/starlette are installed.
+# Access via: from hearth.fastapi import HearthFastAPIDep, require_permission, ...
+try:
+    from .fastapi import HearthFastAPIDep, HearthSettings, VerifiedClaims, require_permission
+    _FASTAPI_AVAILABLE = True
+except ImportError:
+    _FASTAPI_AVAILABLE = False
+
+# Django adapter — only importable when django is installed.
+# Access via: from hearth.django import HearthDjangoMiddleware, require_permission
+try:
+    from .django import HearthDjangoMiddleware
+    _DJANGO_AVAILABLE = True
+except ImportError:
+    _DJANGO_AVAILABLE = False
 from .errors import (
     HearthError,
     HearthSdkError,
@@ -23,9 +39,12 @@ from .errors import (
 )
 from .claims import Claims
 from .middleware import RequirePermissionMiddleware, WsgiPermissionMiddleware
+from .pkce import PkcePair, generate_pkce_pair
+from .jwks import JwksCache
 from .types import (
     AccessTokenAuthorizationMode,
     BootstrapResponse,
+    LoginBeginResult,
     User,
     CreateUserRequest,
     UpdateUserRequest,
@@ -54,6 +73,10 @@ from .types import (
     IntrospectResponse,
     CheckPermissionRequest,
     CheckPermissionResponse,
+    DeviceAuthorizationResponse,
+    SvDeltaEntry,
+    SvDeltaResponse,
+    SvSnapshotResponse,
 )
 
 __all__ = [
@@ -63,6 +86,13 @@ __all__ = [
     # Middleware
     "RequirePermissionMiddleware",
     "WsgiPermissionMiddleware",
+    # PKCE
+    "PkcePair",
+    "generate_pkce_pair",
+    # Login helpers
+    "LoginBeginResult",
+    # JWKS cache
+    "JwksCache",
     # Errors
     "HearthError",
     "HearthSdkError",
@@ -110,4 +140,8 @@ __all__ = [
     "IntrospectResponse",
     "CheckPermissionRequest",
     "CheckPermissionResponse",
+    "DeviceAuthorizationResponse",
+    "SvDeltaEntry",
+    "SvDeltaResponse",
+    "SvSnapshotResponse",
 ]

@@ -4,6 +4,11 @@ All notable changes to `hearth-go` are documented here.
 
 ## [Unreleased]
 
+### Added
+- **Echo middleware adapter** — `sdks/go/hearth/echo` package (`hearthecho`) provides
+  `HearthMiddleware`, `RequirePermission`, and `GetToken` for Echo v4 applications.
+  Supports functional options `WithTokenExtractor` and `WithOnUnauthorized` (HEA-1599).
+
 ### Fixed
 - **Module path corrected** — `go.mod` now declares `module github.com/hearth-auth/hearth/sdks/go`,
   matching the repo at `github.com/hearth-auth/hearth`. The old path (`github.com/anthropics/hearth/sdks/go`)

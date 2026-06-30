@@ -23,7 +23,7 @@ pub(super) const VALID_UI_THEMES: &[&str] =
     &["ember", "ocean", "midnight", "forest", "cloud", "slate"];
 
 /// Valid MFA method names.
-const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn"];
+const VALID_MFA_METHODS: &[&str] = &["totp", "webauthn", "sms"];
 
 /// Valid authentication method names.
 const VALID_AUTH_METHODS: &[&str] = &["password", "magic_link", "passkey"];
@@ -282,7 +282,7 @@ impl Config {
             }
         }
         validate_realm_web_configs_all(self.realms.as_ref(), &mut issues);
-        validate_realm_auth_configs_all(self.realms.as_ref(), &mut issues);
+        validate_realm_auth_configs_all(self.realms.as_ref(), &self.sms, &mut issues);
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
 
@@ -410,7 +410,7 @@ impl Config {
         validate_branding(&self.branding)?;
         validate_realm_names(self.realms.as_ref())?;
         validate_realm_web_configs(self.realms.as_ref())?;
-        validate_realm_auth_configs(self.realms.as_ref())?;
+        validate_realm_auth_configs(self.realms.as_ref(), &self.sms)?;
         validate_realm_applications(self.realms.as_ref())?;
         validate_realm_organizations(self.realms.as_ref())?;
 
@@ -586,8 +586,10 @@ fn validate_realm_web_configs(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_realm_auth_configs(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    sms: &SmsConfig,
 ) -> Result<(), ConfigError> {
     let Some(realms) = realms else {
         return Ok(());
@@ -616,6 +618,13 @@ fn validate_realm_auth_configs(
                         ),
                     ));
                 }
+            }
+            if methods.iter().any(|m| m == "sms") && sms.transport == SmsTransport::Log {
+                return Err(invalid(
+                    &format!("realms.{name}.auth.mfa_methods"),
+                    "'sms' is listed as an MFA method but sms.transport is 'log'; \
+                     configure a real SMS transport (twilio or awssns) to deliver OTP codes",
+                ));
             }
         }
         if let Some(methods) = &auth.allowed_auth_methods {
@@ -958,9 +967,23 @@ fn validate_email_mailtrap(email: &EmailConfig) -> Result<(), ConfigError> {
 
 fn validate_sms(sms: &SmsConfig) -> Result<(), ConfigError> {
     match sms.transport {
-        SmsTransport::Log => Ok(()),
-        SmsTransport::Twilio => validate_sms_twilio(sms),
-        SmsTransport::AwsSns => validate_sms_awssns(sms),
+        SmsTransport::Log => return Ok(()),
+        SmsTransport::Twilio => validate_sms_twilio(sms)?,
+        SmsTransport::AwsSns => validate_sms_awssns(sms)?,
+    }
+    // For real transports, HEARTH_SMS_OTP_HMAC_KEY must be present and long enough.
+    match std::env::var("HEARTH_SMS_OTP_HMAC_KEY") {
+        Ok(key) if key.len() >= 32 => Ok(()),
+        Ok(key) if !key.is_empty() => Err(invalid(
+            "sms",
+            "HEARTH_SMS_OTP_HMAC_KEY must be at least 32 bytes for adequate HMAC-SHA256 \
+             security; use a 32+ byte random value",
+        )),
+        _ => Err(invalid(
+            "sms",
+            "HEARTH_SMS_OTP_HMAC_KEY environment variable is required when \
+             sms.transport is not 'log'",
+        )),
     }
 }
 
@@ -1006,8 +1029,12 @@ fn validate_sms_awssns(sms: &SmsConfig) -> Result<(), ConfigError> {
 }
 
 fn validate_sms_all(sms: &SmsConfig, issues: &mut Vec<ValidationIssue>) {
-    if let Err(ConfigError::ValidationError { field, reason }) = validate_sms(sms) {
-        issues.push(ValidationIssue { field, reason });
+    match validate_sms(sms) {
+        Ok(()) => {}
+        Err(ConfigError::ValidationError { field, reason }) => {
+            issues.push(ValidationIssue { field, reason });
+        }
+        Err(_) => {}
     }
 }
 
@@ -1283,6 +1310,7 @@ fn validate_realm_web_configs_all(
 #[allow(clippy::too_many_lines)]
 fn validate_realm_auth_configs_all(
     realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    sms: &SmsConfig,
     issues: &mut Vec<ValidationIssue>,
 ) {
     let Some(realms) = realms else { return };
@@ -1310,6 +1338,15 @@ fn validate_realm_auth_configs_all(
                         ),
                     });
                 }
+            }
+            if methods.iter().any(|m| m == "sms") && sms.transport == SmsTransport::Log {
+                issues.push(ValidationIssue {
+                    field: format!("realms.{name}.auth.mfa_methods"),
+                    reason:
+                        "'sms' is listed as an MFA method but sms.transport is 'log'; \
+                             configure a real SMS transport (twilio or awssns) to deliver OTP codes"
+                            .to_string(),
+                });
             }
         }
         if let Some(methods) = &auth.allowed_auth_methods {
@@ -1512,5 +1549,167 @@ fn validate_realm_organizations_all(
                 });
             }
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::{
+        RealmAuthYaml, RealmYamlConfig, SmsConfig, SmsTransport, TwilioConfig,
+    };
+
+    fn realm_with_mfa(methods: &[&str]) -> RealmYamlConfig {
+        RealmYamlConfig {
+            auth: Some(RealmAuthYaml {
+                mfa_methods: Some(methods.iter().map(|s| (*s).to_string()).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn sms_log() -> SmsConfig {
+        SmsConfig {
+            transport: SmsTransport::Log,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn sms_is_accepted_in_mfa_methods_with_real_transport() {
+        // "sms" was previously missing from VALID_MFA_METHODS — verify it is now accepted
+        // when paired with a non-log transport. We use Twilio here; the cross-validation
+        // only fires when transport==Log.
+        let mut realms = std::collections::HashMap::new();
+        realms.insert("default".to_string(), realm_with_mfa(&["totp", "sms"]));
+        let sms = SmsConfig {
+            transport: SmsTransport::Twilio,
+            twilio: Some(TwilioConfig {
+                account_sid: "ACtest".to_string(),
+                auth_token: "token".to_string(),
+                from: "+15550001111".to_string(),
+            }),
+            ..Default::default()
+        };
+        // HMAC key must be present for non-log transport validation; inject it via env.
+        // We only test the mfa_methods portion of the validator here (not full validate_sms).
+        let result = validate_realm_auth_configs(Some(&realms), &sms);
+        // Should succeed (the sms + real-transport combo is valid for mfa_methods check).
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+    }
+
+    #[test]
+    fn sms_mfa_with_log_transport_is_rejected() {
+        // Operators cannot deliver OTPs via the log transport; a config that enables
+        // sms as an MFA method while leaving sms.transport=log is a misconfiguration.
+        let mut realms = std::collections::HashMap::new();
+        realms.insert("default".to_string(), realm_with_mfa(&["totp", "sms"]));
+        let result = validate_realm_auth_configs(Some(&realms), &sms_log());
+        let Err(ConfigError::ValidationError { field, reason }) = result else {
+            panic!("expected ValidationError but got: {result:?}");
+        };
+        assert_eq!(field, "realms.default.auth.mfa_methods");
+        assert!(
+            reason.contains("log"),
+            "reason should mention 'log': {reason}"
+        );
+    }
+
+    #[test]
+    fn totp_and_webauthn_still_accepted_with_log_transport() {
+        // Non-sms methods must still be accepted regardless of sms.transport.
+        let mut realms = std::collections::HashMap::new();
+        realms.insert("default".to_string(), realm_with_mfa(&["totp", "webauthn"]));
+        let result = validate_realm_auth_configs(Some(&realms), &sms_log());
+        assert!(result.is_ok(), "expected Ok but got: {result:?}");
+    }
+
+    #[test]
+    fn unknown_mfa_method_is_rejected() {
+        let mut realms = std::collections::HashMap::new();
+        realms.insert(
+            "default".to_string(),
+            realm_with_mfa(&["totp", "carrier_pigeon"]),
+        );
+        let result = validate_realm_auth_configs(Some(&realms), &sms_log());
+        let Err(ConfigError::ValidationError { field, reason }) = result else {
+            panic!("expected ValidationError but got: {result:?}");
+        };
+        assert_eq!(field, "realms.default.auth.mfa_methods");
+        assert!(reason.contains("carrier_pigeon"), "{reason}");
+    }
+
+    #[test]
+    fn validate_all_sms_mfa_with_log_transport_accumulates_issue() {
+        let mut realms = std::collections::HashMap::new();
+        realms.insert("default".to_string(), realm_with_mfa(&["sms"]));
+        let mut issues = Vec::new();
+        validate_realm_auth_configs_all(Some(&realms), &sms_log(), &mut issues);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "realms.default.auth.mfa_methods" && i.reason.contains("log")),
+            "expected an issue about log transport; got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn sms_hmac_key_required_for_non_log_transport() {
+        // Ensure the HMAC key check is caught by validate_sms when transport != Log.
+        // Remove the env var so the check fires.
+        std::env::remove_var("HEARTH_SMS_OTP_HMAC_KEY");
+        let sms = SmsConfig {
+            transport: SmsTransport::Twilio,
+            twilio: Some(TwilioConfig {
+                account_sid: "ACtest".to_string(),
+                auth_token: "token".to_string(),
+                from: "+15550001111".to_string(),
+            }),
+            ..Default::default()
+        };
+        let result = validate_sms(&sms);
+        let Err(ConfigError::ValidationError { field, reason }) = result else {
+            panic!("expected ValidationError but got: {result:?}");
+        };
+        assert_eq!(field, "sms");
+        assert!(
+            reason.contains("HEARTH_SMS_OTP_HMAC_KEY"),
+            "reason should mention HEARTH_SMS_OTP_HMAC_KEY: {reason}"
+        );
+    }
+
+    #[test]
+    fn sms_hmac_key_too_short_is_rejected() {
+        std::env::set_var("HEARTH_SMS_OTP_HMAC_KEY", "short");
+        let sms = SmsConfig {
+            transport: SmsTransport::Twilio,
+            twilio: Some(TwilioConfig {
+                account_sid: "ACtest".to_string(),
+                auth_token: "token".to_string(),
+                from: "+15550001111".to_string(),
+            }),
+            ..Default::default()
+        };
+        let result = validate_sms(&sms);
+        std::env::remove_var("HEARTH_SMS_OTP_HMAC_KEY");
+        let Err(ConfigError::ValidationError { reason, .. }) = result else {
+            panic!("expected ValidationError but got: {result:?}");
+        };
+        assert!(
+            reason.contains("32 bytes"),
+            "reason should mention 32 bytes: {reason}"
+        );
+    }
+
+    #[test]
+    fn sms_log_transport_does_not_require_hmac_key() {
+        std::env::remove_var("HEARTH_SMS_OTP_HMAC_KEY");
+        let result = validate_sms(&sms_log());
+        assert!(result.is_ok(), "log transport should not require HMAC key");
     }
 }

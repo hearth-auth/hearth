@@ -119,6 +119,11 @@ const config = {
             label: 'Guides',
           },
           {
+            to: 'docs/sdks/overview',
+            label: 'SDKs',
+            position: 'left',
+          },
+          {
             to: 'docs/migrating-from-keycloak',
             label: 'Migrate from Keycloak',
             position: 'left',
@@ -168,6 +173,14 @@ const config = {
             ],
           },
           {
+            title: 'SDKs',
+            items: [
+              { label: 'TypeScript', to: 'docs/sdks/typescript' },
+              { label: 'Go', to: 'docs/sdks/go' },
+              { label: 'Migrate from Keycloak', to: 'docs/sdks/migration-from-keycloak' },
+            ],
+          },
+          {
             title: 'Migrate',
             items: [
               { label: 'From Keycloak', to: 'docs/migrating-from-keycloak' },
@@ -183,7 +196,7 @@ const config = {
         // Use nightOwl for both modes — dark-only site, both slots needed by Docusaurus.
         theme: prismThemes.nightOwl,
         darkTheme: prismThemes.nightOwl,
-        additionalLanguages: ['rust', 'bash', 'toml', 'yaml', 'json', 'protobuf'],
+        additionalLanguages: ['rust', 'php', 'markup-templating', 'bash', 'toml', 'yaml', 'json', 'protobuf'],
       },
     }),
 };

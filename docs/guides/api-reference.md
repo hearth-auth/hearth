@@ -3,7 +3,7 @@
 **Who this is for:** Integrators building against the Hearth REST API, and contributors
 who add or change HTTP endpoints.
 
-**Prerequisites:** A running Hearth server (see [Getting Started](getting-started.md)) or the
+**Prerequisites:** A running Hearth server (see [Getting Started](getting-started.mdx)) or the
 static spec files in `docs/api/`.
 
 ---
@@ -179,6 +179,28 @@ appears in the merged spec. The test list must be kept in sync with the route ta
 ```bash
 cargo nextest run --test openapi
 ```
+
+---
+
+## Conditionally-registered routes (agent auth)
+
+Several route groups are registered only when the corresponding `agent_auth.capabilities`
+flag is `true` in `hearth.yaml`. When a capability is disabled, **all routes in that group
+return `404 Not Found`** regardless of authentication — this prevents API fingerprinting by
+scanners or unauthorized callers ([HEA-1138](/HEA/issues/HEA-1138)).
+
+| Capability flag | Routes registered | Phase |
+|-----------------|-------------------|-------|
+| `capabilities.identity: true` | `GET/POST /v1/agents` • `GET/PATCH/DELETE /v1/agents/{id}` • `POST /v1/agents/{id}/credentials/keys` • `GET /v1/agents/{id}/credentials` • `DELETE /v1/agents/{id}/credentials/{cred_id}` • `GET /.well-known/agent.json` | Phase A |
+| `capabilities.approval: true` | `GET/POST /v1/approval-requests` • `GET /v1/approval-requests/{id}` • `POST /v1/approval-requests/{id}/approve` • `POST /v1/approval-requests/{id}/deny` • `POST /v1/tools/invoke` | Phase B+C |
+| `capabilities.advanced: true` | `POST /v1/aats` • `POST /v1/aats/derive` • `POST /v1/aats/validate` • `DELETE /v1/aats/{jti}` • `POST /v1/transaction-tokens` • `POST /v1/transaction-tokens/consume` • `POST /v1/spiffe-mappings` • `GET/DELETE /v1/spiffe-mappings/{agent_id}` • `GET/POST /v1/cross-realm-policies` • `GET/DELETE /v1/cross-realm-policies/{id}` | Phase D |
+
+These routes are absent from the default `openapi.json` when the capabilities are disabled.
+Enable the relevant capability in `agent_auth.capabilities` (see [CONFIGURATION.md](../specs/CONFIGURATION.md#agent_auth))
+before importing the spec into a client that requires them.
+
+All `Phase A` routes require a Bearer token in the `Authorization` header. Requests without
+a valid token receive `401 Unauthorized`, not `404`.
 
 ---
 

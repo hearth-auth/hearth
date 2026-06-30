@@ -532,5 +532,5 @@ To manage federation providers:
 1. Edit `realms.<name>.federation.providers` in `hearth.yaml`.
 2. Reload: restart the server, or send `SIGHUP` for a hot reload.
 
-→ See [Federation examples](hearth-yaml-examples.md#part-4--social-login--federation) for YAML configuration for Google, GitHub, Microsoft, Apple, SAML, and generic OIDC.
+→ See [Federation examples](hearth-yaml-examples/federation.md) for YAML configuration for Google, GitHub, Microsoft, Apple, SAML, and generic OIDC.
 → See [Configuration reference](../specs/CONFIGURATION.md#realmsnamedfederation) for the full field reference.

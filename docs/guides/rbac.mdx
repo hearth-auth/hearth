@@ -1,0 +1,374 @@
+---
+title: RBAC guide
+sidebar_label: RBAC
+description: Configure roles, groups, permissions, and token authorization modes in Hearth.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# RBAC Guide
+
+Hearth uses **claims-based role-based access control (RBAC)**. Permissions are resolved at token issuance time and embedded as JWT claims so that resource servers can check authorization without a network call.
+
+## Concepts
+
+### The four entities
+
+| Entity | Description |
+|--------|-------------|
+| **Permission** | A dot-separated string identifying a capability: `docs.edit`, `billing.view`. Permissions are the authorization surface. |
+| **Role** | A named collection of permissions. Roles can inherit permissions from parent roles. Users and groups are assigned roles, not permissions directly. |
+| **Group** | A named set of users. Groups can be assigned roles. A user's effective permissions include all permissions from their direct role assignments plus all roles assigned to their groups. |
+| **User** | A principal with zero or more direct role assignments and zero or more group memberships. |
+
+### Permission string grammar
+
+```
+<resource> "." <action>
+```
+
+Examples: `docs.view`, `docs.edit`, `billing.admin`, `org.members.manage`.
+
+Hearth does not support wildcards in permission strings — list each permission explicitly when configuring roles.
+
+### JWT claims
+
+After resolving permissions, Hearth embeds three claims in the issued JWT:
+
+```json
+{
+  "roles":       ["editor", "billing-viewer"],
+  "groups":      ["engineers", "leads"],
+  "permissions": ["docs.edit", "docs.view", "org.billing.view"]
+}
+```
+
+`roles` and `groups` carry **names/slugs** (not IDs) for SDK legibility. `permissions` is the authoritative authorization surface. All three arrays are sorted and de-duplicated.
+
+### Scope
+
+Permissions can be realm-scoped (apply everywhere in a realm) or org-scoped (apply only in the context of a specific organization). See [Org-scoped RBAC](#5-assign-a-role-to-a-user-or-group) below.
+
+### Limits
+
+| Item | Limit |
+|------|-------|
+| Permissions per role | 500 |
+| Roles per user (direct) | 50 |
+| Groups per user | 50 |
+| Roles per group | 50 |
+| Permission string length | 128 bytes |
+
+## Setting up RBAC
+
+### 1. Create permissions (via roles)
+
+Permissions are created implicitly when you add them to a role. Create a role with the Admin API:
+
+```bash
+curl -X POST http://127.0.0.1:8420/admin/roles \
+  -H "$HEARTH_ADMIN" -H "$REALM" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "docs-editor",
+    "display_name": "Docs Editor",
+    "permissions": ["docs.view", "docs.edit"]
+  }'
+```
+
+### 2. Compose roles via parent roles
+
+```bash
+curl -X PATCH http://127.0.0.1:8420/admin/roles/<role-id> \
+  -H "$HEARTH_ADMIN" -H "$REALM" \
+  -H "Content-Type: application/json" \
+  -d '{"parent_roles": ["<viewer-role-id>"]}'
+```
+
+The `docs-admin` role will now include all permissions from `docs-viewer` plus any permissions configured directly on `docs-admin`. Inheritance is transitive and de-duplicated.
+
+### 3. Create a group
+
+```bash
+curl -X POST http://127.0.0.1:8420/admin/groups \
+  -H "$HEARTH_ADMIN" -H "$REALM" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "docs-team", "display_name": "Docs Team"}'
+```
+
+### 4. Add a user to a group
+
+```bash
+curl -X POST http://127.0.0.1:8420/admin/groups/<group-id>/members \
+  -H "$HEARTH_ADMIN" -H "$REALM" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "<user-id>"}'
+```
+
+### 5. Assign a role to a user or group
+
+```bash
+# Assign directly to a user (realm-scoped)
+curl -X POST http://127.0.0.1:8420/admin/users/<user-id>/roles \
+  -H "$HEARTH_ADMIN" -H "$REALM" \
+  -H "Content-Type: application/json" \
+  -d '{"role_id": "<role-id>"}'
+
+# Assign to a group (realm-scoped)
+curl -X POST http://127.0.0.1:8420/admin/groups/<group-id>/roles \
+  -H "$HEARTH_ADMIN" -H "$REALM" \
+  -H "Content-Type: application/json" \
+  -d '{"role_id": "<role-id>"}'
+
+# Assign to a user scoped to an organization (org-scoped)
+curl -X POST http://127.0.0.1:8420/admin/users/<user-id>/roles \
+  -H "$HEARTH_ADMIN" -H "$REALM" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "role_id": "<role-id>",
+    "scope": {"type": "org", "org_id": "org_<uuid>"}
+  }'
+```
+
+### 6. Remove an assignment
+
+```bash
+curl -X DELETE http://127.0.0.1:8420/admin/users/<user-id>/roles/<role-id> \
+  -H "$HEARTH_ADMIN" -H "$REALM"
+```
+
+## Checking effective permissions
+
+### Via the token itself (SDK)
+
+All SDKs expose synchronous, zero-network permission helpers that read the `permissions` claim embedded in the JWT. Use these on the hot path — they never make a network call.
+
+The following examples check whether the current token has the `docs.edit` permission:
+
+<Tabs groupId="lang">
+<TabItem value="ts" label="TypeScript" default>
+
+```ts
+import { useHasPermission } from '@hearth-auth/sdk';
+
+// React hook — reads permissions from the JWT in context
+function EditButton() {
+  const canEdit = useHasPermission('docs.edit');
+  if (!canEdit) return null;
+  return <button>Edit</button>;
+}
+```
+
+For server-side TypeScript (Node.js), see the Node tab.
+
+</TabItem>
+<TabItem value="node" label="Node">
+
+```typescript
+import { HearthClient, TokenInvalidError } from '@hearth-auth/node';
+
+const client = new HearthClient({ issuer_url: process.env.HEARTH_ISSUER_URL! });
+
+// After verifyToken() — reads embedded JWT claims locally
+const token = await client.verifyToken(bearerToken);
+if (!token.hasPermission('docs.edit')) {
+  res.status(403).json({ error: 'forbidden' });
+  return;
+}
+```
+
+</TabItem>
+<TabItem value="go" label="Go">
+
+```go
+import "github.com/hearth-auth/hearth/sdks/go/hearth"
+
+client := hearth.NewClient(hearthURL, realmID)
+
+// Reads embedded JWT claims locally — no network call
+if !client.HasPermission(accessToken, "docs.edit") {
+    http.Error(w, "Forbidden", http.StatusForbidden)
+    return
+}
+```
+
+</TabItem>
+<TabItem value="python" label="Python">
+
+```python
+from hearth import HearthClient
+
+client = HearthClient(issuer_url=HEARTH_URL, client_id=CLIENT_ID)
+
+# After verify_token() — reads embedded JWT claims locally
+claims = client.verify_token(access_token)
+if not claims.has_permission("docs.edit"):
+    raise HTTPException(status_code=403, detail="Forbidden")
+```
+
+</TabItem>
+<TabItem value="php" label="PHP">
+
+```php
+use Hearth\HearthClient;
+
+$hearth = new HearthClient(issuerUrl: $hearthUrl, clientId: $clientId);
+
+// After verifyToken() — reads embedded JWT claims locally
+$claims = $hearth->verifyToken($bearerToken);
+if (!$claims->hasPermission('docs.edit')) {
+    http_response_code(403);
+    exit(json_encode(['error' => 'forbidden']));
+}
+```
+
+</TabItem>
+<TabItem value="rust" label="Rust">
+
+```rust
+use hearth_sdk::HearthClient;
+
+// Reads embedded JWT claims locally — no network call
+let allowed = HearthClient::has_permission(&access_token, "docs.edit")?;
+if !allowed {
+    return Err(StatusCode::FORBIDDEN.into_response());
+}
+```
+
+</TabItem>
+<TabItem value="kotlin" label="Kotlin">
+
+```kotlin
+import io.hearth.sdk.HearthClient
+
+val client = HearthClient(
+    issuerUrl = System.getenv("HEARTH_URL"),
+    clientId  = System.getenv("HEARTH_CLIENT_ID"),
+)
+
+// Reads embedded JWT claims locally — no network call
+val claims = client.verifyToken(accessToken)
+if (!claims.hasPermission("docs.edit")) {
+    throw ResponseStatusException(HttpStatus.FORBIDDEN, "Forbidden")
+}
+```
+
+For Ktor, use `call.principal<HearthPrincipal>()!!.claims.hasPermission("docs.edit")` inside an `authenticate("api")` block. For Spring Boot, annotate the handler with `@PreAuthorize("hasAuthority('docs.edit')")` — see the [Kotlin SDK guide](/docs/sdks/kotlin) for setup.
+
+</TabItem>
+</Tabs>
+
+All checks above read from the `permissions` array embedded in the JWT at issuance time — no network call is needed. If you need permissions that reflect role changes made after the token was issued, use the live permission check below.
+
+### Admin API (resolve without issuing a token)
+
+```bash
+curl "http://127.0.0.1:8420/admin/users/<user-id>/effective-permissions" \
+  -H "$HEARTH_ADMIN" -H "$REALM"
+```
+
+Response:
+
+```json
+{
+  "roles": ["docs-admin", "docs-editor"],
+  "groups": ["docs-team"],
+  "permissions": ["docs.delete", "docs.edit", "docs.view"]
+}
+```
+
+### Token endpoint (with scope narrowing)
+
+Request a token with only the permissions mapped by a declared scope bundle:
+
+```bash
+curl -X POST http://127.0.0.1:8420/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=authorization_code&code=<code>&scope=docs"
+```
+
+If `docs` scope is configured to map to `{docs.view, docs.edit}`, the issued token's `permissions` claim is intersected with that set regardless of what the user was assigned.
+
+## Token Authorization Modes
+
+Every `OAuthClient` carries an `access_token_authorization` field that controls how resource servers verify permissions for tokens issued to that client. Choose the mode that fits your consistency and network budget.
+
+| Mode | Value | JWT carries | Resource server call |
+|------|-------|-------------|----------------------|
+| **Embedded** (default) | `embedded` | Full RBAC claims (`roles`, `groups`, `permissions`) | None — read from token |
+| **Introspection** | `introspection` | Identity claims only (`sub`, `tid`, etc.) | `POST /realms/{realm}/introspect` |
+| **Decision** | `decision` | Identity claims only | `POST /oauth/authorize` |
+
+### Embedded mode (default)
+
+The issued JWT carries the full `roles`, `groups`, and `permissions` claim set resolved at issuance time. Resource servers check permissions by decoding the JWT locally — no network call.
+
+**Trade-offs:** Permissions are consistent with the state at token issuance. Role/group changes take effect only when the token expires and is refreshed (typically 15 minutes).
+
+### Introspection mode
+
+The issued JWT carries only identity claims. When a resource server needs to authorize a request, it calls `POST /realms/{realm}/introspect` with the bearer token. Hearth resolves live RBAC and returns the full claim set in the response.
+
+```bash
+curl -X POST https://auth.example.com/realms/acme/introspect \
+  -u "<client_id>:<client_secret>" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "token=<access_token>"
+```
+
+Response (RFC 7662 + Hearth RBAC extensions):
+```json
+{
+  "active": true,
+  "sub": "user_01HXYZ...",
+  "permissions": ["docs.view", "docs.edit"],
+  "roles": ["docs-admin"],
+  "groups": ["leads"],
+  "exp": 1700000900
+}
+```
+
+Hearth includes RBAC claims in introspection responses **only** when the requesting client (`client_id` in Basic Auth) has `access_token_authorization: introspection` configured. Clients in `embedded` mode receive standard RFC 7662 responses without RBAC fields.
+
+**Trade-offs:** Permissions are always current — revocation and role changes take effect on the next introspection call. The network cost is one Hearth call per resource-server request.
+
+### Decision mode
+
+The issued JWT carries only identity claims. When a resource server needs to authorize a request, it calls `POST /oauth/authorize` with the bearer token and the required permission. Hearth evaluates the permission in real time and returns `allowed: true/false`.
+
+**Trade-offs:** Maximum freshness, fail-closed on network errors. Higher latency than introspection for multi-permission checks (one call per permission).
+
+### Configuring a client's mode
+
+Via Admin API (`PUT /admin/applications/{id}`):
+```bash
+curl -X PUT https://auth.example.com/admin/applications/<client_uuid> \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "X-Realm-ID: <realm_uuid>" \
+  -H "Content-Type: application/json" \
+  -d '{"access_token_authorization": "decision"}'
+```
+
+Via `hearth.yaml`:
+```yaml
+realms:
+  acme:
+    applications:
+      billing-service:
+        name: "Billing Service"
+        confidential: true
+        client_secret: "${BILLING_SECRET}"
+        grant_types: [client_credentials]
+        access_token_authorization: decision
+```
+
+## Admin console
+
+All RBAC operations are available in the Admin console at `/ui/admin/`. Select a realm from the sidebar, then choose **Roles**, **Groups**, or **Users** to manage assignments.
+
+## Reference
+
+- [AUTHORIZATION.md](../specs/AUTHORIZATION.md) — normative specification for the full RBAC model, claim profiles, and org-scoped assignments
+- [Organizations guide](organizations.md) — org-scoped role assignments and `oid` JWT claim
+- [Permission delivery guide](permission-delivery.md) — detailed comparison of embedded, introspection, and decision modes

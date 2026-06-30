@@ -16,9 +16,9 @@
 services:
   hearth:
     # TODO(security): replace :latest with a pinned tag + digest before production.
-    # Pattern: ghcr.io/hearth-rs/hearth:<version>@sha256:<digest>
-    # Check releases at https://github.com/hearth-rs/hearth/releases.
-    image: ghcr.io/hearth-rs/hearth:latest
+    # Pattern: ghcr.io/hearth-auth/hearth:<version>@sha256:<digest>
+    # Check releases at https://github.com/hearth-auth/hearth/releases.
+    image: ghcr.io/hearth-auth/hearth:latest
     container_name: hearth
     ports:
       # Bind only to localhost by default. Override to "0.0.0.0:8420:8420" or
