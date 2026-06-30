@@ -176,7 +176,12 @@ const config = {
             title: 'SDKs',
             items: [
               { label: 'TypeScript', to: 'docs/sdks/typescript' },
+              { label: 'Node.js', to: 'docs/sdks/node' },
               { label: 'Go', to: 'docs/sdks/go' },
+              { label: 'Python', to: 'docs/sdks/python' },
+              { label: 'Rust', to: 'docs/sdks/rust' },
+              { label: 'PHP', to: 'docs/sdks/php' },
+              { label: 'Kotlin', to: 'docs/sdks/kotlin' },
               { label: 'Migrate from Keycloak', to: 'docs/sdks/migration-from-keycloak' },
             ],
           },
