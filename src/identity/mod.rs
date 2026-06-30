@@ -78,14 +78,14 @@ pub use types::{
     AttributeDefinitions, AttributeType, BreachCheckConfig, BulkResult, ConsentDecision,
     ConsentListEntry, ConsentRecord, CreateInvitationRequest, CreateOrganizationRequest,
     CreateRealmRequest, CreateUserRequest, CreateWebhookRequest, CredentialExport, DcrPolicy,
-    FapiProfile, ImportClientRequest, ImportUserRequest, InvitationStatus, MigrationReport,
-    Organization, OrganizationConfig, OrganizationInvitation, OrganizationMembership,
-    OrganizationRole, OrganizationStatus, Page, PasswordPolicy, PendingAuthorizationRequest,
-    PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential, Realm, RealmConfig,
-    RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse, RegistrationPolicy,
-    RequiredAction, RequiredActionTokenResponse, Session, SessionContext, SessionLimitPolicy,
-    SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
-    UpdateWebhookRequest, User, UserStatus, WebAuthnAttestationPolicy, Webhook,
+    DemoSeedOutcome, DemoSeedSpec, FapiProfile, ImportClientRequest, ImportUserRequest,
+    InvitationStatus, MigrationReport, Organization, OrganizationConfig, OrganizationInvitation,
+    OrganizationMembership, OrganizationRole, OrganizationStatus, Page, PasswordPolicy,
+    PendingAuthorizationRequest, PreTokenWebhookConfig, PreTokenWebhookErrorPolicy, RawCredential,
+    Realm, RealmConfig, RealmQuotaConfig, RealmStatus, RegisterUserRequest, RegisterUserResponse,
+    RegistrationPolicy, RequiredAction, RequiredActionTokenResponse, Session, SessionContext,
+    SessionLimitPolicy, SessionVersionConfig, UpdateOrganizationRequest, UpdateRealmRequest,
+    UpdateUserRequest, UpdateWebhookRequest, User, UserStatus, WebAuthnAttestationPolicy, Webhook,
 };
 pub use types::{
     AatClaims, AatResponse, AatToolPermission, Agent, AgentCredential, AgentCredentialKind,
@@ -1741,6 +1741,31 @@ pub trait IdentityEngine: Send + Sync {
         realm_id: &RealmId,
         request: &ImportClientRequest,
     ) -> Result<OAuthClient, IdentityError>;
+
+    /// Bulk-seeds synthetic demo users for the large-scale demo seeder.
+    ///
+    /// Generates `spec.target_count` accounts named `user0000001@<domain>`, …,
+    /// all pre-activated and all sharing `password`. The password is hashed
+    /// **once** and the resulting hash is reused for every account, so there is
+    /// no per-user Argon2id cost. Writes are batched per chunk to minimize WAL
+    /// fsync amplification.
+    ///
+    /// Idempotent and resumable: a per-realm sentinel records how many users
+    /// have been seeded, so re-running creates only the delta above that count
+    /// and never modifies existing accounts. Raising `target_count` between
+    /// runs seeds the additional users.
+    ///
+    /// This is a demo-only fast path — it skips per-user email-uniqueness
+    /// checks (generated emails are unique by construction) and records a single
+    /// summary audit event rather than one per user. It refuses to run against
+    /// the system realm. Callers must gate invocation on the operator having
+    /// explicitly enabled demo mode (`demo.enabled = true`).
+    fn seed_demo_users(
+        &self,
+        realm_id: &RealmId,
+        password: &CleartextPassword,
+        spec: &DemoSeedSpec,
+    ) -> Result<DemoSeedOutcome, IdentityError>;
 
     // ===== SCIM externalId management =====
 

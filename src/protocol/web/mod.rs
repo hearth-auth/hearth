@@ -567,6 +567,34 @@ impl WebState {
             .unwrap_or_else(|| self.product_name.clone())
     }
 
+    /// Origin (`scheme://host:port`) used to build emailed links
+    /// (verification, password reset) when `onboarding.base_url` is **not**
+    /// configured. Derived from the server's own bind address and port so the
+    /// link is reachable — crucially, it includes the port. A wildcard bind
+    /// (`0.0.0.0` / `::`) maps to `localhost`. Falls back to `http://localhost`
+    /// only when no config is available (e.g. some unit-test states).
+    ///
+    /// Operators should set `onboarding.base_url` to their public URL; this is
+    /// the best-effort default so local/dev setups still produce working links.
+    #[must_use]
+    pub fn fallback_base_url(&self) -> String {
+        match self.config.as_ref() {
+            Some(cfg) => {
+                let host = match cfg.server.bind_address.as_str() {
+                    "0.0.0.0" | "::" | "[::]" => "localhost",
+                    h => h,
+                };
+                let scheme = if cfg.server.tls_cert_path.is_some() {
+                    "https"
+                } else {
+                    "http"
+                };
+                format!("{scheme}://{host}:{}", cfg.server.port)
+            }
+            None => "http://localhost".to_string(),
+        }
+    }
+
     /// Pins a realm as the "current" one for this process. Called by
     /// onboarding and the login handler so subsequent requests skip
     /// the `list_realms` walk.

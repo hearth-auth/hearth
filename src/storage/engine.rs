@@ -338,60 +338,61 @@ impl EmbeddedStorageEngine {
                         "flush mutex poisoned",
                     )));
                 };
-                let entries = cb_memtable.iter_all();
-                if entries.is_empty() {
-                    return Ok(());
-                }
-                let sst_num = cb_sst_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let sst_path = cb_data_dir.join(format!("{sst_num:06}.sst"));
-                let system_kek = cb_key_registry
-                    .get_kek_for_realm(&cb_system_realm)
-                    .ok_or_else(|| StorageError::Crypto {
-                        reason: "system KEK not found during WAL rotation flush".to_string(),
-                    })?;
-                let system_kek_id = cb_key_registry.kek_id_for_realm(&cb_system_realm);
-                let dek = encryption::generate_dek()?;
-                let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
-                SstWriter::write_sst_with_fs(
-                    &sst_path,
-                    &entries,
-                    &*cb_fs,
-                    sst_num,
-                    &dek,
-                    &enc_header,
-                )?;
-                // Rebuild SST reader list, inserting the new file
-                let mut all_sst_paths: Vec<(PathBuf, u64)> = cb_fs
-                    .read_dir(&cb_data_dir)?
-                    .into_iter()
-                    .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
-                    .filter_map(|p| {
-                        let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
-                        Some((p, num))
-                    })
-                    .collect();
-                all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num));
-                let mut rebuilt = Vec::new();
-                for (path, n) in &all_sst_paths {
-                    let (kek_id, enc_hdr) = match sst::read_encryption_header(path, &*cb_fs) {
-                        Ok(h) => h,
-                        Err(_) => continue,
-                    };
-                    let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
-                    let kek = match cb_key_registry.get_kek_for_realm(&realm_for_kek) {
-                        Some(k) => k,
-                        None => continue,
-                    };
-                    let file_dek = match encryption::unwrap_dek(&enc_hdr, &kek) {
-                        Ok(d) => d,
-                        Err(_) => continue,
-                    };
-                    if let Ok(reader) = SstReader::open_with_fs(path, &*cb_fs, *n, &file_dek) {
-                        rebuilt.push(reader);
+                // Atomic freeze: snapshot + SST write/register + reset all happen
+                // under the memtable write lock, so a write racing with this
+                // rotation flush is never silently dropped.
+                cb_memtable.flush_under_lock(|entries| {
+                    let sst_num = cb_sst_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let sst_path = cb_data_dir.join(format!("{sst_num:06}.sst"));
+                    let system_kek = cb_key_registry
+                        .get_kek_for_realm(&cb_system_realm)
+                        .ok_or_else(|| StorageError::Crypto {
+                            reason: "system KEK not found during WAL rotation flush".to_string(),
+                        })?;
+                    let system_kek_id = cb_key_registry.kek_id_for_realm(&cb_system_realm);
+                    let dek = encryption::generate_dek()?;
+                    let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
+                    SstWriter::write_sst_with_fs(
+                        &sst_path,
+                        entries,
+                        &*cb_fs,
+                        sst_num,
+                        &dek,
+                        &enc_header,
+                    )?;
+                    // Rebuild SST reader list, inserting the new file
+                    let mut all_sst_paths: Vec<(PathBuf, u64)> = cb_fs
+                        .read_dir(&cb_data_dir)?
+                        .into_iter()
+                        .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+                        .filter_map(|p| {
+                            let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
+                            Some((p, num))
+                        })
+                        .collect();
+                    all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num));
+                    let mut rebuilt = Vec::new();
+                    for (path, n) in &all_sst_paths {
+                        let (kek_id, enc_hdr) = match sst::read_encryption_header(path, &*cb_fs) {
+                            Ok(h) => h,
+                            Err(_) => continue,
+                        };
+                        let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
+                        let kek = match cb_key_registry.get_kek_for_realm(&realm_for_kek) {
+                            Some(k) => k,
+                            None => continue,
+                        };
+                        let file_dek = match encryption::unwrap_dek(&enc_hdr, &kek) {
+                            Ok(d) => d,
+                            Err(_) => continue,
+                        };
+                        if let Ok(reader) = SstReader::open_with_fs(path, &*cb_fs, *n, &file_dek) {
+                            rebuilt.push(reader);
+                        }
                     }
-                }
-                cb_sst_readers.store(Arc::new(rebuilt));
-                cb_memtable.clear()?;
+                    cb_sst_readers.store(Arc::new(rebuilt));
+                    Ok(())
+                })?;
                 Ok(())
             });
         }
@@ -411,6 +412,14 @@ impl EmbeddedStorageEngine {
     }
 
     /// Flushes the memtable to a new SST file and clears it.
+    ///
+    /// The snapshot, SST write/registration, and the reset of the in-memory map
+    /// all happen inside a single hold of the memtable's write lock (see
+    /// [`Memtable::flush_under_lock`]). This makes the flush atomic against
+    /// concurrent writers — a `put`/`put_batch` racing with a flush is either
+    /// captured in the SST or kept in the fresh map, never silently dropped. The
+    /// outer `flush_lock` still serializes flushes against each other so SST
+    /// numbering can't collide.
     fn trigger_flush(&self) -> Result<(), StorageError> {
         let Ok(_guard) = self.flush_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
@@ -418,94 +427,99 @@ impl EmbeddedStorageEngine {
             )));
         };
 
-        let entries = self.active_memtable.iter_all();
-        if entries.is_empty() {
-            return Ok(());
-        }
+        self.active_memtable.flush_under_lock(|entries| {
+            // Generate sequential SST filename
+            let sst_num = self
+                .sst_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let sst_path = self.data_dir.join(format!("{sst_num:06}.sst"));
 
-        // Generate sequential SST filename
-        let sst_num = self
-            .sst_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let sst_path = self.data_dir.join(format!("{sst_num:06}.sst"));
+            // Generate per-file DEK and wrap with system realm KEK
+            let system_kek = self
+                .key_registry
+                .get_kek_for_realm(&self.system_realm)
+                .ok_or_else(|| StorageError::Crypto {
+                    reason: "system KEK not found".to_string(),
+                })?;
+            let system_kek_id = self.key_registry.kek_id_for_realm(&self.system_realm);
+            let dek = encryption::generate_dek()?;
+            let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
 
-        // Generate per-file DEK and wrap with system realm KEK
-        let system_kek = self
-            .key_registry
-            .get_kek_for_realm(&self.system_realm)
-            .ok_or_else(|| StorageError::Crypto {
-                reason: "system KEK not found".to_string(),
-            })?;
-        let system_kek_id = self.key_registry.kek_id_for_realm(&self.system_realm);
-        let dek = encryption::generate_dek()?;
-        let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
+            SstWriter::write_sst_with_fs(
+                &sst_path,
+                entries,
+                &*self.fs,
+                sst_num,
+                &dek,
+                &enc_header,
+            )?;
 
-        SstWriter::write_sst_with_fs(&sst_path, &entries, &*self.fs, sst_num, &dek, &enc_header)?;
+            // Rebuild SST reader list from disk (re-open all files). This
+            // registers the new SST *before* the memtable is emptied, so reads
+            // never miss a just-flushed key.
+            let mut all_sst_paths: Vec<(PathBuf, u64)> = self
+                .fs
+                .read_dir(&self.data_dir)?
+                .into_iter()
+                .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+                .filter_map(|p| {
+                    let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
+                    Some((p, num))
+                })
+                .collect();
+            all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num)); // newest first
 
-        // Rebuild SST reader list from disk (re-open all files).
-        let mut all_sst_paths: Vec<(PathBuf, u64)> = self
-            .fs
-            .read_dir(&self.data_dir)?
-            .into_iter()
-            .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
-            .filter_map(|p| {
-                let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
-                Some((p, num))
-            })
-            .collect();
-        all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num)); // newest first
-
-        let mut rebuilt_readers = Vec::new();
-        for (path, sst_num) in &all_sst_paths {
-            let (kek_id, enc_header) = match sst::read_encryption_header(path, &*self.fs) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: failed to read encryption header"
-                    );
-                    continue;
-                }
-            };
-            let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
-            let kek = match self.key_registry.get_kek_for_realm(&realm_for_kek) {
-                Some(k) => k,
-                None => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        realm = %realm_for_kek,
-                        "SST file skipped: KEK not found"
-                    );
-                    continue;
-                }
-            };
-            let dek = match encryption::unwrap_dek(&enc_header, &kek) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: DEK unwrapping failed"
-                    );
-                    continue;
-                }
-            };
-            match SstReader::open_with_fs(path, &*self.fs, *sst_num, &dek) {
-                Ok(reader) => rebuilt_readers.push(reader),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: failed to open reader"
-                    );
+            let mut rebuilt_readers = Vec::new();
+            for (path, sst_num) in &all_sst_paths {
+                let (kek_id, enc_header) = match sst::read_encryption_header(path, &*self.fs) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "SST file skipped: failed to read encryption header"
+                        );
+                        continue;
+                    }
+                };
+                let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
+                let kek = match self.key_registry.get_kek_for_realm(&realm_for_kek) {
+                    Some(k) => k,
+                    None => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            realm = %realm_for_kek,
+                            "SST file skipped: KEK not found"
+                        );
+                        continue;
+                    }
+                };
+                let dek = match encryption::unwrap_dek(&enc_header, &kek) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "SST file skipped: DEK unwrapping failed"
+                        );
+                        continue;
+                    }
+                };
+                match SstReader::open_with_fs(path, &*self.fs, *sst_num, &dek) {
+                    Ok(reader) => rebuilt_readers.push(reader),
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "SST file skipped: failed to open reader"
+                        );
+                    }
                 }
             }
-        }
-        self.sst_readers.store(Arc::new(rebuilt_readers));
+            self.sst_readers.store(Arc::new(rebuilt_readers));
 
-        // Clear the memtable after successful flush
-        self.active_memtable.clear()?;
+            Ok(())
+        })?;
 
         Ok(())
     }
@@ -771,12 +785,14 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.wal
             .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
 
-        // 2. Apply each sub-entry to the in-memory state. If a failure
-        //    occurs here (e.g., memtable mutex poisoned), the WAL record is
-        //    already durable; recovery on the next open will replay the
-        //    batch in full, re-establishing consistency.
-        for (key, value) in entries {
-            self.active_memtable.put(realm_id, key, value)?;
+        // 2. Apply all sub-entries to the in-memory state. The memtable update
+        //    is done in a single copy-on-write cycle (one map clone for the
+        //    whole batch, not one per entry) so bulk loads stay O(N), then we
+        //    invalidate any cached reads. If a failure occurs here (e.g.,
+        //    memtable mutex poisoned), the WAL record is already durable;
+        //    recovery on the next open replays the batch in full.
+        self.active_memtable.put_batch(realm_id, entries)?;
+        for (key, _value) in entries {
             self.hot_tier.invalidate(realm_id, key);
         }
 
@@ -835,10 +851,11 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.wal
             .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
 
-        // 2. Apply puts to in-memory state. If this fails after the WAL write,
-        //    recovery on next open will replay the full batch.
-        for (key, value) in puts {
-            self.active_memtable.put(realm_id, key, value)?;
+        // 2. Apply puts to in-memory state in a single copy-on-write cycle
+        //    (one map clone for the whole batch). If this fails after the WAL
+        //    write, recovery on next open will replay the full batch.
+        self.active_memtable.put_batch(realm_id, puts)?;
+        for (key, _value) in puts {
             self.hot_tier.invalidate(realm_id, key);
         }
 
@@ -1082,6 +1099,77 @@ mod tests {
                 "key {key} should be readable after flush"
             );
         }
+    }
+
+    // Regression test for the flush/write data-loss race. With a tiny flush
+    // threshold every few writes triggers a flush; multiple threads write
+    // concurrently while those flushes run. EVERY acknowledged write must still
+    // be readable. The old flush (lock-free `iter_all()` then a later `clear()`)
+    // could drop a write that landed between the snapshot and the clear; the
+    // atomic `flush_under_lock` makes that impossible.
+    #[test]
+    fn concurrent_writes_during_flush_are_not_lost() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            wal_config: WalConfig {
+                max_size: 64 * 1024 * 1024,
+                sync_mode: SyncMode::None,
+            },
+            memtable_config: MemtableConfig {
+                flush_threshold_bytes: 256, // flush every ~10 writes → constant flushing
+            },
+            tiered_config: TieredConfig {
+                hot_tier_capacity: 64,
+                eviction_batch_size: 8,
+            },
+            allow_missing_keks: false,
+            compaction: CompactionConfig::default(),
+            dev_mode: true,
+        };
+        let engine = std::sync::Arc::new(EmbeddedStorageEngine::open(config).expect("open"));
+
+        const THREADS: u32 = 4;
+        const PER_THREAD: u32 = 800;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let engine = std::sync::Arc::clone(&engine);
+                let realm = realm.clone();
+                std::thread::spawn(move || {
+                    for i in 0..PER_THREAD {
+                        let key = format!("t{t:02}-k{i:05}");
+                        let val = format!("t{t:02}-v{i:05}");
+                        engine
+                            .put(&realm, key.as_bytes(), val.as_bytes())
+                            .expect("put");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("writer thread panicked");
+        }
+
+        // Every acknowledged write must survive the concurrent flushing.
+        let mut lost = Vec::new();
+        for t in 0..THREADS {
+            for i in 0..PER_THREAD {
+                let key = format!("t{t:02}-k{i:05}");
+                let expected = format!("t{t:02}-v{i:05}");
+                match engine.get(&realm, key.as_bytes()).expect("get") {
+                    Some(v) if v == expected.as_bytes() => {}
+                    _ => lost.push(key),
+                }
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "{} acknowledged writes were lost during concurrent flushes (e.g. {:?})",
+            lost.len(),
+            &lost[..lost.len().min(5)]
+        );
     }
 
     // Step 6 test #3: cold read promotes to hot tier (requires composed engine)

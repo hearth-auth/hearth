@@ -7,6 +7,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Large-scale demo seeder (`make seed-large`)** — a new top-level `demo:` config
+  block (`demo.enabled`, `demo.password`) plus a per-realm `seeding:` block
+  (`users`, `email_domain`, `display_name_prefix`, `email_verified`) stand up a
+  fully fleshed-out, multi-million-user instance for local scale testing. When
+  `demo.enabled: true`, each realm's `seeding.users` count is bulk-inserted as
+  synthetic accounts (`user0000001@<domain>`, …) that all share `demo.password`
+  — hashed once and reused, so seeding 1M+ users costs one Argon2id hash, not a
+  million. Seeding runs in the **background after the server is listening**, so
+  the instance is reachable within ~1 s and usable while it fills (watch the
+  per-100k progress logs). It is additive, synthetic-only, idempotent, and
+  resumable via a per-realm sentinel; it is never reached without `demo.enabled`
+  (the production guard). `make seed-large` boots
+  `examples/large-scale-demo/hearth.yaml` into `./data/demo`; `make
+  seed-large-reset` wipes it.
+
+### Fixed
+- **Storage: concurrent writes are no longer lost during a memtable flush.** The
+  flush snapshotted the memtable lock-free and cleared it under the lock as two
+  separate steps; a write landing in that window was silently dropped. Under a
+  multithreaded server this could lose acknowledged writes (e.g. an admin created
+  via the setup wizard while background work flushed, making the account
+  un-loginable and invisible to password reset). The flush now snapshots, writes
+  the SST, and resets the memtable atomically under a single write-lock hold, so
+  a concurrent write is always either captured in the SST or kept in the live map.
+- **Emailed links (verification, password reset) now include the server port.**
+  When `onboarding.base_url` was unset, links fell back to a bare
+  `http://localhost` with no port. The fallback now uses the server's own
+  bind `host:port`; set `onboarding.base_url` to override.
+- **Bulk writes (`put_batch`/`write_batch`) no longer clone the memtable per
+  entry.** The storage engine applied each entry of a batch with its own
+  copy-on-write of the entire memtable `BTreeMap`, making a batch of N entries
+  O(N²). Batches now apply in a single clone-mutate-swap cycle — both on the write
+  path and during crash-recovery WAL replay — so bulk loads (the demo seeder,
+  audit appends, migrations, imports) and reopening a large data directory scale
+  linearly instead of quadratically.
 - **Rust SDK Actix-web middleware adapter (HEA-1602)** — `hearth-sdk` gains an optional
   `actix-middleware` feature that provides `HearthActixMiddleware` (implements Actix-web 4's
   `Transform`/`Service` traits), the `RequirePermission` extractor (reads verified `Claims` from

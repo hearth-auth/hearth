@@ -1198,6 +1198,21 @@ async fn run_serve(
         }
     }
 
+    // Large-scale demo seeding (gated on `demo.enabled`) runs in the BACKGROUND
+    // on a blocking thread, AFTER reconciliation but concurrently with the HTTP
+    // listener bind below. Seeding millions of users would otherwise block
+    // startup for minutes; backgrounding it makes the instance reachable
+    // immediately and lets it fill while you interact with it. Each chunk is
+    // atomic and advances a per-realm sentinel, so an interrupted seed resumes
+    // cleanly on the next start.
+    if config.demo.enabled {
+        let ie = Arc::clone(&identity_engine);
+        let demo_config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            hearth::identity::reconcile::seed_demo_realms(ie.as_ref(), &demo_config);
+        });
+    }
+
     // Phase E: cross-realm user migration (migrate_from / copy_from).
     // Runs after realm reconciliation so destination realms exist.
     // `on_conflict: error` causes a hard exit; all other errors are warnings.

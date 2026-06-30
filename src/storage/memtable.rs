@@ -136,6 +136,100 @@ impl Memtable {
         Ok(())
     }
 
+    /// Inserts or updates many key-value pairs in a single copy-on-write cycle.
+    ///
+    /// Equivalent to calling [`put`](Self::put) once per entry — same final map
+    /// contents and same `approximate_size` — but clones the backing `BTreeMap`
+    /// **once** for the whole batch instead of once per entry. This turns a bulk
+    /// insert of `B` entries from O(B · N) into O(N + B), which is essential for
+    /// large bulk loads (e.g. the demo seeder writing millions of rows).
+    pub(crate) fn put_batch(
+        &self,
+        realm_id: &RealmId,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), StorageError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
+
+        let current = self.data.load_full();
+        let mut new_map = (*current).clone();
+
+        let mut old_total: usize = 0;
+        let mut new_total: usize = 0;
+        for (key, value) in entries {
+            let composite = CompositeKey {
+                realm_id: realm_id.clone(),
+                key: key.clone(),
+            };
+            let new_value = MemtableValue::Data(value.clone());
+
+            new_total += Self::entry_size(key, &new_value);
+            old_total += new_map
+                .get(&composite)
+                .map_or(0, |old_val| Self::entry_size(key, old_val));
+
+            new_map.insert(composite, new_value);
+        }
+
+        self.data.store(Arc::new(new_map));
+        self.update_size(old_total, new_total);
+
+        Ok(())
+    }
+
+    /// Atomically flushes the memtable to an SST and resets it to empty.
+    ///
+    /// Holds the write lock for the **entire** operation — snapshot, the
+    /// caller-supplied `write_sst` (which writes and registers the SST), and the
+    /// reset to empty all happen in one critical section. This is what makes a
+    /// flush safe against concurrent writers: a `put`/`put_batch` racing with a
+    /// flush either completes *before* the snapshot (and is captured in the SST)
+    /// or *after* the reset (and stays in the fresh map) — it can never land in a
+    /// window where it is wiped without being persisted (the bug in the old
+    /// lock-free `iter_all()` + later `clear()` pair).
+    ///
+    /// Reads are unaffected: they never take the write lock, and `write_sst`
+    /// registers the new SST *before* this method empties the in-memory map, so
+    /// a just-flushed key is always readable from one tier or the other.
+    ///
+    /// `write_sst` receives the entries sorted by composite key. If it returns
+    /// `Err`, the memtable is left untouched (no data is dropped). Returns
+    /// `Ok(false)` when the memtable was empty (nothing flushed).
+    pub(crate) fn flush_under_lock<F>(&self, write_sst: F) -> Result<bool, StorageError>
+    where
+        F: FnOnce(&[(CompositeKey, MemtableValue)]) -> Result<(), StorageError>,
+    {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| StorageError::Io(std::io::Error::other("memtable mutex poisoned")))?;
+
+        let current = self.data.load_full();
+        if current.is_empty() {
+            return Ok(false);
+        }
+
+        let entries: Vec<(CompositeKey, MemtableValue)> = current
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        // Persist + register the SST while still holding the write lock. On
+        // failure we return without resetting, so nothing is lost.
+        write_sst(&entries)?;
+
+        self.data.store(Arc::new(BTreeMap::new()));
+        self.approximate_size.store(0, Ordering::Relaxed);
+
+        Ok(true)
+    }
+
     /// Inserts a tombstone for the given key, marking it as deleted.
     ///
     /// Subsequent `get()` calls return `None`. The tombstone is preserved
@@ -232,16 +326,33 @@ impl Memtable {
                 // malformed record and stop replay rather than applying a
                 // partial batch.
                 let sub_entries = crate::storage::wal::decode_batch_payload(&entry.value)?;
+                // Apply runs of consecutive puts via `put_batch` (one map clone
+                // per run) instead of one clone per entry, so replaying a large
+                // WAL segment of bulk writes stays O(N) rather than O(N²). A
+                // delete flushes the pending put-run first to preserve the
+                // encoded order, then applies as a tombstone.
+                let mut put_run: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
                 for sub in &sub_entries {
                     match sub.operation {
-                        WalOperation::Put => self.put(&entry.realm_id, &sub.key, &sub.value)?,
-                        WalOperation::Delete => self.delete(&entry.realm_id, &sub.key)?,
+                        WalOperation::Put => {
+                            put_run.push((sub.key.clone(), sub.value.clone()));
+                        }
+                        WalOperation::Delete => {
+                            if !put_run.is_empty() {
+                                self.put_batch(&entry.realm_id, &put_run)?;
+                                put_run.clear();
+                            }
+                            self.delete(&entry.realm_id, &sub.key)?;
+                        }
                         WalOperation::Batch => {
                             return Err(StorageError::DeserializationFailed {
                                 reason: "nested batch in WAL replay".to_string(),
                             });
                         }
                     }
+                }
+                if !put_run.is_empty() {
+                    self.put_batch(&entry.realm_id, &put_run)?;
                 }
                 Ok(())
             }
@@ -336,6 +447,124 @@ mod tests {
         let realm = RealmId::generate();
 
         assert_eq!(mt.get(&realm, b"missing"), None);
+    }
+
+    // `put_batch` must be observationally identical to N sequential `put`s:
+    // same final values AND same approximate_size. This is the invariant that
+    // lets the storage engine batch the memtable update for bulk loads
+    // (clone-once-per-batch instead of clone-per-entry) without changing
+    // semantics. Includes an overwrite so the old-size accounting is exercised.
+    #[test]
+    fn put_batch_matches_sequential_puts() {
+        let realm = RealmId::generate();
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (b"key1".to_vec(), b"value-one".to_vec()),
+            (b"key2".to_vec(), b"v2".to_vec()),
+            (b"key3".to_vec(), b"value-three-longer".to_vec()),
+            // Overwrite of key1 within the same batch — last write wins, and the
+            // first key1's size must not leak into approximate_size.
+            (b"key1".to_vec(), b"value-one-updated".to_vec()),
+        ];
+
+        // Reference: apply sequentially via `put`.
+        let seq = Memtable::new(MemtableConfig::default());
+        for (k, v) in &entries {
+            seq.put(&realm, k, v).expect("put");
+        }
+
+        // Subject: apply as one batch.
+        let batch = Memtable::new(MemtableConfig::default());
+        batch.put_batch(&realm, &entries).expect("put_batch");
+
+        for key in [b"key1".as_slice(), b"key2".as_slice(), b"key3".as_slice()] {
+            assert_eq!(
+                batch.get(&realm, key),
+                seq.get(&realm, key),
+                "batch and sequential disagree on {key:?}"
+            );
+        }
+        assert_eq!(
+            batch.get(&realm, b"key1"),
+            Some(b"value-one-updated".to_vec())
+        );
+        assert_eq!(
+            batch.approximate_size(),
+            seq.approximate_size(),
+            "put_batch must track the same approximate_size as sequential puts"
+        );
+    }
+
+    #[test]
+    fn put_batch_empty_is_noop() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        mt.put_batch(&realm, &[]).expect("empty put_batch");
+        assert_eq!(mt.approximate_size(), 0);
+    }
+
+    // `flush_under_lock` hands the closure the full snapshot, then empties the
+    // memtable only after the closure succeeds. (Concurrency — that a write
+    // racing the flush is never lost — is covered by an integration test, since
+    // a same-thread write inside the closure would deadlock on the write lock.)
+    #[test]
+    fn flush_under_lock_snapshots_then_empties() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        mt.put(&realm, b"k1", b"v1").expect("put 1");
+        mt.put(&realm, b"k2", b"v2").expect("put 2");
+
+        let mut captured: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let flushed = mt
+            .flush_under_lock(|entries| {
+                for (k, v) in entries {
+                    if let MemtableValue::Data(bytes) = v {
+                        captured.push((k.key().to_vec(), bytes.clone()));
+                    }
+                }
+                Ok(())
+            })
+            .expect("flush");
+
+        assert!(flushed, "non-empty memtable must report a flush");
+        assert_eq!(captured.len(), 2, "closure must see the full snapshot");
+        assert!(
+            mt.iter_all().is_empty(),
+            "memtable must be empty after flush"
+        );
+        assert_eq!(mt.approximate_size(), 0);
+    }
+
+    #[test]
+    fn flush_under_lock_empty_is_noop() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let mut called = false;
+        let flushed = mt
+            .flush_under_lock(|_| {
+                called = true;
+                Ok(())
+            })
+            .expect("flush");
+        assert!(!flushed, "empty memtable reports no flush");
+        assert!(!called, "closure must not run for an empty memtable");
+    }
+
+    #[test]
+    fn flush_under_lock_preserves_data_on_error() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+        mt.put(&realm, b"k1", b"v1").expect("put");
+        let before = mt.approximate_size();
+
+        let res = mt.flush_under_lock(|_| {
+            Err(StorageError::Io(std::io::Error::other(
+                "simulated SST failure",
+            )))
+        });
+
+        assert!(res.is_err(), "flush must surface the SST write error");
+        // Critical: a failed flush must NOT drop the data.
+        assert_eq!(mt.get(&realm, b"k1"), Some(b"v1".to_vec()));
+        assert_eq!(mt.approximate_size(), before);
     }
 
     // TEST_SCENARIOS.md: "Update existing key overwrites value"

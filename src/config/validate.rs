@@ -9,9 +9,9 @@ use super::env;
 use super::error::ConfigError;
 use super::types::{
     parse_duration_to_micros, AgentAuthConfig, AuthConfig, BrandingConfig, CompactionSection,
-    Config, EmailConfig, EmailTransport, MetricsConfig, ObservabilityConfig, OidcYamlConfig,
-    OnboardingConfig, OperationalConfig, RealmYamlConfig, SecurityYaml, ServerConfig, SmsConfig,
-    SmsTransport, StorageSection, TokenYamlConfig, ValidationIssue,
+    Config, DemoConfig, EmailConfig, EmailTransport, MetricsConfig, ObservabilityConfig,
+    OidcYamlConfig, OnboardingConfig, OperationalConfig, RealmYamlConfig, SecurityYaml,
+    ServerConfig, SmsConfig, SmsTransport, StorageSection, TokenYamlConfig, ValidationIssue,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -135,6 +135,7 @@ impl Config {
             cluster: None,
             security: SecurityYaml::default(),
             agent_auth: AgentAuthConfig::default(),
+            demo: DemoConfig::default(),
             dev_mode: true,
             config_warnings: Vec::new(),
         }

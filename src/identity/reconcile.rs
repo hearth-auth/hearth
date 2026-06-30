@@ -19,8 +19,9 @@ use tracing::{info, trace, warn};
 use uuid::Uuid;
 
 use crate::config::{
-    ApplicationYamlConfig, AuthConfig, Config, ConfigDiff, ConfigSnapshot, FederationProviderYaml,
-    FederationYamlConfig, OrganizationYamlConfig, RealmYamlConfig, SeedUserYamlConfig,
+    ApplicationYamlConfig, AuthConfig, Config, ConfigDiff, ConfigSnapshot, DemoConfig,
+    FederationProviderYaml, FederationYamlConfig, OrganizationYamlConfig, RealmYamlConfig,
+    SeedUserYamlConfig, SeedingYamlConfig,
 };
 use crate::core::{ClientId, RealmId, Timestamp};
 use crate::identity::error::IdentityError;
@@ -31,8 +32,9 @@ use crate::identity::keys::{
 use crate::identity::oidc::{ApplicationStatus, ClientProfile, UpdateClientRequest};
 use crate::identity::{
     CleartextPassword, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
-    IdentityEngine, ImportClientRequest, OrganizationConfig, OrganizationStatus, RealmConfig,
-    RealmStatus, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest, UserStatus,
+    DemoSeedSpec, IdentityEngine, ImportClientRequest, OrganizationConfig, OrganizationStatus,
+    RealmConfig, RealmStatus, UpdateOrganizationRequest, UpdateRealmRequest, UpdateUserRequest,
+    UserStatus,
 };
 use crate::rbac::{
     AssignRoleRequest, Group, GroupId, Permission, ProtectedResource, RbacEngine, Scope,
@@ -651,6 +653,112 @@ fn reconcile_seed_users(
     }
 }
 
+/// Runs the large-scale demo seeder for every realm that declares a `seeding:`
+/// block.
+///
+/// This is a **no-op unless `demo.enabled` is `true`** — the production guard: a
+/// config without `demo.enabled` never reaches the mass seeder, so it cannot run
+/// against real data. The realms must already exist (call this *after*
+/// [`reconcile_realms`]); each realm is resolved by name and seeded via
+/// [`IdentityEngine::seed_demo_users`], which is idempotent and resumable.
+///
+/// Designed to run in a background task *after* the HTTP listener binds, so the
+/// server is reachable while millions of users stream in. Per-realm errors are
+/// `warn!`-logged and never propagate.
+pub fn seed_demo_realms(engine: &dyn IdentityEngine, config: &Config) {
+    let demo = &config.demo;
+    if !demo.enabled {
+        return;
+    }
+    let Some(realms) = config.realms.as_ref() else {
+        return;
+    };
+    let to_seed: Vec<(&String, &SeedingYamlConfig)> = realms
+        .iter()
+        .filter_map(|(name, cfg)| cfg.seeding.as_ref().map(|s| (name, s)))
+        .collect();
+    if to_seed.is_empty() {
+        return;
+    }
+
+    let total: u64 = to_seed.iter().map(|(_, s)| s.users).sum();
+    info!(
+        realms = to_seed.len(),
+        users = total,
+        "demo seeding started (background) — server is already accepting requests"
+    );
+
+    for (name, seeding) in to_seed {
+        let realm_id = match engine.get_realm_by_name(name) {
+            Ok(Some(realm)) => realm.id().clone(),
+            Ok(None) => {
+                warn!(realm = name, "demo seeding: realm not found; skipping");
+                continue;
+            }
+            Err(e) => {
+                warn!(realm = name, error = %e, "demo seeding: get_realm_by_name failed; skipping");
+                continue;
+            }
+        };
+        reconcile_demo_seeding(engine, &realm_id, name, demo, seeding);
+    }
+
+    info!("demo seeding finished (all realms)");
+}
+
+/// Runs the large-scale demo seeder for a realm's `seeding:` block.
+///
+/// Only invoked when the top-level `demo.enabled` is `true` (the production
+/// guard is enforced by the caller). Delegates to
+/// [`IdentityEngine::seed_demo_users`], which is idempotent and resumable. The
+/// shared password comes from `demo.password` (or the built-in default); the
+/// email domain defaults to `"<realm-name>.demo"`. Errors are `warn!`-logged
+/// and never abort startup, matching the other reconcile steps.
+fn reconcile_demo_seeding(
+    engine: &dyn IdentityEngine,
+    realm_id: &RealmId,
+    realm_name: &str,
+    demo: &DemoConfig,
+    seeding: &SeedingYamlConfig,
+) {
+    let email_domain = seeding
+        .email_domain
+        .clone()
+        .unwrap_or_else(|| format!("{realm_name}.demo"))
+        .to_lowercase();
+    let display_name_prefix = seeding
+        .display_name_prefix
+        .clone()
+        .unwrap_or_else(|| "Demo User".to_string());
+    let spec = DemoSeedSpec {
+        target_count: seeding.users,
+        email_domain,
+        display_name_prefix,
+        email_verified: seeding.email_verified.unwrap_or(true),
+    };
+    let password = CleartextPassword::from_string(demo.password_or_default().to_string());
+
+    match engine.seed_demo_users(realm_id, &password, &spec) {
+        Ok(outcome) => {
+            tracing::info!(
+                realm = realm_name,
+                created = outcome.created,
+                total = outcome.total,
+                skipped = outcome.skipped,
+                "demo seeding complete"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                realm = realm_name,
+                target = seeding.users,
+                error = %e,
+                "demo seeding failed"
+            );
+        }
+    }
+}
+
 /// Reconciles a declared `realms:` map.
 fn reconcile_declared_realms(
     engine: &dyn IdentityEngine,
@@ -746,6 +854,12 @@ fn reconcile_declared_realms(
         if let Some(seed_users) = yaml_cfg.seed_users.as_deref() {
             reconcile_seed_users(engine, rbac, &realm_id, name, seed_users);
         }
+
+        // NOTE: large-scale demo seeding (`seeding:` blocks) is intentionally
+        // NOT run here. It can insert millions of rows and would block startup
+        // (and the HTTP listener) for minutes. The caller runs it AFTER the
+        // server is listening via `seed_demo_realms`, so the instance is
+        // reachable while it fills.
 
         // Reconcile managed OAuth clients declared under this realm.
         if let Some(apps) = yaml_cfg

@@ -1748,6 +1748,63 @@ impl SeedUserYamlConfig {
     }
 }
 
+/// Top-level demo-mode configuration (`demo:` block).
+///
+/// Gates the large-scale demo seeder driven by per-realm [`SeedingYamlConfig`]
+/// blocks. When `enabled` is `false` — the default — the seeder is never
+/// invoked. A production config simply omits this block, so the mass seeder
+/// physically cannot run against real data.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DemoConfig {
+    /// Master switch. Must be `true` for any per-realm `seeding:` block to run.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Password shared by every seeded user across all realms. When omitted, a
+    /// built-in default ([`DemoConfig::DEFAULT_PASSWORD`]) is used. It is hashed
+    /// once and the resulting hash is reused for every account, so all demo
+    /// users authenticate with this single value.
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+impl DemoConfig {
+    /// Default password applied to seeded users when `password` is unset.
+    pub const DEFAULT_PASSWORD: &'static str = "DemoPassw0rd!";
+
+    /// Returns the configured shared password, or the built-in default.
+    #[must_use]
+    pub fn password_or_default(&self) -> &str {
+        self.password.as_deref().unwrap_or(Self::DEFAULT_PASSWORD)
+    }
+}
+
+/// Per-realm large-scale seeding directive (`realms.<name>.seeding`).
+///
+/// Only honored when the top-level [`DemoConfig::enabled`] is `true`. The seeder
+/// inserts `users` synthetic, pre-activated accounts
+/// (`user0000001@<domain>`, `user0000002@<domain>`, …) that all share the demo
+/// password. It is additive and resumable: a per-realm sentinel records how many
+/// users have been seeded, so re-running only creates the delta and never
+/// modifies or deletes existing accounts. Cross-realm distribution is simply
+/// whichever `users` counts the operator sets per realm.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeedingYamlConfig {
+    /// Target number of synthetic users for this realm.
+    pub users: u64,
+    /// Email domain for generated addresses (`user0000001@<email_domain>`).
+    /// Defaults to `"<realm-name>.demo"` when omitted.
+    #[serde(default)]
+    pub email_domain: Option<String>,
+    /// Display-name prefix (`"<prefix> 1"`, `"<prefix> 2"`, …).
+    /// Defaults to `"Demo User"`.
+    #[serde(default)]
+    pub display_name_prefix: Option<String>,
+    /// Whether generated accounts are pre-verified and immediately Active.
+    /// Defaults to `true`.
+    #[serde(default)]
+    pub email_verified: Option<bool>,
+}
+
 /// Per-realm YAML configuration block.
 ///
 /// Fields are optional — `None` inherits from global `auth:` defaults.
@@ -1869,6 +1926,10 @@ pub struct RealmYamlConfig {
     /// Additive-only: the reconciler never deletes or modifies existing users.
     #[serde(default)]
     pub seed_users: Option<Vec<SeedUserYamlConfig>>,
+    /// Large-scale demo seeding directive. Only honored when the top-level
+    /// `demo.enabled` is `true`. See [`SeedingYamlConfig`].
+    #[serde(default)]
+    pub seeding: Option<SeedingYamlConfig>,
 }
 
 /// YAML for `realms.{name}.scim.*`.
@@ -3050,6 +3111,11 @@ pub struct Config {
     /// See `docs/specs/AGENT_AUTH.md` for the full capability map.
     #[serde(default)]
     pub agent_auth: AgentAuthConfig,
+    /// Demo-mode configuration. Gates the large-scale demo seeder (per-realm
+    /// `seeding:` blocks). Absent or `enabled: false` in production. See
+    /// [`DemoConfig`].
+    #[serde(default)]
+    pub demo: DemoConfig,
     /// Whether development mode is active. Not serialized — set by [`Config::dev`].
     #[serde(skip)]
     pub dev_mode: bool,

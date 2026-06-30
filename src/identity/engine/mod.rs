@@ -237,12 +237,13 @@ use crate::identity::types::{
     Agent, AgentCredential, AgentCredentialKind, AgentOwner, AgentStatus, BulkResult,
     ConsentListEntry, ConsentRecord, CreateAgentApiKeyRequest, CreateAgentApiKeyResponse,
     CreateAgentRequest, CreateInvitationRequest, CreateOrganizationRequest, CreateRealmRequest,
-    CreateUserRequest, ImportClientRequest, ImportUserRequest, InvitationStatus, ListAgentsQuery,
-    Organization, OrganizationInvitation, OrganizationMembership, OrganizationRole,
-    OrganizationStatus, Page, PendingAuthorizationRequest, PlaintextApiKey, ProtectedResource,
-    Realm, RealmStatus, RegisterProtectedResourceRequest, RegisterUserRequest,
-    RegisterUserResponse, RegistrationPolicy, Rfc8693Request, Rfc8693Response, Session,
-    SessionContext, SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
+    CreateUserRequest, DemoSeedOutcome, DemoSeedSpec, ImportClientRequest, ImportUserRequest,
+    InvitationStatus, ListAgentsQuery, Organization, OrganizationInvitation,
+    OrganizationMembership, OrganizationRole, OrganizationStatus, Page,
+    PendingAuthorizationRequest, PlaintextApiKey, ProtectedResource, Realm, RealmStatus,
+    RegisterProtectedResourceRequest, RegisterUserRequest, RegisterUserResponse,
+    RegistrationPolicy, Rfc8693Request, Rfc8693Response, Session, SessionContext,
+    SessionLimitPolicy, UpdateAgentRequest, UpdateOrganizationRequest,
     UpdateProtectedResourceRequest, UpdateRealmRequest, UpdateUserRequest, User, UserStatus,
 };
 use crate::identity::validation;
@@ -8619,6 +8620,126 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )?;
 
         Ok(user)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn seed_demo_users(
+        &self,
+        realm_id: &RealmId,
+        password: &CleartextPassword,
+        spec: &DemoSeedSpec,
+    ) -> Result<DemoSeedOutcome, IdentityError> {
+        // Never seed the system realm.
+        if keys::is_system_realm(realm_id) {
+            return Err(IdentityError::SystemRealmProtected {
+                operation: "seed_demo_users",
+            });
+        }
+
+        // Number of users committed per atomic `put_batch` write. Each user
+        // contributes 3 entries (email index, user record, shared credential);
+        // the advanced sentinel rides in the same batch so a crash mid-seed
+        // resumes exactly at the last committed chunk.
+        const CHUNK: u64 = 2_000;
+
+        // Read the per-realm sentinel to make seeding idempotent/resumable.
+        let count_key = keys::encode_demo_seed_count();
+        let current: u64 = match self
+            .storage
+            .get(realm_id, &count_key)
+            .map_err(Self::storage_err)?
+        {
+            Some(bytes) => std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            None => 0,
+        };
+
+        if current >= spec.target_count {
+            return Ok(DemoSeedOutcome {
+                created: 0,
+                total: current,
+                skipped: true,
+            });
+        }
+
+        // Hash the shared password ONCE; reuse the identical credential for
+        // every account. All users then authenticate with the same password.
+        let now = self.clock.now();
+        let cred_config = self.credential_config_for_realm(realm_id)?;
+        let stored = credentials::hash_password(password, &cred_config, now.as_micros())?;
+        let cred_bytes = Self::serialize_credential(&stored)?;
+
+        // Emit a progress log roughly every this many users so large realms
+        // show steady throughput in the background-seeding logs.
+        const PROGRESS_EVERY: u64 = 100_000;
+        let mut next_progress = current.saturating_add(PROGRESS_EVERY);
+
+        let mut next = current + 1;
+        while next <= spec.target_count {
+            let chunk_end = next.saturating_add(CHUNK - 1).min(spec.target_count);
+            let cap = usize::try_from((chunk_end - next + 1) * 3 + 1).unwrap_or(0);
+            let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(cap);
+
+            for idx in next..=chunk_end {
+                let user_id = UserId::generate();
+                let email = format!("user{idx:07}@{}", spec.email_domain);
+                let display_name = format!("{} {idx}", spec.display_name_prefix);
+                let mut user = User::new(
+                    user_id.clone(),
+                    email.clone(),
+                    display_name,
+                    String::new(),
+                    String::new(),
+                    UserStatus::Active,
+                    Vec::new(),
+                    now,
+                    now,
+                );
+                user.set_email_verified(spec.email_verified);
+
+                let user_bytes = Self::serialize_user(&user)?;
+                let id_bytes = user_id.as_uuid().to_string().into_bytes();
+                entries.push((keys::encode_user_email(&email), id_bytes));
+                entries.push((keys::encode_user_id(&user_id), user_bytes));
+                entries.push((keys::encode_credential_key(&user_id), cred_bytes.clone()));
+            }
+
+            // Advance the sentinel inside the same atomic batch as this chunk's
+            // users, so resume after a crash is exact.
+            entries.push((count_key.clone(), chunk_end.to_string().into_bytes()));
+            self.storage
+                .put_batch(realm_id, &entries)
+                .map_err(Self::storage_err)?;
+
+            if chunk_end >= next_progress {
+                tracing::info!(
+                    realm = %realm_id.as_uuid(),
+                    seeded = chunk_end,
+                    target = spec.target_count,
+                    "demo seeding progress"
+                );
+                next_progress = chunk_end.saturating_add(PROGRESS_EVERY);
+            }
+
+            next = chunk_end + 1;
+        }
+
+        // One summary audit event for the whole seed run (not one per user).
+        let _ = self.record_audit(
+            realm_id,
+            None,
+            AuditAction::UserCreated,
+            "demo_seed",
+            &spec.target_count.to_string(),
+        );
+
+        Ok(DemoSeedOutcome {
+            created: spec.target_count - current,
+            total: spec.target_count,
+            skipped: false,
+        })
     }
 
     fn import_client(

@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -290,6 +290,21 @@ dev:
 dev-reset:
 	rm -rf ./data/dev
 	@echo "Dev data wiped. Run make dev for a fresh start."
+
+## Seed a large multi-realm demo instance into ./data/demo, then serve it.
+## Realms, roles, groups, OAuth clients, and per-realm user counts all come
+## from examples/large-scale-demo/hearth.yaml (gated by `demo.enabled: true`).
+## First run seeds millions of users (use --release; takes a while); later runs
+## are instant thanks to a per-realm sentinel. Browse at http://127.0.0.1:8420
+## and log in as user0000001@acme.demo / DemoPassw0rd!
+seed-large:
+	HEARTH_DEV_DATA_DIR=./data/demo cargo run --release -- serve --dev \
+		--config examples/large-scale-demo/hearth.yaml
+
+## Wipe the large demo data directory (forces a fresh re-seed).
+seed-large-reset:
+	rm -rf ./data/demo
+	@echo "Demo data wiped. Run make seed-large to re-seed."
 
 # ── Helm ──────────────────────────────────────────────
 

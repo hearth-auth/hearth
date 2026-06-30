@@ -89,6 +89,42 @@ pub struct ImportClientRequest {
     pub consent_spans_orgs: bool,
 }
 
+/// Parameters for the large-scale demo seeder ([`IdentityEngine::seed_demo_users`]).
+///
+/// Drives generation of synthetic accounts named
+/// `user0000001@<email_domain>`, `user0000002@<email_domain>`, …. The shared
+/// password is supplied separately (as a `CleartextPassword`) so it can be
+/// hashed once and reused for every account.
+///
+/// [`IdentityEngine::seed_demo_users`]: crate::identity::IdentityEngine::seed_demo_users
+#[derive(Clone, Debug)]
+pub struct DemoSeedSpec {
+    /// Target total number of seeded users for the realm. The seeder creates
+    /// only the users above the realm's recorded sentinel count.
+    pub target_count: u64,
+    /// Email domain for generated addresses. Should be lowercase.
+    pub email_domain: String,
+    /// Display-name prefix; the user index is appended (e.g. `"Demo User 42"`).
+    pub display_name_prefix: String,
+    /// Whether generated accounts are pre-verified (and thus immediately able
+    /// to authenticate without an email-verification step).
+    pub email_verified: bool,
+}
+
+/// Outcome of a [`IdentityEngine::seed_demo_users`] call.
+///
+/// [`IdentityEngine::seed_demo_users`]: crate::identity::IdentityEngine::seed_demo_users
+#[derive(Clone, Debug, Default)]
+pub struct DemoSeedOutcome {
+    /// Number of users created by this call (the delta above the prior count).
+    pub created: u64,
+    /// Total seeded users for the realm after this call.
+    pub total: u64,
+    /// `true` when the realm was already at (or above) the target and nothing
+    /// was created.
+    pub skipped: bool,
+}
+
 /// Summary returned by a successful migration.
 ///
 /// Counts reflect what was actually written. `warnings` contains
