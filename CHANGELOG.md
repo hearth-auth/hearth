@@ -29,6 +29,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   500k-user realm this made a single user-detail page load O(N) — 1–2 s per lookup.
   It now uses the memtable's O(log n) `BTreeMap` lookup (new tombstone-aware
   `get_entry`), so point reads stay near-instant regardless of realm size (HEA-1614).
+- **Performance: admin list page loads no longer scan and allocate the full realm prefix.** `count_prefix` and `scan_prefix_paged` previously called `scan()` on the entire prefix — materialising key + value bytes for every entry (e.g. 500 k users × ~500 B/entry ≈ 250 MB per page load). A new two-phase approach is used: a key-only scan (`scan_keys`) builds the total count without allocating any value bytes, then a bounded value scan covering only the requested page window (O(limit) instead of O(N)) returns the entries with their values. A new `StorageEngine::scan_keys` method and corresponding efficient `EmbeddedStorageEngine` override (using `range_scan_keys`/`iter_realm_range_keys` on SST and memtable layers) underpin the change (HEA-1622).
 - **Pagination: admin list totals are no longer capped at 10,000.** Admin list and
   dashboard counts were truncated to a 10,000-per-prefix ceiling, so a realm with
   500,000 users reported "10,000" and the dashboard summed a wrong global total
