@@ -27,6 +27,7 @@ pub mod pre_token_webhook;
 pub mod ra_token;
 pub mod reconcile;
 pub mod risk;
+pub mod search;
 pub mod session_version;
 pub mod sessions;
 pub mod sms;
