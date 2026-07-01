@@ -93,9 +93,9 @@
   {# Table #}
   <div class="overflow-hidden">
     <table class="w-full">
-      <thead>
+      <thead id="users-thead">
         <tr class="border-b border-divider bg-ht-surface-elevated">
-          <th class="w-8 px-4 py-3">
+          <th class="w-8 px-4 py-3" scope="col" aria-label="Select">
             <input type="checkbox"
                    id="select-all-check"
                    aria-label="Select all"
@@ -104,7 +104,7 @@
           {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
           {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
           {% call sortable::th("Status", "status", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
-          <th class="px-4 py-3" aria-label="Actions"></th>
+          <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
         </tr>
       </thead>
       <tbody id="users-tbody">
