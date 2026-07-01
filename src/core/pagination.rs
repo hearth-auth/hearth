@@ -98,6 +98,17 @@ pub struct PagedResult<T> {
     pub limit: u32,
 }
 
+impl<T> Default for PagedResult<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            total: 0,
+            offset: 0,
+            limit: DEFAULT_PAGE_LIMIT,
+        }
+    }
+}
+
 impl<T> PagedResult<T> {
     /// Constructs a result from components.
     pub fn new(items: Vec<T>, total: u64, offset: u64, limit: u32) -> Self {

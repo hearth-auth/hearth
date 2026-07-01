@@ -28,13 +28,22 @@ impl From<&domain::OAuthClient> for pb::OAuthClient {
     }
 }
 
-/// Converts a domain `Page<OAuthClient>` to a proto `OAuthClientPage`.
+/// Converts a `PagedResult<OAuthClient>` to a proto `OAuthClientPage`.
+///
+/// Phase 3 will add `total`/`offset`/`limit` to the proto. For now the cursor
+/// encodes the next offset as a decimal string for cursor-aware callers.
 pub(crate) fn client_page_to_proto(
-    page: &domain::Page<domain::OAuthClient>,
+    page: &crate::core::PagedResult<domain::OAuthClient>,
 ) -> pb::OAuthClientPage {
+    let next = page.offset + page.items.len() as u64;
+    let next_cursor = if next < page.total {
+        Some(next.to_string())
+    } else {
+        None
+    };
     pb::OAuthClientPage {
         items: page.items.iter().map(pb::OAuthClient::from).collect(),
-        next_cursor: page.next_cursor.clone(),
+        next_cursor,
     }
 }
 

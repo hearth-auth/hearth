@@ -25,7 +25,7 @@ use crate::identity::oidc::{
 };
 use crate::identity::tokens::{self, Audience, LogoutTokenClaims, TokenClaims};
 use crate::identity::types::{
-    BulkResult, ConsentListEntry, ConsentRecord, CreateUserRequest, DelegationGrantEntry, Page,
+    BulkResult, ConsentListEntry, ConsentRecord, CreateUserRequest, DelegationGrantEntry,
     PendingAuthorizationRequest, SessionContext, StoredDelegationGrant, UpdateUserRequest, User,
     UserStatus,
 };
@@ -2870,34 +2870,16 @@ impl EmbeddedIdentityEngine {
     pub(super) fn list_clients_inner(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<OAuthClient>, IdentityError> {
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<OAuthClient>, IdentityError> {
         let prefix = keys::oauth_client_scan_prefix();
-        let start = if let Some(cursor_str) = cursor {
-            let uuid_str = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor_str).map_err(|e| {
-                IdentityError::InvalidInput {
-                    reason: format!("invalid cursor: {e}"),
-                }
-            })?)
-            .map_err(|e| IdentityError::InvalidInput {
-                reason: format!("invalid cursor: {e}"),
-            })?;
-            let mut cursor_key = format!("oauth:client:{uuid_str}").into_bytes();
-            cursor_key.push(0xFF);
-            cursor_key
-        } else {
-            prefix.clone()
-        };
-        let end = keys::prefix_end(&prefix);
-
-        let entries = self
+        let (entries, total) = self
             .storage
-            .scan(realm_id, &start, &end)
+            .scan_prefix_paged(realm_id, &prefix, page.offset, page.limit, 0)
             .map_err(Self::storage_err)?;
 
-        let mut items = Vec::new();
-        for entry in entries.iter().take(limit + 1) {
+        let mut items = Vec::with_capacity(entries.len());
+        for entry in &entries {
             let client: OAuthClient =
                 serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
@@ -2905,15 +2887,12 @@ impl EmbeddedIdentityEngine {
             items.push(client);
         }
 
-        let next_cursor = if items.len() > limit {
-            items.pop(); // discard the extra item
-            let last_kept = items.last().expect("limit >= 1");
-            Some(URL_SAFE_NO_PAD.encode(last_kept.client_id().as_uuid().to_string()))
-        } else {
-            None
-        };
-
-        Ok(Page { items, next_cursor })
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
     }
 
     pub(super) fn get_client_inner(

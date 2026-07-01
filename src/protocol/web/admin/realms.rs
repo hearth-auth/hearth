@@ -30,22 +30,25 @@ pub async fn admin_realms_list(
     RequireAdmin(session): RequireAdmin,
     Query(params): Query<PaginationParams>,
 ) -> Response {
-    match state.identity.list_realms(params.cursor.as_deref(), 20) {
-        Ok(page) => render(&RealmListTemplate {
-            realms: page.items,
-            next_cursor: page.next_cursor,
-            chrome: true,
-            active: "realms",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            realm_theme_url: state.realm_theme_url(),
-            inline_theme_css: state.inline_theme_css(),
-        }),
+    match state.identity.list_realms(&params.as_page_request(20)) {
+        Ok(page) => {
+            let next_cursor = PaginationParams::next_cursor_from(&page);
+            render(&RealmListTemplate {
+                realms: page.items,
+                next_cursor,
+                chrome: true,
+                active: "realms",
+                user_email: Some(session.user_email.clone()),
+                is_admin: true,
+                flash: None,
+                csrf: session.csrf.clone(),
+                narrow: false,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            })
+        }
         Err(e) => {
             tracing::warn!(error = %e, "list_realms failed");
             super::handlers_common::server_error()

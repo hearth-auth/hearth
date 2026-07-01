@@ -333,13 +333,26 @@ pub async fn list_groups(
         None => None,
     };
 
-    let page = match state
-        .identity
-        .list_organizations(&auth.realm_id, None, 1000)
-    {
-        Ok(p) => p,
-        Err(e) => return from_identity_error(&e).into_response(),
-    };
+    // Collect all orgs via offset pagination for SCIM.
+    let mut all_orgs: Vec<crate::identity::Organization> = Vec::new();
+    let mut scim_off = 0u64;
+    loop {
+        let batch = crate::core::MAX_PAGE_LIMIT;
+        let sp = match state.identity.list_organizations(
+            &auth.realm_id,
+            &crate::core::PageRequest::new(scim_off, batch),
+        ) {
+            Ok(p) => p,
+            Err(e) => return from_identity_error(&e).into_response(),
+        };
+        let n = sp.items.len() as u64;
+        all_orgs.extend(sp.items);
+        if n == 0 || scim_off + n >= sp.total {
+            break;
+        }
+        scim_off += n;
+    }
+    let page = crate::core::PagedResult::new(all_orgs, 0, 0, crate::core::MAX_PAGE_LIMIT);
     let mut resources: Vec<ScimGroup> = Vec::with_capacity(page.items.len());
     for org in &page.items {
         let ext = state

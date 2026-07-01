@@ -80,7 +80,7 @@ async fn seeding_creates_users_sharing_demo_password() {
 
     // Exactly 50 users seeded.
     let page = identity
-        .list_users(realm.id(), None, 100)
+        .list_users(realm.id(), &hearth::core::PageRequest::new(0, 100))
         .expect("list_users");
     assert_eq!(page.items.len(), 50, "seeding.users must create 50 users");
 
@@ -139,7 +139,7 @@ async fn seeding_skipped_when_demo_disabled() {
 
     // ...but NO bulk users are seeded when demo.enabled is false.
     let page = identity
-        .list_users(realm.id(), None, 100)
+        .list_users(realm.id(), &hearth::core::PageRequest::new(0, 100))
         .expect("list_users");
     assert!(
         page.items.is_empty(),
@@ -166,10 +166,12 @@ async fn seeding_is_idempotent_and_resumable() {
 
     let count = |id: &hearth::core::RealmId| {
         identity
-            .list_users(id, None, 1000)
+            .list_users(
+                id,
+                &hearth::core::PageRequest::new(0, hearth::core::MAX_PAGE_LIMIT),
+            )
             .expect("list_users")
-            .items
-            .len()
+            .total as usize
     };
     assert_eq!(count(realm.id()), 20, "first run seeds 20");
 

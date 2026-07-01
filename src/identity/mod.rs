@@ -105,8 +105,8 @@ pub use webauthn::{
 };
 
 use crate::core::{
-    AgentId, ClientId, InvitationId, OrganizationId, RealmId, ResourceServerId, SessionId,
-    Timestamp, UserId, WebhookId,
+    AgentId, ClientId, InvitationId, OrganizationId, PageRequest, PagedResult, RealmId,
+    ResourceServerId, SessionId, Timestamp, UserId, WebhookId,
 };
 
 // Maximum page size for all paginated list operations (A-23).
@@ -469,28 +469,26 @@ pub trait IdentityEngine: Send + Sync {
         session_id: &SessionId,
     ) -> Result<Session, IdentityError>;
 
-    /// Lists all sessions belonging to a user, with cursor-based pagination.
+    /// Lists all sessions belonging to a user, with offset-based pagination.
     ///
-    /// Sessions are returned newest-first by their UUID ordering in the
+    /// Sessions are returned by their UUID ordering in the
     /// `ses:user:{user_uuid}:{session_uuid}` index.
     fn list_sessions_by_user(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Session>, IdentityError>;
+        page: &PageRequest,
+    ) -> Result<PagedResult<Session>, IdentityError>;
 
-    /// Lists all sessions in a realm, with cursor-based pagination.
+    /// Lists all active sessions in a realm, with offset-based pagination.
     ///
-    /// Sessions are returned by their UUID ordering in the
-    /// `ses:id:{session_uuid}` primary key space.
+    /// Revoked sessions are excluded. Sessions are returned by their UUID
+    /// ordering in the `ses:id:{session_uuid}` primary key space.
     fn list_sessions_by_realm(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Session>, IdentityError>;
+        page: &PageRequest,
+    ) -> Result<PagedResult<Session>, IdentityError>;
 
     /// Revokes all active sessions (and their grant families) for a user.
     ///
@@ -1130,42 +1128,39 @@ pub trait IdentityEngine: Send + Sync {
 
     // ===== Admin API (Step 27) =====
 
-    /// Lists users with cursor-based pagination.
+    /// Lists users with offset-based pagination.
     ///
-    /// Returns at most `limit` users. If more exist, `Page::next_cursor`
-    /// contains the cursor for the next page.
+    /// Returns a window of users plus the capped total count.
     fn list_users(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<User>, IdentityError>;
+        page: &PageRequest,
+    ) -> Result<PagedResult<User>, IdentityError>;
 
     /// Searches users by substring match on email or display name.
     ///
-    /// Case-insensitive substring match. Returns up to `limit` matches.
-    /// Query must be at least 2 characters; shorter queries return empty.
+    /// Case-insensitive substring match. Returns the matching window plus
+    /// the total filtered count. Query must be at least 2 characters;
+    /// shorter queries return an empty `PagedResult`.
     fn search_users(
         &self,
         realm_id: &RealmId,
         query: &str,
-        limit: usize,
-    ) -> Result<Vec<User>, IdentityError>;
+        page: &PageRequest,
+    ) -> Result<PagedResult<User>, IdentityError>;
 
-    /// Lists realms with cursor-based pagination.
+    /// Lists realms with offset-based pagination.
     ///
     /// Realms are stored under the system realm namespace, so no
     /// `realm_id` parameter is needed for scoping.
-    fn list_realms(&self, cursor: Option<&str>, limit: usize)
-        -> Result<Page<Realm>, IdentityError>;
+    fn list_realms(&self, page: &PageRequest) -> Result<PagedResult<Realm>, IdentityError>;
 
-    /// Lists OAuth clients with cursor-based pagination.
+    /// Lists OAuth clients with offset-based pagination.
     fn list_clients(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<OAuthClient>, IdentityError>;
+        page: &PageRequest,
+    ) -> Result<PagedResult<OAuthClient>, IdentityError>;
 
     /// Retrieves a single OAuth client by ID.
     fn get_client(
@@ -1290,13 +1285,12 @@ pub trait IdentityEngine: Send + Sync {
         org_id: &OrganizationId,
     ) -> Result<(), IdentityError>;
 
-    /// Lists all organizations in a realm with cursor-based pagination.
+    /// Lists all organizations in a realm with offset-based pagination.
     fn list_organizations(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Organization>, IdentityError>;
+        page: &PageRequest,
+    ) -> Result<PagedResult<Organization>, IdentityError>;
 
     /// Adds a user as a member of an organization.
     ///
@@ -1849,8 +1843,12 @@ pub trait IdentityEngine: Send + Sync {
         webhook_id: &WebhookId,
     ) -> Result<Option<Webhook>, IdentityError>;
 
-    /// Lists all webhooks registered in a realm, in insertion order.
-    fn list_webhooks(&self, realm_id: &RealmId) -> Result<Vec<Webhook>, IdentityError>;
+    /// Lists webhooks registered in a realm, sorted by insertion order.
+    fn list_webhooks(
+        &self,
+        realm_id: &RealmId,
+        page: &PageRequest,
+    ) -> Result<PagedResult<Webhook>, IdentityError>;
 
     /// Updates an existing webhook's configuration.
     ///

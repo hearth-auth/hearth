@@ -403,7 +403,8 @@ pub async fn admin_realm_admin_picker(
     let users = if query.len() >= 2 {
         state
             .identity
-            .search_users(&realm_id, &query, 20)
+            .search_users(&realm_id, &query, &crate::core::PageRequest::new(0, 20))
+            .map(|r| r.items)
             .unwrap_or_default()
     } else {
         Vec::new()

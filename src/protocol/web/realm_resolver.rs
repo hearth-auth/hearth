@@ -90,7 +90,10 @@ pub fn resolve(state: &WebState, path_realm: Option<&str>) -> Resolved {
     // For rules 2-4 we need the realm inventory. Cap at 2 is enough to
     // distinguish "exactly one" from "more than one"; the picker case
     // loads the full set separately when needed.
-    let inventory = match state.identity.list_realms(None, 2) {
+    let inventory = match state
+        .identity
+        .list_realms(&crate::core::PageRequest::new(0, 2))
+    {
         Ok(page) => page.items,
         Err(e) => {
             tracing::warn!(error = %e, "resolve: list_realms failed");
@@ -130,7 +133,10 @@ pub fn resolve(state: &WebState, path_realm: Option<&str>) -> Resolved {
 
 /// Loads a larger page of realms for the "choose a realm" picker.
 fn fetch_picker(state: &WebState) -> Resolved {
-    match state.identity.list_realms(None, 100) {
+    match state
+        .identity
+        .list_realms(&crate::core::PageRequest::new(0, 100))
+    {
         Ok(page) => Resolved::MustChoose(page.items),
         Err(e) => {
             tracing::warn!(error = %e, "resolve: picker list_realms failed");

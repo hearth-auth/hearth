@@ -2747,9 +2747,12 @@ impl EmbeddedIdentityEngine {
         }
         let now = self.clock.now();
         let mut evicted: u64 = 0;
-        let mut cursor = None::<String>;
+        let mut offset = 0u64;
+        let batch = crate::core::MAX_PAGE_LIMIT;
         loop {
-            let page = self.list_sessions_by_realm(realm_id, cursor.as_deref(), 200)?;
+            let page = self
+                .list_sessions_by_realm(realm_id, &crate::core::PageRequest::new(offset, batch))?;
+            let n = page.items.len() as u64;
             for session in &page.items {
                 if session.is_valid(now) && session.is_policy_expired(now) {
                     if self.evict_session_by_policy(realm_id, session, now).is_ok() {
@@ -2757,10 +2760,10 @@ impl EmbeddedIdentityEngine {
                     }
                 }
             }
-            cursor = page.next_cursor;
-            if cursor.is_none() {
+            if n == 0 || offset + n >= page.total {
                 break;
             }
+            offset += n;
         }
         Ok(evicted)
     }
@@ -5490,8 +5493,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 let now = self.clock.now();
                 // Use a large-but-safe limit (u32::MAX avoids the take(limit+1)
                 // overflow that usize::MAX would cause inside list_sessions_by_user).
-                let page =
-                    self.list_sessions_by_user(realm_id, user_id, None, u32::MAX as usize)?;
+                // Use max page limit to get all sessions; the engine now counts via total.
+                let page = self.list_sessions_by_user(
+                    realm_id,
+                    user_id,
+                    &crate::core::PageRequest::new(0, crate::core::MAX_PAGE_LIMIT),
+                )?;
                 let mut live: Vec<_> = page.items.into_iter().filter(|s| s.is_valid(now)).collect();
                 let active = live.len() as u32;
 
@@ -5749,37 +5756,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Session>, IdentityError> {
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<Session>, IdentityError> {
         let prefix = keys::encode_user_sessions_prefix(user_id);
-        let start = if let Some(cursor_str) = cursor {
-            let uuid_str = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor_str).map_err(|e| {
-                IdentityError::InvalidInput {
-                    reason: format!("invalid cursor: {e}"),
-                }
-            })?)
-            .map_err(|e| IdentityError::InvalidInput {
-                reason: format!("invalid cursor: {e}"),
-            })?;
-            // The index key is `ses:user:{user_uuid}:{session_uuid}`.
-            // Position just after the cursor session.
-            let mut cursor_key = format!("ses:user:{}:{uuid_str}", user_id.as_uuid()).into_bytes();
-            cursor_key.push(0xFF);
-            cursor_key
-        } else {
-            prefix.clone()
-        };
         let end = keys::prefix_end(&prefix);
 
         let index_entries = self
             .storage
-            .scan(realm_id, &start, &end)
+            .scan(realm_id, &prefix, &end)
             .map_err(Self::storage_err)?;
 
-        let mut items = Vec::new();
-        for entry in index_entries.iter().take(limit + 1) {
-            // Extract session UUID from the index key suffix.
+        // Resolve all sessions from the index, then apply offset window.
+        let mut all: Vec<Session> = Vec::new();
+        for entry in &index_entries {
             let key_str = String::from_utf8_lossy(&entry.key);
             let Some(session_uuid_str) = key_str.rsplit(':').next() else {
                 continue;
@@ -5798,75 +5787,59 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     serde_json::from_slice(&data).map_err(|e| IdentityError::Serialization {
                         reason: e.to_string(),
                     })?;
-                items.push(session);
+                all.push(session);
             }
         }
 
-        let next_cursor = if items.len() > limit {
-            items.pop();
-            items
-                .last()
-                .map(|s| URL_SAFE_NO_PAD.encode(s.id().as_uuid().to_string()))
-        } else {
-            None
-        };
+        let total = all.len().min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        let start = (page.offset as usize).min(all.len());
+        let end_idx = (start + page.limit as usize).min(all.len());
+        let items = all[start..end_idx].to_vec();
 
-        Ok(Page { items, next_cursor })
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
     }
 
     fn list_sessions_by_realm(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Session>, IdentityError> {
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<Session>, IdentityError> {
         let prefix = keys::session_id_scan_prefix();
-        let start = if let Some(cursor_str) = cursor {
-            let uuid_str = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor_str).map_err(|e| {
-                IdentityError::InvalidInput {
-                    reason: format!("invalid cursor: {e}"),
-                }
-            })?)
-            .map_err(|e| IdentityError::InvalidInput {
-                reason: format!("invalid cursor: {e}"),
-            })?;
-            let mut cursor_key = format!("ses:id:{uuid_str}").into_bytes();
-            cursor_key.push(0xFF);
-            cursor_key
-        } else {
-            prefix.clone()
-        };
         let end = keys::prefix_end(&prefix);
 
         let entries = self
             .storage
-            .scan(realm_id, &start, &end)
+            .scan(realm_id, &prefix, &end)
             .map_err(Self::storage_err)?;
 
-        let mut items = Vec::new();
+        // Filter revoked sessions, then apply offset window on remaining.
+        let mut all: Vec<Session> = Vec::new();
         for entry in &entries {
-            if items.len() > limit {
-                break;
-            }
             let session: Session =
                 serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
             if !session.is_revoked() {
-                items.push(session);
+                all.push(session);
             }
         }
 
-        let next_cursor = if items.len() > limit {
-            items.pop();
-            items
-                .last()
-                .map(|s| URL_SAFE_NO_PAD.encode(s.id().as_uuid().to_string()))
-        } else {
-            None
-        };
+        let total = all.len().min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        let start = (page.offset as usize).min(all.len());
+        let end_idx = (start + page.limit as usize).min(all.len());
+        let items = all[start..end_idx].to_vec();
 
-        Ok(Page { items, next_cursor })
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
     }
 
     fn revoke_all_user_sessions(
@@ -5875,21 +5848,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         keep: Option<&SessionId>,
     ) -> Result<u32, IdentityError> {
-        let mut cursor: Option<String> = None;
+        let mut offset = 0u64;
+        let batch = crate::core::MAX_PAGE_LIMIT;
         let mut revoked: u32 = 0;
         let now = self.clock.now();
 
         loop {
-            let page = self.list_sessions_by_user(
+            let result = self.list_sessions_by_user(
                 realm_id,
                 user_id,
-                cursor.as_deref(),
-                crate::abuse::MAX_PAGE_SIZE,
+                &crate::core::PageRequest::new(offset, batch),
             )?;
-            let has_next = page.next_cursor.is_some();
-            cursor = page.next_cursor;
+            let n = result.items.len() as u64;
 
-            for session in &page.items {
+            for session in &result.items {
                 if let Some(keep_id) = keep {
                     if session.id() == keep_id {
                         continue;
@@ -5901,9 +5873,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 }
             }
 
-            if !has_next {
+            if n == 0 || offset + n >= result.total {
                 break;
             }
+            offset += n;
         }
 
         if revoked > 0 {
@@ -7662,14 +7635,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.set_password(realm_id, &user_id, new_password)?;
 
         // 7. Invalidate all existing sessions — credential change should force re-auth.
-        let page = self.list_sessions_by_user(realm_id, &user_id, None, 1000)?;
-        for session in page.items {
-            if let Err(e) = self.revoke_session(realm_id, session.id()) {
-                tracing::warn!(
-                    session_id = %session.id(),
-                    error = %e,
-                    "reset_password: failed to revoke session"
-                );
+        // Revoke all sessions for this user via offset pagination.
+        {
+            let mut offset = 0u64;
+            let batch = crate::core::MAX_PAGE_LIMIT;
+            loop {
+                let page = self.list_sessions_by_user(
+                    realm_id,
+                    &user_id,
+                    &crate::core::PageRequest::new(offset, batch),
+                )?;
+                let n = page.items.len() as u64;
+                for session in &page.items {
+                    if let Err(e) = self.revoke_session(realm_id, session.id()) {
+                        tracing::warn!(
+                            session_id = %session.id(),
+                            error = %e,
+                            "reset_password: failed to revoke session"
+                        );
+                    }
+                }
+                if n == 0 || offset + n >= page.total {
+                    break;
+                }
+                offset += n;
             }
         }
 
@@ -8057,36 +8046,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn list_users(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<User>, IdentityError> {
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<User>, IdentityError> {
         let prefix = keys::user_id_scan_prefix();
-        let start = if let Some(cursor_str) = cursor {
-            // Decode cursor → UUID, build key just after it
-            let uuid_str = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor_str).map_err(|e| {
-                IdentityError::InvalidInput {
-                    reason: format!("invalid cursor: {e}"),
-                }
-            })?)
-            .map_err(|e| IdentityError::InvalidInput {
-                reason: format!("invalid cursor: {e}"),
-            })?;
-            // Build key for cursor UUID and add a byte to get "just after"
-            let mut cursor_key = format!("usr:id:{uuid_str}").into_bytes();
-            cursor_key.push(0xFF);
-            cursor_key
-        } else {
-            prefix.clone()
-        };
-        let end = keys::prefix_end(&prefix);
-
-        let entries = self
+        let (entries, total) = self
             .storage
-            .scan(realm_id, &start, &end)
+            .scan_prefix_paged(realm_id, &prefix, page.offset, page.limit, 0)
             .map_err(Self::storage_err)?;
 
-        let mut items = Vec::new();
-        for entry in entries.iter().take(limit + 1) {
+        let mut items = Vec::with_capacity(entries.len());
+        for entry in &entries {
             let user: User =
                 serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
@@ -8094,26 +8063,28 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             items.push(user);
         }
 
-        let next_cursor = if items.len() > limit {
-            items.pop(); // discard the extra item
-            let last_kept = items.last().expect("limit >= 1");
-            Some(URL_SAFE_NO_PAD.encode(last_kept.id().as_uuid().to_string()))
-        } else {
-            None
-        };
-
-        Ok(Page { items, next_cursor })
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
     }
 
     fn search_users(
         &self,
         realm_id: &RealmId,
         query: &str,
-        limit: usize,
-    ) -> Result<Vec<User>, IdentityError> {
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<User>, IdentityError> {
         let query = query.trim();
         if query.len() < 2 {
-            return Ok(Vec::new());
+            return Ok(crate::core::PagedResult::new(
+                Vec::new(),
+                0,
+                page.offset,
+                page.limit,
+            ));
         }
         let query_lower = query.to_lowercase();
 
@@ -8124,7 +8095,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .scan(realm_id, &prefix, &end)
             .map_err(Self::storage_err)?;
 
-        let mut results = Vec::new();
+        // Filter all matching users first, then apply offset window.
+        let mut all_matching: Vec<User> = Vec::new();
         for entry in &entries {
             let user: User =
                 serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
@@ -8133,52 +8105,42 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             let email_lower = user.email().to_lowercase();
             let name_lower = user.display_name().to_lowercase();
             if email_lower.contains(&query_lower) || name_lower.contains(&query_lower) {
-                results.push(user);
-                if results.len() >= limit {
-                    break;
-                }
+                all_matching.push(user);
             }
         }
 
-        Ok(results)
+        let total = all_matching
+            .len()
+            .min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        let start = (page.offset as usize).min(all_matching.len());
+        let end_idx = (start + page.limit as usize).min(all_matching.len());
+        let items = all_matching[start..end_idx].to_vec();
+
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
     }
 
     fn list_realms(
         &self,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Realm>, IdentityError> {
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<Realm>, IdentityError> {
         let sys_realm = keys::system_realm_id();
         let prefix = keys::realm_id_scan_prefix();
-        let start = if let Some(cursor_str) = cursor {
-            let uuid_str = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor_str).map_err(|e| {
-                IdentityError::InvalidInput {
-                    reason: format!("invalid cursor: {e}"),
-                }
-            })?)
-            .map_err(|e| IdentityError::InvalidInput {
-                reason: format!("invalid cursor: {e}"),
-            })?;
-            let mut cursor_key = format!("realm:id:{uuid_str}").into_bytes();
-            cursor_key.push(0xFF);
-            cursor_key
-        } else {
-            prefix.clone()
-        };
         let end = keys::prefix_end(&prefix);
 
         let entries = self
             .storage
-            .scan(&sys_realm, &start, &end)
+            .scan(&sys_realm, &prefix, &end)
             .map_err(Self::storage_err)?;
 
-        // Filter out the reserved system realm: its record lives here
-        // alongside application realms but must never surface on the
-        // admin listing, realm switcher, or resolver's sole-realm
-        // shortcut. We scan with `limit + 1` headroom plus the filter
-        // so a page that happens to straddle the nil realm still
-        // returns `limit` real results.
-        let mut items = Vec::new();
+        // Filter out the reserved system realm record. It lives in the same
+        // prefix space as application realms but must never surface on admin
+        // listings. Full-scan then slice so the filter doesn't skew offsets.
+        let mut all: Vec<Realm> = Vec::new();
         for entry in &entries {
             let realm: Realm =
                 serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
@@ -8187,21 +8149,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             if keys::is_system_realm(realm.id()) {
                 continue;
             }
-            items.push(realm);
-            if items.len() > limit {
-                break;
-            }
+            all.push(realm);
         }
 
-        let next_cursor = if items.len() > limit {
-            items.pop(); // discard the extra item
-            let last_kept = items.last().expect("limit >= 1");
-            Some(URL_SAFE_NO_PAD.encode(last_kept.id().as_uuid().to_string()))
-        } else {
-            None
-        };
+        let total = all.len().min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        let start = (page.offset as usize).min(all.len());
+        let end_idx = (start + page.limit as usize).min(all.len());
+        let items = all[start..end_idx].to_vec();
 
-        Ok(Page { items, next_cursor })
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
     }
 
     fn authenticate_oauth_client(
@@ -8216,10 +8177,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn list_clients(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<OAuthClient>, IdentityError> {
-        self.list_clients_inner(realm_id, cursor, limit)
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<OAuthClient>, IdentityError> {
+        self.list_clients_inner(realm_id, page)
     }
 
     fn get_client(
@@ -9237,34 +9197,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn list_organizations(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Organization>, IdentityError> {
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<Organization>, IdentityError> {
         let prefix = keys::org_id_scan_prefix();
-        let start = if let Some(cursor_str) = cursor {
-            let uuid_str = String::from_utf8(URL_SAFE_NO_PAD.decode(cursor_str).map_err(|e| {
-                IdentityError::InvalidInput {
-                    reason: format!("invalid cursor: {e}"),
-                }
-            })?)
-            .map_err(|e| IdentityError::InvalidInput {
-                reason: format!("invalid cursor: {e}"),
-            })?;
-            let mut cursor_key = format!("org:id:{uuid_str}").into_bytes();
-            cursor_key.push(0xFF);
-            cursor_key
-        } else {
-            prefix.clone()
-        };
-        let end = keys::prefix_end(&prefix);
-
-        let entries = self
+        let (entries, total) = self
             .storage
-            .scan(realm_id, &start, &end)
+            .scan_prefix_paged(realm_id, &prefix, page.offset, page.limit, 0)
             .map_err(Self::storage_err)?;
 
-        let mut items = Vec::new();
-        for entry in entries.iter().take(limit + 1) {
+        let mut items = Vec::with_capacity(entries.len());
+        for entry in &entries {
             let org: Organization =
                 serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
@@ -9272,15 +9214,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             items.push(org);
         }
 
-        let next_cursor = if items.len() > limit {
-            items.pop();
-            let last_kept = items.last().expect("limit >= 1");
-            Some(URL_SAFE_NO_PAD.encode(last_kept.id().as_uuid().to_string()))
-        } else {
-            None
-        };
-
-        Ok(Page { items, next_cursor })
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
     }
 
     fn add_member(
@@ -10541,7 +10480,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn list_webhooks(
         &self,
         realm_id: &RealmId,
-    ) -> Result<Vec<crate::identity::Webhook>, IdentityError> {
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<crate::identity::Webhook>, IdentityError> {
         use crate::identity::types::Webhook;
         let prefix = keys::webhook_id_scan_prefix();
         let end = keys::prefix_end(&prefix);
@@ -10549,17 +10489,30 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .storage
             .scan(realm_id, &prefix, &end)
             .map_err(|e| IdentityError::Storage(Box::new(e)))?;
-        let mut out = Vec::with_capacity(entries.len());
-        for entry in entries {
+
+        // Deserialize all, sort by insertion order, then apply page window.
+        let mut all: Vec<Webhook> = Vec::with_capacity(entries.len());
+        for entry in &entries {
             match serde_json::from_slice::<Webhook>(&entry.value) {
-                Ok(wh) => out.push(wh),
+                Ok(wh) => all.push(wh),
                 Err(e) => {
                     tracing::warn!(error = %e, "webhook deserialization failed, skipping");
                 }
             }
         }
-        out.sort_by_key(|w| w.created_at);
-        Ok(out)
+        all.sort_by_key(|w| w.created_at);
+
+        let total = all.len().min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        let start = (page.offset as usize).min(all.len());
+        let end_idx = (start + page.limit as usize).min(all.len());
+        let items = all[start..end_idx].to_vec();
+
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
     }
 
     fn update_webhook(

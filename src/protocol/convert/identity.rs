@@ -190,21 +190,40 @@ impl From<pb::UpdateRealmRequest> for domain::UpdateRealmRequest {
     }
 }
 
-// ==================== Page ====================
+// ==================== PagedResult → proto page ====================
 
-/// Converts a domain `Page<User>` to a proto `UserPage`.
-pub(crate) fn user_page_to_proto(page: &domain::Page<domain::User>) -> pb::UserPage {
+/// Converts a `PagedResult<User>` to a proto `UserPage`.
+///
+/// Phase 3 will extend the proto with `total`/`offset`/`limit`. For now the
+/// cursor field encodes the next offset as a decimal string so that
+/// cursor-aware callers can still paginate.
+pub(crate) fn user_page_to_proto(page: &crate::core::PagedResult<domain::User>) -> pb::UserPage {
+    let next_cursor = next_offset_cursor(page.total, page.offset, page.items.len() as u64);
     pb::UserPage {
         items: page.items.iter().map(pb::User::from).collect(),
-        next_cursor: page.next_cursor.clone(),
+        next_cursor,
     }
 }
 
-/// Converts a domain `Page<Realm>` to a proto `RealmPage`.
-pub(crate) fn realm_page_to_proto(page: &domain::Page<domain::Realm>) -> pb::RealmPage {
+/// Converts a `PagedResult<Realm>` to a proto `RealmPage`.
+pub(crate) fn realm_page_to_proto(page: &crate::core::PagedResult<domain::Realm>) -> pb::RealmPage {
+    let next_cursor = next_offset_cursor(page.total, page.offset, page.items.len() as u64);
     pb::RealmPage {
         items: page.items.iter().map(pb::Realm::from).collect(),
-        next_cursor: page.next_cursor.clone(),
+        next_cursor,
+    }
+}
+
+/// Returns `Some("<next-offset>")` when more pages exist, or `None` on the last page.
+///
+/// The cursor is a decimal offset string. Phase 3 will replace cursor fields
+/// with explicit `total`/`offset`/`limit` proto fields.
+fn next_offset_cursor(total: u64, offset: u64, n: u64) -> Option<String> {
+    let next = offset + n;
+    if next < total {
+        Some(next.to_string())
+    } else {
+        None
     }
 }
 

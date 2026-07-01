@@ -67,29 +67,20 @@ fn setup_admin() -> (tempfile::TempDir, EmbeddedIdentityEngine, RealmId) {
 
 /// Benchmarks a single page of `list_users` at the middle of the dataset.
 ///
-/// We measure a single-page read (not the whole cursor walk) so criterion
-/// reports per-page latency directly, matching the target budget.
+/// We measure a single mid-dataset page so criterion reports per-page latency.
 fn bench_admin_list_users_page(c: &mut Criterion) {
     let (_dir, engine, realm_id) = setup_admin();
 
-    // Walk forward to a mid-dataset cursor so we benchmark a steady-state
-    // page read rather than the first page (which is always the hottest).
-    let mut cursor: Option<String> = None;
-    for _ in 0..(USER_COUNT / PAGE_SIZE / 2) {
-        let page = engine
-            .list_users(&realm_id, cursor.as_deref(), PAGE_SIZE)
-            .expect("list_users");
-        cursor = page.next_cursor;
-        if cursor.is_none() {
-            break;
-        }
-    }
-    let mid_cursor = cursor;
+    // Use a mid-dataset offset to benchmark a steady-state page read.
+    let mid_offset = (USER_COUNT / PAGE_SIZE / 2 * PAGE_SIZE) as u64;
 
     c.bench_function("admin_list_users_page_mid", |b| {
         b.iter(|| {
             let page = engine
-                .list_users(&realm_id, mid_cursor.as_deref(), PAGE_SIZE)
+                .list_users(
+                    &realm_id,
+                    &hearth::core::PageRequest::new(mid_offset, PAGE_SIZE as u32),
+                )
                 .expect("list_users");
             assert_eq!(page.items.len(), PAGE_SIZE);
         });
@@ -104,17 +95,21 @@ fn bench_admin_list_users_full_walk(c: &mut Criterion) {
 
     c.bench_function("admin_list_users_full_walk", |b| {
         b.iter(|| {
-            let mut cursor: Option<String> = None;
+            let mut offset = 0u64;
             let mut total = 0usize;
             loop {
                 let page = engine
-                    .list_users(&realm_id, cursor.as_deref(), PAGE_SIZE)
+                    .list_users(
+                        &realm_id,
+                        &hearth::core::PageRequest::new(offset, PAGE_SIZE as u32),
+                    )
                     .expect("list_users");
-                total += page.items.len();
-                match page.next_cursor {
-                    Some(c) => cursor = Some(c),
-                    None => break,
+                let n = page.items.len();
+                total += n;
+                if n == 0 || offset + n as u64 >= page.total {
+                    break;
                 }
+                offset += n as u64;
             }
             assert_eq!(total, USER_COUNT);
         });

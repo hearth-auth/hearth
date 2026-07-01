@@ -124,7 +124,7 @@ pub struct SetupOutcome {
 ///
 /// Returns any error from `list_realms`.
 pub fn is_first_run(engine: &dyn IdentityEngine) -> Result<bool, IdentityError> {
-    let page = engine.list_realms(None, 1)?;
+    let page = engine.list_realms(&crate::core::PageRequest::new(0, 1))?;
     Ok(page.items.is_empty())
 }
 

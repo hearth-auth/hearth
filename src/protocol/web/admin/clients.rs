@@ -35,24 +35,27 @@ pub async fn admin_apps_list(
 ) -> Response {
     match state
         .identity
-        .list_clients(target.id(), params.cursor.as_deref(), 20)
+        .list_clients(target.id(), &params.as_page_request(20))
     {
-        Ok(page) => render(&AppListTemplate {
-            applications: page.items,
-            next_cursor: page.next_cursor,
-            realm_name: target.0.name().to_string(),
-            chrome: true,
-            active: "applications",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            realm_theme_url: state.realm_theme_url(),
-            inline_theme_css: state.inline_theme_css(),
-        }),
+        Ok(page) => {
+            let next_cursor = PaginationParams::next_cursor_from(&page);
+            render(&AppListTemplate {
+                applications: page.items,
+                next_cursor,
+                realm_name: target.0.name().to_string(),
+                chrome: true,
+                active: "applications",
+                user_email: Some(session.user_email.clone()),
+                is_admin: true,
+                flash: None,
+                csrf: session.csrf.clone(),
+                narrow: false,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            })
+        }
         Err(e) => {
             tracing::warn!(error = %e, "list_clients failed");
             super::handlers_common::server_error()

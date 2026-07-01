@@ -2004,41 +2004,46 @@ pub async fn dashboard(
     // pages), so the counts must be too. Failures fall through silently
     // — partial counts are better than a 500 on a stat card.
     let (user_count, realm_count, app_count, org_count) = if is_admin {
+        // Use total from a single paged call (covers capped count up to DEFAULT_COUNT_CAP).
+        let probe = crate::core::PageRequest::new(0, 1);
         let realm_count = state
             .identity
-            .list_realms(None, 10_000)
-            .map(|p| p.items.len())
+            .list_realms(&probe)
+            .map(|p| p.total as usize)
             .unwrap_or(0);
 
         let system_id = crate::identity::keys::system_realm_id();
-        let mut user_count = 0;
-        let mut app_count = 0;
-        let mut org_count = 0;
+        let mut user_count = 0usize;
+        let mut app_count = 0usize;
+        let mut org_count = 0usize;
 
         // System realm — operators only.
         user_count += state
             .identity
-            .list_users(&system_id, None, 10_000)
-            .map(|p| p.items.len())
+            .list_users(&system_id, &probe)
+            .map(|p| p.total as usize)
             .unwrap_or(0);
 
         // Tenant realms — sum users / clients / orgs from each.
-        if let Ok(realms_page) = state.identity.list_realms(None, 10_000) {
+        if let Ok(realms_page) = state.identity.list_realms(&crate::core::PageRequest::new(
+            0,
+            crate::core::MAX_PAGE_LIMIT,
+        )) {
             for realm in realms_page.items {
                 user_count += state
                     .identity
-                    .list_users(realm.id(), None, 10_000)
-                    .map(|p| p.items.len())
+                    .list_users(realm.id(), &probe)
+                    .map(|p| p.total as usize)
                     .unwrap_or(0);
                 app_count += state
                     .identity
-                    .list_clients(realm.id(), None, 10_000)
-                    .map(|p| p.items.len())
+                    .list_clients(realm.id(), &probe)
+                    .map(|p| p.total as usize)
                     .unwrap_or(0);
                 org_count += state
                     .identity
-                    .list_organizations(realm.id(), None, 10_000)
-                    .map(|p| p.items.len())
+                    .list_organizations(realm.id(), &probe)
+                    .map(|p| p.total as usize)
                     .unwrap_or(0);
             }
         }

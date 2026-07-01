@@ -102,11 +102,20 @@ impl IdentityAdminService for IdentityAdminSvc {
     ) -> Result<Response<pb::UserPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         let body = req.into_inner();
-        let limit = body.limit.unwrap_or(50) as usize;
+        let limit = body.limit.unwrap_or(50) as u32;
+        // Cursor field repurposed as decimal offset for backward compat.
+        let offset: u64 = body
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
         let page = self
             .state
             .identity
-            .list_users(&auth.realm_id, body.cursor.as_deref(), limit)
+            .list_users(
+                &auth.realm_id,
+                &crate::core::PageRequest::new(offset, limit),
+            )
             .map_err(identity_to_status)?;
         Ok(Response::new(user_page_to_proto(&page)))
     }
@@ -182,13 +191,18 @@ impl IdentityAdminService for IdentityAdminSvc {
     ) -> Result<Response<pb::RealmPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         let body = req.into_inner();
-        let limit = body.limit.unwrap_or(50) as usize;
+        let limit = body.limit.unwrap_or(50) as u32;
+        let offset: u64 = body
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
         // System-realm admins may list all realms; regular realm admins see only their own.
         if crate::identity::keys::is_system_realm(&auth.realm_id) {
             let page = self
                 .state
                 .identity
-                .list_realms(body.cursor.as_deref(), limit)
+                .list_realms(&crate::core::PageRequest::new(offset, limit))
                 .map_err(identity_to_status)?;
             Ok(Response::new(realm_page_to_proto(&page)))
         } else {
@@ -303,17 +317,28 @@ impl IdentityAdminService for IdentityAdminSvc {
     ) -> Result<Response<pb::OrganizationPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         let body = req.into_inner();
-        let limit = body.limit.unwrap_or(50) as usize;
+        let limit = body.limit.unwrap_or(50) as u32;
+        let offset: u64 = body
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
         let page = self
             .state
             .identity
-            .list_organizations(&auth.realm_id, body.cursor.as_deref(), limit)
+            .list_organizations(
+                &auth.realm_id,
+                &crate::core::PageRequest::new(offset, limit),
+            )
             .map_err(identity_to_status)?;
+        let next = page.offset + page.items.len() as u64;
+        let next_cursor = if next < page.total {
+            Some(next.to_string())
+        } else {
+            None
+        };
         let items: Vec<_> = page.items.iter().map(org_to_proto).collect();
-        Ok(Response::new(pb::OrganizationPage {
-            items,
-            next_cursor: page.next_cursor,
-        }))
+        Ok(Response::new(pb::OrganizationPage { items, next_cursor }))
     }
 
     async fn get_organization(
@@ -649,11 +674,19 @@ impl ApplicationAdminService for AppAdminSvc {
     ) -> Result<Response<pb::OAuthClientPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
         let body = req.into_inner();
-        let limit = body.limit.unwrap_or(50) as usize;
+        let limit = body.limit.unwrap_or(50) as u32;
+        let offset: u64 = body
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
         let page = self
             .state
             .identity
-            .list_clients(&auth.realm_id, body.cursor.as_deref(), limit)
+            .list_clients(
+                &auth.realm_id,
+                &crate::core::PageRequest::new(offset, limit),
+            )
             .map_err(identity_to_status)?;
         Ok(Response::new(client_page_to_proto(&page)))
     }

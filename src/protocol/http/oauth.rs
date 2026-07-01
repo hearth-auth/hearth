@@ -461,7 +461,10 @@ async fn token_options_preflight(
     // Check whether any registered client accepts this origin.
     let allowed = state
         .identity
-        .list_clients(&realm_id, None, 200)
+        .list_clients(
+            &realm_id,
+            &crate::core::PageRequest::new(0, crate::core::MAX_PAGE_LIMIT),
+        )
         .ok()
         .map(|page| {
             page.items.iter().any(|c| {
@@ -670,7 +673,10 @@ async fn generate_unique_slug(state: Arc<AppState>, realm_id: &RealmId, base: &s
         let candidate = format!("{base}-{}", &suffix[..8]);
 
         // Check for collision against existing clients.
-        match state.identity.list_clients(realm_id, None, 1000) {
+        match state.identity.list_clients(
+            realm_id,
+            &crate::core::PageRequest::new(0, crate::core::MAX_PAGE_LIMIT),
+        ) {
             Ok(page) => {
                 let collision = page.items.iter().any(|c| c.slug() == candidate);
                 if !collision {

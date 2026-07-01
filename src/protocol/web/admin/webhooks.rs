@@ -74,11 +74,14 @@ pub async fn admin_webhooks_list(
     let realm_name = target.0.name().to_string();
     let identity = state.identity.clone();
     let realm_id = target.id().clone();
-    let rows = tokio::task::spawn_blocking(move || identity.list_webhooks(&realm_id))
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
+    let rows = tokio::task::spawn_blocking(move || {
+        identity.list_webhooks(&realm_id, &crate::core::PageRequest::new(0, 200))
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .map(|p| p.items)
+    .unwrap_or_default();
 
     let webhook_rows: Vec<WebhookRow> = rows
         .into_iter()

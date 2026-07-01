@@ -197,10 +197,9 @@ impl RbacEngine for FailSeedRbac {
     fn list_groups(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Group>, RbacError> {
-        self.inner.list_groups(realm_id, cursor, limit)
+        page: &hearth::core::PageRequest,
+    ) -> Result<hearth::core::PagedResult<Group>, RbacError> {
+        self.inner.list_groups(realm_id, page)
     }
 
     fn add_group_member(

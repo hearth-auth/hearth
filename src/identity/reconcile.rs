@@ -265,7 +265,7 @@ pub fn reconcile_realms(
     match &config.realms {
         None => {
             // Check if any realms exist
-            let page = engine.list_realms(None, 1)?;
+            let page = engine.list_realms(&crate::core::PageRequest::new(0, 1))?;
             if page.items.is_empty() {
                 // No realms and no YAML config → create "default"
                 let realm_config = default_realm_config(&config.auth, config);
@@ -293,23 +293,24 @@ pub fn reconcile_realms(
 /// so re-running it on healthy realms is safe. Errors are logged but do not
 /// abort startup — one broken realm must not prevent others from serving.
 pub fn reconcile_rbac_seeds(engine: &dyn IdentityEngine, rbac: &dyn RbacEngine) {
-    const PAGE: usize = 100;
-    let mut cursor: Option<String> = None;
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
     loop {
-        let page = match engine.list_realms(cursor.as_deref(), PAGE) {
+        let page = match engine.list_realms(&crate::core::PageRequest::new(offset, batch)) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, "reconcile_rbac_seeds: failed to list realms");
                 return;
             }
         };
+        let n = page.items.len() as u64;
         for realm in &page.items {
             seed_realm_or_log(rbac, realm.id(), realm.name());
         }
-        match page.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+        if n == 0 || offset + n >= page.total {
+            break;
         }
+        offset += n;
     }
 }
 
@@ -887,24 +888,28 @@ fn reconcile_declared_realms(
     }
 
     // Archive storage realms not in YAML
-    let mut cursor = None;
-    loop {
-        let page = engine.list_realms(cursor.as_deref(), 100)?;
-        for realm in &page.items {
-            if !yaml_names.contains(realm.name()) && realm.status() != RealmStatus::Archived {
-                engine.update_realm(
-                    realm.id(),
-                    &UpdateRealmRequest {
-                        status: Some(RealmStatus::Archived),
-                        ..Default::default()
-                    },
-                )?;
-                report.archived.push(realm.name().to_string());
+    {
+        let batch = crate::core::MAX_PAGE_LIMIT;
+        let mut offset = 0u64;
+        loop {
+            let page = engine.list_realms(&crate::core::PageRequest::new(offset, batch))?;
+            let n = page.items.len() as u64;
+            for realm in &page.items {
+                if !yaml_names.contains(realm.name()) && realm.status() != RealmStatus::Archived {
+                    engine.update_realm(
+                        realm.id(),
+                        &UpdateRealmRequest {
+                            status: Some(RealmStatus::Archived),
+                            ..Default::default()
+                        },
+                    )?;
+                    report.archived.push(realm.name().to_string());
+                }
             }
-        }
-        match page.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+            if n == 0 || offset + n >= page.total {
+                break;
+            }
+            offset += n;
         }
     }
 
@@ -1150,40 +1155,45 @@ pub(crate) fn reconcile_applications(
         .map(|k| deterministic_client_id(realm_name, k))
         .collect();
 
-    let mut cursor = None;
-    loop {
-        let page = engine.list_clients(realm_id, cursor.as_deref(), 100)?;
-        for client in &page.items {
-            let cid = client.client_id().clone();
-            if yaml_client_ids.contains(&cid)
-                || !is_deterministic_id(realm_name, &cid)
-                || client.status() == ApplicationStatus::Archived
-            {
-                continue;
+    {
+        let batch = crate::core::MAX_PAGE_LIMIT;
+        let mut offset = 0u64;
+        loop {
+            let page =
+                engine.list_clients(realm_id, &crate::core::PageRequest::new(offset, batch))?;
+            let n = page.items.len() as u64;
+            for client in &page.items {
+                let cid = client.client_id().clone();
+                if yaml_client_ids.contains(&cid)
+                    || !is_deterministic_id(realm_name, &cid)
+                    || client.status() == ApplicationStatus::Archived
+                {
+                    continue;
+                }
+                engine.update_client(
+                    realm_id,
+                    &cid,
+                    &UpdateClientRequest {
+                        status: Some(ApplicationStatus::Archived),
+                        ..Default::default()
+                    },
+                )?;
+                info!(
+                    realm = realm_name,
+                    client_id = %cid.as_uuid(),
+                    name = client.client_name(),
+                    "archived application removed from YAML"
+                );
+                report.applications.push(AppReconcileEntry {
+                    realm: realm_name.to_string(),
+                    app_key: client.client_name().to_string(),
+                    action: AppReconcileAction::Archived,
+                });
             }
-            engine.update_client(
-                realm_id,
-                &cid,
-                &UpdateClientRequest {
-                    status: Some(ApplicationStatus::Archived),
-                    ..Default::default()
-                },
-            )?;
-            info!(
-                realm = realm_name,
-                client_id = %cid.as_uuid(),
-                name = client.client_name(),
-                "archived application removed from YAML"
-            );
-            report.applications.push(AppReconcileEntry {
-                realm: realm_name.to_string(),
-                app_key: client.client_name().to_string(),
-                action: AppReconcileAction::Archived,
-            });
-        }
-        match page.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+            if n == 0 || offset + n >= page.total {
+                break;
+            }
+            offset += n;
         }
     }
 
@@ -1296,37 +1306,42 @@ pub(crate) fn reconcile_organizations(
     // Archive organizations whose slugs are no longer declared in YAML.
     // Scan all active orgs and archive those absent from the current YAML set.
     let yaml_slugs: std::collections::HashSet<&str> = orgs.keys().map(String::as_str).collect();
-    let mut cursor = None;
-    loop {
-        let page = engine.list_organizations(realm_id, cursor.as_deref(), 100)?;
-        for org in &page.items {
-            if org.status() == OrganizationStatus::Archived {
-                continue;
+    {
+        let batch = crate::core::MAX_PAGE_LIMIT;
+        let mut offset = 0u64;
+        loop {
+            let page = engine
+                .list_organizations(realm_id, &crate::core::PageRequest::new(offset, batch))?;
+            let n = page.items.len() as u64;
+            for org in &page.items {
+                if org.status() == OrganizationStatus::Archived {
+                    continue;
+                }
+                if !yaml_slugs.contains(org.slug()) {
+                    engine.update_organization(
+                        realm_id,
+                        org.id(),
+                        &UpdateOrganizationRequest {
+                            status: Some(OrganizationStatus::Archived),
+                            ..UpdateOrganizationRequest::default()
+                        },
+                    )?;
+                    info!(
+                        realm = realm_name,
+                        org = org.slug(),
+                        "archived organization removed from YAML"
+                    );
+                    report.organizations.push(OrgReconcileEntry {
+                        realm: realm_name.to_string(),
+                        slug: org.slug().to_string(),
+                        action: OrgReconcileAction::Archived,
+                    });
+                }
             }
-            if !yaml_slugs.contains(org.slug()) {
-                engine.update_organization(
-                    realm_id,
-                    org.id(),
-                    &UpdateOrganizationRequest {
-                        status: Some(OrganizationStatus::Archived),
-                        ..UpdateOrganizationRequest::default()
-                    },
-                )?;
-                info!(
-                    realm = realm_name,
-                    org = org.slug(),
-                    "archived organization removed from YAML"
-                );
-                report.organizations.push(OrgReconcileEntry {
-                    realm: realm_name.to_string(),
-                    slug: org.slug().to_string(),
-                    action: OrgReconcileAction::Archived,
-                });
+            if n == 0 || offset + n >= page.total {
+                break;
             }
-        }
-        match page.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+            offset += n;
         }
     }
 
@@ -2022,74 +2037,68 @@ pub fn detect_orphaned_realms(
 
     // Walk all realms in storage; collect orphan candidates.
     let mut current: HashMap<String, OrphanRecord> = HashMap::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let page = match engine.list_realms(cursor.as_deref(), 100) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(error = %e, "orphan detection: failed to list realms; skipping");
+    {
+        let batch = crate::core::MAX_PAGE_LIMIT;
+        let mut offset = 0u64;
+        loop {
+            let page = match engine.list_realms(&crate::core::PageRequest::new(offset, batch)) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "orphan detection: failed to list realms; skipping");
+                    break;
+                }
+            };
+            let n = page.items.len() as u64;
+            for realm in &page.items {
+                if realm.status() != RealmStatus::Archived {
+                    continue;
+                }
+                let slug = realm.name().to_string();
+                if resolved_slugs.contains(&slug) {
+                    continue;
+                }
+
+                // Count users in the archived realm using total from a probe call.
+                let user_count: u64 = engine
+                    .list_users(realm.id(), &crate::core::PageRequest::new(0, 1))
+                    .map(|p| p.total)
+                    .unwrap_or(0);
+                if user_count == 0 {
+                    continue; // Empty archived realm is not an orphan risk.
+                }
+
+                // Count organizations.
+                let org_count: u64 = engine
+                    .list_organizations(realm.id(), &crate::core::PageRequest::new(0, 1))
+                    .map(|p| p.total)
+                    .unwrap_or(0);
+
+                // Preserve the original `detected_at` if this orphan was already known.
+                let detected_at = existing
+                    .get(&slug)
+                    .map(|r| r.detected_at.clone())
+                    .unwrap_or_else(|| {
+                        let secs = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        crate::config::diff::format_unix_secs_as_rfc3339(secs)
+                    });
+
+                current.insert(
+                    slug.clone(),
+                    OrphanRecord {
+                        realm_slug: slug,
+                        detected_at,
+                        user_count,
+                        org_count,
+                    },
+                );
+            }
+            if n == 0 || offset + n >= page.total {
                 break;
             }
-        };
-        for realm in &page.items {
-            if realm.status() != RealmStatus::Archived {
-                continue;
-            }
-            let slug = realm.name().to_string();
-            if resolved_slugs.contains(&slug) {
-                continue;
-            }
-
-            // Count users in the archived realm (full pagination).
-            let mut user_count: u64 = 0;
-            let mut ucursor: Option<String> = None;
-            while let Ok(up) = engine.list_users(realm.id(), ucursor.as_deref(), 1_000) {
-                user_count += up.items.len() as u64;
-                match up.next_cursor {
-                    Some(c) => ucursor = Some(c),
-                    None => break,
-                }
-            }
-            if user_count == 0 {
-                continue; // Empty archived realm is not an orphan risk.
-            }
-
-            // Count organizations.
-            let mut org_count: u64 = 0;
-            let mut ocursor: Option<String> = None;
-            while let Ok(op) = engine.list_organizations(realm.id(), ocursor.as_deref(), 1_000) {
-                org_count += op.items.len() as u64;
-                match op.next_cursor {
-                    Some(c) => ocursor = Some(c),
-                    None => break,
-                }
-            }
-
-            // Preserve the original `detected_at` if this orphan was already known.
-            let detected_at = existing
-                .get(&slug)
-                .map(|r| r.detected_at.clone())
-                .unwrap_or_else(|| {
-                    let secs = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    crate::config::diff::format_unix_secs_as_rfc3339(secs)
-                });
-
-            current.insert(
-                slug.clone(),
-                OrphanRecord {
-                    realm_slug: slug,
-                    detected_at,
-                    user_count,
-                    org_count,
-                },
-            );
-        }
-        match page.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+            offset += n;
         }
     }
 

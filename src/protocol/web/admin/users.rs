@@ -9,10 +9,21 @@ use super::*;
 /// Query params for `GET /ui/admin/users`.
 #[derive(Debug, Deserialize)]
 pub struct UserListParams {
-    /// Opaque cursor for the next page.
+    /// Decimal offset for the next page (repurposed from opaque cursor).
     pub cursor: Option<String>,
     /// Search query (email or name).
     pub q: Option<String>,
+}
+
+impl UserListParams {
+    fn as_page_request(&self, per_page: u32) -> crate::core::PageRequest {
+        let offset: u64 = self
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        crate::core::PageRequest::new(offset, per_page)
+    }
 }
 
 /// Template for `GET /ui/admin/users`.
@@ -77,31 +88,29 @@ pub async fn admin_users_list(
     let result = if search_query.len() >= 2 {
         state
             .identity
-            .search_users(target.id(), &search_query, 20)
-            .map(|users| Page {
-                items: users,
-                next_cursor: None,
-            })
+            .search_users(target.id(), &search_query, &params.as_page_request(20))
     } else {
         state
             .identity
-            .list_users(target.id(), params.cursor.as_deref(), 20)
+            .list_users(target.id(), &params.as_page_request(20))
     };
 
     match result {
         Ok(page) => {
             let realm_name = target.0.name().to_string();
             let user_base_url = format!("/ui/admin/realms/{realm_name}/users");
+            let next_cursor = PaginationParams::next_cursor_from(&page);
+            let users = page.items;
             if htmx.0 {
                 return render(&UserRowsTemplate {
-                    users: page.items,
+                    users,
                     user_base_url,
                     user_detail_qs: String::new(),
                 });
             }
             render(&UserListTemplate {
-                users: page.items,
-                next_cursor: page.next_cursor,
+                users,
+                next_cursor,
                 search_query,
                 list_url: format!("/ui/admin/realms/{realm_name}/users"),
                 user_base_url,
@@ -152,29 +161,27 @@ pub async fn admin_admin_users_list(
     let result = if search_query.len() >= 2 {
         state
             .identity
-            .search_users(&system_realm, &search_query, 20)
-            .map(|users| Page {
-                items: users,
-                next_cursor: None,
-            })
+            .search_users(&system_realm, &search_query, &params.as_page_request(20))
     } else {
         state
             .identity
-            .list_users(&system_realm, params.cursor.as_deref(), 20)
+            .list_users(&system_realm, &params.as_page_request(20))
     };
 
     match result {
         Ok(page) => {
+            let next_cursor = PaginationParams::next_cursor_from(&page);
+            let users = page.items;
             if htmx.0 {
                 return render(&UserRowsTemplate {
-                    users: page.items,
+                    users,
                     user_base_url: "/ui/admin/realms/system/users".to_string(),
                     user_detail_qs: "?admin_target=system".to_string(),
                 });
             }
             render(&UserListTemplate {
-                users: page.items,
-                next_cursor: page.next_cursor,
+                users,
+                next_cursor,
                 search_query,
                 realm_name: String::new(),
                 list_url: "/ui/admin/admin-users".to_string(),
@@ -675,7 +682,7 @@ pub async fn admin_user_detail(
     // Load related data for the detail page
     let raw_sessions = state
         .identity
-        .list_sessions_by_user(target.id(), &uid, None, 10)
+        .list_sessions_by_user(target.id(), &uid, &crate::core::PageRequest::new(0, 10))
         .unwrap_or_default();
     // Single now-snapshot for the whole list so two rows can't disagree
     // on whether they're past expiry within the same render.
@@ -1669,12 +1676,23 @@ struct SessionListTemplate {
 /// expiry filter. Default semantics: no `status` → show only Active.
 #[derive(Debug, Deserialize, Default)]
 pub struct SessionsListParams {
-    /// Opaque cursor for the next page.
+    /// Decimal offset for the next page.
     #[serde(default)]
     pub cursor: Option<String>,
     /// Expiry filter — `"active"` (default), `"expired"`, or `"all"`.
     #[serde(default)]
     pub status: Option<String>,
+}
+
+impl SessionsListParams {
+    fn as_page_request(&self, per_page: u32) -> crate::core::PageRequest {
+        let offset: u64 = self
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        crate::core::PageRequest::new(offset, per_page)
+    }
 }
 
 fn resolve_user_org_memberships(
@@ -1765,9 +1783,10 @@ pub async fn admin_sessions_list(
 
     match state
         .identity
-        .list_sessions_by_realm(target.id(), params.cursor.as_deref(), 20)
+        .list_sessions_by_realm(target.id(), &params.as_page_request(20))
     {
         Ok(page) => {
+            let next_cursor = PaginationParams::next_cursor_from(&page);
             let all_rows: Vec<SessionRow> = page
                 .items
                 .into_iter()
@@ -1787,7 +1806,7 @@ pub async fn admin_sessions_list(
             let rows = filter_session_rows(all_rows, &status_filter);
             render(&SessionListTemplate {
                 sessions: rows,
-                next_cursor: page.next_cursor,
+                next_cursor,
                 realm_name: realm_name.clone(),
                 is_global: false,
                 status_filter: status_filter.clone(),
@@ -2919,11 +2938,11 @@ fn process_csv_import(
         // Check if user already exists via search.
         let existing = state
             .identity
-            .search_users(realm_id, &email, 1)
+            .search_users(realm_id, &email, &crate::core::PageRequest::new(0, 1))
             .ok()
-            .and_then(|mut v| {
-                v.retain(|u| u.email().eq_ignore_ascii_case(&email));
-                v.into_iter().next()
+            .and_then(|mut r| {
+                r.items.retain(|u| u.email().eq_ignore_ascii_case(&email));
+                r.items.into_iter().next()
             });
 
         if let Some(user) = existing {
