@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use criterion::{black_box, criterion_group, Criterion};
 
 use hearth::core::RealmId;
+use hearth::storage::wal::SyncMode;
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -88,7 +89,9 @@ const REALM_SIZES: [usize; 3] = [10_000, 100_000, 500_000];
 ///
 /// Uses dev mode (no `HEARTH_MASTER_KEY` required) with a 64 MiB memtable
 /// to minimise SST fan-out during the 500 k-user setup phase.
-/// Compaction is disabled so SST count is deterministic across the bench.
+/// `SyncMode::None` eliminates per-write fsync so 500 k writes complete in
+/// milliseconds instead of ~50 s (500 k × ~100 µs per fsync on NVMe).
+/// Compaction is disabled so SST count stays deterministic across the bench.
 fn open_engine(hot_capacity: usize) -> (tempfile::TempDir, EmbeddedStorageEngine, RealmId) {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut config = StorageConfig::production(
@@ -98,6 +101,9 @@ fn open_engine(hot_capacity: usize) -> (tempfile::TempDir, EmbeddedStorageEngine
         hot_capacity,
     );
     config.dev_mode = true;
+    // Disable per-write fsync for bench setup speed.  Production durability is
+    // not relevant here — we measure read latency, not write durability.
+    config.wal_config.sync_mode = SyncMode::None;
     config.compaction.enabled = false;
     let engine = EmbeddedStorageEngine::open(config).expect("open");
     let realm = RealmId::generate();
