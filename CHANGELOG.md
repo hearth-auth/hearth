@@ -13,6 +13,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   + `dir=asc|desc`). Sort is applied to the full filtered set before the page slice
   so pagination totals are always exact. Sort and search params survive page / page-size
   navigation via `preserved_params` (HEA-1633).
+- **Search + column sort rolled out to every admin table** — realms, organizations,
+  groups, sessions, webhooks, and identity providers now share the same search
+  grammar (substring / quoted-exact `"…"` / glob `*`,`?`) and clickable `sort`/`dir`
+  column headers as the users list, via the shared `_sortable_th` header macro.
+  Realms and webhooks gain a `q` search bar; sessions sort by created/expires
+  (default newest-first), webhooks search URL + events and sort by URL, and
+  identity providers sort by name/kind. `aria-sort` is exposed on every sortable
+  header and stays accurate after HTMX partial swaps (HEA-1634, HEA-1635, HEA-1636,
+  HEA-1637, HEA-1638).
 - **Per-SST Bloom filters (SST V2 format)** — each newly written SST file now
   embeds a Bloom filter (k = 7, ~1% FPR, ~10 bits/entry). A cold point lookup
   probes the filter in O(k) constant time (~70 ns/SST) before performing a binary
