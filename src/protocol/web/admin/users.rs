@@ -86,8 +86,9 @@ struct UserListTemplate {
 }
 
 /// Rows-only partial returned when the user list is filtered live via
-/// HTMX. Keeps the response payload to a single `<tbody>` swap so the
-/// page chrome doesn't re-render on every keystroke.
+/// HTMX (search, no sort state change). Keeps the response payload to a
+/// single `<tbody>` innerHTML swap so page chrome doesn't re-render on
+/// every keystroke.
 #[derive(Template)]
 #[template(path = "ui/admin/users/_rows.html")]
 struct UserRowsTemplate {
@@ -100,6 +101,31 @@ struct UserRowsTemplate {
     /// `"?admin_target=system"` for the system realm so `TargetRealm`
     /// resolves correctly without a path-segment realm name.
     user_detail_qs: String,
+}
+
+/// Compound HTMX response for sort requests: the row fragment (swapped
+/// `innerHTML` into `#users-tbody`) followed by an OOB `<thead>` with
+/// updated `aria-sort` attributes (routed by HTMX to `#users-thead`).
+///
+/// Using a server-side OOB element avoids the `hx-select`/`hx-select-oob`
+/// client-side pattern that silently aborts when the primary selector is not
+/// found in the fragment.
+#[derive(Template)]
+#[template(path = "ui/admin/users/_sort_response.html")]
+struct UserSortResponseTemplate {
+    users: Vec<User>,
+    user_base_url: String,
+    user_detail_qs: String,
+    /// Active sort column key, e.g. `"email"`.
+    sort_field: String,
+    /// Active sort direction, `"asc"` or `"desc"`.
+    sort_dir: String,
+    /// List URL used as the base for sort link hrefs in the thead.
+    list_url: String,
+    /// Active search query (preserved across sort clicks).
+    search_query: String,
+    /// Active page size (preserved across sort clicks).
+    per_page: u32,
 }
 
 /// `GET /ui/admin/users`.
@@ -137,6 +163,18 @@ pub async fn admin_users_list(
             let user_base_url = format!("/ui/admin/realms/{realm_name}/users");
             let users = page.items.clone();
             if htmx.0 {
+                if has_sort {
+                    return render(&UserSortResponseTemplate {
+                        users,
+                        user_detail_qs: String::new(),
+                        sort_field: params.sort.clone().unwrap_or_default(),
+                        sort_dir: params.dir.clone().unwrap_or_default(),
+                        list_url: user_base_url.clone(),
+                        search_query: search_query.clone(),
+                        per_page: params.per_page_validated(),
+                        user_base_url,
+                    });
+                }
                 return render(&UserRowsTemplate {
                     users,
                     user_base_url,
@@ -227,6 +265,18 @@ pub async fn admin_admin_users_list(
         Ok(page) => {
             let users = page.items.clone();
             if htmx.0 {
+                if has_sort {
+                    return render(&UserSortResponseTemplate {
+                        users,
+                        user_base_url: "/ui/admin/realms/system/users".to_string(),
+                        user_detail_qs: "?admin_target=system".to_string(),
+                        sort_field: params.sort.clone().unwrap_or_default(),
+                        sort_dir: params.dir.clone().unwrap_or_default(),
+                        list_url: "/ui/admin/admin-users".to_string(),
+                        search_query: search_query.clone(),
+                        per_page: params.per_page_validated(),
+                    });
+                }
                 return render(&UserRowsTemplate {
                     users,
                     user_base_url: "/ui/admin/realms/system/users".to_string(),
@@ -1704,6 +1754,12 @@ struct SessionListTemplate {
     sessions: Vec<SessionRow>,
     pagination: PaginationView,
     realm_name: String,
+    /// Active sort column (`"created"` | `"expires"`), empty = default (created desc).
+    sort_field: String,
+    /// Active sort direction (`"asc"` | `"desc"`).
+    sort_dir: String,
+    /// Base URL of this sessions list (used by sortable header links).
+    list_url: String,
     /// `true` when the page is rendering the cross-realm aggregation at
     /// `/ui/admin/sessions` (no `?realm=` / `?admin_target=`). The list
     /// template uses this to swap the heading and reveal the Realm
@@ -1749,6 +1805,12 @@ pub struct SessionsListParams {
     /// Expiry filter — `"active"` (default), `"expired"`, or `"all"`.
     #[serde(default)]
     pub status: Option<String>,
+    /// Column to sort by: `created` | `expires`. Unknown values → default (created desc).
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Sort direction: `asc` | `desc`. Defaults to `desc` (newest first).
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 impl SessionsListParams {
@@ -1761,6 +1823,13 @@ impl SessionsListParams {
             self.page.unwrap_or(1),
             self.per_page_validated(),
         )
+    }
+
+    fn sort_dir(&self) -> crate::identity::search::SortDir {
+        self.dir
+            .as_deref()
+            .map(crate::identity::search::SortDir::from_param)
+            .unwrap_or(crate::identity::search::SortDir::Desc) // newest first by default
     }
 }
 
@@ -1858,7 +1927,7 @@ pub async fn admin_sessions_list(
             let base_url = format!("/ui/admin/realms/{realm_name}/sessions");
             let preserved =
                 super::pagination::encode_param("status", params.status.as_deref().unwrap_or(""));
-            let pagination = PaginationView::new(&page, base_url, preserved);
+            let pagination = PaginationView::new(&page, base_url.clone(), preserved);
             let all_rows: Vec<SessionRow> = page
                 .items
                 .into_iter()
@@ -1875,11 +1944,35 @@ pub async fn admin_sessions_list(
                 .collect();
             let count_active = all_rows.iter().filter(|r| r.is_active).count();
             let count_expired = all_rows.len() - count_active;
-            let rows = filter_session_rows(all_rows, &status_filter);
+            let mut rows = filter_session_rows(all_rows, &status_filter);
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir = params.sort_dir();
+            match sort_field_str.as_str() {
+                "expires" => rows.sort_by(|a, b| {
+                    let ord = a.session.expires_at().cmp(&b.session.expires_at());
+                    if sort_dir == crate::identity::search::SortDir::Asc {
+                        ord
+                    } else {
+                        ord.reverse()
+                    }
+                }),
+                _ => rows.sort_by(|a, b| {
+                    let ord = a.session.created_at().cmp(&b.session.created_at());
+                    if sort_dir == crate::identity::search::SortDir::Asc {
+                        ord
+                    } else {
+                        ord.reverse()
+                    }
+                }),
+            }
+            let sort_dir_str = params.dir.clone().unwrap_or_else(|| "desc".to_string());
             render(&SessionListTemplate {
                 sessions: rows,
                 pagination,
                 realm_name: realm_name.clone(),
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
+                list_url: base_url.clone(),
                 is_global: false,
                 status_filter: status_filter.clone(),
                 count_active,

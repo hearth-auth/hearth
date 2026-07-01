@@ -44,8 +44,7 @@
       hx-get="{{ list_url }}"
       hx-trigger="input changed delay:200ms from:input[name=q], search from:input[name=q]"
       hx-target="#users-tbody"
-      hx-select="#users-tbody"
-      hx-swap="outerHTML"
+      hx-swap="innerHTML"
       hx-push-url="true">
   <div class="relative">
     <input type="search" name="q" value="{{ search_query }}" placeholder="Search by email or name…"

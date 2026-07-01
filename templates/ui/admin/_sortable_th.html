@@ -5,11 +5,11 @@
   active search query + page size across navigation, and exposes `aria-sort`
   for assistive technology.
 
-  The <thead> that contains these headers MUST carry id="users-thead". The
-  HTMX `hx-select-oob` attribute on the sort link selects the updated thead
-  from the full-page response and swaps it out-of-band, so `aria-sort` values
-  and the active-column caret stay accurate after every partial swap —
-  without a full page reload or a dedicated partial endpoint.
+  The <thead> that contains these headers MUST carry id="users-thead". Sort
+  requests use a server-side OOB compound response (`_sort_response.html`)
+  that appends `<thead hx-swap-oob="true">` to the rows fragment; HTMX routes
+  it to the live thead automatically, keeping `aria-sort` and the active-column
+  caret accurate after every partial swap without a full page reload.
 
   Askama imports are hermetic (the macro cannot read caller context), so every
   value is passed explicitly. Usage from any list template:
@@ -36,11 +36,9 @@
   <a href="{{ base_url }}?sort={{ col }}&dir={% if is_active && dir == "asc" %}desc{% else %}asc{% endif %}{% if !q.is_empty() %}&q={{ q }}{% endif %}&per_page={{ per_page }}"
      hx-get="{{ base_url }}?sort={{ col }}&dir={% if is_active && dir == "asc" %}desc{% else %}asc{% endif %}{% if !q.is_empty() %}&q={{ q }}{% endif %}&per_page={{ per_page }}"
      hx-target="#users-tbody"
-     hx-select="#users-tbody"
-     hx-select-oob="#users-thead"
-     hx-swap="outerHTML"
+     hx-swap="innerHTML"
      hx-push-url="true"
-     class="inline-flex items-center gap-1 rounded hover:text-ht-content-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ht-brand-accent{% if is_active %} text-ht-content-secondary{% endif %}">
+     class="inline-flex items-center gap-1 rounded hover:text-ht-content-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ht-brand-accent{% if is_active %} text-ht-content-secondary{% endif %}">
     {{ label }}
     {%- if is_active -%}
       {%- if dir == "asc" -%}

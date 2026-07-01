@@ -635,6 +635,109 @@ async fn admin_users_list_returns_rows_partial_for_htmx_request() {
     );
 }
 
+/// Sort HTMX request returns a compound response: `<tr>` rows as the
+/// primary payload (swapped `innerHTML` into `#users-tbody`) PLUS an OOB
+/// `<thead hx-swap-oob="true">` so `aria-sort` updates without a full
+/// page reload. Pins the fix for HEA-1642.
+#[tokio::test]
+async fn admin_users_sort_htmx_returns_oob_thead_with_aria_sort() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-users-sort-htmx");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/realms/acme/users?sort=email&dir=asc")
+                .header(header::COOKIE, cookie)
+                .header("HX-Request", "true")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+
+    assert!(
+        !body.to_ascii_lowercase().contains("<!doctype html"),
+        "sort HTMX response must not include the page <!DOCTYPE>"
+    );
+    assert!(
+        body.contains("bob@acme.test"),
+        "sort HTMX response must include user rows"
+    );
+    // OOB thead must be present so HTMX can update aria-sort in-place.
+    assert!(
+        body.contains(r#"id="users-thead" hx-swap-oob="true""#),
+        "sort HTMX response must contain the OOB thead element"
+    );
+    // Active column must have aria-sort="ascending".
+    assert!(
+        body.contains(r#"aria-sort="ascending""#),
+        "active sort column must carry aria-sort=ascending"
+    );
+    // Inactive columns must remain aria-sort="none".
+    assert!(
+        body.contains(r#"aria-sort="none""#),
+        "inactive sort columns must carry aria-sort=none"
+    );
+}
+
+/// Sort links use server-side OOB (`hx-swap="innerHTML"`) — no client-side
+/// `hx-select` / `hx-select-oob` attributes that would silently abort when
+/// the fragment lacks the expected wrapper element. Pins HEA-1642.
+#[tokio::test]
+async fn admin_users_sort_links_use_innerhtml_swap_no_hx_select() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-users-sort-attrs");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/realms/acme/users")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+
+    assert!(
+        !body.contains("hx-select="),
+        "sort links and search form must not use hx-select (silently aborts on fragment mismatch)"
+    );
+    assert!(
+        !body.contains("hx-select-oob="),
+        "sort links must not use hx-select-oob (replaced by server-side hx-swap-oob)"
+    );
+    // Sort links target the tbody and use innerHTML to place rows inside it.
+    assert!(
+        body.contains(r#"hx-swap="innerHTML""#),
+        "sort links and search form must use hx-swap=innerHTML"
+    );
+    // WCAG 2.2 SC 2.4.11 minimum focus ring.
+    assert!(
+        body.contains("focus-visible:ring-2"),
+        "sort link anchor must use focus-visible:ring-2 for WCAG 2.2 SC 2.4.11"
+    );
+}
+
 /// `/ui/admin/sessions` renders the Active/Expired/All filter pills
 /// and defaults to the Active view. Resolves REQ-050 in the gap doc.
 #[tokio::test]

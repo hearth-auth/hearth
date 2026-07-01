@@ -1,0 +1,24 @@
+{#- Compound HTMX sort response: row content (primary innerHTML swap into
+    #users-tbody) followed by an OOB <thead> update so aria-sort and the
+    active-column caret reflect the new sort state without a full page reload.
+
+    HTMX strips the `hx-swap-oob="true"` element from the response before the
+    primary swap and routes it directly to the matching id in the live DOM, so
+    the two updates are applied atomically from the browser's perspective.
+-#}
+{% import "ui/admin/_sortable_th.html" as sortable %}
+{% include "ui/admin/users/_rows.html" %}
+<thead id="users-thead" hx-swap-oob="true">
+  <tr class="border-b border-divider bg-ht-surface-elevated">
+    <th class="w-8 px-4 py-3" scope="col" aria-label="Select">
+      <input type="checkbox"
+             id="select-all-check"
+             aria-label="Select all"
+             class="h-4 w-4 rounded border-divider bg-ht-surface-elevated">
+    </th>
+    {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, per_page) %}
+    {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, per_page) %}
+    {% call sortable::th("Status", "status", sort_field, sort_dir, list_url, search_query, per_page) %}
+    <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
+  </tr>
+</thead>
