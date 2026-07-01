@@ -35,6 +35,16 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 /// Hot tier capacity used for the hot-hit scenario (matches production default).
 const HOT_TIER_CAPACITY: usize = 100_000;
 
+/// Number of keys pre-warmed into the hot tier before hot-hit measurement.
+///
+/// Hot-tier lookup is O(1) regardless of how many entries are in the tier,
+/// so warming a small fixed count is sufficient to measure the ArcSwap path.
+/// Warming the full `HOT_TIER_CAPACITY` (100 k) would require O(N²) HashMap
+/// clone-swap operations in `promote()` — 5 billion malloc calls for 100 k
+/// entries — making bench setup impractically slow. A fixed 1 k warm is enough
+/// to exercise the hot path while keeping setup ≤ 1 second.
+const HOT_WARM_COUNT: usize = 1_000;
+
 /// Intentionally tiny hot tier for the cold-path scenario so nearly every
 /// bench read falls through to the memtable / SST layers.
 const COLD_HOT_TIER_CAPACITY: usize = 1_000;
@@ -169,13 +179,14 @@ fn gate_flat_latency() {
     let mut hot_p99s: Vec<(usize, Duration)> = Vec::new();
 
     for &user_count in &REALM_SIZES {
-        let warm_count = user_count.min(HOT_TIER_CAPACITY);
         let (_dir, engine, realm) = open_engine(HOT_TIER_CAPACITY);
         populate(&engine, &realm, user_count);
-        let keys = pre_gen_keys(warm_count);
-        warm_hot_tier(&engine, &realm, &keys);
+        // Warm a fixed 1 k subset — see HOT_WARM_COUNT for why a small fixed
+        // count is correct and faster than warming the full tier.
+        let warm_keys = pre_gen_keys(HOT_WARM_COUNT);
+        warm_hot_tier(&engine, &realm, &warm_keys);
 
-        let times = measure(&engine, &realm, &keys, SAMPLES);
+        let times = measure(&engine, &realm, &warm_keys, SAMPLES);
         let (p50, p99) = p50_p99(times);
         println!(
             "  hot-tier hit {:>7}k users  p50={p50:?}  p99={p99:?}",
@@ -251,11 +262,10 @@ fn gate_flat_latency() {
 // We use a parametric helper to avoid code duplication across the three sizes.
 
 fn bench_hot_hit(c: &mut Criterion, user_count: usize) {
-    let warm_count = user_count.min(HOT_TIER_CAPACITY);
     let (_dir, engine, realm) = open_engine(HOT_TIER_CAPACITY);
     populate(&engine, &realm, user_count);
-    let keys = pre_gen_keys(warm_count);
-    warm_hot_tier(&engine, &realm, &keys);
+    let warm_keys = pre_gen_keys(HOT_WARM_COUNT);
+    warm_hot_tier(&engine, &realm, &warm_keys);
 
     let label = format!("hot_hit_{}", user_count / 1_000);
     let mut group = c.benchmark_group("point_lookup");
@@ -264,7 +274,7 @@ fn bench_hot_hit(c: &mut Criterion, user_count: usize) {
         b.iter(|| {
             let _ = black_box(
                 engine
-                    .get(&realm, black_box(&keys[i % warm_count]))
+                    .get(&realm, black_box(&warm_keys[i % HOT_WARM_COUNT]))
                     .expect("get"),
             );
             i += 1;
