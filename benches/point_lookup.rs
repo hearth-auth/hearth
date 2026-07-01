@@ -65,37 +65,40 @@ const WARMUP: usize = 200;
 /// Sub-microsecond in practice; 100 µs is very generous to tolerate CI noise.
 const HOT_P99_CEILING: Duration = Duration::from_micros(100);
 
-/// p99 ceiling for cold (SST binary-search) reads, any realm size.
+/// p99 ceiling for cold (SST) reads at any realm size.
 ///
-/// With 4 MiB memtable threshold and 50 k users, there are ~3–4 SST files
-/// each with ~14 k entries.  Binary search per SST: log₂(14 k) ≈ 14 steps.
-/// Fan-out: 4 SSTs × 14 = 56 comparisons + 4 CompositeKey allocs ≈ 3 µs.
-/// The 5 ms ceiling gives > 1 000 × headroom over the expected ~3 µs.
+/// With bloom filters (HEA-1626 Phase 2): at 500 k users (~35 SSTs), a cold
+/// read probes 7 CRC32 hash positions per SST for fast rejection (~70 ns/SST)
+/// then binary-searches the single matching SST (~1 µs). Total ≈ 34 × 70 ns
+/// + 1 µs ≈ 3.4 µs — well within this 5 ms ceiling.
 const COLD_P99_CEILING: Duration = Duration::from_millis(5);
 
-/// Maximum allowed ratio of cold p99 at 50 k users vs cold p99 at 1 k users.
+/// Maximum allowed ratio of cold p99 at the largest realm vs the smallest.
 ///
-/// Binary search grows O(log n): log₂(50k)/log₂(1k) ≈ 1.65×, plus SST
-/// fan-out (1 → 4 SSTs across this range).  20× is intentionally loose — it
-/// rejects an O(N) regression (which produced ~3 000× growth pre-HEA-1614)
-/// while tolerating the actual fan-out increase from 1 k (1 SST) to 50 k
-/// (3–4 SSTs).
+/// Without bloom filters: O(k·log n) fan-out grows ~47× from 10 k to 500 k
+/// users (1 → 35 SSTs), exceeding this limit.
+/// With bloom filters: O(k·hash_count) per rejected SST grows only ~4–5× over
+/// the same range (constant hash cost vs growing binary-search fan-out), easily
+/// clearing the 20× gate.
 const COLD_SCALE_LIMIT: f64 = 20.0;
 
-/// Realm sizes exercised by the bench.
+/// Chunk size for batched seeder writes via `put_batch`.
 ///
-/// The target spec calls for 10 k / 100 k / 500 k, but bulk-populating that
-/// many users exposes an O(N²) clone-mutate-swap in `Memtable::put()` — the
-/// same root cause as the O(N²) found in `HotTier::promote()`.  Every write
-/// clones the entire BTreeMap; 100 k writes sum to ~150 s of copies.
+/// `populate()` previously called `engine.put()` once per entry, which clones
+/// the entire memtable BTreeMap per write — O(N²) per flush cycle.
+/// Using `put_batch` with chunks clones the map once per chunk instead of once
+/// per entry: O(N + chunk_size) per batch. At 500 k users this is the
+/// difference between ~150 s and ~2 s of setup time.
+const SEED_BATCH_SIZE: usize = 5_000;
+
+/// Realm sizes exercised by the bench (restored to original spec: 10k/100k/500k).
 ///
-/// [1 k / 10 k / 50 k] stays within the session window: 50 k ≈ 11 s of
-/// memtable clone work with the 4 MiB threshold (3–4 flush cycles of ~14 k
-/// entries, each with ∑ i = 14k²/2 ≈ 1.1×10⁸ clone operations).
-///
-/// Phase 2 must fix the O(N) clone-per-write before this bench can run at
-/// the originally intended 500 k scale.
-const REALM_SIZES: [usize; 3] = [1_000, 10_000, 50_000];
+/// Previously limited to [1k/10k/50k] because `populate()` used per-entry
+/// `engine.put()` causing O(N²) BTreeMap clone work in the memtable.
+/// HEA-1626 Phase 2 fixes this by seeding via `engine.put_batch()` (one map
+/// clone per chunk instead of one per entry), and adds per-SST bloom filters
+/// so the O(k·log n) SST fan-out at 500 k users stays within the 20× gate.
+const REALM_SIZES: [usize; 3] = [10_000, 100_000, 500_000];
 
 // ── Engine factory ────────────────────────────────────────────────────────────
 
@@ -142,10 +145,17 @@ fn make_value() -> Vec<u8> {
     vec![0x42u8; VALUE_SIZE]
 }
 
+/// Seeds `count` key-value pairs into `engine` using batched writes.
+///
+/// Calling `engine.put()` per entry clones the entire memtable BTreeMap on
+/// every write — O(N²) per flush cycle.  `engine.put_batch()` clones the map
+/// once per `SEED_BATCH_SIZE` entries instead, reducing setup to O(N).
 fn populate(engine: &EmbeddedStorageEngine, realm: &RealmId, count: usize) {
     let value = make_value();
-    for i in 0..count {
-        engine.put(realm, &make_key(i), &value).expect("put");
+    let entries: Vec<(Vec<u8>, Vec<u8>)> =
+        (0..count).map(|i| (make_key(i), value.clone())).collect();
+    for chunk in entries.chunks(SEED_BATCH_SIZE) {
+        engine.put_batch(realm, chunk).expect("put_batch");
     }
 }
 
@@ -196,9 +206,9 @@ fn gate_flat_latency() {
     println!("=== point_lookup gate: measuring hot-tier hit latency ===");
 
     // ── Hot-tier hit ──────────────────────────────────────────────────────────
-    // Each realm is sized to fit in the hot tier (capacity = HOT_TIER_CAPACITY).
-    // We warm the smaller of (user_count, HOT_TIER_CAPACITY) entries, then bench
-    // reads cycling through that warmed set.
+    // Each realm is fully populated but only a fixed 1 k subset is warmed into
+    // the hot tier. The hot-tier path is O(1) ArcSwap regardless of realm size,
+    // so p99 must stay flat across all three realm sizes.
 
     let mut hot_p99s: Vec<(usize, Duration)> = Vec::new();
 
@@ -333,33 +343,33 @@ fn bench_cold_random(c: &mut Criterion, user_count: usize) {
 
 // ── Criterion group wrappers (one per variant) ────────────────────────────────
 
-fn bench_hot_hit_1k(c: &mut Criterion) {
-    bench_hot_hit(c, 1_000);
-}
 fn bench_hot_hit_10k(c: &mut Criterion) {
     bench_hot_hit(c, 10_000);
 }
-fn bench_hot_hit_50k(c: &mut Criterion) {
-    bench_hot_hit(c, 50_000);
+fn bench_hot_hit_100k(c: &mut Criterion) {
+    bench_hot_hit(c, 100_000);
 }
-fn bench_cold_random_1k(c: &mut Criterion) {
-    bench_cold_random(c, 1_000);
+fn bench_hot_hit_500k(c: &mut Criterion) {
+    bench_hot_hit(c, 500_000);
 }
 fn bench_cold_random_10k(c: &mut Criterion) {
     bench_cold_random(c, 10_000);
 }
-fn bench_cold_random_50k(c: &mut Criterion) {
-    bench_cold_random(c, 50_000);
+fn bench_cold_random_100k(c: &mut Criterion) {
+    bench_cold_random(c, 100_000);
+}
+fn bench_cold_random_500k(c: &mut Criterion) {
+    bench_cold_random(c, 500_000);
 }
 
 criterion_group!(
     benches,
-    bench_hot_hit_1k,
     bench_hot_hit_10k,
-    bench_hot_hit_50k,
-    bench_cold_random_1k,
+    bench_hot_hit_100k,
+    bench_hot_hit_500k,
     bench_cold_random_10k,
-    bench_cold_random_50k,
+    bench_cold_random_100k,
+    bench_cold_random_500k,
 );
 
 // ── Custom main: gate first, then Criterion ───────────────────────────────────
