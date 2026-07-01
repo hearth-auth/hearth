@@ -570,23 +570,8 @@ impl fmt::Display for TraversalKind {
 // Paging
 // ---------------------------------------------------------------------------
 
-/// Generic paged listing result.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Page<T> {
-    /// The current page of items.
-    pub items: Vec<T>,
-    /// Cursor to fetch the next page, or `None` if the end has been reached.
-    pub next_cursor: Option<String>,
-}
-
-impl<T> Default for Page<T> {
-    fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            next_cursor: None,
-        }
-    }
-}
+// Re-export the canonical cursor-based page type from core.
+pub use crate::core::Page;
 
 // ---------------------------------------------------------------------------
 // Tests

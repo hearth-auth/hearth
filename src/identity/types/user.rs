@@ -7,27 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::core::{Timestamp, UserId};
 use crate::identity::credentials::CleartextPassword;
 
-/// A cursor-based page of results.
-///
-/// The `next_cursor` is an opaque token that the client passes back to
-/// fetch the next page. When `next_cursor` is `None`, there are no more
-/// results.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Page<T> {
-    /// The items on this page.
-    pub items: Vec<T>,
-    /// Cursor for the next page, or `None` if this is the last page.
-    pub next_cursor: Option<String>,
-}
-
-impl<T> Default for Page<T> {
-    fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            next_cursor: None,
-        }
-    }
-}
+// Re-export the canonical cursor-based page type from core so that
+// identity and rbac share a single definition.
+pub use crate::core::Page;
 
 /// Result of a single item within a bulk operation.
 ///

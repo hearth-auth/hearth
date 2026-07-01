@@ -42,6 +42,20 @@ pub struct ScanEntry {
     pub value: Vec<u8>,
 }
 
+/// Returns an exclusive end bound for a prefix scan (increments last byte).
+///
+/// Used alongside [`StorageEngine::scan`] to bound a scan to a given key
+/// prefix: `scan(realm, prefix, &prefix_scan_end(prefix))`.
+///
+/// Panics if `prefix` is empty.
+pub fn prefix_scan_end(prefix: &[u8]) -> Vec<u8> {
+    let mut end = prefix.to_vec();
+    if let Some(last) = end.last_mut() {
+        *last = last.saturating_add(1);
+    }
+    end
+}
+
 /// Trait defining the public storage engine interface.
 ///
 /// Synchronous for Phase 0 — callers should use `spawn_blocking` for async
@@ -112,6 +126,63 @@ pub trait StorageEngine: Send + Sync {
         }
         self.put(realm_id, key, value)?;
         Ok(true)
+    }
+
+    /// Counts entries whose key starts with `prefix` for the given realm,
+    /// stopping early once the count reaches `cap`.
+    ///
+    /// Returns the exact count when fewer than `cap` entries exist, or `cap`
+    /// when the actual count is at or above `cap`. Callers should display
+    /// "10,000+" (or the configured cap value) to make the ceiling visible.
+    ///
+    /// This is explicitly **off the hot path** — O(N) scan cost is acceptable
+    /// for admin list endpoints.
+    fn count_prefix(
+        &self,
+        realm_id: &RealmId,
+        prefix: &[u8],
+        cap: u64,
+    ) -> Result<u64, StorageError> {
+        if prefix.is_empty() {
+            return Ok(0);
+        }
+        let end = prefix_scan_end(prefix);
+        let entries = self.scan(realm_id, prefix, &end)?;
+        Ok(entries.len().min(cap as usize) as u64)
+    }
+
+    /// Scans a key prefix with offset-based pagination, returning the items
+    /// window and a capped total count.
+    ///
+    /// Returns `(window, total)` where:
+    /// - `window` — up to `limit` entries starting at zero-based `offset`.
+    /// - `total` — capped count of all prefix entries (see [`count_prefix`]).
+    ///
+    /// `cap` defaults to [`crate::core::DEFAULT_COUNT_CAP`] when callers pass
+    /// `0`; pass an explicit non-zero value to override.
+    ///
+    /// This is explicitly **off the hot path** — O(offset + limit) scan cost
+    /// is acceptable for admin list endpoints.
+    fn scan_prefix_paged(
+        &self,
+        realm_id: &RealmId,
+        prefix: &[u8],
+        offset: u64,
+        limit: u32,
+        cap: u64,
+    ) -> Result<(Vec<ScanEntry>, u64), StorageError> {
+        use crate::core::DEFAULT_COUNT_CAP;
+        if prefix.is_empty() {
+            return Ok((vec![], 0));
+        }
+        let effective_cap = if cap == 0 { DEFAULT_COUNT_CAP } else { cap };
+        let end = prefix_scan_end(prefix);
+        let all = self.scan(realm_id, prefix, &end)?;
+        let total = all.len().min(effective_cap as usize) as u64;
+        let start = (offset as usize).min(all.len());
+        let end_idx = (start + limit as usize).min(all.len());
+        let window = all[start..end_idx].to_vec();
+        Ok((window, total))
     }
 
     /// Atomically writes a batch of puts and deletes for a single realm.

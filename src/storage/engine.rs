@@ -1786,4 +1786,153 @@ mod tests {
             );
         }
     }
+
+    // ===== count_prefix / scan_prefix_paged tests (HEA-1616) =====
+
+    fn put_prefixed(engine: &EmbeddedStorageEngine, realm: &RealmId, prefix: &str, n: usize) {
+        for i in 0..n {
+            let key = format!("{prefix}:{i:05}");
+            engine
+                .put(realm, key.as_bytes(), b"v")
+                .expect("put in put_prefixed");
+        }
+    }
+
+    #[test]
+    fn count_prefix_zero_when_empty() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        let count = engine.count_prefix(&realm, b"usr:", 10_000).expect("count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn count_prefix_exact_count() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 7);
+        let count = engine.count_prefix(&realm, b"usr:", 10_000).expect("count");
+        assert_eq!(count, 7);
+    }
+
+    #[test]
+    fn count_prefix_caps_at_cap() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        // Insert 20 items but cap at 10 — count must be capped.
+        put_prefixed(&engine, &realm, "usr:", 20);
+        let count = engine.count_prefix(&realm, b"usr:", 10).expect("count");
+        assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn count_prefix_cap_boundary_exact() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 10);
+        // Exactly cap many items — count must equal cap.
+        let count = engine.count_prefix(&realm, b"usr:", 10).expect("count");
+        assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn count_prefix_realm_isolation() {
+        let (_dir, engine) = setup_engine();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        put_prefixed(&engine, &realm_a, "usr:", 5);
+        put_prefixed(&engine, &realm_b, "usr:", 99);
+        // realm_a's count must not be affected by realm_b's data.
+        let count = engine
+            .count_prefix(&realm_a, b"usr:", 10_000)
+            .expect("count");
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn scan_prefix_paged_offset_zero() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 15);
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 0, 5, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 15);
+        assert_eq!(window.len(), 5);
+    }
+
+    #[test]
+    fn scan_prefix_paged_offset_mid() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 15);
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 10, 5, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 15);
+        assert_eq!(window.len(), 5);
+    }
+
+    #[test]
+    fn scan_prefix_paged_offset_past_end() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 5);
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 100, 10, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 5, "total still reflects full count");
+        assert!(window.is_empty(), "past-end offset returns no items");
+    }
+
+    #[test]
+    fn scan_prefix_paged_last_page_partial() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 7);
+        // Offset 5, limit 10 — only 2 items remain.
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 5, 10, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 7);
+        assert_eq!(window.len(), 2);
+    }
+
+    #[test]
+    fn scan_prefix_paged_empty_store() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 0, 10, 10_000)
+            .expect("paged scan on empty store");
+        assert_eq!(total, 0);
+        assert!(window.is_empty());
+    }
+
+    #[test]
+    fn scan_prefix_paged_realm_isolation() {
+        let (_dir, engine) = setup_engine();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        put_prefixed(&engine, &realm_a, "usr:", 3);
+        put_prefixed(&engine, &realm_b, "usr:", 50);
+        let (window, total) = engine
+            .scan_prefix_paged(&realm_a, b"usr:", 0, 100, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 3);
+        assert_eq!(window.len(), 3);
+    }
+
+    #[test]
+    fn scan_prefix_paged_total_is_capped() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 20);
+        let cap = 10;
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 0, 5, cap)
+            .expect("paged scan");
+        assert_eq!(total, cap, "total must be capped at cap value");
+        assert_eq!(window.len(), 5);
+    }
 }
