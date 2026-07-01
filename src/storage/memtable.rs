@@ -276,6 +276,20 @@ impl Memtable {
         }
     }
 
+    /// Looks up the raw memtable entry for a key via the backing `BTreeMap`.
+    ///
+    /// Returns `Some(Data)`, `Some(Tombstone)`, or `None` (absent). Unlike
+    /// [`get`](Self::get) this distinguishes a tombstone from an absent key, so
+    /// the storage engine can stop searching deeper layers on a delete without
+    /// materialising the realm's entries. O(log n) lock-free read.
+    pub(crate) fn get_entry(&self, realm_id: &RealmId, key: &[u8]) -> Option<MemtableValue> {
+        let composite = CompositeKey {
+            realm_id: realm_id.clone(),
+            key: key.to_vec(),
+        };
+        self.data.load().get(&composite).cloned()
+    }
+
     /// Returns whether the memtable has reached its flush threshold.
     pub(crate) fn should_flush(&self) -> bool {
         self.approximate_size.load(Ordering::Relaxed) >= self.config.flush_threshold_bytes
@@ -300,6 +314,29 @@ impl Memtable {
             .range(start..)
             .take_while(|(k, _)| k.realm_id == *realm_id)
             .map(|(k, v)| (k.key.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Key-only range scan within a realm — returns `(key, is_alive)` pairs
+    /// without cloning value bytes.
+    ///
+    /// Used by the key-only scan path to avoid allocating value bytes for
+    /// count/total queries on large prefixes.
+    pub(crate) fn iter_realm_range_keys(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Vec<(Vec<u8>, bool)> {
+        let snapshot = self.data.load();
+        let start_key = CompositeKey {
+            realm_id: realm_id.clone(),
+            key: start.to_vec(),
+        };
+        snapshot
+            .range(start_key..)
+            .take_while(|(k, _)| k.realm_id == *realm_id && k.key.as_slice() < end)
+            .map(|(k, v)| (k.key.clone(), matches!(v, MemtableValue::Data(_))))
             .collect()
     }
 
@@ -447,6 +484,35 @@ mod tests {
         let realm = RealmId::generate();
 
         assert_eq!(mt.get(&realm, b"missing"), None);
+    }
+
+    // `get_entry` powers the storage engine's O(log n) point lookup: it must
+    // distinguish a live value, a tombstone, and an absent key so the engine
+    // can stop descending into SSTs on a delete without an O(N) realm scan
+    // (HEA-1614 user-detail slowness).
+    #[test]
+    fn get_entry_distinguishes_data_tombstone_and_absent() {
+        let mt = Memtable::new(MemtableConfig::default());
+        let realm = RealmId::generate();
+
+        mt.put(&realm, b"live", b"v").expect("put");
+        mt.delete(&realm, b"dead").expect("delete");
+
+        assert!(
+            matches!(mt.get_entry(&realm, b"live"), Some(MemtableValue::Data(v)) if v == b"v"),
+            "live key returns Data"
+        );
+        assert!(
+            matches!(
+                mt.get_entry(&realm, b"dead"),
+                Some(MemtableValue::Tombstone)
+            ),
+            "deleted key returns Tombstone, not None"
+        );
+        assert!(
+            mt.get_entry(&realm, b"absent").is_none(),
+            "absent key returns None"
+        );
     }
 
     // `put_batch` must be observationally identical to N sequential `put`s:

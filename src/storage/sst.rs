@@ -279,6 +279,25 @@ impl SstReader {
             .collect()
     }
 
+    /// Key-only range scan — like [`range_scan`] but returns `(key, is_alive)`
+    /// pairs without cloning value bytes. Used by the key-only scan path to
+    /// avoid allocating value bytes when only the count or key list is needed.
+    pub(crate) fn range_scan_keys(
+        &self,
+        realm_id: &RealmId,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> Vec<(Vec<u8>, bool)> {
+        let start = CompositeKey::new(realm_id.clone(), start_key.to_vec());
+        let end = CompositeKey::new(realm_id.clone(), end_key.to_vec());
+
+        self.entries
+            .iter()
+            .filter(|(k, _)| *k >= start && *k < end)
+            .map(|(k, v)| (k.key().to_vec(), matches!(v, MemtableValue::Data(_))))
+            .collect()
+    }
+
     /// Returns the entry count as declared in the SST header.
     pub(crate) fn entry_count(&self) -> u32 {
         self.entry_count

@@ -641,26 +641,23 @@ impl StorageEngine for EmbeddedStorageEngine {
             return Ok(Some(arc_val.to_vec()));
         }
 
-        // 2. Active memtable
-        // Note: memtable.get() returns None for both absent keys and tombstones.
-        // We need to check for tombstones explicitly to avoid false cold-path lookups.
-        {
-            let entries = self.active_memtable.iter_realm(realm_id);
-            for (k, v) in &entries {
-                if k.as_slice() == key {
-                    match v {
-                        MemtableValue::Data(data) => {
-                            // Promote to hot tier on memtable hit
-                            self.hot_tier.promote(realm_id, key, data);
-                            return Ok(Some(data.clone()));
-                        }
-                        MemtableValue::Tombstone => {
-                            // Key was deleted — stop searching deeper layers
-                            return Ok(None);
-                        }
-                    }
-                }
+        // 2. Active memtable — O(log n) BTreeMap lookup.
+        // `get_entry` distinguishes a tombstone from an absent key so we can
+        // stop searching deeper layers on a delete. This MUST NOT fall back to
+        // an `iter_realm` linear scan: at 500k entries in a single realm that
+        // turned every point lookup (e.g. a user-detail page) into an O(N)
+        // clone-and-scan — seconds per `get` (HEA-1614).
+        match self.active_memtable.get_entry(realm_id, key) {
+            Some(MemtableValue::Data(data)) => {
+                // Promote to hot tier on memtable hit
+                self.hot_tier.promote(realm_id, key, &data);
+                return Ok(Some(data));
             }
+            Some(MemtableValue::Tombstone) => {
+                // Key was deleted — stop searching deeper layers
+                return Ok(None);
+            }
+            None => {}
         }
 
         // 3. SST files newest-to-oldest (binary search)
@@ -916,6 +913,51 @@ impl StorageEngine for EmbeddedStorageEngine {
             .collect();
 
         Ok(result)
+    }
+
+    /// Key-only scan — same merge as [`scan`] but stores only a `bool` (alive
+    /// flag) instead of value bytes, then returns surviving keys.
+    ///
+    /// Avoids allocating value bytes entirely, which is the dominant memory cost
+    /// for prefix scans on large realms (e.g. 500k users × 500 B/entry ≈ 250 MB
+    /// saved per count query). Used by `count_prefix` and the first phase of
+    /// `scan_prefix_paged`.
+    fn scan_keys(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Vec<u8>>, crate::storage::StorageError> {
+        let _timer = crate::metrics::metrics()
+            .storage_operation_duration_seconds
+            .with_label_values(&["scan_keys"])
+            .start_timer();
+
+        // BTreeMap<key, is_alive>: true = Data, false = Tombstone.
+        // Memtable entries (newest) overwrite SST entries as we insert in
+        // oldest-to-newest order.
+        let mut merged: std::collections::BTreeMap<Vec<u8>, bool> =
+            std::collections::BTreeMap::new();
+
+        let sst_readers = self.sst_readers.load();
+        for reader in sst_readers.iter().rev() {
+            for (key, alive) in reader.range_scan_keys(realm_id, start, end) {
+                merged.insert(key, alive);
+            }
+        }
+
+        for (key, alive) in self
+            .active_memtable
+            .iter_realm_range_keys(realm_id, start, end)
+        {
+            merged.insert(key, alive);
+        }
+
+        Ok(merged
+            .into_iter()
+            .filter(|(_, alive)| *alive)
+            .map(|(k, _)| k)
+            .collect())
     }
 }
 
@@ -1787,6 +1829,61 @@ mod tests {
         }
     }
 
+    // ===== scan_keys tests (HEA-1622) =====
+
+    #[test]
+    fn scan_keys_returns_only_keys() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine
+            .put(&realm, b"usr:alice", b"large-value-bytes")
+            .expect("put");
+        engine
+            .put(&realm, b"usr:bob", b"another-large-value")
+            .expect("put");
+        let end = crate::storage::prefix_scan_end(b"usr:");
+        let mut keys = engine.scan_keys(&realm, b"usr:", &end).expect("scan_keys");
+        keys.sort();
+        assert_eq!(keys, vec![b"usr:alice".to_vec(), b"usr:bob".to_vec()]);
+    }
+
+    #[test]
+    fn scan_keys_excludes_tombstones() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"usr:alice", b"val").expect("put");
+        engine.put(&realm, b"usr:bob", b"val").expect("put");
+        engine.delete(&realm, b"usr:bob").expect("delete");
+        let end = crate::storage::prefix_scan_end(b"usr:");
+        let keys = engine.scan_keys(&realm, b"usr:", &end).expect("scan_keys");
+        assert_eq!(keys, vec![b"usr:alice".to_vec()]);
+    }
+
+    #[test]
+    fn scan_keys_realm_isolation() {
+        let (_dir, engine) = setup_engine();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        engine.put(&realm_a, b"usr:a", b"v").expect("put a");
+        engine.put(&realm_b, b"usr:x", b"v").expect("put b");
+        engine.put(&realm_b, b"usr:y", b"v").expect("put b2");
+        let end = crate::storage::prefix_scan_end(b"usr:");
+        let keys_a = engine
+            .scan_keys(&realm_a, b"usr:", &end)
+            .expect("scan_keys");
+        assert_eq!(keys_a, vec![b"usr:a".to_vec()]);
+    }
+
+    #[test]
+    fn scan_keys_empty_prefix_returns_empty() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"usr:x", b"v").expect("put");
+        // Empty start==end means no range → empty
+        let keys = engine.scan_keys(&realm, b"", b"").expect("scan_keys");
+        assert!(keys.is_empty());
+    }
+
     // ===== count_prefix / scan_prefix_paged tests (HEA-1616) =====
 
     fn put_prefixed(engine: &EmbeddedStorageEngine, realm: &RealmId, prefix: &str, n: usize) {
@@ -1934,6 +2031,51 @@ mod tests {
             .expect("paged scan");
         assert_eq!(total, cap, "total must be capped at cap value");
         assert_eq!(window.len(), 5);
+    }
+
+    // ===== HEA-1622: two-phase paged scan (key-only count + bounded value scan) =====
+
+    #[test]
+    fn scan_prefix_paged_window_carries_values() {
+        // Values must be present in the window even with the two-phase approach.
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        for i in 0..10u32 {
+            let key = format!("usr:{i:04}");
+            let val = format!("val-{i}");
+            engine
+                .put(&realm, key.as_bytes(), val.as_bytes())
+                .expect("put");
+        }
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 3, 4, 0)
+            .expect("paged scan");
+        assert_eq!(total, 10);
+        assert_eq!(window.len(), 4);
+        // Key ordering must be preserved and values must match keys.
+        assert_eq!(window[0].key, b"usr:0003");
+        assert_eq!(window[0].value, b"val-3");
+        assert_eq!(window[3].key, b"usr:0006");
+        assert_eq!(window[3].value, b"val-6");
+    }
+
+    #[test]
+    fn scan_prefix_paged_last_window_bounded_correctly() {
+        // Last page: window touches the end — win_end falls back to prefix_end.
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        for i in 0..7u32 {
+            engine
+                .put(&realm, format!("usr:{i:04}").as_bytes(), b"v")
+                .expect("put");
+        }
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 5, 10, 0)
+            .expect("paged scan");
+        assert_eq!(total, 7);
+        assert_eq!(window.len(), 2);
+        assert_eq!(window[0].key, b"usr:0005");
+        assert_eq!(window[1].key, b"usr:0006");
     }
 
     // ===== HEA-1614: cap == 0 means "no ceiling" (exact total) =====

@@ -23,6 +23,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   seed-large-reset` wipes it.
 
 ### Fixed
+- **Performance: point lookups no longer scan the whole realm.** `StorageEngine::get`
+  fell through to an `iter_realm` linear scan of the active memtable, cloning and
+  scanning every entry in the realm on each key lookup. On a freshly-seeded
+  500k-user realm this made a single user-detail page load O(N) — 1–2 s per lookup.
+  It now uses the memtable's O(log n) `BTreeMap` lookup (new tombstone-aware
+  `get_entry`), so point reads stay near-instant regardless of realm size (HEA-1614).
 - **Pagination: admin list totals are no longer capped at 10,000.** Admin list and
   dashboard counts were truncated to a 10,000-per-prefix ceiling, so a realm with
   500,000 users reported "10,000" and the dashboard summed a wrong global total

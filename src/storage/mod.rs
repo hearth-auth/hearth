@@ -128,6 +128,25 @@ pub trait StorageEngine: Send + Sync {
         Ok(true)
     }
 
+    /// Scans a range of keys returning only key bytes (no values).
+    ///
+    /// Semantics mirror [`scan`] but omit value materialisation. Use this when
+    /// only the key list or count is needed — avoids allocating value bytes for
+    /// every entry in large prefixes.
+    ///
+    /// The default implementation falls back to [`scan`] and discards values.
+    /// [`EmbeddedStorageEngine`] overrides this with a true key-only merge that
+    /// never allocates value bytes.
+    fn scan_keys(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Vec<u8>>, StorageError> {
+        let entries = self.scan(realm_id, start, end)?;
+        Ok(entries.into_iter().map(|e| e.key).collect())
+    }
+
     /// Counts entries whose key starts with `prefix` for the given realm.
     ///
     /// A `cap` of `0` means **no ceiling** — return the exact count. A non-zero
@@ -135,8 +154,7 @@ pub trait StorageEngine: Send + Sync {
     /// e.g. "N+" to make the ceiling visible). The full prefix scan runs
     /// regardless; the cap only bounds the reported number.
     ///
-    /// This is explicitly **off the hot path** — O(N) scan cost is acceptable
-    /// for admin list endpoints.
+    /// Uses a key-only scan to avoid materialising value bytes.
     fn count_prefix(
         &self,
         realm_id: &RealmId,
@@ -147,8 +165,8 @@ pub trait StorageEngine: Send + Sync {
             return Ok(0);
         }
         let end = prefix_scan_end(prefix);
-        let entries = self.scan(realm_id, prefix, &end)?;
-        let n = entries.len() as u64;
+        let keys = self.scan_keys(realm_id, prefix, &end)?;
+        let n = keys.len() as u64;
         Ok(if cap == 0 { n } else { n.min(cap) })
     }
 
@@ -164,8 +182,9 @@ pub trait StorageEngine: Send + Sync {
     /// The item window is always exact. Only the reported `total` is subject to
     /// `cap`.
     ///
-    /// This is explicitly **off the hot path** — O(offset + limit) scan cost
-    /// is acceptable for admin list endpoints.
+    /// Two-phase implementation: key-only scan for the total (no value bytes
+    /// allocated for out-of-window entries), then a bounded value scan covering
+    /// only the `limit` window entries.
     fn scan_prefix_paged(
         &self,
         realm_id: &RealmId,
@@ -177,13 +196,32 @@ pub trait StorageEngine: Send + Sync {
         if prefix.is_empty() {
             return Ok((vec![], 0));
         }
-        let end = prefix_scan_end(prefix);
-        let all = self.scan(realm_id, prefix, &end)?;
-        let n = all.len() as u64;
+        let prefix_end = prefix_scan_end(prefix);
+
+        // Phase 1: key-only scan for total (no value bytes allocated).
+        let all_keys = self.scan_keys(realm_id, prefix, &prefix_end)?;
+        let n = all_keys.len() as u64;
         let total = if cap == 0 { n } else { n.min(cap) };
-        let start = (offset as usize).min(all.len());
-        let end_idx = (start + limit as usize).min(all.len());
-        let window = all[start..end_idx].to_vec();
+
+        // Phase 2: bounded value scan for the window only.
+        let start_idx = (offset as usize).min(all_keys.len());
+        let end_idx = (start_idx + limit as usize).min(all_keys.len());
+
+        if start_idx >= end_idx {
+            return Ok((vec![], total));
+        }
+
+        // Bound the scan to exactly the window keys. `win_end` is either the
+        // key immediately after the window (exclusive) or the prefix sentinel.
+        let win_start = &all_keys[start_idx];
+        let win_end: Vec<u8> = if end_idx < all_keys.len() {
+            all_keys[end_idx].clone()
+        } else {
+            prefix_end
+        };
+
+        // This scan processes only O(limit) entries instead of O(N).
+        let window = self.scan(realm_id, win_start, &win_end)?;
         Ok((window, total))
     }
 
