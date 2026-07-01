@@ -1215,13 +1215,13 @@ pub async fn revoke_other_sessions(
         return resp;
     }
 
-    let mut cursor: Option<String> = None;
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
     loop {
         let page = match state.identity.list_sessions_by_user(
             &session.realm_id,
             &session.user_id,
-            cursor.as_deref(),
-            100,
+            &crate::core::PageRequest::new(offset, batch),
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -1229,6 +1229,7 @@ pub async fn revoke_other_sessions(
                 return handlers_common::server_error();
             }
         };
+        let n = page.items.len() as u64;
         for s in &page.items {
             if s.id() == &session.session_id || s.is_revoked() {
                 continue;
@@ -1243,10 +1244,10 @@ pub async fn revoke_other_sessions(
                 }
             }
         }
-        match page.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+        if n == 0 || offset + n >= page.total {
+            break;
         }
+        offset += n;
     }
 
     Redirect::to("/ui/account/sessions").into_response()
@@ -1285,13 +1286,13 @@ fn audit_self_session_revoke(
 /// flagging the row whose id matches the current request's session.
 fn load_session_rows(state: &Arc<WebState>, session: &UiSession) -> Vec<AccountSessionRow> {
     let mut out = Vec::new();
-    let mut cursor: Option<String> = None;
+    let batch = crate::core::MAX_PAGE_LIMIT;
+    let mut offset = 0u64;
     loop {
         let page = match state.identity.list_sessions_by_user(
             &session.realm_id,
             &session.user_id,
-            cursor.as_deref(),
-            50,
+            &crate::core::PageRequest::new(offset, batch),
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -1299,6 +1300,7 @@ fn load_session_rows(state: &Arc<WebState>, session: &UiSession) -> Vec<AccountS
                 break;
             }
         };
+        let n = page.items.len() as u64;
         for s in page.items {
             if s.is_revoked() {
                 continue;
@@ -1317,10 +1319,10 @@ fn load_session_rows(state: &Arc<WebState>, session: &UiSession) -> Vec<AccountS
                 is_current: s.id() == &session.session_id,
             });
         }
-        match page.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+        if n == 0 || offset + n >= page.total {
+            break;
         }
+        offset += n;
     }
     out
 }

@@ -53,12 +53,27 @@ pub struct MemberWithAccess {
 // ---------------------------------------------------------------------------
 
 /// Query params for `GET /ui/admin/organizations`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct OrgListParams {
-    /// Opaque cursor for the next page.
-    pub cursor: Option<String>,
+    /// 1-based page number.
+    pub page: Option<u32>,
+    /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
+    pub per_page: Option<u32>,
     /// Search query (matches name or slug, case-insensitive substring).
     pub q: Option<String>,
+}
+
+impl OrgListParams {
+    fn per_page_validated(&self) -> u32 {
+        super::pagination::validate_per_page(self.per_page.unwrap_or(DEFAULT_PER_PAGE))
+    }
+
+    fn as_page_request(&self) -> crate::core::PageRequest {
+        crate::core::PageRequest::from_page_number(
+            self.page.unwrap_or(1),
+            self.per_page_validated(),
+        )
+    }
 }
 
 /// Template for `GET /ui/admin/organizations`.
@@ -67,7 +82,7 @@ pub struct OrgListParams {
 #[allow(clippy::struct_excessive_bools)]
 struct OrgListTemplate {
     organizations: Vec<Organization>,
-    next_cursor: Option<String>,
+    pagination: PaginationView,
     search_query: String,
     realm_name: String,
     chrome: bool,
@@ -92,15 +107,11 @@ pub async fn admin_orgs_list(
     Query(params): Query<OrgListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
+    let realm_name = target.0.name().to_string();
     let result = if search_query.len() >= 2 {
-        // No engine-level secondary index on org name/slug yet; scan a
-        // bounded window and filter in-handler. Bound matches the
-        // assignment-flow fan-out at admin.rs §RBAC and is a soft cap —
-        // realms with thousands of orgs will need a dedicated engine
-        // method, tracked as future work.
         state
             .identity
-            .list_organizations(target.id(), None, 200)
+            .list_organizations(target.id(), &crate::core::PageRequest::new(0, 200))
             .map(|page| {
                 let needle = search_query.to_ascii_lowercase();
                 let filtered: Vec<Organization> = page
@@ -111,35 +122,38 @@ pub async fn admin_orgs_list(
                             || o.slug().to_ascii_lowercase().contains(&needle)
                     })
                     .collect();
-                Page {
-                    items: filtered,
-                    next_cursor: None,
-                }
+                let total = filtered.len() as u64;
+                crate::core::PagedResult::new(filtered, total, 0, params.per_page_validated())
             })
     } else {
         state
             .identity
-            .list_organizations(target.id(), params.cursor.as_deref(), 20)
+            .list_organizations(target.id(), &params.as_page_request())
     };
 
     match result {
-        Ok(page) => render(&OrgListTemplate {
-            organizations: page.items,
-            next_cursor: page.next_cursor,
-            search_query,
-            realm_name: target.0.name().to_string(),
-            chrome: true,
-            active: "organizations",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            realm_theme_url: state.realm_theme_url(),
-            inline_theme_css: state.inline_theme_css(),
-        }),
+        Ok(page) => {
+            let base_url = format!("/ui/admin/realms/{realm_name}/organizations");
+            let preserved = super::pagination::encode_param("q", &search_query);
+            let pagination = PaginationView::new(&page, base_url, preserved);
+            render(&OrgListTemplate {
+                organizations: page.items,
+                pagination,
+                search_query,
+                realm_name,
+                chrome: true,
+                active: "organizations",
+                user_email: Some(session.user_email.clone()),
+                is_admin: true,
+                flash: None,
+                csrf: session.csrf.clone(),
+                narrow: false,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            })
+        }
         Err(e) => {
             tracing::warn!(error = %e, "list_organizations failed");
             super::handlers_common::server_error()
@@ -1027,9 +1041,20 @@ pub struct MemberPickerParams {
     /// Search query.
     #[serde(default)]
     pub q: String,
-    /// Pagination cursor.
+    /// Decimal offset for the next page.
     #[serde(default)]
     pub cursor: Option<String>,
+}
+
+impl MemberPickerParams {
+    pub(super) fn as_page_request(&self, per_page: u32) -> crate::core::PageRequest {
+        let offset: u64 = self
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        crate::core::PageRequest::new(offset, per_page)
+    }
 }
 
 /// `GET /ui/admin/organizations/:id/members/picker` — inline search results.
@@ -1049,25 +1074,33 @@ pub async fn admin_org_member_picker(
     };
 
     let query = params.q.trim().to_string();
-    let page = if query.len() >= 2 {
-        state
+    let (users, next_cursor) = if query.len() >= 2 {
+        match state
             .identity
-            .search_users(target.id(), &query, 20)
-            .map(|users| Page {
-                items: users,
-                next_cursor: None,
-            })
+            .search_users(target.id(), &query, &params.as_page_request(20))
+        {
+            Ok(r) => {
+                let nc = PaginationParams::next_cursor_from(&r);
+                (r.items, nc)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "member picker search_users failed");
+                (Vec::new(), None)
+            }
+        }
     } else {
-        state
+        match state
             .identity
-            .list_users(target.id(), params.cursor.as_deref(), 20)
-    };
-
-    let (users, next_cursor) = match page {
-        Ok(p) => (p.items, p.next_cursor),
-        Err(e) => {
-            tracing::warn!(error = %e, "member picker list_users failed");
-            (Vec::new(), None)
+            .list_users(target.id(), &params.as_page_request(20))
+        {
+            Ok(p) => {
+                let nc = PaginationParams::next_cursor_from(&p);
+                (p.items, nc)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "member picker list_users failed");
+                (Vec::new(), None)
+            }
         }
     };
 
@@ -1754,7 +1787,8 @@ pub async fn admin_api_user_search(
     } else {
         state
             .identity
-            .search_users(target.id(), &query, 10)
+            .search_users(target.id(), &query, &crate::core::PageRequest::new(0, 10))
+            .map(|r| r.items)
             .unwrap_or_default()
     };
 
@@ -1794,7 +1828,8 @@ pub async fn admin_api_rbac_user_search(
     } else {
         state
             .identity
-            .search_users(target.id(), &query, 10)
+            .search_users(target.id(), &query, &crate::core::PageRequest::new(0, 10))
+            .map(|r| r.items)
             .unwrap_or_default()
     };
     render(&RbacUserSearchOptionsTemplate { users, query })
@@ -1820,15 +1855,20 @@ pub async fn admin_api_nav_realms(
     let mut items: Vec<serde_json::Value> = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let system_id = crate::identity::keys::system_realm_id();
-    let mut cursor: Option<String> = None;
+    let mut offset = 0u64;
+    let batch = crate::core::MAX_PAGE_LIMIT;
     loop {
-        let page = match state.identity.list_realms(cursor.as_deref(), 100) {
+        let page = match state
+            .identity
+            .list_realms(&crate::core::PageRequest::new(offset, batch))
+        {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, "list_realms failed in nav endpoint");
                 return super::handlers_common::server_error();
             }
         };
+        let n = page.items.len() as u64;
         for realm in &page.items {
             if realm.id() == &system_id {
                 continue;
@@ -1845,10 +1885,10 @@ pub async fn admin_api_nav_realms(
                 "archived": realm.status() == RealmStatus::Archived,
             }));
         }
-        match page.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+        if n == 0 || offset + n >= page.total {
+            break;
         }
+        offset += n;
     }
     axum::response::Json(serde_json::json!({ "realms": items })).into_response()
 }

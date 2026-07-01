@@ -677,6 +677,25 @@ agent_auth:
 
 ---
 
+### `demo`
+
+Master guard for the **large-scale demo seeder**. Absent or `enabled: false` in production. When `enabled: true`, each realm's [`seeding:`](#realmsnameseeding) block is bulk-inserted at startup. Because the seeder is unreachable without this flag, a production config simply omits the block and the mass seeder can never fire against real data.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master switch. Must be `true` for any per-realm `seeding:` block to run. |
+| `password` | string | `"DemoPassw0rd!"` | Password shared by **every** seeded user across all realms. Hashed once and reused for all accounts. |
+
+```yaml
+demo:
+  enabled: true
+  password: "DemoPassw0rd!"
+```
+
+> **See also:** `examples/large-scale-demo/` and `make seed-large` for a ready-to-run multi-realm, multi-million-user instance.
+
+---
+
 ## `realms` Section
 
 The `realms` key is a map of **slug → configuration**. When present, Hearth manages realms declaratively via YAML reconciliation at startup.
@@ -1130,6 +1149,40 @@ realms:
 
 ---
 
+### `realms.<name>.seeding`
+
+Large-scale **demo** seeding directive. Bulk-inserts a large population of synthetic users for local scale testing. **Only honored when the top-level [`demo.enabled`](#demo) is `true`** — a production config that omits the `demo:` block never reaches the seeder, so it cannot run against real data. Seeding is **additive and synthetic-only** (it never reads, modifies, or deletes existing accounts) and **idempotent/resumable** via a per-realm sentinel: re-running creates only the delta above the recorded count.
+
+Generated accounts are named `user0000001@<email_domain>`, `user0000002@<email_domain>`, … and all share the single [`demo.password`](#demo) — it is hashed once and reused for every account, so seeding 1M+ users costs one Argon2id hash. Cross-realm distribution is simply whichever `users` count you set per realm.
+
+Seeding runs **in the background after the HTTP listener binds**, so the server is reachable within ~1 second and usable while it fills (watch the `demo seeding progress` / `complete` logs). Interrupting mid-seed is safe — the sentinel makes the next start resume where it left off.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `users` | integer | — | Target number of synthetic users for this realm. **Required.** |
+| `email_domain` | string | `"<realm-name>.demo"` | Email domain for generated addresses. |
+| `display_name_prefix` | string | `"Demo User"` | Display-name prefix; the user index is appended (e.g. `"Demo User 42"`). |
+| `email_verified` | bool | `true` | When `true`, accounts are pre-verified and immediately Active. |
+
+```yaml
+demo:
+  enabled: true
+  password: "DemoPassw0rd!"
+
+realms:
+  acme:
+    seeding:
+      users: 500000
+      email_domain: acme.demo
+  globex:
+    seeding:
+      users: 400000
+```
+
+See `examples/large-scale-demo/` and `make seed-large` for a ready-to-run setup.
+
+---
+
 ### `realms.<name>` — Migration Controls
 
 Three fields trigger one-shot realm data migrations during startup reconciliation. **Remove them from YAML after the migration completes** — the reconciler marks the flag consumed, and leaving them in has no effect on subsequent restarts, but keeping them prevents accidental re-migration after future config reloads.
@@ -1368,6 +1421,11 @@ Every field's default value at a glance.
 | `agent_auth.capabilities` | `mcp` | `false` |
 | `realms.<name>.seed_users[*]` | `email_verified` | `true` |
 | `realms.<name>.seed_users[*]` | `roles` | `[]` |
+| `demo` | `enabled` | `false` |
+| `demo` | `password` | `"DemoPassw0rd!"` |
+| `realms.<name>.seeding` | `email_domain` | `"<realm-name>.demo"` |
+| `realms.<name>.seeding` | `display_name_prefix` | `"Demo User"` |
+| `realms.<name>.seeding` | `email_verified` | `true` |
 | `realms.<name>.migrate` | `users` | `true` |
 | `realms.<name>.migrate` | `orgs` | `true` |
 | `realms.<name>.migrate` | `applications` | `false` |

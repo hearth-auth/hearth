@@ -7,12 +7,27 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// Query params for `GET /ui/admin/users`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UserListParams {
-    /// Opaque cursor for the next page.
-    pub cursor: Option<String>,
+    /// 1-based page number.
+    pub page: Option<u32>,
+    /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
+    pub per_page: Option<u32>,
     /// Search query (email or name).
     pub q: Option<String>,
+}
+
+impl UserListParams {
+    fn per_page_validated(&self) -> u32 {
+        super::pagination::validate_per_page(self.per_page.unwrap_or(DEFAULT_PER_PAGE))
+    }
+
+    fn as_page_request(&self) -> crate::core::PageRequest {
+        crate::core::PageRequest::from_page_number(
+            self.page.unwrap_or(1),
+            self.per_page_validated(),
+        )
+    }
 }
 
 /// Template for `GET /ui/admin/users`.
@@ -21,7 +36,7 @@ pub struct UserListParams {
 #[allow(clippy::struct_excessive_bools)]
 struct UserListTemplate {
     users: Vec<User>,
-    next_cursor: Option<String>,
+    pagination: PaginationView,
     search_query: String,
     realm_name: String,
     /// Base URL the search form submits to, also used as the `hx-get`
@@ -77,33 +92,33 @@ pub async fn admin_users_list(
     let result = if search_query.len() >= 2 {
         state
             .identity
-            .search_users(target.id(), &search_query, 20)
-            .map(|users| Page {
-                items: users,
-                next_cursor: None,
-            })
+            .search_users(target.id(), &search_query, &params.as_page_request())
     } else {
         state
             .identity
-            .list_users(target.id(), params.cursor.as_deref(), 20)
+            .list_users(target.id(), &params.as_page_request())
     };
 
     match result {
         Ok(page) => {
             let realm_name = target.0.name().to_string();
             let user_base_url = format!("/ui/admin/realms/{realm_name}/users");
+            let users = page.items.clone();
             if htmx.0 {
                 return render(&UserRowsTemplate {
-                    users: page.items,
+                    users,
                     user_base_url,
                     user_detail_qs: String::new(),
                 });
             }
+            let base_url = format!("/ui/admin/realms/{realm_name}/users");
+            let preserved = super::pagination::encode_param("q", &search_query);
+            let pagination = PaginationView::new(&page, base_url.clone(), preserved);
             render(&UserListTemplate {
                 users: page.items,
-                next_cursor: page.next_cursor,
+                pagination,
                 search_query,
-                list_url: format!("/ui/admin/realms/{realm_name}/users"),
+                list_url: base_url,
                 user_base_url,
                 user_detail_qs: String::new(),
                 realm_name,
@@ -152,29 +167,28 @@ pub async fn admin_admin_users_list(
     let result = if search_query.len() >= 2 {
         state
             .identity
-            .search_users(&system_realm, &search_query, 20)
-            .map(|users| Page {
-                items: users,
-                next_cursor: None,
-            })
+            .search_users(&system_realm, &search_query, &params.as_page_request())
     } else {
         state
             .identity
-            .list_users(&system_realm, params.cursor.as_deref(), 20)
+            .list_users(&system_realm, &params.as_page_request())
     };
 
     match result {
         Ok(page) => {
+            let users = page.items.clone();
             if htmx.0 {
                 return render(&UserRowsTemplate {
-                    users: page.items,
+                    users,
                     user_base_url: "/ui/admin/realms/system/users".to_string(),
                     user_detail_qs: "?admin_target=system".to_string(),
                 });
             }
+            let preserved = super::pagination::encode_param("q", &search_query);
+            let pagination = PaginationView::new(&page, "/ui/admin/admin-users", preserved);
             render(&UserListTemplate {
                 users: page.items,
-                next_cursor: page.next_cursor,
+                pagination,
                 search_query,
                 realm_name: String::new(),
                 list_url: "/ui/admin/admin-users".to_string(),
@@ -675,7 +689,7 @@ pub async fn admin_user_detail(
     // Load related data for the detail page
     let raw_sessions = state
         .identity
-        .list_sessions_by_user(target.id(), &uid, None, 10)
+        .list_sessions_by_user(target.id(), &uid, &crate::core::PageRequest::new(0, 10))
         .unwrap_or_default();
     // Single now-snapshot for the whole list so two rows can't disagree
     // on whether they're past expiry within the same render.
@@ -1631,7 +1645,7 @@ pub struct SessionRow {
 #[template(path = "ui/admin/sessions/list.html")]
 struct SessionListTemplate {
     sessions: Vec<SessionRow>,
-    next_cursor: Option<String>,
+    pagination: PaginationView,
     realm_name: String,
     /// `true` when the page is rendering the cross-realm aggregation at
     /// `/ui/admin/sessions` (no `?realm=` / `?admin_target=`). The list
@@ -1669,12 +1683,28 @@ struct SessionListTemplate {
 /// expiry filter. Default semantics: no `status` → show only Active.
 #[derive(Debug, Deserialize, Default)]
 pub struct SessionsListParams {
-    /// Opaque cursor for the next page.
+    /// 1-based page number.
     #[serde(default)]
-    pub cursor: Option<String>,
+    pub page: Option<u32>,
+    /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
+    #[serde(default)]
+    pub per_page: Option<u32>,
     /// Expiry filter — `"active"` (default), `"expired"`, or `"all"`.
     #[serde(default)]
     pub status: Option<String>,
+}
+
+impl SessionsListParams {
+    fn per_page_validated(&self) -> u32 {
+        super::pagination::validate_per_page(self.per_page.unwrap_or(DEFAULT_PER_PAGE))
+    }
+
+    fn as_page_request(&self) -> crate::core::PageRequest {
+        crate::core::PageRequest::from_page_number(
+            self.page.unwrap_or(1),
+            self.per_page_validated(),
+        )
+    }
 }
 
 fn resolve_user_org_memberships(
@@ -1765,9 +1795,13 @@ pub async fn admin_sessions_list(
 
     match state
         .identity
-        .list_sessions_by_realm(target.id(), params.cursor.as_deref(), 20)
+        .list_sessions_by_realm(target.id(), &params.as_page_request())
     {
         Ok(page) => {
+            let base_url = format!("/ui/admin/realms/{realm_name}/sessions");
+            let preserved =
+                super::pagination::encode_param("status", params.status.as_deref().unwrap_or(""));
+            let pagination = PaginationView::new(&page, base_url, preserved);
             let all_rows: Vec<SessionRow> = page
                 .items
                 .into_iter()
@@ -1787,7 +1821,7 @@ pub async fn admin_sessions_list(
             let rows = filter_session_rows(all_rows, &status_filter);
             render(&SessionListTemplate {
                 sessions: rows,
-                next_cursor: page.next_cursor,
+                pagination,
                 realm_name: realm_name.clone(),
                 is_global: false,
                 status_filter: status_filter.clone(),
@@ -2919,11 +2953,11 @@ fn process_csv_import(
         // Check if user already exists via search.
         let existing = state
             .identity
-            .search_users(realm_id, &email, 1)
+            .search_users(realm_id, &email, &crate::core::PageRequest::new(0, 1))
             .ok()
-            .and_then(|mut v| {
-                v.retain(|u| u.email().eq_ignore_ascii_case(&email));
-                v.into_iter().next()
+            .and_then(|mut r| {
+                r.items.retain(|u| u.email().eq_ignore_ascii_case(&email));
+                r.items.into_iter().next()
             });
 
         if let Some(user) = existing {

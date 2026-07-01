@@ -50,10 +50,10 @@ async fn search_users_by_email_prefix() {
         .expect("create bob");
 
     let results = identity
-        .search_users(&tid, "alice", 10)
+        .search_users(&tid, "alice", &hearth::core::PageRequest::new(0, 10))
         .expect("search alice");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].email(), "alice@example.com");
+    assert_eq!(results.items.len(), 1);
+    assert_eq!(results.items[0].email(), "alice@example.com");
 }
 
 #[tokio::test]
@@ -76,10 +76,10 @@ async fn search_users_by_display_name() {
         .expect("create user");
 
     let results = identity
-        .search_users(&tid, "charlie", 10)
+        .search_users(&tid, "charlie", &hearth::core::PageRequest::new(0, 10))
         .expect("search by name");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].display_name(), "Charlie Brown");
+    assert_eq!(results.items.len(), 1);
+    assert_eq!(results.items[0].display_name(), "Charlie Brown");
 }
 
 #[tokio::test]
@@ -103,14 +103,14 @@ async fn search_users_case_insensitive() {
 
     // Search with different case
     let results = identity
-        .search_users(&tid, "alice", 10)
+        .search_users(&tid, "alice", &hearth::core::PageRequest::new(0, 10))
         .expect("search lowercase");
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.items.len(), 1);
 
     let results = identity
-        .search_users(&tid, "ALICE", 10)
+        .search_users(&tid, "ALICE", &hearth::core::PageRequest::new(0, 10))
         .expect("search uppercase");
-    assert_eq!(results.len(), 1);
+    assert_eq!(results.items.len(), 1);
 }
 
 #[tokio::test]
@@ -135,9 +135,9 @@ async fn search_users_respects_limit() {
     }
 
     let results = identity
-        .search_users(&tid, "user", 3)
+        .search_users(&tid, "user", &hearth::core::PageRequest::new(0, 3))
         .expect("search with limit");
-    assert_eq!(results.len(), 3);
+    assert_eq!(results.items.len(), 3);
 }
 
 #[tokio::test]
@@ -160,11 +160,15 @@ async fn search_users_empty_query_returns_empty() {
         .expect("create user");
 
     // Empty or too-short query returns nothing (min 2 chars)
-    let results = identity.search_users(&tid, "", 10).expect("empty query");
-    assert!(results.is_empty());
+    let results = identity
+        .search_users(&tid, "", &hearth::core::PageRequest::new(0, 10))
+        .expect("empty query");
+    assert!(results.items.is_empty());
 
-    let results = identity.search_users(&tid, "a", 10).expect("1-char query");
-    assert!(results.is_empty());
+    let results = identity
+        .search_users(&tid, "a", &hearth::core::PageRequest::new(0, 10))
+        .expect("1-char query");
+    assert!(results.items.is_empty());
 }
 
 #[tokio::test]
@@ -187,9 +191,9 @@ async fn search_users_no_matches_returns_empty() {
         .expect("create user");
 
     let results = identity
-        .search_users(&tid, "zzzzz", 10)
+        .search_users(&tid, "zzzzz", &hearth::core::PageRequest::new(0, 10))
         .expect("no match query");
-    assert!(results.is_empty());
+    assert!(results.items.is_empty());
 }
 
 // ===== get_realm_by_name tests =====

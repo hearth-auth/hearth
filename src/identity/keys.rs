@@ -340,6 +340,19 @@ pub(crate) fn encode_credential_key(user_id: &UserId) -> Vec<u8> {
     format!("{CREDENTIAL_PREFIX}{}", user_id.as_uuid()).into_bytes()
 }
 
+/// Key for the large-scale demo seeder's per-realm sentinel.
+const DEMO_SEED_COUNT_KEY: &str = "demo:seed:count";
+
+/// Encodes the demo-seeder sentinel key.
+///
+/// Format: `demo:seed:count` → number of synthetic demo users seeded so far,
+/// stored as decimal ASCII. Read on each reconcile to make seeding idempotent
+/// and resumable: only users above this count are created. Stored under the
+/// realm namespace, so it is inherently per-realm.
+pub(crate) fn encode_demo_seed_count() -> Vec<u8> {
+    DEMO_SEED_COUNT_KEY.as_bytes().to_vec()
+}
+
 /// Scan prefix for all credential records in a realm.
 pub(crate) fn credential_scan_prefix() -> Vec<u8> {
     CREDENTIAL_PREFIX.as_bytes().to_vec()

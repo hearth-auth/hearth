@@ -193,6 +193,16 @@ impl PaginationParams {
     pub(super) fn effective_limit(&self) -> usize {
         self.limit.unwrap_or(20).clamp(1, 100)
     }
+
+    /// Returns a `PageRequest` treating `cursor` as a decimal offset.
+    pub(super) fn as_page_request(&self) -> crate::core::PageRequest {
+        let offset: u64 = self
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        crate::core::PageRequest::new(offset, self.effective_limit() as u32)
+    }
 }
 
 fn parse_realm_id(id: &str) -> Result<RealmId, Response> {
@@ -246,16 +256,23 @@ async fn admin_list_users(
         }
         return match state
             .identity
-            .search_users(&auth.realm_id, q, params.effective_limit())
+            .search_users(&auth.realm_id, q, &params.as_page_request())
         {
-            Ok(users) => {
-                let items: Vec<serde_json::Value> = users
+            Ok(result) => {
+                let items: Vec<serde_json::Value> = result
+                    .items
                     .iter()
                     .map(|u| proto_to_rest_json(&pb::User::from(u)))
                     .collect();
+                let next = result.offset + result.items.len() as u64;
+                let next_cursor: Option<String> = if next < result.total {
+                    Some(next.to_string())
+                } else {
+                    None
+                };
                 (
                     StatusCode::OK,
-                    Json(serde_json::json!({"items": items, "next_cursor": null})),
+                    Json(serde_json::json!({"items": items, "next_cursor": next_cursor, "total": result.total})),
                 )
                     .into_response()
             }
@@ -288,16 +305,27 @@ async fn admin_list_users(
             None
         };
 
-        // Full scan up to a bounded cap, then apply predicates. Filtered results
-        // don't support cursor pagination — next_cursor is always null.
+        // Full scan via offset pages up to a bounded cap, then apply predicates.
+        // Filtered results don't support cursor pagination — next_cursor is always null.
         const FILTER_SCAN_CAP: usize = 10_000;
-        let all_users = match state
-            .identity
-            .list_users(&auth.realm_id, None, FILTER_SCAN_CAP)
-        {
-            Ok(page) => page.items,
-            Err(e) => return identity_error_to_response(&e).into_response(),
-        };
+        let mut all_users: Vec<crate::identity::User> = Vec::new();
+        let mut scan_offset = 0u64;
+        loop {
+            let batch = crate::core::MAX_PAGE_LIMIT;
+            let scan_page = match state.identity.list_users(
+                &auth.realm_id,
+                &crate::core::PageRequest::new(scan_offset, batch),
+            ) {
+                Ok(p) => p,
+                Err(e) => return identity_error_to_response(&e).into_response(),
+            };
+            let n = scan_page.items.len() as u64;
+            all_users.extend(scan_page.items);
+            if n == 0 || scan_offset + n >= scan_page.total || all_users.len() >= FILTER_SCAN_CAP {
+                break;
+            }
+            scan_offset += n;
+        }
 
         let email_norm = params.email.as_deref().map(|e| e.to_lowercase());
         let username_lower = params.username.as_deref().map(|u| u.to_lowercase());
@@ -355,11 +383,10 @@ async fn admin_list_users(
             .into_response();
     }
 
-    match state.identity.list_users(
-        &auth.realm_id,
-        params.cursor.as_deref(),
-        params.effective_limit(),
-    ) {
+    match state
+        .identity
+        .list_users(&auth.realm_id, &params.as_page_request())
+    {
         Ok(page) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&user_page_to_proto(&page))),
@@ -533,20 +560,22 @@ async fn admin_export_users(
 
     // Collect all users by draining pages.
     let mut all_users: Vec<crate::identity::User> = Vec::new();
-    let mut cursor: Option<String> = None;
+    let mut offset = 0u64;
+    let batch = crate::core::MAX_PAGE_LIMIT;
     loop {
-        let page = match state
-            .identity
-            .list_users(&auth.realm_id, cursor.as_deref(), 100)
-        {
+        let page = match state.identity.list_users(
+            &auth.realm_id,
+            &crate::core::PageRequest::new(offset, batch),
+        ) {
             Ok(p) => p,
             Err(e) => return identity_error_to_response(&e).into_response(),
         };
+        let n = page.items.len() as u64;
         all_users.extend(page.items);
-        cursor = page.next_cursor;
-        if cursor.is_none() {
+        if n == 0 || offset + n >= page.total {
             break;
         }
+        offset += n;
     }
 
     let user_to_json = |u: &crate::identity::User| -> serde_json::Value {
@@ -948,10 +977,7 @@ async fn admin_list_realms(
         return e.into_response();
     }
 
-    match state
-        .identity
-        .list_realms(params.cursor.as_deref(), params.effective_limit())
-    {
+    match state.identity.list_realms(&params.as_page_request()) {
         Ok(page) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&realm_page_to_proto(&page))),
@@ -1808,11 +1834,10 @@ async fn admin_list_clients(
         return e.into_response();
     }
 
-    match state.identity.list_clients(
-        &auth.realm_id,
-        params.cursor.as_deref(),
-        params.effective_limit(),
-    ) {
+    match state
+        .identity
+        .list_clients(&auth.realm_id, &params.as_page_request())
+    {
         Ok(page) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&client_page_to_proto(&page))),
@@ -2959,19 +2984,27 @@ async fn admin_list_groups(
     if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
-    match state.rbac.list_groups(
-        &auth.realm_id,
-        pagination.cursor.as_deref(),
-        pagination.effective_limit(),
-    ) {
-        Ok(page) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "items": page.items,
-                "next_cursor": page.next_cursor,
-            })),
-        )
-            .into_response(),
+    match state
+        .rbac
+        .list_groups(&auth.realm_id, &pagination.as_page_request())
+    {
+        Ok(page) => {
+            let next = page.offset + page.items.len() as u64;
+            let next_cursor: Option<String> = if next < page.total {
+                Some(next.to_string())
+            } else {
+                None
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "items": page.items,
+                    "next_cursor": next_cursor,
+                    "total": page.total,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => rbac_error_to_response(&e).into_response(),
     }
 }
@@ -3730,21 +3763,23 @@ async fn admin_backup_create(
         // Resolve optional realm slug to a RealmId.
         let filter_id: Option<crate::core::RealmId> = if let Some(slug) = &realm_filter_slug {
             let mut found = None;
-            let mut cursor = None;
+            let batch = crate::core::MAX_PAGE_LIMIT;
+            let mut offset = 0u64;
             loop {
                 let page = identity
-                    .list_realms(cursor.as_deref(), 200)
+                    .list_realms(&crate::core::PageRequest::new(offset, batch))
                     .map_err(|e| format!("list_realms: {e}"))?;
+                let n = page.items.len() as u64;
                 for realm in &page.items {
                     if realm.name() == slug {
                         found = Some(realm.id().clone());
                         break;
                     }
                 }
-                if found.is_some() || page.next_cursor.is_none() {
+                if found.is_some() || n == 0 || offset + n >= page.total {
                     break;
                 }
-                cursor = page.next_cursor;
+                offset += n;
             }
             Some(found.ok_or_else(|| format!("realm '{slug}' not found"))?)
         } else {
@@ -3770,18 +3805,20 @@ async fn admin_backup_create(
             vec![id]
         } else {
             let mut ids = Vec::new();
-            let mut cursor = None;
+            let batch = crate::core::MAX_PAGE_LIMIT;
+            let mut offset = 0u64;
             loop {
                 let page = identity
-                    .list_realms(cursor.as_deref(), 200)
+                    .list_realms(&crate::core::PageRequest::new(offset, batch))
                     .map_err(|e| format!("list_realms: {e}"))?;
+                let n = page.items.len() as u64;
                 for realm in &page.items {
                     ids.push(realm.id().clone());
                 }
-                if page.next_cursor.is_none() {
+                if n == 0 || offset + n >= page.total {
                     break;
                 }
-                cursor = page.next_cursor;
+                offset += n;
             }
             ids
         };
@@ -4243,13 +4280,13 @@ async fn admin_list_user_sessions(
             .into_response();
     };
     let user_id = crate::core::UserId::new(uuid);
-    match state.identity.list_sessions_by_user(
-        &auth.realm_id,
-        &user_id,
-        params.cursor.as_deref(),
-        params.effective_limit(),
-    ) {
+    match state
+        .identity
+        .list_sessions_by_user(&auth.realm_id, &user_id, &params.as_page_request())
+    {
         Ok(page) => {
+            // Filter out revoked sessions before serialising — the engine returns
+            // all index entries regardless of revocation status.
             let items: Vec<serde_json::Value> = page
                 .items
                 .iter()
@@ -4266,9 +4303,16 @@ async fn admin_list_user_sessions(
                     })
                 })
                 .collect();
+            let next = page.offset + page.items.len() as u64;
+            let next_cursor: Option<String> = if next < page.total {
+                Some(next.to_string())
+            } else {
+                None
+            };
             let body = serde_json::json!({
                 "items": items,
-                "next_cursor": page.next_cursor,
+                "next_cursor": next_cursor,
+                "total": page.total,
             });
             (StatusCode::OK, Json(body)).into_response()
         }

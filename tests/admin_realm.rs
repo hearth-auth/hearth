@@ -43,7 +43,9 @@ async fn system_realm_exists_after_startup() {
     assert_eq!(realm.id(), &system_realm_id());
 
     // list_realms hides it.
-    let page = identity.list_realms(None, 100).expect("list_realms");
+    let page = identity
+        .list_realms(&hearth::core::PageRequest::new(0, 100))
+        .expect("list_realms");
     assert!(
         !page.items.iter().any(|r| r.id() == &system_realm_id()),
         "list_realms must filter out the system realm"
@@ -632,7 +634,9 @@ async fn list_realms_excludes_system_even_with_many_realms() {
             })
             .expect("create realm");
     }
-    let page = identity.list_realms(None, 100).expect("list_realms");
+    let page = identity
+        .list_realms(&hearth::core::PageRequest::new(0, 100))
+        .expect("list_realms");
     assert_eq!(page.items.len(), 5, "expected 5 user realms");
     assert!(
         !page.items.iter().any(|r| r.id() == &system_realm_id()),

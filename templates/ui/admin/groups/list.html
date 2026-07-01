@@ -31,7 +31,7 @@
   </div>
 </form>
 
-{% if groups.is_empty() && next_cursor.is_none() && search_query.is_empty() %}
+{% if groups.is_empty() && pagination.total == 0 && search_query.is_empty() %}
   <div class="rounded-lg border border-divider-subtle bg-ht-surface-elevated px-6 py-12 text-center">
     <svg class="mx-auto h-10 w-10 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
@@ -72,16 +72,6 @@
     </div>
   </div>
 
-  {% match next_cursor %}
-    {% when Some with (cursor) %}
-      <nav class="mt-4 flex justify-end">
-        <a href="/ui/admin/realms/{{ realm_name }}/groups?cursor={{ cursor }}"
-           class="inline-flex items-center gap-1 rounded border border-strong bg-ht-surface-elevated px-3 py-1.5 text-sm font-medium text-ht-content-secondary hover-bg-divider">
-          Next page
-          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-        </a>
-      </nav>
-    {% when None %}
-  {% endmatch %}
+  {% include "ui/admin/_pagination.html" %}
 {% endif %}
 {% endblock %}

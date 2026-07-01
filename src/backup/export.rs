@@ -250,10 +250,9 @@ impl BackupExporter {
         }
 
         // users.ndjson
-        let users = self.export_paginated(|cursor| {
+        let users = self.export_offset_paginated(|page| {
             self.identity
-                .list_users(realm_id, cursor, 500)
-                .map(|p| (p.items, p.next_cursor))
+                .list_users(realm_id, &page)
                 .map_err(|e| BackupError::Engine(e.to_string()))
         })?;
         counts.users = users.len() as u64;
@@ -276,10 +275,9 @@ impl BackupExporter {
         }
 
         // clients.ndjson
-        let clients = self.export_paginated(|cursor| {
+        let clients = self.export_offset_paginated(|page| {
             self.identity
-                .list_clients(realm_id, cursor, 500)
-                .map(|p| (p.items, p.next_cursor))
+                .list_clients(realm_id, &page)
                 .map_err(|e| BackupError::Engine(e.to_string()))
         })?;
         counts.clients = clients.len() as u64;
@@ -316,10 +314,9 @@ impl BackupExporter {
         }
 
         // groups.ndjson
-        let groups = self.export_paginated(|cursor| {
+        let groups = self.export_offset_paginated(|page| {
             self.rbac
-                .list_groups(realm_id, cursor, 500)
-                .map(|p| (p.items, p.next_cursor))
+                .list_groups(realm_id, &page)
                 .map_err(|e| BackupError::Engine(e.to_string()))
         })?;
         counts.groups = groups.len() as u64;
@@ -354,10 +351,9 @@ impl BackupExporter {
         }
 
         // organizations.ndjson
-        let organizations = self.export_paginated(|cursor| {
+        let organizations = self.export_offset_paginated(|page| {
             self.identity
-                .list_organizations(realm_id, cursor, 500)
-                .map(|p| (p.items, p.next_cursor))
+                .list_organizations(realm_id, &page)
                 .map_err(|e| BackupError::Engine(e.to_string()))
         })?;
         counts.organizations = organizations.len() as u64;
@@ -401,6 +397,7 @@ impl BackupExporter {
     /// The closure returns `(items, next_cursor)` — this avoids a type conflict
     /// between `identity::types::Page<T>` and `rbac::types::Page<T>`, which are
     /// structurally identical but distinct types.
+    /// Paginates via cursor for engines that still use cursor-based APIs (e.g. list_roles).
     fn export_paginated<T, F>(&self, fetch: F) -> Result<Vec<T>, BackupError>
     where
         F: Fn(Option<&str>) -> Result<(Vec<T>, Option<String>), BackupError>,
@@ -414,6 +411,26 @@ impl BackupExporter {
                 None => break,
                 Some(c) => cursor = Some(c),
             }
+        }
+        Ok(all)
+    }
+
+    /// Paginates via offset for engines that use `PageRequest` / `PagedResult`.
+    fn export_offset_paginated<T, F>(&self, fetch: F) -> Result<Vec<T>, BackupError>
+    where
+        F: Fn(crate::core::PageRequest) -> Result<crate::core::PagedResult<T>, BackupError>,
+    {
+        let batch = crate::core::MAX_PAGE_LIMIT;
+        let mut all = Vec::new();
+        let mut offset = 0u64;
+        loop {
+            let result = fetch(crate::core::PageRequest::new(offset, batch))?;
+            let n = result.items.len() as u64;
+            all.extend(result.items);
+            if n == 0 || offset + n >= result.total {
+                break;
+            }
+            offset += n;
         }
         Ok(all)
     }

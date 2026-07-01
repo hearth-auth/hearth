@@ -1024,36 +1024,33 @@ impl RbacEngine for EmbeddedRbacEngine {
     fn list_groups(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Group>, RbacError> {
+        page: &crate::core::PageRequest,
+    ) -> Result<crate::core::PagedResult<Group>, RbacError> {
         let prefix = keys::group_slug_scan_prefix(realm_id);
         let end = keys::prefix_end(&prefix);
-        let start = match cursor {
-            Some(c) => {
-                let mut v = prefix.clone();
-                v.extend_from_slice(c.as_bytes());
-                v.push(0);
-                v
-            }
-            None => prefix.clone(),
-        };
-        let entries = self.storage.scan(realm_id, &start, &end)?;
+        let all = self.storage.scan(realm_id, &prefix, &end)?;
 
-        let mut items = Vec::new();
-        let mut next_cursor = None;
-        for entry in entries {
-            if items.len() >= limit {
-                let slug_bytes = &entry.key[prefix.len()..];
-                next_cursor = Some(String::from_utf8_lossy(slug_bytes).to_string());
-                break;
-            }
+        // Exact total: full result set is already materialised, so capping the
+        // count only hides groups from the admin UI pager (HEA-1614).
+        let total = all.len() as u64;
+        let start = (page.offset as usize).min(all.len());
+        let end_idx = (start + page.limit as usize).min(all.len());
+        let window = &all[start..end_idx];
+
+        let mut items = Vec::with_capacity(window.len());
+        for entry in window {
             let gid: GroupId = Self::de(&entry.value)?;
             if let Some(g) = self.load_group(realm_id, &gid)? {
                 items.push(g);
             }
         }
-        Ok(Page { items, next_cursor })
+
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
     }
 
     fn add_group_member(

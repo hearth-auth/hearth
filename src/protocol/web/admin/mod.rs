@@ -31,8 +31,8 @@ use crate::identity::oidc::{ClientTrustLevel, RegisterClientRequest, UpdateClien
 use crate::identity::{
     CleartextPassword, CreateInvitationRequest, CreateOrganizationRequest, CreateUserRequest,
     IdentityError, OAuthClient, Organization, OrganizationConfig, OrganizationInvitation,
-    OrganizationMembership, OrganizationRole, OrganizationStatus, Page, Realm, RealmStatus,
-    Session, UpdateOrganizationRequest, UpdateUserRequest, User, UserStatus,
+    OrganizationMembership, OrganizationRole, OrganizationStatus, Realm, RealmStatus, Session,
+    UpdateOrganizationRequest, UpdateUserRequest, User, UserStatus,
 };
 use crate::rbac::{
     CreateGroupRequest, CreateRoleRequest, Group, GroupId, GroupMember, Permission, Role, RoleId,
@@ -53,6 +53,7 @@ pub mod identity_providers;
 pub mod migrations;
 pub mod onboarding;
 pub mod orgs;
+pub mod pagination;
 pub mod rbac;
 pub mod realms;
 pub mod users;
@@ -67,6 +68,7 @@ pub use identity_providers::*;
 pub use migrations::*;
 pub use onboarding::*;
 pub use orgs::*;
+pub use pagination::{AdminPageParams, PaginationView, DEFAULT_PER_PAGE, PAGE_SIZES};
 pub use rbac::*;
 pub use realms::*;
 pub use users::*;
@@ -82,8 +84,30 @@ pub use webhooks::*;
 /// Pagination query params for list endpoints.
 #[derive(Debug, Deserialize)]
 pub struct PaginationParams {
-    /// Opaque cursor for the next page.
+    /// Decimal offset for the next page (repurposed from opaque cursor).
     pub cursor: Option<String>,
+}
+
+impl PaginationParams {
+    /// Returns a `PageRequest` treating `cursor` as a decimal offset string.
+    pub fn as_page_request(&self, per_page: u32) -> crate::core::PageRequest {
+        let offset: u64 = self
+            .cursor
+            .as_deref()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        crate::core::PageRequest::new(offset, per_page)
+    }
+
+    /// Computes the next-page cursor value from a `PagedResult`.
+    pub fn next_cursor_from<T>(result: &crate::core::PagedResult<T>) -> Option<String> {
+        let next = result.offset + result.items.len() as u64;
+        if next < result.total {
+            Some(next.to_string())
+        } else {
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +525,7 @@ fn collect_org_permissions(state: &Arc<WebState>, realm_id: &RealmId) -> Vec<Str
 fn build_available_orgs(state: &Arc<WebState>, realm_id: &RealmId) -> Vec<AvailableOrg> {
     state
         .identity
-        .list_organizations(realm_id, None, 200)
+        .list_organizations(realm_id, &crate::core::PageRequest::new(0, 200))
         .map(|p| p.items)
         .unwrap_or_default()
         .into_iter()

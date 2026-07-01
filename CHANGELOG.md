@@ -7,6 +7,72 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Per-SST Bloom filters (SST V2 format)** — each newly written SST file now
+  embeds a Bloom filter (k = 7, ~1% FPR, ~10 bits/entry). A cold point lookup
+  probes the filter in O(k) constant time (~70 ns/SST) before performing a binary
+  search, so absent-key reads skip the binary search on ~99% of SSTs. At 500 k
+  users (~35 SSTs), this cuts a cold miss from O(35 · log n) to approximately
+  35 × 70 ns + 1 µs binary search for the single matching SST. V2 SST files carry
+  magic bytes `HSS2`; the engine remains fully backward-compatible with V1 files
+  (`HSST` magic), which load without a filter and pass all membership tests (HEA-1626).
+- **Large-scale demo seeder (`make seed-large`)** — a new top-level `demo:` config
+  block (`demo.enabled`, `demo.password`) plus a per-realm `seeding:` block
+  (`users`, `email_domain`, `display_name_prefix`, `email_verified`) stand up a
+  fully fleshed-out, multi-million-user instance for local scale testing. When
+  `demo.enabled: true`, each realm's `seeding.users` count is bulk-inserted as
+  synthetic accounts (`user0000001@<domain>`, …) that all share `demo.password`
+  — hashed once and reused, so seeding 1M+ users costs one Argon2id hash, not a
+  million. Seeding runs in the **background after the server is listening**, so
+  the instance is reachable within ~1 s and usable while it fills (watch the
+  per-100k progress logs). It is additive, synthetic-only, idempotent, and
+  resumable via a per-realm sentinel; it is never reached without `demo.enabled`
+  (the production guard). `make seed-large` boots
+  `examples/large-scale-demo/hearth.yaml` into `./data/demo`; `make
+  seed-large-reset` wipes it.
+
+### Fixed
+- **Performance: point lookups no longer scan the whole realm.** `StorageEngine::get`
+  fell through to an `iter_realm` linear scan of the active memtable, cloning and
+  scanning every entry in the realm on each key lookup. On a freshly-seeded
+  500k-user realm this made a single user-detail page load O(N) — 1–2 s per lookup.
+  It now uses the memtable's O(log n) `BTreeMap` lookup (new tombstone-aware
+  `get_entry`), so point reads stay near-instant regardless of realm size (HEA-1614).
+- **Performance: admin list page loads no longer scan and allocate the full realm prefix.** `count_prefix` and `scan_prefix_paged` previously called `scan()` on the entire prefix — materialising key + value bytes for every entry (e.g. 500 k users × ~500 B/entry ≈ 250 MB per page load). A new two-phase approach is used: a key-only scan (`scan_keys`) builds the total count without allocating any value bytes, then a bounded value scan covering only the requested page window (O(limit) instead of O(N)) returns the entries with their values. A new `StorageEngine::scan_keys` method and corresponding efficient `EmbeddedStorageEngine` override (using `range_scan_keys`/`iter_realm_range_keys` on SST and memtable layers) underpin the change (HEA-1622).
+- **Pagination: admin list totals are no longer capped at 10,000.** Admin list and
+  dashboard counts were truncated to a 10,000-per-prefix ceiling, so a realm with
+  500,000 users reported "10,000" and the dashboard summed a wrong global total
+  (4 realms → "40,000"); worse, the pager's `total_pages` was computed from the
+  capped total, making every record past the first 10,000 unreachable. The storage
+  count primitives (`count_prefix`, `scan_prefix_paged`) now treat `cap == 0` as
+  "no ceiling" and every admin list path reports the exact count, so pagination
+  spans the full result set (HEA-1614).
+- **Pagination: disabled prev/next controls now use `<button disabled>` instead of
+  `<span aria-disabled="true">`.** `aria-disabled` is invalid on non-interactive elements;
+  the native `disabled` attribute on a `<button>` is the correct, axe-core-passing pattern
+  (HEA-1621).
+- **Pagination: per-page `<select>` no longer uses an inline `onchange=` handler.**
+  The handler was blocked by `Content-Security-Policy: script-src 'self'`, making the
+  per-page dropdown a no-op. The logic is now wired in `admin.js` via an external event
+  listener (HEA-1621).
+- **Storage: concurrent writes are no longer lost during a memtable flush.** The
+  flush snapshotted the memtable lock-free and cleared it under the lock as two
+  separate steps; a write landing in that window was silently dropped. Under a
+  multithreaded server this could lose acknowledged writes (e.g. an admin created
+  via the setup wizard while background work flushed, making the account
+  un-loginable and invisible to password reset). The flush now snapshots, writes
+  the SST, and resets the memtable atomically under a single write-lock hold, so
+  a concurrent write is always either captured in the SST or kept in the live map.
+- **Emailed links (verification, password reset) now include the server port.**
+  When `onboarding.base_url` was unset, links fell back to a bare
+  `http://localhost` with no port. The fallback now uses the server's own
+  bind `host:port`; set `onboarding.base_url` to override.
+- **Bulk writes (`put_batch`/`write_batch`) no longer clone the memtable per
+  entry.** The storage engine applied each entry of a batch with its own
+  copy-on-write of the entire memtable `BTreeMap`, making a batch of N entries
+  O(N²). Batches now apply in a single clone-mutate-swap cycle — both on the write
+  path and during crash-recovery WAL replay — so bulk loads (the demo seeder,
+  audit appends, migrations, imports) and reopening a large data directory scale
+  linearly instead of quadratically.
 - **Rust SDK Actix-web middleware adapter (HEA-1602)** — `hearth-sdk` gains an optional
   `actix-middleware` feature that provides `HearthActixMiddleware` (implements Actix-web 4's
   `Transform`/`Service` traits), the `RequirePermission` extractor (reads verified `Claims` from
@@ -320,6 +386,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   routes (AATs, transaction tokens, SPIFFE, cross-realm) are available out of the box in
   development without requiring `hearth.yaml` edits. Production deployments (without `--dev`)
   are unaffected: capabilities remain `false` unless explicitly set. (HEA-1408)
+
+- **Admin UI full pagination** — all admin list pages (users, realms, audit, groups,
+  organisations, applications, sessions, roles) now display complete pagination controls:
+  total record count, "Page X of Y", numbered page links, and prev/next buttons.
+  Pages accept `?page=` and `?per_page=` query parameters; `per_page` is selectable from a
+  dropdown (5 / 10 / 25 / 50 / 100, default 25). An active `?q=` search filter is preserved
+  when changing pages or page size; changing page size always resets to page 1 (HEA-1614).
+
+- **`?cursor=` removed from admin UI list routes (breaking, admin UI only)** — the former
+  cursor-based pagination parameter is no longer accepted on any `/ui/admin/…` list URL.
+  REST (`/v1/…`) and gRPC list endpoints are unaffected (HEA-1614).
 
 ### Added
 

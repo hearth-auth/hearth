@@ -1,0 +1,169 @@
+# hearth.yaml — Large-scale demo configuration.
+#
+# Boots a fully fleshed-out, MULTI-MILLION-user Hearth instance on a local
+# machine to prove the storage model's usability at scale. Used by
+# `make seed-large`, which runs:
+#
+#   HEARTH_DEV_DATA_DIR=./data/demo cargo run --release -- serve --dev \
+#       --config examples/large-scale-demo/hearth.yaml
+#
+# NOT for production. The mass seeder below is gated by `demo.enabled: true`;
+# a production config simply omits this block, so the seeder can never fire
+# against real data.
+#
+# First boot seeds the users (this takes a while — see the seeding counts) and
+# then serves. Subsequent boots are instant: a per-realm sentinel records the
+# seeded count, so nothing is re-created. To force a fresh re-seed, run
+# `make seed-large-reset` (wipes ./data/demo).
+#
+# Every seeded user shares ONE password (`demo.password`). Log in as e.g.
+# `user0000001@acme.demo` with that password. A handful of named accounts
+# (below) carry real roles so you can exercise RBAC.
+
+# ── Demo mode (master guard for the large-scale seeder) ──────────────────────
+demo:
+  enabled: true
+  # Shared by EVERY seeded user across all realms. Hashed once, reused for all.
+  password: "DemoPassw0rd!"
+
+server:
+  bind_address: "127.0.0.1"
+  port: 8420
+
+storage:
+  # `make seed-large` runs in --dev mode and overrides the data dir via
+  # HEARTH_DEV_DATA_DIR=./data/demo, so writes land on disk without per-write
+  # fsync — fast bulk loading that still persists for you to explore.
+  data_dir: "./data/demo"
+  fsync: false
+
+oidc:
+  issuer: "http://localhost:8420"
+
+onboarding:
+  # Public-facing base URL used to build emailed links (verification, password
+  # reset) AND the first-run setup link. Without this, links fall back to the
+  # bind origin; set it explicitly so every link points at the right host:port.
+  base_url: "http://localhost:8420"
+
+observability:
+  log_level: "info"
+  log_format: "text"
+
+email:
+  transport: mailcatcher   # captured in-process; inbox at /dev/mail
+
+# ── Realms ───────────────────────────────────────────────────────────────────
+#
+# Cross-realm distribution is simply whichever `seeding.users` count you set per
+# realm. Edit these freely — raise them for a heavier stress test (e.g. 5M+),
+# or lower them for a quick smoke run. The totals below come to ~1.2M.
+realms:
+  # ── Acme — 500,000 users ────────────────────────────────────────────────────
+  acme:
+    applications:
+      acme-portal:
+        name: "Acme Portal"
+        confidential: false           # public client; PKCE required
+        redirect_uris:
+          - "http://127.0.0.1:8420/callback"
+        grant_types:
+          - authorization_code
+          - refresh_token
+    permissions:
+      - name: content.read
+        display_name: "Read content"
+        category: content
+      - name: content.write
+        display_name: "Write content"
+        category: content
+    roles:
+      - name: member
+        display_name: "Member"
+        scope_kind: realm
+        permissions: [content.read]
+      - name: editor
+        display_name: "Editor"
+        scope_kind: realm
+        permissions: [content.read, content.write]
+    groups:
+      - name: Engineering
+        description: "Engineering staff"
+      - name: Support
+        description: "Customer support staff"
+    seed_users:
+      - email: admin@acme.demo
+        display_name: Ada Admin
+        password: "DemoPassw0rd!"
+        roles: [editor]
+    seeding:
+      users: 500000
+      email_domain: acme.demo
+
+  # ── Globex — 400,000 users ──────────────────────────────────────────────────
+  globex:
+    applications:
+      globex-app:
+        name: "Globex App"
+        confidential: false
+        redirect_uris:
+          - "http://127.0.0.1:8420/callback"
+        grant_types:
+          - authorization_code
+          - refresh_token
+    permissions:
+      - name: billing.read
+        display_name: "Read billing"
+        category: billing
+    roles:
+      - name: member
+        display_name: "Member"
+        scope_kind: realm
+        permissions: [billing.read]
+    groups:
+      - name: Finance
+        description: "Finance team"
+    seed_users:
+      - email: admin@globex.demo
+        display_name: Gil Globex
+        password: "DemoPassw0rd!"
+        roles: [member]
+    seeding:
+      users: 400000
+      email_domain: globex.demo
+
+  # ── Initech — 200,000 users ─────────────────────────────────────────────────
+  initech:
+    applications:
+      initech-tps:
+        name: "Initech TPS"
+        confidential: false
+        redirect_uris:
+          - "http://127.0.0.1:8420/callback"
+        grant_types:
+          - authorization_code
+    roles:
+      - name: member
+        display_name: "Member"
+        scope_kind: realm
+    seeding:
+      users: 200000
+      email_domain: initech.demo
+
+  # ── Umbrella — 100,000 users ────────────────────────────────────────────────
+  umbrella:
+    applications:
+      umbrella-console:
+        name: "Umbrella Console"
+        confidential: false
+        redirect_uris:
+          - "http://127.0.0.1:8420/callback"
+        grant_types:
+          - authorization_code
+    roles:
+      - name: member
+        display_name: "Member"
+        scope_kind: realm
+    seeding:
+      users: 100000
+      email_domain: umbrella.demo

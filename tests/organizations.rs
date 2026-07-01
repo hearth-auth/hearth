@@ -85,7 +85,7 @@ async fn full_organization_lifecycle() {
 
     // 5. List organizations
     let page = identity
-        .list_organizations(&realm_id, None, 10)
+        .list_organizations(&realm_id, &hearth::core::PageRequest::new(0, 10))
         .expect("list orgs");
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id(), org.id());
@@ -888,7 +888,7 @@ mod proptests {
             }
 
             let remaining = identity
-                .list_organizations(&realm_id, None, 100)
+                .list_organizations(&realm_id, &hearth::core::PageRequest::new(0, 100))
                 .expect("list orgs");
             let expected = create_count - delete_count;
             prop_assert_eq!(

@@ -1397,6 +1397,7 @@ document.addEventListener('DOMContentLoaded', () => {
   run('initPasswordStrength',   () => initPasswordStrength());
   run('initAttrRows',           () => initAttrRows());
   run('initConfigEditor',       () => initConfigEditor());
+  run('initPerPageSelect',         () => initPerPageSelect());
   run('initFormSubmitProtection', () => initFormSubmitProtection());
   run('initKeyboardShortcutOverlay', () => initKeyboardShortcutOverlay());
 });
@@ -1409,6 +1410,18 @@ function initConfigEditor() {
   const root = document.getElementById('config-editor-root');
   if (!root) return;
   new ConfigEditor().init(root);
+}
+
+// =========================================================================
+// initPerPageSelect — auto-submit the page-size form on change.
+// Replaces the removed `onchange="this.form.submit()"` inline handler,
+// which is blocked by CSP `script-src 'self'` (no unsafe-inline).
+// =========================================================================
+
+function initPerPageSelect() {
+  const sel = document.getElementById('per-page-select');
+  if (!sel) return;
+  sel.addEventListener('change', function () { this.form.submit(); });
 }
 
 // =========================================================================

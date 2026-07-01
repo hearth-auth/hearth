@@ -1198,6 +1198,21 @@ async fn run_serve(
         }
     }
 
+    // Large-scale demo seeding (gated on `demo.enabled`) runs in the BACKGROUND
+    // on a blocking thread, AFTER reconciliation but concurrently with the HTTP
+    // listener bind below. Seeding millions of users would otherwise block
+    // startup for minutes; backgrounding it makes the instance reachable
+    // immediately and lets it fill while you interact with it. Each chunk is
+    // atomic and advances a per-realm sentinel, so an interrupted seed resumes
+    // cleanly on the next start.
+    if config.demo.enabled {
+        let ie = Arc::clone(&identity_engine);
+        let demo_config = config.clone();
+        tokio::task::spawn_blocking(move || {
+            hearth::identity::reconcile::seed_demo_realms(ie.as_ref(), &demo_config);
+        });
+    }
+
     // Phase E: cross-realm user migration (migrate_from / copy_from).
     // Runs after realm reconciliation so destination realms exist.
     // `on_conflict: error` causes a hard exit; all other errors are warnings.
@@ -1354,15 +1369,19 @@ async fn run_serve(
             interval.tick().await;
             loop {
                 interval.tick().await;
-                let mut cursor = None::<String>;
+                let batch = hearth::core::MAX_PAGE_LIMIT;
+                let mut offset = 0u64;
                 loop {
-                    let page = match engine.list_realms(cursor.as_deref(), 100) {
+                    let page = match engine
+                        .list_realms(&hearth::core::PageRequest::new(offset, batch))
+                    {
                         Ok(p) => p,
                         Err(e) => {
                             error!(error = %e, "cleanup: realm enumeration failed, retrying next tick");
                             break;
                         }
                     };
+                    let n = page.items.len() as u64;
                     for realm in &page.items {
                         match engine.sweep_expired(realm.id()) {
                             Ok(stats) => {
@@ -1388,10 +1407,10 @@ async fn run_serve(
                             }
                         }
                     }
-                    cursor = page.next_cursor;
-                    if cursor.is_none() {
+                    if n == 0 || offset + n >= page.total {
                         break;
                     }
+                    offset += n;
                 }
             }
         });
@@ -1407,17 +1426,21 @@ async fn run_serve(
             interval.tick().await;
             loop {
                 interval.tick().await;
-                let mut cursor = None::<String>;
+                let batch = hearth::core::MAX_PAGE_LIMIT;
                 let mut total_evicted: u64 = 0;
                 let mut total_active: u64 = 0;
+                let mut offset = 0u64;
                 loop {
-                    let page = match dfp_engine.list_realms(cursor.as_deref(), 100) {
+                    let page = match dfp_engine
+                        .list_realms(&hearth::core::PageRequest::new(offset, batch))
+                    {
                         Ok(p) => p,
                         Err(e) => {
                             warn!(error = %e, "dfp_sweeper: realm enumeration failed, retrying next tick");
                             break;
                         }
                     };
+                    let n = page.items.len() as u64;
                     let now_secs = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
@@ -1445,10 +1468,10 @@ async fn run_serve(
                             }
                         }
                     }
-                    cursor = page.next_cursor;
-                    if cursor.is_none() {
+                    if n == 0 || offset + n >= page.total {
                         break;
                     }
+                    offset += n;
                 }
                 // Realistic eviction/active counts never approach 2^53, so the
                 // u64 → f64 conversion is lossless in practice. Prometheus
@@ -1525,15 +1548,19 @@ async fn run_serve(
             interval.tick().await; // skip first immediate tick
             loop {
                 interval.tick().await;
-                let mut cursor = None::<String>;
+                let batch = hearth::core::MAX_PAGE_LIMIT;
+                let mut prune_offset = 0u64;
                 loop {
-                    let page = match prune_identity.list_realms(cursor.as_deref(), 100) {
+                    let page = match prune_identity
+                        .list_realms(&hearth::core::PageRequest::new(prune_offset, batch))
+                    {
                         Ok(p) => p,
                         Err(e) => {
                             warn!(error = %e, "audit prune: realm enumeration failed");
                             break;
                         }
                     };
+                    let prune_n = page.items.len() as u64;
                     for realm in &page.items {
                         let retention = match prune_audit.get_retention_config(realm.id()) {
                             Ok(c) => c,
@@ -1618,10 +1645,10 @@ async fn run_serve(
                             }
                         }
                     }
-                    cursor = page.next_cursor;
-                    if cursor.is_none() {
+                    if prune_n == 0 || prune_offset + prune_n >= page.total {
                         break;
                     }
+                    prune_offset += prune_n;
                 }
             }
         });
@@ -3109,20 +3136,22 @@ fn run_backup_create(
                 return Ok(RealmId::new(uuid));
             }
             // Name lookup: list all realms and match.
-            let mut cursor = None;
+            let batch = hearth::core::MAX_PAGE_LIMIT;
+            let mut offset = 0u64;
             loop {
                 let page = identity
-                    .list_realms(cursor.as_deref(), 200)
+                    .list_realms(&hearth::core::PageRequest::new(offset, batch))
                     .map_err(|e| format!("list_realms: {e}"))?;
+                let n = page.items.len() as u64;
                 for realm in &page.items {
                     if realm.name() == s {
                         return Ok(realm.id().clone());
                     }
                 }
-                if page.next_cursor.is_none() {
+                if n == 0 || offset + n >= page.total {
                     break;
                 }
-                cursor = page.next_cursor;
+                offset += n;
             }
             Err(format!("realm '{s}' not found"))
         })
@@ -3145,18 +3174,20 @@ fn run_backup_create(
         vec![id]
     } else {
         let mut ids = Vec::new();
-        let mut cursor = None;
+        let batch = hearth::core::MAX_PAGE_LIMIT;
+        let mut offset = 0u64;
         loop {
             let page = identity
-                .list_realms(cursor.as_deref(), 200)
+                .list_realms(&hearth::core::PageRequest::new(offset, batch))
                 .map_err(|e| format!("list_realms: {e}"))?;
+            let n = page.items.len() as u64;
             for realm in &page.items {
                 ids.push(realm.id().clone());
             }
-            if page.next_cursor.is_none() {
+            if n == 0 || offset + n >= page.total {
                 break;
             }
-            cursor = page.next_cursor;
+            offset += n;
         }
         ids
     };
@@ -3795,7 +3826,7 @@ fn log_verbose_startup_diagnostics(config: &Config, identity: &dyn IdentityEngin
     );
 
     // Realms and key fingerprints.
-    match identity.list_realms(None, 200) {
+    match identity.list_realms(&hearth::core::PageRequest::new(0, 200)) {
         Ok(page) => {
             debug!(count = page.items.len(), "verbose: loaded realms");
             for realm in &page.items {

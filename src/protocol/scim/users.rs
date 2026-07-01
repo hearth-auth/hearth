@@ -326,10 +326,26 @@ pub async fn list_users(
     // Phase 1 pagination: fetch up to 1000 users in one scan and slice in
     // memory. Okta / Azure paginate at ~100; Phase 2 can push the filter
     // + pagination into the engine layer.
-    let page = match state.identity.list_users(&auth.realm_id, None, 1000) {
-        Ok(p) => p,
-        Err(e) => return from_identity_error(&e).into_response(),
-    };
+    // Collect all users via offset pagination for SCIM.
+    let mut all_items: Vec<crate::identity::User> = Vec::new();
+    let mut scim_offset = 0u64;
+    loop {
+        let batch = crate::core::MAX_PAGE_LIMIT;
+        let scan_page = match state.identity.list_users(
+            &auth.realm_id,
+            &crate::core::PageRequest::new(scim_offset, batch),
+        ) {
+            Ok(p) => p,
+            Err(e) => return from_identity_error(&e).into_response(),
+        };
+        let n = scan_page.items.len() as u64;
+        all_items.extend(scan_page.items);
+        if n == 0 || scim_offset + n >= scan_page.total {
+            break;
+        }
+        scim_offset += n;
+    }
+    let page = crate::core::PagedResult::new(all_items, 0, 0, crate::core::MAX_PAGE_LIMIT);
 
     let mut resources: Vec<ScimUser> = Vec::with_capacity(page.items.len());
     for user in &page.items {

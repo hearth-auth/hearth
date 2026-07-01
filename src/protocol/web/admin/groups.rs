@@ -3,12 +3,27 @@
 use super::*;
 
 /// Query params for `GET /ui/admin/groups`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct GroupListParams {
-    /// Opaque cursor for the next page.
-    pub cursor: Option<String>,
+    /// 1-based page number.
+    pub page: Option<u32>,
+    /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
+    pub per_page: Option<u32>,
     /// Search query (name or slug).
     pub q: Option<String>,
+}
+
+impl GroupListParams {
+    fn per_page_validated(&self) -> u32 {
+        super::pagination::validate_per_page(self.per_page.unwrap_or(DEFAULT_PER_PAGE))
+    }
+
+    fn as_page_request(&self) -> crate::core::PageRequest {
+        crate::core::PageRequest::from_page_number(
+            self.page.unwrap_or(1),
+            self.per_page_validated(),
+        )
+    }
 }
 
 /// Template for `GET /ui/admin/groups`.
@@ -17,7 +32,7 @@ pub struct GroupListParams {
 #[allow(clippy::struct_excessive_bools)]
 struct GroupListTemplate {
     groups: Vec<Group>,
-    next_cursor: Option<String>,
+    pagination: PaginationView,
     search_query: String,
     realm_name: String,
     chrome: bool,
@@ -41,49 +56,57 @@ pub async fn admin_groups_list(
     Query(params): Query<GroupListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
+    let realm_name = target.0.name().to_string();
     // Mirror the org-list strategy: scan a bounded window and filter
     // in-handler when searching, since the engine has no name-substring
     // index on groups today.
     let result = if search_query.len() >= 2 {
-        state.rbac.list_groups(target.id(), None, 200).map(|page| {
-            let needle = search_query.to_ascii_lowercase();
-            let filtered: Vec<Group> = page
-                .items
-                .into_iter()
-                .filter(|g| {
-                    g.name.to_ascii_lowercase().contains(&needle)
-                        || g.slug.to_ascii_lowercase().contains(&needle)
-                })
-                .collect();
-            crate::rbac::Page {
-                items: filtered,
-                next_cursor: None,
-            }
-        })
+        // Scan a bounded window, filter in-handler for now (no name-substring index).
+        state
+            .rbac
+            .list_groups(target.id(), &crate::core::PageRequest::new(0, 200))
+            .map(|page| {
+                let needle = search_query.to_ascii_lowercase();
+                let filtered: Vec<Group> = page
+                    .items
+                    .into_iter()
+                    .filter(|g| {
+                        g.name.to_ascii_lowercase().contains(&needle)
+                            || g.slug.to_ascii_lowercase().contains(&needle)
+                    })
+                    .collect();
+                let total = filtered.len() as u64;
+                crate::core::PagedResult::new(filtered, total, 0, params.per_page_validated())
+            })
     } else {
         state
             .rbac
-            .list_groups(target.id(), params.cursor.as_deref(), 20)
+            .list_groups(target.id(), &params.as_page_request())
     };
 
     match result {
-        Ok(page) => render(&GroupListTemplate {
-            groups: page.items,
-            next_cursor: page.next_cursor,
-            search_query,
-            realm_name: target.0.name().to_string(),
-            chrome: true,
-            active: "groups",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            realm_theme_url: state.realm_theme_url(),
-            inline_theme_css: state.inline_theme_css(),
-        }),
+        Ok(page) => {
+            let base_url = format!("/ui/admin/realms/{realm_name}/groups");
+            let preserved = super::pagination::encode_param("q", &search_query);
+            let pagination = PaginationView::new(&page, base_url, preserved);
+            render(&GroupListTemplate {
+                groups: page.items,
+                pagination,
+                search_query,
+                realm_name,
+                chrome: true,
+                active: "groups",
+                user_email: Some(session.user_email.clone()),
+                is_admin: true,
+                flash: None,
+                csrf: session.csrf.clone(),
+                narrow: false,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            })
+        }
         Err(e) => {
             tracing::warn!(error = %e, "list_groups failed");
             super::handlers_common::server_error()
@@ -441,7 +464,7 @@ pub async fn admin_group_detail(
     // dropdown is set to "Org". An empty list disables the Org option.
     let available_orgs: Vec<AvailableOrg> = state
         .identity
-        .list_organizations(target.id(), None, 200)
+        .list_organizations(target.id(), &crate::core::PageRequest::new(0, 200))
         .map(|p| {
             p.items
                 .into_iter()
@@ -803,44 +826,47 @@ pub async fn admin_group_member_picker(
     // `admin_orgs_list:2844-2873`. For realms with thousands of users
     // this needs a dedicated index, but at admin-UI scale (a few
     // hundred) it's acceptable.
-    let page = if query.is_empty() {
-        state
+    let (users, next_cursor) = if query.is_empty() {
+        match state
             .identity
-            .list_users(target.id(), params.cursor.as_deref(), 20)
-            .map(|p| {
+            .list_users(target.id(), &params.as_page_request(20))
+        {
+            Ok(p) => {
+                let nc = PaginationParams::next_cursor_from(&p);
                 let filtered: Vec<User> = p
                     .items
                     .into_iter()
                     .filter(|u| !exclude.contains(u.id().as_uuid()))
                     .collect();
-                Page {
-                    items: filtered,
-                    next_cursor: p.next_cursor,
-                }
-            })
-    } else {
-        state.identity.list_users(target.id(), None, 200).map(|p| {
-            let needle = query.to_ascii_lowercase();
-            let filtered: Vec<User> = p
-                .items
-                .into_iter()
-                .filter(|u| !exclude.contains(u.id().as_uuid()))
-                .filter(|u| {
-                    u.display_name().to_ascii_lowercase().contains(&needle)
-                        || u.email().to_ascii_lowercase().contains(&needle)
-                })
-                .collect();
-            Page {
-                items: filtered,
-                next_cursor: None,
+                (filtered, nc)
             }
-        })
-    };
-    let (users, next_cursor) = match page {
-        Ok(p) => (p.items, p.next_cursor),
-        Err(e) => {
-            tracing::warn!(error = %e, "group member picker list_users failed");
-            (Vec::new(), None)
+            Err(e) => {
+                tracing::warn!(error = %e, "group member picker list_users failed");
+                (Vec::new(), None)
+            }
+        }
+    } else {
+        match state
+            .identity
+            .list_users(target.id(), &crate::core::PageRequest::new(0, 200))
+        {
+            Ok(p) => {
+                let needle = query.to_ascii_lowercase();
+                let filtered: Vec<User> = p
+                    .items
+                    .into_iter()
+                    .filter(|u| !exclude.contains(u.id().as_uuid()))
+                    .filter(|u| {
+                        u.display_name().to_ascii_lowercase().contains(&needle)
+                            || u.email().to_ascii_lowercase().contains(&needle)
+                    })
+                    .collect();
+                (filtered, None)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "group member picker list_users failed");
+                (Vec::new(), None)
+            }
         }
     };
     render(&GroupMemberPickerRowsTemplate {

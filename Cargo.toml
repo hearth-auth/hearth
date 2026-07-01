@@ -171,6 +171,10 @@ harness = false
 name = "agent_credentials"
 harness = false
 
+[[bench]]
+name = "point_lookup"
+harness = false
+
 [profile.release]
 overflow-checks = true
 panic = "abort"

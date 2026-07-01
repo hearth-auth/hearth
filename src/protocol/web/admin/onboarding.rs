@@ -861,7 +861,10 @@ pub async fn admin_onboarding_complete_get(
 ///
 /// On a fresh install there are ≤ 5 realms, so a linear scan is fine.
 fn resolve_realm_by_name(state: &WebState, realm_name: &str) -> Option<RealmId> {
-    let page = state.identity.list_realms(None, 50).ok()?;
+    let page = state
+        .identity
+        .list_realms(&crate::core::PageRequest::new(0, 50))
+        .ok()?;
     page.items
         .into_iter()
         .find(|r| r.name() == realm_name)

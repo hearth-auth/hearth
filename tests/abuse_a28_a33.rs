@@ -104,7 +104,7 @@ async fn a28_concurrent_slug_reservation_only_one_wins() {
     assert_eq!(by_slug.slug(), "race-slug");
 
     let page = identity
-        .list_organizations(&realm_id, None, 10)
+        .list_organizations(&realm_id, &hearth::core::PageRequest::new(0, 10))
         .expect("list");
     assert_eq!(page.items.len(), 1, "only one org must exist after race");
 }
@@ -478,11 +478,11 @@ async fn a33_chunked_cascade_leaves_no_orphans() {
 
     // Confirm data exists before deletion.
     let pre_users = identity
-        .list_users(&realm_id, None, 10)
+        .list_users(&realm_id, &hearth::core::PageRequest::new(0, 10))
         .expect("list users before");
     assert_eq!(pre_users.items.len(), 3, "expect 3 users before deletion");
     let pre_orgs = identity
-        .list_organizations(&realm_id, None, 10)
+        .list_organizations(&realm_id, &hearth::core::PageRequest::new(0, 10))
         .expect("list orgs before");
     assert_eq!(pre_orgs.items.len(), 1, "expect 1 org before deletion");
 

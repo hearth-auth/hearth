@@ -16,7 +16,7 @@ pub use types::parse_duration_to_micros;
 pub use types::ClusterConfig;
 pub use types::{
     AccountRateLimitYaml, ApplicationYamlConfig, AuthConfig, BrandingConfig, CaptchaProviderKind,
-    CaptchaYaml, ClaimsYamlConfig, CompactionSection, EmailConfig, EmailTransport,
+    CaptchaYaml, ClaimsYamlConfig, CompactionSection, DemoConfig, EmailConfig, EmailTransport,
     FederationProviderYaml, FederationYamlConfig, GlobalRateLimitYaml, GroupYamlConfig,
     IpRateLimitYaml, LinkModeYaml, MailgunConfig, MailgunRegion, MailtrapConfig, MetricsConfig,
     MigrateConflictPolicy, ObservabilityConfig, OidcYamlConfig, OnboardingConfig,
@@ -24,9 +24,9 @@ pub use types::{
     PasswordPolicyYaml, PermissionYamlConfig, PostmarkConfig, ProtectedResourceYamlConfig,
     RateLimitYaml, RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml, RealmScimYaml, RealmTokenYaml,
     RealmWebYaml, RealmYamlConfig, RoleYamlConfig, SamlServiceProviderYaml, ScopeBundleYamlConfig,
-    SecurityYaml, SeedUserYamlConfig, SendgridConfig, ServerConfig, SmsConfig, SmsTransport,
-    SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection, TokenYamlConfig, TurnstileYaml,
-    TwilioConfig,
+    SecurityYaml, SeedUserYamlConfig, SeedingYamlConfig, SendgridConfig, ServerConfig, SmsConfig,
+    SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection, TokenYamlConfig,
+    TurnstileYaml, TwilioConfig,
 };
 pub use types::{AgentAuthCapabilities, AgentAuthConfig};
 pub use types::{Config, ValidationIssue};

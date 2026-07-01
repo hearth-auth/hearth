@@ -476,7 +476,7 @@ async fn skip_mode_idempotency() {
         reader.realms()[0].realm_id.parse().expect("parse realm_id");
     let page = dst
         .identity()
-        .list_users(&restored_realm_id, None, 100)
+        .list_users(&restored_realm_id, &hearth::core::PageRequest::new(0, 100))
         .expect("list users");
     assert_eq!(
         page.items.iter().filter(|u| u.email() == email).count(),

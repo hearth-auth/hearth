@@ -341,19 +341,27 @@ impl RbacAdminService for RbacAdminSvc {
         let _auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
         let realm_id = parse_realm_id(&inner.realm_id)?;
-        let cursor = if inner.cursor.is_empty() {
-            None
+        // cursor repurposed as decimal offset for backward compat
+        let offset: u64 = if inner.cursor.is_empty() {
+            0
         } else {
-            Some(inner.cursor.as_str())
+            inner.cursor.parse().unwrap_or(0)
         };
+        let limit = effective_limit(inner.limit) as u32;
         let page = self
             .state
             .rbac
-            .list_groups(&realm_id, cursor, effective_limit(inner.limit))
+            .list_groups(&realm_id, &crate::core::PageRequest::new(offset, limit))
             .map_err(rbac_to_status)?;
+        let next = page.offset + page.items.len() as u64;
+        let next_cursor = if next < page.total {
+            next.to_string()
+        } else {
+            String::new()
+        };
         Ok(Response::new(pb::ListGroupsResponse {
             groups: page.items.iter().map(group_to_proto).collect(),
-            next_cursor: page.next_cursor.unwrap_or_default(),
+            next_cursor,
         }))
     }
 

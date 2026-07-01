@@ -35,7 +35,7 @@ pub use types::{
     UserPermissionGrant,
 };
 
-use crate::core::{OrganizationId, RealmId, Uri, UserId};
+use crate::core::{OrganizationId, PageRequest, PagedResult, RealmId, Uri, UserId};
 use crate::identity::ClientTrustLevel;
 
 /// Callback trait used by [`RbacEngine`] to bump session versions when
@@ -213,13 +213,12 @@ pub trait RbacEngine: Send + Sync {
     /// Deletes a group and its memberships.
     fn delete_group(&self, realm_id: &RealmId, group_id: &GroupId) -> Result<(), RbacError>;
 
-    /// Lists groups in a realm with paging.
+    /// Lists groups in a realm with offset-based pagination.
     fn list_groups(
         &self,
         realm_id: &RealmId,
-        cursor: Option<&str>,
-        limit: usize,
-    ) -> Result<Page<Group>, RbacError>;
+        page: &PageRequest,
+    ) -> Result<PagedResult<Group>, RbacError>;
 
     /// Adds a user or child group as a member of the target group.
     fn add_group_member(

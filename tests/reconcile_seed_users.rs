@@ -118,7 +118,7 @@ async fn reconcile_seed_users_is_idempotent() {
         .expect("realm must exist");
 
     let page = identity
-        .list_users(realm.id(), None, 100)
+        .list_users(realm.id(), &hearth::core::PageRequest::new(0, 100))
         .expect("list_users");
 
     assert_eq!(

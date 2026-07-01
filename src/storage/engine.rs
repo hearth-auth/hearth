@@ -338,60 +338,61 @@ impl EmbeddedStorageEngine {
                         "flush mutex poisoned",
                     )));
                 };
-                let entries = cb_memtable.iter_all();
-                if entries.is_empty() {
-                    return Ok(());
-                }
-                let sst_num = cb_sst_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let sst_path = cb_data_dir.join(format!("{sst_num:06}.sst"));
-                let system_kek = cb_key_registry
-                    .get_kek_for_realm(&cb_system_realm)
-                    .ok_or_else(|| StorageError::Crypto {
-                        reason: "system KEK not found during WAL rotation flush".to_string(),
-                    })?;
-                let system_kek_id = cb_key_registry.kek_id_for_realm(&cb_system_realm);
-                let dek = encryption::generate_dek()?;
-                let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
-                SstWriter::write_sst_with_fs(
-                    &sst_path,
-                    &entries,
-                    &*cb_fs,
-                    sst_num,
-                    &dek,
-                    &enc_header,
-                )?;
-                // Rebuild SST reader list, inserting the new file
-                let mut all_sst_paths: Vec<(PathBuf, u64)> = cb_fs
-                    .read_dir(&cb_data_dir)?
-                    .into_iter()
-                    .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
-                    .filter_map(|p| {
-                        let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
-                        Some((p, num))
-                    })
-                    .collect();
-                all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num));
-                let mut rebuilt = Vec::new();
-                for (path, n) in &all_sst_paths {
-                    let (kek_id, enc_hdr) = match sst::read_encryption_header(path, &*cb_fs) {
-                        Ok(h) => h,
-                        Err(_) => continue,
-                    };
-                    let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
-                    let kek = match cb_key_registry.get_kek_for_realm(&realm_for_kek) {
-                        Some(k) => k,
-                        None => continue,
-                    };
-                    let file_dek = match encryption::unwrap_dek(&enc_hdr, &kek) {
-                        Ok(d) => d,
-                        Err(_) => continue,
-                    };
-                    if let Ok(reader) = SstReader::open_with_fs(path, &*cb_fs, *n, &file_dek) {
-                        rebuilt.push(reader);
+                // Atomic freeze: snapshot + SST write/register + reset all happen
+                // under the memtable write lock, so a write racing with this
+                // rotation flush is never silently dropped.
+                cb_memtable.flush_under_lock(|entries| {
+                    let sst_num = cb_sst_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let sst_path = cb_data_dir.join(format!("{sst_num:06}.sst"));
+                    let system_kek = cb_key_registry
+                        .get_kek_for_realm(&cb_system_realm)
+                        .ok_or_else(|| StorageError::Crypto {
+                            reason: "system KEK not found during WAL rotation flush".to_string(),
+                        })?;
+                    let system_kek_id = cb_key_registry.kek_id_for_realm(&cb_system_realm);
+                    let dek = encryption::generate_dek()?;
+                    let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
+                    SstWriter::write_sst_with_fs(
+                        &sst_path,
+                        entries,
+                        &*cb_fs,
+                        sst_num,
+                        &dek,
+                        &enc_header,
+                    )?;
+                    // Rebuild SST reader list, inserting the new file
+                    let mut all_sst_paths: Vec<(PathBuf, u64)> = cb_fs
+                        .read_dir(&cb_data_dir)?
+                        .into_iter()
+                        .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+                        .filter_map(|p| {
+                            let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
+                            Some((p, num))
+                        })
+                        .collect();
+                    all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num));
+                    let mut rebuilt = Vec::new();
+                    for (path, n) in &all_sst_paths {
+                        let (kek_id, enc_hdr) = match sst::read_encryption_header(path, &*cb_fs) {
+                            Ok(h) => h,
+                            Err(_) => continue,
+                        };
+                        let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
+                        let kek = match cb_key_registry.get_kek_for_realm(&realm_for_kek) {
+                            Some(k) => k,
+                            None => continue,
+                        };
+                        let file_dek = match encryption::unwrap_dek(&enc_hdr, &kek) {
+                            Ok(d) => d,
+                            Err(_) => continue,
+                        };
+                        if let Ok(reader) = SstReader::open_with_fs(path, &*cb_fs, *n, &file_dek) {
+                            rebuilt.push(reader);
+                        }
                     }
-                }
-                cb_sst_readers.store(Arc::new(rebuilt));
-                cb_memtable.clear()?;
+                    cb_sst_readers.store(Arc::new(rebuilt));
+                    Ok(())
+                })?;
                 Ok(())
             });
         }
@@ -411,6 +412,14 @@ impl EmbeddedStorageEngine {
     }
 
     /// Flushes the memtable to a new SST file and clears it.
+    ///
+    /// The snapshot, SST write/registration, and the reset of the in-memory map
+    /// all happen inside a single hold of the memtable's write lock (see
+    /// [`Memtable::flush_under_lock`]). This makes the flush atomic against
+    /// concurrent writers — a `put`/`put_batch` racing with a flush is either
+    /// captured in the SST or kept in the fresh map, never silently dropped. The
+    /// outer `flush_lock` still serializes flushes against each other so SST
+    /// numbering can't collide.
     fn trigger_flush(&self) -> Result<(), StorageError> {
         let Ok(_guard) = self.flush_lock.lock() else {
             return Err(StorageError::Io(std::io::Error::other(
@@ -418,94 +427,99 @@ impl EmbeddedStorageEngine {
             )));
         };
 
-        let entries = self.active_memtable.iter_all();
-        if entries.is_empty() {
-            return Ok(());
-        }
+        self.active_memtable.flush_under_lock(|entries| {
+            // Generate sequential SST filename
+            let sst_num = self
+                .sst_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let sst_path = self.data_dir.join(format!("{sst_num:06}.sst"));
 
-        // Generate sequential SST filename
-        let sst_num = self
-            .sst_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let sst_path = self.data_dir.join(format!("{sst_num:06}.sst"));
+            // Generate per-file DEK and wrap with system realm KEK
+            let system_kek = self
+                .key_registry
+                .get_kek_for_realm(&self.system_realm)
+                .ok_or_else(|| StorageError::Crypto {
+                    reason: "system KEK not found".to_string(),
+                })?;
+            let system_kek_id = self.key_registry.kek_id_for_realm(&self.system_realm);
+            let dek = encryption::generate_dek()?;
+            let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
 
-        // Generate per-file DEK and wrap with system realm KEK
-        let system_kek = self
-            .key_registry
-            .get_kek_for_realm(&self.system_realm)
-            .ok_or_else(|| StorageError::Crypto {
-                reason: "system KEK not found".to_string(),
-            })?;
-        let system_kek_id = self.key_registry.kek_id_for_realm(&self.system_realm);
-        let dek = encryption::generate_dek()?;
-        let enc_header = encryption::wrap_dek(&dek, &system_kek, system_kek_id)?;
+            SstWriter::write_sst_with_fs(
+                &sst_path,
+                entries,
+                &*self.fs,
+                sst_num,
+                &dek,
+                &enc_header,
+            )?;
 
-        SstWriter::write_sst_with_fs(&sst_path, &entries, &*self.fs, sst_num, &dek, &enc_header)?;
+            // Rebuild SST reader list from disk (re-open all files). This
+            // registers the new SST *before* the memtable is emptied, so reads
+            // never miss a just-flushed key.
+            let mut all_sst_paths: Vec<(PathBuf, u64)> = self
+                .fs
+                .read_dir(&self.data_dir)?
+                .into_iter()
+                .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
+                .filter_map(|p| {
+                    let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
+                    Some((p, num))
+                })
+                .collect();
+            all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num)); // newest first
 
-        // Rebuild SST reader list from disk (re-open all files).
-        let mut all_sst_paths: Vec<(PathBuf, u64)> = self
-            .fs
-            .read_dir(&self.data_dir)?
-            .into_iter()
-            .filter(|p| p.extension().is_some_and(|ext| ext == "sst"))
-            .filter_map(|p| {
-                let num = p.file_stem()?.to_str()?.parse::<u64>().ok()?;
-                Some((p, num))
-            })
-            .collect();
-        all_sst_paths.sort_by_key(|(_, num)| std::cmp::Reverse(*num)); // newest first
-
-        let mut rebuilt_readers = Vec::new();
-        for (path, sst_num) in &all_sst_paths {
-            let (kek_id, enc_header) = match sst::read_encryption_header(path, &*self.fs) {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: failed to read encryption header"
-                    );
-                    continue;
-                }
-            };
-            let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
-            let kek = match self.key_registry.get_kek_for_realm(&realm_for_kek) {
-                Some(k) => k,
-                None => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        realm = %realm_for_kek,
-                        "SST file skipped: KEK not found"
-                    );
-                    continue;
-                }
-            };
-            let dek = match encryption::unwrap_dek(&enc_header, &kek) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: DEK unwrapping failed"
-                    );
-                    continue;
-                }
-            };
-            match SstReader::open_with_fs(path, &*self.fs, *sst_num, &dek) {
-                Ok(reader) => rebuilt_readers.push(reader),
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "SST file skipped: failed to open reader"
-                    );
+            let mut rebuilt_readers = Vec::new();
+            for (path, sst_num) in &all_sst_paths {
+                let (kek_id, enc_header) = match sst::read_encryption_header(path, &*self.fs) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "SST file skipped: failed to read encryption header"
+                        );
+                        continue;
+                    }
+                };
+                let realm_for_kek = RealmId::new(uuid::Uuid::from_bytes(kek_id));
+                let kek = match self.key_registry.get_kek_for_realm(&realm_for_kek) {
+                    Some(k) => k,
+                    None => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            realm = %realm_for_kek,
+                            "SST file skipped: KEK not found"
+                        );
+                        continue;
+                    }
+                };
+                let dek = match encryption::unwrap_dek(&enc_header, &kek) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "SST file skipped: DEK unwrapping failed"
+                        );
+                        continue;
+                    }
+                };
+                match SstReader::open_with_fs(path, &*self.fs, *sst_num, &dek) {
+                    Ok(reader) => rebuilt_readers.push(reader),
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "SST file skipped: failed to open reader"
+                        );
+                    }
                 }
             }
-        }
-        self.sst_readers.store(Arc::new(rebuilt_readers));
+            self.sst_readers.store(Arc::new(rebuilt_readers));
 
-        // Clear the memtable after successful flush
-        self.active_memtable.clear()?;
+            Ok(())
+        })?;
 
         Ok(())
     }
@@ -627,26 +641,23 @@ impl StorageEngine for EmbeddedStorageEngine {
             return Ok(Some(arc_val.to_vec()));
         }
 
-        // 2. Active memtable
-        // Note: memtable.get() returns None for both absent keys and tombstones.
-        // We need to check for tombstones explicitly to avoid false cold-path lookups.
-        {
-            let entries = self.active_memtable.iter_realm(realm_id);
-            for (k, v) in &entries {
-                if k.as_slice() == key {
-                    match v {
-                        MemtableValue::Data(data) => {
-                            // Promote to hot tier on memtable hit
-                            self.hot_tier.promote(realm_id, key, data);
-                            return Ok(Some(data.clone()));
-                        }
-                        MemtableValue::Tombstone => {
-                            // Key was deleted — stop searching deeper layers
-                            return Ok(None);
-                        }
-                    }
-                }
+        // 2. Active memtable — O(log n) BTreeMap lookup.
+        // `get_entry` distinguishes a tombstone from an absent key so we can
+        // stop searching deeper layers on a delete. This MUST NOT fall back to
+        // an `iter_realm` linear scan: at 500k entries in a single realm that
+        // turned every point lookup (e.g. a user-detail page) into an O(N)
+        // clone-and-scan — seconds per `get` (HEA-1614).
+        match self.active_memtable.get_entry(realm_id, key) {
+            Some(MemtableValue::Data(data)) => {
+                // Promote to hot tier on memtable hit
+                self.hot_tier.promote(realm_id, key, &data);
+                return Ok(Some(data));
             }
+            Some(MemtableValue::Tombstone) => {
+                // Key was deleted — stop searching deeper layers
+                return Ok(None);
+            }
+            None => {}
         }
 
         // 3. SST files newest-to-oldest (binary search)
@@ -771,12 +782,14 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.wal
             .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
 
-        // 2. Apply each sub-entry to the in-memory state. If a failure
-        //    occurs here (e.g., memtable mutex poisoned), the WAL record is
-        //    already durable; recovery on the next open will replay the
-        //    batch in full, re-establishing consistency.
-        for (key, value) in entries {
-            self.active_memtable.put(realm_id, key, value)?;
+        // 2. Apply all sub-entries to the in-memory state. The memtable update
+        //    is done in a single copy-on-write cycle (one map clone for the
+        //    whole batch, not one per entry) so bulk loads stay O(N), then we
+        //    invalidate any cached reads. If a failure occurs here (e.g.,
+        //    memtable mutex poisoned), the WAL record is already durable;
+        //    recovery on the next open replays the batch in full.
+        self.active_memtable.put_batch(realm_id, entries)?;
+        for (key, _value) in entries {
             self.hot_tier.invalidate(realm_id, key);
         }
 
@@ -835,10 +848,11 @@ impl StorageEngine for EmbeddedStorageEngine {
         self.wal
             .append_with_pre_rotate(&wal_entry, || self.trigger_flush())?;
 
-        // 2. Apply puts to in-memory state. If this fails after the WAL write,
-        //    recovery on next open will replay the full batch.
-        for (key, value) in puts {
-            self.active_memtable.put(realm_id, key, value)?;
+        // 2. Apply puts to in-memory state in a single copy-on-write cycle
+        //    (one map clone for the whole batch). If this fails after the WAL
+        //    write, recovery on next open will replay the full batch.
+        self.active_memtable.put_batch(realm_id, puts)?;
+        for (key, _value) in puts {
             self.hot_tier.invalidate(realm_id, key);
         }
 
@@ -899,6 +913,51 @@ impl StorageEngine for EmbeddedStorageEngine {
             .collect();
 
         Ok(result)
+    }
+
+    /// Key-only scan — same merge as [`scan`] but stores only a `bool` (alive
+    /// flag) instead of value bytes, then returns surviving keys.
+    ///
+    /// Avoids allocating value bytes entirely, which is the dominant memory cost
+    /// for prefix scans on large realms (e.g. 500k users × 500 B/entry ≈ 250 MB
+    /// saved per count query). Used by `count_prefix` and the first phase of
+    /// `scan_prefix_paged`.
+    fn scan_keys(
+        &self,
+        realm_id: &RealmId,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<Vec<u8>>, crate::storage::StorageError> {
+        let _timer = crate::metrics::metrics()
+            .storage_operation_duration_seconds
+            .with_label_values(&["scan_keys"])
+            .start_timer();
+
+        // BTreeMap<key, is_alive>: true = Data, false = Tombstone.
+        // Memtable entries (newest) overwrite SST entries as we insert in
+        // oldest-to-newest order.
+        let mut merged: std::collections::BTreeMap<Vec<u8>, bool> =
+            std::collections::BTreeMap::new();
+
+        let sst_readers = self.sst_readers.load();
+        for reader in sst_readers.iter().rev() {
+            for (key, alive) in reader.range_scan_keys(realm_id, start, end) {
+                merged.insert(key, alive);
+            }
+        }
+
+        for (key, alive) in self
+            .active_memtable
+            .iter_realm_range_keys(realm_id, start, end)
+        {
+            merged.insert(key, alive);
+        }
+
+        Ok(merged
+            .into_iter()
+            .filter(|(_, alive)| *alive)
+            .map(|(k, _)| k)
+            .collect())
     }
 }
 
@@ -1082,6 +1141,77 @@ mod tests {
                 "key {key} should be readable after flush"
             );
         }
+    }
+
+    // Regression test for the flush/write data-loss race. With a tiny flush
+    // threshold every few writes triggers a flush; multiple threads write
+    // concurrently while those flushes run. EVERY acknowledged write must still
+    // be readable. The old flush (lock-free `iter_all()` then a later `clear()`)
+    // could drop a write that landed between the snapshot and the clear; the
+    // atomic `flush_under_lock` makes that impossible.
+    #[test]
+    fn concurrent_writes_during_flush_are_not_lost() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            wal_config: WalConfig {
+                max_size: 64 * 1024 * 1024,
+                sync_mode: SyncMode::None,
+            },
+            memtable_config: MemtableConfig {
+                flush_threshold_bytes: 256, // flush every ~10 writes → constant flushing
+            },
+            tiered_config: TieredConfig {
+                hot_tier_capacity: 64,
+                eviction_batch_size: 8,
+            },
+            allow_missing_keks: false,
+            compaction: CompactionConfig::default(),
+            dev_mode: true,
+        };
+        let engine = std::sync::Arc::new(EmbeddedStorageEngine::open(config).expect("open"));
+
+        const THREADS: u32 = 4;
+        const PER_THREAD: u32 = 800;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let engine = std::sync::Arc::clone(&engine);
+                let realm = realm.clone();
+                std::thread::spawn(move || {
+                    for i in 0..PER_THREAD {
+                        let key = format!("t{t:02}-k{i:05}");
+                        let val = format!("t{t:02}-v{i:05}");
+                        engine
+                            .put(&realm, key.as_bytes(), val.as_bytes())
+                            .expect("put");
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("writer thread panicked");
+        }
+
+        // Every acknowledged write must survive the concurrent flushing.
+        let mut lost = Vec::new();
+        for t in 0..THREADS {
+            for i in 0..PER_THREAD {
+                let key = format!("t{t:02}-k{i:05}");
+                let expected = format!("t{t:02}-v{i:05}");
+                match engine.get(&realm, key.as_bytes()).expect("get") {
+                    Some(v) if v == expected.as_bytes() => {}
+                    _ => lost.push(key),
+                }
+            }
+        }
+        assert!(
+            lost.is_empty(),
+            "{} acknowledged writes were lost during concurrent flushes (e.g. {:?})",
+            lost.len(),
+            &lost[..lost.len().min(5)]
+        );
     }
 
     // Step 6 test #3: cold read promotes to hot tier (requires composed engine)
@@ -1697,5 +1827,290 @@ mod tests {
                 "rot-key-{i:04} must be readable after WAL rotation"
             );
         }
+    }
+
+    // ===== scan_keys tests (HEA-1622) =====
+
+    #[test]
+    fn scan_keys_returns_only_keys() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine
+            .put(&realm, b"usr:alice", b"large-value-bytes")
+            .expect("put");
+        engine
+            .put(&realm, b"usr:bob", b"another-large-value")
+            .expect("put");
+        let end = crate::storage::prefix_scan_end(b"usr:");
+        let mut keys = engine.scan_keys(&realm, b"usr:", &end).expect("scan_keys");
+        keys.sort();
+        assert_eq!(keys, vec![b"usr:alice".to_vec(), b"usr:bob".to_vec()]);
+    }
+
+    #[test]
+    fn scan_keys_excludes_tombstones() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"usr:alice", b"val").expect("put");
+        engine.put(&realm, b"usr:bob", b"val").expect("put");
+        engine.delete(&realm, b"usr:bob").expect("delete");
+        let end = crate::storage::prefix_scan_end(b"usr:");
+        let keys = engine.scan_keys(&realm, b"usr:", &end).expect("scan_keys");
+        assert_eq!(keys, vec![b"usr:alice".to_vec()]);
+    }
+
+    #[test]
+    fn scan_keys_realm_isolation() {
+        let (_dir, engine) = setup_engine();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        engine.put(&realm_a, b"usr:a", b"v").expect("put a");
+        engine.put(&realm_b, b"usr:x", b"v").expect("put b");
+        engine.put(&realm_b, b"usr:y", b"v").expect("put b2");
+        let end = crate::storage::prefix_scan_end(b"usr:");
+        let keys_a = engine
+            .scan_keys(&realm_a, b"usr:", &end)
+            .expect("scan_keys");
+        assert_eq!(keys_a, vec![b"usr:a".to_vec()]);
+    }
+
+    #[test]
+    fn scan_keys_empty_prefix_returns_empty() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        engine.put(&realm, b"usr:x", b"v").expect("put");
+        // Empty start==end means no range → empty
+        let keys = engine.scan_keys(&realm, b"", b"").expect("scan_keys");
+        assert!(keys.is_empty());
+    }
+
+    // ===== count_prefix / scan_prefix_paged tests (HEA-1616) =====
+
+    fn put_prefixed(engine: &EmbeddedStorageEngine, realm: &RealmId, prefix: &str, n: usize) {
+        for i in 0..n {
+            let key = format!("{prefix}:{i:05}");
+            engine
+                .put(realm, key.as_bytes(), b"v")
+                .expect("put in put_prefixed");
+        }
+    }
+
+    #[test]
+    fn count_prefix_zero_when_empty() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        let count = engine.count_prefix(&realm, b"usr:", 10_000).expect("count");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn count_prefix_exact_count() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 7);
+        let count = engine.count_prefix(&realm, b"usr:", 10_000).expect("count");
+        assert_eq!(count, 7);
+    }
+
+    #[test]
+    fn count_prefix_caps_at_cap() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        // Insert 20 items but cap at 10 — count must be capped.
+        put_prefixed(&engine, &realm, "usr:", 20);
+        let count = engine.count_prefix(&realm, b"usr:", 10).expect("count");
+        assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn count_prefix_cap_boundary_exact() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 10);
+        // Exactly cap many items — count must equal cap.
+        let count = engine.count_prefix(&realm, b"usr:", 10).expect("count");
+        assert_eq!(count, 10);
+    }
+
+    #[test]
+    fn count_prefix_realm_isolation() {
+        let (_dir, engine) = setup_engine();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        put_prefixed(&engine, &realm_a, "usr:", 5);
+        put_prefixed(&engine, &realm_b, "usr:", 99);
+        // realm_a's count must not be affected by realm_b's data.
+        let count = engine
+            .count_prefix(&realm_a, b"usr:", 10_000)
+            .expect("count");
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn scan_prefix_paged_offset_zero() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 15);
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 0, 5, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 15);
+        assert_eq!(window.len(), 5);
+    }
+
+    #[test]
+    fn scan_prefix_paged_offset_mid() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 15);
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 10, 5, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 15);
+        assert_eq!(window.len(), 5);
+    }
+
+    #[test]
+    fn scan_prefix_paged_offset_past_end() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 5);
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 100, 10, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 5, "total still reflects full count");
+        assert!(window.is_empty(), "past-end offset returns no items");
+    }
+
+    #[test]
+    fn scan_prefix_paged_last_page_partial() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 7);
+        // Offset 5, limit 10 — only 2 items remain.
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 5, 10, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 7);
+        assert_eq!(window.len(), 2);
+    }
+
+    #[test]
+    fn scan_prefix_paged_empty_store() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 0, 10, 10_000)
+            .expect("paged scan on empty store");
+        assert_eq!(total, 0);
+        assert!(window.is_empty());
+    }
+
+    #[test]
+    fn scan_prefix_paged_realm_isolation() {
+        let (_dir, engine) = setup_engine();
+        let realm_a = RealmId::generate();
+        let realm_b = RealmId::generate();
+        put_prefixed(&engine, &realm_a, "usr:", 3);
+        put_prefixed(&engine, &realm_b, "usr:", 50);
+        let (window, total) = engine
+            .scan_prefix_paged(&realm_a, b"usr:", 0, 100, 10_000)
+            .expect("paged scan");
+        assert_eq!(total, 3);
+        assert_eq!(window.len(), 3);
+    }
+
+    #[test]
+    fn scan_prefix_paged_total_is_capped() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 20);
+        let cap = 10;
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 0, 5, cap)
+            .expect("paged scan");
+        assert_eq!(total, cap, "total must be capped at cap value");
+        assert_eq!(window.len(), 5);
+    }
+
+    // ===== HEA-1622: two-phase paged scan (key-only count + bounded value scan) =====
+
+    #[test]
+    fn scan_prefix_paged_window_carries_values() {
+        // Values must be present in the window even with the two-phase approach.
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        for i in 0..10u32 {
+            let key = format!("usr:{i:04}");
+            let val = format!("val-{i}");
+            engine
+                .put(&realm, key.as_bytes(), val.as_bytes())
+                .expect("put");
+        }
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 3, 4, 0)
+            .expect("paged scan");
+        assert_eq!(total, 10);
+        assert_eq!(window.len(), 4);
+        // Key ordering must be preserved and values must match keys.
+        assert_eq!(window[0].key, b"usr:0003");
+        assert_eq!(window[0].value, b"val-3");
+        assert_eq!(window[3].key, b"usr:0006");
+        assert_eq!(window[3].value, b"val-6");
+    }
+
+    #[test]
+    fn scan_prefix_paged_last_window_bounded_correctly() {
+        // Last page: window touches the end — win_end falls back to prefix_end.
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        for i in 0..7u32 {
+            engine
+                .put(&realm, format!("usr:{i:04}").as_bytes(), b"v")
+                .expect("put");
+        }
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 5, 10, 0)
+            .expect("paged scan");
+        assert_eq!(total, 7);
+        assert_eq!(window.len(), 2);
+        assert_eq!(window[0].key, b"usr:0005");
+        assert_eq!(window[1].key, b"usr:0006");
+    }
+
+    // ===== HEA-1614: cap == 0 means "no ceiling" (exact total) =====
+
+    #[test]
+    fn count_prefix_cap_zero_means_uncapped() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 12);
+        // `cap == 0` must report the exact count, not `min(12, 0) == 0`.
+        let count = engine.count_prefix(&realm, b"usr:", 0).expect("count");
+        assert_eq!(count, 12);
+    }
+
+    #[test]
+    fn scan_prefix_paged_cap_zero_reports_exact_total_above_default() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        // More than DEFAULT_COUNT_CAP (10_000) rows. `cap == 0` must NOT
+        // truncate the reported total to 10_000 — the admin UI needs the true
+        // count to page through the whole realm (HEA-1614 large-scale seeder).
+        let n = 10_050usize;
+        let puts: Vec<(Vec<u8>, Vec<u8>)> = (0..n)
+            .map(|i| (format!("usr:{i:06}").into_bytes(), b"v".to_vec()))
+            .collect();
+        engine
+            .write_batch(&realm, &puts, &[])
+            .expect("batch insert");
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 0, 25, 0)
+            .expect("paged scan");
+        assert_eq!(
+            total, n as u64,
+            "cap=0 must report the true total, not the 10k cap"
+        );
+        assert_eq!(window.len(), 25);
     }
 }

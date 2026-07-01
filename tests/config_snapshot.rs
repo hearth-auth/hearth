@@ -744,7 +744,7 @@ async fn apply_diff_idempotent_on_org_added() {
 
     let page = harness
         .identity()
-        .list_organizations(realm.id(), None, 100)
+        .list_organizations(realm.id(), &hearth::core::PageRequest::new(0, 100))
         .expect("list orgs");
     let matching: Vec<_> = page
         .items
@@ -837,8 +837,8 @@ async fn apply_diff_group_added_creates_group_in_storage() {
     .expect("apply_diff");
 
     let groups = harness
-        .rbac()
-        .list_groups(realm.id(), None, 100)
+        .rbac_arc()
+        .list_groups(realm.id(), &hearth::core::PageRequest::new(0, 100))
         .expect("list groups");
     assert!(
         groups.items.iter().any(|g| g.name == "power-users"),

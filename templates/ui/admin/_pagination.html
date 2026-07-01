@@ -1,0 +1,118 @@
+{#-
+  Shared pagination partial — include from any admin list template.
+
+  Required template variables (must be on the parent template struct):
+    pagination: PaginationView
+
+  The page-size <select> is a full GET <form> that carries all filter_params
+  as hidden inputs so search/filter state survives page-size changes.
+  The <select> submits on change (onchange + no-JS "Go" fallback).
+  Changing page size always resets to page 1.
+-#}
+{% if pagination.total > 0 %}
+<div class="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+
+  {# ── Count summary ── #}
+  <p class="text-sm text-ht-content-muted">
+    {% if pagination.total_pages <= 1 %}
+      {{ pagination.total }} item{% if pagination.total != 1 %}s{% endif %}
+    {% else %}
+      {{ pagination.range_start() }}–{{ pagination.range_end() }}
+      of {{ pagination.total }}
+    {% endif %}
+  </p>
+
+  {# ── Page-size form (GET, no JS required) ── #}
+  <form method="get" action="{{ pagination.base_url }}" class="flex items-center gap-2">
+    {# preserve search/filter params as hidden inputs (pre-split on Rust side) #}
+    {% for (k, v) in pagination.filter_params %}
+      <input type="hidden" name="{{ k }}" value="{{ v }}">
+    {% endfor %}
+    {# page 1 on every size change #}
+    <input type="hidden" name="page" value="1">
+    <label for="per-page-select" class="text-sm text-ht-content-muted">Rows per page</label>
+    <select id="per-page-select"
+            name="per_page"
+            class="rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-primary focus:outline-none focus:ring-1 focus:ring-ht-brand-accent">
+      {% for opt in pagination.page_size_options %}
+        <option value="{{ opt.size }}" {% if opt.selected %}selected{% endif %}>{{ opt.size }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit"
+            class="rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-secondary hover-bg-divider">
+      Go
+    </button>
+  </form>
+
+  {# ── Page navigation ── #}
+  {% if pagination.total_pages > 1 %}
+  <nav class="flex items-center gap-1" aria-label="Page navigation">
+    {# Prev #}
+    {% match pagination.prev_page %}
+      {% when Some with (prev) %}
+        <a href="{{ pagination.base_url }}?page={{ prev }}&per_page={{ pagination.per_page }}{% if !pagination.preserved_params.is_empty() %}&{{ pagination.preserved_params }}{% endif %}"
+           class="inline-flex items-center rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-secondary hover-bg-divider"
+           aria-label="Previous page">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </a>
+      {% when None %}
+        <button type="button" disabled
+                class="inline-flex items-center rounded border border-divider-faint bg-ht-surface-base px-2 py-1 text-sm text-ht-content-muted opacity-40 cursor-not-allowed"
+                aria-label="Previous page">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </button>
+    {% endmatch %}
+
+    {# Page number window — ellipsis flag and is_current are pre-computed #}
+    {% for item in pagination.page_window %}
+      {% if item.is_ellipsis() %}
+        <span class="px-1 text-sm text-ht-content-muted select-none" aria-hidden="true">…</span>
+      {% else %}
+        {% match item.page %}
+          {% when Some with (p) %}
+            {% if item.is_current %}
+              <span class="inline-flex items-center rounded border border-ht-brand-accent bg-ht-surface-elevated px-2.5 py-1 text-sm font-semibold text-ht-content-primary"
+                    aria-current="page">{{ p }}</span>
+            {% else %}
+              <a href="{{ pagination.base_url }}?page={{ p }}&per_page={{ pagination.per_page }}{% if !pagination.preserved_params.is_empty() %}&{{ pagination.preserved_params }}{% endif %}"
+                 class="inline-flex items-center rounded border border-strong bg-ht-surface-elevated px-2.5 py-1 text-sm text-ht-content-secondary hover-bg-divider">
+                {{ p }}
+              </a>
+            {% endif %}
+          {% when None %}
+        {% endmatch %}
+      {% endif %}
+    {% endfor %}
+
+    {# Next #}
+    {% match pagination.next_page %}
+      {% when Some with (next) %}
+        <a href="{{ pagination.base_url }}?page={{ next }}&per_page={{ pagination.per_page }}{% if !pagination.preserved_params.is_empty() %}&{{ pagination.preserved_params }}{% endif %}"
+           class="inline-flex items-center rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-secondary hover-bg-divider"
+           aria-label="Next page">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </a>
+      {% when None %}
+        <button type="button" disabled
+                class="inline-flex items-center rounded border border-divider-faint bg-ht-surface-base px-2 py-1 text-sm text-ht-content-muted opacity-40 cursor-not-allowed"
+                aria-label="Next page">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </button>
+    {% endmatch %}
+  </nav>
+  {% endif %}{# total_pages > 1 #}
+
+</div>
+{% endif %}{# total > 0 #}

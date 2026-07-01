@@ -163,22 +163,25 @@ pub fn execute_cross_realm_migration(
 
     // 2. Enumerate all users in the source realm (full pagination).
     let mut user_ids: Vec<UserId> = Vec::new();
-    let mut cursor: Option<String> = None;
+    let mut offset = 0u64;
+    let batch = crate::core::MAX_PAGE_LIMIT;
     loop {
-        let page = match engine.list_users(src_realm_id, cursor.as_deref(), 200) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(error = %e, src_slug, "failed to list source users; aborting migration");
-                return Ok(report);
-            }
-        };
+        let page =
+            match engine.list_users(src_realm_id, &crate::core::PageRequest::new(offset, batch)) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, src_slug, "failed to list source users; aborting migration");
+                    return Ok(report);
+                }
+            };
+        let n = page.items.len() as u64;
         for user in &page.items {
             user_ids.push(user.id().clone());
         }
-        match page.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+        if n == 0 || offset + n >= page.total {
+            break;
         }
+        offset += n;
     }
 
     if user_ids.is_empty() {

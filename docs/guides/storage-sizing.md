@@ -18,11 +18,18 @@ Read path: hot tier → memtable → SST files
 |------|---------------|--------|-------------|-------------|
 | Hot tier | `HashMap` + `ArcSwap` | DRAM | < 5 µs | < 10 µs |
 | Memtable | `BTreeMap` + read lock | DRAM | < 20 µs | < 100 µs |
-| SST files | `memmap2` read-only mmap | page cache / NVMe | < 100 µs | < 500 µs |
+| SST files (warm page cache) | `memmap2` read-only mmap + Bloom filter | DRAM (page cache) | < 10 µs | < 100 µs |
+| SST files (cold page fault) | `memmap2` read-only mmap + Bloom filter | NVMe | < 100 µs | < 5 ms |
 
-These ranges match the CI gate thresholds in `benches/storage_gate.rs` and
-`benches/demotion_latency.rs`. Run `make bench-gate` on your target hardware
-to collect authoritative numbers.
+Each SST file embeds a per-file Bloom filter (k = 7, ~1% false-positive rate,
+~10 bits/entry). A point read probes the filter in O(k) constant time before
+performing a binary search, so absent-key reads skip the disk search on ~99%
+of SSTs. V1 SSTs (pre-HEA-1626) remain readable without a filter; `might_contain`
+returns `true` for every key on those files, falling back to the full binary search.
+
+These ranges match the CI gate thresholds in `benches/storage_gate.rs`,
+`benches/point_lookup.rs`, and `benches/demotion_latency.rs`. Run `make bench-gate`
+on your target hardware to collect authoritative numbers.
 
 ## Hot tier memory model
 
@@ -173,6 +180,8 @@ All latency claims in this guide are derived from the CI gate assertions in:
 
 - `benches/storage_gate.rs` — absolute p50/p99 thresholds for hot-tier, session,
   and user lookup paths
+- `benches/point_lookup.rs` — cold SST point-lookup p99 gate at 10k / 100k / 500k
+  users; validates bloom-filter scale factor (< 20× across realm sizes)
 - `benches/demotion_latency.rs` — three-phase demotion cycle p99 assertion
   (`demotion_cycle/pre_demotion_read`, `demotion_cycle/post_demotion_read`)
 - `benches/tiered_storage.rs` — Criterion throughput benchmarks for hot/cold
