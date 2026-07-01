@@ -20,7 +20,7 @@ Returns a paginated list of users. Accepts optional filters; when a filter is ac
 |---|---|
 | `cursor` | Opaque pagination cursor from a previous response (not available with field filters) |
 | `limit` | Page size, 1–100 (default 20) |
-| `search` | Full-text search across email and display name (min 2 characters) |
+| `search` | Search across email and display name using the [admin search grammar](admin-table-search.md) (substring by default; exact with `"…"`; glob with `*`/`?`; min 2 characters) |
 | `email` | Exact email match (case-insensitive) |
 | `username` | Substring match on `display_name` (case-insensitive) |
 | `status` | Status filter: `active`, `disabled`, or `pending_verification` |
