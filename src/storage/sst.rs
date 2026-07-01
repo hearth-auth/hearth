@@ -2,12 +2,27 @@
 //!
 //! All SST files are encrypted at rest using AES-256-GCM envelope encryption.
 //!
-//! Binary format:
+//! ## File formats
+//!
+//! ### V1 — original format (magic `b"HSST"`)
+//!
 //! ```text
 //! BASE HEADER (12 bytes):
 //!   [4B] magic    = b"HSST"
 //!   [4B] entry_count (u32 LE)
 //!   [4B] CRC32 of the plaintext data section
+//!
+//! ENCRYPTION HEADER (76 bytes): ...
+//! ENCRYPTED DATA SECTION: serialized (CompositeKey, MemtableValue) entries
+//! ```
+//!
+//! ### V2 — with per-file Bloom filter (magic `b"HSS2"`)
+//!
+//! ```text
+//! BASE HEADER (12 bytes):
+//!   [4B] magic    = b"HSS2"
+//!   [4B] entry_count (u32 LE)
+//!   [4B] CRC32 of the V2 plaintext data section (covers filter + entries)
 //!
 //! ENCRYPTION HEADER (76 bytes):
 //!   [16B] KEK identifier (realm UUID bytes)
@@ -16,9 +31,15 @@
 //!   [16B] GCM authentication tag for DEK wrapping
 //!
 //! ENCRYPTED DATA SECTION (variable):
-//!   [NB] AES-256-GCM ciphertext of the serialized data section
-//!        (includes appended 16B GCM tag)
+//!   Plaintext inside the AES-256-GCM envelope:
+//!     [4B] bloom_byte_count (u32 LE) — 0 for empty SSTs (no filter data)
+//!     [1B] bloom_k — hash function count (only if bloom_byte_count > 0)
+//!     [N B] bloom bits (only if bloom_byte_count > 0)
+//!     [M B] serialized (CompositeKey, MemtableValue) entries (same as V1)
 //! ```
+//!
+//! New SST writes always produce V2. V1 SSTs are still readable (they load
+//! without a bloom filter; `might_contain` returns `true` for every query).
 //!
 //! Per-file DEKs are randomly generated. The data nonce is derived from
 //! the SST file number via `counter_nonce()`.
