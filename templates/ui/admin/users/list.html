@@ -100,9 +100,45 @@
                    aria-label="Select all"
                    class="h-4 w-4 rounded border-divider bg-ht-surface-elevated">
           </th>
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Email</th>
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Name</th>
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
+          {# Email column #}
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted"
+              aria-sort="{% if sort_field == "email" %}{% if sort_dir == "desc" %}descending{% else %}ascending{% endif %}{% else %}none{% endif %}">
+            <a href="{{ list_url }}?sort=email&dir={% if sort_field == "email" && sort_dir == "asc" %}desc{% else %}asc{% endif %}{% if !search_query.is_empty() %}&q={{ search_query }}{% endif %}&per_page={{ pagination.per_page }}"
+               class="inline-flex items-center gap-1 hover:text-ht-content-secondary {% if sort_field == "email" %}text-ht-content-secondary{% endif %}">
+              Email
+              {% if sort_field == "email" %}
+                {% if sort_dir == "asc" %}<svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>
+                {% else %}<svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-7-7 7 7 7-7"/></svg>
+                {% endif %}
+              {% else %}<svg class="h-3 w-3 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7-7 7 7M5 12l7 7 7-7" opacity="0.5"/></svg>{% endif %}
+            </a>
+          </th>
+          {# Name column #}
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted"
+              aria-sort="{% if sort_field == "name" %}{% if sort_dir == "desc" %}descending{% else %}ascending{% endif %}{% else %}none{% endif %}">
+            <a href="{{ list_url }}?sort=name&dir={% if sort_field == "name" && sort_dir == "asc" %}desc{% else %}asc{% endif %}{% if !search_query.is_empty() %}&q={{ search_query }}{% endif %}&per_page={{ pagination.per_page }}"
+               class="inline-flex items-center gap-1 hover:text-ht-content-secondary {% if sort_field == "name" %}text-ht-content-secondary{% endif %}">
+              Name
+              {% if sort_field == "name" %}
+                {% if sort_dir == "asc" %}<svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>
+                {% else %}<svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-7-7 7 7 7-7"/></svg>
+                {% endif %}
+              {% else %}<svg class="h-3 w-3 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7-7 7 7M5 12l7 7 7-7" opacity="0.5"/></svg>{% endif %}
+            </a>
+          </th>
+          {# Status column #}
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted"
+              aria-sort="{% if sort_field == "status" %}{% if sort_dir == "desc" %}descending{% else %}ascending{% endif %}{% else %}none{% endif %}">
+            <a href="{{ list_url }}?sort=status&dir={% if sort_field == "status" && sort_dir == "asc" %}desc{% else %}asc{% endif %}{% if !search_query.is_empty() %}&q={{ search_query }}{% endif %}&per_page={{ pagination.per_page }}"
+               class="inline-flex items-center gap-1 hover:text-ht-content-secondary {% if sort_field == "status" %}text-ht-content-secondary{% endif %}">
+              Status
+              {% if sort_field == "status" %}
+                {% if sort_dir == "asc" %}<svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>
+                {% else %}<svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-7-7 7 7 7-7"/></svg>
+                {% endif %}
+              {% else %}<svg class="h-3 w-3 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7-7 7 7M5 12l7 7 7-7" opacity="0.5"/></svg>{% endif %}
+            </a>
+          </th>
           <th class="px-4 py-3" aria-label="Actions"></th>
         </tr>
       </thead>

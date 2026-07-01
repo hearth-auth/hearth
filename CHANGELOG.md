@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Users table search grammar + column sort** — the admin users list now supports
+  exact (`"alice@acme.com"`), glob (`*@acme.com`, `alice?`), and substring search
+  via the `q` param, plus 4-column ascending/descending sort (`sort=email|name|status|created`
+  + `dir=asc|desc`). Sort is applied to the full filtered set before the page slice
+  so pagination totals are always exact. Sort and search params survive page / page-size
+  navigation via `preserved_params` (HEA-1633).
 - **Per-SST Bloom filters (SST V2 format)** — each newly written SST file now
   embeds a Bloom filter (k = 7, ~1% FPR, ~10 bits/entry). A cold point lookup
   probes the filter in O(k) constant time (~70 ns/SST) before performing a binary

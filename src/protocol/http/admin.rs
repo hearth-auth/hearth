@@ -254,10 +254,13 @@ async fn admin_list_users(
             )
                 .into_response();
         }
-        return match state
-            .identity
-            .search_users(&auth.realm_id, q, &params.as_page_request())
-        {
+        return match state.identity.search_users(
+            &auth.realm_id,
+            q,
+            &params.as_page_request(),
+            None,
+            crate::identity::search::SortDir::default(),
+        ) {
             Ok(result) => {
                 let items: Vec<serde_json::Value> = result
                     .items

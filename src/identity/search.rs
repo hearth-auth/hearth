@@ -209,6 +209,84 @@ fn glob_match(segments: &[GlobSegment], text: &[char]) -> bool {
     p == toks.len()
 }
 
+// ---------------------------------------------------------------------------
+// Sort types for user list queries
+// ---------------------------------------------------------------------------
+
+/// Column by which the user list may be sorted.
+///
+/// All variants map directly to a field on [`crate::identity::types::User`].
+/// The set is intentionally closed so the protocol layer cannot request an
+/// unsortable column — unknown strings silently map to the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserSortField {
+    /// Sort by normalized email address.
+    #[default]
+    Email,
+    /// Sort by display name.
+    Name,
+    /// Sort by account status (Active → PendingVerification → Disabled).
+    Status,
+    /// Sort by creation timestamp (oldest first when ascending).
+    Created,
+}
+
+impl UserSortField {
+    /// Parses a raw query-parameter string.  Unknown values fall back to
+    /// [`UserSortField::Email`] so the URL cannot cause a server error.
+    #[must_use]
+    pub fn from_param(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "name" => Self::Name,
+            "status" => Self::Status,
+            "created" => Self::Created,
+            _ => Self::Email,
+        }
+    }
+
+    /// Canonical query-parameter name for round-tripping through URLs.
+    #[must_use]
+    pub fn as_param(&self) -> &'static str {
+        match self {
+            Self::Email => "email",
+            Self::Name => "name",
+            Self::Status => "status",
+            Self::Created => "created",
+        }
+    }
+}
+
+/// Sort direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDir {
+    /// Ascending order (A → Z, oldest → newest).
+    #[default]
+    Asc,
+    /// Descending order (Z → A, newest → oldest).
+    Desc,
+}
+
+impl SortDir {
+    /// Parses a raw query-parameter string.  Unknown values fall back to
+    /// [`SortDir::Asc`].
+    #[must_use]
+    pub fn from_param(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "desc" => Self::Desc,
+            _ => Self::Asc,
+        }
+    }
+
+    /// Canonical query-parameter name for round-tripping through URLs.
+    #[must_use]
+    pub fn as_param(&self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

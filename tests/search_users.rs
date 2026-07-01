@@ -2,6 +2,7 @@
 
 mod common;
 
+use hearth::identity::search::SortDir;
 use hearth::identity::{CreateRealmRequest, CreateUserRequest, IdentityEngine, RealmStatus};
 
 /// Helper: creates a realm and returns its ID.
@@ -50,7 +51,13 @@ async fn search_users_by_email_prefix() {
         .expect("create bob");
 
     let results = identity
-        .search_users(&tid, "alice", &hearth::core::PageRequest::new(0, 10))
+        .search_users(
+            &tid,
+            "alice",
+            &hearth::core::PageRequest::new(0, 10),
+            None,
+            SortDir::default(),
+        )
         .expect("search alice");
     assert_eq!(results.items.len(), 1);
     assert_eq!(results.items[0].email(), "alice@example.com");
@@ -76,7 +83,13 @@ async fn search_users_by_display_name() {
         .expect("create user");
 
     let results = identity
-        .search_users(&tid, "charlie", &hearth::core::PageRequest::new(0, 10))
+        .search_users(
+            &tid,
+            "charlie",
+            &hearth::core::PageRequest::new(0, 10),
+            None,
+            SortDir::default(),
+        )
         .expect("search by name");
     assert_eq!(results.items.len(), 1);
     assert_eq!(results.items[0].display_name(), "Charlie Brown");
@@ -103,12 +116,24 @@ async fn search_users_case_insensitive() {
 
     // Search with different case
     let results = identity
-        .search_users(&tid, "alice", &hearth::core::PageRequest::new(0, 10))
+        .search_users(
+            &tid,
+            "alice",
+            &hearth::core::PageRequest::new(0, 10),
+            None,
+            SortDir::default(),
+        )
         .expect("search lowercase");
     assert_eq!(results.items.len(), 1);
 
     let results = identity
-        .search_users(&tid, "ALICE", &hearth::core::PageRequest::new(0, 10))
+        .search_users(
+            &tid,
+            "ALICE",
+            &hearth::core::PageRequest::new(0, 10),
+            None,
+            SortDir::default(),
+        )
         .expect("search uppercase");
     assert_eq!(results.items.len(), 1);
 }
@@ -135,13 +160,19 @@ async fn search_users_respects_limit() {
     }
 
     let results = identity
-        .search_users(&tid, "user", &hearth::core::PageRequest::new(0, 3))
+        .search_users(
+            &tid,
+            "user",
+            &hearth::core::PageRequest::new(0, 3),
+            None,
+            SortDir::default(),
+        )
         .expect("search with limit");
     assert_eq!(results.items.len(), 3);
 }
 
 #[tokio::test]
-async fn search_users_empty_query_returns_empty() {
+async fn search_users_empty_query_matches_all() {
     let harness = common::TestHarness::embedded().await.expect("harness");
     let identity = harness.identity();
     let tid = setup_realm(identity);
@@ -159,16 +190,32 @@ async fn search_users_empty_query_returns_empty() {
         )
         .expect("create user");
 
-    // Empty or too-short query returns nothing (min 2 chars)
+    // Empty or too-short (<2 char) queries now compile to `MatchAll`, so they
+    // return every user rather than nothing. This unifies the search and
+    // sort-only engine paths: a sort with no search term passes an empty query
+    // here and must see the full set. (The HTTP handler still guards the search
+    // box with `len() >= 2`, so the user-facing "empty search" UX is unchanged.)
     let results = identity
-        .search_users(&tid, "", &hearth::core::PageRequest::new(0, 10))
+        .search_users(
+            &tid,
+            "",
+            &hearth::core::PageRequest::new(0, 10),
+            None,
+            SortDir::default(),
+        )
         .expect("empty query");
-    assert!(results.items.is_empty());
+    assert_eq!(results.items.len(), 1, "empty query is match-all");
 
     let results = identity
-        .search_users(&tid, "a", &hearth::core::PageRequest::new(0, 10))
+        .search_users(
+            &tid,
+            "a",
+            &hearth::core::PageRequest::new(0, 10),
+            None,
+            SortDir::default(),
+        )
         .expect("1-char query");
-    assert!(results.items.is_empty());
+    assert_eq!(results.items.len(), 1, "sub-2-char query is match-all");
 }
 
 #[tokio::test]
@@ -191,7 +238,13 @@ async fn search_users_no_matches_returns_empty() {
         .expect("create user");
 
     let results = identity
-        .search_users(&tid, "zzzzz", &hearth::core::PageRequest::new(0, 10))
+        .search_users(
+            &tid,
+            "zzzzz",
+            &hearth::core::PageRequest::new(0, 10),
+            None,
+            SortDir::default(),
+        )
         .expect("no match query");
     assert!(results.items.is_empty());
 }

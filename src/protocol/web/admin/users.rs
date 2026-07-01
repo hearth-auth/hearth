@@ -13,8 +13,13 @@ pub struct UserListParams {
     pub page: Option<u32>,
     /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
     pub per_page: Option<u32>,
-    /// Search query (email or name).
+    /// Search query (email or name). Supports exact (`"…"`) and glob (`*`/`?`) syntax.
     pub q: Option<String>,
+    /// Column to sort by: `email` | `name` | `status` | `created`.
+    /// Unknown values are silently ignored (no error).
+    pub sort: Option<String>,
+    /// Sort direction: `asc` | `desc`. Defaults to `asc`.
+    pub dir: Option<String>,
 }
 
 impl UserListParams {
@@ -27,6 +32,20 @@ impl UserListParams {
             self.page.unwrap_or(1),
             self.per_page_validated(),
         )
+    }
+
+    fn sort_field(&self) -> Option<crate::identity::search::UserSortField> {
+        self.sort
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::identity::search::UserSortField::from_param)
+    }
+
+    fn sort_dir(&self) -> crate::identity::search::SortDir {
+        self.dir
+            .as_deref()
+            .map(crate::identity::search::SortDir::from_param)
+            .unwrap_or_default()
     }
 }
 
@@ -48,6 +67,10 @@ struct UserListTemplate {
     user_base_url: String,
     /// See `UserRowsTemplate::user_detail_qs`.
     user_detail_qs: String,
+    /// Active sort column name (e.g. `"email"`), empty when unsorted.
+    sort_field: String,
+    /// Active sort direction (`"asc"` or `"desc"`).
+    sort_dir: String,
     // Chrome fields.
     chrome: bool,
     active: &'static str,
@@ -89,10 +112,19 @@ pub async fn admin_users_list(
     Query(params): Query<UserListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
-    let result = if search_query.len() >= 2 {
-        state
-            .identity
-            .search_users(target.id(), &search_query, &params.as_page_request())
+    let sort_field = params.sort_field();
+    let sort_dir = params.sort_dir();
+    let has_search = search_query.len() >= 2;
+    let has_sort = sort_field.is_some();
+
+    let result = if has_search || has_sort {
+        state.identity.search_users(
+            target.id(),
+            &search_query,
+            &params.as_page_request(),
+            sort_field,
+            sort_dir,
+        )
     } else {
         state
             .identity
@@ -112,7 +144,13 @@ pub async fn admin_users_list(
                 });
             }
             let base_url = format!("/ui/admin/realms/{realm_name}/users");
-            let preserved = super::pagination::encode_param("q", &search_query);
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir_str = params.dir.clone().unwrap_or_default();
+            let preserved = super::pagination::join_params(&[
+                super::pagination::encode_param("q", &search_query),
+                super::pagination::encode_param("sort", &sort_field_str),
+                super::pagination::encode_param("dir", &sort_dir_str),
+            ]);
             let pagination = PaginationView::new(&page, base_url.clone(), preserved);
             render(&UserListTemplate {
                 users: page.items,
@@ -121,6 +159,8 @@ pub async fn admin_users_list(
                 list_url: base_url,
                 user_base_url,
                 user_detail_qs: String::new(),
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
                 realm_name,
                 chrome: true,
                 active: "users",
@@ -164,10 +204,19 @@ pub async fn admin_admin_users_list(
 ) -> Response {
     let system_realm = crate::identity::keys::system_realm_id();
     let search_query = params.q.clone().unwrap_or_default();
-    let result = if search_query.len() >= 2 {
-        state
-            .identity
-            .search_users(&system_realm, &search_query, &params.as_page_request())
+    let sort_field = params.sort_field();
+    let sort_dir = params.sort_dir();
+    let has_search = search_query.len() >= 2;
+    let has_sort = sort_field.is_some();
+
+    let result = if has_search || has_sort {
+        state.identity.search_users(
+            &system_realm,
+            &search_query,
+            &params.as_page_request(),
+            sort_field,
+            sort_dir,
+        )
     } else {
         state
             .identity
@@ -184,7 +233,13 @@ pub async fn admin_admin_users_list(
                     user_detail_qs: "?admin_target=system".to_string(),
                 });
             }
-            let preserved = super::pagination::encode_param("q", &search_query);
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir_str = params.dir.clone().unwrap_or_default();
+            let preserved = super::pagination::join_params(&[
+                super::pagination::encode_param("q", &search_query),
+                super::pagination::encode_param("sort", &sort_field_str),
+                super::pagination::encode_param("dir", &sort_dir_str),
+            ]);
             let pagination = PaginationView::new(&page, "/ui/admin/admin-users", preserved);
             render(&UserListTemplate {
                 users: page.items,
@@ -194,6 +249,8 @@ pub async fn admin_admin_users_list(
                 list_url: "/ui/admin/admin-users".to_string(),
                 user_base_url: "/ui/admin/realms/system/users".to_string(),
                 user_detail_qs: "?admin_target=system".to_string(),
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
                 chrome: true,
                 active: "admin-users",
                 user_email: Some(session.user_email.clone()),
@@ -2953,7 +3010,13 @@ fn process_csv_import(
         // Check if user already exists via search.
         let existing = state
             .identity
-            .search_users(realm_id, &email, &crate::core::PageRequest::new(0, 1))
+            .search_users(
+                realm_id,
+                &email,
+                &crate::core::PageRequest::new(0, 1),
+                None,
+                crate::identity::search::SortDir::default(),
+            )
             .ok()
             .and_then(|mut r| {
                 r.items.retain(|u| u.email().eq_ignore_ascii_case(&email));

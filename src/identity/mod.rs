@@ -1138,16 +1138,23 @@ pub trait IdentityEngine: Send + Sync {
         page: &PageRequest,
     ) -> Result<PagedResult<User>, IdentityError>;
 
-    /// Searches users by substring match on email or display name.
+    /// Searches and/or sorts users.
     ///
-    /// Case-insensitive substring match. Returns the matching window plus
-    /// the total filtered count. Query must be at least 2 characters;
-    /// shorter queries return an empty `PagedResult`.
+    /// When `query` is non-trivial (≥ 2 characters or glob/exact syntax),
+    /// filters results using the [`SearchQuery`] grammar over email +
+    /// display name.  When `sort_field` is `Some`, the full matching set is
+    /// sorted before the offset slice so page navigation is stable.
+    ///
+    /// When both `query` is trivial (`MatchAll`) **and** `sort_field` is
+    /// `None`, callers should prefer [`Self::list_users`] for its fast
+    /// key-order scan path.
     fn search_users(
         &self,
         realm_id: &RealmId,
         query: &str,
         page: &PageRequest,
+        sort_field: Option<crate::identity::search::UserSortField>,
+        sort_dir: crate::identity::search::SortDir,
     ) -> Result<PagedResult<User>, IdentityError>;
 
     /// Lists realms with offset-based pagination.

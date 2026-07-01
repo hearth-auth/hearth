@@ -8082,18 +8082,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         realm_id: &RealmId,
         query: &str,
         page: &crate::core::PageRequest,
+        sort_field: Option<crate::identity::search::UserSortField>,
+        sort_dir: crate::identity::search::SortDir,
     ) -> Result<crate::core::PagedResult<User>, IdentityError> {
-        let query = query.trim();
-        if query.len() < 2 {
-            return Ok(crate::core::PagedResult::new(
-                Vec::new(),
-                0,
-                page.offset,
-                page.limit,
-            ));
-        }
-        let query_lower = query.to_lowercase();
+        use crate::identity::search::{SearchQuery, SortDir, UserSortField};
 
+        let matcher = SearchQuery::compile(query);
         let prefix = keys::user_id_scan_prefix();
         let end = keys::prefix_end(&prefix);
         let entries = self
@@ -8101,21 +8095,47 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .scan(realm_id, &prefix, &end)
             .map_err(Self::storage_err)?;
 
-        // Filter all matching users first, then apply offset window.
+        // Filter using the compiled matcher (email or display name).
         let mut all_matching: Vec<User> = Vec::new();
         for entry in &entries {
             let user: User =
                 serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
-            let email_lower = user.email().to_lowercase();
-            let name_lower = user.display_name().to_lowercase();
-            if email_lower.contains(&query_lower) || name_lower.contains(&query_lower) {
+            if matcher.matches_any(&[user.email(), user.display_name()]) {
                 all_matching.push(user);
             }
         }
 
-        // Exact total so filtered lists paginate fully (HEA-1614).
+        // Sort the full matching set before slicing so page N is stable
+        // regardless of storage key order.
+        if let Some(field) = sort_field {
+            all_matching.sort_by(|a, b| {
+                let ord = match field {
+                    UserSortField::Email => a.email().cmp(b.email()),
+                    UserSortField::Name => a.display_name().cmp(b.display_name()),
+                    UserSortField::Status => {
+                        // Stable ordering: Active(0) < PendingVerification(1) < Disabled(2).
+                        fn rank(s: UserStatus) -> u8 {
+                            match s {
+                                UserStatus::Active => 0,
+                                UserStatus::PendingVerification => 1,
+                                UserStatus::Disabled => 2,
+                            }
+                        }
+                        rank(a.status()).cmp(&rank(b.status()))
+                    }
+                    UserSortField::Created => a.created_at().cmp(&b.created_at()),
+                };
+                if sort_dir == SortDir::Desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+        }
+
+        // Exact total so filtered lists paginate correctly (HEA-1614).
         let total = all_matching.len() as u64;
         let start = (page.offset as usize).min(all_matching.len());
         let end_idx = (start + page.limit as usize).min(all_matching.len());

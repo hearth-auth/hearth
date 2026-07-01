@@ -1075,10 +1075,13 @@ pub async fn admin_org_member_picker(
 
     let query = params.q.trim().to_string();
     let (users, next_cursor) = if query.len() >= 2 {
-        match state
-            .identity
-            .search_users(target.id(), &query, &params.as_page_request(20))
-        {
+        match state.identity.search_users(
+            target.id(),
+            &query,
+            &params.as_page_request(20),
+            None,
+            crate::identity::search::SortDir::default(),
+        ) {
             Ok(r) => {
                 let nc = PaginationParams::next_cursor_from(&r);
                 (r.items, nc)
@@ -1787,7 +1790,13 @@ pub async fn admin_api_user_search(
     } else {
         state
             .identity
-            .search_users(target.id(), &query, &crate::core::PageRequest::new(0, 10))
+            .search_users(
+                target.id(),
+                &query,
+                &crate::core::PageRequest::new(0, 10),
+                None,
+                crate::identity::search::SortDir::default(),
+            )
             .map(|r| r.items)
             .unwrap_or_default()
     };
@@ -1828,7 +1837,13 @@ pub async fn admin_api_rbac_user_search(
     } else {
         state
             .identity
-            .search_users(target.id(), &query, &crate::core::PageRequest::new(0, 10))
+            .search_users(
+                target.id(),
+                &query,
+                &crate::core::PageRequest::new(0, 10),
+                None,
+                crate::identity::search::SortDir::default(),
+            )
             .map(|r| r.items)
             .unwrap_or_default()
     };
