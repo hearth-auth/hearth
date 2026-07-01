@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Per-SST Bloom filters (SST V2 format)** — each newly written SST file now
+  embeds a Bloom filter (k = 7, ~1% FPR, ~10 bits/entry). A cold point lookup
+  probes the filter in O(k) constant time (~70 ns/SST) before performing a binary
+  search, so absent-key reads skip the binary search on ~99% of SSTs. At 500 k
+  users (~35 SSTs), this cuts a cold miss from O(35 · log n) to approximately
+  35 × 70 ns + 1 µs binary search for the single matching SST. V2 SST files carry
+  magic bytes `HSS2`; the engine remains fully backward-compatible with V1 files
+  (`HSST` magic), which load without a filter and pass all membership tests (HEA-1626).
 - **Large-scale demo seeder (`make seed-large`)** — a new top-level `demo:` config
   block (`demo.enabled`, `demo.password`) plus a per-realm `seeding:` block
   (`users`, `email_domain`, `display_name_prefix`, `email_verified`) stand up a
