@@ -34,6 +34,10 @@ struct WebhookListTemplate {
     webhooks: Vec<WebhookRow>,
     pagination: PaginationView,
     realm_name: String,
+    search_query: String,
+    sort_field: String,
+    sort_dir: String,
+    list_url: String,
     flash_message: Option<String>,
     chrome: bool,
     active: &'static str,
@@ -56,16 +60,15 @@ pub struct WebhookListParams {
     pub page: Option<u32>,
     /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
     pub per_page: Option<u32>,
+    /// Search query over webhook URL. Supports exact/glob/substring.
+    pub q: Option<String>,
+    /// Column to sort by: `url`. Unknown values → no sort.
+    pub sort: Option<String>,
+    /// Sort direction: `asc` | `desc`. Defaults to `asc`.
+    pub dir: Option<String>,
 }
 
-impl WebhookListParams {
-    fn as_admin_page_params(&self) -> AdminPageParams {
-        AdminPageParams {
-            page: self.page,
-            per_page: self.per_page,
-        }
-    }
-}
+impl WebhookListParams {}
 
 /// `GET /ui/admin/realms/{realm}/webhooks` — lists registered webhooks.
 pub async fn admin_webhooks_list(
@@ -83,20 +86,31 @@ pub async fn admin_webhooks_list(
     });
 
     let realm_name = target.0.name().to_string();
+    let search_query = params.q.clone().unwrap_or_default();
+    let sort_field_str = params.sort.clone().unwrap_or_default();
+    let sort_dir_str = params.dir.clone().unwrap_or_default();
+    let has_search = search_query.len() >= 2;
+    let has_sort = !sort_field_str.is_empty();
+
     let identity = state.identity.clone();
     let realm_id = target.id().clone();
-    let page_req = params.as_admin_page_params().as_page_request();
+    // Load a full window when filtering/sorting so we slice after.
+    let load_limit = if has_search || has_sort {
+        crate::core::MAX_PAGE_LIMIT
+    } else {
+        params.per_page.unwrap_or(25)
+    };
+    let load_req = crate::core::PageRequest::new(0, load_limit);
     let page_result =
-        tokio::task::spawn_blocking(move || identity.list_webhooks(&realm_id, &page_req))
+        tokio::task::spawn_blocking(move || identity.list_webhooks(&realm_id, &load_req))
             .await
             .ok()
             .and_then(|r| r.ok())
             .unwrap_or_default();
 
     let base_url = format!("/ui/admin/realms/{realm_name}/webhooks");
-    let pagination = PaginationView::new(&page_result, base_url, "");
-
-    let webhook_rows: Vec<WebhookRow> = page_result
+    // Collect into owned rows before slicing.
+    let mut webhook_rows: Vec<WebhookRow> = page_result
         .items
         .into_iter()
         .map(|wh| WebhookRow {
@@ -108,10 +122,51 @@ pub async fn admin_webhooks_list(
         })
         .collect();
 
+    if has_search {
+        use crate::identity::search::SearchQuery;
+        let matcher = SearchQuery::compile(&search_query);
+        webhook_rows.retain(|w| {
+            let events_joined = w.events.join(" ");
+            matcher.matches_any(&[w.url.as_str(), events_joined.as_str()])
+        });
+    }
+    if has_sort {
+        use crate::identity::search::SortDir;
+        let sort_dir = SortDir::from_param(&sort_dir_str);
+        webhook_rows.sort_by(|a, b| {
+            let ord = a.url.cmp(&b.url);
+            if sort_dir == SortDir::Desc {
+                ord.reverse()
+            } else {
+                ord
+            }
+        });
+    }
+
+    let total = webhook_rows.len() as u64;
+    let per = super::pagination::validate_per_page(params.per_page.unwrap_or(25)) as usize;
+    let offset = ((params.page.unwrap_or(1).saturating_sub(1)) as usize) * per;
+    let start = offset.min(webhook_rows.len());
+    let end_idx = (start + per).min(webhook_rows.len());
+    // Drain the slice window out of the vec to avoid requiring Clone on WebhookRow.
+    let page_webhooks: Vec<WebhookRow> = webhook_rows.drain(start..end_idx).collect();
+    let mock_page = crate::core::PagedResult::new(page_webhooks, total, offset as u64, per as u32);
+    let preserved = super::pagination::join_params(&[
+        super::pagination::encode_param("q", &search_query),
+        super::pagination::encode_param("sort", &sort_field_str),
+        super::pagination::encode_param("dir", &sort_dir_str),
+    ]);
+    let base_url_clone = base_url.clone();
+    let pagination = PaginationView::new(&mock_page, base_url_clone, preserved);
+
     render(&WebhookListTemplate {
-        webhooks: webhook_rows,
+        webhooks: mock_page.items,
         pagination,
         realm_name,
+        search_query,
+        sort_field: sort_field_str,
+        sort_dir: sort_dir_str,
+        list_url: base_url.clone(),
         flash_message,
         chrome: true,
         active: "webhooks",

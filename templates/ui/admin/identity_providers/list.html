@@ -1,4 +1,5 @@
 {% extends "ui/_layout.html" %}
+{% import "ui/admin/_sortable_th.html" as sortable %}
 {% block title %}{{ product_name }} · Identity Providers{% endblock %}
 {% block breadcrumb %}
 <nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
@@ -31,12 +32,12 @@
   </div>
   {% else %}
   <table class="w-full text-sm">
-    <thead>
+    <thead id="idps-thead">
       <tr class="border-b border-divider-subtle bg-ht-surface-elevated">
-        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Name</th>
-        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Display name</th>
-        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Protocol</th>
-        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Issuer</th>
+        {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, "", 25) %}
+        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Display name</th>
+        {% call sortable::th("Protocol", "kind", sort_field, sort_dir, list_url, "", 25) %}
+        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Issuer</th>
       </tr>
     </thead>
     <tbody class="divide-y divide-divider-subtle">
