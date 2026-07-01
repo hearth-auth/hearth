@@ -6852,7 +6852,7 @@ Used by:
   - allocator-api2 0.2.21
   - android_system_properties 0.1.5
   - anes 0.1.6
-  - anyhow 1.0.102
+  - anyhow 1.0.103
   - asn1-rs-impl 0.2.0
   - async-trait 0.1.89
   - aws-lc-sys 0.41.0
@@ -9222,6 +9222,7 @@ ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation a
 License: zlib License (Zlib)
 Used by:
   - foldhash 0.1.5
+  - foldhash 0.2.0
 
 Copyright (c) 2024 Orson Peters
 
