@@ -90,12 +90,12 @@
           {% endif %}
           <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Device</th>
           <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">IP</th>
-          {% call sortable::th("Created", "created", sort_field, sort_dir, list_url, "", pagination.per_page) %}
-          {% call sortable::th("Expires", "expires", sort_field, sort_dir, list_url, "", pagination.per_page) %}
+          {% call sortable::th("Created", "created", sort_field, sort_dir, list_url, "", pagination.per_page, "sessions-tbody", "sessions-thead") %}
+          {% call sortable::th("Expires", "expires", sort_field, sort_dir, list_url, "", pagination.per_page, "sessions-tbody", "sessions-thead") %}
           <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
         </tr>
       </thead>
-      <tbody id="table-body">
+      <tbody id="sessions-tbody">
         {% include "ui/admin/sessions/_rows.html" %}
       </tbody>
     </table>

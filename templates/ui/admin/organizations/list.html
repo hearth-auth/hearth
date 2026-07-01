@@ -95,13 +95,13 @@
                      aria-label="Select all"
                      class="h-4 w-4 rounded border-divider bg-ht-surface-elevated">
             </th>
-            {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
-            {% call sortable::th("Slug", "slug", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
+            {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page, "orgs-tbody", "orgs-thead") %}
+            {% call sortable::th("Slug", "slug", sort_field, sort_dir, list_url, search_query, pagination.per_page, "orgs-tbody", "orgs-thead") %}
             <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Status</th>
             <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
           </tr>
         </thead>
-        <tbody id="table-body">
+        <tbody id="orgs-tbody">
           {% include "ui/admin/organizations/_rows.html" %}
         </tbody>
       </table>

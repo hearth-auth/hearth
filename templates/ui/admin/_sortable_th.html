@@ -5,19 +5,23 @@
   active search query + page size across navigation, and exposes `aria-sort`
   for assistive technology.
 
-  The <thead> that contains these headers MUST carry id="users-thead". Sort
-  requests use a server-side OOB compound response (`_sort_response.html`)
-  that appends `<thead hx-swap-oob="true">` to the rows fragment; HTMX routes
-  it to the live thead automatically, keeping `aria-sort` and the active-column
-  caret accurate after every partial swap without a full page reload.
+  The <thead> and <tbody> MUST carry stable HTML ids passed via `thead_id` and
+  `tbody_id`. Sort links return a full-page response; `hx-select` extracts the
+  tbody and `hx-select-oob` updates the thead aria-sort in place — all without
+  a full page reload.
+
+  Returning a full page (rather than a bare `<tr>`/`<thead>` fragment) is
+  required because DOMParser.parseFromString strips table structural elements
+  that appear outside a `<table>` context (HEA-1643). A full page keeps all
+  elements properly nested so the browser parser preserves them.
 
   Askama imports are hermetic (the macro cannot read caller context), so every
   value is passed explicitly. Usage from any list template:
 
     {% import "ui/admin/_sortable_th.html" as sortable %}
     ...
-    {# inside <thead id="users-thead"> #}
-    {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
+    {# inside <thead id="users-thead"> / <tbody id="users-tbody"> #}
+    {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-tbody", "users-thead") %}
 
   Params:
   - label:    visible header text
@@ -27,16 +31,21 @@
   - base_url: list URL the header links back to
   - q:        active search query (preserved across sort clicks)
   - per_page: active page size (preserved across sort clicks)
+  - tbody_id: HTML id of the <tbody> element (without leading #)
+  - thead_id: HTML id of the <thead> element (without leading #)
 -#}
-{% macro th(label, col, active, dir, base_url, q, per_page) %}
+{% macro th(label, col, active, dir, base_url, q, per_page, tbody_id, thead_id) %}
 {%- let is_active = active == col -%}
 <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted"
     scope="col"
     aria-sort="{% if is_active %}{% if dir == "desc" %}descending{% else %}ascending{% endif %}{% else %}none{% endif %}">
   <a href="{{ base_url }}?sort={{ col }}&dir={% if is_active && dir == "asc" %}desc{% else %}asc{% endif %}{% if !q.is_empty() %}&q={{ q }}{% endif %}&per_page={{ per_page }}"
-     hx-get="{{ base_url }}?sort={{ col }}&dir={% if is_active && dir == "asc" %}desc{% else %}asc{% endif %}{% if !q.is_empty() %}&q={{ q }}{% endif %}&per_page={{ per_page }}"
-     hx-target="#users-tbody"
-     hx-swap="innerHTML"
+     hx-get="{{ base_url }}?sort={{ col }}&dir={% if is_active && dir == "asc" %}desc{% else %}asc{% endif %}&per_page={{ per_page }}"
+     hx-include="input[name='q']"
+     hx-target="#{{ tbody_id }}"
+     hx-select="#{{ tbody_id }}"
+     hx-select-oob="#{{ thead_id }}"
+     hx-swap="outerHTML"
      hx-push-url="true"
      class="inline-flex items-center gap-1 rounded hover:text-ht-content-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ht-brand-accent{% if is_active %} text-ht-content-secondary{% endif %}">
     {{ label }}

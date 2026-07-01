@@ -103,31 +103,6 @@ struct UserRowsTemplate {
     user_detail_qs: String,
 }
 
-/// Compound HTMX response for sort requests: the row fragment (swapped
-/// `innerHTML` into `#users-tbody`) followed by an OOB `<thead>` with
-/// updated `aria-sort` attributes (routed by HTMX to `#users-thead`).
-///
-/// Using a server-side OOB element avoids the `hx-select`/`hx-select-oob`
-/// client-side pattern that silently aborts when the primary selector is not
-/// found in the fragment.
-#[derive(Template)]
-#[template(path = "ui/admin/users/_sort_response.html")]
-struct UserSortResponseTemplate {
-    users: Vec<User>,
-    user_base_url: String,
-    user_detail_qs: String,
-    /// Active sort column key, e.g. `"email"`.
-    sort_field: String,
-    /// Active sort direction, `"asc"` or `"desc"`.
-    sort_dir: String,
-    /// List URL used as the base for sort link hrefs in the thead.
-    list_url: String,
-    /// Active search query (preserved across sort clicks).
-    search_query: String,
-    /// Active page size (preserved across sort clicks).
-    per_page: u32,
-}
-
 /// `GET /ui/admin/users`.
 pub async fn admin_users_list(
     State(state): State<Arc<WebState>>,
@@ -161,27 +136,23 @@ pub async fn admin_users_list(
         Ok(page) => {
             let realm_name = target.0.name().to_string();
             let user_base_url = format!("/ui/admin/realms/{realm_name}/users");
-            let users = page.items.clone();
-            if htmx.0 {
-                if has_sort {
-                    return render(&UserSortResponseTemplate {
-                        users,
-                        user_detail_qs: String::new(),
-                        sort_field: params.sort.clone().unwrap_or_default(),
-                        sort_dir: params.dir.clone().unwrap_or_default(),
-                        list_url: user_base_url.clone(),
-                        search_query: search_query.clone(),
-                        per_page: params.per_page_validated(),
-                        user_base_url,
-                    });
-                }
+
+            // HTMX search-only: bare rows partial — safe because the search
+            // form uses innerHTML swap and the response has no table structural
+            // elements outside a <table> context.
+            if htmx.0 && !has_sort {
                 return render(&UserRowsTemplate {
-                    users,
+                    users: page.items,
                     user_base_url,
                     user_detail_qs: String::new(),
                 });
             }
-            let base_url = format!("/ui/admin/realms/{realm_name}/users");
+
+            // Full-page for non-HTMX baseline or HTMX sort requests.
+            // For sort, the client uses hx-select="#users-tbody" and
+            // hx-select-oob="#users-thead" to extract the two table sections.
+            // Returning a full page avoids DOMParser silently dropping bare
+            // <thead> outside <table> context (HEA-1643).
             let sort_field_str = params.sort.clone().unwrap_or_default();
             let sort_dir_str = params.dir.clone().unwrap_or_default();
             let preserved = super::pagination::join_params(&[
@@ -189,12 +160,12 @@ pub async fn admin_users_list(
                 super::pagination::encode_param("sort", &sort_field_str),
                 super::pagination::encode_param("dir", &sort_dir_str),
             ]);
-            let pagination = PaginationView::new(&page, base_url.clone(), preserved);
+            let pagination = PaginationView::new(&page, user_base_url.clone(), preserved);
             render(&UserListTemplate {
                 users: page.items,
                 pagination,
                 search_query,
-                list_url: base_url,
+                list_url: user_base_url.clone(),
                 user_base_url,
                 user_detail_qs: String::new(),
                 sort_field: sort_field_str,
@@ -263,26 +234,19 @@ pub async fn admin_admin_users_list(
 
     match result {
         Ok(page) => {
-            let users = page.items.clone();
-            if htmx.0 {
-                if has_sort {
-                    return render(&UserSortResponseTemplate {
-                        users,
-                        user_base_url: "/ui/admin/realms/system/users".to_string(),
-                        user_detail_qs: "?admin_target=system".to_string(),
-                        sort_field: params.sort.clone().unwrap_or_default(),
-                        sort_dir: params.dir.clone().unwrap_or_default(),
-                        list_url: "/ui/admin/admin-users".to_string(),
-                        search_query: search_query.clone(),
-                        per_page: params.per_page_validated(),
-                    });
-                }
+            // HTMX search-only: bare rows partial (safe — no bare table
+            // structural elements in the response).
+            if htmx.0 && !has_sort {
                 return render(&UserRowsTemplate {
-                    users,
+                    users: page.items,
                     user_base_url: "/ui/admin/realms/system/users".to_string(),
                     user_detail_qs: "?admin_target=system".to_string(),
                 });
             }
+
+            // Full-page for non-HTMX baseline or HTMX sort.
+            // For sort, hx-select + hx-select-oob on the client extract tbody
+            // and thead from the full page (HEA-1643).
             let sort_field_str = params.sort.clone().unwrap_or_default();
             let sort_dir_str = params.dir.clone().unwrap_or_default();
             let preserved = super::pagination::join_params(&[

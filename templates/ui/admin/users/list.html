@@ -100,9 +100,9 @@
                    aria-label="Select all"
                    class="h-4 w-4 rounded border-divider bg-ht-surface-elevated">
           </th>
-          {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
-          {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
-          {% call sortable::th("Status", "status", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
+          {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-tbody", "users-thead") %}
+          {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-tbody", "users-thead") %}
+          {% call sortable::th("Status", "status", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-tbody", "users-thead") %}
           <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
         </tr>
       </thead>

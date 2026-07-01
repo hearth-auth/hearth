@@ -34,13 +34,13 @@
   <table class="w-full text-sm">
     <thead id="idps-thead">
       <tr class="border-b border-divider-subtle bg-ht-surface-elevated">
-        {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, "", 25) %}
+        {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, "", 25, "idps-tbody", "idps-thead") %}
         <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Display name</th>
-        {% call sortable::th("Protocol", "kind", sort_field, sort_dir, list_url, "", 25) %}
+        {% call sortable::th("Protocol", "kind", sort_field, sort_dir, list_url, "", 25, "idps-tbody", "idps-thead") %}
         <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Issuer</th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-divider-subtle">
+    <tbody id="idps-tbody" class="divide-y divide-divider-subtle">
       {% for row in providers %}
       <tr class="hover:bg-ht-surface-base">
         <td class="px-4 py-3 whitespace-nowrap">
