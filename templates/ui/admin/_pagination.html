@@ -38,13 +38,10 @@
         <option value="{{ opt.size }}" {% if opt.selected %}selected{% endif %}>{{ opt.size }}</option>
       {% endfor %}
     </select>
-    {# no-JS fallback: "Go" button #}
-    <noscript>
-      <button type="submit"
-              class="rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-secondary hover-bg-divider">
-        Go
-      </button>
-    </noscript>
+    <button type="submit"
+            class="rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-secondary hover-bg-divider">
+      Go
+    </button>
   </form>
 
   {# ── Page navigation ── #}
