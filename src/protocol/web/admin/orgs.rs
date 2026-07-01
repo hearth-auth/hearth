@@ -59,8 +59,12 @@ pub struct OrgListParams {
     pub page: Option<u32>,
     /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
     pub per_page: Option<u32>,
-    /// Search query (matches name or slug, case-insensitive substring).
+    /// Search query (name or slug). Supports exact (`"…"`) and glob (`*`/`?`) syntax.
     pub q: Option<String>,
+    /// Column to sort by: `name` | `slug`. Unknown values ignored.
+    pub sort: Option<String>,
+    /// Sort direction: `asc` | `desc`. Defaults to `asc`.
+    pub dir: Option<String>,
 }
 
 impl OrgListParams {
@@ -74,6 +78,20 @@ impl OrgListParams {
             self.per_page_validated(),
         )
     }
+
+    fn sort_field(&self) -> Option<crate::identity::search::OrgSortField> {
+        self.sort
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::identity::search::OrgSortField::from_param)
+    }
+
+    fn sort_dir(&self) -> crate::identity::search::SortDir {
+        self.dir
+            .as_deref()
+            .map(crate::identity::search::SortDir::from_param)
+            .unwrap_or_default()
+    }
 }
 
 /// Template for `GET /ui/admin/organizations`.
@@ -84,6 +102,9 @@ struct OrgListTemplate {
     organizations: Vec<Organization>,
     pagination: PaginationView,
     search_query: String,
+    sort_field: String,
+    sort_dir: String,
+    list_url: String,
     realm_name: String,
     chrome: bool,
     active: &'static str,
@@ -107,23 +128,51 @@ pub async fn admin_orgs_list(
     Query(params): Query<OrgListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
+    let sort_field = params.sort_field();
+    let sort_dir = params.sort_dir();
     let realm_name = target.0.name().to_string();
-    let result = if search_query.len() >= 2 {
+    let has_search = search_query.len() >= 2;
+    let has_sort = sort_field.is_some();
+
+    let result = if has_search || has_sort {
+        use crate::identity::search::{OrgSortField, SearchQuery, SortDir};
         state
             .identity
-            .list_organizations(target.id(), &crate::core::PageRequest::new(0, 200))
+            .list_organizations(
+                target.id(),
+                &crate::core::PageRequest::new(0, crate::core::MAX_PAGE_LIMIT),
+            )
             .map(|page| {
-                let needle = search_query.to_ascii_lowercase();
-                let filtered: Vec<Organization> = page
+                let matcher = SearchQuery::compile(&search_query);
+                let mut filtered: Vec<Organization> = page
                     .items
                     .into_iter()
-                    .filter(|o| {
-                        o.name().to_ascii_lowercase().contains(&needle)
-                            || o.slug().to_ascii_lowercase().contains(&needle)
-                    })
+                    .filter(|o| matcher.matches_any(&[o.name(), o.slug()]))
                     .collect();
+                if let Some(field) = sort_field {
+                    filtered.sort_by(|a, b| {
+                        let ord = match field {
+                            OrgSortField::Name => a.name().cmp(b.name()),
+                            OrgSortField::Slug => a.slug().cmp(b.slug()),
+                        };
+                        if sort_dir == SortDir::Desc {
+                            ord.reverse()
+                        } else {
+                            ord
+                        }
+                    });
+                }
                 let total = filtered.len() as u64;
-                crate::core::PagedResult::new(filtered, total, 0, params.per_page_validated())
+                let per = params.per_page_validated() as usize;
+                let offset = ((params.page.unwrap_or(1).saturating_sub(1)) as usize) * per;
+                let start = offset.min(filtered.len());
+                let end = (start + per).min(filtered.len());
+                crate::core::PagedResult::new(
+                    filtered[start..end].to_vec(),
+                    total,
+                    offset as u64,
+                    per as u32,
+                )
             })
     } else {
         state
@@ -134,12 +183,21 @@ pub async fn admin_orgs_list(
     match result {
         Ok(page) => {
             let base_url = format!("/ui/admin/realms/{realm_name}/organizations");
-            let preserved = super::pagination::encode_param("q", &search_query);
-            let pagination = PaginationView::new(&page, base_url, preserved);
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir_str = params.dir.clone().unwrap_or_default();
+            let preserved = super::pagination::join_params(&[
+                super::pagination::encode_param("q", &search_query),
+                super::pagination::encode_param("sort", &sort_field_str),
+                super::pagination::encode_param("dir", &sort_dir_str),
+            ]);
+            let pagination = PaginationView::new(&page, base_url.clone(), preserved);
             render(&OrgListTemplate {
                 organizations: page.items,
                 pagination,
                 search_query,
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
+                list_url: base_url,
                 realm_name,
                 chrome: true,
                 active: "organizations",

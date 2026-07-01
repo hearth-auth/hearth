@@ -210,6 +210,104 @@ fn glob_match(segments: &[GlobSegment], text: &[char]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Sort types — per-entity enums
+// ---------------------------------------------------------------------------
+
+/// Column by which the realm list may be sorted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RealmSortField {
+    /// Sort by realm name.
+    #[default]
+    Name,
+    /// Sort by realm status (Active → Suspended → Archived).
+    Status,
+    /// Sort by creation timestamp (oldest first when ascending).
+    Created,
+}
+
+impl RealmSortField {
+    /// Parses a raw query-parameter string; unknown values fall back to `Name`.
+    #[must_use]
+    pub fn from_param(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "status" => Self::Status,
+            "created" => Self::Created,
+            _ => Self::Name,
+        }
+    }
+
+    /// Canonical query-parameter name.
+    #[must_use]
+    pub fn as_param(&self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Status => "status",
+            Self::Created => "created",
+        }
+    }
+}
+
+/// Column by which the organization list may be sorted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OrgSortField {
+    /// Sort by organization name.
+    #[default]
+    Name,
+    /// Sort by slug.
+    Slug,
+}
+
+impl OrgSortField {
+    /// Parses a raw query-parameter string; unknown values fall back to `Name`.
+    #[must_use]
+    pub fn from_param(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "slug" => Self::Slug,
+            _ => Self::Name,
+        }
+    }
+
+    /// Canonical query-parameter name.
+    #[must_use]
+    pub fn as_param(&self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Slug => "slug",
+        }
+    }
+}
+
+/// Column by which the group list may be sorted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupSortField {
+    /// Sort by group name.
+    #[default]
+    Name,
+    /// Sort by slug.
+    Slug,
+}
+
+impl GroupSortField {
+    /// Parses a raw query-parameter string; unknown values fall back to `Name`.
+    #[must_use]
+    pub fn from_param(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "slug" => Self::Slug,
+            _ => Self::Name,
+        }
+    }
+
+    /// Canonical query-parameter name.
+    #[must_use]
+    pub fn as_param(&self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Slug => "slug",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sort types for user list queries
 // ---------------------------------------------------------------------------
 

@@ -8193,6 +8193,77 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         ))
     }
 
+    fn search_realms(
+        &self,
+        query: &str,
+        page: &crate::core::PageRequest,
+        sort_field: Option<crate::identity::search::RealmSortField>,
+        sort_dir: crate::identity::search::SortDir,
+    ) -> Result<crate::core::PagedResult<Realm>, IdentityError> {
+        use crate::identity::search::{RealmSortField, SearchQuery, SortDir};
+
+        let matcher = SearchQuery::compile(query);
+        let sys_realm = keys::system_realm_id();
+        let prefix = keys::realm_id_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let entries = self
+            .storage
+            .scan(&sys_realm, &prefix, &end)
+            .map_err(Self::storage_err)?;
+
+        let mut all: Vec<Realm> = Vec::new();
+        for entry in &entries {
+            let realm: Realm =
+                serde_json::from_slice(&entry.value).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            if keys::is_system_realm(realm.id()) {
+                continue;
+            }
+            if matcher.matches(realm.name()) {
+                all.push(realm);
+            }
+        }
+
+        if let Some(field) = sort_field {
+            all.sort_by(|a, b| {
+                let ord = match field {
+                    RealmSortField::Name => a.name().cmp(b.name()),
+                    RealmSortField::Status => {
+                        fn rank(s: crate::identity::types::RealmStatus) -> u8 {
+                            use crate::identity::types::RealmStatus;
+                            match s {
+                                RealmStatus::Active => 0,
+                                RealmStatus::Suspended => 1,
+                                RealmStatus::Archived => 2,
+                                RealmStatus::DeletingInProgress => 3,
+                            }
+                        }
+                        rank(a.status()).cmp(&rank(b.status()))
+                    }
+                    RealmSortField::Created => a.created_at().cmp(&b.created_at()),
+                };
+                if sort_dir == SortDir::Desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+        }
+
+        let total = all.len() as u64;
+        let start = (page.offset as usize).min(all.len());
+        let end_idx = (start + page.limit as usize).min(all.len());
+        let items = all[start..end_idx].to_vec();
+
+        Ok(crate::core::PagedResult::new(
+            items,
+            total,
+            page.offset,
+            page.limit,
+        ))
+    }
+
     fn authenticate_oauth_client(
         &self,
         realm_id: &RealmId,

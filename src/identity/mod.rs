@@ -1163,6 +1163,20 @@ pub trait IdentityEngine: Send + Sync {
     /// `realm_id` parameter is needed for scoping.
     fn list_realms(&self, page: &PageRequest) -> Result<PagedResult<Realm>, IdentityError>;
 
+    /// Searches and/or sorts the realm list.
+    ///
+    /// Filters realms by name using the [`crate::identity::search::SearchQuery`]
+    /// grammar. When `sort_field` is `Some`, the full matching set is sorted
+    /// before the offset slice. Prefer [`Self::list_realms`] when both query is
+    /// trivial and `sort_field` is `None`.
+    fn search_realms(
+        &self,
+        query: &str,
+        page: &PageRequest,
+        sort_field: Option<crate::identity::search::RealmSortField>,
+        sort_dir: crate::identity::search::SortDir,
+    ) -> Result<PagedResult<Realm>, IdentityError>;
+
     /// Lists OAuth clients with offset-based pagination.
     fn list_clients(
         &self,
