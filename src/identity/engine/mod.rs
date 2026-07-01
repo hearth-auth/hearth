@@ -5791,7 +5791,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        let total = all.len().min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        // Exact total: this path already materialises the full result set, so
+        // capping the reported count only hides records from the admin UI
+        // pager (HEA-1614).
+        let total = all.len() as u64;
         let start = (page.offset as usize).min(all.len());
         let end_idx = (start + page.limit as usize).min(all.len());
         let items = all[start..end_idx].to_vec();
@@ -5829,7 +5832,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        let total = all.len().min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        // Exact total: this path already materialises the full result set, so
+        // capping the reported count only hides records from the admin UI
+        // pager (HEA-1614).
+        let total = all.len() as u64;
         let start = (page.offset as usize).min(all.len());
         let end_idx = (start + page.limit as usize).min(all.len());
         let items = all[start..end_idx].to_vec();
@@ -8109,9 +8115,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             }
         }
 
-        let total = all_matching
-            .len()
-            .min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        // Exact total so filtered lists paginate fully (HEA-1614).
+        let total = all_matching.len() as u64;
         let start = (page.offset as usize).min(all_matching.len());
         let end_idx = (start + page.limit as usize).min(all_matching.len());
         let items = all_matching[start..end_idx].to_vec();
@@ -8152,7 +8157,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             all.push(realm);
         }
 
-        let total = all.len().min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        // Exact total: this path already materialises the full result set, so
+        // capping the reported count only hides records from the admin UI
+        // pager (HEA-1614).
+        let total = all.len() as u64;
         let start = (page.offset as usize).min(all.len());
         let end_idx = (start + page.limit as usize).min(all.len());
         let items = all[start..end_idx].to_vec();
@@ -10502,7 +10510,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
         all.sort_by_key(|w| w.created_at);
 
-        let total = all.len().min(crate::core::DEFAULT_COUNT_CAP as usize) as u64;
+        // Exact total: this path already materialises the full result set, so
+        // capping the reported count only hides records from the admin UI
+        // pager (HEA-1614).
+        let total = all.len() as u64;
         let start = (page.offset as usize).min(all.len());
         let end_idx = (start + page.limit as usize).min(all.len());
         let items = all[start..end_idx].to_vec();

@@ -128,12 +128,12 @@ pub trait StorageEngine: Send + Sync {
         Ok(true)
     }
 
-    /// Counts entries whose key starts with `prefix` for the given realm,
-    /// stopping early once the count reaches `cap`.
+    /// Counts entries whose key starts with `prefix` for the given realm.
     ///
-    /// Returns the exact count when fewer than `cap` entries exist, or `cap`
-    /// when the actual count is at or above `cap`. Callers should display
-    /// "10,000+" (or the configured cap value) to make the ceiling visible.
+    /// A `cap` of `0` means **no ceiling** — return the exact count. A non-zero
+    /// `cap` truncates the reported count to `cap` (callers may then display
+    /// e.g. "N+" to make the ceiling visible). The full prefix scan runs
+    /// regardless; the cap only bounds the reported number.
     ///
     /// This is explicitly **off the hot path** — O(N) scan cost is acceptable
     /// for admin list endpoints.
@@ -148,18 +148,21 @@ pub trait StorageEngine: Send + Sync {
         }
         let end = prefix_scan_end(prefix);
         let entries = self.scan(realm_id, prefix, &end)?;
-        Ok(entries.len().min(cap as usize) as u64)
+        let n = entries.len() as u64;
+        Ok(if cap == 0 { n } else { n.min(cap) })
     }
 
     /// Scans a key prefix with offset-based pagination, returning the items
-    /// window and a capped total count.
+    /// window and the total count.
     ///
     /// Returns `(window, total)` where:
     /// - `window` — up to `limit` entries starting at zero-based `offset`.
-    /// - `total` — capped count of all prefix entries (see [`count_prefix`]).
+    /// - `total` — count of all prefix entries. A `cap` of `0` means **no
+    ///   ceiling** (report the exact total so admin UIs can page through the
+    ///   whole result set); a non-zero `cap` truncates the reported total.
     ///
-    /// `cap` defaults to [`crate::core::DEFAULT_COUNT_CAP`] when callers pass
-    /// `0`; pass an explicit non-zero value to override.
+    /// The item window is always exact. Only the reported `total` is subject to
+    /// `cap`.
     ///
     /// This is explicitly **off the hot path** — O(offset + limit) scan cost
     /// is acceptable for admin list endpoints.
@@ -171,14 +174,13 @@ pub trait StorageEngine: Send + Sync {
         limit: u32,
         cap: u64,
     ) -> Result<(Vec<ScanEntry>, u64), StorageError> {
-        use crate::core::DEFAULT_COUNT_CAP;
         if prefix.is_empty() {
             return Ok((vec![], 0));
         }
-        let effective_cap = if cap == 0 { DEFAULT_COUNT_CAP } else { cap };
         let end = prefix_scan_end(prefix);
         let all = self.scan(realm_id, prefix, &end)?;
-        let total = all.len().min(effective_cap as usize) as u64;
+        let n = all.len() as u64;
+        let total = if cap == 0 { n } else { n.min(cap) };
         let start = (offset as usize).min(all.len());
         let end_idx = (start + limit as usize).min(all.len());
         let window = all[start..end_idx].to_vec();

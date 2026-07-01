@@ -19,10 +19,13 @@ pub const DEFAULT_PAGE_LIMIT: u32 = 50;
 /// Hard cap on items per page for offset-based pagination.
 pub const MAX_PAGE_LIMIT: u32 = 200;
 
-/// Default cap passed to [`StorageEngine::count_prefix`].
+/// Optional display ceiling for [`StorageEngine::count_prefix`] /
+/// `scan_prefix_paged`.
 ///
-/// When the real count exceeds this, `count_prefix` returns the cap value and
-/// callers display "10,000+" rather than spending O(N) time counting.
+/// These primitives treat `cap == 0` as "no ceiling" and report the exact
+/// total (the default for admin list endpoints, so pagers can reach every
+/// record). This constant is retained for callers that deliberately want a
+/// bounded, "N+"-style display on pathologically large prefixes.
 pub const DEFAULT_COUNT_CAP: u64 = 10_000;
 
 // ---------------------------------------------------------------------------
@@ -82,10 +85,10 @@ impl Default for PageRequest {
 
 /// Result of an offset-based paged query.
 ///
-/// Carries the items for the requested window plus the (possibly capped) total
-/// count. Callers should display "10,000+" when `total` equals
-/// [`DEFAULT_COUNT_CAP`] and the current page is not the last page, to avoid
-/// implying exactness.
+/// Carries the items for the requested window plus the total count. The total
+/// is exact by default (engines pass `cap == 0` to the storage primitives); a
+/// caller that opts into a non-zero cap should display "N+" to avoid implying
+/// exactness.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PagedResult<T> {
     /// Items in the requested window.

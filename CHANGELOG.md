@@ -23,6 +23,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   seed-large-reset` wipes it.
 
 ### Fixed
+- **Pagination: admin list totals are no longer capped at 10,000.** Admin list and
+  dashboard counts were truncated to a 10,000-per-prefix ceiling, so a realm with
+  500,000 users reported "10,000" and the dashboard summed a wrong global total
+  (4 realms → "40,000"); worse, the pager's `total_pages` was computed from the
+  capped total, making every record past the first 10,000 unreachable. The storage
+  count primitives (`count_prefix`, `scan_prefix_paged`) now treat `cap == 0` as
+  "no ceiling" and every admin list path reports the exact count, so pagination
+  spans the full result set (HEA-1614).
 - **Pagination: disabled prev/next controls now use `<button disabled>` instead of
   `<span aria-disabled="true">`.** `aria-disabled` is invalid on non-interactive elements;
   the native `disabled` attribute on a `<button>` is the correct, axe-core-passing pattern

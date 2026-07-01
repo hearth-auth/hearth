@@ -1935,4 +1935,40 @@ mod tests {
         assert_eq!(total, cap, "total must be capped at cap value");
         assert_eq!(window.len(), 5);
     }
+
+    // ===== HEA-1614: cap == 0 means "no ceiling" (exact total) =====
+
+    #[test]
+    fn count_prefix_cap_zero_means_uncapped() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        put_prefixed(&engine, &realm, "usr:", 12);
+        // `cap == 0` must report the exact count, not `min(12, 0) == 0`.
+        let count = engine.count_prefix(&realm, b"usr:", 0).expect("count");
+        assert_eq!(count, 12);
+    }
+
+    #[test]
+    fn scan_prefix_paged_cap_zero_reports_exact_total_above_default() {
+        let (_dir, engine) = setup_engine();
+        let realm = RealmId::generate();
+        // More than DEFAULT_COUNT_CAP (10_000) rows. `cap == 0` must NOT
+        // truncate the reported total to 10_000 — the admin UI needs the true
+        // count to page through the whole realm (HEA-1614 large-scale seeder).
+        let n = 10_050usize;
+        let puts: Vec<(Vec<u8>, Vec<u8>)> = (0..n)
+            .map(|i| (format!("usr:{i:06}").into_bytes(), b"v".to_vec()))
+            .collect();
+        engine
+            .write_batch(&realm, &puts, &[])
+            .expect("batch insert");
+        let (window, total) = engine
+            .scan_prefix_paged(&realm, b"usr:", 0, 25, 0)
+            .expect("paged scan");
+        assert_eq!(
+            total, n as u64,
+            "cap=0 must report the true total, not the 10k cap"
+        );
+        assert_eq!(window.len(), 25);
+    }
 }
