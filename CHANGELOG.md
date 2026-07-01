@@ -23,6 +23,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   seed-large-reset` wipes it.
 
 ### Fixed
+- **Pagination: disabled prev/next controls now use `<button disabled>` instead of
+  `<span aria-disabled="true">`.** `aria-disabled` is invalid on non-interactive elements;
+  the native `disabled` attribute on a `<button>` is the correct, axe-core-passing pattern
+  (HEA-1621).
+- **Pagination: per-page `<select>` no longer uses an inline `onchange=` handler.**
+  The handler was blocked by `Content-Security-Policy: script-src 'self'`, making the
+  per-page dropdown a no-op. The logic is now wired in `admin.js` via an external event
+  listener (HEA-1621).
 - **Storage: concurrent writes are no longer lost during a memtable flush.** The
   flush snapshotted the memtable lock-free and cleared it under the lock as two
   separate steps; a write landing in that window was silently dropped. Under a
@@ -355,6 +363,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   routes (AATs, transaction tokens, SPIFFE, cross-realm) are available out of the box in
   development without requiring `hearth.yaml` edits. Production deployments (without `--dev`)
   are unaffected: capabilities remain `false` unless explicitly set. (HEA-1408)
+
+- **Admin UI full pagination** — all admin list pages (users, realms, audit, groups,
+  organisations, applications, sessions, roles) now display complete pagination controls:
+  total record count, "Page X of Y", numbered page links, and prev/next buttons.
+  Pages accept `?page=` and `?per_page=` query parameters; `per_page` is selectable from a
+  dropdown (5 / 10 / 25 / 50 / 100, default 25). An active `?q=` search filter is preserved
+  when changing pages or page size; changing page size always resets to page 1 (HEA-1614).
+
+- **`?cursor=` removed from admin UI list routes (breaking, admin UI only)** — the former
+  cursor-based pagination parameter is no longer accepted on any `/ui/admin/…` list URL.
+  REST (`/v1/…`) and gRPC list endpoints are unaffected (HEA-1614).
 
 ### Added
 

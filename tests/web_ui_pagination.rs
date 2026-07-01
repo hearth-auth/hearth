@@ -284,10 +284,11 @@ async fn realm_list_pagination_renders_for_multiple_pages() {
         body1.contains("page=2"),
         "should render a next-page (page=2) link"
     );
-    // Prev disabled on page 1 (rendered as a <span aria-disabled="true">)
+    // Prev disabled on page 1 — rendered as <button type="button" disabled> (HEA-1621).
+    // aria-disabled on a non-interactive element is invalid; native disabled is correct.
     assert!(
-        body1.contains("aria-disabled=\"true\""),
-        "Prev must be disabled on page 1"
+        body1.contains("<button type=\"button\" disabled"),
+        "Prev must be a disabled <button> on page 1"
     );
 
     // Page 2 — Prev enabled, should show range "6–6".
@@ -431,5 +432,134 @@ async fn user_list_search_filter_preserved_in_page_size_form() {
     assert!(
         body.contains("name=\"q\" value=\"findme\""),
         "q param must be in a hidden input so page-size change preserves the search filter"
+    );
+}
+
+/// The per-page `<select>` must NOT carry an `onchange=` inline handler —
+/// CSP `script-src 'self'` blocks inline event handlers (HEA-1621).
+/// The external listener in admin.js replaces it.
+#[tokio::test]
+async fn pagination_no_inline_onchange_handler() {
+    let rig = build_rig();
+    let admin_realm_id = RealmId::new(uuid::Uuid::nil());
+
+    for i in 0..6 {
+        let u = rig
+            .identity
+            .create_admin_user(&CreateUserRequest {
+                email: format!("onchange-{i}@csp.test"),
+                display_name: format!("Onchange {i}"),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            })
+            .expect("create user");
+        rig.identity
+            .update_user(
+                &admin_realm_id,
+                u.id(),
+                &UpdateUserRequest {
+                    status: Some(UserStatus::Active),
+                    email: None,
+                    display_name: None,
+                    first_name: None,
+                    last_name: None,
+                    ..Default::default()
+                },
+            )
+            .expect("activate user");
+    }
+
+    let cookie = admin_cookie(&rig, "csrf-onchange");
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/admin-users?per_page=5")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+
+    assert!(
+        !body.contains("onchange="),
+        "pagination must not use an onchange= inline handler (CSP violation)"
+    );
+}
+
+/// Disabled prev/next pagination controls must use `<button type=\"button\" disabled>`,
+/// not `<span aria-disabled=\"true\">`. `aria-disabled` is invalid on non-interactive
+/// elements; the native `disabled` attribute on a button is the correct pattern (HEA-1621).
+#[tokio::test]
+async fn pagination_disabled_nav_uses_button_not_aria_disabled_span() {
+    let rig = build_rig();
+    let admin_realm_id = RealmId::new(uuid::Uuid::nil());
+
+    for i in 0..6 {
+        let u = rig
+            .identity
+            .create_admin_user(&CreateUserRequest {
+                email: format!("disabled-nav-{i}@a11y.test"),
+                display_name: format!("DisabledNav {i}"),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            })
+            .expect("create user");
+        rig.identity
+            .update_user(
+                &admin_realm_id,
+                u.id(),
+                &UpdateUserRequest {
+                    status: Some(UserStatus::Active),
+                    email: None,
+                    display_name: None,
+                    first_name: None,
+                    last_name: None,
+                    ..Default::default()
+                },
+            )
+            .expect("activate user");
+    }
+
+    let cookie = admin_cookie(&rig, "csrf-disabnav");
+    // Page 1 of 2 — Previous nav control will be in the disabled state.
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/admin-users?per_page=5&page=1")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+
+    assert!(
+        body.contains("<button type=\"button\" disabled"),
+        "disabled pagination nav must render as <button type=\"button\" disabled>, not a span"
+    );
+    assert!(
+        !body.contains("aria-disabled=\"true\""),
+        "aria-disabled must not appear on non-interactive elements in pagination"
     );
 }

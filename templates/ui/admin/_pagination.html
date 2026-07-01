@@ -33,7 +33,6 @@
     <label for="per-page-select" class="text-sm text-ht-content-muted">Rows per page</label>
     <select id="per-page-select"
             name="per_page"
-            onchange="this.form.submit()"
             class="rounded border border-strong bg-ht-surface-elevated px-2 py-1 text-sm text-ht-content-primary focus:outline-none focus:ring-1 focus:ring-ht-brand-accent">
       {% for opt in pagination.page_size_options %}
         <option value="{{ opt.size }}" {% if opt.selected %}selected{% endif %}>{{ opt.size }}</option>
@@ -63,13 +62,14 @@
           </svg>
         </a>
       {% when None %}
-        <span class="inline-flex items-center rounded border border-divider-faint bg-ht-surface-base px-2 py-1 text-sm text-ht-content-muted opacity-40 cursor-not-allowed"
-              aria-disabled="true" aria-label="Previous page (disabled)">
+        <button type="button" disabled
+                class="inline-flex items-center rounded border border-divider-faint bg-ht-surface-base px-2 py-1 text-sm text-ht-content-muted opacity-40 cursor-not-allowed"
+                aria-label="Previous page">
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polyline points="15 18 9 12 15 6"/>
           </svg>
-        </span>
+        </button>
     {% endmatch %}
 
     {# Page number window — ellipsis flag and is_current are pre-computed #}
@@ -105,13 +105,14 @@
           </svg>
         </a>
       {% when None %}
-        <span class="inline-flex items-center rounded border border-divider-faint bg-ht-surface-base px-2 py-1 text-sm text-ht-content-muted opacity-40 cursor-not-allowed"
-              aria-disabled="true" aria-label="Next page (disabled)">
+        <button type="button" disabled
+                class="inline-flex items-center rounded border border-divider-faint bg-ht-surface-base px-2 py-1 text-sm text-ht-content-muted opacity-40 cursor-not-allowed"
+                aria-label="Next page">
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polyline points="9 18 15 12 9 6"/>
           </svg>
-        </span>
+        </button>
     {% endmatch %}
   </nav>
   {% endif %}{# total_pages > 1 #}
