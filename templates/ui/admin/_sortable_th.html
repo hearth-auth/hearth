@@ -1,0 +1,37 @@
+{# Reusable sortable column header for admin tables.
+
+   Renders a <th> whose link toggles sort direction, preserves the active
+   search query + page size across navigation, and exposes `aria-sort` for
+   assistive technology.
+
+   Askama imports are hermetic (the macro cannot read caller context), so every
+   value is passed explicitly. Usage from any list template:
+
+     {% import "ui/admin/_sortable_th.html" as sortable %}
+     ...
+     {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, pagination.per_page) %}
+
+   Params:
+   - label:    visible header text
+   - col:      sort key emitted as `?sort={col}` (must match a server SortField)
+   - active:   currently-sorted column key (String; empty when unsorted)
+   - dir:      current direction, "asc" | "desc"
+   - base_url: list URL the header links back to
+   - q:        active search query (preserved across sort clicks)
+   - per_page: active page size (preserved across sort clicks)
+#}
+{% macro th(label, col, active, dir, base_url, q, per_page) %}
+{% let is_active = active == col %}
+<th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted"
+    aria-sort="{% if is_active %}{% if dir == "desc" %}descending{% else %}ascending{% endif %}{% else %}none{% endif %}">
+  <a href="{{ base_url }}?sort={{ col }}&dir={% if is_active && dir == "asc" %}desc{% else %}asc{% endif %}{% if !q.is_empty() %}&q={{ q }}{% endif %}&per_page={{ per_page }}"
+     class="inline-flex items-center gap-1 hover:text-ht-content-secondary {% if is_active %}text-ht-content-secondary{% endif %}">
+    {{ label }}
+    {% if is_active %}
+      {% if dir == "asc" %}<svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>
+      {% else %}<svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14m-7-7 7 7 7-7"/></svg>
+      {% endif %}
+    {% else %}<svg class="h-3 w-3 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7-7 7 7M5 12l7 7 7-7" opacity="0.5"/></svg>{% endif %}
+  </a>
+</th>
+{% endmacro %}
