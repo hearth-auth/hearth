@@ -10,7 +10,7 @@ use super::*;
 #[template(path = "ui/admin/realms/list.html")]
 struct RealmListTemplate {
     realms: Vec<Realm>,
-    next_cursor: Option<String>,
+    pagination: PaginationView,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -28,14 +28,14 @@ struct RealmListTemplate {
 pub async fn admin_realms_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<AdminPageParams>,
 ) -> Response {
-    match state.identity.list_realms(&params.as_page_request(20)) {
+    match state.identity.list_realms(&params.as_page_request()) {
         Ok(page) => {
-            let next_cursor = PaginationParams::next_cursor_from(&page);
+            let pagination = PaginationView::new(&page, "/ui/admin/realms", "");
             render(&RealmListTemplate {
                 realms: page.items,
-                next_cursor,
+                pagination,
                 chrome: true,
                 active: "realms",
                 user_email: Some(session.user_email.clone()),

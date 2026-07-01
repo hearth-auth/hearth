@@ -10,7 +10,7 @@ use super::*;
 #[template(path = "ui/admin/applications/list.html")]
 struct AppListTemplate {
     applications: Vec<OAuthClient>,
-    next_cursor: Option<String>,
+    pagination: PaginationView,
     realm_name: String,
     chrome: bool,
     active: &'static str,
@@ -31,18 +31,20 @@ pub async fn admin_apps_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<AdminPageParams>,
 ) -> Response {
+    let realm_name = target.0.name().to_string();
     match state
         .identity
-        .list_clients(target.id(), &params.as_page_request(20))
+        .list_clients(target.id(), &params.as_page_request())
     {
         Ok(page) => {
-            let next_cursor = PaginationParams::next_cursor_from(&page);
+            let base_url = format!("/ui/admin/realms/{realm_name}/applications");
+            let pagination = PaginationView::new(&page, base_url, "");
             render(&AppListTemplate {
                 applications: page.items,
-                next_cursor,
-                realm_name: target.0.name().to_string(),
+                pagination,
+                realm_name,
                 chrome: true,
                 active: "applications",
                 user_email: Some(session.user_email.clone()),

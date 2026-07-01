@@ -33,7 +33,7 @@
   </div>
 </form>
 
-{% if organizations.is_empty() && next_cursor.is_none() && search_query.is_empty() %}
+{% if organizations.is_empty() && pagination.total == 0 && search_query.is_empty() %}
   {# Empty-state panel — replaces the bare "No organizations found." td.
      A blank realm is the most likely first impression for a new admin,
      so the panel doubles as orientation: what an org *is*, plus the
@@ -104,16 +104,6 @@
     </div>
   </form>
 
-  {% match next_cursor %}
-    {% when Some with (cursor) %}
-      <nav class="mt-4 flex justify-end">
-        <a href="/ui/admin/realms/{{ realm_name }}/organizations?cursor={{ cursor }}"
-           class="inline-flex items-center gap-1 rounded border border-strong bg-ht-surface-elevated px-3 py-1.5 text-sm font-medium text-ht-content-secondary hover-bg-divider">
-          Next page
-          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-        </a>
-      </nav>
-    {% when None %}
-  {% endmatch %}
+  {% include "ui/admin/_pagination.html" %}
 {% endif %}
 {% endblock %}

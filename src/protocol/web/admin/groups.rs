@@ -3,22 +3,26 @@
 use super::*;
 
 /// Query params for `GET /ui/admin/groups`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct GroupListParams {
-    /// Decimal offset for the next page.
-    pub cursor: Option<String>,
+    /// 1-based page number.
+    pub page: Option<u32>,
+    /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
+    pub per_page: Option<u32>,
     /// Search query (name or slug).
     pub q: Option<String>,
 }
 
 impl GroupListParams {
-    fn as_page_request(&self, per_page: u32) -> crate::core::PageRequest {
-        let offset: u64 = self
-            .cursor
-            .as_deref()
-            .and_then(|c| c.parse().ok())
-            .unwrap_or(0);
-        crate::core::PageRequest::new(offset, per_page)
+    fn per_page_validated(&self) -> u32 {
+        super::pagination::validate_per_page(self.per_page.unwrap_or(DEFAULT_PER_PAGE))
+    }
+
+    fn as_page_request(&self) -> crate::core::PageRequest {
+        crate::core::PageRequest::from_page_number(
+            self.page.unwrap_or(1),
+            self.per_page_validated(),
+        )
     }
 }
 
@@ -28,7 +32,7 @@ impl GroupListParams {
 #[allow(clippy::struct_excessive_bools)]
 struct GroupListTemplate {
     groups: Vec<Group>,
-    next_cursor: Option<String>,
+    pagination: PaginationView,
     search_query: String,
     realm_name: String,
     chrome: bool,
@@ -52,6 +56,7 @@ pub async fn admin_groups_list(
     Query(params): Query<GroupListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
+    let realm_name = target.0.name().to_string();
     // Mirror the org-list strategy: scan a bounded window and filter
     // in-handler when searching, since the engine has no name-substring
     // index on groups today.
@@ -71,22 +76,24 @@ pub async fn admin_groups_list(
                     })
                     .collect();
                 let total = filtered.len() as u64;
-                crate::core::PagedResult::new(filtered, total, 0, 200)
+                crate::core::PagedResult::new(filtered, total, 0, params.per_page_validated())
             })
     } else {
         state
             .rbac
-            .list_groups(target.id(), &params.as_page_request(20))
+            .list_groups(target.id(), &params.as_page_request())
     };
 
     match result {
         Ok(page) => {
-            let next_cursor = PaginationParams::next_cursor_from(&page);
+            let base_url = format!("/ui/admin/realms/{realm_name}/groups");
+            let preserved = super::pagination::encode_param("q", &search_query);
+            let pagination = PaginationView::new(&page, base_url, preserved);
             render(&GroupListTemplate {
                 groups: page.items,
-                next_cursor,
+                pagination,
                 search_query,
-                realm_name: target.0.name().to_string(),
+                realm_name,
                 chrome: true,
                 active: "groups",
                 user_email: Some(session.user_email.clone()),

@@ -32,11 +32,9 @@ pub struct DeliveryRow {
 #[template(path = "ui/admin/webhooks/list.html")]
 struct WebhookListTemplate {
     webhooks: Vec<WebhookRow>,
+    pagination: PaginationView,
     realm_name: String,
     flash_message: Option<String>,
-    /// Active workspace tab label (used by `_workspace_tabs.html` include).
-    /// Cursor for the next page of results; `None` when on the last page.
-    next_cursor: Option<String>,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -51,9 +49,22 @@ struct WebhookListTemplate {
 }
 
 /// Query params accepted by the webhook list page.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 pub struct WebhookListParams {
     pub flash: Option<String>,
+    /// 1-based page number.
+    pub page: Option<u32>,
+    /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
+    pub per_page: Option<u32>,
+}
+
+impl WebhookListParams {
+    fn as_admin_page_params(&self) -> AdminPageParams {
+        AdminPageParams {
+            page: self.page,
+            per_page: self.per_page,
+        }
+    }
 }
 
 /// `GET /ui/admin/realms/{realm}/webhooks` — lists registered webhooks.
@@ -74,16 +85,19 @@ pub async fn admin_webhooks_list(
     let realm_name = target.0.name().to_string();
     let identity = state.identity.clone();
     let realm_id = target.id().clone();
-    let rows = tokio::task::spawn_blocking(move || {
-        identity.list_webhooks(&realm_id, &crate::core::PageRequest::new(0, 200))
-    })
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-    .map(|p| p.items)
-    .unwrap_or_default();
+    let page_req = params.as_admin_page_params().as_page_request();
+    let page_result =
+        tokio::task::spawn_blocking(move || identity.list_webhooks(&realm_id, &page_req))
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
 
-    let webhook_rows: Vec<WebhookRow> = rows
+    let base_url = format!("/ui/admin/realms/{realm_name}/webhooks");
+    let pagination = PaginationView::new(&page_result, base_url, "");
+
+    let webhook_rows: Vec<WebhookRow> = page_result
+        .items
         .into_iter()
         .map(|wh| WebhookRow {
             id: wh.id().as_uuid().to_string(),
@@ -96,9 +110,9 @@ pub async fn admin_webhooks_list(
 
     render(&WebhookListTemplate {
         webhooks: webhook_rows,
+        pagination,
         realm_name,
         flash_message,
-        next_cursor: None,
         chrome: true,
         active: "webhooks",
         user_email: Some(session.user_email.clone()),
