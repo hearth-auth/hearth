@@ -45,6 +45,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `examples/large-scale-demo/hearth.yaml` into `./data/demo`; `make
   seed-large-reset` wipes it.
 
+### Security
+- **gRPC RBAC admin: cross-realm BOLA closed across all 30 methods (HEA-1650)** — all
+  `RbacAdminService` handlers previously discarded the authenticated realm from the
+  `x-realm-id` header and sourced the target realm from the request body's `realm_id`
+  field instead. A realm-A admin could write groups, roles, and assignments into
+  realm-B by setting `realm_id: <realm-B-uuid>` in the body. All 30 methods now
+  assert that the body `realm_id` matches the authenticated realm and return
+  `PERMISSION_DENIED` on mismatch; the authenticated realm is always authoritative.
+- **Webhook SSRF guard at registration and delivery (HEA-1651)** — webhook URLs are now
+  validated for SSRF safety (RFC 1918, loopback, link-local, ULA, cloud-metadata ranges
+  blocked) at registration time via `POST /admin/webhooks` and `PUT /admin/webhooks/{id}`,
+  and again immediately before each delivery attempt to defend against DNS rebinding.
+
 ### Fixed
 - **Admin tables: search, sort, and pagination now interact consistently.** Sorting
   or searching only swapped the table rows, leaving the pagination bar stale — so
