@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **MFA enroll/disable/regenerate now require step-up credential verification** — `POST /ui/account/totp/activate`
+  requires the user's current password before activating MFA; `POST /ui/account/totp/disable` and
+  `POST /ui/account/totp/regenerate-codes` require a fresh TOTP code before proceeding. A stolen
+  session cookie can no longer silently strip or replace a user's second factor (HEA-1659).
 - **OIDC RSA signing key now persisted across restarts** — the server-wide RS256 keypair (`kid`)
   is stored in the system realm under `sys:oidc:rsa:key` (WAL-synced) so previously-issued ID tokens
   remain verifiable after a restart. JWKS includes retiring keys during the configured grace window

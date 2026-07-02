@@ -57,8 +57,11 @@ pub const CSRF_COOKIE: &str = "hearth_ui_csrf";
 /// Name of the short-lived cookie carrying the pending MFA challenge state.
 ///
 /// Issued after successful password verification when MFA is enabled.
-/// The value is `{user_id}.{realm_id}.{expires_unix_secs}.{return_to_b64}.{mac}`
-/// where MAC = HMAC-SHA256(secret, `user_id|realm_id|expires|return_to_b64`).
+/// The value is `{user_id}.{realm_id}.{expires_unix_secs}.{return_to_b64}.{nonce}.{mac}`
+/// where MAC = HMAC-SHA256(secret, `user_id|realm_id|expires|return_to_b64|nonce`).
+/// The `nonce` is a random 16-byte value (base64url, no-pad, 22 chars) that is
+/// burned server-side after the first successful MFA attempt so the cookie is
+/// single-use on the success path.
 /// TTL: 5 minutes.
 pub const MFA_PENDING_COOKIE: &str = "hearth_ui_mfa_pending";
 
@@ -91,7 +94,7 @@ pub const SYSTEM_REALM_SENTINEL: &str = "__system__";
 const LAST_REALM_TTL_SECS: u64 = 31_536_000;
 
 /// TTL for the MFA pending cookie in seconds (5 minutes).
-const MFA_PENDING_TTL_SECS: u64 = 300;
+pub(super) const MFA_PENDING_TTL_SECS: u64 = 300;
 
 /// Secret used to MAC session cookies. 32 random bytes. Shared across
 /// all UI handlers via [`WebState::cookie_secret`].
@@ -154,6 +157,8 @@ pub struct MfaPending {
     pub realm_id: RealmId,
     /// Optional `return_to` path to redirect after MFA completes.
     pub return_to: Option<String>,
+    /// Random nonce burned server-side after first successful MFA use.
+    pub nonce: String,
 }
 
 /// Builds the full `Set-Cookie` header value for an MFA pending cookie.
@@ -182,9 +187,16 @@ pub fn issue_mfa_pending_cookie(
         _ => String::new(),
     };
 
-    let mac = compute_mfa_pending_mac(secret, user_id, realm_id, expires, &return_to_b64);
+    // Generate a 16-byte random nonce for single-use enforcement.
+    let rng = SystemRandom::new();
+    let mut nonce_bytes = [0u8; 16];
+    rng.fill(&mut nonce_bytes)
+        .expect("SystemRandom::fill must not fail");
+    let nonce = BASE64URL_NOPAD.encode(&nonce_bytes);
+
+    let mac = compute_mfa_pending_mac(secret, user_id, realm_id, expires, &return_to_b64, &nonce);
     let value = format!(
-        "{}.{}.{expires}.{return_to_b64}.{mac}",
+        "{}.{}.{expires}.{return_to_b64}.{nonce}.{mac}",
         user_id.as_uuid(),
         realm_id.as_uuid(),
     );
@@ -201,11 +213,12 @@ pub fn issue_mfa_pending_cookie(
 /// opaque — callers redirect to `/ui/login` on `None`.
 #[must_use]
 pub fn parse_mfa_pending_cookie(secret: &CookieSecret, value: &str) -> Option<MfaPending> {
-    let mut parts = value.splitn(5, '.');
+    let mut parts = value.splitn(6, '.');
     let uid_str = parts.next()?;
     let tid_str = parts.next()?;
     let expires_str = parts.next()?;
     let return_to_b64 = parts.next()?;
+    let nonce = parts.next()?;
     let mac_str = parts.next()?;
     if parts.next().is_some() {
         return None;
@@ -219,7 +232,8 @@ pub fn parse_mfa_pending_cookie(secret: &CookieSecret, value: &str) -> Option<Mf
     let realm_id = RealmId::new(tid);
 
     // Verify MAC first (constant-time).
-    let expected = compute_mfa_pending_mac(secret, &user_id, &realm_id, expires, return_to_b64);
+    let expected =
+        compute_mfa_pending_mac(secret, &user_id, &realm_id, expires, return_to_b64, nonce);
     let mac_match: bool = expected.as_bytes().ct_eq(mac_str.as_bytes()).into();
     if !mac_match {
         return None;
@@ -245,6 +259,7 @@ pub fn parse_mfa_pending_cookie(secret: &CookieSecret, value: &str) -> Option<Mf
         user_id,
         realm_id,
         return_to,
+        nonce: nonce.to_string(),
     })
 }
 
@@ -262,6 +277,7 @@ fn compute_mfa_pending_mac(
     realm_id: &RealmId,
     expires: u64,
     return_to_b64: &str,
+    nonce: &str,
 ) -> String {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
         .expect("HMAC-SHA256 accepts any 32-byte key");
@@ -272,6 +288,8 @@ fn compute_mfa_pending_mac(
     mac.update(expires.to_string().as_bytes());
     mac.update(b"|");
     mac.update(return_to_b64.as_bytes());
+    mac.update(b"|");
+    mac.update(nonce.as_bytes());
     let tag = mac.finalize().into_bytes();
     BASE64URL_NOPAD.encode(&tag)
 }
@@ -1279,9 +1297,10 @@ mod tests {
             .as_secs();
         let expired = now.saturating_sub(10);
         let return_to_b64 = "";
-        let mac = compute_mfa_pending_mac(&secret, &uid, &tid, expired, return_to_b64);
+        let nonce = "test-nonce";
+        let mac = compute_mfa_pending_mac(&secret, &uid, &tid, expired, return_to_b64, nonce);
         let value = format!(
-            "{}.{}.{expired}.{return_to_b64}.{mac}",
+            "{}.{}.{expired}.{return_to_b64}.{nonce}.{mac}",
             uid.as_uuid(),
             tid.as_uuid(),
         );

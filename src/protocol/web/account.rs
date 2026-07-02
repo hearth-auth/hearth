@@ -337,6 +337,8 @@ struct TotpEnrollTemplate {
     recovery_codes: Vec<String>,
     /// Inline error shown above the activation form (e.g. "Invalid code").
     activation_error: Option<String>,
+    /// Inline error shown on the disable / regenerate form (e.g. "Invalid authentication code").
+    disable_error: Option<String>,
     // Chrome/layout fields.
     chrome: bool,
     active: &'static str,
@@ -372,6 +374,7 @@ impl TotpEnrollTemplate {
             qr_svg,
             recovery_codes,
             activation_error,
+            disable_error: None,
             chrome: true,
             active: "account",
             user_email: Some(session.user_email.clone()),
@@ -495,7 +498,7 @@ pub async fn totp_enroll_form(State(state): State<Arc<WebState>>, session: UiSes
 }
 
 /// `application/x-www-form-urlencoded` body for `POST /ui/account/totp/activate`.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ActivateTotpForm {
     /// Current TOTP code from the authenticator app.
     #[serde(default)]
@@ -503,6 +506,9 @@ pub struct ActivateTotpForm {
     /// CSRF double-submit token.
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+    /// Current account password — step-up credential required before activating MFA.
+    #[serde(default)]
+    pub password: String,
 }
 
 /// `POST /ui/account/totp/activate`.
@@ -513,6 +519,30 @@ pub async fn totp_activate(
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
+    }
+
+    // Step-up: require current password before allowing MFA enrollment.
+    let password = CleartextPassword::from_string(form.password.trim().to_string());
+    let realm_id = session.realm_id.clone();
+    let user_id = session.user_id.clone();
+    let identity = state.identity.clone();
+    let pw_result = tokio::task::spawn_blocking(move || {
+        identity.verify_password(&realm_id, &user_id, &password)
+    })
+    .await;
+    match pw_result {
+        Ok(Ok(true)) => {} // password correct, proceed
+        Ok(Ok(false) | Err(_)) => {
+            return render_totp_error(
+                &state,
+                &session,
+                "Current password is incorrect. Please try again.",
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "verify_password spawn_blocking panicked");
+            return render_totp_error(&state, &session, "Unable to verify password right now.");
+        }
     }
 
     let realm_id = session.realm_id.clone();
@@ -555,12 +585,16 @@ pub async fn totp_activate(
     }
 }
 
-/// `application/x-www-form-urlencoded` body for `POST /ui/account/totp/disable`.
-#[derive(Debug, Deserialize)]
+/// `application/x-www-form-urlencoded` body for `POST /ui/account/totp/disable`
+/// and `POST /ui/account/totp/regenerate-codes`.
+#[derive(Deserialize)]
 pub struct DisableTotpForm {
     /// CSRF double-submit token.
     #[serde(rename = "_csrf", default)]
     pub csrf: String,
+    /// Current TOTP code — step-up credential required before disabling MFA or regenerating codes.
+    #[serde(default)]
+    pub current_totp_code: String,
 }
 
 /// `POST /ui/account/totp/disable`.
@@ -571,6 +605,32 @@ pub async fn totp_disable(
 ) -> Response {
     if let Err(resp) = verify_csrf_form_field(&session, &form.csrf) {
         return resp;
+    }
+
+    // Step-up: require current TOTP code before allowing MFA to be disabled.
+    let code = form.current_totp_code.trim().to_string();
+    let realm_id = session.realm_id.clone();
+    let user_id = session.user_id.clone();
+    let identity = state.identity.clone();
+    let totp_result =
+        tokio::task::spawn_blocking(move || identity.verify_totp(&realm_id, &user_id, &code)).await;
+    match totp_result {
+        Ok(Ok(())) => {} // code correct, proceed
+        Ok(Err(IdentityError::InvalidMfaCode | IdentityError::RateLimited)) => {
+            return render_disable_error(
+                &state,
+                &session,
+                "Invalid authentication code. Please try again.",
+            );
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "verify_totp in disable failed");
+            return render_disable_error(&state, &session, "Unable to verify code right now.");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "verify_totp spawn_blocking panicked");
+            return render_disable_error(&state, &session, "Unable to verify code right now.");
+        }
     }
 
     match state
@@ -585,7 +645,7 @@ pub async fn totp_disable(
         }
         Err(e) => {
             tracing::warn!(error = %e, "disable_mfa failed");
-            render_totp_error(&state, &session, "Unable to disable MFA right now.")
+            render_disable_error(&state, &session, "Unable to disable MFA right now.")
         }
     }
 }
@@ -638,6 +698,33 @@ pub async fn totp_regenerate_codes(
         return resp;
     }
 
+    // Step-up: require current TOTP code before regenerating recovery codes.
+    let code = form.current_totp_code.trim().to_string();
+    let realm_id_v = session.realm_id.clone();
+    let user_id_v = session.user_id.clone();
+    let identity_v = state.identity.clone();
+    let totp_result =
+        tokio::task::spawn_blocking(move || identity_v.verify_totp(&realm_id_v, &user_id_v, &code))
+            .await;
+    match totp_result {
+        Ok(Ok(())) => {} // code correct, proceed
+        Ok(Err(IdentityError::InvalidMfaCode | IdentityError::RateLimited)) => {
+            return render_disable_error(
+                &state,
+                &session,
+                "Invalid authentication code. Please try again.",
+            );
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "verify_totp in regenerate-codes failed");
+            return render_disable_error(&state, &session, "Unable to verify code right now.");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "verify_totp spawn_blocking panicked");
+            return render_disable_error(&state, &session, "Unable to verify code right now.");
+        }
+    }
+
     let realm_id = session.realm_id.clone();
     let user_id = session.user_id.clone();
     let identity = state.identity.clone();
@@ -683,6 +770,28 @@ pub async fn totp_regenerate_codes(
     render(&tmpl)
 }
 
+/// Re-renders the TOTP disable / regenerate page with an inline error.
+/// Used when the step-up TOTP verification fails on the MFA-enabled form.
+fn render_disable_error(state: &Arc<WebState>, session: &UiSession, msg: &str) -> Response {
+    let admin = super::handlers::is_admin(state, session);
+    let mut tmpl = TotpEnrollTemplate::new(
+        session,
+        true,
+        String::new(),
+        String::new(),
+        String::new(),
+        Vec::new(),
+        None,
+        admin,
+        state.product_name.clone(),
+        state.logo_url.clone(),
+    );
+    tmpl.disable_error = Some(msg.to_string());
+    tmpl.realm_theme_url = state.realm_theme_url();
+    tmpl.inline_theme_css = state.inline_theme_css();
+    render(&tmpl)
+}
+
 /// Re-renders the TOTP enrolment page with an inline error above the
 /// activation form. Used when activation fails without restarting the
 /// ceremony.
@@ -693,26 +802,10 @@ fn render_totp_error(state: &Arc<WebState>, session: &UiSession, msg: &str) -> R
         .mfa_enabled(&session.realm_id, &session.user_id)
         .unwrap_or(false);
 
-    // When enabled = true the activation form is not shown; in that
-    // case there's no meaningful surface for an inline error, so we
-    // fall through to rendering the disable form cleanly.
+    // When enabled = true the activation form is not shown; fall through
+    // to render_disable_error so the error surface is correct.
     if enabled {
-        let mut tmpl = TotpEnrollTemplate::new(
-            session,
-            true,
-            String::new(),
-            String::new(),
-            String::new(),
-            Vec::new(),
-            None,
-            admin,
-            state.product_name.clone(),
-            state.logo_url.clone(),
-        );
-        tmpl.realm_theme_url = state.realm_theme_url();
-        tmpl.inline_theme_css = state.inline_theme_css();
-        tmpl.inline_theme_css = state.inline_theme_css();
-        return render(&tmpl);
+        return render_disable_error(state, session, msg);
     }
 
     // Reload the pending enrollment state so the QR code, secret, and

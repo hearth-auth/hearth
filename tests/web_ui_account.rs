@@ -487,8 +487,8 @@ async fn totp_activate_enables_mfa_with_valid_code() {
         .as_secs();
     let code = compute_totp_code(&secret, now_secs);
 
-    // POST to activate.
-    let form = format!("code={code}&_csrf={csrf}");
+    // POST to activate (password required by step-up gate).
+    let form = format!("code={code}&_csrf={csrf}&password={OLD_PASSWORD}");
     let response = rig
         .app
         .clone()
@@ -539,7 +539,8 @@ async fn totp_activate_with_bad_code_shows_inline_error() {
         .await
         .expect("oneshot");
 
-    let form = format!("code=000000&_csrf={csrf}");
+    // Include valid password (step-up gate) but wrong TOTP code.
+    let form = format!("code=000000&_csrf={csrf}&password={OLD_PASSWORD}");
     let response = rig
         .app
         .clone()
@@ -652,16 +653,18 @@ async fn totp_disable_turns_mfa_off() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("time")
         .as_secs();
-    let code = compute_totp_code(&enrollment.secret_base32, now_secs);
+    let enroll_code = compute_totp_code(&enrollment.secret_base32, now_secs);
     rig.identity
-        .verify_totp_enrollment(&rig.realm_id, &rig.user_id, &code)
+        .verify_totp_enrollment(&rig.realm_id, &rig.user_id, &enroll_code)
         .expect("verify enrollment");
     assert!(rig
         .identity
         .mfa_enabled(&rig.realm_id, &rig.user_id)
         .expect("mfa_enabled"));
 
-    let form = format!("_csrf={csrf}");
+    // Use next time step to avoid replay protection.
+    let disable_code = compute_totp_code(&enrollment.secret_base32, now_secs + 30);
+    let form = format!("_csrf={csrf}&current_totp_code={disable_code}");
     let response = rig
         .app
         .clone()
@@ -682,4 +685,374 @@ async fn totp_disable_turns_mfa_off() {
         .identity
         .mfa_enabled(&rig.realm_id, &rig.user_id)
         .expect("mfa_enabled"));
+}
+
+// ---------------------------------------------------------------------------
+// Step-up credential checks (HEA-1659)
+// ---------------------------------------------------------------------------
+
+/// Helper: enrolls and fully activates TOTP for the rig's user.
+/// Returns the base32 secret so callers can compute fresh codes.
+fn enroll_and_activate_mfa(rig: &TestRig) -> String {
+    let enrollment = rig
+        .identity
+        .enroll_totp(&rig.realm_id, &rig.user_id)
+        .expect("enroll_totp");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&enrollment.secret_base32, now_secs);
+    rig.identity
+        .verify_totp_enrollment(&rig.realm_id, &rig.user_id, &code)
+        .expect("verify_totp_enrollment");
+    enrollment.secret_base32
+}
+
+#[tokio::test]
+async fn totp_disable_rejects_missing_totp_code() {
+    let rig = build_rig();
+    let csrf = "csrf-disable-no-code";
+    let cookie = auth_cookie(&rig, csrf);
+    enroll_and_activate_mfa(&rig);
+
+    // POST with no current_totp_code field (empty string falls through to invalid code).
+    let form = format!("_csrf={csrf}&current_totp_code=");
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/account/totp/disable")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    // Must not redirect — must stay on the page with an error.
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+    assert!(
+        body.contains("Invalid") || body.contains("incorrect") || body.contains("required"),
+        "expected credential error in body, got: {body}"
+    );
+    // MFA must still be active.
+    assert!(
+        rig.identity
+            .mfa_enabled(&rig.realm_id, &rig.user_id)
+            .expect("mfa_enabled"),
+        "MFA should still be enabled after rejected disable"
+    );
+}
+
+#[tokio::test]
+async fn totp_disable_rejects_wrong_totp_code() {
+    let rig = build_rig();
+    let csrf = "csrf-disable-wrong-code";
+    let cookie = auth_cookie(&rig, csrf);
+    enroll_and_activate_mfa(&rig);
+
+    let form = format!("_csrf={csrf}&current_totp_code=000000");
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/account/totp/disable")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+    assert!(
+        body.contains("Invalid") || body.contains("incorrect"),
+        "expected credential error in body, got: {body}"
+    );
+    assert!(
+        rig.identity
+            .mfa_enabled(&rig.realm_id, &rig.user_id)
+            .expect("mfa_enabled"),
+        "MFA should still be enabled after rejected disable"
+    );
+}
+
+#[tokio::test]
+async fn totp_activate_rejects_missing_password() {
+    let rig = build_rig();
+    let csrf = "csrf-activate-nopw";
+    let cookie = auth_cookie(&rig, csrf);
+
+    // Seed pending enrollment via GET.
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/account/totp")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+    let secret = scrape_secret(body);
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&secret, now_secs);
+
+    // POST without password field.
+    let form = format!("code={code}&_csrf={csrf}&password=");
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/account/totp/activate")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+    assert!(
+        body.contains("password") || body.contains("incorrect") || body.contains("Invalid"),
+        "expected password error in body, got: {body}"
+    );
+    assert!(
+        !rig.identity
+            .mfa_enabled(&rig.realm_id, &rig.user_id)
+            .expect("mfa_enabled"),
+        "MFA should not be enabled after password-rejected activate"
+    );
+}
+
+#[tokio::test]
+async fn totp_activate_rejects_wrong_password() {
+    let rig = build_rig();
+    let csrf = "csrf-activate-wrongpw";
+    let cookie = auth_cookie(&rig, csrf);
+
+    // Seed pending enrollment via GET.
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/account/totp")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+    let secret = scrape_secret(body);
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&secret, now_secs);
+
+    let form = format!("code={code}&_csrf={csrf}&password=wrong-password-xyz");
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/account/totp/activate")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+    assert!(
+        body.contains("password") || body.contains("incorrect") || body.contains("Invalid"),
+        "expected password error in body, got: {body}"
+    );
+    assert!(
+        !rig.identity
+            .mfa_enabled(&rig.realm_id, &rig.user_id)
+            .expect("mfa_enabled"),
+        "MFA should not be enabled after password-rejected activate"
+    );
+}
+
+#[tokio::test]
+async fn totp_activate_with_correct_password_and_code_succeeds() {
+    let rig = build_rig();
+    let csrf = "csrf-activate-full";
+    let cookie = auth_cookie(&rig, csrf);
+
+    // Seed pending enrollment via GET.
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/account/totp")
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+    let secret = scrape_secret(body);
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&secret, now_secs);
+
+    // POST with correct password and correct TOTP code.
+    let form = format!("code={code}&_csrf={csrf}&password={OLD_PASSWORD}");
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/account/totp/activate")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        rig.identity
+            .mfa_enabled(&rig.realm_id, &rig.user_id)
+            .expect("mfa_enabled"),
+        "MFA should be enabled after successful activation"
+    );
+}
+
+#[tokio::test]
+async fn totp_regenerate_rejects_wrong_totp_code() {
+    let rig = build_rig();
+    let csrf = "csrf-regen-wrong";
+    let cookie = auth_cookie(&rig, csrf);
+    enroll_and_activate_mfa(&rig);
+
+    let form = format!("_csrf={csrf}&current_totp_code=000000");
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/account/totp/regenerate-codes")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+    assert!(
+        body.contains("Invalid") || body.contains("incorrect"),
+        "expected credential error in body, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn totp_regenerate_succeeds_with_correct_totp_code() {
+    let rig = build_rig();
+    let csrf = "csrf-regen-ok";
+    let cookie = auth_cookie(&rig, csrf);
+    let secret = enroll_and_activate_mfa(&rig);
+
+    // Use next time step to avoid replay protection from enrollment.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&secret, now_secs + 30);
+
+    let form = format!("_csrf={csrf}&current_totp_code={code}");
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ui/account/totp/regenerate-codes")
+                .header(header::COOKIE, cookie)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body).expect("utf-8");
+    // New codes page should contain recovery code indicators.
+    assert!(
+        body.contains("recovery") || body.contains("code"),
+        "expected recovery codes in body, got: {body}"
+    );
 }
