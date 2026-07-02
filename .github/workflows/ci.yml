@@ -172,6 +172,13 @@ jobs:
       - name: Secret hygiene (fingerprint_hmac_secret literals)
         run: bash scripts/check-secret-hygiene.sh
 
+      # HEA-1657: prevent recurrence of the cross-realm BOLA class (HEA-1629).
+      # Fails on `let _auth`, `let _ = extract_admin_auth(...)`, or any unbound
+      # auth call in src/protocol/http/admin.rs and src/protocol/grpc/*.rs.
+      # Runs on every PR — pure grep, no Rust build required.
+      - name: Auth-discard lint (check-auth-discard.sh)
+        run: bash scripts/check-auth-discard.sh
+
   # ── Rust quality gate ────────────────────────────────────────────────────────
 
   quality:

@@ -35,6 +35,9 @@ pub struct AdminAuth {
 /// - `UNAUTHENTICATED` — missing/invalid bearer token or realm header.
 /// - `PERMISSION_DENIED` — valid token but missing `hearth.admin` claim.
 /// - `RESOURCE_EXHAUSTED` — rate-limit exceeded.
+///
+/// The `Result` **must** be used — discarding it silently bypasses authentication.
+#[must_use = "discarding this Result bypasses authentication; bind the return value"]
 pub fn authenticate_admin(md: &MetadataMap, state: &GrpcState) -> Result<AdminAuth, Status> {
     let realm_id = super::convert::extract_realm_id(md)?;
     let token = extract_bearer_token(md)?;

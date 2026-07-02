@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Auth-discard CI lint** — `scripts/check-auth-discard.sh` and `make auth-discard-check`
+  fail on any occurrence of `let _auth`, `let _ = extract_admin_auth(...)`, or an unbound
+  `authenticate_admin()` call in `src/protocol/http/admin.rs` and `src/protocol/grpc/*.rs`.
+  Wired into the `filter` CI job (runs on every PR, no Rust build required) and
+  `make ci-local-fast`. Prevents recurrence of the cross-realm BOLA class found in
+  HEA-1629 (HEA-1657).
+- **Auth-boundary PR review checklist** — `docs/guides/security-hardening.md` now
+  documents the automated CI backstops, a five-point manual review checklist, and the
+  `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
+
 ### Security
 - **MFA-pending cookie is now single-use** — a random 128-bit nonce is embedded in
   the cookie and burned server-side on first successful MFA completion. A captured
