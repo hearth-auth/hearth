@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **OIDC RSA signing key now persisted across restarts** — the server-wide RS256 keypair (`kid`)
+  is stored in the system realm under `sys:oidc:rsa:key` (WAL-synced) so previously-issued ID tokens
+  remain verifiable after a restart. JWKS includes retiring keys during the configured grace window
+  so tokens signed before an explicit key rotation continue to validate (HEA-1655).
 - **Cross-realm BOLA hardening in REST admin handlers** — introduced `scoped_realm(auth, path_realm_id)`
   accessor that enforces `auth.realm_id == path_realm_id` (system realm bypasses as superuser) for
   every endpoint that carries a `{realm_id}` path parameter. Fixes 10 handlers previously vulnerable

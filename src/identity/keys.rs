@@ -524,6 +524,50 @@ pub(crate) fn encode_global_signing_key() -> Vec<u8> {
     b"sys:global:key".to_vec()
 }
 
+/// Storage key for the server-wide OIDC RSA-2048 signing key.
+///
+/// Format: `sys:oidc:rsa:key` — JSON `{"pkcs8": [...], "cert": [...]}`.
+/// Stored under the system realm. Generated once on first JWKS request and
+/// persisted so the `kid` survives restarts (HEA-1655).
+pub(crate) fn encode_oidc_rsa_key() -> Vec<u8> {
+    b"sys:oidc:rsa:key".to_vec()
+}
+
+/// Storage key for a retiring OIDC RSA key during its grace window.
+///
+/// Format: `sys:oidc:rsa:retiring:{deadline_secs:020}:{kid}`
+///
+/// `deadline_secs` is zero-padded to 20 digits so lexicographic order
+/// matches time order, enabling efficient range scan.
+/// Stored under the system realm.
+///
+/// Called by the OIDC RSA key-rotation function (and by tests). Suppressing
+/// `dead_code` because the production write-path (rotation) is a follow-up.
+#[allow(dead_code)]
+pub(crate) fn encode_oidc_rsa_retiring_key(deadline_secs: u64, kid: &str) -> Vec<u8> {
+    format!("sys:oidc:rsa:retiring:{deadline_secs:020}:{kid}").into_bytes()
+}
+
+/// Scan prefix for all retiring OIDC RSA keys.
+///
+/// Used to enumerate grace-window keys for inclusion in JWKS.
+pub(crate) fn oidc_rsa_retiring_scan_prefix() -> Vec<u8> {
+    b"sys:oidc:rsa:retiring:".to_vec()
+}
+
+/// Parses the deadline (Unix seconds) from a retiring OIDC RSA storage key.
+///
+/// Expected format: `sys:oidc:rsa:retiring:{deadline:020}:{kid}`.
+/// Returns `None` when the key does not match.
+pub(crate) fn parse_oidc_rsa_retiring_deadline(key_bytes: &[u8]) -> Option<u64> {
+    const PREFIX: &str = "sys:oidc:rsa:retiring:";
+    let s = std::str::from_utf8(key_bytes).ok()?;
+    let after = s.strip_prefix(PREFIX)?;
+    // First 20 characters are the zero-padded deadline.
+    let deadline_str = after.get(..20)?;
+    deadline_str.parse::<u64>().ok()
+}
+
 /// Encodes the storage key for a retiring realm signing key.
 ///
 /// Format: `realm:retiring:{realm_uuid}:{deadline_secs:020}:{key_id}`
