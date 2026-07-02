@@ -18,6 +18,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **Pre-token webhook HMAC signing implemented** — `hmac_secret` now produces a real
+  `X-Hearth-Signature-256: sha256=<hex>` header over the serialized request body; the
+  prior stub silently ignored the secret, allowing claim injection by any party able to
+  reach the endpoint (HEA-1661/HEA-1662).
+- **Pre-token webhook timeout enforced** — the configured `timeout_ms` is now wired through
+  `ureq::config::Config::timeout_global`; previously the timeout was a no-op, allowing a
+  slow webhook to stall the token endpoint indefinitely (HEA-1661/HEA-1663).
+- **Session revocation on user disable** — `update_user()` now calls
+  `revoke_all_user_sessions` when the status transitions to `Disabled`, preventing
+  previously-issued access tokens from remaining valid for up to the token TTL after an
+  administrator disables the account (HEA-1661/HEA-1664).
+- **HSTS `preload` directive added** — the `Strict-Transport-Security` header now includes
+  `; preload`, enabling HSTS preload-list submission so browsers never attempt an initial
+  plaintext connection to a Hearth deployment (HEA-1661).
 - **`quick-xml` upgraded 0.36 → 0.41 (RUSTSEC advisories)** — remediates two advisories in
   the SAML XML parser: quadratic runtime on duplicate-attribute checks and an unbounded
   namespace-declaration allocation enabling memory-exhaustion DoS on crafted XML. The SAML

@@ -140,7 +140,8 @@ impl PreTokenWebhookTransport for FixedClaimsTransport {
         &self,
         _url: &str,
         _timeout_ms: u64,
-        _request: &hearth::identity::pre_token_webhook::PreTokenWebhookRequest,
+        _body: &[u8],
+        _hmac_sig: Option<&str>,
     ) -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
         *self.call_count.lock().expect("lock") += 1;
         Ok(PreTokenWebhookResponse {
@@ -171,7 +172,8 @@ impl PreTokenWebhookTransport for FailingTransport {
         &self,
         _url: &str,
         _timeout_ms: u64,
-        _request: &hearth::identity::pre_token_webhook::PreTokenWebhookRequest,
+        _body: &[u8],
+        _hmac_sig: Option<&str>,
     ) -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
         *self.call_count.lock().expect("lock") += 1;
         Err(PreTokenWebhookError::TransportError {
@@ -458,10 +460,11 @@ async fn webhook_not_called_when_not_configured() {
 /// The webhook request payload includes user_id, realm_id, grant_type, and scope.
 #[tokio::test]
 async fn webhook_request_contains_expected_context() {
-    use hearth::identity::pre_token_webhook::PreTokenWebhookRequest;
-
+    // CapturingTransport stores raw body bytes because PreTokenWebhookRequest
+    // has `event: &'static str` which cannot be deserialized from dynamic input.
+    // We check fields via serde_json::Value instead.
     struct CapturingTransport {
-        last_request: Arc<Mutex<Option<PreTokenWebhookRequest>>>,
+        last_body: Arc<Mutex<Option<Vec<u8>>>>,
     }
 
     impl PreTokenWebhookTransport for CapturingTransport {
@@ -469,18 +472,19 @@ async fn webhook_request_contains_expected_context() {
             &self,
             _url: &str,
             _timeout_ms: u64,
-            request: &PreTokenWebhookRequest,
+            body: &[u8],
+            _hmac_sig: Option<&str>,
         ) -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
-            *self.last_request.lock().expect("lock") = Some(request.clone());
+            *self.last_body.lock().expect("lock") = Some(body.to_vec());
             Ok(PreTokenWebhookResponse {
                 extra_claims: BTreeMap::new(),
             })
         }
     }
 
-    let captured = Arc::new(Mutex::new(None::<PreTokenWebhookRequest>));
+    let captured = Arc::new(Mutex::new(None::<Vec<u8>>));
     let transport = CapturingTransport {
-        last_request: Arc::clone(&captured),
+        last_body: Arc::clone(&captured),
     };
 
     let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
@@ -507,21 +511,189 @@ async fn webhook_request_contains_expected_context() {
 
     let _token_response = authorize_and_exchange(&harness, &realm);
 
-    let req = captured
+    let raw_body = captured
         .lock()
         .expect("lock")
         .clone()
         .expect("transport was not called");
+    let req: serde_json::Value =
+        serde_json::from_slice(&raw_body).expect("body must be valid JSON");
     assert_eq!(
-        req.realm_id,
+        req["realm_id"].as_str().unwrap_or(""),
         realm.to_string(),
         "realm_id mismatch in webhook request"
     );
     assert!(
-        !req.user_id.is_empty(),
+        !req["user_id"].as_str().unwrap_or("").is_empty(),
         "user_id missing from webhook request"
     );
-    assert_eq!(req.grant_type, "authorization_code");
+    assert_eq!(
+        req["grant_type"].as_str().unwrap_or(""),
+        "authorization_code"
+    );
+}
+
+/// When `hmac_secret` is configured, the transport must receive a valid
+/// `X-Hearth-Signature-256` header value (F-1 fix verification).
+#[tokio::test]
+async fn webhook_hmac_sig_forwarded_to_transport_when_secret_configured() {
+    struct SignatureCapturingTransport {
+        captured_sig: Arc<Mutex<Option<String>>>,
+        captured_body: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl PreTokenWebhookTransport for SignatureCapturingTransport {
+        fn fire(
+            &self,
+            _url: &str,
+            _timeout_ms: u64,
+            body: &[u8],
+            hmac_sig: Option<&str>,
+        ) -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
+            *self.captured_sig.lock().expect("lock") = hmac_sig.map(str::to_string);
+            *self.captured_body.lock().expect("lock") = Some(body.to_vec());
+            Ok(PreTokenWebhookResponse {
+                extra_claims: BTreeMap::new(),
+            })
+        }
+    }
+
+    let captured_sig = Arc::new(Mutex::new(None::<String>));
+    let captured_body = Arc::new(Mutex::new(None::<Vec<u8>>));
+    let transport = SignatureCapturingTransport {
+        captured_sig: Arc::clone(&captured_sig),
+        captured_body: Arc::clone(&captured_body),
+    };
+
+    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+        .await
+        .expect("harness setup");
+
+    let realm = harness.create_realm();
+    let secret = "test-hmac-secret-value";
+    harness
+        .identity()
+        .update_realm(
+            &realm,
+            &UpdateRealmRequest {
+                config: Some(hearth::identity::RealmConfig {
+                    pre_token_webhook: Some(PreTokenWebhookConfig {
+                        url: "http://localhost:9999/enrich".to_string(),
+                        timeout_ms: 1000,
+                        on_error: PreTokenWebhookErrorPolicy::FailOpen,
+                        hmac_secret: Some(secret.to_string()),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("update realm");
+
+    // Trigger a token issuance to fire the webhook.
+    let _ = authorize_and_exchange(&harness, &realm);
+
+    let sig = captured_sig
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("transport must have received hmac_sig when secret is configured");
+
+    assert!(
+        sig.starts_with("sha256="),
+        "signature must start with 'sha256=', got: {sig}"
+    );
+
+    let hex_part = sig.trim_start_matches("sha256=");
+    assert_eq!(hex_part.len(), 64, "HMAC-SHA256 hex must be 64 chars");
+
+    // Verify the HMAC matches: recompute over the captured body.
+    let body = captured_body
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("transport must have been called with a body");
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key must be non-empty");
+    mac.update(&body);
+    let expected_hex = hex::encode(mac.finalize().into_bytes());
+    assert_eq!(
+        hex_part, expected_hex,
+        "HMAC signature must be computed over the serialized request body"
+    );
+
+    // Deserialize body to confirm it's a valid request JSON payload.
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("body must be valid JSON");
+    assert!(
+        parsed.get("realm_id").is_some(),
+        "body must contain realm_id field"
+    );
+}
+
+/// When `hmac_secret` is NOT configured, the transport must receive `None`
+/// for `hmac_sig` (no spurious header).
+#[tokio::test]
+async fn webhook_no_sig_forwarded_when_no_secret() {
+    struct SigCheckTransport {
+        received_sig: Arc<Mutex<Option<Option<String>>>>,
+    }
+
+    impl PreTokenWebhookTransport for SigCheckTransport {
+        fn fire(
+            &self,
+            _url: &str,
+            _timeout_ms: u64,
+            _body: &[u8],
+            hmac_sig: Option<&str>,
+        ) -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
+            *self.received_sig.lock().expect("lock") = Some(hmac_sig.map(str::to_string));
+            Ok(PreTokenWebhookResponse {
+                extra_claims: BTreeMap::new(),
+            })
+        }
+    }
+
+    let received = Arc::new(Mutex::new(None::<Option<String>>));
+    let transport = SigCheckTransport {
+        received_sig: Arc::clone(&received),
+    };
+
+    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+        .await
+        .expect("harness setup");
+
+    let realm = harness.create_realm();
+    harness
+        .identity()
+        .update_realm(
+            &realm,
+            &UpdateRealmRequest {
+                config: Some(hearth::identity::RealmConfig {
+                    pre_token_webhook: Some(setup_webhook_config(
+                        "http://localhost:9999/enrich",
+                        PreTokenWebhookErrorPolicy::FailOpen,
+                    )),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("update realm");
+
+    let _ = authorize_and_exchange(&harness, &realm);
+
+    let captured = received
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("transport must have been called");
+    assert!(
+        captured.is_none(),
+        "hmac_sig must be None when no secret is configured, got: {captured:?}"
+    );
 }
 
 // ──────────────────── test utility ────────────────────────
