@@ -1258,6 +1258,71 @@ realms:
 
 ---
 
+### `realms.<name>.pre_token_webhook`
+
+Call an external HTTP endpoint immediately before issuing an access token. The endpoint
+receives user and session context and may return `extra_claims` that are merged into the
+token. This is the minimal escape hatch for claim-enrichment logic that must run outside
+Hearth (equivalent to Auth0 Actions / Keycloak Token Mappers via HTTP).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | string | *required* | HTTPS endpoint to POST to. Hearth rejects non-HTTPS URLs in production. |
+| `timeout_ms` | integer | `1000` | Request timeout in milliseconds. Exceeded requests are treated as errors and handled per `on_error`. |
+| `on_error` | string | `fail_open` | `fail_open` — token issuance continues without the extra claims; `fail_closed` — token issuance is rejected with an error. |
+| `hmac_secret` | string | — | HMAC-SHA256 signing key. When set, the request body is signed and `X-Hearth-Signature-256: sha256=<hex>` is added so the endpoint can verify the request is authentic. |
+
+**Security requirements:**
+
+- `hmac_secret` **MUST** be set in production. Without it, any party that can reach your webhook endpoint can forge enrichment responses and inject arbitrary claims into issued tokens.
+- Use `on_error: fail_closed` together with `hmac_secret` for defense in depth. `fail_open` is the default only to avoid blocking token issuance during initial rollout.
+- Supply `hmac_secret` via an environment variable — never commit a plaintext secret.
+- The webhook cannot overwrite reserved JWT claims (`sub`, `iss`, `aud`, `exp`, `iat`, `sid`, `roles`, `permissions`, etc.). Those keys in `extra_claims` are silently dropped.
+
+```yaml
+realms:
+  - name: corp
+    pre_token_webhook:
+      url: "https://claims.internal.example.com/enrich"
+      timeout_ms: 500
+      on_error: fail_closed
+      hmac_secret: "${HEARTH_REALM_CORP_WEBHOOK_SECRET}"
+```
+
+**Webhook request body** (POSTed as JSON):
+
+```json
+{
+  "event": "pre_token",
+  "realm_id": "<realm-id>",
+  "user_id": "<user-uuid>",
+  "client_id": "<oauth-client-id>",
+  "grant_type": "authorization_code",
+  "scope": "openid profile",
+  "session_id": "<session-uuid>",
+  "existing_claims": {
+    "roles": ["viewer"],
+    "groups": ["engineering"],
+    "permissions": ["read:reports"]
+  }
+}
+```
+
+**Webhook response** (return JSON with an `extra_claims` object):
+
+```json
+{
+  "extra_claims": {
+    "cost_center": "eng-42",
+    "feature_flags": ["beta_dashboard"]
+  }
+}
+```
+
+Return `2xx` with no body (or `{}`) to issue the token without extra claims. Any non-2xx response is treated as an error and handled per `on_error`.
+
+---
+
 ## Complete Example
 
 ```yaml
