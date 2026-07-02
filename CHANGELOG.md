@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **MFA-pending cookie is now single-use** — a random 128-bit nonce is embedded in
+  the cookie and burned server-side on first successful MFA completion. A captured
+  pending cookie can no longer be replayed after the session has been established (HEA-1656).
+- **`azp` (Authorized Party) claim added to OIDC ID tokens** — ID tokens issued via
+  the authorization-code and device flows now include `azp: <client_id>` per OIDC Core §2,
+  satisfying FAPI 2.0 requirements (HEA-1656).
+- **RP-initiated logout no longer open-redirects on unknown sessions** — `GET /end_session`
+  with a `post_logout_redirect_uri` but no resolvable client now returns 200 JSON instead of
+  redirecting to the caller-supplied URI. The engine also rejects unregistered
+  `post_logout_redirect_uri` values when no `client_id` is provided (HEA-1656).
+- **Federation account-link enumeration resistance** — `POST /ui/federation/confirm-link`
+  on password failure now redirects to `/ui/login` instead of back to the confirm-link
+  page with the ticket in the URL, preventing attackers from distinguishing
+  "valid ticket + wrong password" from "invalid ticket" (HEA-1656).
 - **MFA enroll/disable/regenerate now require step-up credential verification** — `POST /ui/account/totp/activate`
   requires the user's current password before activating MFA; `POST /ui/account/totp/disable` and
   `POST /ui/account/totp/regenerate-codes` require a fresh TOTP code before proceeding. A stolen
