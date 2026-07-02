@@ -254,10 +254,13 @@ async fn admin_list_users(
             )
                 .into_response();
         }
-        return match state
-            .identity
-            .search_users(&auth.realm_id, q, &params.as_page_request())
-        {
+        return match state.identity.search_users(
+            &auth.realm_id,
+            q,
+            &params.as_page_request(),
+            None,
+            crate::identity::search::SortDir::default(),
+        ) {
             Ok(result) => {
                 let items: Vec<serde_json::Value> = result
                     .items
@@ -2361,9 +2364,17 @@ fn dev_seed_system_admin(state: &AppState) {
         return;
     }
 
-    // Bail early if user already exists.
+    // If the user already exists, reset the password so re-bootstrap always
+    // restores the known dev credential (fixes HEA-1644: login failed after
+    // server restart with persistent data).
     match state.identity.get_user_by_email(&sys, "admin@hearth.test") {
-        Ok(Some(_)) => return,
+        Ok(Some(existing)) => {
+            let pwd = crate::identity::CleartextPassword::from_string("HearthTest123!".to_string());
+            if let Err(e) = state.identity.set_password(&sys, existing.id(), &pwd) {
+                tracing::warn!(error = %e, "dev bootstrap: system realm password reset failed");
+            }
+            return;
+        }
         Ok(None) => {}
         Err(e) => {
             tracing::warn!(error = %e, "dev bootstrap: system realm user lookup failed");

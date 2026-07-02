@@ -1,0 +1,82 @@
+{#-
+  Reusable sortable column header for admin tables.
+
+  Renders a <th> whose link toggles sort direction via HTMX, preserves the
+  active search query + page size across navigation, and exposes `aria-sort`
+  for assistive technology.
+
+  The whole table+pagination region MUST be wrapped in a single element whose
+  stable id is passed via `region_id`. Sort links return a full-page response;
+  `hx-select` extracts that entire region and swaps it as one unit — thead,
+  tbody, AND the pagination bar update together, so no control is ever left
+  showing stale state (HEA-1615). The live-search form and the pagination links
+  target the SAME region id, which is what keeps search, sort, and pagination
+  consistent when combined.
+
+  The search box is deliberately OUTSIDE the region so an in-place swap never
+  steals focus or clobbers the query the user is typing. The sort link carries
+  the active query via `hx-include="input[name='q']"`; omitting `page` resets to
+  page 1, which is the correct behavior for a fresh sort.
+
+  Returning a full page (rather than a bare `<tr>`/`<thead>` fragment) is
+  required because DOMParser.parseFromString strips table structural elements
+  that appear outside a `<table>` context (HEA-1643). A full page keeps all
+  elements properly nested so the browser parser preserves them; because the
+  region wraps a complete `<table>`, hx-select extracts it intact.
+
+  Askama imports are hermetic (the macro cannot read caller context), so every
+  value is passed explicitly. Usage from any list template:
+
+    {% import "ui/admin/_sortable_th.html" as sortable %}
+    ...
+    {# inside <thead>, within <div id="users-table-region"> #}
+    {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-table-region") %}
+
+  Params:
+  - label:     visible header text
+  - col:       sort key emitted as ?sort={col} (must match a server SortField)
+  - active:    currently-sorted column key (String; empty when unsorted)
+  - dir:       current direction, "asc" | "desc"
+  - base_url:  list URL the header links back to
+  - q:         active search query (preserved across sort clicks)
+  - per_page:  active page size (preserved across sort clicks)
+  - region_id: HTML id of the wrapping table+pagination region (no leading #)
+-#}
+{% macro th(label, col, active, dir, base_url, q, per_page, region_id) %}
+{%- let is_active = active == col -%}
+<th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted"
+    scope="col"
+    aria-sort="{% if is_active %}{% if dir == "desc" %}descending{% else %}ascending{% endif %}{% else %}none{% endif %}">
+  <a href="{{ base_url }}?sort={{ col }}&dir={% if is_active && dir == "asc" %}desc{% else %}asc{% endif %}{% if !q.is_empty() %}&q={{ q }}{% endif %}&per_page={{ per_page }}"
+     hx-get="{{ base_url }}?sort={{ col }}&dir={% if is_active && dir == "asc" %}desc{% else %}asc{% endif %}&per_page={{ per_page }}"
+     hx-include="input[name='q'], input[name='status']"
+     hx-target="#{{ region_id }}"
+     hx-select="#{{ region_id }}"
+     hx-swap="outerHTML"
+     hx-push-url="true"
+     class="inline-flex items-center gap-1 rounded hover:text-ht-content-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ht-brand-accent{% if is_active %} text-ht-content-secondary{% endif %}">
+    {{ label }}
+    {%- if is_active -%}
+      {%- if dir == "asc" -%}
+        {# ascending caret: arrow up #}
+        <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 19V5m-7 7 7-7 7 7"/>
+        </svg>
+      {%- else -%}
+        {# descending caret: arrow down #}
+        <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 5v14m-7-7 7 7 7-7"/>
+        </svg>
+      {%- endif -%}
+    {%- else -%}
+      {# neutral dual-caret: column is sortable but inactive #}
+      <svg class="h-3 w-3 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 5v14M5 12l7-7 7 7M5 12l7 7 7-7" opacity="0.5"/>
+      </svg>
+    {%- endif -%}
+  </a>
+</th>
+{%- endmacro -%}

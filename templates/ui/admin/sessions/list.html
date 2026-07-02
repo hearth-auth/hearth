@@ -1,4 +1,5 @@
 {% extends "ui/_layout.html" %}
+{% import "ui/admin/_sortable_th.html" as sortable %}
 {% block title %}{{ product_name }} · Sessions{% endblock %}
 {% block breadcrumb %}
 {% if is_global %}
@@ -78,23 +79,30 @@
   {% endif %}
 </div>
 
+{# Table region — swapped as one unit on sort so the pagination bar stays in
+   sync. The hidden status carrier lets a sort click preserve the active
+   status-filter tab via the macro's hx-include (HEA-1615). #}
+<div id="sessions-table-region">
+<span id="sessions-sortstate" hidden>
+  <input type="hidden" name="status" value="{{ status_filter }}">
+</span>
 <div class="overflow-hidden rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
   <div class="overflow-x-auto">
     <table class="w-full">
-      <thead>
+      <thead id="sessions-thead">
         <tr class="border-b border-divider bg-ht-surface-elevated">
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">User</th>
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">User</th>
           {% if is_global %}
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Realm</th>
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Realm</th>
           {% endif %}
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Device</th>
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">IP</th>
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Created</th>
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Expires</th>
-          <th class="px-4 py-3" aria-label="Actions"></th>
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Device</th>
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">IP</th>
+          {% call sortable::th("Created", "created", sort_field, sort_dir, list_url, "", pagination.per_page, "sessions-table-region") %}
+          {% call sortable::th("Expires", "expires", sort_field, sort_dir, list_url, "", pagination.per_page, "sessions-table-region") %}
+          <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
         </tr>
       </thead>
-      <tbody id="table-body">
+      <tbody id="sessions-tbody">
         {% include "ui/admin/sessions/_rows.html" %}
       </tbody>
     </table>
@@ -102,4 +110,5 @@
 </div>
 
 {% include "ui/admin/_pagination.html" %}
+</div>{# #sessions-table-region #}
 {% endblock %}

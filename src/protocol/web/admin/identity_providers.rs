@@ -70,10 +70,22 @@ impl From<IdpConfig> for IdpDetailRow {
 // List
 // ---------------------------------------------------------------------------
 
+/// Query params for the IdP list page.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct IdpListParams {
+    /// Column to sort by: `name` | `kind`. Unknown values ignored (no sort).
+    pub sort: Option<String>,
+    /// Sort direction: `asc` | `desc`. Defaults to `asc`.
+    pub dir: Option<String>,
+}
+
 #[derive(Template)]
 #[template(path = "ui/admin/identity_providers/list.html")]
 struct IdpListTemplate {
     providers: Vec<IdpRow>,
+    sort_field: String,
+    sort_dir: String,
+    list_url: String,
     realm_name: String,
     chrome: bool,
     active: &'static str,
@@ -94,23 +106,57 @@ pub async fn admin_idp_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
+    DedupQuery(params): DedupQuery<IdpListParams>,
 ) -> Response {
+    let realm_name = target.0.name().to_string();
+    let sort_field_str = params.sort.clone().unwrap_or_default();
+    let sort_dir_str = params.dir.clone().unwrap_or_default();
+    let sort_dir = crate::identity::search::SortDir::from_param(&sort_dir_str);
+
     match state.identity.list_idps(target.id()) {
-        Ok(idps) => render(&IdpListTemplate {
-            providers: idps.into_iter().map(IdpRow::from).collect(),
-            realm_name: target.0.name().to_string(),
-            chrome: true,
-            active: "identity_providers",
-            user_email: Some(session.user_email.clone()),
-            is_admin: true,
-            flash: None,
-            csrf: session.csrf.clone(),
-            narrow: false,
-            product_name: state.product_name.clone(),
-            logo_url: state.logo_url.clone(),
-            realm_theme_url: state.realm_theme_url(),
-            inline_theme_css: state.inline_theme_css(),
-        }),
+        Ok(idps) => {
+            let mut providers: Vec<IdpRow> = idps.into_iter().map(IdpRow::from).collect();
+            match sort_field_str.as_str() {
+                "kind" => providers.sort_by(|a, b| {
+                    let ord = a.kind.cmp(&b.kind);
+                    if sort_dir == crate::identity::search::SortDir::Desc {
+                        ord.reverse()
+                    } else {
+                        ord
+                    }
+                }),
+                _ if !sort_field_str.is_empty() || sort_field_str == "name" => {
+                    providers.sort_by(|a, b| {
+                        let ord = a.name.cmp(&b.name);
+                        if sort_dir == crate::identity::search::SortDir::Desc {
+                            ord.reverse()
+                        } else {
+                            ord
+                        }
+                    });
+                }
+                _ => {}
+            }
+            let list_url = format!("/ui/admin/realms/{realm_name}/identity-providers");
+            render(&IdpListTemplate {
+                providers,
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
+                list_url,
+                realm_name,
+                chrome: true,
+                active: "identity_providers",
+                user_email: Some(session.user_email.clone()),
+                is_admin: true,
+                flash: None,
+                csrf: session.csrf.clone(),
+                narrow: false,
+                product_name: state.product_name.clone(),
+                logo_url: state.logo_url.clone(),
+                realm_theme_url: state.realm_theme_url(),
+                inline_theme_css: state.inline_theme_css(),
+            })
+        }
         Err(e) => {
             tracing::warn!(error = %e, "list_idps failed");
             super::handlers_common::server_error()

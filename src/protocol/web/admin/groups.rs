@@ -9,8 +9,12 @@ pub struct GroupListParams {
     pub page: Option<u32>,
     /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
     pub per_page: Option<u32>,
-    /// Search query (name or slug).
+    /// Search query (name or slug). Supports exact (`"…"`) and glob (`*`/`?`) syntax.
     pub q: Option<String>,
+    /// Column to sort by: `name` | `slug`. Unknown values ignored.
+    pub sort: Option<String>,
+    /// Sort direction: `asc` | `desc`. Defaults to `asc`.
+    pub dir: Option<String>,
 }
 
 impl GroupListParams {
@@ -24,6 +28,20 @@ impl GroupListParams {
             self.per_page_validated(),
         )
     }
+
+    fn sort_field(&self) -> Option<crate::identity::search::GroupSortField> {
+        self.sort
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::identity::search::GroupSortField::from_param)
+    }
+
+    fn sort_dir(&self) -> crate::identity::search::SortDir {
+        self.dir
+            .as_deref()
+            .map(crate::identity::search::SortDir::from_param)
+            .unwrap_or_default()
+    }
 }
 
 /// Template for `GET /ui/admin/groups`.
@@ -34,6 +52,9 @@ struct GroupListTemplate {
     groups: Vec<Group>,
     pagination: PaginationView,
     search_query: String,
+    sort_field: String,
+    sort_dir: String,
+    list_url: String,
     realm_name: String,
     chrome: bool,
     active: &'static str,
@@ -53,30 +74,54 @@ pub async fn admin_groups_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    Query(params): Query<GroupListParams>,
+    DedupQuery(params): DedupQuery<GroupListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
+    let sort_field = params.sort_field();
+    let sort_dir = params.sort_dir();
     let realm_name = target.0.name().to_string();
-    // Mirror the org-list strategy: scan a bounded window and filter
-    // in-handler when searching, since the engine has no name-substring
-    // index on groups today.
-    let result = if search_query.len() >= 2 {
-        // Scan a bounded window, filter in-handler for now (no name-substring index).
+    let has_search = search_query.len() >= 2;
+    let has_sort = sort_field.is_some();
+
+    let result = if has_search || has_sort {
+        use crate::identity::search::{GroupSortField, SearchQuery, SortDir};
         state
             .rbac
-            .list_groups(target.id(), &crate::core::PageRequest::new(0, 200))
+            .list_groups(
+                target.id(),
+                &crate::core::PageRequest::new(0, crate::core::MAX_PAGE_LIMIT),
+            )
             .map(|page| {
-                let needle = search_query.to_ascii_lowercase();
-                let filtered: Vec<Group> = page
+                let matcher = SearchQuery::compile(&search_query);
+                let mut filtered: Vec<Group> = page
                     .items
                     .into_iter()
-                    .filter(|g| {
-                        g.name.to_ascii_lowercase().contains(&needle)
-                            || g.slug.to_ascii_lowercase().contains(&needle)
-                    })
+                    .filter(|g| matcher.matches_any(&[g.name.as_str(), g.slug.as_str()]))
                     .collect();
+                if let Some(field) = sort_field {
+                    filtered.sort_by(|a, b| {
+                        let ord = match field {
+                            GroupSortField::Name => a.name.cmp(&b.name),
+                            GroupSortField::Slug => a.slug.cmp(&b.slug),
+                        };
+                        if sort_dir == SortDir::Desc {
+                            ord.reverse()
+                        } else {
+                            ord
+                        }
+                    });
+                }
                 let total = filtered.len() as u64;
-                crate::core::PagedResult::new(filtered, total, 0, params.per_page_validated())
+                let per = params.per_page_validated() as usize;
+                let offset = ((params.page.unwrap_or(1).saturating_sub(1)) as usize) * per;
+                let start = offset.min(filtered.len());
+                let end = (start + per).min(filtered.len());
+                crate::core::PagedResult::new(
+                    filtered[start..end].to_vec(),
+                    total,
+                    offset as u64,
+                    per as u32,
+                )
             })
     } else {
         state
@@ -87,12 +132,21 @@ pub async fn admin_groups_list(
     match result {
         Ok(page) => {
             let base_url = format!("/ui/admin/realms/{realm_name}/groups");
-            let preserved = super::pagination::encode_param("q", &search_query);
-            let pagination = PaginationView::new(&page, base_url, preserved);
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir_str = params.dir.clone().unwrap_or_default();
+            let preserved = super::pagination::join_params(&[
+                super::pagination::encode_param("q", &search_query),
+                super::pagination::encode_param("sort", &sort_field_str),
+                super::pagination::encode_param("dir", &sort_dir_str),
+            ]);
+            let pagination = PaginationView::new(&page, base_url.clone(), preserved);
             render(&GroupListTemplate {
                 groups: page.items,
                 pagination,
                 search_query,
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
+                list_url: base_url,
                 realm_name,
                 chrome: true,
                 active: "groups",

@@ -152,6 +152,73 @@ async fn bootstrap_returns_admin_credentials_in_dev_mode() {
     assert!(!token.is_empty(), "access_token should not be empty");
 }
 
+/// Regression test for HEA-1644: re-bootstrapping a dev server that already has
+/// `admin@hearth.test` must reset the password to `HearthTest123!` so login
+/// always works after a restart with persistent data.
+#[tokio::test]
+async fn bootstrap_resets_dev_admin_password_on_second_call() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let sys = crate::identity::keys::system_realm_id();
+
+    // First bootstrap — creates admin@hearth.test with HearthTest123!
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "first bootstrap");
+
+    // Simulate a password change (e.g. admin changes their own password).
+    let admin = state
+        .identity
+        .get_user_by_email(&sys, "admin@hearth.test")
+        .expect("lookup")
+        .expect("user exists");
+    let changed = crate::identity::CleartextPassword::from_string("SomeOtherPassword!".to_string());
+    state
+        .identity
+        .set_password(&sys, admin.id(), &changed)
+        .expect("set changed password");
+
+    // Confirm HearthTest123! no longer works.
+    let dev_pwd = crate::identity::CleartextPassword::from_string("HearthTest123!".to_string());
+    assert!(
+        !state
+            .identity
+            .verify_password(&sys, admin.id(), &dev_pwd)
+            .expect("verify"),
+        "password should differ before re-bootstrap"
+    );
+
+    // Second bootstrap — must reset password back to HearthTest123!
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "second bootstrap");
+
+    // HearthTest123! must work again.
+    assert!(
+        state
+            .identity
+            .verify_password(&sys, admin.id(), &dev_pwd)
+            .expect("verify after re-bootstrap"),
+        "re-bootstrap must restore HearthTest123! password"
+    );
+}
+
 /// PAR with a signed JAR JWT in the request body is accepted under FAPI Advanced.
 ///
 /// Regression for HEA-1019: `HttpParRequest` was missing the `request` field,

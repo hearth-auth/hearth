@@ -581,21 +581,34 @@ async fn admin_users_list_renders_htmx_live_search_attrs() {
         body.contains(r#"hx-trigger="input changed delay:200ms"#),
         "search form must debounce input by 200ms"
     );
+    // HEA-1615: search now swaps the whole table+pagination region as one unit
+    // so sort and pagination never go stale.
     assert!(
-        body.contains(r##"hx-target="#users-tbody""##),
-        "search form must target the rows tbody"
+        body.contains(r##"hx-target="#users-table-region""##),
+        "search form must target the unified table region"
     );
     assert!(
-        body.contains(r#"<tbody id="users-tbody">"#),
-        "the tbody must carry the id the search form targets"
+        body.contains(r##"hx-select="#users-table-region""##),
+        "search form must hx-select the region out of the full-page response"
+    );
+    assert!(
+        body.contains(r#"<div id="users-table-region">"#),
+        "the region wrapper must carry the id the search form targets"
+    );
+    // The active sort survives a new search keystroke via hx-include.
+    assert!(
+        body.contains(r##"hx-include="#users-table-region [name='sort']"##),
+        "search form must re-send the active sort/dir via hx-include"
     );
 }
 
-/// `GET /ui/admin/users` with `HX-Request: true` returns ONLY the rows
-/// partial — no DOCTYPE / html / page chrome. Pins the live-search
-/// payload size and prevents accidental nested-`<html>` regressions.
+/// `GET /ui/admin/users` with `HX-Request: true` returns a FULL page whose
+/// `#users-table-region` the client extracts via `hx-select` (HEA-1615). The
+/// old rows-only partial left the pagination bar stale; a full page keeps the
+/// table structural elements nested so DOMParser preserves them (HEA-1643),
+/// and swapping the whole region keeps rows, headers, and pagination in sync.
 #[tokio::test]
-async fn admin_users_list_returns_rows_partial_for_htmx_request() {
+async fn admin_users_list_returns_full_region_for_htmx_request() {
     let rig = build_rig();
     let cookie = admin_cookie(&rig, "csrf-users-htmx-partial");
 
@@ -620,18 +633,269 @@ async fn admin_users_list_returns_rows_partial_for_htmx_request() {
         .expect("body");
     let body = std::str::from_utf8(&body_bytes).expect("utf-8");
 
+    // The region the client selects must be present in the response.
     assert!(
-        !body.to_ascii_lowercase().contains("<!doctype html"),
-        "HTMX response must not include the page <!DOCTYPE>"
+        body.contains(r#"<div id="users-table-region">"#),
+        "HTMX response must contain the table region for hx-select to extract"
     );
+    // The region includes the pagination bar so it never goes stale.
     assert!(
-        !body.contains("<html"),
-        "HTMX response must not include a <html> tag"
+        body.contains("Rows per page"),
+        "region must include the pagination bar (kept in sync with the rows)"
     );
     // Should still contain at least one user row marker (the seeded bob).
     assert!(
         body.contains("bob@acme.test"),
-        "rows partial must include the seeded user rows"
+        "response must include the seeded user rows"
+    );
+}
+
+/// Sort HTMX request returns a full page so the browser HTML parser sees
+/// `<thead>` inside a proper `<table>` context. The client uses
+/// `hx-select="#users-table-region"` to extract the whole table+pagination
+/// region and swap it as one unit (HEA-1615); `aria-sort` updates without a
+/// full page reload. Fixes HEA-1643 (bare `<thead>` outside `<table>` is
+/// silently stripped by DOMParser).
+#[tokio::test]
+async fn admin_users_sort_htmx_returns_full_page_with_aria_sort() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-users-sort-htmx");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/realms/acme/users?sort=email&dir=asc")
+                .header(header::COOKIE, cookie)
+                .header("HX-Request", "true")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+
+    // Full-page response keeps table elements in proper nesting context.
+    assert!(
+        body.to_ascii_lowercase().contains("<!doctype html"),
+        "sort HTMX response must be a full page so table elements survive DOMParser"
+    );
+    assert!(
+        body.contains("bob@acme.test"),
+        "sort HTMX response must include user rows"
+    );
+    // Active column must have aria-sort="ascending".
+    assert!(
+        body.contains(r#"aria-sort="ascending""#),
+        "active sort column must carry aria-sort=ascending"
+    );
+    // Inactive columns must remain aria-sort="none".
+    assert!(
+        body.contains(r#"aria-sort="none""#),
+        "inactive sort columns must carry aria-sort=none"
+    );
+}
+
+/// Sort links extract the whole `#users-table-region` from the full-page
+/// response via `hx-select` and swap it as one unit (HEA-1615). A full page
+/// keeps `<thead>` nested inside `<table>` so DOMParser preserves it
+/// (HEA-1643); wrapping the region means the pagination bar updates with the
+/// sort instead of going stale — so no separate OOB thead swap is needed.
+#[tokio::test]
+async fn admin_users_sort_links_use_hx_select_for_region() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-users-sort-attrs");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/realms/acme/users")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+
+    // Sort links must target + select the unified region.
+    assert!(
+        body.contains(r##"hx-select="#users-table-region""##),
+        "sort links must hx-select the whole table region"
+    );
+    assert!(
+        body.contains(r##"hx-target="#users-table-region""##),
+        "sort links must target the whole table region"
+    );
+    // The stale-prone OOB thead swap is gone — the region carries the thead.
+    assert!(
+        !body.contains(r##"hx-select-oob="#users-thead""##),
+        "sort links must no longer use a separate OOB thead swap"
+    );
+    // WCAG 2.2 SC 2.4.11 minimum focus ring.
+    assert!(
+        body.contains("focus-visible:ring-2"),
+        "sort link anchor must use focus-visible:ring-2 for WCAG 2.2 SC 2.4.11"
+    );
+}
+
+/// Sort links carry `hx-include="input[name='q']"` so HTMX dynamically
+/// reads the live search input value at click time. This ensures the
+/// active search query is preserved even after a partial tbody-only swap
+/// has left the thead's static `q` stale (HEA-1646).
+#[tokio::test]
+async fn admin_users_sort_links_carry_hx_include_for_q() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-users-sort-hx-include");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/realms/acme/users")
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+
+    // Sort links must use hx-include to pick up the live search input value
+    // (and any active status filter, e.g. on the sessions table — HEA-1615).
+    assert!(
+        body.contains(r#"hx-include="input[name='q'], input[name='status']""#),
+        "sort links must carry hx-include pointing at the search + status inputs"
+    );
+    // hx-get must NOT bake a static q= into the URL — hx-include owns that.
+    // href may still carry it as a no-JS fallback.
+    let hx_get_with_q = r#"hx-get="/ui/admin/realms/acme/users?sort=email&dir=asc&q="#;
+    assert!(
+        !body.contains(hx_get_with_q),
+        "sort link hx-get must not contain a static q= param (hx-include provides it)"
+    );
+}
+
+/// When an HTMX sort request carries an active `?q=` search param, the
+/// server must return filtered+sorted rows and render the new thead with
+/// `q` in the sort link hrefs so subsequent sort clicks keep the filter.
+/// Regression guard for HEA-1646.
+#[tokio::test]
+async fn admin_users_sort_with_active_search_preserves_filter() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-users-sort-search");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ui/admin/realms/acme/users?sort=email&dir=asc&q=bob")
+                .header(header::COOKIE, cookie)
+                .header("HX-Request", "true")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+
+    // Full page so OOB thead swap works.
+    assert!(
+        body.to_ascii_lowercase().contains("<!doctype html"),
+        "sort+search HTMX response must be a full page"
+    );
+    // The seeded user matching q=bob must appear.
+    assert!(
+        body.contains("bob@acme.test"),
+        "sort+search response must include the matching user row"
+    );
+    // The sort link href for the active column must carry q=bob so the
+    // newly-swapped-in thead has correct static fallback URLs.
+    assert!(
+        body.contains("&amp;q=bob") || body.contains("&q=bob"),
+        "new thead sort links must carry q=bob in href for no-JS fallback"
+    );
+}
+
+/// Sorting while a search term is active must NOT 400.
+///
+/// Reproduces the exact request the browser sends (HEA-1615): htmx 1.9's
+/// `hx-include` repeats the `q` parameter several times on a sort-header
+/// click when the search box is populated, e.g.
+/// `?sort=email&dir=asc&q=bob&q=bob&q=bob`. axum's stock `Query` extractor
+/// rejects the duplicated scalar key with `400`, so the sort swap silently
+/// failed and the table never re-sorted — the board's "sorting still doesn't
+/// work when a search term is active". The `DedupQuery` extractor collapses
+/// the repeats, so the request now succeeds and returns filtered+sorted rows.
+#[tokio::test]
+async fn admin_users_sort_with_duplicated_q_param_does_not_400() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-users-dup-q");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                // q repeated 4× — exactly what htmx hx-include emits.
+                .uri("/ui/admin/realms/acme/users?sort=email&dir=asc&per_page=25&q=bob&q=bob&q=bob&q=bob")
+                .header(header::COOKIE, cookie)
+                .header("HX-Request", "true")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    // The whole point: this used to be 400.
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "duplicated q params must not be rejected"
+    );
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+
+    // Filter still applied (q=bob) and the region is present for hx-select.
+    assert!(
+        body.contains("bob@acme.test"),
+        "dedup must preserve the q=bob filter"
+    );
+    assert!(
+        body.contains(r#"<div id="users-table-region">"#),
+        "response must contain the region so the sort swap lands"
     );
 }
 

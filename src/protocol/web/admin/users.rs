@@ -13,8 +13,13 @@ pub struct UserListParams {
     pub page: Option<u32>,
     /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
     pub per_page: Option<u32>,
-    /// Search query (email or name).
+    /// Search query (email or name). Supports exact (`"…"`) and glob (`*`/`?`) syntax.
     pub q: Option<String>,
+    /// Column to sort by: `email` | `name` | `status` | `created`.
+    /// Unknown values are silently ignored (no error).
+    pub sort: Option<String>,
+    /// Sort direction: `asc` | `desc`. Defaults to `asc`.
+    pub dir: Option<String>,
 }
 
 impl UserListParams {
@@ -27,6 +32,20 @@ impl UserListParams {
             self.page.unwrap_or(1),
             self.per_page_validated(),
         )
+    }
+
+    fn sort_field(&self) -> Option<crate::identity::search::UserSortField> {
+        self.sort
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::identity::search::UserSortField::from_param)
+    }
+
+    fn sort_dir(&self) -> crate::identity::search::SortDir {
+        self.dir
+            .as_deref()
+            .map(crate::identity::search::SortDir::from_param)
+            .unwrap_or_default()
     }
 }
 
@@ -44,10 +63,17 @@ struct UserListTemplate {
     /// tenant realms, `/ui/admin/admin-users` for the system-realm
     /// operator surface.
     list_url: String,
-    /// See `UserRowsTemplate::user_base_url`.
+    /// Path prefix for user detail/edit links, e.g.
+    /// `/ui/admin/realms/foo/users`.
     user_base_url: String,
-    /// See `UserRowsTemplate::user_detail_qs`.
+    /// Optional query-string suffix appended after each detail/edit path
+    /// segment (`""` for tenant realms, `"?admin_target=system"` for the
+    /// system realm so `TargetRealm` resolves without a path-segment name).
     user_detail_qs: String,
+    /// Active sort column name (e.g. `"email"`), empty when unsorted.
+    sort_field: String,
+    /// Active sort direction (`"asc"` or `"desc"`).
+    sort_dir: String,
     // Chrome fields.
     chrome: bool,
     active: &'static str,
@@ -62,37 +88,35 @@ struct UserListTemplate {
     inline_theme_css: Option<String>,
 }
 
-/// Rows-only partial returned when the user list is filtered live via
-/// HTMX. Keeps the response payload to a single `<tbody>` swap so the
-/// page chrome doesn't re-render on every keystroke.
-#[derive(Template)]
-#[template(path = "ui/admin/users/_rows.html")]
-struct UserRowsTemplate {
-    users: Vec<User>,
-    /// Path prefix for user detail/edit links, e.g.
-    /// `/ui/admin/realms/foo/users`.
-    user_base_url: String,
-    /// Optional query-string suffix appended after each detail/edit
-    /// path segment, e.g. `""` for tenant realms or
-    /// `"?admin_target=system"` for the system realm so `TargetRealm`
-    /// resolves correctly without a path-segment realm name.
-    user_detail_qs: String,
-}
-
 /// `GET /ui/admin/users`.
+///
+/// Always renders the full page. Live search and column sorts are HTMX
+/// requests that carry `hx-select="#users-table-region"`, so the client
+/// extracts the table+pagination region from this full-page response and
+/// swaps it as one unit — keeping search, sort, and pagination consistent
+/// (HEA-1615). There is no rows-only fast path: a stale pagination bar was
+/// worse than the marginal cost of re-rendering chrome.
 pub async fn admin_users_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    htmx: super::templates::IsHtmx,
-    Query(params): Query<UserListParams>,
+    DedupQuery(params): DedupQuery<UserListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
-    let result = if search_query.len() >= 2 {
-        state
-            .identity
-            .search_users(target.id(), &search_query, &params.as_page_request())
+    let sort_field = params.sort_field();
+    let sort_dir = params.sort_dir();
+    let has_search = search_query.len() >= 2;
+    let has_sort = sort_field.is_some();
+
+    let result = if has_search || has_sort {
+        state.identity.search_users(
+            target.id(),
+            &search_query,
+            &params.as_page_request(),
+            sort_field,
+            sort_dir,
+        )
     } else {
         state
             .identity
@@ -103,24 +127,27 @@ pub async fn admin_users_list(
         Ok(page) => {
             let realm_name = target.0.name().to_string();
             let user_base_url = format!("/ui/admin/realms/{realm_name}/users");
-            let users = page.items.clone();
-            if htmx.0 {
-                return render(&UserRowsTemplate {
-                    users,
-                    user_base_url,
-                    user_detail_qs: String::new(),
-                });
-            }
-            let base_url = format!("/ui/admin/realms/{realm_name}/users");
-            let preserved = super::pagination::encode_param("q", &search_query);
-            let pagination = PaginationView::new(&page, base_url.clone(), preserved);
+
+            // Full page always. Search/sort HTMX requests extract
+            // #users-table-region via hx-select; a full page keeps the table
+            // structural elements nested so DOMParser preserves them (HEA-1643).
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir_str = params.dir.clone().unwrap_or_default();
+            let preserved = super::pagination::join_params(&[
+                super::pagination::encode_param("q", &search_query),
+                super::pagination::encode_param("sort", &sort_field_str),
+                super::pagination::encode_param("dir", &sort_dir_str),
+            ]);
+            let pagination = PaginationView::new(&page, user_base_url.clone(), preserved);
             render(&UserListTemplate {
                 users: page.items,
                 pagination,
                 search_query,
-                list_url: base_url,
+                list_url: user_base_url.clone(),
                 user_base_url,
                 user_detail_qs: String::new(),
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
                 realm_name,
                 chrome: true,
                 active: "users",
@@ -159,15 +186,23 @@ pub async fn admin_admin_user_create_alias() -> axum::response::Redirect {
 pub async fn admin_admin_users_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
-    htmx: super::templates::IsHtmx,
-    Query(params): Query<UserListParams>,
+    DedupQuery(params): DedupQuery<UserListParams>,
 ) -> Response {
     let system_realm = crate::identity::keys::system_realm_id();
     let search_query = params.q.clone().unwrap_or_default();
-    let result = if search_query.len() >= 2 {
-        state
-            .identity
-            .search_users(&system_realm, &search_query, &params.as_page_request())
+    let sort_field = params.sort_field();
+    let sort_dir = params.sort_dir();
+    let has_search = search_query.len() >= 2;
+    let has_sort = sort_field.is_some();
+
+    let result = if has_search || has_sort {
+        state.identity.search_users(
+            &system_realm,
+            &search_query,
+            &params.as_page_request(),
+            sort_field,
+            sort_dir,
+        )
     } else {
         state
             .identity
@@ -176,15 +211,15 @@ pub async fn admin_admin_users_list(
 
     match result {
         Ok(page) => {
-            let users = page.items.clone();
-            if htmx.0 {
-                return render(&UserRowsTemplate {
-                    users,
-                    user_base_url: "/ui/admin/realms/system/users".to_string(),
-                    user_detail_qs: "?admin_target=system".to_string(),
-                });
-            }
-            let preserved = super::pagination::encode_param("q", &search_query);
+            // Full page always; HTMX search/sort extract #users-table-region
+            // via hx-select from this response (HEA-1615 / HEA-1643).
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir_str = params.dir.clone().unwrap_or_default();
+            let preserved = super::pagination::join_params(&[
+                super::pagination::encode_param("q", &search_query),
+                super::pagination::encode_param("sort", &sort_field_str),
+                super::pagination::encode_param("dir", &sort_dir_str),
+            ]);
             let pagination = PaginationView::new(&page, "/ui/admin/admin-users", preserved);
             render(&UserListTemplate {
                 users: page.items,
@@ -194,6 +229,8 @@ pub async fn admin_admin_users_list(
                 list_url: "/ui/admin/admin-users".to_string(),
                 user_base_url: "/ui/admin/realms/system/users".to_string(),
                 user_detail_qs: "?admin_target=system".to_string(),
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
                 chrome: true,
                 active: "admin-users",
                 user_email: Some(session.user_email.clone()),
@@ -1647,6 +1684,12 @@ struct SessionListTemplate {
     sessions: Vec<SessionRow>,
     pagination: PaginationView,
     realm_name: String,
+    /// Active sort column (`"created"` | `"expires"`), empty = default (created desc).
+    sort_field: String,
+    /// Active sort direction (`"asc"` | `"desc"`).
+    sort_dir: String,
+    /// Base URL of this sessions list (used by sortable header links).
+    list_url: String,
     /// `true` when the page is rendering the cross-realm aggregation at
     /// `/ui/admin/sessions` (no `?realm=` / `?admin_target=`). The list
     /// template uses this to swap the heading and reveal the Realm
@@ -1692,6 +1735,12 @@ pub struct SessionsListParams {
     /// Expiry filter — `"active"` (default), `"expired"`, or `"all"`.
     #[serde(default)]
     pub status: Option<String>,
+    /// Column to sort by: `created` | `expires`. Unknown values → default (created desc).
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Sort direction: `asc` | `desc`. Defaults to `desc` (newest first).
+    #[serde(default)]
+    pub dir: Option<String>,
 }
 
 impl SessionsListParams {
@@ -1704,6 +1753,13 @@ impl SessionsListParams {
             self.page.unwrap_or(1),
             self.per_page_validated(),
         )
+    }
+
+    fn sort_dir(&self) -> crate::identity::search::SortDir {
+        self.dir
+            .as_deref()
+            .map(crate::identity::search::SortDir::from_param)
+            .unwrap_or(crate::identity::search::SortDir::Desc) // newest first by default
     }
 }
 
@@ -1775,7 +1831,7 @@ pub async fn admin_sessions_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    Query(params): Query<SessionsListParams>,
+    DedupQuery(params): DedupQuery<SessionsListParams>,
 ) -> Response {
     // Single now-snapshot per request — two rows can't disagree on
     // whether they're past expiry within the same render.
@@ -1799,9 +1855,23 @@ pub async fn admin_sessions_list(
     {
         Ok(page) => {
             let base_url = format!("/ui/admin/realms/{realm_name}/sessions");
-            let preserved =
-                super::pagination::encode_param("status", params.status.as_deref().unwrap_or(""));
-            let pagination = PaginationView::new(&page, base_url, preserved);
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir = params.sort_dir();
+            let sort_dir_str = params.dir.clone().unwrap_or_else(|| "desc".to_string());
+            // Pagination links must carry every active dimension — status,
+            // sort column, and direction — so paging never silently drops a
+            // filter or a sort (HEA-1615).
+            let dir_param = if sort_field_str.is_empty() {
+                String::new()
+            } else {
+                sort_dir_str.clone()
+            };
+            let preserved = super::pagination::join_params(&[
+                super::pagination::encode_param("status", params.status.as_deref().unwrap_or("")),
+                super::pagination::encode_param("sort", &sort_field_str),
+                super::pagination::encode_param("dir", &dir_param),
+            ]);
+            let pagination = PaginationView::new(&page, base_url.clone(), preserved);
             let all_rows: Vec<SessionRow> = page
                 .items
                 .into_iter()
@@ -1818,11 +1888,32 @@ pub async fn admin_sessions_list(
                 .collect();
             let count_active = all_rows.iter().filter(|r| r.is_active).count();
             let count_expired = all_rows.len() - count_active;
-            let rows = filter_session_rows(all_rows, &status_filter);
+            let mut rows = filter_session_rows(all_rows, &status_filter);
+            match sort_field_str.as_str() {
+                "expires" => rows.sort_by(|a, b| {
+                    let ord = a.session.expires_at().cmp(&b.session.expires_at());
+                    if sort_dir == crate::identity::search::SortDir::Asc {
+                        ord
+                    } else {
+                        ord.reverse()
+                    }
+                }),
+                _ => rows.sort_by(|a, b| {
+                    let ord = a.session.created_at().cmp(&b.session.created_at());
+                    if sort_dir == crate::identity::search::SortDir::Asc {
+                        ord
+                    } else {
+                        ord.reverse()
+                    }
+                }),
+            }
             render(&SessionListTemplate {
                 sessions: rows,
                 pagination,
                 realm_name: realm_name.clone(),
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
+                list_url: base_url.clone(),
                 is_global: false,
                 status_filter: status_filter.clone(),
                 count_active,
@@ -2953,7 +3044,13 @@ fn process_csv_import(
         // Check if user already exists via search.
         let existing = state
             .identity
-            .search_users(realm_id, &email, &crate::core::PageRequest::new(0, 1))
+            .search_users(
+                realm_id,
+                &email,
+                &crate::core::PageRequest::new(0, 1),
+                None,
+                crate::identity::search::SortDir::default(),
+            )
             .ok()
             .and_then(|mut r| {
                 r.items.retain(|u| u.email().eq_ignore_ascii_case(&email));

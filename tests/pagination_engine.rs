@@ -9,7 +9,8 @@ mod common;
 
 use hearth::core::{PageRequest, MAX_PAGE_LIMIT};
 use hearth::identity::{
-    CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest, IdentityEngine,
+    search::SortDir, CreateOrganizationRequest, CreateRealmRequest, CreateUserRequest,
+    IdentityEngine,
 };
 use hearth::rbac::CreateGroupRequest;
 
@@ -145,30 +146,44 @@ async fn search_users_returns_total_and_first_page() {
     .expect("create admin");
 
     let r = id
-        .search_users(&rid, "user", &PageRequest::new(0, 4))
+        .search_users(
+            &rid,
+            "user",
+            &PageRequest::new(0, 4),
+            None,
+            SortDir::default(),
+        )
         .expect("search p1");
     assert_eq!(r.total, 8, "8 users match 'user'");
     assert_eq!(r.items.len(), 4);
 
     let r2 = id
-        .search_users(&rid, "user", &PageRequest::new(4, 4))
+        .search_users(
+            &rid,
+            "user",
+            &PageRequest::new(4, 4),
+            None,
+            SortDir::default(),
+        )
         .expect("search p2");
     assert_eq!(r2.total, 8);
     assert_eq!(r2.items.len(), 4);
 }
 
 #[tokio::test]
-async fn search_users_empty_query_returns_zero_total() {
+async fn search_users_empty_query_matches_all_via_match_all() {
+    // Empty query compiles to SearchQuery::MatchAll, which matches every user.
+    // Callers that want the fast key-order path use list_users instead.
     let h = common::TestHarness::embedded().await.expect("harness");
     let id = h.identity();
     let rid = realm(id);
     seed_users(id, &rid, 3);
 
     let r = id
-        .search_users(&rid, "", &PageRequest::default())
-        .expect("empty");
-    assert_eq!(r.total, 0);
-    assert!(r.items.is_empty());
+        .search_users(&rid, "", &PageRequest::default(), None, SortDir::default())
+        .expect("empty query");
+    assert_eq!(r.total, 3, "MatchAll must match all 3 users");
+    assert_eq!(r.items.len(), 3);
 }
 
 #[tokio::test]
@@ -179,7 +194,13 @@ async fn search_users_no_matches_returns_zero_total() {
     seed_users(id, &rid, 3);
 
     let r = id
-        .search_users(&rid, "zzzzz", &PageRequest::default())
+        .search_users(
+            &rid,
+            "zzzzz",
+            &PageRequest::default(),
+            None,
+            SortDir::default(),
+        )
         .expect("no match");
     assert_eq!(r.total, 0);
     assert!(r.items.is_empty());
@@ -193,7 +214,13 @@ async fn search_users_beyond_last_returns_empty_items_correct_total() {
     seed_users(id, &rid, 3);
 
     let r = id
-        .search_users(&rid, "user", &PageRequest::new(100, 10))
+        .search_users(
+            &rid,
+            "user",
+            &PageRequest::new(100, 10),
+            None,
+            SortDir::default(),
+        )
         .expect("beyond");
     assert_eq!(r.total, 3);
     assert!(r.items.is_empty());

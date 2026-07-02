@@ -27,6 +27,7 @@ pub mod pre_token_webhook;
 pub mod ra_token;
 pub mod reconcile;
 pub mod risk;
+pub mod search;
 pub mod session_version;
 pub mod sessions;
 pub mod sms;
@@ -1137,16 +1138,23 @@ pub trait IdentityEngine: Send + Sync {
         page: &PageRequest,
     ) -> Result<PagedResult<User>, IdentityError>;
 
-    /// Searches users by substring match on email or display name.
+    /// Searches and/or sorts users.
     ///
-    /// Case-insensitive substring match. Returns the matching window plus
-    /// the total filtered count. Query must be at least 2 characters;
-    /// shorter queries return an empty `PagedResult`.
+    /// When `query` is non-trivial (≥ 2 characters or glob/exact syntax),
+    /// filters results using the [`SearchQuery`] grammar over email +
+    /// display name.  When `sort_field` is `Some`, the full matching set is
+    /// sorted before the offset slice so page navigation is stable.
+    ///
+    /// When both `query` is trivial (`MatchAll`) **and** `sort_field` is
+    /// `None`, callers should prefer [`Self::list_users`] for its fast
+    /// key-order scan path.
     fn search_users(
         &self,
         realm_id: &RealmId,
         query: &str,
         page: &PageRequest,
+        sort_field: Option<crate::identity::search::UserSortField>,
+        sort_dir: crate::identity::search::SortDir,
     ) -> Result<PagedResult<User>, IdentityError>;
 
     /// Lists realms with offset-based pagination.
@@ -1154,6 +1162,20 @@ pub trait IdentityEngine: Send + Sync {
     /// Realms are stored under the system realm namespace, so no
     /// `realm_id` parameter is needed for scoping.
     fn list_realms(&self, page: &PageRequest) -> Result<PagedResult<Realm>, IdentityError>;
+
+    /// Searches and/or sorts the realm list.
+    ///
+    /// Filters realms by name using the [`crate::identity::search::SearchQuery`]
+    /// grammar. When `sort_field` is `Some`, the full matching set is sorted
+    /// before the offset slice. Prefer [`Self::list_realms`] when both query is
+    /// trivial and `sort_field` is `None`.
+    fn search_realms(
+        &self,
+        query: &str,
+        page: &PageRequest,
+        sort_field: Option<crate::identity::search::RealmSortField>,
+        sort_dir: crate::identity::search::SortDir,
+    ) -> Result<PagedResult<Realm>, IdentityError>;
 
     /// Lists OAuth clients with offset-based pagination.
     fn list_clients(

@@ -1,4 +1,5 @@
 {% extends "ui/_layout.html" %}
+{% import "ui/admin/_sortable_th.html" as sortable %}
 {% block title %}{{ product_name }} · Identity Providers{% endblock %}
 {% block breadcrumb %}
 <nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
@@ -15,7 +16,7 @@
   <p class="mt-1 text-sm text-ht-content-muted">Social login and enterprise SSO connectors configured for this realm.</p>
 </div>
 
-<div class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle overflow-hidden">
+<div id="idps-table-region" class="rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle overflow-hidden">
   {% if providers.is_empty() %}
   <div class="flex flex-col items-center justify-center py-16 text-center">
     <div class="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-ht-surface-elevated ring-1 ring-divider-subtle">
@@ -31,15 +32,15 @@
   </div>
   {% else %}
   <table class="w-full text-sm">
-    <thead>
+    <thead id="idps-thead">
       <tr class="border-b border-divider-subtle bg-ht-surface-elevated">
-        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Name</th>
-        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Display name</th>
-        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Protocol</th>
-        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Issuer</th>
+        {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, "", 25, "idps-table-region") %}
+        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Display name</th>
+        {% call sortable::th("Protocol", "kind", sort_field, sort_dir, list_url, "", 25, "idps-table-region") %}
+        <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Issuer</th>
       </tr>
     </thead>
-    <tbody class="divide-y divide-divider-subtle">
+    <tbody id="idps-tbody" class="divide-y divide-divider-subtle">
       {% for row in providers %}
       <tr class="hover:bg-ht-surface-base">
         <td class="px-4 py-3 whitespace-nowrap">

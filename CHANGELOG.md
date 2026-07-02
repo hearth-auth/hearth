@@ -7,6 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Users table search grammar + column sort** — the admin users list now supports
+  exact (`"alice@acme.com"`), glob (`*@acme.com`, `alice?`), and substring search
+  via the `q` param, plus 4-column ascending/descending sort (`sort=email|name|status|created`
+  + `dir=asc|desc`). Sort is applied to the full filtered set before the page slice
+  so pagination totals are always exact. Sort and search params survive page / page-size
+  navigation via `preserved_params` (HEA-1633).
+- **Search + column sort rolled out to every admin table** — realms, organizations,
+  groups, sessions, webhooks, and identity providers now share the same search
+  grammar (substring / quoted-exact `"…"` / glob `*`,`?`) and clickable `sort`/`dir`
+  column headers as the users list, via the shared `_sortable_th` header macro.
+  Realms and webhooks gain a `q` search bar; sessions sort by created/expires
+  (default newest-first), webhooks search URL + events and sort by URL, and
+  identity providers sort by name/kind. `aria-sort` is exposed on every sortable
+  header and stays accurate after HTMX partial swaps (HEA-1634, HEA-1635, HEA-1636,
+  HEA-1637, HEA-1638).
 - **Per-SST Bloom filters (SST V2 format)** — each newly written SST file now
   embeds a Bloom filter (k = 7, ~1% FPR, ~10 bits/entry). A cold point lookup
   probes the filter in O(k) constant time (~70 ns/SST) before performing a binary
@@ -31,6 +46,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   seed-large-reset` wipes it.
 
 ### Fixed
+- **Admin tables: search, sort, and pagination now interact consistently.** Sorting
+  or searching only swapped the table rows, leaving the pagination bar stale — so
+  sorting on page 3 showed page 1's rows under a "page 3" widget, clearing the
+  search box didn't reset paging, and paging afterward re-applied the cleared query.
+  Every in-place interaction now swaps a single `#…-table-region` (table + pagination)
+  as one unit, and pagination links carry the full `q`+`sort`+`dir` (and session
+  `status`) state, so the three controls always agree. Applies to users, realms,
+  groups, organizations, webhooks, sessions, and identity providers (HEA-1615).
+- **Admin tables: sorting no longer 400s when a search term is active.** Clicking a
+  sort header while the search box was populated sent the `q` parameter several times
+  (htmx `hx-include` repeats it), which the stock query-string parser rejected with
+  `400 Bad Request` — so the sort silently did nothing. Admin list endpoints now
+  tolerate duplicated query keys (keeping the last value), so sort, search, and
+  pagination compose in any order (HEA-1615).
 - **Performance: point lookups no longer scan the whole realm.** `StorageEngine::get`
   fell through to an `iter_realm` linear scan of the active memtable, cloning and
   scanning every entry in the realm on each key lookup. On a freshly-seeded

@@ -1,4 +1,5 @@
 {% extends "ui/_layout.html" %}
+{% import "ui/admin/_sortable_th.html" as sortable %}
 {% block title %}{{ product_name }} · Webhooks{% endblock %}
 {% block body %}
 {% if !realm_name.is_empty() %}{% include "ui/admin/realms/_workspace_tabs.html" %}{% endif %}
@@ -21,7 +22,7 @@
   {% when None %}
 {% endmatch %}
 
-{% if webhooks.is_empty() %}
+{% if webhooks.is_empty() && search_query.is_empty() %}
   <div class="rounded-lg border border-divider-subtle bg-ht-surface-elevated px-6 py-12 text-center">
     <svg class="mx-auto h-10 w-10 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
@@ -38,18 +39,50 @@
     </a>
   </div>
 {% else %}
+  {# Live search — swaps #webhooks-table-region (table + pagination) as one unit
+     so sort/search/pagination stay consistent; hx-include carries the active
+     sort out of the region (HEA-1615). #}
+  <form method="get" action="{{ list_url }}" class="mb-4"
+        hx-get="{{ list_url }}"
+        hx-trigger="input changed delay:200ms from:input[name=q], search from:input[name=q]"
+        hx-include="#webhooks-table-region [name='sort'], #webhooks-table-region [name='dir']"
+        hx-target="#webhooks-table-region"
+        hx-select="#webhooks-table-region"
+        hx-swap="outerHTML"
+        hx-push-url="true">
+    <div class="relative">
+      <input type="search" name="q" value="{{ search_query }}" placeholder="Search by URL or event type…"
+             autocomplete="off" class="input pl-9">
+      <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ht-content-muted"
+           viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+      </svg>
+    </div>
+  </form>
+
+  <div id="webhooks-table-region">
+  <span id="webhooks-sortstate" hidden>
+    <input type="hidden" name="sort" value="{{ sort_field }}">
+    <input type="hidden" name="dir" value="{{ sort_dir }}">
+  </span>
+  {% if webhooks.is_empty() %}
+  <div class="rounded-md bg-ht-surface-elevated p-6 text-center ring-1 ring-divider-subtle">
+    <p class="text-sm text-ht-content-secondary">No webhooks match <code class="rounded-sm bg-ht-surface-elevated px-1 py-0.5 font-mono text-ht-content-primary">{{ search_query }}</code>.</p>
+  </div>
+  {% else %}
   <div class="overflow-hidden rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
     <table class="w-full">
-      <thead>
+      <thead id="webhooks-thead">
         <tr class="border-b border-divider bg-ht-surface-elevated">
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Endpoint URL</th>
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Events</th>
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Status</th>
-          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted">Last delivery</th>
-          <th class="px-4 py-3" aria-label="Actions"></th>
+          {% call sortable::th("Endpoint URL", "url", sort_field, sort_dir, list_url, search_query, pagination.per_page, "webhooks-table-region") %}
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Events</th>
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Status</th>
+          <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Last delivery</th>
+          <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="webhooks-tbody">
         {% for wh in webhooks %}
         <tr class="border-b border-divider-subtle hover-bg-divider">
           <td class="px-4 py-3">
@@ -113,7 +146,9 @@
       </tbody>
     </table>
   </div>
+  {% endif %}
 
   {% include "ui/admin/_pagination.html" %}
+  </div>{# #webhooks-table-region #}
 {% endif %}
 {% endblock %}

@@ -6,11 +6,59 @@ use super::*;
 // Realm list
 // ---------------------------------------------------------------------------
 
+/// Query params for `GET /ui/admin/realms`.
+#[derive(Debug, Default, Deserialize)]
+pub struct RealmListParams {
+    /// 1-based page number.
+    pub page: Option<u32>,
+    /// Items per page (allowlist: 5/10/25/50/100; defaults to 25).
+    pub per_page: Option<u32>,
+    /// Search query (realm name). Supports exact (`"…"`) and glob (`*`/`?`) syntax.
+    pub q: Option<String>,
+    /// Column to sort by: `name` | `status` | `created`. Unknown values ignored.
+    pub sort: Option<String>,
+    /// Sort direction: `asc` | `desc`. Defaults to `asc`.
+    pub dir: Option<String>,
+}
+
+impl RealmListParams {
+    fn per_page_validated(&self) -> u32 {
+        super::pagination::validate_per_page(self.per_page.unwrap_or(DEFAULT_PER_PAGE))
+    }
+
+    fn as_page_request(&self) -> crate::core::PageRequest {
+        crate::core::PageRequest::from_page_number(
+            self.page.unwrap_or(1),
+            self.per_page_validated(),
+        )
+    }
+
+    fn sort_field(&self) -> Option<crate::identity::search::RealmSortField> {
+        self.sort
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(crate::identity::search::RealmSortField::from_param)
+    }
+
+    fn sort_dir(&self) -> crate::identity::search::SortDir {
+        self.dir
+            .as_deref()
+            .map(crate::identity::search::SortDir::from_param)
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Template)]
 #[template(path = "ui/admin/realms/list.html")]
 struct RealmListTemplate {
     realms: Vec<Realm>,
     pagination: PaginationView,
+    /// Active search query (empty string when unsorted/unsearched).
+    search_query: String,
+    /// Active sort column (e.g. `"name"`), empty when unsorted.
+    sort_field: String,
+    /// Active sort direction (`"asc"` or `"desc"`).
+    sort_dir: String,
     chrome: bool,
     active: &'static str,
     user_email: Option<String>,
@@ -28,14 +76,41 @@ struct RealmListTemplate {
 pub async fn admin_realms_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
-    Query(params): Query<AdminPageParams>,
+    DedupQuery(params): DedupQuery<RealmListParams>,
 ) -> Response {
-    match state.identity.list_realms(&params.as_page_request()) {
+    let search_query = params.q.clone().unwrap_or_default();
+    let sort_field = params.sort_field();
+    let sort_dir = params.sort_dir();
+    let has_search = search_query.len() >= 2;
+    let has_sort = sort_field.is_some();
+
+    let result = if has_search || has_sort {
+        state.identity.search_realms(
+            &search_query,
+            &params.as_page_request(),
+            sort_field,
+            sort_dir,
+        )
+    } else {
+        state.identity.list_realms(&params.as_page_request())
+    };
+
+    match result {
         Ok(page) => {
-            let pagination = PaginationView::new(&page, "/ui/admin/realms", "");
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir_str = params.dir.clone().unwrap_or_default();
+            let preserved = super::pagination::join_params(&[
+                super::pagination::encode_param("q", &search_query),
+                super::pagination::encode_param("sort", &sort_field_str),
+                super::pagination::encode_param("dir", &sort_dir_str),
+            ]);
+            let pagination = PaginationView::new(&page, "/ui/admin/realms", preserved);
             render(&RealmListTemplate {
                 realms: page.items,
                 pagination,
+                search_query,
+                sort_field: sort_field_str,
+                sort_dir: sort_dir_str,
                 chrome: true,
                 active: "realms",
                 user_email: Some(session.user_email.clone()),
