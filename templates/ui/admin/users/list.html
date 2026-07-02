@@ -39,12 +39,18 @@
 {% include "ui/admin/users/_empty.html" %}
 {% else %}
 
-{# Search bar — HTMX live search after 200ms idle, ≥2 chars. #}
+{# Search bar — HTMX live search after 200ms idle, ≥2 chars.
+   Swaps the whole #users-table-region (table + pagination) so search, sort, and
+   pagination never disagree. `hx-include` pulls the active sort/dir out of the
+   region so typing a new query preserves the current sort (HEA-1615). The box
+   itself lives OUTSIDE the region so a swap never steals focus. #}
 <form method="get" action="{{ list_url }}" class="mb-4"
       hx-get="{{ list_url }}"
       hx-trigger="input changed delay:200ms from:input[name=q], search from:input[name=q]"
-      hx-target="#users-tbody"
-      hx-swap="innerHTML"
+      hx-include="#users-table-region [name='sort'], #users-table-region [name='dir']"
+      hx-target="#users-table-region"
+      hx-select="#users-table-region"
+      hx-swap="outerHTML"
       hx-push-url="true">
   <div class="relative">
     <input type="search" name="q" value="{{ search_query }}" placeholder="Search by email or name…"
@@ -53,6 +59,15 @@
     <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
   </div>
 </form>
+
+{# Table region — the single unit swapped by search / sort so the rows, the
+   sortable headers, and the pagination bar always update together (HEA-1615).
+   The hidden sort-state carrier is read by the search form's hx-include. #}
+<div id="users-table-region">
+<span id="users-sortstate" hidden>
+  <input type="hidden" name="sort" value="{{ sort_field }}">
+  <input type="hidden" name="dir" value="{{ sort_dir }}">
+</span>
 
 {# Bulk-action wrapper: the <form> covers both the action bar and the table so
    row checkboxes (`name="ids"`) submit together. Confirmation prevents
@@ -100,9 +115,9 @@
                    aria-label="Select all"
                    class="h-4 w-4 rounded border-divider bg-ht-surface-elevated">
           </th>
-          {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-tbody", "users-thead") %}
-          {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-tbody", "users-thead") %}
-          {% call sortable::th("Status", "status", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-tbody", "users-thead") %}
+          {% call sortable::th("Email", "email", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-table-region") %}
+          {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-table-region") %}
+          {% call sortable::th("Status", "status", sort_field, sort_dir, list_url, search_query, pagination.per_page, "users-table-region") %}
           <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
         </tr>
       </thead>
@@ -114,6 +129,7 @@
 </form>
 
 {% include "ui/admin/_pagination.html" %}
+</div>{# #users-table-region #}
 
 {% endif %}{# end else: !users.is_empty() || !search_query.is_empty() #}
 <script src="/ui/static/admin/users-list.js" defer></script>

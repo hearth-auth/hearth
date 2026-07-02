@@ -581,21 +581,34 @@ async fn admin_users_list_renders_htmx_live_search_attrs() {
         body.contains(r#"hx-trigger="input changed delay:200ms"#),
         "search form must debounce input by 200ms"
     );
+    // HEA-1615: search now swaps the whole table+pagination region as one unit
+    // so sort and pagination never go stale.
     assert!(
-        body.contains(r##"hx-target="#users-tbody""##),
-        "search form must target the rows tbody"
+        body.contains(r##"hx-target="#users-table-region""##),
+        "search form must target the unified table region"
     );
     assert!(
-        body.contains(r#"<tbody id="users-tbody">"#),
-        "the tbody must carry the id the search form targets"
+        body.contains(r##"hx-select="#users-table-region""##),
+        "search form must hx-select the region out of the full-page response"
+    );
+    assert!(
+        body.contains(r#"<div id="users-table-region">"#),
+        "the region wrapper must carry the id the search form targets"
+    );
+    // The active sort survives a new search keystroke via hx-include.
+    assert!(
+        body.contains(r##"hx-include="#users-table-region [name='sort']"##),
+        "search form must re-send the active sort/dir via hx-include"
     );
 }
 
-/// `GET /ui/admin/users` with `HX-Request: true` returns ONLY the rows
-/// partial — no DOCTYPE / html / page chrome. Pins the live-search
-/// payload size and prevents accidental nested-`<html>` regressions.
+/// `GET /ui/admin/users` with `HX-Request: true` returns a FULL page whose
+/// `#users-table-region` the client extracts via `hx-select` (HEA-1615). The
+/// old rows-only partial left the pagination bar stale; a full page keeps the
+/// table structural elements nested so DOMParser preserves them (HEA-1643),
+/// and swapping the whole region keeps rows, headers, and pagination in sync.
 #[tokio::test]
-async fn admin_users_list_returns_rows_partial_for_htmx_request() {
+async fn admin_users_list_returns_full_region_for_htmx_request() {
     let rig = build_rig();
     let cookie = admin_cookie(&rig, "csrf-users-htmx-partial");
 
@@ -620,27 +633,29 @@ async fn admin_users_list_returns_rows_partial_for_htmx_request() {
         .expect("body");
     let body = std::str::from_utf8(&body_bytes).expect("utf-8");
 
+    // The region the client selects must be present in the response.
     assert!(
-        !body.to_ascii_lowercase().contains("<!doctype html"),
-        "HTMX response must not include the page <!DOCTYPE>"
+        body.contains(r#"<div id="users-table-region">"#),
+        "HTMX response must contain the table region for hx-select to extract"
     );
+    // The region includes the pagination bar so it never goes stale.
     assert!(
-        !body.contains("<html"),
-        "HTMX response must not include a <html> tag"
+        body.contains("Rows per page"),
+        "region must include the pagination bar (kept in sync with the rows)"
     );
     // Should still contain at least one user row marker (the seeded bob).
     assert!(
         body.contains("bob@acme.test"),
-        "rows partial must include the seeded user rows"
+        "response must include the seeded user rows"
     );
 }
 
 /// Sort HTMX request returns a full page so the browser HTML parser sees
 /// `<thead>` inside a proper `<table>` context. The client uses
-/// `hx-select="#users-tbody"` + `hx-select-oob="#users-thead"` to extract
-/// the two table sections; `aria-sort` updates without a full page reload.
-/// Fixes HEA-1643 (bare `<thead>` outside `<table>` is silently stripped by
-/// DOMParser, causing the OOB update to be dropped).
+/// `hx-select="#users-table-region"` to extract the whole table+pagination
+/// region and swap it as one unit (HEA-1615); `aria-sort` updates without a
+/// full page reload. Fixes HEA-1643 (bare `<thead>` outside `<table>` is
+/// silently stripped by DOMParser).
 #[tokio::test]
 async fn admin_users_sort_htmx_returns_full_page_with_aria_sort() {
     let rig = build_rig();
@@ -688,12 +703,13 @@ async fn admin_users_sort_htmx_returns_full_page_with_aria_sort() {
     );
 }
 
-/// Sort links carry `hx-select` + `hx-select-oob` so that the client extracts
-/// `#users-tbody` and `#users-thead` from the full-page response. This avoids
-/// the HTML-parser bug (HEA-1643) where bare `<thead>` outside `<table>`
-/// context is silently dropped, breaking `aria-sort` updates on sort click.
+/// Sort links extract the whole `#users-table-region` from the full-page
+/// response via `hx-select` and swap it as one unit (HEA-1615). A full page
+/// keeps `<thead>` nested inside `<table>` so DOMParser preserves it
+/// (HEA-1643); wrapping the region means the pagination bar updates with the
+/// sort instead of going stale — so no separate OOB thead swap is needed.
 #[tokio::test]
-async fn admin_users_sort_links_use_hx_select_for_oob_thead() {
+async fn admin_users_sort_links_use_hx_select_for_region() {
     let rig = build_rig();
     let cookie = admin_cookie(&rig, "csrf-users-sort-attrs");
 
@@ -717,15 +733,19 @@ async fn admin_users_sort_links_use_hx_select_for_oob_thead() {
         .expect("body");
     let body = std::str::from_utf8(&body_bytes).expect("utf-8");
 
-    // Sort links must pull the tbody from the full-page response.
+    // Sort links must target + select the unified region.
     assert!(
-        body.contains(r##"hx-select="#users-tbody""##),
-        "sort links must carry hx-select to extract tbody from full-page response"
+        body.contains(r##"hx-select="#users-table-region""##),
+        "sort links must hx-select the whole table region"
     );
-    // Sort links must update the thead aria-sort via OOB.
     assert!(
-        body.contains(r##"hx-select-oob="#users-thead""##),
-        "sort links must carry hx-select-oob to update thead aria-sort"
+        body.contains(r##"hx-target="#users-table-region""##),
+        "sort links must target the whole table region"
+    );
+    // The stale-prone OOB thead swap is gone — the region carries the thead.
+    assert!(
+        !body.contains(r##"hx-select-oob="#users-thead""##),
+        "sort links must no longer use a separate OOB thead swap"
     );
     // WCAG 2.2 SC 2.4.11 minimum focus ring.
     assert!(
@@ -763,10 +783,11 @@ async fn admin_users_sort_links_carry_hx_include_for_q() {
         .expect("body");
     let body = std::str::from_utf8(&body_bytes).expect("utf-8");
 
-    // Sort links must use hx-include to pick up the live search input value.
+    // Sort links must use hx-include to pick up the live search input value
+    // (and any active status filter, e.g. on the sessions table — HEA-1615).
     assert!(
-        body.contains(r#"hx-include="input[name='q']""#),
-        "sort links must carry hx-include pointing at the search input"
+        body.contains(r#"hx-include="input[name='q'], input[name='status']""#),
+        "sort links must carry hx-include pointing at the search + status inputs"
     );
     // hx-get must NOT bake a static q= into the URL — hx-include owns that.
     // href may still carry it as a no-JS fallback.

@@ -24,17 +24,6 @@
   </a>
 </div>
 
-<form method="get" action="/ui/admin/realms/{{ realm_name }}/groups" class="mb-4">
-  <div class="relative">
-    <input id="page-search" type="search" name="q" value="{{ search_query }}" placeholder="Search by name or slug…"
-           autocomplete="off"
-           class="input pl-9">
-    <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-  </div>
-  {% if !sort_field.is_empty() %}<input type="hidden" name="sort" value="{{ sort_field }}">{% endif %}
-  {% if !sort_dir.is_empty() %}<input type="hidden" name="dir" value="{{ sort_dir }}">{% endif %}
-</form>
-
 {% if groups.is_empty() && pagination.total == 0 && search_query.is_empty() %}
   <div class="rounded-lg border border-divider-subtle bg-ht-surface-elevated px-6 py-12 text-center">
     <svg class="mx-auto h-10 w-10 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -50,7 +39,32 @@
       Create your first group
     </a>
   </div>
-{% else if groups.is_empty() && !search_query.is_empty() %}
+{% else %}
+{# Live search — swaps #groups-table-region (table + pagination) as one unit so
+   sort/search/pagination stay consistent; hx-include carries the active sort
+   out of the region (HEA-1615). #}
+<form method="get" action="/ui/admin/realms/{{ realm_name }}/groups" class="mb-4"
+      hx-get="/ui/admin/realms/{{ realm_name }}/groups"
+      hx-trigger="input changed delay:200ms from:input[name=q], search from:input[name=q]"
+      hx-include="#groups-table-region [name='sort'], #groups-table-region [name='dir']"
+      hx-target="#groups-table-region"
+      hx-select="#groups-table-region"
+      hx-swap="outerHTML"
+      hx-push-url="true">
+  <div class="relative">
+    <input id="page-search" type="search" name="q" value="{{ search_query }}" placeholder="Search by name or slug…"
+           autocomplete="off"
+           class="input pl-9">
+    <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+  </div>
+</form>
+
+<div id="groups-table-region">
+<span id="groups-sortstate" hidden>
+  <input type="hidden" name="sort" value="{{ sort_field }}">
+  <input type="hidden" name="dir" value="{{ sort_dir }}">
+</span>
+{% if groups.is_empty() %}
   <div class="rounded-md bg-ht-surface-elevated p-6 text-center ring-1 ring-divider-subtle">
     <p class="text-sm text-ht-content-secondary">No groups match <code class="rounded-sm bg-ht-surface-elevated px-1 py-0.5 font-mono text-ht-content-primary">{{ search_query }}</code>.</p>
   </div>
@@ -63,8 +77,8 @@
       <table class="w-full">
         <thead id="groups-thead">
           <tr class="border-b border-divider bg-ht-surface-elevated">
-            {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page, "groups-tbody", "groups-thead") %}
-            {% call sortable::th("Slug", "slug", sort_field, sort_dir, list_url, search_query, pagination.per_page, "groups-tbody", "groups-thead") %}
+            {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page, "groups-table-region") %}
+            {% call sortable::th("Slug", "slug", sort_field, sort_dir, list_url, search_query, pagination.per_page, "groups-table-region") %}
             <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Description</th>
             <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
           </tr>
@@ -75,7 +89,9 @@
       </table>
     </div>
   </div>
+{% endif %}
 
   {% include "ui/admin/_pagination.html" %}
+</div>{# #groups-table-region #}
 {% endif %}
 {% endblock %}

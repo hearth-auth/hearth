@@ -24,19 +24,6 @@
   </a>
 </div>
 
-{# Search bar — substring match over name/slug. Form GET keeps state in
-   the URL and refreshes the realm-scoped list pattern. #}
-<form method="get" action="/ui/admin/realms/{{ realm_name }}/organizations" class="mb-4">
-  <div class="relative">
-    <input id="page-search" type="search" name="q" value="{{ search_query }}" placeholder="Search by name or slug…"
-           autocomplete="off"
-           class="input pl-9">
-    <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-  </div>
-  {% if !sort_field.is_empty() %}<input type="hidden" name="sort" value="{{ sort_field }}">{% endif %}
-  {% if !sort_dir.is_empty() %}<input type="hidden" name="dir" value="{{ sort_dir }}">{% endif %}
-</form>
-
 {% if organizations.is_empty() && pagination.total == 0 && search_query.is_empty() %}
   {# Empty-state panel — replaces the bare "No organizations found." td.
      A blank realm is the most likely first impression for a new admin,
@@ -56,7 +43,32 @@
       Create your first organization
     </a>
   </div>
-{% else if organizations.is_empty() && !search_query.is_empty() %}
+{% else %}
+{# Live search — swaps #orgs-table-region (table + pagination) as one unit so
+   sort/search/pagination stay consistent; hx-include carries the active sort
+   out of the region (HEA-1615). #}
+<form method="get" action="/ui/admin/realms/{{ realm_name }}/organizations" class="mb-4"
+      hx-get="/ui/admin/realms/{{ realm_name }}/organizations"
+      hx-trigger="input changed delay:200ms from:input[name=q], search from:input[name=q]"
+      hx-include="#orgs-table-region [name='sort'], #orgs-table-region [name='dir']"
+      hx-target="#orgs-table-region"
+      hx-select="#orgs-table-region"
+      hx-swap="outerHTML"
+      hx-push-url="true">
+  <div class="relative">
+    <input id="page-search" type="search" name="q" value="{{ search_query }}" placeholder="Search by name or slug…"
+           autocomplete="off"
+           class="input pl-9">
+    <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ht-content-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+  </div>
+</form>
+
+<div id="orgs-table-region">
+<span id="orgs-sortstate" hidden>
+  <input type="hidden" name="sort" value="{{ sort_field }}">
+  <input type="hidden" name="dir" value="{{ sort_dir }}">
+</span>
+{% if organizations.is_empty() %}
   <div class="rounded-md bg-ht-surface-elevated p-6 text-center ring-1 ring-divider-subtle">
     <p class="text-sm text-ht-content-secondary">No organizations match <code class="rounded-sm bg-ht-surface-elevated px-1 py-0.5 font-mono text-ht-content-primary">{{ search_query }}</code>.</p>
   </div>
@@ -95,8 +107,8 @@
                      aria-label="Select all"
                      class="h-4 w-4 rounded border-divider bg-ht-surface-elevated">
             </th>
-            {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page, "orgs-tbody", "orgs-thead") %}
-            {% call sortable::th("Slug", "slug", sort_field, sort_dir, list_url, search_query, pagination.per_page, "orgs-tbody", "orgs-thead") %}
+            {% call sortable::th("Name", "name", sort_field, sort_dir, list_url, search_query, pagination.per_page, "orgs-table-region") %}
+            {% call sortable::th("Slug", "slug", sort_field, sort_dir, list_url, search_query, pagination.per_page, "orgs-table-region") %}
             <th class="px-4 py-3 text-left font-mono text-xs font-medium uppercase tracking-[0.12em] text-ht-content-muted" scope="col">Status</th>
             <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
           </tr>
@@ -107,7 +119,9 @@
       </table>
     </div>
   </form>
+{% endif %}
 
   {% include "ui/admin/_pagination.html" %}
+</div>{# #orgs-table-region #}
 {% endif %}
 {% endblock %}

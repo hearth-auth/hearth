@@ -63,9 +63,12 @@ struct UserListTemplate {
     /// tenant realms, `/ui/admin/admin-users` for the system-realm
     /// operator surface.
     list_url: String,
-    /// See `UserRowsTemplate::user_base_url`.
+    /// Path prefix for user detail/edit links, e.g.
+    /// `/ui/admin/realms/foo/users`.
     user_base_url: String,
-    /// See `UserRowsTemplate::user_detail_qs`.
+    /// Optional query-string suffix appended after each detail/edit path
+    /// segment (`""` for tenant realms, `"?admin_target=system"` for the
+    /// system realm so `TargetRealm` resolves without a path-segment name).
     user_detail_qs: String,
     /// Active sort column name (e.g. `"email"`), empty when unsorted.
     sort_field: String,
@@ -85,31 +88,19 @@ struct UserListTemplate {
     inline_theme_css: Option<String>,
 }
 
-/// Rows-only partial returned when the user list is filtered live via
-/// HTMX (search, no sort state change). Keeps the response payload to a
-/// single `<tbody>` innerHTML swap so page chrome doesn't re-render on
-/// every keystroke.
-#[derive(Template)]
-#[template(path = "ui/admin/users/_rows.html")]
-struct UserRowsTemplate {
-    users: Vec<User>,
-    /// Path prefix for user detail/edit links, e.g.
-    /// `/ui/admin/realms/foo/users`.
-    user_base_url: String,
-    /// Optional query-string suffix appended after each detail/edit
-    /// path segment, e.g. `""` for tenant realms or
-    /// `"?admin_target=system"` for the system realm so `TargetRealm`
-    /// resolves correctly without a path-segment realm name.
-    user_detail_qs: String,
-}
-
 /// `GET /ui/admin/users`.
+///
+/// Always renders the full page. Live search and column sorts are HTMX
+/// requests that carry `hx-select="#users-table-region"`, so the client
+/// extracts the table+pagination region from this full-page response and
+/// swaps it as one unit — keeping search, sort, and pagination consistent
+/// (HEA-1615). There is no rows-only fast path: a stale pagination bar was
+/// worse than the marginal cost of re-rendering chrome.
 pub async fn admin_users_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    htmx: super::templates::IsHtmx,
     Query(params): Query<UserListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
@@ -137,22 +128,9 @@ pub async fn admin_users_list(
             let realm_name = target.0.name().to_string();
             let user_base_url = format!("/ui/admin/realms/{realm_name}/users");
 
-            // HTMX search-only: bare rows partial — safe because the search
-            // form uses innerHTML swap and the response has no table structural
-            // elements outside a <table> context.
-            if htmx.0 && !has_sort {
-                return render(&UserRowsTemplate {
-                    users: page.items,
-                    user_base_url,
-                    user_detail_qs: String::new(),
-                });
-            }
-
-            // Full-page for non-HTMX baseline or HTMX sort requests.
-            // For sort, the client uses hx-select="#users-tbody" and
-            // hx-select-oob="#users-thead" to extract the two table sections.
-            // Returning a full page avoids DOMParser silently dropping bare
-            // <thead> outside <table> context (HEA-1643).
+            // Full page always. Search/sort HTMX requests extract
+            // #users-table-region via hx-select; a full page keeps the table
+            // structural elements nested so DOMParser preserves them (HEA-1643).
             let sort_field_str = params.sort.clone().unwrap_or_default();
             let sort_dir_str = params.dir.clone().unwrap_or_default();
             let preserved = super::pagination::join_params(&[
@@ -208,7 +186,6 @@ pub async fn admin_admin_user_create_alias() -> axum::response::Redirect {
 pub async fn admin_admin_users_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
-    htmx: super::templates::IsHtmx,
     Query(params): Query<UserListParams>,
 ) -> Response {
     let system_realm = crate::identity::keys::system_realm_id();
@@ -234,19 +211,8 @@ pub async fn admin_admin_users_list(
 
     match result {
         Ok(page) => {
-            // HTMX search-only: bare rows partial (safe — no bare table
-            // structural elements in the response).
-            if htmx.0 && !has_sort {
-                return render(&UserRowsTemplate {
-                    users: page.items,
-                    user_base_url: "/ui/admin/realms/system/users".to_string(),
-                    user_detail_qs: "?admin_target=system".to_string(),
-                });
-            }
-
-            // Full-page for non-HTMX baseline or HTMX sort.
-            // For sort, hx-select + hx-select-oob on the client extract tbody
-            // and thead from the full page (HEA-1643).
+            // Full page always; HTMX search/sort extract #users-table-region
+            // via hx-select from this response (HEA-1615 / HEA-1643).
             let sort_field_str = params.sort.clone().unwrap_or_default();
             let sort_dir_str = params.dir.clone().unwrap_or_default();
             let preserved = super::pagination::join_params(&[
@@ -1889,8 +1855,22 @@ pub async fn admin_sessions_list(
     {
         Ok(page) => {
             let base_url = format!("/ui/admin/realms/{realm_name}/sessions");
-            let preserved =
-                super::pagination::encode_param("status", params.status.as_deref().unwrap_or(""));
+            let sort_field_str = params.sort.clone().unwrap_or_default();
+            let sort_dir = params.sort_dir();
+            let sort_dir_str = params.dir.clone().unwrap_or_else(|| "desc".to_string());
+            // Pagination links must carry every active dimension — status,
+            // sort column, and direction — so paging never silently drops a
+            // filter or a sort (HEA-1615).
+            let dir_param = if sort_field_str.is_empty() {
+                String::new()
+            } else {
+                sort_dir_str.clone()
+            };
+            let preserved = super::pagination::join_params(&[
+                super::pagination::encode_param("status", params.status.as_deref().unwrap_or("")),
+                super::pagination::encode_param("sort", &sort_field_str),
+                super::pagination::encode_param("dir", &dir_param),
+            ]);
             let pagination = PaginationView::new(&page, base_url.clone(), preserved);
             let all_rows: Vec<SessionRow> = page
                 .items
@@ -1909,8 +1889,6 @@ pub async fn admin_sessions_list(
             let count_active = all_rows.iter().filter(|r| r.is_active).count();
             let count_expired = all_rows.len() - count_active;
             let mut rows = filter_session_rows(all_rows, &status_filter);
-            let sort_field_str = params.sort.clone().unwrap_or_default();
-            let sort_dir = params.sort_dir();
             match sort_field_str.as_str() {
                 "expires" => rows.sort_by(|a, b| {
                     let ord = a.session.expires_at().cmp(&b.session.expires_at());
@@ -1929,7 +1907,6 @@ pub async fn admin_sessions_list(
                     }
                 }),
             }
-            let sort_dir_str = params.dir.clone().unwrap_or_else(|| "desc".to_string());
             render(&SessionListTemplate {
                 sessions: rows,
                 pagination,

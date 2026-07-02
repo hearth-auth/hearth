@@ -404,6 +404,54 @@ mod tests {
     }
 
     #[test]
+    fn preserved_params_carry_search_sort_and_dir_together() {
+        // Regression (HEA-1615): paginating after a combined search + sort must
+        // keep EVERY dimension. The reported bug was that navigating pages (or
+        // changing page size) silently dropped `q`/`sort`/`dir`, resetting the
+        // list. `preserved_params` feeds prev/next hrefs verbatim and
+        // `filter_params` feeds the page-size form's hidden inputs — both must
+        // round-trip all three keys.
+        let preserved = join_params(&[
+            encode_param("q", "alice"),
+            encode_param("sort", "email"),
+            encode_param("dir", "desc"),
+        ]);
+        assert_eq!(preserved, "q=alice&sort=email&dir=desc");
+
+        let r = make_result(100, 25, 25); // page 2 of 4
+        let v = PaginationView::new(&r, "/ui/admin/admin-users", preserved);
+
+        assert_eq!(
+            v.preserved_params, "q=alice&sort=email&dir=desc",
+            "prev/next hrefs embed the full preserved query"
+        );
+        let keys: Vec<&str> = v.filter_params.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"q"), "page-size form must resend q");
+        assert!(keys.contains(&"sort"), "page-size form must resend sort");
+        assert!(keys.contains(&"dir"), "page-size form must resend dir");
+        assert_eq!(v.current_page, 2);
+        assert_eq!(v.prev_page, Some(1));
+        assert_eq!(v.next_page, Some(3));
+    }
+
+    #[test]
+    fn cleared_search_drops_query_from_preserved_params() {
+        // Regression (HEA-1615): after clearing the search box, pagination must
+        // NOT re-introduce the old query. An empty value encodes to nothing, so
+        // preserved_params carries only the still-active sort.
+        let preserved = join_params(&[
+            encode_param("q", ""),
+            encode_param("sort", "email"),
+            encode_param("dir", "asc"),
+        ]);
+        assert_eq!(preserved, "sort=email&dir=asc", "no dangling q= remains");
+        let r = make_result(100, 0, 25);
+        let v = PaginationView::new(&r, "/ui/admin/admin-users", preserved);
+        let keys: Vec<&str> = v.filter_params.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!keys.contains(&"q"), "cleared search must not resurface");
+    }
+
+    #[test]
     fn pagination_view_empty_result() {
         let r = make_result(0, 0, 25);
         let v = PaginationView::new(&r, "/items", "");

@@ -46,6 +46,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   seed-large-reset` wipes it.
 
 ### Fixed
+- **Admin tables: search, sort, and pagination now interact consistently.** Sorting
+  or searching only swapped the table rows, leaving the pagination bar stale — so
+  sorting on page 3 showed page 1's rows under a "page 3" widget, clearing the
+  search box didn't reset paging, and paging afterward re-applied the cleared query.
+  Every in-place interaction now swaps a single `#…-table-region` (table + pagination)
+  as one unit, and pagination links carry the full `q`+`sort`+`dir` (and session
+  `status`) state, so the three controls always agree. Applies to users, realms,
+  groups, organizations, webhooks, sessions, and identity providers (HEA-1615).
 - **Performance: point lookups no longer scan the whole realm.** `StorageEngine::get`
   fell through to an `iter_realm` linear scan of the active memtable, cloning and
   scanning every entry in the realm on each key lookup. On a freshly-seeded

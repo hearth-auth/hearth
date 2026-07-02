@@ -24,7 +24,16 @@
   </a>
 </div>
 
-<form method="get" action="/ui/admin/realms" class="mb-4">
+{# Live search — swaps the whole #realms-table-region so sort + pagination stay
+   in sync; hx-include carries the active sort out of the region (HEA-1615). #}
+<form method="get" action="/ui/admin/realms" class="mb-4"
+      hx-get="/ui/admin/realms"
+      hx-trigger="input changed delay:200ms from:input[name=q], search from:input[name=q]"
+      hx-include="#realms-table-region [name='sort'], #realms-table-region [name='dir']"
+      hx-target="#realms-table-region"
+      hx-select="#realms-table-region"
+      hx-swap="outerHTML"
+      hx-push-url="true">
   <div class="relative">
     <input type="search" name="q" value="{{ search_query }}"
            placeholder="Search by realm name…"
@@ -35,17 +44,20 @@
          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
     </svg>
-    {% if !sort_field.is_empty() %}<input type="hidden" name="sort" value="{{ sort_field }}">{% endif %}
-    {% if !sort_dir.is_empty() %}<input type="hidden" name="dir" value="{{ sort_dir }}">{% endif %}
   </div>
 </form>
 
+<div id="realms-table-region">
+<span id="realms-sortstate" hidden>
+  <input type="hidden" name="sort" value="{{ sort_field }}">
+  <input type="hidden" name="dir" value="{{ sort_dir }}">
+</span>
 <div class="overflow-hidden rounded-md bg-ht-surface-elevated ring-1 ring-divider-subtle">
   <table class="w-full">
     <thead id="realms-thead">
       <tr class="border-b border-divider bg-ht-surface-elevated">
-        {% call sortable::th("Name", "name", sort_field, sort_dir, "/ui/admin/realms", search_query, pagination.per_page, "realms-tbody", "realms-thead") %}
-        {% call sortable::th("Status", "status", sort_field, sort_dir, "/ui/admin/realms", search_query, pagination.per_page, "realms-tbody", "realms-thead") %}
+        {% call sortable::th("Name", "name", sort_field, sort_dir, "/ui/admin/realms", search_query, pagination.per_page, "realms-table-region") %}
+        {% call sortable::th("Status", "status", sort_field, sort_dir, "/ui/admin/realms", search_query, pagination.per_page, "realms-table-region") %}
         <th class="px-4 py-3" scope="col" aria-label="Actions"></th>
       </tr>
     </thead>
@@ -56,4 +68,5 @@
 </div>
 
 {% include "ui/admin/_pagination.html" %}
+</div>{# #realms-table-region #}
 {% endblock %}
