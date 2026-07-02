@@ -18,6 +18,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **`quick-xml` upgraded 0.36 → 0.41 (RUSTSEC advisories)** — remediates two advisories in
+  the SAML XML parser: quadratic runtime on duplicate-attribute checks and an unbounded
+  namespace-declaration allocation enabling memory-exhaustion DoS on crafted XML. The SAML
+  reader now resolves quick-xml 0.41's standalone entity-reference events (numeric and the
+  five predefined entities) and rejects any DTD-defined general entity, preserving the
+  existing anti-XXE posture and canonicalization/signature-validation behavior (HEA-1629).
 - **MFA-pending cookie is now single-use** — a random 128-bit nonce is embedded in
   the cookie and burned server-side on first successful MFA completion. A captured
   pending cookie can no longer be replayed after the session has been established (HEA-1656).

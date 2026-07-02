@@ -4,7 +4,9 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use super::authn_request::format_xsd_datetime;
-use super::xml::{attr, escape_attr, escape_text, is_element, ns, parse_err};
+use super::xml::{
+    attr, escape_attr, escape_text, is_element, ns, parse_err, resolve_entity_ref, unescape_text,
+};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 
@@ -133,13 +135,30 @@ pub fn parse_logout_request(xml: &[u8]) -> Result<LogoutRequest, IdentityError> 
                 }
             }
             Ok(Event::Text(t)) => {
-                if let Some(cap) = capture.take() {
-                    let val = t.unescape().map(|s| s.into_owned()).unwrap_or_default();
-                    match cap {
-                        Capture::Issuer => issuer = Some(val),
-                        Capture::NameId => name_id = Some(val),
-                        Capture::SessionIndex => session_index = Some(val),
-                    }
+                if let Some(cap) = capture.as_ref() {
+                    let val = unescape_text(&t)
+                        .map(|s| s.into_owned())
+                        .unwrap_or_default();
+                    let slot = match cap {
+                        Capture::Issuer => &mut issuer,
+                        Capture::NameId => &mut name_id,
+                        Capture::SessionIndex => &mut session_index,
+                    };
+                    slot.get_or_insert_with(String::new).push_str(&val);
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                // quick-xml 0.41 emits `&amp;`-style references as separate
+                // events; accumulate the resolved character into the value
+                // being captured so escaped content is preserved.
+                if let Some(cap) = capture.as_ref() {
+                    let resolved = resolve_entity_ref(&r)?;
+                    let slot = match cap {
+                        Capture::Issuer => &mut issuer,
+                        Capture::NameId => &mut name_id,
+                        Capture::SessionIndex => &mut session_index,
+                    };
+                    slot.get_or_insert_with(String::new).push_str(&resolved);
                 }
             }
             Ok(Event::End(_)) => capture = None,
@@ -191,10 +210,14 @@ pub fn parse_logout_response(xml: &[u8]) -> Result<LogoutResponse, IdentityError
                 }
             }
             Ok(Event::Text(t)) if in_issuer => {
-                if let Ok(s) = t.unescape() {
-                    issuer = Some(s.into_owned());
+                if let Ok(s) = unescape_text(&t) {
+                    issuer.get_or_insert_with(String::new).push_str(&s);
                 }
-                in_issuer = false;
+            }
+            Ok(Event::GeneralRef(r)) if in_issuer => {
+                issuer
+                    .get_or_insert_with(String::new)
+                    .push_str(&resolve_entity_ref(&r)?);
             }
             Ok(Event::End(_)) => in_issuer = false,
             Ok(Event::Eof) => break,

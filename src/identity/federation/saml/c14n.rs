@@ -25,7 +25,9 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use std::collections::BTreeMap;
 
-use super::xml::{escape_attr, escape_text, ns, parse_err};
+use super::xml::{
+    escape_attr, escape_text, ns, parse_err, resolve_entity_ref, unescape_attr_value, unescape_text,
+};
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
 
@@ -158,8 +160,20 @@ pub fn canonicalize_with_inherited(
                     buf.clear();
                     continue;
                 }
-                let raw = t.unescape().map_err(|e| parse_err(e.to_string()))?;
+                let raw = unescape_text(&t).map_err(|e| parse_err(e.to_string()))?;
                 let escaped = escape_text(raw.as_ref());
+                out.extend_from_slice(escaped.as_bytes());
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if skip_depth.is_some() {
+                    buf.clear();
+                    continue;
+                }
+                // quick-xml 0.41 emits escaped characters as standalone
+                // entity-reference events. Resolve then re-escape so the
+                // canonical output matches the source's textual content.
+                let resolved = resolve_entity_ref(&r)?;
+                let escaped = escape_text(&resolved);
                 out.extend_from_slice(escaped.as_bytes());
             }
             Ok(Event::CData(c)) => {
@@ -212,11 +226,7 @@ fn process_start(
     for a in start.attributes().with_checks(false) {
         let a = a.map_err(|e| parse_err(format!("bad attribute: {e}")))?;
         let key = a.key.as_ref().to_vec();
-        let val = a
-            .unescape_value()
-            .map_err(|e| parse_err(format!("bad attr value: {e}")))?
-            .into_owned()
-            .into_bytes();
+        let val = unescape_attr_value(&a)?.into_bytes();
         if key == b"xmlns" || key.starts_with(b"xmlns:") {
             let prefix = if key == b"xmlns" {
                 Vec::new()
