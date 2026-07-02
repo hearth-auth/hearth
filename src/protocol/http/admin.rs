@@ -3469,6 +3469,31 @@ async fn admin_create_webhook(
         event_filters,
     };
 
+    // SSRF guard at registration time (F3/HEA-1651). DNS I/O is blocking so
+    // we run it on the blocking thread pool before persisting the URL.
+    let url_to_check = req.url.clone();
+    match tokio::task::spawn_blocking(move || {
+        crate::webhook::ssrf::check_webhook_url(&url_to_check)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "ssrf check failed"})),
+            )
+                .into_response();
+        }
+    }
+
     match engine.create(&req) {
         Ok(sub) => (StatusCode::CREATED, Json(sub)).into_response(),
         Err(crate::webhook::WebhookError::InvalidUrl { reason }) => (
@@ -3569,6 +3594,32 @@ async fn admin_update_webhook(
         enabled: body.enabled,
         event_filters,
     };
+
+    // SSRF guard: re-validate the new URL if one was supplied (F3/HEA-1651).
+    if let Some(url) = req.url.as_deref() {
+        let url_to_check = url.to_string();
+        match tokio::task::spawn_blocking(move || {
+            crate::webhook::ssrf::check_webhook_url(&url_to_check)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "ssrf check failed"})),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     match engine.update(&auth.realm_id, &webhook_id, &req) {
         Ok(sub) => (StatusCode::OK, Json(sub)).into_response(),

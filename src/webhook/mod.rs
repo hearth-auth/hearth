@@ -22,6 +22,7 @@ pub mod dispatcher;
 mod engine;
 mod error;
 mod keys;
+pub(crate) mod ssrf;
 mod types;
 
 pub use engine::EmbeddedWebhookEngine;
