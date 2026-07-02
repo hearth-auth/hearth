@@ -101,7 +101,7 @@ pub async fn admin_users_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    Query(params): Query<UserListParams>,
+    DedupQuery(params): DedupQuery<UserListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
     let sort_field = params.sort_field();
@@ -186,7 +186,7 @@ pub async fn admin_admin_user_create_alias() -> axum::response::Redirect {
 pub async fn admin_admin_users_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
-    Query(params): Query<UserListParams>,
+    DedupQuery(params): DedupQuery<UserListParams>,
 ) -> Response {
     let system_realm = crate::identity::keys::system_realm_id();
     let search_query = params.q.clone().unwrap_or_default();
@@ -1831,7 +1831,7 @@ pub async fn admin_sessions_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    Query(params): Query<SessionsListParams>,
+    DedupQuery(params): DedupQuery<SessionsListParams>,
 ) -> Response {
     // Single now-snapshot per request — two rows can't disagree on
     // whether they're past expiry within the same render.

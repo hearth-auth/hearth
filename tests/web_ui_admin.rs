@@ -846,6 +846,59 @@ async fn admin_users_sort_with_active_search_preserves_filter() {
     );
 }
 
+/// Sorting while a search term is active must NOT 400.
+///
+/// Reproduces the exact request the browser sends (HEA-1615): htmx 1.9's
+/// `hx-include` repeats the `q` parameter several times on a sort-header
+/// click when the search box is populated, e.g.
+/// `?sort=email&dir=asc&q=bob&q=bob&q=bob`. axum's stock `Query` extractor
+/// rejects the duplicated scalar key with `400`, so the sort swap silently
+/// failed and the table never re-sorted — the board's "sorting still doesn't
+/// work when a search term is active". The `DedupQuery` extractor collapses
+/// the repeats, so the request now succeeds and returns filtered+sorted rows.
+#[tokio::test]
+async fn admin_users_sort_with_duplicated_q_param_does_not_400() {
+    let rig = build_rig();
+    let cookie = admin_cookie(&rig, "csrf-users-dup-q");
+
+    let response = rig
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                // q repeated 4× — exactly what htmx hx-include emits.
+                .uri("/ui/admin/realms/acme/users?sort=email&dir=asc&per_page=25&q=bob&q=bob&q=bob&q=bob")
+                .header(header::COOKIE, cookie)
+                .header("HX-Request", "true")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    // The whole point: this used to be 400.
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "duplicated q params must not be rejected"
+    );
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+
+    // Filter still applied (q=bob) and the region is present for hx-select.
+    assert!(
+        body.contains("bob@acme.test"),
+        "dedup must preserve the q=bob filter"
+    );
+    assert!(
+        body.contains(r#"<div id="users-table-region">"#),
+        "response must contain the region so the sort swap lands"
+    );
+}
+
 /// `/ui/admin/sessions` renders the Active/Expired/All filter pills
 /// and defaults to the Active view. Resolves REQ-050 in the gap doc.
 #[tokio::test]

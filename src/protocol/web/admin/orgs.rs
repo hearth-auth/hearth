@@ -125,7 +125,7 @@ pub async fn admin_orgs_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    Query(params): Query<OrgListParams>,
+    DedupQuery(params): DedupQuery<OrgListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
     let sort_field = params.sort_field();

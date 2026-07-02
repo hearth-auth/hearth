@@ -76,7 +76,7 @@ pub async fn admin_webhooks_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    Query(params): Query<WebhookListParams>,
+    DedupQuery(params): DedupQuery<WebhookListParams>,
 ) -> Response {
     let flash_message = params.flash.as_deref().map(|f| match f {
         "created" => "Webhook created.".to_string(),

@@ -76,7 +76,7 @@ struct RealmListTemplate {
 pub async fn admin_realms_list(
     State(state): State<Arc<WebState>>,
     RequireAdmin(session): RequireAdmin,
-    Query(params): Query<RealmListParams>,
+    DedupQuery(params): DedupQuery<RealmListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
     let sort_field = params.sort_field();

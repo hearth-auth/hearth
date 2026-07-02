@@ -54,6 +54,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   as one unit, and pagination links carry the full `q`+`sort`+`dir` (and session
   `status`) state, so the three controls always agree. Applies to users, realms,
   groups, organizations, webhooks, sessions, and identity providers (HEA-1615).
+- **Admin tables: sorting no longer 400s when a search term is active.** Clicking a
+  sort header while the search box was populated sent the `q` parameter several times
+  (htmx `hx-include` repeats it), which the stock query-string parser rejected with
+  `400 Bad Request` — so the sort silently did nothing. Admin list endpoints now
+  tolerate duplicated query keys (keeping the last value), so sort, search, and
+  pagination compose in any order (HEA-1615).
 - **Performance: point lookups no longer scan the whole realm.** `StorageEngine::get`
   fell through to an `iter_realm` linear scan of the active memtable, cloning and
   scanning every entry in the realm on each key lookup. On a freshly-seeded

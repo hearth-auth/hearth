@@ -106,7 +106,7 @@ pub async fn admin_idp_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    Query(params): Query<IdpListParams>,
+    DedupQuery(params): DedupQuery<IdpListParams>,
 ) -> Response {
     let realm_name = target.0.name().to_string();
     let sort_field_str = params.sort.clone().unwrap_or_default();

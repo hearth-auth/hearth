@@ -74,7 +74,7 @@ pub async fn admin_groups_list(
     RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
-    Query(params): Query<GroupListParams>,
+    DedupQuery(params): DedupQuery<GroupListParams>,
 ) -> Response {
     let search_query = params.q.clone().unwrap_or_default();
     let sort_field = params.sort_field();
