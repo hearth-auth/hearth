@@ -254,6 +254,7 @@ async fn test_restore_preserves_signing_keys() {
         fid: None,
         scope: None,
         nonce: None,
+        azp: None,
         cnf: None,
         roles: Vec::new(),
         groups: Vec::new(),

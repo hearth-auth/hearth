@@ -247,6 +247,13 @@ pub struct TokenClaims {
     /// authorization request, the ID token MUST include it unmodified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
+    /// Authorized Party (OIDC Core §2).
+    ///
+    /// The `client_id` of the OAuth 2.0 client to which the ID token was
+    /// issued. REQUIRED when the token has multiple audiences; SHOULD be
+    /// set on all ID tokens for FAPI 2.0 compliance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azp: Option<String>,
     /// DPoP confirmation claim (RFC 7800 / RFC 9449).
     ///
     /// Present only on DPoP-bound access tokens. Contains the JWK thumbprint
@@ -693,6 +700,7 @@ impl SigningKey {
             fid: None,
             scope: request.scope.clone(),
             nonce: None,
+            azp: None,
             cnf: request.dpop_jkt.as_deref().map(|jkt| CnfClaim {
                 jkt: jkt.to_string(),
             }),
@@ -721,6 +729,7 @@ impl SigningKey {
             fid: None,
             scope: None,
             nonce: None,
+            azp: None,
             cnf: None, // DPoP binding is on access tokens only
             roles: Vec::new(),
             groups: Vec::new(),
@@ -1360,6 +1369,7 @@ mod tests {
             fid: None,
             scope: None,
             nonce: None,
+            azp: None,
             cnf: None,
             roles: Vec::new(),
             groups: Vec::new(),

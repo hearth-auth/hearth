@@ -2549,6 +2549,7 @@ impl EmbeddedIdentityEngine {
             fid: Some(fid.to_string()),
             scope: claims.scope.clone(),
             nonce: None,
+            azp: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
             org_groups: claims.org_groups.clone(),
@@ -2576,6 +2577,7 @@ impl EmbeddedIdentityEngine {
             fid: Some(fid.to_string()),
             scope: claims.scope.clone(),
             nonce: None,
+            azp: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
             org_groups: Vec::new(),
@@ -4559,6 +4561,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 fid: None,
                 scope: None,
                 nonce: None,
+                azp: None,
                 roles: Vec::new(),
                 groups: Vec::new(),
                 org_groups: Vec::new(),
@@ -12616,6 +12619,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             fid: subject_claims.fid.clone(),
             scope: Some(effective_scope.clone()),
             nonce: None,
+            azp: None,
             cnf: request
                 .dpop_jkt
                 .as_ref()

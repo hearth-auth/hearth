@@ -1741,7 +1741,27 @@ pub async fn mfa_challenge_submit(
         }
     }
 
-    // MFA passed — create the session.
+    // MFA passed — enforce single-use nonce before creating the session.
+    // If this nonce was already burned (replay), reject and force re-login.
+    {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let nonce = pending.nonce.clone();
+        let mut nonces = state
+            .burned_mfa_nonces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Prune expired entries on each access.
+        nonces.retain(|_, &mut exp| exp > now_secs);
+        if nonces.contains_key(&nonce) {
+            // Nonce already consumed — this is a replayed pending cookie.
+            drop(nonces);
+            return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+        }
+        nonces.insert(nonce, now_secs + super::auth::MFA_PENDING_TTL_SECS as u64);
+    }
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.
     revoke_prior_session_cookie(state.identity.as_ref(), &headers, &state.cookie_secret);

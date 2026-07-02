@@ -387,6 +387,7 @@ impl EmbeddedIdentityEngine {
             fid: None,
             scope: Some(format!("tool.{}.{}", request.tool, request.action)),
             nonce: None,
+            azp: None,
             cnf: None,
             roles: Vec::new(),
             groups: Vec::new(),

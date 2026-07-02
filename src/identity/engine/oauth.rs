@@ -991,6 +991,7 @@ impl EmbeddedIdentityEngine {
             fid: Some(family_id.clone()),
             scope: (!scope_value.is_empty()).then(|| scope_value.clone()),
             nonce: None,
+            azp: None,
             roles: access_roles,
             groups: access_groups,
             org_groups: Vec::new(),
@@ -1021,6 +1022,7 @@ impl EmbeddedIdentityEngine {
             fid: Some(family_id.clone()),
             scope: (!scope_value.is_empty()).then(|| scope_value.clone()),
             nonce: None,
+            azp: None,
             roles: access_claims.roles.clone(),
             groups: access_claims.groups.clone(),
             org_groups: Vec::new(),
@@ -1095,6 +1097,7 @@ impl EmbeddedIdentityEngine {
             fid: None,
             scope: (!scope_value.is_empty()).then(|| scope_value.clone()),
             nonce: stored_code.nonce.clone(),
+            azp: Some(request.client_id.to_string()),
             roles: id_roles,
             groups: id_groups,
             org_groups: Vec::new(),
@@ -1424,6 +1427,7 @@ impl EmbeddedIdentityEngine {
             fid: None,
             scope: scope.clone(),
             nonce: None,
+            azp: None,
             roles: Vec::new(),
             groups: Vec::new(),
             org_groups: Vec::new(),
@@ -1582,6 +1586,7 @@ impl EmbeddedIdentityEngine {
             fid: None,
             scope: scope.clone(),
             nonce: None,
+            azp: None,
             roles: Vec::new(),
             groups: Vec::new(),
             org_groups: Vec::new(),
@@ -2268,6 +2273,7 @@ impl EmbeddedIdentityEngine {
                     fid: None,
                     scope: stored.scope.clone(),
                     nonce: None,
+                    azp: Some(client_id.to_string()),
                     roles: Vec::new(),
                     groups: Vec::new(),
                     org_groups: Vec::new(),
@@ -3833,11 +3839,13 @@ impl EmbeddedIdentityEngine {
         }
 
         // Validate post_logout_redirect_uri against the registering client's list.
+        // When no client_id is provided we cannot validate the URI, so we drop it
+        // to prevent open-redirect (OIDC RP-Initiated Logout 1.0 §3).
         let post_logout_redirect_uri = match &request.post_logout_redirect_uri {
             None => None,
             Some(uri) => {
                 let valid = match &request.client_id {
-                    None => true, // No client specified — accept without validation.
+                    None => false, // No client to validate against — reject unvalidated redirect.
                     Some(cid) => {
                         let client_key = keys::encode_oauth_client(cid);
                         match self.storage.get(realm_id, &client_key) {
