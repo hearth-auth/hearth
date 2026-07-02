@@ -279,6 +279,43 @@ async fn tampered_nonce_is_rejected() {
 }
 
 #[tokio::test]
+async fn absent_nonce_in_id_token_is_rejected() {
+    // Attacker strips the nonce claim from a replayed ID token, or the
+    // upstream provider omits it entirely.  Hearth always sends a nonce;
+    // absence in the token response is treated as tampering (§8 F8).
+    let cfg = oidc_config(&RealmId::generate(), &IdpId::generate(), "g");
+    let state = state_bag_for("expected-nonce");
+    let mut claims = claims_with(
+        &cfg.issuer,
+        serde_json::Value::String(cfg.client_id.clone()),
+        1_700_000_000,
+        "expected-nonce",
+    );
+    claims.nonce = None;
+    let err = verify_id_token_claims(&claims, &cfg, &state, 1_700_000_000).unwrap_err();
+    assert!(matches!(
+        err,
+        IdentityError::FederationTokenVerificationFailed
+    ));
+}
+
+#[tokio::test]
+async fn correct_nonce_in_id_token_is_accepted() {
+    // Baseline: a token carrying the exact nonce we sent must succeed
+    // (guards against regressions that make the check too strict).
+    let cfg = oidc_config(&RealmId::generate(), &IdpId::generate(), "g");
+    let state = state_bag_for("expected-nonce");
+    let claims = claims_with(
+        &cfg.issuer,
+        serde_json::Value::String(cfg.client_id.clone()),
+        1_700_000_000,
+        "expected-nonce",
+    );
+    verify_id_token_claims(&claims, &cfg, &state, 1_700_000_000)
+        .expect("correct nonce must be accepted");
+}
+
+#[tokio::test]
 async fn expired_id_token_beyond_skew_is_rejected() {
     let cfg = oidc_config(&RealmId::generate(), &IdpId::generate(), "g");
     let state = state_bag_for("nnn");

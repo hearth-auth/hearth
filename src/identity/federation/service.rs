@@ -172,6 +172,11 @@ impl FederationService {
                     provider: "transport".to_string(),
                     reason: "connector task panicked".to_string(),
                 })??;
+        // Nonce replay protection (§8 F8): verify_id_token_claims /
+        // verify_apple_claims inside connector.exchange() compare the
+        // ID-token nonce claim against bag.nonce and return
+        // FederationTokenVerificationFailed on mismatch or absence.
+        // Reaching this line means the nonce was already verified.
 
         // 1. Existing link?
         if let Some(user_id) = self.engine.find_user_by_external_identity(
