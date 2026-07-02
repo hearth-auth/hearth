@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **Cross-realm BOLA hardening in REST admin handlers** — introduced `scoped_realm(auth, path_realm_id)`
+  accessor that enforces `auth.realm_id == path_realm_id` (system realm bypasses as superuser) for
+  every endpoint that carries a `{realm_id}` path parameter. Fixes 10 handlers previously vulnerable
+  to Broken Object-Level Authorization: `GET/DELETE /admin/realms/{id}`, `GET/PATCH /admin/realms/{id}/branding`,
+  `GET/PUT/DELETE /admin/realms/{id}/email-templates/{k}`, `POST /admin/realms/{id}/rotate-signing-key`,
+  `POST /admin/realms/{id}/sv-bump-all`. Adds missing `hearth.realm.admin` permission gate to
+  `POST /admin/sessions/{id}/sv-bump`. Audit events for cross-realm mutations now log under the
+  target realm rather than the auth realm (HEA-1649).
+
 ### Added
 - **Users table search grammar + column sort** — the admin users list now supports
   exact (`"alice@acme.com"`), glob (`*@acme.com`, `alice?`), and substring search

@@ -32,7 +32,8 @@ use tracing::error;
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
     identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
-    require_admin_permission, verify_manifest_signature, AppState, BACKUP_RESTORE_BODY_LIMIT,
+    require_admin_permission, verify_manifest_signature, AdminAuth, AppState,
+    BACKUP_RESTORE_BODY_LIMIT,
 };
 
 /// Registers all admin API routes (mounted under `/admin` by the parent router).
@@ -224,6 +225,27 @@ fn require_realm(state: &AppState, realm_id: &RealmId) -> Result<crate::identity
         )
             .into_response()),
         Err(e) => Err(identity_error_to_response(&e).into_response()),
+    }
+}
+
+/// Enforces realm-level object authorization (BOLA guard).
+///
+/// Returns `path_realm_id` when access is permitted:
+/// - The **system realm** (nil UUID) is a superuser that may operate on any realm.
+/// - Otherwise `auth.realm_id` must equal `path_realm_id` exactly.
+///
+/// Returns `403 Forbidden` in all other cases. Every handler that exposes a
+/// `{realm_id}` path parameter **must** obtain the realm through this function
+/// rather than using `path_realm_id` directly.
+fn scoped_realm(auth: &AdminAuth, path_realm_id: RealmId) -> Result<RealmId, Response> {
+    if auth.realm_id.as_uuid().is_nil() || auth.realm_id == path_realm_id {
+        Ok(path_realm_id)
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "forbidden"})),
+        )
+            .into_response())
     }
 }
 
@@ -1007,10 +1029,13 @@ async fn admin_get_realm(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let _auth = match extract_admin_auth(&headers, &state) {
+    let auth = match extract_admin_auth(&headers, &state) {
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
 
     let realm_uuid: uuid::Uuid = match id.parse() {
         Ok(u) => u,
@@ -1023,7 +1048,12 @@ async fn admin_get_realm(
         }
     };
 
-    match state.identity.get_realm(&RealmId::new(realm_uuid)) {
+    let realm_id = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+
+    match state.identity.get_realm(&realm_id) {
         Ok(Some(realm)) => (
             StatusCode::OK,
             Json(proto_to_rest_json(&pb::Realm::from(&realm))),
@@ -1078,7 +1108,10 @@ async fn admin_delete_realm(
         }
     };
 
-    let tid = RealmId::new(realm_uuid);
+    let tid = match scoped_realm(&auth, RealmId::new(realm_uuid)) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
 
     // Check realm status — only Archived realms can be permanently deleted.
     match state.identity.get_realm(&tid) {
@@ -1088,7 +1121,7 @@ async fn admin_delete_realm(
             match state.identity.delete_realm(&tid) {
                 Ok(()) => {
                     let _ = state.audit.append(&CreateAuditEvent {
-                        realm_id: auth.realm_id.clone(),
+                        realm_id: tid.clone(),
                         actor: auth.user_id.as_uuid().to_string(),
                         action: crate::audit::AuditAction::RealmDeleted,
                         resource_type: "realm".to_string(),
@@ -1448,6 +1481,11 @@ async fn admin_rotate_realm_signing_key(
         Err(e) => return e,
     };
 
+    let realm_id = match scoped_realm(&auth, realm_id) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+
     let _ = match require_realm(&state, &realm_id) {
         Ok(r) => r,
         Err(e) => return e,
@@ -1461,7 +1499,7 @@ async fn admin_rotate_realm_signing_key(
     {
         Ok(()) => {
             let _ = state.audit.append(&crate::audit::CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
+                realm_id: realm_id.clone(),
                 actor: auth.user_id.as_uuid().to_string(),
                 action: crate::audit::AuditAction::RealmUpdated,
                 resource_type: "realm".to_string(),
@@ -1523,6 +1561,10 @@ async fn admin_get_realm_branding(
         Ok(r) => r,
         Err(e) => return e,
     };
+    let realm_id = match scoped_realm(&auth, realm_id) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
     let realm = match require_realm(&state, &realm_id) {
         Ok(r) => r,
         Err(e) => return e,
@@ -1557,6 +1599,10 @@ async fn admin_patch_realm_branding(
         return e.into_response();
     }
     let realm_id = match parse_realm_id(&id) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let realm_id = match scoped_realm(&auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1604,7 +1650,7 @@ async fn admin_patch_realm_branding(
     ) {
         Ok(updated) => {
             let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
+                realm_id: realm_id.clone(),
                 actor: auth.user_id.as_uuid().to_string(),
                 action: crate::audit::AuditAction::RealmUpdated,
                 resource_type: "realm".to_string(),
@@ -1632,10 +1678,18 @@ async fn admin_list_realm_email_templates(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(e) = extract_admin_auth(&headers, &state) {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
     let realm_id = match parse_realm_id(&id) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let realm_id = match scoped_realm(&auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1652,10 +1706,18 @@ async fn admin_get_realm_email_template(
     headers: HeaderMap,
     Path((id, kind)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    if let Err(e) = extract_admin_auth(&headers, &state) {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
     let realm_id = match parse_realm_id(&id) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let realm_id = match scoped_realm(&auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1691,6 +1753,10 @@ async fn admin_put_realm_email_template(
         return e.into_response();
     }
     let realm_id = match parse_realm_id(&id) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let realm_id = match scoped_realm(&auth, realm_id) {
         Ok(r) => r,
         Err(e) => return e,
     };
@@ -1750,7 +1816,7 @@ async fn admin_put_realm_email_template(
     ) {
         Ok(updated) => {
             let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
+                realm_id: realm_id.clone(),
                 actor: auth.user_id.as_uuid().to_string(),
                 action: crate::audit::AuditAction::RealmUpdated,
                 resource_type: "realm".to_string(),
@@ -1785,6 +1851,10 @@ async fn admin_delete_realm_email_template(
         Ok(r) => r,
         Err(e) => return e,
     };
+    let realm_id = match scoped_realm(&auth, realm_id) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
     let realm = match require_realm(&state, &realm_id) {
         Ok(r) => r,
         Err(e) => return e,
@@ -1808,7 +1878,7 @@ async fn admin_delete_realm_email_template(
     ) {
         Ok(_) => {
             let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id.clone(),
+                realm_id: realm_id.clone(),
                 actor: auth.user_id.as_uuid().to_string(),
                 action: crate::audit::AuditAction::RealmUpdated,
                 resource_type: "realm".to_string(),
@@ -4226,6 +4296,9 @@ async fn admin_sv_bump_session(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
 
     let uuid = match uuid::Uuid::parse_str(&session_id_str) {
         Ok(u) => u,
@@ -4275,7 +4348,11 @@ async fn admin_sv_bump_all(
     headers: HeaderMap,
     Path(realm_id_str): Path<String>,
 ) -> Response {
-    if let Err(e) = extract_admin_auth(&headers, &state) {
+    let auth = match extract_admin_auth(&headers, &state) {
+        Ok(a) => a,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
         return e.into_response();
     }
 
@@ -4289,7 +4366,10 @@ async fn admin_sv_bump_all(
                 .into_response()
         }
     };
-    let realm_id = RealmId::new(uuid);
+    let realm_id = match scoped_realm(&auth, RealmId::new(uuid)) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
 
     let result = tokio::task::spawn_blocking({
         let identity = Arc::clone(&state.identity);
