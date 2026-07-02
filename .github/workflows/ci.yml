@@ -53,6 +53,7 @@ jobs:
       docs-only: ${{ steps.filter.outputs.docs-only }}
       abuse-coverage: ${{ steps.filter.outputs.abuse-coverage }}
       ldap: ${{ steps.filter.outputs.ldap }}
+      deny: ${{ steps.filter.outputs.deny }}
 
     steps:
       - name: Checkout
@@ -139,6 +140,11 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+            deny:
+              - 'deny.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
 
       - name: Summarize filter results
         run: |
@@ -157,6 +163,7 @@ jobs:
             echo "| docs-only | ${{ steps.filter.outputs.docs-only }} |"
             echo "| abuse-coverage | ${{ steps.filter.outputs.abuse-coverage }} |"
             echo "| ldap | ${{ steps.filter.outputs.ldap }} |"
+            echo "| deny | ${{ steps.filter.outputs.deny }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # HEA-858: static guard against committing real secret material.
@@ -667,6 +674,40 @@ jobs:
             echo "| AC-7: write contention, 2 leadership changes | cluster_chaos.rs |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ── Dependency advisory gate (HEA-1652) ─────────────────────────────────────
+  #
+  # Dedicated cargo-deny job so advisory/license/ban violations appear as their
+  # own named CI check rather than being buried in the 30-minute quality job.
+  #
+  # Gated on the `deny` filter (deny.toml, Cargo.toml, Cargo.lock) so it only
+  # runs when dependency state actually changes. Always runs on pushes to main
+  # and schedule events (security.yml's weekly cron also fires cargo-deny, but
+  # that workflow does not feed required-summary — this one does).
+  #
+  # No Rust build needed: cargo-deny reads Cargo.lock and deny.toml directly.
+  # Runtime is ~30 s vs ~25 min for the full quality job.
+
+  cargo-deny:
+    name: cargo-deny (advisories + licenses + bans)
+    needs: filter
+    if: (needs.filter.result == 'success' && needs.filter.outputs.deny == 'true') || github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check (advisories + licenses + bans)
+        run: cargo deny check
+
   # ── Required-summary gate (HEA-693) ──────────────────────────────────────────
   #
   # Branch protection requires ONLY this job for the CI workflow. It always runs
@@ -684,7 +725,7 @@ jobs:
   required-summary:
     name: required-summary
     if: always()
-    needs: [filter, quality, ui, sdk-node, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos]
+    needs: [filter, quality, ui, sdk-node, sdk-conformance, abuse-coverage, ldap-integration, cluster-chaos, cargo-deny]
     runs-on: ubuntu-latest
     timeout-minutes: 1
 
@@ -699,9 +740,10 @@ jobs:
           ABUSE_COVERAGE: ${{ needs.abuse-coverage.result }}
           LDAP_INTEGRATION: ${{ needs.ldap-integration.result }}
           CLUSTER_CHAOS: ${{ needs.cluster-chaos.result }}
+          CARGO_DENY: ${{ needs.cargo-deny.result }}
         run: |
-          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS"
-          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS"; do
+          echo "filter=$FILTER quality=$QUALITY ui=$UI sdk-node=$SDK_NODE sdk-conformance=$SDK_CONFORMANCE abuse-coverage=$ABUSE_COVERAGE ldap-integration=$LDAP_INTEGRATION cluster-chaos=$CLUSTER_CHAOS cargo-deny=$CARGO_DENY"
+          for result in "$FILTER" "$QUALITY" "$UI" "$SDK_NODE" "$SDK_CONFORMANCE" "$ABUSE_COVERAGE" "$LDAP_INTEGRATION" "$CLUSTER_CHAOS" "$CARGO_DENY"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "A required job failed or was cancelled."
               exit 1
