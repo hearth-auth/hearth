@@ -3,7 +3,7 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-use super::xml::{attr, escape_attr, is_element, ns, parse_err};
+use super::xml::{attr, escape_attr, is_element, ns, parse_err, resolve_entity_ref, unescape_text};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 
@@ -98,10 +98,17 @@ pub fn parse_authn_request(xml: &[u8]) -> Result<AuthnRequest, IdentityError> {
                 }
             }
             Ok(Event::Text(t)) if in_issuer => {
-                if let Ok(s) = t.unescape() {
-                    issuer = Some(s.into_owned());
+                if let Ok(s) = unescape_text(&t) {
+                    issuer.get_or_insert_with(String::new).push_str(&s);
                 }
-                in_issuer = false;
+            }
+            Ok(Event::GeneralRef(r)) if in_issuer => {
+                // quick-xml 0.41 splits `&amp;`-style references out of the
+                // surrounding text; accumulate the resolved character so an
+                // escaped Issuer value is not truncated.
+                issuer
+                    .get_or_insert_with(String::new)
+                    .push_str(&resolve_entity_ref(&r)?);
             }
             Ok(Event::End(_)) => {
                 in_issuer = false;

@@ -47,6 +47,22 @@ fn parse_realm_id(raw: &str) -> Result<RealmId, Status> {
         .map_err(|_| Status::invalid_argument("invalid realm_id"))
 }
 
+/// Asserts that the optional body `realm_id` field matches the authenticated
+/// realm.  If the body supplies a non-empty value that differs from the
+/// `x-realm-id` header used for authentication, the call is rejected with
+/// `PERMISSION_DENIED`.  An empty body field is silently accepted (the
+/// authenticated realm is always authoritative).
+fn assert_realm_matches(auth_realm: &RealmId, body_realm_id: &str) -> Result<(), Status> {
+    if body_realm_id.is_empty() {
+        return Ok(());
+    }
+    let body_realm = parse_realm_id(body_realm_id)?;
+    if body_realm.as_uuid() != auth_realm.as_uuid() {
+        return Err(Status::new(Code::PermissionDenied, "realm_id mismatch"));
+    }
+    Ok(())
+}
+
 fn parse_role_id(raw: &str) -> Result<RoleId, Status> {
     let s = raw.strip_prefix("role_").unwrap_or(raw);
     uuid::Uuid::parse_str(s)
@@ -209,9 +225,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListRolesRequest>,
     ) -> Result<Response<pb::ListRolesResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let cursor = if inner.cursor.is_empty() {
             None
         } else {
@@ -232,9 +249,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::CreateRoleRequest>,
     ) -> Result<Response<pb::Role>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let permissions = permissions_from_strings(&inner.permissions)?;
         let parent_roles = parent_role_ids_from_strings(&inner.parent_role_ids)?;
         let description = if inner.description.is_empty() {
@@ -263,9 +281,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::GetRoleRequest>,
     ) -> Result<Response<pb::Role>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let role_id = parse_role_id(&inner.role_id)?;
         match self
             .state
@@ -282,9 +301,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::UpdateRoleRequest>,
     ) -> Result<Response<pb::Role>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let role_id = parse_role_id(&inner.role_id)?;
         // The proto uses "empty string = unchanged" semantics for name/description
         // and "always replace" semantics for permissions/parent_role_ids.
@@ -323,9 +343,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::DeleteRoleRequest>,
     ) -> Result<Response<pb::DeleteRoleResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let role_id = parse_role_id(&inner.role_id)?;
         self.state
             .rbac
@@ -338,9 +359,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListGroupsRequest>,
     ) -> Result<Response<pb::ListGroupsResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         // cursor repurposed as decimal offset for backward compat
         let offset: u64 = if inner.cursor.is_empty() {
             0
@@ -369,9 +391,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::CreateGroupRequest>,
     ) -> Result<Response<pb::Group>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let description = if inner.description.is_empty() {
             None
         } else {
@@ -396,9 +419,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::GetGroupRequest>,
     ) -> Result<Response<pb::Group>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         match self
             .state
@@ -415,9 +439,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::UpdateGroupRequest>,
     ) -> Result<Response<pb::Group>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         let name = if inner.name.is_empty() {
             None
@@ -454,9 +479,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::DeleteGroupRequest>,
     ) -> Result<Response<pb::DeleteGroupResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         self.state
             .rbac
@@ -469,9 +495,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListGroupMembersRequest>,
     ) -> Result<Response<pb::ListGroupMembersResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         let cursor = if inner.cursor.is_empty() {
             None
@@ -493,9 +520,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::AddGroupMemberRequest>,
     ) -> Result<Response<pb::GroupMembership>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         let member_proto = inner
             .member
@@ -522,9 +550,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::RemoveGroupMemberRequest>,
     ) -> Result<Response<pb::RemoveGroupMemberResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         let member_proto = inner
             .member
@@ -541,9 +570,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::AssignUserRoleRequest>,
     ) -> Result<Response<pb::RoleAssignment>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let role_id = parse_role_id(&inner.role_id)?;
         let scope = proto_to_scope(inner.scope.as_ref())?;
@@ -567,9 +597,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::UnassignUserRoleRequest>,
     ) -> Result<Response<pb::UnassignUserRoleResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let aid = parse_assignment_id(&inner.assignment_id)?;
         self.state
             .rbac
@@ -582,9 +613,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListUserAssignmentsRequest>,
     ) -> Result<Response<pb::ListUserAssignmentsResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let assignments = self
             .state
@@ -600,9 +632,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::AssignGroupRoleRequest>,
     ) -> Result<Response<pb::RoleAssignment>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let group_id = parse_group_id(&inner.group_id)?;
         let role_id = parse_role_id(&inner.role_id)?;
         let scope = proto_to_scope(inner.scope.as_ref())?;
@@ -626,9 +659,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::UnassignGroupRoleRequest>,
     ) -> Result<Response<pb::UnassignGroupRoleResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let aid = parse_assignment_id(&inner.assignment_id)?;
         self.state
             .rbac
@@ -641,9 +675,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListRoleMembersRequest>,
     ) -> Result<Response<pb::ListRoleMembersResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let role_id = parse_role_id(&inner.role_id)?;
         let cursor = if inner.cursor.is_empty() {
             None
@@ -681,9 +716,10 @@ impl RbacAdminService for RbacAdminSvc {
     ) -> Result<Response<pb::GrantUserPermissionResponse>, Status> {
         use crate::core::Timestamp;
         use crate::rbac::UserPermissionGrant;
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let permission = Permission::new(inner.permission.clone())
             .map_err(|r| Status::invalid_argument(format!("invalid permission: {r}")))?;
@@ -721,9 +757,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::RevokeUserPermissionRequest>,
     ) -> Result<Response<pb::RevokeUserPermissionResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let permission = Permission::new(inner.permission.clone())
             .map_err(|r| Status::invalid_argument(format!("invalid permission: {r}")))?;
@@ -748,9 +785,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListUserPermissionsRequest>,
     ) -> Result<Response<pb::ListUserPermissionsResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let grants = self
             .state
@@ -786,9 +824,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::AddAdditionalRoleRequest>,
     ) -> Result<Response<pb::AddAdditionalRoleResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let org_stripped = inner.org_id.strip_prefix("org_").unwrap_or(&inner.org_id);
         let org_uuid = uuid::Uuid::parse_str(org_stripped)
             .map_err(|_| Status::invalid_argument("invalid org_id"))?;
@@ -816,9 +855,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::RemoveAdditionalRoleRequest>,
     ) -> Result<Response<pb::RemoveAdditionalRoleResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let org_stripped = inner.org_id.strip_prefix("org_").unwrap_or(&inner.org_id);
         let org_uuid = uuid::Uuid::parse_str(org_stripped)
             .map_err(|_| Status::invalid_argument("invalid org_id"))?;
@@ -835,9 +875,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListAdditionalRolesRequest>,
     ) -> Result<Response<pb::ListAdditionalRolesResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let org_stripped = inner.org_id.strip_prefix("org_").unwrap_or(&inner.org_id);
         let org_uuid = uuid::Uuid::parse_str(org_stripped)
             .map_err(|_| Status::invalid_argument("invalid org_id"))?;
@@ -857,9 +898,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListRealmPermissionsRequest>,
     ) -> Result<Response<pb::ListRealmPermissionsResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let cursor = if inner.cursor.is_empty() {
             None
         } else {
@@ -894,9 +936,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListRealmRolesRequest>,
     ) -> Result<Response<pb::ListRealmRolesResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let cursor = if inner.cursor.is_empty() {
             None
         } else {
@@ -933,9 +976,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ResolveEffectivePermissionsRequest>,
     ) -> Result<Response<pb::ResolveEffectivePermissionsResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let org_id = if inner.org_id.is_empty() {
             None
@@ -976,9 +1020,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::RevokeConsentRequest>,
     ) -> Result<Response<pb::RevokeConsentResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let client_uuid = uuid::Uuid::parse_str(&inner.client_id)
             .map_err(|_| Status::new(Code::InvalidArgument, "invalid client_id"))?;
@@ -995,9 +1040,10 @@ impl RbacAdminService for RbacAdminSvc {
         &self,
         req: Request<pb::ListUserConsentsRequest>,
     ) -> Result<Response<pb::ListUserConsentsResponse>, Status> {
-        let _auth = authenticate_admin(req.metadata(), &self.state)?;
+        let auth = authenticate_admin(req.metadata(), &self.state)?;
         let inner = req.into_inner();
-        let realm_id = parse_realm_id(&inner.realm_id)?;
+        assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
+        let realm_id = auth.realm_id;
         let user_id = parse_user_id(&inner.user_id)?;
         let entries = self
             .state

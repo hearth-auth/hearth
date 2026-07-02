@@ -25,6 +25,14 @@ pub enum WebhookError {
     /// The signing secret is too short.
     #[error("secret too short: minimum 16 bytes")]
     SecretTooShort,
+
+    /// The webhook destination resolves to a private/reserved IP address.
+    ///
+    /// Raised by the SSRF guard (F3/HEA-1651) when the target hostname
+    /// resolves to loopback, RFC 1918, link-local, ULA, or cloud metadata
+    /// ranges, or when DNS resolution itself fails.
+    #[error("blocked destination: {reason}")]
+    BlockedDestination { reason: String },
 }
 
 impl From<crate::storage::StorageError> for WebhookError {

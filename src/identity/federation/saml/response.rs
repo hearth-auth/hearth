@@ -5,7 +5,9 @@ use quick_xml::Reader;
 use std::collections::BTreeMap;
 
 use super::authn_request::{format_xsd_datetime, parse_xsd_datetime};
-use super::xml::{attr, escape_attr, escape_text, is_element, ns, parse_err};
+use super::xml::{
+    attr, escape_attr, escape_text, is_element, ns, parse_err, resolve_entity_ref, unescape_text,
+};
 use crate::core::Timestamp;
 use crate::identity::error::IdentityError;
 use crate::identity::federation::saml::SamlError;
@@ -134,6 +136,11 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
     let mut attr_name: Option<String> = None;
     let mut attr_values: Vec<String> = Vec::new();
     let mut capturing_text: Option<TextTarget> = None;
+    // Text content is accumulated here across `Text`/`GeneralRef` events and
+    // committed to `capturing_text`'s target when the element closes. quick-xml
+    // 0.41 tokenizes `&amp;`-style references into standalone `GeneralRef`
+    // events, so a single value may span several events.
+    let mut text_buf = String::new();
 
     // A-35: cap XML event count to prevent resource exhaustion from
     // crafted responses with thousands of elements (no DTD required).
@@ -147,6 +154,10 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
         }
         match ev {
             Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
+                // A new element closes any capture window left dangling by a
+                // self-closing capturing element (which emits no `End`).
+                capturing_text = None;
+                text_buf.clear();
                 if is_element(e, ns::SAMLP, "Response") {
                     response_id = attr(e, "ID");
                     in_response_to = attr(e, "InResponseTo");
@@ -201,31 +212,42 @@ pub fn parse_response(xml: &[u8]) -> Result<SamlResponse, IdentityError> {
                     capturing_text = Some(TextTarget::AttributeValue);
                 }
             }
-            Ok(Event::Text(t)) => {
-                if let Some(target) = capturing_text.take() {
-                    let val = t.unescape().map(|s| s.into_owned()).unwrap_or_default();
-                    match target {
-                        TextTarget::ResponseIssuer => response_issuer = Some(val),
-                        TextTarget::AssertionIssuer => {
-                            if let Some(ref mut a) = current {
-                                a.issuer = val;
-                            }
-                        }
-                        TextTarget::SubjectNameId => {
-                            if let Some(ref mut a) = current {
-                                a.subject_name_id = Some(val);
-                            }
-                        }
-                        TextTarget::Audience => {
-                            if let Some(ref mut a) = current {
-                                a.audience = Some(val);
-                            }
-                        }
-                        TextTarget::AttributeValue => attr_values.push(val),
-                    }
+            Ok(Event::Text(t)) if capturing_text.is_some() => {
+                if let Ok(s) = unescape_text(&t) {
+                    text_buf.push_str(&s);
                 }
             }
+            Ok(Event::GeneralRef(r)) if capturing_text.is_some() => {
+                text_buf.push_str(&resolve_entity_ref(&r)?);
+            }
             Ok(Event::End(e)) => {
+                // Commit any captured text to its target. Empty content is not
+                // committed, matching the pre-0.41 single-`Text`-event behavior.
+                if let Some(target) = capturing_text.take() {
+                    if !text_buf.is_empty() {
+                        let val = std::mem::take(&mut text_buf);
+                        match target {
+                            TextTarget::ResponseIssuer => response_issuer = Some(val),
+                            TextTarget::AssertionIssuer => {
+                                if let Some(ref mut a) = current {
+                                    a.issuer = val;
+                                }
+                            }
+                            TextTarget::SubjectNameId => {
+                                if let Some(ref mut a) = current {
+                                    a.subject_name_id = Some(val);
+                                }
+                            }
+                            TextTarget::Audience => {
+                                if let Some(ref mut a) = current {
+                                    a.audience = Some(val);
+                                }
+                            }
+                            TextTarget::AttributeValue => attr_values.push(val),
+                        }
+                    }
+                    text_buf.clear();
+                }
                 let nm = e.name();
                 let name_bytes = nm.as_ref();
                 if name_bytes.ends_with(b":Attribute") || name_bytes == b"Attribute" {
@@ -403,6 +425,44 @@ mod tests {
         assert_eq!(a.id, "_a1");
         assert_eq!(a.subject_name_id.as_deref(), Some("alice@example.com"));
         assert_eq!(a.audience.as_deref(), Some("https://sp.example"));
+    }
+
+    /// quick-xml 0.41 tokenizes `&amp;`-style references into standalone
+    /// `GeneralRef` events, splitting text runs. A value like an Issuer URI or
+    /// a NameID that contains an escaped character must still be parsed in full
+    /// — the pre-upgrade "capture the first Text event" logic would truncate at
+    /// the entity. This guards that regression.
+    #[test]
+    fn parse_preserves_escaped_entities_in_text() {
+        let xml = concat!(
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" "#,
+            r#"xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r1" "#,
+            r#"IssueInstant="2023-11-14T00:00:00Z">"#,
+            r#"<saml:Issuer>https://idp.example/sso?a=1&amp;b=2</saml:Issuer>"#,
+            r#"<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>"#,
+            r#"<saml:Assertion ID="_a1">"#,
+            r#"<saml:Issuer>https://idp.example/sso?a=1&amp;b=2</saml:Issuer>"#,
+            r#"<saml:Subject><saml:NameID "#,
+            r#"Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">"#,
+            r#"a&amp;b@example.com</saml:NameID></saml:Subject>"#,
+            r#"<saml:Conditions NotBefore="2023-11-14T00:00:00Z" NotOnOrAfter="2023-11-14T01:00:00Z">"#,
+            r#"<saml:AudienceRestriction><saml:Audience>https://sp.example/?x=1&amp;y=2</saml:Audience>"#,
+            r#"</saml:AudienceRestriction></saml:Conditions>"#,
+            r#"<saml:AttributeStatement><saml:Attribute Name="dept">"#,
+            r#"<saml:AttributeValue>R&amp;D &lt;core&gt;</saml:AttributeValue>"#,
+            r#"</saml:Attribute></saml:AttributeStatement>"#,
+            r#"</saml:Assertion></samlp:Response>"#,
+        );
+        let parsed = parse_response(xml.as_bytes()).expect("parse");
+        assert_eq!(parsed.issuer, "https://idp.example/sso?a=1&b=2");
+        let a = &parsed.assertions[0];
+        assert_eq!(a.issuer, "https://idp.example/sso?a=1&b=2");
+        assert_eq!(a.subject_name_id.as_deref(), Some("a&b@example.com"));
+        assert_eq!(a.audience.as_deref(), Some("https://sp.example/?x=1&y=2"));
+        assert_eq!(
+            a.attributes.get("dept").map(Vec::as_slice),
+            Some(["R&D <core>".to_string()].as_slice())
+        );
     }
 
     #[test]

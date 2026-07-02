@@ -871,6 +871,17 @@ mod tests {
     }
 
     #[test]
+    fn apple_claims_reject_absent_nonce() {
+        // Apple always echoes the nonce we send. Absence means the token
+        // was tampered with or produced by a non-compliant provider — reject.
+        let cfg = sample_apple_config_for_claims();
+        let state = sample_state("expected");
+        let mut claims = sample_apple_claims("expected", 1_700_000_000);
+        claims.nonce = None;
+        assert!(verify_apple_claims(&claims, &cfg, &state, 1_700_000_000).is_err());
+    }
+
+    #[test]
     fn email_verified_handles_string_true() {
         let claims = AppleIdTokenClaims {
             iss: "i".to_string(),

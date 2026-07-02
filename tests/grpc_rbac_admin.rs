@@ -23,7 +23,7 @@ use tonic::Request;
 
 struct GrpcCtx {
     // Holds engine lifetimes alive for the service under test.
-    _h: common::TestHarness,
+    h: common::TestHarness,
     realm: RealmId,
     token: String,
     svc: RbacAdminSvc,
@@ -84,7 +84,7 @@ async fn grpc_ctx_with_admin(with_admin: bool) -> GrpcCtx {
     let svc = RbacAdminSvc::new(state);
 
     GrpcCtx {
-        _h: h,
+        h,
         realm,
         token,
         svc,
@@ -251,4 +251,89 @@ async fn admin_tampered_unsigned_claim_returns_unauthenticated() {
         .await
         .expect_err("tampered token must fail");
     assert_eq!(status.code(), tonic::Code::Unauthenticated);
+}
+
+// --- BOLA regression tests (HEA-1650) --------------------------------------
+//
+// Before the fix every handler discarded the authenticated realm and used the
+// body's `realm_id` instead, allowing realm-A credentials to write into
+// realm-B by setting `realm_id` to realm-B's UUID.  After the fix the body
+// realm must match the authenticated realm or the call returns PermissionDenied.
+
+/// Realm-A admin token + realm-B `realm_id` in body → `create_group` must be rejected.
+#[tokio::test]
+async fn bola_cross_realm_create_group_rejected() {
+    let ctx = grpc_ctx().await;
+    let realm_b = ctx.h.create_realm();
+
+    let status = ctx
+        .svc
+        .create_group(req(
+            &ctx,
+            pb::CreateGroupRequest {
+                realm_id: realm_b.as_uuid().to_string(), // attacker targets realm B
+                name: "attacker-group".into(),
+                slug: "attacker-group".into(),
+                description: String::new(),
+            },
+        ))
+        .await
+        .expect_err("cross-realm create_group must be rejected");
+    assert_eq!(
+        status.code(),
+        tonic::Code::PermissionDenied,
+        "expected PermissionDenied for cross-realm request, got: {status:?}"
+    );
+}
+
+/// Realm-A admin token + realm-B `realm_id` in body → `create_role` must be rejected.
+#[tokio::test]
+async fn bola_cross_realm_create_role_rejected() {
+    let ctx = grpc_ctx().await;
+    let realm_b = ctx.h.create_realm();
+
+    let status = ctx
+        .svc
+        .create_role(req(
+            &ctx,
+            pb::CreateRoleRequest {
+                realm_id: realm_b.as_uuid().to_string(), // attacker targets realm B
+                name: "attacker-role".into(),
+                description: String::new(),
+                permissions: vec![],
+                parent_role_ids: vec![],
+            },
+        ))
+        .await
+        .expect_err("cross-realm create_role must be rejected");
+    assert_eq!(
+        status.code(),
+        tonic::Code::PermissionDenied,
+        "expected PermissionDenied for cross-realm request, got: {status:?}"
+    );
+}
+
+/// Realm-A admin token + realm-B `realm_id` in body → `list_roles` must be rejected.
+#[tokio::test]
+async fn bola_cross_realm_list_roles_rejected() {
+    let ctx = grpc_ctx().await;
+    let realm_b = ctx.h.create_realm();
+
+    let status = ctx
+        .svc
+        .list_roles(req(
+            &ctx,
+            pb::ListRolesRequest {
+                realm_id: realm_b.as_uuid().to_string(), // attacker targets realm B
+                cursor: String::new(),
+                limit: 0,
+            },
+        ))
+        .await
+        .expect_err("cross-realm list_roles must be rejected");
+    assert_eq!(
+        status.code(),
+        tonic::Code::PermissionDenied,
+        "expected PermissionDenied for cross-realm request, got: {status:?}"
+    );
 }

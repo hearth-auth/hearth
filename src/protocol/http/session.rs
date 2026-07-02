@@ -123,8 +123,14 @@ async fn end_session(
     let result = match state.identity.initiate_logout(&realm_id, &request) {
         Ok(r) => r,
         Err(crate::identity::IdentityError::SessionNotFound) => {
-            // Session already gone — still redirect cleanly.
-            return end_session_redirect(params.post_logout_redirect_uri, params.state);
+            // Session already gone. Do NOT redirect to post_logout_redirect_uri here —
+            // we cannot validate it without a known client, so accepting it would be
+            // an open redirect (OIDC RP-Initiated Logout 1.0 §3).
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({"message": "logged out"})),
+            )
+                .into_response();
         }
         Err(crate::identity::IdentityError::InvalidToken) => {
             return (

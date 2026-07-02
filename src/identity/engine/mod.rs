@@ -469,20 +469,19 @@ pub struct EmbeddedIdentityEngine {
     // INVARIANT: guard is always released inside a scoped block before any I/O or storage call.
     realm_saml_keys: Mutex<HashMap<String, Arc<crate::identity::tokens::RsaSigningKey>>>,
     /// Server-wide RSA-2048 signing key advertised at `/certs` for RS256
-    /// (HEA-51 / OIDC M1).
+    /// (HEA-51 / OIDC M1, HEA-1655).
     ///
     /// Lazily initialized on first JWKS access — RSA keygen is slow
     /// (~0.5-1s), so we don't pay that cost in tests that never touch
-    /// `/certs` or in startup paths that don't need OIDC. The key has
-    /// the same lifetime as the engine instance (in-memory only in M1);
-    /// persistent storage + rotation are deferred to follow-ups.
+    /// `/certs` or in startup paths that don't need OIDC. The key is
+    /// persisted under `sys:oidc:rsa:key` in the system realm so the `kid`
+    /// survives restarts (HEA-1655).
     oidc_rsa_key: std::sync::OnceLock<Arc<crate::identity::tokens::RsaSigningKey>>,
     /// Server-wide ECDSA P-256 signing key advertised at `/certs` for
     /// ES256 (HEA-51 / OIDC M1).
     ///
-    /// Same lazy/in-memory caveats as `oidc_rsa_key`. EC keygen is fast
-    /// but we follow the same pattern for symmetry and to keep both keys'
-    /// initialization order coupled to the first JWKS request.
+    /// Lazily initialized on first JWKS access. EC keygen is fast but we
+    /// follow the same OnceLock pattern as `oidc_rsa_key` for symmetry.
     oidc_ecdsa_key: std::sync::OnceLock<Arc<crate::identity::tokens::EcdsaSigningKey>>,
     /// Per-user failed attempt trackers for rate limiting.
     ///
@@ -2550,6 +2549,7 @@ impl EmbeddedIdentityEngine {
             fid: Some(fid.to_string()),
             scope: claims.scope.clone(),
             nonce: None,
+            azp: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
             org_groups: claims.org_groups.clone(),
@@ -2577,6 +2577,7 @@ impl EmbeddedIdentityEngine {
             fid: Some(fid.to_string()),
             scope: claims.scope.clone(),
             nonce: None,
+            azp: None,
             roles: claims.roles.clone(),
             groups: claims.groups.clone(),
             org_groups: Vec::new(),
@@ -4560,6 +4561,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 fid: None,
                 scope: None,
                 nonce: None,
+                azp: None,
                 roles: Vec::new(),
                 groups: Vec::new(),
                 org_groups: Vec::new(),
@@ -6379,14 +6381,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn jwks(&self) -> JwksDocument {
         let mut keys = vec![self.signing_key.to_jwk()];
         // RS256 + ES256 advertised for ecosystem compatibility per
-        // ARCHITECTURE.md §8.1 and HEA-51 OIDC M1. Lazily generated on
-        // first JWKS access; failures here would only fire if `ring`
-        // entropy collection failed, which is unrecoverable. We log and
+        // ARCHITECTURE.md §8.1 and HEA-51 OIDC M1. Persisted in storage so
+        // the `kid` survives restarts (HEA-1655). Failures here would only
+        // fire if `ring` entropy collection or storage I/O failed; we log and
         // serve a partial JWKS rather than 500 the endpoint.
         match self.oidc_rsa_jwk() {
             Ok(jwk) => keys.push(jwk),
             Err(err) => tracing::error!(error = %err, "failed to materialize RS256 JWKS entry"),
         }
+        // Include retiring OIDC RSA keys that are still within their grace
+        // window so tokens signed before an explicit rotation remain
+        // verifiable (HEA-1655).
+        keys.extend(self.oidc_rsa_retiring_jwks());
         match self.oidc_ecdsa_jwk() {
             Ok(jwk) => keys.push(jwk),
             Err(err) => tracing::error!(error = %err, "failed to materialize ES256 JWKS entry"),
@@ -12613,6 +12619,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             fid: subject_claims.fid.clone(),
             scope: Some(effective_scope.clone()),
             nonce: None,
+            azp: None,
             cnf: request
                 .dpop_jkt
                 .as_ref()
@@ -18385,6 +18392,206 @@ mod tests {
         assert_eq!(
             secret1, secret2,
             "nonce secret must survive a server restart"
+        );
+    }
+
+    // ===== HEA-1655: OIDC RSA key persistence + JWKS grace window =====
+
+    #[test]
+    fn oidc_rsa_kid_survives_engine_restart() {
+        // Rebuild the engine from the same storage path to simulate a restart.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_cfg = StorageConfig::dev(dir.path().to_path_buf());
+
+        let make_engine = |cfg: StorageConfig, ts: i64| {
+            let storage =
+                Arc::new(EmbeddedStorageEngine::open(cfg).expect("open")) as Arc<dyn StorageEngine>;
+            let clock = Arc::new(FakeClock::new(Timestamp::from_micros(ts))) as Arc<dyn Clock>;
+            let audit = Arc::new(EmbeddedAuditEngine::new(
+                Arc::clone(&storage),
+                Arc::clone(&clock),
+            ));
+            EmbeddedIdentityEngine::new(
+                storage,
+                clock,
+                IdentityConfig {
+                    credential: CredentialConfig::fast_for_testing(),
+                    ..IdentityConfig::default()
+                },
+                audit as Arc<dyn AuditEngine>,
+            )
+            .expect("engine")
+        };
+
+        // First engine: trigger RSA key generation + WAL persist via jwks().
+        let engine1 = make_engine(storage_cfg.clone(), 1_000_000);
+        let jwks1 = engine1.jwks();
+        let rsa_kid1 = jwks1
+            .keys
+            .iter()
+            .find(|k| k.kty == "RSA")
+            .map(|k| k.kid.clone())
+            .expect("RS256 key must appear in JWKS");
+        drop(engine1);
+
+        // Second engine from same storage — simulates a server restart.
+        let engine2 = make_engine(storage_cfg, 2_000_000);
+        let jwks2 = engine2.jwks();
+        let rsa_kid2 = jwks2
+            .keys
+            .iter()
+            .find(|k| k.kty == "RSA")
+            .map(|k| k.kid.clone())
+            .expect("RS256 key must appear in JWKS after restart");
+
+        assert_eq!(
+            rsa_kid1, rsa_kid2,
+            "OIDC RSA kid must be stable across restarts"
+        );
+    }
+
+    #[test]
+    fn oidc_rsa_retiring_key_in_jwks_during_grace() {
+        // Hold the storage Arc so we can write retiring keys directly (simulating
+        // what a future key-rotation call would do).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("open"),
+        ) as Arc<dyn StorageEngine>;
+        let clock =
+            Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000_000))) as Arc<dyn Clock>;
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+            IdentityConfig {
+                credential: CredentialConfig::fast_for_testing(),
+                ..IdentityConfig::default()
+            },
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine");
+
+        // Trigger RSA key generation + storage.
+        let jwks_before = engine.jwks();
+        let current_rsa_kid = jwks_before
+            .keys
+            .iter()
+            .find(|k| k.kty == "RSA")
+            .map(|k| k.kid.clone())
+            .expect("RS256 key in initial JWKS");
+
+        // Generate a separate "previous" RSA key and write it as a retiring
+        // entry with a future deadline (simulating a recent rotation).
+        let retiring_key = crate::identity::tokens::RsaSigningKey::generate("hearth-oidc", 3650)
+            .expect("gen retiring key");
+        let retiring_kid = retiring_key.key_id().to_string();
+        assert_ne!(
+            retiring_kid, current_rsa_kid,
+            "retiring and current kids must differ"
+        );
+
+        let sys = crate::identity::keys::system_realm_id();
+        let now_secs = (clock.now().as_micros() / 1_000_000) as u64;
+        let deadline_secs = now_secs + 86_400; // 24 h from now
+        let storage_key =
+            crate::identity::keys::encode_oidc_rsa_retiring_key(deadline_secs, &retiring_kid);
+
+        // JSON envelope matches the StoredRsaKey format in engine/oauth.rs.
+        #[derive(serde::Serialize)]
+        struct Stored<'a> {
+            pkcs8: &'a [u8],
+            cert: &'a [u8],
+        }
+        let body = serde_json::to_vec(&Stored {
+            pkcs8: retiring_key.pkcs8_bytes(),
+            cert: retiring_key.cert_der(),
+        })
+        .expect("serialize retiring key");
+        storage
+            .put(&sys, &storage_key, &body)
+            .expect("write retiring key");
+
+        // JWKS must now contain both the current kid and the retiring kid.
+        let jwks_after = engine.jwks();
+        let rsa_kids: Vec<&str> = jwks_after
+            .keys
+            .iter()
+            .filter(|k| k.kty == "RSA")
+            .map(|k| k.kid.as_str())
+            .collect();
+        assert!(
+            rsa_kids.contains(&current_rsa_kid.as_str()),
+            "current kid must appear in JWKS; got {rsa_kids:?}"
+        );
+        assert!(
+            rsa_kids.contains(&retiring_kid.as_str()),
+            "retiring kid must appear in JWKS during grace; got {rsa_kids:?}"
+        );
+    }
+
+    #[test]
+    fn oidc_rsa_expired_retiring_key_omitted_from_jwks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            EmbeddedStorageEngine::open(StorageConfig::dev(dir.path().to_path_buf()))
+                .expect("open"),
+        ) as Arc<dyn StorageEngine>;
+        let clock =
+            Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000_000))) as Arc<dyn Clock>;
+        let audit = Arc::new(EmbeddedAuditEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+        ));
+        let engine = EmbeddedIdentityEngine::new(
+            Arc::clone(&storage),
+            Arc::clone(&clock),
+            IdentityConfig {
+                credential: CredentialConfig::fast_for_testing(),
+                ..IdentityConfig::default()
+            },
+            audit as Arc<dyn AuditEngine>,
+        )
+        .expect("engine");
+
+        engine.jwks(); // Trigger RSA key persistence.
+
+        // Write an already-expired retiring key (deadline in the past).
+        let expired_key = crate::identity::tokens::RsaSigningKey::generate("hearth-oidc", 3650)
+            .expect("gen expired key");
+        let expired_kid = expired_key.key_id().to_string();
+        let sys = crate::identity::keys::system_realm_id();
+        let now_secs = (clock.now().as_micros() / 1_000_000) as u64;
+        let deadline_past = now_secs.saturating_sub(1); // already expired
+        let storage_key =
+            crate::identity::keys::encode_oidc_rsa_retiring_key(deadline_past, &expired_kid);
+        #[derive(serde::Serialize)]
+        struct Stored<'a> {
+            pkcs8: &'a [u8],
+            cert: &'a [u8],
+        }
+        let body = serde_json::to_vec(&Stored {
+            pkcs8: expired_key.pkcs8_bytes(),
+            cert: expired_key.cert_der(),
+        })
+        .expect("serialize");
+        storage.put(&sys, &storage_key, &body).expect("put");
+
+        // The expired key must NOT appear in JWKS.
+        let jwks = engine.jwks();
+        let rsa_kids: Vec<&str> = jwks
+            .keys
+            .iter()
+            .filter(|k| k.kty == "RSA")
+            .map(|k| k.kid.as_str())
+            .collect();
+        assert!(
+            !rsa_kids.contains(&expired_kid.as_str()),
+            "expired retiring kid must be omitted from JWKS; got {rsa_kids:?}"
         );
     }
 }

@@ -369,3 +369,67 @@ security-critical data:
 - Back it up independently of the main data store.
 - Monitor for gaps or out-of-order entries.
 - Do not delete audit log entries to cover tracks — the hash chain will reveal the deletion.
+
+---
+
+## Auth-Boundary PR Review Checklist
+
+Any PR that touches `src/protocol/http/admin.rs`, `src/protocol/grpc/*.rs`, or the
+auth helpers (`src/protocol/http/auth.rs`, `src/protocol/grpc/auth.rs`) is an
+**auth-boundary PR** and must pass the following checks before merge.
+
+### Automated backstops (enforced in CI)
+
+| Check | Mechanism | Catches |
+|---|---|---|
+| `#[must_use]` on `extract_admin_auth` / `authenticate_admin` | Rust compiler + `clippy -D warnings` | Unbound calls (result dropped as statement) |
+| `scripts/check-auth-discard.sh` | `filter` job, runs on every PR | `let _auth`, `let _ = auth-call(...)`, unbound calls |
+| `make auth-discard-check` | `ci-local-fast` | Same as above, runs pre-push |
+
+CI gate: the auth-discard lint runs inside the `filter` job, which feeds into
+`required-summary`. A lint failure blocks merge.
+
+### Manual review checklist
+
+Reviewers MUST verify the following for every handler in scope:
+
+- [ ] **Auth result is bound to a named variable**, e.g. `let auth = match extract_admin_auth(...)`.
+      A `let _` or `let _auth` binding compiles but bypasses authorization — CI will catch
+      these, but human review is the second line of defense.
+
+- [ ] **`?` or explicit error-return is used** immediately after the auth call.
+      The `Result` must be propagated so an auth failure returns an HTTP/gRPC error
+      rather than falling through to handler logic.
+
+- [ ] **`scoped_realm(auth, path_realm_id)` is called** for any handler that accepts a
+      `{realm_id}` path parameter. Plain `auth.realm_id` bypasses the cross-realm guard.
+      See `src/protocol/http/admin.rs::scoped_realm` for the canonical pattern.
+
+- [ ] **No new handler omits the auth call entirely.** Grep for `async fn` in scope
+      and confirm every handler body contains at least one of:
+      `extract_admin_auth`, `authenticate_admin`, or an explicit `scoped_realm` call.
+
+- [ ] **gRPC service methods return `?` on the auth result**, not just log/ignore it.
+      Tonic methods that return `Result<Response<_>, Status>` must propagate `Status::unauthenticated`.
+
+### Why this matters
+
+The HEA-1629 audit found 11 REST handlers and 30+ gRPC handlers where the auth extractor
+was called but its `Result` was either silently dropped or the handler continued even on
+auth failure. This is Broken Object-Level Authorization (BOLA): an attacker in one realm
+could read or mutate resources in another realm by supplying a different `{realm_id}` path
+parameter. The `scoped_realm` accessor and the `#[must_use]` annotation were introduced to
+make this class of mistake a compile error rather than a code review catch.
+
+### Suppression escape hatch
+
+If a line is legitimately exempt (e.g. a test fixture that intentionally exercises the
+failure path of `extract_admin_auth`), add an inline comment to suppress the grep lint:
+
+```rust
+let _result = extract_admin_auth(&headers, &state); // auth-discard-lint-allow
+```
+
+The `// auth-discard-lint-allow` token must appear on the **same line** as the violation.
+Use suppressions sparingly — each one is a documented exception that reviewers should
+scrutinize.

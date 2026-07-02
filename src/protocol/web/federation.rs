@@ -588,11 +588,12 @@ pub async fn confirm_link_submit(
         .verify_password(&realm_id, &ticket_rec.user_id, &cleartext)
         .unwrap_or(false);
     if !ok {
-        return Redirect::to(&format!(
-            "/ui/federation/confirm-link?ticket={}&error=1",
-            form.ticket
-        ))
-        .into_response();
+        // Redirect to login rather than back to the confirm-link page.
+        // Returning to confirm-link with the ticket reveals that the ticket
+        // was valid (enumeration resistance). The ticket was consumed by
+        // take_confirm_link_ticket above, so the user must restart the
+        // federation flow to try again.
+        return Redirect::to("/ui/login?error=fed_link_failed").into_response();
     }
     // Link and complete.
     if let Err(e) = state.identity.link_external_identity(

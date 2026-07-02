@@ -187,15 +187,21 @@ pub(crate) fn make_delivery(
     }
 }
 
+/// Validates the static properties of a webhook URL (scheme, length).
+///
+/// DNS-based SSRF validation (`ssrf::check_webhook_url`) is intentionally
+/// separate: it performs blocking DNS I/O and is called from the HTTP handler
+/// (via `spawn_blocking`) before invoking the engine, and again before each
+/// delivery attempt in the dispatcher (DNS rebinding defence).
 fn validate_url(url: &str) -> Result<(), WebhookError> {
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err(WebhookError::InvalidUrl {
-            reason: "URL must begin with http:// or https://".to_string(),
-        });
-    }
     if url.len() > 2048 {
         return Err(WebhookError::InvalidUrl {
             reason: "URL exceeds 2048 characters".to_string(),
+        });
+    }
+    if !url.starts_with("https://") {
+        return Err(WebhookError::InvalidUrl {
+            reason: "webhook URL must use the https:// scheme".to_string(),
         });
     }
     Ok(())
@@ -261,8 +267,25 @@ mod tests {
         let engine = make_engine();
         let realm = RealmId::generate();
         let req = CreateWebhookRequest {
-            realm_id: realm,
+            realm_id: realm.clone(),
             url: "ftp://example.com/hook".to_string(),
+            secret: "super-secret-key-16+".to_string(),
+            enabled: true,
+            event_filters: vec![],
+        };
+        assert!(matches!(
+            engine.create(&req),
+            Err(WebhookError::InvalidUrl { .. })
+        ));
+    }
+
+    #[test]
+    fn create_rejects_http_scheme() {
+        let engine = make_engine();
+        let realm = RealmId::generate();
+        let req = CreateWebhookRequest {
+            realm_id: realm,
+            url: "http://example.com/hook".to_string(),
             secret: "super-secret-key-16+".to_string(),
             enabled: true,
             event_filters: vec![],

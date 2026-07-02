@@ -212,10 +212,17 @@ async fn deliver_with_retry(
     }
 }
 
+/// Connect timeout for outbound webhook HTTP calls (F4, HEA-1651).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Total request timeout for outbound webhook HTTP calls (F4, HEA-1651).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Performs a single HTTP POST delivery.
 ///
 /// Returns `Ok(status_code)` for 2xx responses, `Err(message)` otherwise.
 /// Intended to be called inside `spawn_blocking`.
+///
+/// Re-checks SSRF on every attempt (DNS rebinding defence, F3/HEA-1651).
 fn deliver_once(
     url: &str,
     body: &[u8],
@@ -223,13 +230,25 @@ fn deliver_once(
     event_type: &str,
     delivery_id: &str,
 ) -> Result<u16, String> {
-    let req = ureq::post(url)
+    // Re-validate destination immediately before connecting (DNS rebinding defence).
+    super::ssrf::check_webhook_url(url).map_err(|e| format!("SSRF guard blocked delivery: {e}"))?;
+
+    // Build a per-call agent with explicit connect + total timeouts (F4).
+    let config = ureq::config::Config::builder()
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_global(Some(REQUEST_TIMEOUT))
+        .https_only(true)
+        .build();
+    let agent = config.new_agent();
+
+    let response = agent
+        .post(url)
         .header("Content-Type", "application/json")
         .header("X-Hearth-Signature-256", signature)
         .header("X-Hearth-Event", event_type)
-        .header("X-Hearth-Delivery", delivery_id);
-
-    let response = req.send(body).map_err(|e| format!("HTTP error: {e}"))?;
+        .header("X-Hearth-Delivery", delivery_id)
+        .send(body)
+        .map_err(|e| format!("HTTP error: {e}"))?;
 
     let status: u16 = response.status().into();
     if (200..300).contains(&status) {

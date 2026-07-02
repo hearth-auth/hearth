@@ -5,7 +5,7 @@ PROTOC ?= protoc
 CARGO_FLAGS ?=
 BUF := buf
 
-.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
+.PHONY: setup build test clippy fmt check css css-check css-watch tailwind-install openapi openapi-check proto-gen proto-lint proto-format proto-format-check proto-breaking proto-check sdk-test test-quality abuse-check auth-discard-check notice notice-check ci-fast bench-gate cluster-route-check cluster-smoke ci-standard ci-local-fast ci-local-full sdk-smoke-local dev dev-reset seed-large seed-large-reset ui-test ui-test-smoke ui-coverage-check ui-test-visual ui-test-cross-browser helm-lint helm-template
 
 # ── Contributor Setup ─────────────────────────────────
 
@@ -87,6 +87,12 @@ test-quality:
 ## Rollback: set SKIP_ABUSE_COVERAGE_CHECK=1 (see scripts/check-abuse-coverage.sh).
 abuse-check:
 	@bash scripts/check-abuse-coverage.sh
+
+## Guard: auth results in protocol handler files must never be discarded (HEA-1657).
+## Fails on `let _auth`, `let _ = extract_admin_auth(...)`, or unbound auth calls in
+## src/protocol/http/admin.rs and src/protocol/grpc/*.rs.
+auth-discard-check: ## Lint for discarded authentication results (HEA-1657)
+	@bash scripts/check-auth-discard.sh
 
 # ── Proto ─────────────────────────────────────────────
 
@@ -250,6 +256,7 @@ ci-standard: ci-fast test proto-breaking sdk-test proto-check bench-gate cluster
 ci-local-fast: ## Run host-side checks that mirror PR-blocking CI (~5 min)
 	@echo "==> test-quality"              && $(MAKE) test-quality
 	@echo "==> abuse-check (§3.41)"       && $(MAKE) abuse-check
+	@echo "==> auth-discard-check (HEA-1657)" && $(MAKE) auth-discard-check
 	@echo "==> check (clippy + fmt + nextest)" && $(MAKE) check
 	@echo "==> css-check"                && $(MAKE) css-check
 	@echo "==> proto-check"              && $(MAKE) proto-check

@@ -16,30 +16,67 @@
 </div>
 
 {% if mfa_enabled %}
-<div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
-  <div class="flex items-center gap-3 mb-4">
-    <div class="flex h-8 w-8 items-center justify-center rounded-full bg-success/[0.12]">
-      <svg class="h-4 w-4 text-success-fg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+<div class="space-y-4">
+
+  {% match disable_error %}
+    {% when Some with (msg) %}
+      <div class="rounded-lg bg-danger/[0.12] px-4 py-3 text-sm font-medium text-danger-fg" role="alert">{{ msg }}</div>
+    {% when None %}
+  {% endmatch %}
+
+  <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
+    <div class="flex items-center gap-3 mb-4">
+      <div class="flex h-8 w-8 items-center justify-center rounded-full bg-success/[0.12]">
+        <svg class="h-4 w-4 text-success-fg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </div>
+      <h2 class="text-base font-semibold text-ht-content-primary">MFA is enabled</h2>
     </div>
-    <h2 class="text-base font-semibold text-ht-content-primary">MFA is enabled</h2>
+
+    <p class="mb-4 text-sm text-ht-content-secondary">Disabling MFA will allow password-only login. Reconsider before proceeding.</p>
+
+    <form method="post" action="/ui/account/totp/disable" autocomplete="off">
+      {% match csrf %}
+        {% when Some with (token) %}
+          <input type="hidden" name="_csrf" value="{{ token }}">
+        {% when None %}
+      {% endmatch %}
+      <div class="mb-4">
+        <label for="disable_totp_code" class="block text-sm font-medium text-ht-content-secondary">Enter your current authentication code to confirm</label>
+        <input type="text" id="disable_totp_code" name="current_totp_code" inputmode="numeric" pattern="[0-9]*" maxlength="8" required autocomplete="one-time-code"
+               class="mt-1 input w-40">
+      </div>
+      <div class="flex items-center gap-3">
+        <button type="submit"
+                class="btn-danger rounded px-4 py-2 text-sm font-semibold">
+          Disable MFA
+        </button>
+        <a href="/ui/account" class="text-sm font-medium text-ht-content-muted hover:text-ht-content-secondary">Cancel</a>
+      </div>
+    </form>
   </div>
 
-  <p class="mb-4 text-sm text-ht-content-secondary">Disabling MFA will allow password-only login. Reconsider before proceeding.</p>
+  <div class="rounded-md bg-ht-surface-elevated p-6 ring-1 ring-divider-subtle">
+    <h2 class="mb-2 text-base font-semibold text-ht-content-primary">Regenerate recovery codes</h2>
+    <p class="mb-4 text-sm text-ht-content-secondary">Generates a new set of recovery codes and invalidates all existing ones.</p>
 
-  <form method="post" action="/ui/account/totp/disable" autocomplete="off">
-    {% match csrf %}
-      {% when Some with (token) %}
-        <input type="hidden" name="_csrf" value="{{ token }}">
-      {% when None %}
-    {% endmatch %}
-    <div class="flex items-center gap-3">
+    <form method="post" action="/ui/account/totp/regenerate-codes" autocomplete="off">
+      {% match csrf %}
+        {% when Some with (token) %}
+          <input type="hidden" name="_csrf" value="{{ token }}">
+        {% when None %}
+      {% endmatch %}
+      <div class="mb-4">
+        <label for="regen_totp_code" class="block text-sm font-medium text-ht-content-secondary">Enter your current authentication code to confirm</label>
+        <input type="text" id="regen_totp_code" name="current_totp_code" inputmode="numeric" pattern="[0-9]*" maxlength="8" required autocomplete="one-time-code"
+               class="mt-1 input w-40">
+      </div>
       <button type="submit"
-              class="btn-danger rounded px-4 py-2 text-sm font-semibold">
-        Disable MFA
+              class="rounded bg-ht-surface-raised px-4 py-2 text-sm font-semibold text-ht-content-secondary ring-1 ring-divider-subtle hover:bg-ht-surface-hover">
+        Regenerate codes
       </button>
-      <a href="/ui/account" class="text-sm font-medium text-ht-content-muted hover:text-ht-content-secondary">Cancel</a>
-    </div>
-  </form>
+    </form>
+  </div>
+
 </div>
 {% else %}
 <div>
@@ -97,13 +134,18 @@
         <div class="flex gap-4">
           <div class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-brand-muted text-xs font-bold text-ht-content-brand">3</div>
           <div class="min-w-0 flex-1">
-            <p class="text-sm font-medium text-ht-content-primary">Enter the current 6-digit code</p>
-            <form data-component="submit-state" data-loading="#totp-loading" data-content="#totp-setup-content" method="post" action="/ui/account/totp/activate" autocomplete="off" class="mt-3">
+            <p class="text-sm font-medium text-ht-content-primary">Confirm with your current password and authentication code</p>
+            <form data-component="submit-state" data-loading="#totp-loading" data-content="#totp-setup-content" method="post" action="/ui/account/totp/activate" autocomplete="off" class="mt-3 space-y-3">
               {% match csrf %}
                 {% when Some with (token) %}
                   <input type="hidden" name="_csrf" value="{{ token }}">
                 {% when None %}
               {% endmatch %}
+              <div>
+                <label for="activate_password" class="block text-sm font-medium text-ht-content-secondary">Current password</label>
+                <input type="password" id="activate_password" name="password" required autocomplete="current-password"
+                       class="mt-1 input">
+              </div>
               <div class="flex items-end gap-3">
                 <div class="flex-1">
                   <label for="code" class="block text-sm font-medium text-ht-content-secondary">Authentication code</label>

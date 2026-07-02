@@ -37,25 +37,31 @@ use super::validate_claim_payload;
 use super::EmbeddedIdentityEngine;
 use super::CLOCK_SKEW_SECS;
 
+/// JSON envelope used to persist an RSA keypair in storage.
+///
+/// Not logged or displayed; fields carry sensitive key material.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredRsaKey {
+    pkcs8: Vec<u8>,
+    cert: Vec<u8>,
+}
+
 impl EmbeddedIdentityEngine {
     // ===== OIDC signing-key helpers (moved from mod.rs) =====
 
-    /// Generates the key the first time it is requested and caches it for
-    /// the life of the engine. Future M1 follow-ups will replace this with
-    /// a storage-backed lookup so `kid`s remain stable across restarts.
+    /// Returns the server-wide OIDC RSA signing key, loading from or
+    /// persisting to storage on first call so the `kid` survives restarts
+    /// (HEA-1655). Subsequent calls return the cached value from the OnceLock.
     fn oidc_rsa_signing_key(
         &self,
     ) -> Result<Arc<crate::identity::tokens::RsaSigningKey>, IdentityError> {
         if let Some(existing) = self.oidc_rsa_key.get() {
             return Ok(Arc::clone(existing));
         }
-        let generated = Arc::new(crate::identity::tokens::RsaSigningKey::generate(
-            "hearth-oidc",
-            3650,
-        )?);
+        let key = Arc::new(self.load_or_persist_oidc_rsa_key()?);
         // Race: if another thread initialized in parallel, prefer the
         // already-stored value so all callers observe the same `kid`.
-        let _ = self.oidc_rsa_key.set(Arc::clone(&generated));
+        let _ = self.oidc_rsa_key.set(Arc::clone(&key));
         Ok(Arc::clone(
             self.oidc_rsa_key
                 .get()
@@ -63,13 +69,92 @@ impl EmbeddedIdentityEngine {
         ))
     }
 
+    /// Loads the OIDC RSA keypair from storage, or generates a new one and
+    /// persists it (WAL-synced) on first startup.
+    ///
+    /// Stored under the system realm as `sys:oidc:rsa:key`.
+    fn load_or_persist_oidc_rsa_key(
+        &self,
+    ) -> Result<crate::identity::tokens::RsaSigningKey, IdentityError> {
+        let sys = keys::system_realm_id();
+        let storage_key = keys::encode_oidc_rsa_key();
+
+        if let Some(bytes) = self
+            .storage
+            .get(&sys, &storage_key)
+            .map_err(Self::storage_err)?
+        {
+            let stored: StoredRsaKey =
+                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            return crate::identity::tokens::RsaSigningKey::from_pkcs8_and_cert(
+                &stored.pkcs8,
+                &stored.cert,
+            );
+        }
+
+        // First startup: generate, WAL-persist, then return.
+        let key = crate::identity::tokens::RsaSigningKey::generate("hearth-oidc", 3650)?;
+        let body = serde_json::to_vec(&StoredRsaKey {
+            pkcs8: key.pkcs8_bytes().to_vec(),
+            cert: key.cert_der().to_vec(),
+        })
+        .map_err(|e| IdentityError::Serialization {
+            reason: e.to_string(),
+        })?;
+        self.storage
+            .put(&sys, &storage_key, &body)
+            .map_err(Self::storage_err)?;
+
+        Ok(key)
+    }
+
     pub(super) fn oidc_rsa_jwk(&self) -> Result<crate::identity::tokens::Jwk, IdentityError> {
         self.oidc_rsa_signing_key()?.to_jwk()
     }
 
+    /// Collects retiring OIDC RSA keys whose grace-window has not yet expired
+    /// and returns their JWKs for inclusion in `/certs`.
+    ///
+    /// Retiring keys are written by a key-rotation call and scanned via the
+    /// `sys:oidc:rsa:retiring:` prefix range under the system realm.
+    pub(super) fn oidc_rsa_retiring_jwks(&self) -> Vec<crate::identity::tokens::Jwk> {
+        let sys = keys::system_realm_id();
+        let prefix = keys::oidc_rsa_retiring_scan_prefix();
+        let end = keys::prefix_end(&prefix);
+        let now_secs = (self.clock.now().as_micros() / 1_000_000) as u64;
+
+        let Ok(entries) = self.storage.scan(&sys, &prefix, &end) else {
+            return vec![];
+        };
+
+        let mut out = Vec::new();
+        for entry in entries {
+            let Some(deadline) = keys::parse_oidc_rsa_retiring_deadline(&entry.key) else {
+                continue;
+            };
+            if deadline <= now_secs {
+                continue; // Grace period expired — omit.
+            }
+            let Ok(stored) = serde_json::from_slice::<StoredRsaKey>(&entry.value) else {
+                continue;
+            };
+            let Ok(key) = crate::identity::tokens::RsaSigningKey::from_pkcs8_and_cert(
+                &stored.pkcs8,
+                &stored.cert,
+            ) else {
+                continue;
+            };
+            if let Ok(jwk) = key.to_jwk() {
+                out.push(jwk);
+            }
+        }
+        out
+    }
+
     /// Returns the server-wide ECDSA P-256 signing key used to publish the
-    /// ES256 entry in the `/certs` JWKS. See `oidc_rsa_signing_key` for
-    /// the same caching / persistence caveats.
+    /// ES256 entry in the `/certs` JWKS.
     fn oidc_ecdsa_signing_key(
         &self,
     ) -> Result<Arc<crate::identity::tokens::EcdsaSigningKey>, IdentityError> {
@@ -906,6 +991,7 @@ impl EmbeddedIdentityEngine {
             fid: Some(family_id.clone()),
             scope: (!scope_value.is_empty()).then(|| scope_value.clone()),
             nonce: None,
+            azp: None,
             roles: access_roles,
             groups: access_groups,
             org_groups: Vec::new(),
@@ -936,6 +1022,7 @@ impl EmbeddedIdentityEngine {
             fid: Some(family_id.clone()),
             scope: (!scope_value.is_empty()).then(|| scope_value.clone()),
             nonce: None,
+            azp: None,
             roles: access_claims.roles.clone(),
             groups: access_claims.groups.clone(),
             org_groups: Vec::new(),
@@ -1010,6 +1097,7 @@ impl EmbeddedIdentityEngine {
             fid: None,
             scope: (!scope_value.is_empty()).then(|| scope_value.clone()),
             nonce: stored_code.nonce.clone(),
+            azp: Some(request.client_id.to_string()),
             roles: id_roles,
             groups: id_groups,
             org_groups: Vec::new(),
@@ -1339,6 +1427,7 @@ impl EmbeddedIdentityEngine {
             fid: None,
             scope: scope.clone(),
             nonce: None,
+            azp: None,
             roles: Vec::new(),
             groups: Vec::new(),
             org_groups: Vec::new(),
@@ -1497,6 +1586,7 @@ impl EmbeddedIdentityEngine {
             fid: None,
             scope: scope.clone(),
             nonce: None,
+            azp: None,
             roles: Vec::new(),
             groups: Vec::new(),
             org_groups: Vec::new(),
@@ -2183,6 +2273,7 @@ impl EmbeddedIdentityEngine {
                     fid: None,
                     scope: stored.scope.clone(),
                     nonce: None,
+                    azp: Some(client_id.to_string()),
                     roles: Vec::new(),
                     groups: Vec::new(),
                     org_groups: Vec::new(),
@@ -3748,11 +3839,13 @@ impl EmbeddedIdentityEngine {
         }
 
         // Validate post_logout_redirect_uri against the registering client's list.
+        // When no client_id is provided we cannot validate the URI, so we drop it
+        // to prevent open-redirect (OIDC RP-Initiated Logout 1.0 §3).
         let post_logout_redirect_uri = match &request.post_logout_redirect_uri {
             None => None,
             Some(uri) => {
                 let valid = match &request.client_id {
-                    None => true, // No client specified — accept without validation.
+                    None => false, // No client to validate against — reject unvalidated redirect.
                     Some(cid) => {
                         let client_key = keys::encode_oauth_client(cid);
                         match self.storage.get(realm_id, &client_key) {

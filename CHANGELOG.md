@@ -7,6 +7,55 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Auth-discard CI lint** — `scripts/check-auth-discard.sh` and `make auth-discard-check`
+  fail on any occurrence of `let _auth`, `let _ = extract_admin_auth(...)`, or an unbound
+  `authenticate_admin()` call in `src/protocol/http/admin.rs` and `src/protocol/grpc/*.rs`.
+  Wired into the `filter` CI job (runs on every PR, no Rust build required) and
+  `make ci-local-fast`. Prevents recurrence of the cross-realm BOLA class found in
+  HEA-1629 (HEA-1657).
+- **Auth-boundary PR review checklist** — `docs/guides/security-hardening.md` now
+  documents the automated CI backstops, a five-point manual review checklist, and the
+  `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
+
+### Security
+- **`quick-xml` upgraded 0.36 → 0.41 (RUSTSEC advisories)** — remediates two advisories in
+  the SAML XML parser: quadratic runtime on duplicate-attribute checks and an unbounded
+  namespace-declaration allocation enabling memory-exhaustion DoS on crafted XML. The SAML
+  reader now resolves quick-xml 0.41's standalone entity-reference events (numeric and the
+  five predefined entities) and rejects any DTD-defined general entity, preserving the
+  existing anti-XXE posture and canonicalization/signature-validation behavior (HEA-1629).
+- **MFA-pending cookie is now single-use** — a random 128-bit nonce is embedded in
+  the cookie and burned server-side on first successful MFA completion. A captured
+  pending cookie can no longer be replayed after the session has been established (HEA-1656).
+- **`azp` (Authorized Party) claim added to OIDC ID tokens** — ID tokens issued via
+  the authorization-code and device flows now include `azp: <client_id>` per OIDC Core §2,
+  satisfying FAPI 2.0 requirements (HEA-1656).
+- **RP-initiated logout no longer open-redirects on unknown sessions** — `GET /end_session`
+  with a `post_logout_redirect_uri` but no resolvable client now returns 200 JSON instead of
+  redirecting to the caller-supplied URI. The engine also rejects unregistered
+  `post_logout_redirect_uri` values when no `client_id` is provided (HEA-1656).
+- **Federation account-link enumeration resistance** — `POST /ui/federation/confirm-link`
+  on password failure now redirects to `/ui/login` instead of back to the confirm-link
+  page with the ticket in the URL, preventing attackers from distinguishing
+  "valid ticket + wrong password" from "invalid ticket" (HEA-1656).
+- **MFA enroll/disable/regenerate now require step-up credential verification** — `POST /ui/account/totp/activate`
+  requires the user's current password before activating MFA; `POST /ui/account/totp/disable` and
+  `POST /ui/account/totp/regenerate-codes` require a fresh TOTP code before proceeding. A stolen
+  session cookie can no longer silently strip or replace a user's second factor (HEA-1659).
+- **OIDC RSA signing key now persisted across restarts** — the server-wide RS256 keypair (`kid`)
+  is stored in the system realm under `sys:oidc:rsa:key` (WAL-synced) so previously-issued ID tokens
+  remain verifiable after a restart. JWKS includes retiring keys during the configured grace window
+  so tokens signed before an explicit key rotation continue to validate (HEA-1655).
+- **Cross-realm BOLA hardening in REST admin handlers** — introduced `scoped_realm(auth, path_realm_id)`
+  accessor that enforces `auth.realm_id == path_realm_id` (system realm bypasses as superuser) for
+  every endpoint that carries a `{realm_id}` path parameter. Fixes 10 handlers previously vulnerable
+  to Broken Object-Level Authorization: `GET/DELETE /admin/realms/{id}`, `GET/PATCH /admin/realms/{id}/branding`,
+  `GET/PUT/DELETE /admin/realms/{id}/email-templates/{k}`, `POST /admin/realms/{id}/rotate-signing-key`,
+  `POST /admin/realms/{id}/sv-bump-all`. Adds missing `hearth.realm.admin` permission gate to
+  `POST /admin/sessions/{id}/sv-bump`. Audit events for cross-realm mutations now log under the
+  target realm rather than the auth realm (HEA-1649).
+
+### Added
 - **Users table search grammar + column sort** — the admin users list now supports
   exact (`"alice@acme.com"`), glob (`*@acme.com`, `alice?`), and substring search
   via the `q` param, plus 4-column ascending/descending sort (`sort=email|name|status|created`
@@ -44,6 +93,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (the production guard). `make seed-large` boots
   `examples/large-scale-demo/hearth.yaml` into `./data/demo`; `make
   seed-large-reset` wipes it.
+
+### Security
+- **gRPC RBAC admin: cross-realm BOLA closed across all 30 methods (HEA-1650)** — all
+  `RbacAdminService` handlers previously discarded the authenticated realm from the
+  `x-realm-id` header and sourced the target realm from the request body's `realm_id`
+  field instead. A realm-A admin could write groups, roles, and assignments into
+  realm-B by setting `realm_id: <realm-B-uuid>` in the body. All 30 methods now
+  assert that the body `realm_id` matches the authenticated realm and return
+  `PERMISSION_DENIED` on mismatch; the authenticated realm is always authoritative.
+- **Webhook SSRF guard at registration and delivery (HEA-1651)** — webhook URLs are now
+  validated for SSRF safety (RFC 1918, loopback, link-local, ULA, cloud-metadata ranges
+  blocked) at registration time via `POST /admin/webhooks` and `PUT /admin/webhooks/{id}`,
+  and again immediately before each delivery attempt to defend against DNS rebinding.
 
 ### Fixed
 - **Admin tables: search, sort, and pagination now interact consistently.** Sorting

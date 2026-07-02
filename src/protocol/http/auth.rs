@@ -47,6 +47,9 @@ pub struct AdminAuth {
 /// 2. Validates the token via `identity.validate_token()`
 /// 3. Checks `hearth.admin` appears in the token's `permissions` claim
 /// 4. Checks rate limit (100 req/min per admin user)
+///
+/// The `Result` **must** be used — discarding it silently bypasses authentication.
+#[must_use = "discarding this Result bypasses authentication; bind the return value"]
 pub(crate) fn extract_admin_auth(
     headers: &HeaderMap,
     state: &AppState,

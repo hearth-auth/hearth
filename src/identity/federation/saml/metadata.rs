@@ -5,7 +5,7 @@ use base64::Engine as _;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-use super::xml::{attr, escape_attr, is_element, ns, parse_err, read_text};
+use super::xml::{attr, escape_attr, is_element, ns, parse_err, read_text, unescape_text};
 use crate::identity::error::IdentityError;
 
 /// SP metadata parameters.
@@ -148,7 +148,7 @@ pub fn parse_idp_metadata(xml: &[u8]) -> Result<ParsedIdpMetadata, IdentityError
                 in_idp = false;
             }
             Ok(Event::Text(t)) if expect_cert => {
-                if let Ok(s) = t.unescape() {
+                if let Ok(s) = unescape_text(&t) {
                     let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
                     if !cleaned.is_empty() {
                         certs.push(wrap_cert_pem(&cleaned));

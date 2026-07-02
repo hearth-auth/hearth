@@ -8,8 +8,11 @@
 //! and comments outside of the document root. These vectors have produced
 //! many XXE CVEs in SAML parsers historically.
 
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::escape::{resolve_predefined_entity, unescape};
+use quick_xml::events::attributes::Attribute;
+use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use quick_xml::Reader;
+use std::borrow::Cow;
 use std::io::BufRead;
 
 use crate::identity::error::IdentityError;
@@ -70,8 +73,8 @@ fn namespace_matches_prefix(prefix: &[u8], expected_uri: &str, start: &BytesStar
     let attr_name = [b"xmlns:", prefix].concat();
     for attr in start.attributes().with_checks(false).flatten() {
         if attr.key.as_ref() == attr_name {
-            if let Ok(v) = attr.unescape_value() {
-                return v.as_ref() == expected_uri;
+            if let Ok(v) = unescape_attr_value(&attr) {
+                return v == expected_uri;
             }
         }
     }
@@ -90,8 +93,8 @@ fn namespace_matches_prefix(prefix: &[u8], expected_uri: &str, start: &BytesStar
 fn has_default_namespace(start: &BytesStart<'_>, expected_uri: &str) -> bool {
     for attr in start.attributes().with_checks(false).flatten() {
         if attr.key.as_ref() == b"xmlns" {
-            if let Ok(v) = attr.unescape_value() {
-                return v.as_ref() == expected_uri;
+            if let Ok(v) = unescape_attr_value(&attr) {
+                return v == expected_uri;
             }
         }
     }
@@ -102,12 +105,72 @@ fn has_default_namespace(start: &BytesStart<'_>, expected_uri: &str) -> bool {
 pub fn attr(start: &BytesStart<'_>, name: &str) -> Option<String> {
     for a in start.attributes().with_checks(false).flatten() {
         if a.key.as_ref() == name.as_bytes() {
-            if let Ok(v) = a.unescape_value() {
-                return Some(v.into_owned());
+            if let Ok(v) = unescape_attr_value(&a) {
+                return Some(v);
             }
         }
     }
     None
+}
+
+/// Decodes and entity-unescapes an XML text node.
+///
+/// quick-xml 0.41 removed `BytesText::unescape()`, which decoded the raw
+/// bytes and resolved XML entity references (`&amp;` → `&`) in a single
+/// call. This restores that behavior: XML 1.0 decode with EOL normalization,
+/// then entity unescaping. Preserves the pre-upgrade parsing semantics so no
+/// SAML message is decoded differently than before.
+pub fn unescape_text<'a>(t: &BytesText<'a>) -> Result<Cow<'a, str>, quick_xml::Error> {
+    match t.xml10_content()? {
+        Cow::Borrowed(s) => Ok(unescape(s)?),
+        Cow::Owned(s) => Ok(Cow::Owned(unescape(&s)?.into_owned())),
+    }
+}
+
+/// Resolves an XML entity-reference event ([`Event::GeneralRef`]) to its text.
+///
+/// quick-xml 0.41 tokenizes every `&...;` reference — including the five
+/// predefined entities — into a standalone [`Event::GeneralRef`] rather than
+/// folding it into the surrounding text. Text-collecting loops must resolve
+/// these so escaped characters (e.g. an `&amp;` inside an Issuer URI) are not
+/// silently dropped.
+///
+/// Numeric character references (`&#48;`, `&#x30;`) and the five predefined
+/// entities (`amp`, `lt`, `gt`, `quot`, `apos`) are resolved. Any other
+/// (DTD-defined) general entity is rejected: Hearth's SAML reader forbids
+/// DOCTYPE/entity expansion, so a custom entity reference is treated as an
+/// XXE attempt.
+pub fn resolve_entity_ref(r: &BytesRef<'_>) -> Result<String, IdentityError> {
+    if let Some(c) = r
+        .resolve_char_ref()
+        .map_err(|e| parse_err(format!("bad character reference: {e}")))?
+    {
+        return Ok(c.to_string());
+    }
+    let name = r
+        .decode()
+        .map_err(|e| parse_err(format!("bad entity reference: {e}")))?;
+    resolve_predefined_entity(&name)
+        .map(str::to_owned)
+        .ok_or_else(|| parse_err(format!("disallowed XML entity reference: &{name};")))
+}
+
+/// Decodes and entity-unescapes an attribute value.
+///
+/// Replaces the `Attribute::unescape_value()` method deprecated in quick-xml
+/// 0.41. Deliberately preserves the pre-0.41 semantics — decode UTF-8 and
+/// resolve XML entity references only — and does **not** apply the XML
+/// attribute-value whitespace normalization that `normalized_value()` performs.
+/// Canonicalization (`c14n`) relies on literal tab/newline/carriage-return
+/// characters surviving so they can be escaped to their numeric character
+/// references; normalizing them to spaces here would corrupt the canonical
+/// form and break signature validation.
+pub fn unescape_attr_value(a: &Attribute<'_>) -> Result<String, IdentityError> {
+    let raw = std::str::from_utf8(a.value.as_ref())
+        .map_err(|e| parse_err(format!("attribute value not UTF-8: {e}")))?;
+    Ok(unescape(raw)
+        .map_err(|e| parse_err(format!("bad attribute value: {e}")))?
+        .into_owned())
 }
 
 /// Parse error helper.
@@ -126,9 +189,12 @@ pub fn read_text<R: BufRead>(reader: &mut Reader<R>) -> Result<String, IdentityE
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Text(t)) => {
-                if let Ok(s) = t.unescape() {
+                if let Ok(s) = unescape_text(&t) {
                     out.push_str(s.as_ref());
                 }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                out.push_str(&resolve_entity_ref(&r)?);
             }
             Ok(Event::CData(c)) => {
                 if let Ok(s) = std::str::from_utf8(c.as_ref()) {
