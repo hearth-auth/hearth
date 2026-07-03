@@ -34,6 +34,17 @@ realms:
     session_ttl: "30d"    # maximum recommended for consumer contexts
 ```
 
+### Immediate session revocation when disabling a user
+
+When an admin disables a user account (`update_user()` with `enabled: false`), Hearth
+**immediately revokes all active sessions** for that user. Existing access tokens derived
+from those sessions will fail validation at the next refresh cycle (within the
+`access_token_ttl` window, default 15 minutes).
+
+This means disabling a user in the admin UI or via `PATCH /admin/users/{id}` is an
+effective and fast off-boarding control — you do not need to wait for token expiry or
+manually revoke sessions separately.
+
 ### Access and refresh token TTLs
 
 Refresh tokens can extend session validity beyond the access token TTL. Ensure
@@ -337,6 +348,29 @@ supported.
   a proxy. Terminating at the proxy creates a plaintext hop between proxy and Hearth.
 - Use the `tls` configuration block to point Hearth at your certificate and key files.
 - Hearth supports hot-reload of TLS certificates without dropping existing connections.
+
+### HSTS (HTTP Strict Transport Security)
+
+When TLS is enabled, Hearth automatically sets:
+
+```
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+```
+
+This enforces HTTPS for one year on the domain and all subdomains, and includes the
+`preload` directive. **The `preload` directive opts your domain into browser HSTS preload
+lists** (maintained by Chrome, Firefox, Safari, etc.). Once submitted and accepted,
+browsers will refuse plain HTTP connections to your domain even on first visit — this
+cannot be undone quickly (removal from preload lists takes months to propagate).
+
+**Operator actions required before enabling TLS:**
+
+1. Confirm that _all_ subdomains of your Hearth domain can serve HTTPS. The `includeSubDomains`
+   directive means `*.auth.example.com` is also covered.
+2. If you are not ready to submit to HSTS preload lists, do not publicly advertise the domain
+   yet, or use a subdomain isolated from your main domain.
+3. If you later need to remove the preload protection, submit a removal request at
+   [hstspreload.org](https://hstspreload.org) — expect several months for full propagation.
 
 ---
 

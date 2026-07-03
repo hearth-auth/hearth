@@ -20,6 +20,11 @@
 //! This follows GitHub's webhook signature convention so operators can reuse
 //! their existing verification middleware.
 //!
+//! **Security note**: `hmac_secret` MUST be set in production. When not set,
+//! the webhook endpoint receives unsigned requests and any party that can reach
+//! your endpoint can forge enrichment responses. Configure `on_error: fail_closed`
+//! together with `hmac_secret` for defense in depth.
+//!
 //! # Claim merge policy
 //!
 //! `extra_claims` keys that collide with reserved JWT standard claims
@@ -138,13 +143,18 @@ pub struct PreTokenWebhookResponse {
 /// Trait-based so tests can inject a stub without network I/O.
 /// The `url` and `timeout_ms` are passed at call time so the same transport
 /// instance can serve all realms with different webhook URLs.
+///
+/// `body` is the pre-serialized JSON payload. `hmac_sig` is the optional
+/// `X-Hearth-Signature-256` header value (e.g. `"sha256=<hex>"`); the
+/// transport must include it verbatim when `Some`.
 pub trait PreTokenWebhookTransport: Send + Sync {
     /// Fires the webhook at `url` and returns the parsed response.
     fn fire(
         &self,
         url: &str,
         timeout_ms: u64,
-        request: &PreTokenWebhookRequest,
+        body: &[u8],
+        hmac_sig: Option<&str>,
     ) -> Result<PreTokenWebhookResponse, PreTokenWebhookError>;
 }
 
@@ -162,24 +172,31 @@ impl PreTokenWebhookTransport for UreqPreTokenWebhookTransport {
         &self,
         url: &str,
         timeout_ms: u64,
-        request: &PreTokenWebhookRequest,
+        body: &[u8],
+        hmac_sig: Option<&str>,
     ) -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
-        let body =
-            serde_json::to_string(request).map_err(|e| PreTokenWebhookError::ParseError {
-                reason: format!("failed to serialize request: {e}"),
-            })?;
         let url = url.to_string();
         let timeout = Duration::from_millis(timeout_ms);
-
-        let _ = timeout; // TODO: HEA-1355 wire timeout via ureq agent config in a follow-up
+        let body = body.to_vec();
+        let hmac_sig = hmac_sig.map(str::to_string);
 
         let do_request = move || -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
-            let resp = ureq::post(&url)
-                .header("Content-Type", "application/json")
-                .send(&body)
-                .map_err(|e| PreTokenWebhookError::TransportError {
-                    reason: e.to_string(),
-                })?;
+            let agent = ureq::config::Config::builder()
+                .timeout_global(Some(timeout))
+                .build()
+                .new_agent();
+
+            let mut req = agent.post(&url).header("Content-Type", "application/json");
+
+            if let Some(ref sig) = hmac_sig {
+                req = req.header("X-Hearth-Signature-256", sig.as_str());
+            }
+
+            let resp =
+                req.send(body.as_slice())
+                    .map_err(|e| PreTokenWebhookError::TransportError {
+                        reason: e.to_string(),
+                    })?;
 
             let status: u16 = resp.status().into();
             if !(200..300).contains(&status) {
@@ -242,7 +259,10 @@ impl PreTokenWebhookClient {
     /// The caller supplies:
     /// - `url` — the configured webhook URL
     /// - `timeout_ms` — request timeout in milliseconds
-    /// - `hmac_secret` — optional signing secret (passed via header, not used by stub)
+    /// - `hmac_secret` — optional HMAC-SHA256 signing secret; when set,
+    ///   the serialized body is signed and the result sent as
+    ///   `X-Hearth-Signature-256: sha256=<hex>` so the endpoint can
+    ///   verify authenticity.
     /// - `request` — the pre-built payload to POST
     ///
     /// Reserved claim keys are stripped from the response before returning.
@@ -253,9 +273,26 @@ impl PreTokenWebhookClient {
         hmac_secret: Option<&str>,
         request: &PreTokenWebhookRequest,
     ) -> Result<BTreeMap<String, serde_json::Value>, PreTokenWebhookError> {
-        let _ = hmac_secret; // TODO: HEA-1356 sign body and inject X-Hearth-Signature-256 header
+        let body = serde_json::to_vec(request).map_err(|e| PreTokenWebhookError::ParseError {
+            reason: format!("failed to serialize request: {e}"),
+        })?;
 
-        let resp = self.transport.fire(url, timeout_ms, request)?;
+        let hmac_sig: Option<String> = hmac_secret.map(|secret| {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            type HmacSha256 = Hmac<Sha256>;
+            // HMAC accepts any key size — `new_from_slice` only errors on
+            // zero-length keys, which the config layer rejects at load time.
+            #[allow(clippy::expect_used)]
+            let mut mac =
+                HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key must be non-empty");
+            mac.update(&body);
+            format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+        });
+
+        let resp = self
+            .transport
+            .fire(url, timeout_ms, &body, hmac_sig.as_deref())?;
 
         // Strip reserved keys from the response before merging into the token.
         let safe_claims: BTreeMap<String, serde_json::Value> = resp

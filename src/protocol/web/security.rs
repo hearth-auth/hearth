@@ -110,7 +110,7 @@ where
                 insert(
                     headers,
                     "strict-transport-security",
-                    "max-age=31536000; includeSubDomains",
+                    "max-age=31536000; includeSubDomains; preload",
                 );
             }
             if coop_coep_enabled {
@@ -200,6 +200,14 @@ mod tests {
             .await
             .expect("service call");
 
-        assert!(resp.headers().contains_key("strict-transport-security"));
+        let hsts = resp.headers()["strict-transport-security"]
+            .to_str()
+            .expect("HSTS header must be valid ASCII");
+        assert!(hsts.contains("max-age=31536000"), "HSTS missing max-age");
+        assert!(
+            hsts.contains("includeSubDomains"),
+            "HSTS missing includeSubDomains"
+        );
+        assert!(hsts.contains("preload"), "HSTS missing preload directive");
     }
 }

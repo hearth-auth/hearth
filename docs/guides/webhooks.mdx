@@ -11,6 +11,18 @@ import TabItem from '@theme/TabItem';
 
 **Audience:** operators and developers integrating Hearth into external systems.
 
+:::note Two distinct webhook systems
+Hearth has two independent webhook mechanisms:
+
+1. **Audit event webhooks** (this guide) — subscribe to real-time events delivered by the
+   audit engine. Configured at runtime via `POST /admin/webhooks`.
+2. **Pre-token enrichment webhook** — called before every access token issuance to inject
+   custom claims. Configured statically in `hearth.yaml` under
+   `realms.<name>.pre_token_webhook`. See
+   [CONFIGURATION.md §realms.\<name\>.pre_token_webhook](../specs/CONFIGURATION.md) for
+   the full reference.
+:::
+
 Hearth delivers real-time audit events to HTTP endpoints you control. Each event is signed with HMAC-SHA256 so you can verify it came from Hearth. This guide covers creating subscriptions, filtering events, verifying delivery signatures, and inspecting the delivery log.
 
 ---

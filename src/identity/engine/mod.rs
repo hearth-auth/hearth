@@ -4757,6 +4757,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         self.get_user(realm_id, &user_id)
     }
 
+    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
     fn update_user(
         &self,
         realm_id: &RealmId,
@@ -4824,9 +4825,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // 4. Apply status change if requested
-        if let Some(new_status) = request.status {
+        let status_disabled = if let Some(new_status) = request.status {
+            let prev = user.status();
             user.set_status(new_status);
-        }
+            prev != crate::identity::types::UserStatus::Disabled
+                && new_status == crate::identity::types::UserStatus::Disabled
+        } else {
+            false
+        };
 
         // 4a. Replace attributes map if requested.
         if let Some(attributes) = &request.attributes {
@@ -4885,6 +4891,20 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     user_id = %user_id.as_uuid(),
                     error = %e,
                     "revoke_all_user_sessions failed on email change"
+                );
+            }
+        }
+
+        // Security: disabling a user must immediately invalidate all existing
+        // sessions so that active access tokens cannot be used past revocation.
+        // Access tokens embed claims at issuance and are not re-checked on the
+        // hot path, so revocation is the only mechanism to enforce a disable.
+        if status_disabled {
+            if let Err(e) = self.revoke_all_user_sessions(realm_id, user_id, None) {
+                tracing::warn!(
+                    user_id = %user_id.as_uuid(),
+                    error = %e,
+                    "revoke_all_user_sessions failed on user disable"
                 );
             }
         }
@@ -13320,6 +13340,72 @@ mod tests {
             .expect("update");
 
         assert_eq!(updated.status(), UserStatus::Disabled);
+    }
+
+    #[test]
+    fn disabling_user_revokes_all_sessions() {
+        // Security: disabling a user must immediately invalidate existing
+        // sessions so JWT holders cannot continue operating past the disable.
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        let user = engine
+            .create_user(
+                &realm,
+                &CreateUserRequest {
+                    email: "disable-test@example.com".to_string(),
+                    display_name: "Disable Test".to_string(),
+                    ..Default::default()
+                },
+            )
+            .expect("create user");
+
+        // Create two sessions for this user.
+        engine
+            .create_session(&realm, user.id(), &SessionContext::default())
+            .expect("create session 1");
+        engine
+            .create_session(&realm, user.id(), &SessionContext::default())
+            .expect("create session 2");
+
+        let page_all = crate::core::PageRequest::new(0, crate::core::MAX_PAGE_LIMIT);
+
+        let before = engine
+            .list_sessions_by_user(&realm, user.id(), &page_all)
+            .expect("list before");
+        assert_eq!(
+            before.items.len(),
+            2,
+            "expected 2 active sessions before disable"
+        );
+
+        // Disable the user.
+        engine
+            .update_user(
+                &realm,
+                user.id(),
+                &UpdateUserRequest {
+                    status: Some(UserStatus::Disabled),
+                    ..UpdateUserRequest::default()
+                },
+            )
+            .expect("disable user");
+
+        let after = engine
+            .list_sessions_by_user(&realm, user.id(), &page_all)
+            .expect("list after");
+        // list_sessions_by_user includes revoked sessions (index is kept for
+        // audit); verify each session is marked revoked rather than asserting
+        // count == 0.
+        assert_eq!(
+            after.items.len(),
+            2,
+            "both session records must still be in index"
+        );
+        assert!(
+            after.items.iter().all(|s| s.is_revoked()),
+            "all sessions must be revoked immediately when user is disabled"
+        );
     }
 
     #[test]
