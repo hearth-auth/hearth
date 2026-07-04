@@ -329,7 +329,7 @@ async fn oidc_authorization_code_flow_via_http() {
         "expires_in should be positive"
     );
 
-    // 6. Verify JWKS endpoint returns keys
+    // 6. Verify JWKS endpoint returns keys with required security headers.
     let jwks_resp = http_client
         .get(format!("{base}/jwks"))
         // /jwks blocks until dev-mode RSA/EC signing keys are minted (5-8s on cold CI);
@@ -339,11 +339,28 @@ async fn oidc_authorization_code_flow_via_http() {
         .await
         .expect("jwks request");
     assert_eq!(jwks_resp.status(), 200);
+    // HEA-SEC-28: JWKS response MUST carry Cache-Control for rotation safety.
+    let cc = jwks_resp
+        .headers()
+        .get("cache-control")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        cc.contains("max-age=3600") && cc.contains("must-revalidate"),
+        "JWKS must have Cache-Control with max-age=3600 and must-revalidate, got: {cc:?}"
+    );
     let jwks_body: serde_json::Value = jwks_resp.json().await.expect("parse jwks");
     assert!(
         jwks_body["keys"].as_array().is_some_and(|k| !k.is_empty()),
         "JWKS should have at least one key"
     );
+    // HEA-SEC-28: each key must carry the x-key-role annotation.
+    for key in jwks_body["keys"].as_array().expect("keys array") {
+        assert!(
+            key.get("x-key-role").is_some(),
+            "JWKS key missing x-key-role annotation: {key}"
+        );
+    }
 
     // 7. Test missing realm header returns 400
     let no_realm_resp = http_client

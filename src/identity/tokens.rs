@@ -423,6 +423,15 @@ pub struct Jwk {
     pub use_: String,
     /// Algorithm — `"EdDSA"`, `"RS256"`, or `"ES256"`.
     pub alg: String,
+    /// Non-standard informational role hint. Values:
+    /// `"access-token-signing"` (EdDSA), `"saml-signing"` (RSA),
+    /// `"ecdsa-compat"` (EC). Omitted by keys that predate this field.
+    #[serde(
+        rename = "x-key-role",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub x_key_role: Option<String>,
 }
 
 /// JWKS document containing public keys.
@@ -538,6 +547,7 @@ impl SigningKey {
             kid: self.key_id.clone(),
             use_: "sig".to_string(),
             alg: JWT_ALGORITHM.to_string(),
+            x_key_role: Some("access-token-signing".to_string()),
         }
     }
 
@@ -1157,6 +1167,7 @@ impl RsaSigningKey {
             kid: self.key_id.clone(),
             use_: "sig".to_string(),
             alg: "RS256".to_string(),
+            x_key_role: Some("saml-signing".to_string()),
         })
     }
 }
@@ -1264,6 +1275,7 @@ impl EcdsaSigningKey {
             kid: self.key_id.clone(),
             use_: "sig".to_string(),
             alg: "ES256".to_string(),
+            x_key_role: Some("ecdsa-compat".to_string()),
         }
     }
 }

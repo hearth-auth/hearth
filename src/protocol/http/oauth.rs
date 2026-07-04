@@ -216,7 +216,15 @@ async fn jwks(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl In
             .into_response();
     }
     let doc = state.identity.jwks();
-    (StatusCode::OK, Json(doc)).into_response()
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("max-age=3600, must-revalidate"),
+        )],
+        Json(doc),
+    )
+        .into_response()
 }
 
 /// HTTP request body for token exchange.
@@ -440,53 +448,35 @@ fn apply_cors_to_response(
     }
 }
 
-/// Handles `OPTIONS` preflight for token endpoints. Validates that at least
-/// one registered client in the realm accepts the requesting origin, then
-/// responds `204 No Content` with the required CORS preflight headers.
+/// Handles `OPTIONS` preflight for token endpoints.
+///
+/// Always returns `204 No Content` with the same CORS preflight headers
+/// regardless of whether the requesting `Origin` is registered. This closes
+/// the CORS-oracle information-disclosure: previously the presence or absence
+/// of `Access-Control-Allow-Origin` in the 204 revealed which origins have
+/// registered clients (OAUTH-10 / HEA-SEC-28).
+///
+/// The actual origin-allowlist check lives in `append_cors_headers`, which is
+/// called on every POST /token response. The browser's Same-Origin Policy
+/// enforces the real boundary: an unregistered origin receives a 204 preflight
+/// here but then gets no `Access-Control-Allow-Origin` on the actual response,
+/// so the browser blocks it. Non-browser clients bypass preflights entirely.
 async fn token_options_preflight(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     headers: HeaderMap,
-    realm_id: RealmId,
+    _realm_id: RealmId,
 ) -> Response {
-    let Some(origin_val) = headers.get(axum::http::header::ORIGIN) else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
-    let Ok(origin_str) = origin_val.to_str() else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
-    let Some(origin_base) = extract_origin_base(origin_str) else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
-    // Check whether any registered client has this origin in its cors_origins allowlist.
-    let allowed = state
-        .identity
-        .list_clients(
-            &realm_id,
-            &crate::core::PageRequest::new(0, crate::core::MAX_PAGE_LIMIT),
-        )
-        .ok()
-        .map(|page| {
-            page.items.iter().any(|c| {
-                c.cors_origins().iter().any(|allowed_origin| {
-                    extract_origin_base(allowed_origin)
-                        .map(|base| base == origin_base)
-                        .unwrap_or(false)
-                })
-            })
-        })
-        .unwrap_or(false);
-    if !allowed {
-        return StatusCode::NO_CONTENT.into_response();
-    }
-    let Ok(allow_origin_hv) = axum::http::HeaderValue::from_str(origin_str) else {
-        return StatusCode::NO_CONTENT.into_response();
-    };
+    build_cors_preflight_response(headers.get(axum::http::header::ORIGIN))
+}
+
+/// Constructs a uniform CORS preflight 204 response.
+///
+/// Reflects the requesting `Origin` back as `Access-Control-Allow-Origin` when
+/// present and valid. Response structure is identical for registered and
+/// unregistered origins, preventing origin enumeration (HEA-SEC-28 / OAUTH-10).
+fn build_cors_preflight_response(origin: Option<&axum::http::HeaderValue>) -> Response {
     let mut resp = StatusCode::NO_CONTENT.into_response();
     let h = resp.headers_mut();
-    h.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        allow_origin_hv,
-    );
     h.insert(
         axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
         axum::http::HeaderValue::from_static("POST, OPTIONS"),
@@ -501,7 +491,73 @@ async fn token_options_preflight(
         axum::http::HeaderName::from_static("access-control-max-age"),
         axum::http::HeaderValue::from_static("86400"),
     );
+    // Reflect the requesting origin unconditionally. The actual enforcement
+    // (allowlist check) happens in append_cors_headers on POST /token.
+    if let Some(origin_hv) = origin {
+        if let Ok(hv) = axum::http::HeaderValue::try_from(origin_hv.as_bytes()) {
+            h.insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, hv);
+        }
+    }
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CORS oracle fix (HEA-SEC-28 / OAUTH-10): OPTIONS preflight MUST return
+    /// identical header structure regardless of origin registration status.
+    ///
+    /// Before this fix the handler returned a bare 204 for unregistered origins
+    /// and a 204 + CORS headers for registered ones, leaking which origins have
+    /// clients.
+    #[test]
+    fn preflight_identical_for_any_origin() {
+        let registered = axum::http::HeaderValue::from_static("https://registered.example.com");
+        let unregistered = axum::http::HeaderValue::from_static("https://unknown.attacker.com");
+
+        let r_reg = build_cors_preflight_response(Some(&registered));
+        let r_unreg = build_cors_preflight_response(Some(&unregistered));
+        let r_none = build_cors_preflight_response(None);
+
+        assert_eq!(r_reg.status(), StatusCode::NO_CONTENT);
+        assert_eq!(r_unreg.status(), StatusCode::NO_CONTENT);
+        assert_eq!(r_none.status(), StatusCode::NO_CONTENT);
+
+        for name in &[
+            "access-control-allow-methods",
+            "access-control-allow-headers",
+            "access-control-max-age",
+        ] {
+            assert_eq!(
+                r_reg.headers().get(*name),
+                r_unreg.headers().get(*name),
+                "header {name} must be identical for registered and unregistered origins"
+            );
+        }
+
+        assert_eq!(
+            r_reg
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .map(|v| v.as_bytes()),
+            Some(registered.as_bytes()),
+        );
+        assert_eq!(
+            r_unreg
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .map(|v| v.as_bytes()),
+            Some(unregistered.as_bytes()),
+        );
+        assert!(
+            r_none
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none(),
+            "no-origin request must not get Access-Control-Allow-Origin"
+        );
+    }
 }
 
 /// `OPTIONS /token` — CORS preflight.
