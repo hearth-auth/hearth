@@ -80,37 +80,22 @@ pub enum ApplicationStatus {
 pub struct OidcConfig {
     /// Time-to-live for authorization codes, in seconds.
     ///
-    /// Default: 10 minutes (600 seconds). RFC 6749 recommends a maximum
-    /// lifetime of 10 minutes.
+    /// Default: 60 seconds (RFC 6749 §4.1.2). Operators may configure a
+    /// longer TTL via `oidc.authorization_code_ttl`; values above 600 s
+    /// are rejected by config validation.
     pub authorization_code_ttl_secs: i64,
 
     /// The issuer URL used in discovery documents and ID tokens.
     ///
     /// Must match the `iss` claim in issued tokens.
     pub issuer: String,
-
-    /// Whether to enforce nonce uniqueness in authorization requests.
-    ///
-    /// Enabled by default. When enabled, duplicate nonces in authorization
-    /// requests are rejected to prevent replay attacks. Set to `false` only for
-    /// legacy clients that cannot supply nonces; a startup warning is emitted.
-    pub enforce_nonces: bool,
-
-    /// Require PKCE for confidential clients (RFC 9700 §2.1.1).
-    ///
-    /// `true` (default) — all clients, including those with a `client_secret`,
-    /// must supply `code_challenge`/`code_verifier`.  Set to `false` only for
-    /// legacy clients that cannot be updated; document the exemption.
-    pub require_pkce_for_confidential_clients: bool,
 }
 
 impl Default for OidcConfig {
     fn default() -> Self {
         Self {
-            authorization_code_ttl_secs: 600, // 10 minutes
+            authorization_code_ttl_secs: 60, // 60 s (RFC 6749 §4.1.2)
             issuer: "https://hearth.local".to_string(),
-            enforce_nonces: true,
-            require_pkce_for_confidential_clients: true,
         }
     }
 }
@@ -851,10 +836,10 @@ pub struct AuthorizationRequest {
     pub code_challenge: Option<String>,
     /// PKCE code challenge method (must be S256 if present).
     pub code_challenge_method: Option<CodeChallengeMethod>,
-    /// Optional nonce for replay protection.
+    /// Optional nonce for OIDC replay protection (OIDC Core §3.1.2.1).
     ///
-    /// When nonce enforcement is enabled (`OidcConfig::enforce_nonces`),
-    /// duplicate nonces are rejected.
+    /// Nonce uniqueness is always enforced: duplicate nonces within a TTL
+    /// window are rejected unconditionally.
     pub nonce: Option<String>,
     /// Authentication Methods References (RFC 8176) established before code
     /// issuance. Non-empty when an MFA challenge was successfully completed
@@ -1772,7 +1757,7 @@ mod tests {
     #[test]
     fn oidc_config_default_values() {
         let config = OidcConfig::default();
-        assert_eq!(config.authorization_code_ttl_secs, 600);
+        assert_eq!(config.authorization_code_ttl_secs, 60);
         assert_eq!(config.issuer, "https://hearth.local");
     }
 

@@ -747,13 +747,14 @@ pub struct OidcYamlConfig {
     /// Default: 10 minutes (600 seconds).
     #[serde(default)]
     pub authorization_code_ttl: Option<String>,
-    /// Whether to enforce nonce uniqueness in authorization requests.
+    /// **Removed opt-out (HEA-SEC-29).** Setting this to `false` is rejected
+    /// at startup. Nonce replay protection is unconditional per OIDC Core §3.1.2.1.
+    /// Remove this key from your config; `true` is silently accepted for compatibility.
     #[serde(default)]
     pub enforce_nonces: Option<bool>,
-    /// Require PKCE for confidential clients (RFC 9700 §2.1.1). Default: true.
-    ///
-    /// Set to `false` only for legacy confidential clients that cannot supply
-    /// `code_challenge`. Production systems should leave this enabled.
+    /// **Removed opt-out (HEA-SEC-29).** Setting this to `false` is rejected
+    /// at startup. PKCE is unconditional for all clients per RFC 9700 §2.1.1.
+    /// Remove this key from your config; `true` is silently accepted for compatibility.
     #[serde(default)]
     pub require_pkce_for_confidential_clients: Option<bool>,
 }

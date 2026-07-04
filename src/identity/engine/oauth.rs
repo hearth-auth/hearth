@@ -459,21 +459,17 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::RealmSuspended);
         }
 
-        // 2b. Nonce replay protection (when enforcement is enabled)
-        if self.config.oidc.enforce_nonces {
-            if let Some(ref nonce) = request.nonce {
-                let now = self.clock.now();
-                let ttl_micros = self.config.oidc.authorization_code_ttl_secs * 1_000_000;
-                let mut nonces = self.used_nonces.lock().expect("nonce lock");
-                // Sweep nonces older than the auth-code TTL to bound memory.
-                nonces.retain(|_, inserted_at| {
-                    now.as_micros() - inserted_at.as_micros() < ttl_micros
+        // 2b. Nonce replay protection (OIDC Core §3.1.2.1 — unconditional)
+        if let Some(ref nonce) = request.nonce {
+            let now = self.clock.now();
+            let ttl_micros = self.config.oidc.authorization_code_ttl_secs * 1_000_000;
+            let mut nonces = self.used_nonces.lock().expect("nonce lock");
+            // Sweep nonces older than the auth-code TTL to bound memory.
+            nonces.retain(|_, inserted_at| now.as_micros() - inserted_at.as_micros() < ttl_micros);
+            if nonces.insert(nonce.clone(), now).is_some() {
+                return Err(IdentityError::InvalidGrant {
+                    reason: "nonce has already been used".to_string(),
                 });
-                if nonces.insert(nonce.clone(), now).is_some() {
-                    return Err(IdentityError::InvalidGrant {
-                        reason: "nonce has already been used".to_string(),
-                    });
-                }
             }
         }
 
@@ -595,13 +591,8 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        // 5. PKCE enforcement (RFC 9700 §2.1.1)
-        // All clients must provide PKCE by default. Confidential clients may be
-        // exempted via `require_pkce_for_confidential_clients: false` for legacy
-        // compatibility only.
-        let pkce_required =
-            !client.is_confidential() || self.config.oidc.require_pkce_for_confidential_clients;
-        if pkce_required && request.code_challenge.is_none() {
+        // 5. PKCE enforcement (RFC 9700 §2.1.1 — unconditional for all clients)
+        if request.code_challenge.is_none() {
             return Err(IdentityError::InvalidInput {
                 reason: "PKCE is required (code_challenge with S256 must be supplied)".to_string(),
             });
@@ -2422,9 +2413,7 @@ impl EmbeddedIdentityEngine {
         // FAPI 2.0 post-JAR gate: PKCE must be checked against `effective_code_challenge`
         // so that clients who supply it only inside the JAR (RFC 9101 §6.1) are accepted.
         if realm.config().fapi_profile.is_some() {
-            // Baseline + Advanced: PKCE (S256) is always required, even for confidential
-            // clients. The `require_pkce_for_confidential_clients` config flag has no
-            // effect under a FAPI profile.
+            // Baseline + Advanced: PKCE (S256) is always required.
             if effective_code_challenge.is_none() {
                 return Err(IdentityError::FapiViolation {
                     reason: "FAPI 2.0 Baseline requires PKCE (code_challenge with S256)"
@@ -2452,9 +2441,8 @@ impl EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidRedirectUri);
         }
 
-        let pkce_required =
-            !client.is_confidential() || self.config.oidc.require_pkce_for_confidential_clients;
-        if pkce_required && effective_code_challenge.is_none() {
+        // PKCE unconditional for all clients (RFC 9700 §2.1.1)
+        if effective_code_challenge.is_none() {
             return Err(IdentityError::InvalidInput {
                 reason: "PKCE is required (code_challenge with S256 must be supplied)".to_string(),
             });

@@ -975,6 +975,20 @@ fn validate_oidc(oidc: &OidcYamlConfig, dev_mode: bool) -> Result<(), ConfigErro
             )
         })?;
     }
+    if oidc.enforce_nonces == Some(false) {
+        return Err(invalid(
+            "oidc.enforce_nonces",
+            "this opt-out has been removed (HEA-SEC-29). Nonce replay protection is \
+             now unconditional per OIDC Core §3.1.2.1. Remove the key from your config.",
+        ));
+    }
+    if oidc.require_pkce_for_confidential_clients == Some(false) {
+        return Err(invalid(
+            "oidc.require_pkce_for_confidential_clients",
+            "this opt-out has been removed (HEA-SEC-29). PKCE is now unconditional \
+             for all clients per RFC 9700 §2.1.1. Remove the key from your config.",
+        ));
+    }
     Ok(())
 }
 
@@ -1273,6 +1287,22 @@ fn validate_oidc_all(oidc: &OidcYamlConfig, dev_mode: bool, issues: &mut Vec<Val
                 reason: "invalid duration format".to_string(),
             });
         }
+    }
+    if oidc.enforce_nonces == Some(false) {
+        issues.push(ValidationIssue {
+            field: "oidc.enforce_nonces".to_string(),
+            reason: "this opt-out has been removed (HEA-SEC-29). Nonce replay protection is \
+                     now unconditional per OIDC Core §3.1.2.1. Remove the key from your config."
+                .to_string(),
+        });
+    }
+    if oidc.require_pkce_for_confidential_clients == Some(false) {
+        issues.push(ValidationIssue {
+            field: "oidc.require_pkce_for_confidential_clients".to_string(),
+            reason: "this opt-out has been removed (HEA-SEC-29). PKCE is now unconditional \
+                     for all clients per RFC 9700 §2.1.1. Remove the key from your config."
+                .to_string(),
+        });
     }
 }
 
@@ -2055,6 +2085,76 @@ mod tests {
         assert!(
             issues.iter().any(|i| i.field == "token.refresh_token_ttl"),
             "expected refresh_token_ttl issue; got: {issues:?}"
+        );
+    }
+
+    // ── HEA-SEC-29: removed opt-out fields must be rejected ─────────────────
+
+    #[test]
+    fn sec29_enforce_nonces_false_rejected() {
+        use crate::config::types::OidcYamlConfig;
+        let oidc = OidcYamlConfig {
+            enforce_nonces: Some(false),
+            ..Default::default()
+        };
+        let result = validate_oidc(&oidc, true);
+        let Err(ConfigError::ValidationError { field, reason }) = result else {
+            panic!("expected ValidationError, got: {result:?}");
+        };
+        assert_eq!(field, "oidc.enforce_nonces");
+        assert!(
+            reason.contains("HEA-SEC-29"),
+            "error must reference HEA-SEC-29; got: {reason}"
+        );
+    }
+
+    #[test]
+    fn sec29_enforce_nonces_true_accepted() {
+        use crate::config::types::OidcYamlConfig;
+        let oidc = OidcYamlConfig {
+            enforce_nonces: Some(true),
+            ..Default::default()
+        };
+        assert!(validate_oidc(&oidc, true).is_ok());
+    }
+
+    #[test]
+    fn sec29_require_pkce_false_rejected() {
+        use crate::config::types::OidcYamlConfig;
+        let oidc = OidcYamlConfig {
+            require_pkce_for_confidential_clients: Some(false),
+            ..Default::default()
+        };
+        let result = validate_oidc(&oidc, true);
+        let Err(ConfigError::ValidationError { field, reason }) = result else {
+            panic!("expected ValidationError, got: {result:?}");
+        };
+        assert_eq!(field, "oidc.require_pkce_for_confidential_clients");
+        assert!(
+            reason.contains("HEA-SEC-29"),
+            "error must reference HEA-SEC-29; got: {reason}"
+        );
+    }
+
+    #[test]
+    fn sec29_validate_oidc_all_collects_opt_out_violations() {
+        use crate::config::types::OidcYamlConfig;
+        let oidc = OidcYamlConfig {
+            enforce_nonces: Some(false),
+            require_pkce_for_confidential_clients: Some(false),
+            ..Default::default()
+        };
+        let mut issues = Vec::new();
+        validate_oidc_all(&oidc, true, &mut issues);
+        assert!(
+            issues.iter().any(|i| i.field == "oidc.enforce_nonces"),
+            "expected enforce_nonces issue; got: {issues:?}"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "oidc.require_pkce_for_confidential_clients"),
+            "expected require_pkce_for_confidential_clients issue; got: {issues:?}"
         );
     }
 }

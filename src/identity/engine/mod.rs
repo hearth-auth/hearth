@@ -15772,10 +15772,7 @@ mod tests {
         let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
         let identity_config = IdentityConfig {
             credential: CredentialConfig::fast_for_testing(),
-            oidc: OidcConfig {
-                enforce_nonces: true,
-                ..OidcConfig::default()
-            },
+            oidc: OidcConfig::default(),
             ..IdentityConfig::default()
         };
         let audit = Arc::new(EmbeddedAuditEngine::new(
@@ -15869,71 +15866,6 @@ mod tests {
         assert!(result.is_ok(), "different nonce should succeed");
     }
 
-    fn setup_engine_with_nonce_disabled(
-    ) -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<FakeClock>) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = StorageConfig::dev(dir.path().to_path_buf());
-        let storage =
-            Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
-        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
-        let identity_config = IdentityConfig {
-            credential: CredentialConfig::fast_for_testing(),
-            oidc: OidcConfig {
-                enforce_nonces: false,
-                ..OidcConfig::default()
-            },
-            ..IdentityConfig::default()
-        };
-        let audit = Arc::new(EmbeddedAuditEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&clock) as Arc<dyn Clock>,
-        ));
-        let engine = EmbeddedIdentityEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&clock) as Arc<dyn Clock>,
-            identity_config,
-            audit as Arc<dyn AuditEngine>,
-        )
-        .expect("engine creation");
-        (dir, engine, clock)
-    }
-
-    #[test]
-    fn nonce_not_enforced_when_disabled() {
-        // Explicitly opt out of nonce enforcement to verify the bypass path.
-        let (_dir, engine, _clock) = setup_engine_with_nonce_disabled();
-        let realm = create_test_realm(&engine);
-        let client = register_test_client(&engine, &realm);
-        let user = create_test_user(&engine, &realm);
-
-        // Same nonce used twice should succeed when enforcement is off
-        for state_suffix in ["1", "2"] {
-            let result = engine.authorize(
-                &realm,
-                &AuthorizationRequest {
-                    client_id: client.client_id().clone(),
-                    redirect_uri: "https://app.example.com/callback".to_string(),
-                    scope: "openid".to_string(),
-                    state: format!("state-{state_suffix}"),
-                    response_type: "code".to_string(),
-                    user_id: user.id().clone(),
-                    code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
-                    code_challenge_method: Some(CodeChallengeMethod::S256),
-                    nonce: Some("same-nonce".to_string()),
-                    resource: None,
-                    amr_values: Vec::new(),
-                    response_mode: None,
-                    request: None,
-                    via_par: false,
-                },
-            );
-            assert!(
-                result.is_ok(),
-                "nonce reuse should be allowed when enforcement is off"
-            );
-        }
-    }
-
     #[test]
     fn nonce_reusable_after_ttl_expiry() {
         // After the authorization_code_ttl_secs window has passed, a previously
@@ -15977,7 +15909,7 @@ mod tests {
             "same nonce reused before TTL must be rejected"
         );
 
-        // Advance past the authorization_code_ttl_secs (default 600 s = 600_000_000 µs).
+        // Advance past the authorization_code_ttl_secs (default 60 s = 60_000_000 µs).
         let ttl_micros = engine.config.oidc.authorization_code_ttl_secs * 1_000_000;
         clock.advance(ttl_micros);
 
@@ -18125,37 +18057,11 @@ mod tests {
         );
     }
 
-    // F-01: Confidential client can omit PKCE when the legacy exemption flag is set
+    // F-01: Confidential client without PKCE must always be rejected (RFC 9700 §2.1.1)
     #[test]
-    fn confidential_client_can_omit_pkce() {
-        // Use an engine with require_pkce_for_confidential_clients disabled to
-        // verify the legacy exemption path works for confidential clients.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config = StorageConfig::dev(dir.path().to_path_buf());
-        let storage =
-            Arc::new(EmbeddedStorageEngine::open(config).expect("open")) as Arc<dyn StorageEngine>;
-        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
-        let identity_config = IdentityConfig {
-            credential: CredentialConfig::fast_for_testing(),
-            oidc: OidcConfig {
-                require_pkce_for_confidential_clients: false,
-                ..OidcConfig::default()
-            },
-            ..IdentityConfig::default()
-        };
-        let audit = Arc::new(EmbeddedAuditEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&clock) as Arc<dyn Clock>,
-        ));
-        let engine = EmbeddedIdentityEngine::new(
-            Arc::clone(&storage),
-            Arc::clone(&clock) as Arc<dyn Clock>,
-            identity_config,
-            audit as Arc<dyn AuditEngine>,
-        )
-        .expect("engine creation");
+    fn confidential_client_without_pkce_rejected() {
+        let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
-        // Confidential auth-code client: has secret + redirect_uri + authorization_code grant.
         let client = engine
             .register_client(
                 &realm,
@@ -18164,7 +18070,7 @@ mod tests {
                     redirect_uris: vec!["https://app.example.com/callback".to_string()],
                     client_secret: Some("s3cr3t".to_string()),
                     grant_types: vec!["authorization_code".to_string()],
-                    require_consent: true,
+                    require_consent: false,
                     client_logo_url: None,
                     ..Default::default()
                 },
@@ -18173,27 +18079,29 @@ mod tests {
         let user = create_test_user(&engine, &realm);
         assert!(client.is_confidential());
 
-        engine
-            .authorize(
-                &realm,
-                &AuthorizationRequest {
-                    client_id: client.client_id().clone(),
-                    redirect_uri: "https://app.example.com/callback".to_string(),
-                    scope: "openid".to_string(),
-                    state: "s".to_string(),
-                    response_type: "code".to_string(),
-                    user_id: user.id().clone(),
-                    code_challenge: None,
-                    code_challenge_method: None,
-                    nonce: None,
-                    resource: None,
-                    amr_values: Vec::new(),
-                    response_mode: None,
-                    request: None,
-                    via_par: false,
-                },
-            )
-            .expect("confidential client must succeed without PKCE");
+        let result = engine.authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: "https://app.example.com/callback".to_string(),
+                scope: "openid".to_string(),
+                state: "s".to_string(),
+                response_type: "code".to_string(),
+                user_id: user.id().clone(),
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        );
+        assert!(
+            matches!(&result, Err(IdentityError::InvalidInput { reason }) if reason.contains("PKCE")),
+            "confidential client without PKCE must be rejected; got: {result:?}"
+        );
     }
 
     // F-02: Redirect URI with fragment must be rejected at registration

@@ -1,7 +1,7 @@
-//! HEA-550 regression: PKCE must be enforced for confidential OAuth clients.
+//! HEA-SEC-29 / HEA-550: PKCE is unconditional for all OAuth 2.0 clients.
 //!
-//! RFC 9700 §2.1.1 mandates PKCE for all clients. Before the fix, the check
-//! `!client.is_confidential()` exempted confidential clients entirely.
+//! RFC 9700 §2.1.1 mandates PKCE for all clients. The `require_pkce_for_confidential_clients`
+//! opt-out config flag has been removed; confidential clients can no longer bypass PKCE.
 
 mod common;
 
@@ -13,8 +13,7 @@ use hearth::identity::{
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 use std::sync::Arc;
 
-/// Builds a minimal identity engine with the given OIDC config.
-fn build_engine(oidc: OidcConfig) -> (tempfile::TempDir, EmbeddedIdentityEngine) {
+fn build_engine() -> (tempfile::TempDir, EmbeddedIdentityEngine) {
     use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
     use hearth::rbac::{EmbeddedRbacEngine, RbacEngine};
 
@@ -33,7 +32,7 @@ fn build_engine(oidc: OidcConfig) -> (tempfile::TempDir, EmbeddedIdentityEngine)
     )) as Arc<dyn AuditEngine>;
     let config = IdentityConfig {
         credential: CredentialConfig::fast_for_testing(),
-        oidc,
+        oidc: OidcConfig::default(),
         ..IdentityConfig::default()
     };
     let engine =
@@ -42,10 +41,10 @@ fn build_engine(oidc: OidcConfig) -> (tempfile::TempDir, EmbeddedIdentityEngine)
     (dir, engine)
 }
 
-fn setup(oidc: OidcConfig) -> (tempfile::TempDir, EmbeddedIdentityEngine, RealmId) {
+fn setup() -> (tempfile::TempDir, EmbeddedIdentityEngine, RealmId) {
     use hearth::identity::IdentityEngine;
 
-    let (dir, engine) = build_engine(oidc);
+    let (dir, engine) = build_engine();
     let realm = engine
         .create_realm(&CreateRealmRequest {
             name: "pkce-test".to_string(),
@@ -97,20 +96,17 @@ fn register_confidential(
     client
 }
 
-// ── HEA-550: confidential client, no PKCE, default config → rejected ────────
+// ── HEA-SEC-29: confidential client without PKCE is unconditionally rejected ─
 
-/// Regression: confidential client without PKCE must be rejected by default.
+/// Confidential clients without PKCE must be rejected (RFC 9700 §2.1.1).
 ///
-/// Before HEA-550, `!client.is_confidential()` short-circuited the check and
-/// allowed confidential clients to omit `code_challenge` entirely.
+/// The `require_pkce_for_confidential_clients` opt-out has been removed in
+/// HEA-SEC-29. There is no config escape hatch — PKCE is mandatory for all clients.
 #[test]
-fn confidential_client_without_pkce_rejected_by_default() {
+fn confidential_client_without_pkce_always_rejected() {
     use hearth::identity::IdentityEngine;
 
-    let (_dir, engine, realm_id) = setup(OidcConfig {
-        require_pkce_for_confidential_clients: true, // default — explicit for clarity
-        ..OidcConfig::default()
-    });
+    let (_dir, engine, realm_id) = setup();
     let user = make_user(&engine, &realm_id);
     let client = register_confidential(&engine, &realm_id);
 
@@ -140,56 +136,13 @@ fn confidential_client_without_pkce_rejected_by_default() {
     assert!(err.contains("PKCE"), "error must mention PKCE, got: {err}");
 }
 
-// ── HEA-550: opt-out allows legacy confidential client without PKCE ──────────
-
-/// Legacy opt-out: confidential client without PKCE accepted when
-/// `require_pkce_for_confidential_clients: false`.
-#[test]
-fn confidential_client_without_pkce_allowed_with_opt_out() {
-    use hearth::identity::IdentityEngine;
-
-    let (_dir, engine, realm_id) = setup(OidcConfig {
-        require_pkce_for_confidential_clients: false,
-        ..OidcConfig::default()
-    });
-    let user = make_user(&engine, &realm_id);
-    let client = register_confidential(&engine, &realm_id);
-
-    engine
-        .authorize(
-            &realm_id,
-            &AuthorizationRequest {
-                client_id: client.client_id().clone(),
-                redirect_uri: "https://app.example.com/cb".to_string(),
-                scope: "openid".to_string(),
-                state: "csrf-token".to_string(),
-                response_type: "code".to_string(),
-                user_id: user.id().clone(),
-                code_challenge: None,
-                code_challenge_method: None,
-                nonce: None,
-                resource: None,
-                amr_values: Vec::new(),
-                response_mode: None,
-                request: None,
-                via_par: false,
-            },
-        )
-        .expect("confidential client without PKCE must succeed when opt-out is configured");
-}
-
 // ── Public clients remain rejected without PKCE (no regression) ─────────────
 
-/// Public clients (no secret) still require PKCE regardless of the confidential flag.
 #[test]
 fn public_client_without_pkce_always_rejected() {
     use hearth::identity::IdentityEngine;
 
-    // Even with the confidential opt-out, public clients are always held to PKCE.
-    let (_dir, engine, realm_id) = setup(OidcConfig {
-        require_pkce_for_confidential_clients: false,
-        ..OidcConfig::default()
-    });
+    let (_dir, engine, realm_id) = setup();
     let user = make_user(&engine, &realm_id);
 
     let client = engine
@@ -198,7 +151,7 @@ fn public_client_without_pkce_always_rejected() {
             &RegisterClientRequest {
                 client_name: "Public App".to_string(),
                 redirect_uris: vec!["https://app.example.com/cb".to_string()],
-                client_secret: None, // public
+                client_secret: None,
                 grant_types: vec!["authorization_code".to_string()],
                 require_consent: false,
                 ..Default::default()
@@ -229,6 +182,6 @@ fn public_client_without_pkce_always_rejected() {
 
     assert!(
         matches!(&result, Err(IdentityError::InvalidInput { reason }) if reason.contains("PKCE")),
-        "public client without PKCE must be rejected with InvalidInput(PKCE required); got: {result:?}"
+        "public client without PKCE must be rejected; got: {result:?}"
     );
 }
