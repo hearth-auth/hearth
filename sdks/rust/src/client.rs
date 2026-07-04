@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use rand::RngCore;
 use reqwest::header;
+use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -903,7 +903,11 @@ impl HearthClient {
     fn generate_state() -> String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
         let mut bytes = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        let rng = SystemRandom::new();
+        #[allow(clippy::unwrap_used)]
+        // INVARIANT: SystemRandom::fill fails only when the OS entropy source is
+        // unavailable — an unrecoverable system failure with no safe fallback.
+        rng.fill(&mut bytes).unwrap();
         URL_SAFE_NO_PAD.encode(bytes)
     }
 
@@ -1436,6 +1440,23 @@ mod tests {
         assert_eq!(
             params.get("state").map(|v| v.as_ref()),
             Some(result.state.as_str())
+        );
+    }
+
+    #[test]
+    fn generate_state_values_are_unique() {
+        let states: std::collections::HashSet<String> =
+            (0..10).map(|_| HearthClient::generate_state()).collect();
+        assert_eq!(states.len(), 10, "each generate_state call must produce a distinct value");
+    }
+
+    #[test]
+    fn generate_state_is_url_safe_base64() {
+        let state = HearthClient::generate_state();
+        assert!(!state.is_empty(), "state must not be empty");
+        assert!(
+            state.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "state must be URL-safe base64 (no padding): {state}"
         );
     }
 

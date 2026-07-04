@@ -1,7 +1,7 @@
 //! PKCE generation utilities (RFC 7636).
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::RngCore;
+use ring::rand::{SecureRandom, SystemRandom};
 use sha2::{Digest, Sha256};
 
 /// A PKCE code verifier and its corresponding SHA-256 challenge (RFC 7636).
@@ -30,7 +30,11 @@ pub struct PkcePair {
 /// ```
 pub fn generate_pkce_pair() -> PkcePair {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    let rng = SystemRandom::new();
+    #[allow(clippy::unwrap_used)]
+    // INVARIANT: SystemRandom::fill fails only when the OS entropy source is
+    // unavailable — an unrecoverable system failure with no safe fallback.
+    rng.fill(&mut bytes).unwrap();
     let verifier = URL_SAFE_NO_PAD.encode(bytes);
 
     let mut hasher = Sha256::new();
