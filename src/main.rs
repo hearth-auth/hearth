@@ -8,7 +8,7 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
-use hearth::config::{Config, EmailTransport, SmsTransport, ValidationIssue};
+use hearth::config::{Config, EmailTransport, SmsTransport, TlsMinVersionYaml, ValidationIssue};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::email::mailcatcher::{
     generate_password, MailcatcherSender, MailcatcherState,
@@ -2668,6 +2668,7 @@ async fn run_serve_tls(
         client_ca_path: config.server.tls_client_ca_path.clone(),
         require_client_cert: config.server.tls_require_client_cert,
         crl_paths: config.security.tls.crl_paths.clone(),
+        tls13_only: config.security.tls.min_version == TlsMinVersionYaml::Tls13,
     };
     let server_config =
         build_server_config(params).map_err(|e| format!("failed to build TLS config: {e}"))?;

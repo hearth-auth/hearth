@@ -277,6 +277,9 @@ pub struct TlsConfigParams {
     /// is checked against every CRL in the list. Revoked certificates are rejected.
     /// Empty (the default) preserves the pre-A-44 behaviour: no revocation check.
     pub crl_paths: Vec<PathBuf>,
+    /// When `true`, only TLS 1.3 is offered; TLS 1.2 connections are rejected at
+    /// the handshake level (HEA-SEC-33). Set via `security.tls.min_version: "1.3"`.
+    pub tls13_only: bool,
 }
 
 /// Builds a [`rustls::ServerConfig`] with the given parameters.
@@ -298,6 +301,13 @@ pub struct TlsConfigParams {
 /// start rather than silently allowing replay-vulnerable early data.
 pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
+
+    // HEA-SEC-33: when tls13_only, present only TLS 1.3 so TLS 1.2 is rejected at handshake.
+    let versions: &[&rustls::SupportedProtocolVersion] = if params.tls13_only {
+        &[&rustls::version::TLS13]
+    } else {
+        &[&rustls::version::TLS12, &rustls::version::TLS13]
+    };
 
     // A-44: load CRL files so mTLS revocation is enforced at the TLS layer.
     let crls: Vec<CertificateRevocationListDer<'static>> = params
@@ -345,14 +355,14 @@ pub fn build_server_config(params: TlsConfigParams) -> Result<ServerConfig, TlsE
         };
 
         ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+            .with_protocol_versions(versions)
             .map_err(|e| TlsError::ConfigBuild {
                 reason: e.to_string(),
             })?
             .with_client_cert_verifier(verifier)
     } else {
         ServerConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+            .with_protocol_versions(versions)
             .map_err(|e| TlsError::ConfigBuild {
                 reason: e.to_string(),
             })?
@@ -575,6 +585,7 @@ mod tests {
             client_ca_path: None,
             require_client_cert: false,
             crl_paths: vec![],
+            tls13_only: false,
         };
 
         let server_config = build_server_config(params).expect("build config");
@@ -601,6 +612,7 @@ mod tests {
             client_ca_path: None,
             require_client_cert: false,
             crl_paths: vec![],
+            tls13_only: false,
         };
 
         let server_config = build_server_config(params).expect("build config");
@@ -632,6 +644,7 @@ mod tests {
             client_ca_path: None,
             require_client_cert: false,
             crl_paths: vec![],
+            tls13_only: false,
         };
 
         let server_config = build_server_config(params).expect("build config");
@@ -658,6 +671,28 @@ mod tests {
         );
     }
 
+    /// HEA-SEC-33: `tls13_only: true` builds a valid config (ALPN still wired).
+    #[test]
+    fn tls13_only_config_builds_successfully() {
+        let dir = TempDir::new().expect("tempdir");
+        let (cert_path, key_path) = generate_test_certs(dir.path());
+        let tls_config = ReloadableTlsConfig::load(cert_path, key_path).expect("load config");
+
+        let params = TlsConfigParams {
+            resolver: Arc::new(tls_config.resolver()),
+            client_ca_path: None,
+            require_client_cert: false,
+            crl_paths: vec![],
+            tls13_only: true,
+        };
+
+        let server_config = build_server_config(params).expect("build tls13-only config");
+        assert!(
+            server_config.alpn_protocols.contains(&b"h2".to_vec()),
+            "tls13-only must still advertise h2 ALPN"
+        );
+    }
+
     // === mTLS config build ===
 
     #[test]
@@ -672,6 +707,7 @@ mod tests {
             client_ca_path: Some(ca_cert_path),
             require_client_cert: true,
             crl_paths: vec![],
+            tls13_only: false,
         };
 
         let result = build_server_config(params);

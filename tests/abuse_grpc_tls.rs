@@ -76,6 +76,7 @@ fn base_params(dir: &Path) -> (TlsConfigParams, PathBuf, PathBuf) {
         client_ca_path: None,
         require_client_cert: false,
         crl_paths: vec![],
+        tls13_only: false,
     };
     (params, cert_path, key_path)
 }
@@ -264,6 +265,32 @@ fn a44_build_server_config_with_bad_crl_path_errors() {
     };
     let result = build_server_config(params);
     result.expect_err("must error when a CRL path does not exist");
+}
+
+/// HEA-SEC-33: `security.tls.min_version` deserializes and maps to `tls13_only` correctly.
+#[test]
+fn sec33_tls_min_version_config_round_trips() {
+    use hearth::config::{SecurityYaml, TlsMinVersionYaml};
+    use serde_norway::from_str;
+
+    // "1.3" should map to Tls13
+    let yaml13 = "tls:\n  min_version: \"1.3\"\n";
+    let sec13: SecurityYaml = from_str(yaml13).expect("deser 1.3");
+    assert_eq!(sec13.tls.min_version, TlsMinVersionYaml::Tls13);
+
+    // "1.2" should map to Tls12 (explicit)
+    let yaml12 = "tls:\n  min_version: \"1.2\"\n";
+    let sec12: SecurityYaml = from_str(yaml12).expect("deser 1.2");
+    assert_eq!(sec12.tls.min_version, TlsMinVersionYaml::Tls12);
+
+    // absent → default Tls12
+    let yaml_absent = "";
+    let sec_absent: SecurityYaml = from_str(yaml_absent).expect("deser absent");
+    assert_eq!(sec_absent.tls.min_version, TlsMinVersionYaml::Tls12);
+
+    // Verify the mapping to tls13_only used by build_server_config
+    assert!(sec13.tls.min_version == TlsMinVersionYaml::Tls13);
+    assert!(sec12.tls.min_version != TlsMinVersionYaml::Tls13);
 }
 
 /// Config deserialization: `security.tls.crl_paths` round-trips correctly.

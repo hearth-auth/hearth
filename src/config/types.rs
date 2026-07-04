@@ -1053,6 +1053,22 @@ pub struct GrpcSecurityYaml {
     pub reflection_enabled: Option<bool>,
 }
 
+/// Minimum TLS protocol version the server will accept (HEA-SEC-33).
+///
+/// Restricting to TLS 1.3 eliminates downgrade-attack surface present in TLS 1.2
+/// (POODLE, BEAST, ROBOT). Recommended for high-security deployments where all
+/// clients are known to support TLS 1.3.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+pub enum TlsMinVersionYaml {
+    /// Accept TLS 1.2 and TLS 1.3 (default). Broadest client compatibility.
+    #[default]
+    #[serde(rename = "1.2")]
+    Tls12,
+    /// Accept TLS 1.3 only. Recommended for high-security deployments.
+    #[serde(rename = "1.3")]
+    Tls13,
+}
+
 /// `security.tls` — TLS-specific security settings (A-44).
 ///
 /// Example:
@@ -1060,11 +1076,19 @@ pub struct GrpcSecurityYaml {
 /// ```yaml
 /// security:
 ///   tls:
+///     min_version: "1.3"
 ///     crl_paths:
 ///       - /etc/hearth/crl/client-ca.crl.pem
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TlsSecurityYaml {
+    /// Minimum TLS protocol version to accept.
+    ///
+    /// - `"1.2"` (default): accept TLS 1.2 and TLS 1.3.
+    /// - `"1.3"`: TLS 1.3 only — TLS 1.2 connections are rejected at the handshake.
+    ///   Recommended for high-security deployments where all clients support TLS 1.3.
+    #[serde(default)]
+    pub min_version: TlsMinVersionYaml,
     /// Paths to PEM-encoded Certificate Revocation List (CRL) files for mTLS.
     ///
     /// When non-empty, mTLS client certificates are checked against every CRL in
@@ -1460,6 +1484,11 @@ pub struct RealmTokenYaml {
     /// additional token-theft window by enabling this flag.
     #[serde(default)]
     pub allow_unsafe_ttl: bool,
+    /// Device authorization code TTL as a duration string (e.g. `"10m"`).
+    /// Defaults to 10 minutes when absent. Hard-capped at 30 minutes unless
+    /// `allow_unsafe_ttl` is set (HSEC-008).
+    #[serde(default)]
+    pub device_code_ttl: Option<String>,
 }
 
 /// Per-realm rate limit overrides in YAML.
@@ -2332,6 +2361,12 @@ impl RealmYamlConfig {
             .and_then(|t| t.magic_link_ttl.as_deref())
             .and_then(|s| parse_duration_to_micros(s).ok());
 
+        let device_code_ttl_secs_parsed = auth
+            .and_then(|a| a.token.as_ref())
+            .and_then(|t| t.device_code_ttl.as_deref())
+            .and_then(|s| parse_duration_to_micros(s).ok())
+            .map(|us| us / 1_000_000); // convert µs → seconds
+
         let allow_unsafe_ttl = auth
             .and_then(|a| a.token.as_ref())
             .map(|t| t.allow_unsafe_ttl)
@@ -2382,6 +2417,17 @@ impl RealmYamlConfig {
                     field: "auth.token.magic_link_ttl".to_string(),
                     value: format!("{ml_ttl}µs"),
                     reason: "exceeds 30m hard cap (A-14); set auth.token.allow_unsafe_ttl: true to override"
+                        .to_string(),
+                });
+            }
+        }
+        const DEVICE_CODE_TTL_CAP_SECS: i64 = 1_800; // 30 minutes
+        if let Some(dc_ttl) = device_code_ttl_secs_parsed {
+            if dc_ttl > DEVICE_CODE_TTL_CAP_SECS && !allow_unsafe_ttl {
+                errors.push(RegistryError::InvalidRealmConfigField {
+                    field: "auth.token.device_code_ttl".to_string(),
+                    value: format!("{dc_ttl}s"),
+                    reason: "exceeds 30m hard cap (HSEC-008); set auth.token.allow_unsafe_ttl: true to override"
                         .to_string(),
                 });
             }
@@ -2635,6 +2681,7 @@ impl RealmYamlConfig {
             refresh_token_ttl_micros,
             password_reset_token_ttl_micros,
             magic_link_ttl_micros: magic_link_ttl_micros_parsed,
+            device_code_ttl_secs: device_code_ttl_secs_parsed,
             max_failed_logins,
             lockout_duration_micros,
             passkey_requires_mfa,

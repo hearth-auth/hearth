@@ -25,8 +25,8 @@ pub use types::{
     RateLimitYaml, RealmAuthYaml, RealmEmailYaml, RealmMigrateYaml, RealmScimYaml, RealmTokenYaml,
     RealmWebYaml, RealmYamlConfig, RoleYamlConfig, SamlServiceProviderYaml, ScopeBundleYamlConfig,
     SecurityYaml, SeedUserYamlConfig, SeedingYamlConfig, SendgridConfig, ServerConfig, SmsConfig,
-    SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection, TokenYamlConfig,
-    TurnstileYaml, TwilioConfig,
+    SmsTransport, SmtpConfig, SmtpEncryption, SnsSmsConfig, StorageSection, TlsMinVersionYaml,
+    TokenYamlConfig, TurnstileYaml, TwilioConfig,
 };
 pub use types::{AgentAuthCapabilities, AgentAuthConfig};
 pub use types::{Config, ValidationIssue};

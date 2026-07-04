@@ -303,3 +303,82 @@ fn a52_subdomain_of_allowlisted_origin_rejected() {
         "subdomain of whitelisted origin must not be accepted"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HEA-SEC-33 — Minimal security headers on REST API responses
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// REST API responses include `X-Content-Type-Options: nosniff` and
+/// `Referrer-Policy: no-referrer` on every route (HEA-SEC-33).
+#[tokio::test]
+async fn sec33_rest_api_responses_include_minimal_security_headers() {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
+    use hearth::core::SystemClock;
+    use hearth::identity::{CredentialConfig, EmbeddedIdentityEngine, IdentityConfig};
+    use hearth::protocol::http::{router, AppState};
+    use hearth::rbac::EmbeddedRbacEngine;
+    use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let config = StorageConfig::dev(temp_dir.path().to_path_buf());
+    let engine = Arc::new(EmbeddedStorageEngine::open(config).expect("open storage"));
+    let clock = Arc::new(SystemClock) as Arc<dyn hearth::core::Clock>;
+    let identity_config = IdentityConfig {
+        credential: CredentialConfig::fast_for_testing(),
+        ..IdentityConfig::default()
+    };
+    let audit_engine = Arc::new(EmbeddedAuditEngine::new(
+        Arc::clone(&engine) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    )) as Arc<dyn AuditEngine>;
+    let identity_engine = EmbeddedIdentityEngine::new(
+        Arc::clone(&engine) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+        identity_config,
+        Arc::clone(&audit_engine),
+    )
+    .expect("identity engine");
+    let authz_engine = EmbeddedRbacEngine::new(
+        Arc::clone(&engine) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    );
+    let state = Arc::new(AppState::new(
+        Arc::new(identity_engine),
+        Arc::new(authz_engine),
+        audit_engine,
+    ));
+
+    let resp = router(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("oneshot");
+
+    let headers = resp.headers();
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .expect("X-Content-Type-Options missing on REST response")
+            .to_str()
+            .expect("header value"),
+        "nosniff"
+    );
+    assert_eq!(
+        headers
+            .get("referrer-policy")
+            .expect("Referrer-Policy missing on REST response")
+            .to_str()
+            .expect("header value"),
+        "no-referrer"
+    );
+}

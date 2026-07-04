@@ -17,7 +17,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   documents the automated CI backstops, a five-point manual review checklist, and the
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
+### Added
+- **TLS 1.3-only mode** — `security.tls.min_version: "1.3"` config option restricts the server
+  to TLS 1.3 only, rejecting TLS 1.2 clients at the handshake level. Default `"1.2"` preserves
+  existing TLS 1.2+1.3 behaviour. Recommended for high-security deployments (HEA-SEC-33).
+
 ### Security
+- **Minimal security headers on all REST API responses** — `X-Content-Type-Options: nosniff`
+  and `Referrer-Policy: no-referrer` are now applied to every HTTP response from the REST API,
+  not only the web UI. Prevents MIME-type sniffing and referrer leakage (HEA-SEC-33).
 - **Rust SDK: PKCE and OAuth state use OS entropy** — `rand::thread_rng()` (userspace CSPRNG)
   replaced with `ring::rand::SystemRandom` (direct OS entropy, consistent with server-side)
   in PKCE verifier generation and OAuth state token generation. The `rand` crate dependency

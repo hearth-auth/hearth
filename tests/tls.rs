@@ -132,6 +132,7 @@ async fn https_endpoint_serves_valid_tls() {
         client_ca_path: None,
         require_client_cert: false,
         crl_paths: vec![],
+        tls13_only: false,
     };
     let server_config = build_server_config(params).expect("build server config");
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
@@ -252,6 +253,7 @@ async fn mtls_valid_client_cert_succeeds() {
         client_ca_path: Some(ca_cert_path.clone()),
         require_client_cert: true,
         crl_paths: vec![],
+        tls13_only: false,
     };
     let server_config = build_server_config(params).expect("build mTLS server config");
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
@@ -312,6 +314,7 @@ async fn mtls_missing_client_cert_rejected() {
         client_ca_path: Some(ca_cert_path.clone()),
         require_client_cert: true,
         crl_paths: vec![],
+        tls13_only: false,
     };
     let server_config = build_server_config(params).expect("build mTLS server config");
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
@@ -376,6 +379,7 @@ async fn tls_downgrade_prevention_rejects_tls10() {
         client_ca_path: None,
         require_client_cert: false,
         crl_paths: vec![],
+        tls13_only: false,
     };
     let server_config = build_server_config(params).expect("build server config");
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
@@ -454,6 +458,75 @@ async fn tls_downgrade_prevention_rejects_tls10() {
         // Connection closed, error, or timeout — all indicate TLS 1.0 rejection
         _ => {}
     }
+
+    drop(shutdown_tx);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+}
+
+// ===== HEA-SEC-33: TLS 1.3-only mode rejects TLS 1.2 clients =====
+
+#[tokio::test]
+async fn tls13_only_rejects_tls12_client() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_app_state(temp_dir.path());
+
+    let cert_dir = tempfile::tempdir().expect("cert dir");
+    let (ca_cert_path, cert_path, key_path, _ca_cert, _ca_key) =
+        generate_server_certs(cert_dir.path());
+
+    let tls_config = ReloadableTlsConfig::load(cert_path, key_path).expect("load TLS config");
+    let params = TlsConfigParams {
+        resolver: Arc::new(tls_config.resolver()),
+        client_ca_path: None,
+        require_client_cert: false,
+        crl_paths: vec![],
+        tls13_only: true,
+    };
+    let server_config = build_server_config(params).expect("build tls13-only server config");
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let local_addr = listener.local_addr().expect("local addr");
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let server_handle = tokio::spawn(async move {
+        http::serve_tls(listener, state, acceptor, shutdown_rx)
+            .await
+            .expect("serve_tls");
+    });
+
+    // Build a rustls client restricted to TLS 1.2 only.
+    let ca_pem = std::fs::read(&ca_cert_path).expect("read CA cert");
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in rustls_pki_types::pem::PemObject::pem_slice_iter(ca_pem.as_slice())
+        .collect::<Result<Vec<rustls_pki_types::CertificateDer<'static>>, _>>()
+        .expect("parse CA certs")
+    {
+        root_store.add(cert).expect("add CA cert");
+    }
+    let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS12])
+    .expect("TLS 1.2 client config")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let stream = tokio::net::TcpStream::connect(local_addr)
+        .await
+        .expect("TCP connect");
+    let server_name = rustls_pki_types::ServerName::try_from("localhost")
+        .expect("server name")
+        .to_owned();
+    let result = connector.connect(server_name, stream).await;
+
+    assert!(
+        result.is_err(),
+        "TLS 1.2 client must be rejected by a tls13-only server"
+    );
 
     drop(shutdown_tx);
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;

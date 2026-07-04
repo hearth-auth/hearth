@@ -339,6 +339,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
         // A-26: strip Server: header so the runtime identity is not disclosed.
         .layer(axum::middleware::from_fn(strip_server_header))
+        // HEA-SEC-33: minimal security headers on every REST API response.
+        .layer(axum::middleware::from_fn(minimal_security_headers))
         // A-40: Host header allowlist — outermost layer so it runs before route
         // dispatch. Uses from_fn_with_state so the middleware can read
         // state.allowed_hosts without a separate Arc capture.
@@ -347,4 +349,24 @@ pub fn router(state: Arc<AppState>) -> Router {
             enforce_host_allowlist,
         ))
         .with_state(state)
+}
+
+/// Adds `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` to every
+/// REST API response. Unlike the web UI's full [`SecurityHeadersLayer`], these two headers
+/// are safe for machine-API responses and do not require UI-specific context.
+async fn minimal_security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(
+        axum::http::HeaderName::from_static("x-content-type-options"),
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        axum::http::HeaderName::from_static("referrer-policy"),
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    resp
 }
