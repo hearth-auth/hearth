@@ -14,3 +14,10 @@ packages:
   - "sdks/python"
   - "sdks/php"
   - "sdks/kotlin"
+allowBuilds:
+  better-sqlite3: false
+  context-mode: false
+  reflex-search: false
+  sharp: false
+minimumReleaseAgeExclude:
+  - reflex-search@1.6.0
