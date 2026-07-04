@@ -18,6 +18,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **Rate-limit counters persisted to WAL** — five secondary rate-limit trackers
+  (`ip_login`, `mfa`, `magic_link`, `password_reset`, `registration_email`) were
+  previously in-memory only and reset to zero on every process restart, allowing
+  an attacker to bypass brute-force and abuse-rate limits with a simple server
+  restart or rolling-restart deploy. All five now write increments to the WAL and
+  are restored on startup; the sweep also prunes stale WAL entries to bound storage
+  growth. The per-user password-failure tracker (`attempt_trackers`) was already
+  WAL-persisted and is unaffected (HEA-1669).
 - **Pre-token webhook HMAC signing implemented** — `hmac_secret` now produces a real
   `X-Hearth-Signature-256: sha256=<hex>` header over the serialized request body; the
   prior stub silently ignored the secret, allowing claim injection by any party able to

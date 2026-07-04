@@ -193,6 +193,31 @@ const FED_CONFIRM_PREFIX: &str = "fed:confirm:";
 /// so no realm UUID is embedded in the key.
 const ATTEMPT_TRACKER_PREFIX: &str = "rl:user:";
 
+/// Prefix for WAL-persisted per-IP login rate-limit counters.
+///
+/// Format: `rl:ip-login:{ip}` — realm-scoped via `StorageEngine` handle.
+const IP_LOGIN_TRACKER_PREFIX: &str = "rl:ip-login:";
+
+/// Prefix for WAL-persisted per-user MFA failed-attempt trackers.
+///
+/// Format: `rl:mfa:{user_uuid}` — realm-scoped via `StorageEngine` handle.
+const MFA_TRACKER_PREFIX: &str = "rl:mfa:";
+
+/// Prefix for WAL-persisted per-email magic-link request rate-limit counters.
+///
+/// Format: `rl:rml:{email}` — realm-scoped via `StorageEngine` handle.
+const MAGIC_LINK_RL_PREFIX: &str = "rl:rml:";
+
+/// Prefix for WAL-persisted per-email password-reset request rate-limit counters.
+///
+/// Format: `rl:rpwreset:{email}` — realm-scoped via `StorageEngine` handle.
+const PASSWORD_RESET_RL_PREFIX: &str = "rl:rpwreset:";
+
+/// Prefix for WAL-persisted per-email registration rate-limit counters.
+///
+/// Format: `rl:rreg-email:{email}` — realm-scoped via `StorageEngine` handle.
+const REGISTRATION_EMAIL_RL_PREFIX: &str = "rl:rreg-email:";
+
 /// Prefix for `prompt=none` silent-auth probe counters (A-37).
 ///
 /// Format: `rl:prompt_none:{user_uuid}`
@@ -1647,6 +1672,76 @@ pub(crate) fn encode_attempt_tracker(user_id: &UserId) -> Vec<u8> {
 /// Format: `rl:user:`
 pub(crate) fn attempt_tracker_scan_prefix() -> Vec<u8> {
     ATTEMPT_TRACKER_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the WAL storage key for a per-IP login rate-limit counter.
+///
+/// Format: `rl:ip-login:{ip}` — realm-scoped via `StorageEngine` handle.
+pub(crate) fn encode_ip_login_tracker(ip: &str) -> Vec<u8> {
+    format!("{IP_LOGIN_TRACKER_PREFIX}{ip}").into_bytes()
+}
+
+/// Returns the scan prefix for all persisted per-IP login trackers in a realm.
+///
+/// Format: `rl:ip-login:`
+pub(crate) fn ip_login_tracker_scan_prefix() -> Vec<u8> {
+    IP_LOGIN_TRACKER_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the WAL storage key for a per-user MFA failed-attempt tracker.
+///
+/// Format: `rl:mfa:{user_uuid}` — realm-scoped via `StorageEngine` handle.
+pub(crate) fn encode_mfa_tracker(user_id: &UserId) -> Vec<u8> {
+    format!("{MFA_TRACKER_PREFIX}{}", user_id.as_uuid()).into_bytes()
+}
+
+/// Returns the scan prefix for all persisted per-user MFA trackers in a realm.
+///
+/// Format: `rl:mfa:`
+pub(crate) fn mfa_tracker_scan_prefix() -> Vec<u8> {
+    MFA_TRACKER_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the WAL storage key for a per-email magic-link rate-limit counter.
+///
+/// Format: `rl:rml:{email}` — realm-scoped via `StorageEngine` handle.
+pub(crate) fn encode_magic_link_rl_tracker(email: &str) -> Vec<u8> {
+    format!("{MAGIC_LINK_RL_PREFIX}{email}").into_bytes()
+}
+
+/// Returns the scan prefix for all persisted magic-link rate-limit trackers.
+///
+/// Format: `rl:rml:`
+pub(crate) fn magic_link_rl_scan_prefix() -> Vec<u8> {
+    MAGIC_LINK_RL_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the WAL storage key for a per-email password-reset rate-limit counter.
+///
+/// Format: `rl:rpwreset:{email}` — realm-scoped via `StorageEngine` handle.
+pub(crate) fn encode_password_reset_rl_tracker(email: &str) -> Vec<u8> {
+    format!("{PASSWORD_RESET_RL_PREFIX}{email}").into_bytes()
+}
+
+/// Returns the scan prefix for all persisted password-reset rate-limit trackers.
+///
+/// Format: `rl:rpwreset:`
+pub(crate) fn password_reset_rl_scan_prefix() -> Vec<u8> {
+    PASSWORD_RESET_RL_PREFIX.as_bytes().to_vec()
+}
+
+/// Encodes the WAL storage key for a per-email registration rate-limit counter.
+///
+/// Format: `rl:rreg-email:{email}` — realm-scoped via `StorageEngine` handle.
+pub(crate) fn encode_registration_email_rl_tracker(email: &str) -> Vec<u8> {
+    format!("{REGISTRATION_EMAIL_RL_PREFIX}{email}").into_bytes()
+}
+
+/// Returns the scan prefix for all persisted registration email rate-limit trackers.
+///
+/// Format: `rl:rreg-email:`
+pub(crate) fn registration_email_rl_scan_prefix() -> Vec<u8> {
+    REGISTRATION_EMAIL_RL_PREFIX.as_bytes().to_vec()
 }
 
 /// Encodes the storage key for a `prompt=none` probe counter (A-37).

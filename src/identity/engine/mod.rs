@@ -1032,13 +1032,14 @@ impl EmbeddedIdentityEngine {
         Ok(engine)
     }
 
-    /// Scans the WAL for persisted per-user attempt trackers and loads any
-    /// non-expired entries into the in-memory `attempt_trackers` map.
+    /// Scans the WAL for all persisted rate-limit trackers and rehydrates the
+    /// in-memory maps.
     ///
-    /// Called once at startup from [`Self::with_rbac`]. Entries where the
-    /// lockout window has already expired are silently skipped.
+    /// Called once at startup from [`Self::new`]. Entries whose rate-limit window
+    /// has already expired are silently skipped (they can never enforce a block).
+    #[allow(clippy::too_many_lines)]
     fn restore_attempt_trackers_from_wal(&self) -> Result<(), IdentityError> {
-        // Collect all non-system realm IDs by scanning the system realm.
+        // Collect all non-system realm IDs once; reuse for every tracker type.
         let sys_realm = keys::system_realm_id();
         let realm_prefix = keys::realm_id_scan_prefix();
         let realm_end = keys::prefix_end(&realm_prefix);
@@ -1047,12 +1048,15 @@ impl EmbeddedIdentityEngine {
             .scan(&sys_realm, &realm_prefix, &realm_end)
             .map_err(Self::storage_err)?;
 
-        let tracker_prefix = keys::attempt_tracker_scan_prefix();
-        let tracker_end = keys::prefix_end(&tracker_prefix);
         let now = self.clock.now().as_micros();
-        let prefix_len = tracker_prefix.len();
 
-        let mut trackers = self.attempt_trackers.lock().expect("tracker lock");
+        // Helper: read one JSON blob entry and return (failed_count, last_failure_micros).
+        fn parse_blob(value: &[u8]) -> Option<(u32, i64)> {
+            let blob = serde_json::from_slice::<serde_json::Value>(value).ok()?;
+            let failed_count = blob["failed_count"].as_u64().map(|v| v as u32)?;
+            let last_failure_micros = blob["last_failure_micros"].as_i64()?;
+            Some((failed_count, last_failure_micros))
+        }
 
         for realm_entry in &realm_entries {
             let realm: Realm = match serde_json::from_slice(&realm_entry.value) {
@@ -1062,52 +1066,233 @@ impl EmbeddedIdentityEngine {
             if keys::is_system_realm(realm.id()) {
                 continue;
             }
+            let realm_id = realm.id();
 
-            let entries = match self.storage.scan(realm.id(), &tracker_prefix, &tracker_end) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            let (max_attempts, lockout_micros) = self.effective_rate_limit(realm.id());
-
-            for entry in entries {
-                let Ok(blob) = serde_json::from_slice::<serde_json::Value>(&entry.value) else {
-                    continue;
-                };
-                let Some(failed_count) = blob["failed_count"].as_u64().map(|v| v as u32) else {
-                    continue;
-                };
-                let Some(last_failure_micros) = blob["last_failure_micros"].as_i64() else {
-                    continue;
-                };
-
-                // Skip entries whose lockout window has already expired.
-                if failed_count >= max_attempts {
-                    let elapsed = now - last_failure_micros;
-                    if elapsed >= lockout_micros {
-                        continue;
+            // ── per-user password-failure trackers (attempt_trackers) ─────────
+            {
+                let prefix = keys::attempt_tracker_scan_prefix();
+                let end = keys::prefix_end(&prefix);
+                let (max_attempts, lockout_micros) = self.effective_rate_limit(realm_id);
+                let mut map = self.attempt_trackers.lock().expect("tracker lock");
+                if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                    for entry in entries {
+                        let Some((failed_count, last_failure_micros)) = parse_blob(&entry.value)
+                        else {
+                            continue;
+                        };
+                        if failed_count >= max_attempts
+                            && now - last_failure_micros >= lockout_micros
+                        {
+                            continue;
+                        }
+                        if entry.key.len() <= prefix.len() {
+                            continue;
+                        }
+                        let Ok(uuid_str) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
+                            continue;
+                        };
+                        let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) else {
+                            continue;
+                        };
+                        let user_id = UserId::new(uuid);
+                        let mem_key = Self::tracker_key(realm_id, &user_id);
+                        map.insert(
+                            mem_key,
+                            AttemptTracker {
+                                failed_count,
+                                last_failure_micros,
+                            },
+                        );
                     }
                 }
+            }
 
-                // Extract user UUID from key suffix "rl:user:{uuid}"
-                if entry.key.len() <= prefix_len {
-                    continue;
+            // ── per-IP login rate-limit trackers ──────────────────────────────
+            {
+                let prefix = keys::ip_login_tracker_scan_prefix();
+                let end = keys::prefix_end(&prefix);
+                let window = self.config.rate_limit.ip_window_micros;
+                let max_count = self.config.rate_limit.ip_max_attempts;
+                let mut map = self
+                    .ip_login_rate_trackers
+                    .lock()
+                    .expect("ip login tracker lock");
+                if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                    for entry in entries {
+                        let Some((failed_count, last_failure_micros)) = parse_blob(&entry.value)
+                        else {
+                            continue;
+                        };
+                        if failed_count >= max_count && now - last_failure_micros >= window {
+                            continue;
+                        }
+                        if entry.key.len() <= prefix.len() {
+                            continue;
+                        }
+                        let Ok(ip) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
+                            continue;
+                        };
+                        // In-memory key includes realm UUID so different realms
+                        // share a single HashMap without key collisions.
+                        let mem_key = Self::ip_login_tracker_key(realm_id, ip);
+                        map.insert(
+                            mem_key,
+                            AttemptTracker {
+                                failed_count,
+                                last_failure_micros,
+                            },
+                        );
+                    }
                 }
-                let Ok(uuid_str) = std::str::from_utf8(&entry.key[prefix_len..]) else {
-                    continue;
-                };
-                let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) else {
-                    continue;
-                };
-                let user_id = UserId::new(uuid);
-                let mem_key = Self::tracker_key(realm.id(), &user_id);
-                trackers.insert(
-                    mem_key,
-                    AttemptTracker {
-                        failed_count,
-                        last_failure_micros,
-                    },
-                );
+            }
+
+            // ── per-user MFA failed-attempt trackers ──────────────────────────
+            {
+                let prefix = keys::mfa_tracker_scan_prefix();
+                let end = keys::prefix_end(&prefix);
+                let mut map = self.mfa_attempt_trackers.lock().expect("mfa tracker lock");
+                if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                    for entry in entries {
+                        let Some((failed_count, last_failure_micros)) = parse_blob(&entry.value)
+                        else {
+                            continue;
+                        };
+                        if failed_count >= Self::MFA_MAX_ATTEMPTS
+                            && now - last_failure_micros >= Self::MFA_LOCKOUT_MICROS
+                        {
+                            continue;
+                        }
+                        if entry.key.len() <= prefix.len() {
+                            continue;
+                        }
+                        let Ok(uuid_str) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
+                            continue;
+                        };
+                        let Ok(uuid) = uuid::Uuid::parse_str(uuid_str) else {
+                            continue;
+                        };
+                        let user_id = UserId::new(uuid);
+                        let mem_key = Self::mfa_tracker_key(realm_id, &user_id);
+                        map.insert(
+                            mem_key,
+                            AttemptTracker {
+                                failed_count,
+                                last_failure_micros,
+                            },
+                        );
+                    }
+                }
+            }
+
+            // ── per-email magic-link rate-limit trackers ─────────��────────────
+            {
+                let prefix = keys::magic_link_rl_scan_prefix();
+                let end = keys::prefix_end(&prefix);
+                let mut map = self
+                    .magic_link_rate_trackers
+                    .lock()
+                    .expect("magic link tracker lock");
+                if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                    for entry in entries {
+                        let Some((failed_count, last_failure_micros)) = parse_blob(&entry.value)
+                        else {
+                            continue;
+                        };
+                        if failed_count >= Self::MAGIC_LINK_MAX_REQUESTS
+                            && now - last_failure_micros >= Self::MAGIC_LINK_RATE_WINDOW_MICROS
+                        {
+                            continue;
+                        }
+                        if entry.key.len() <= prefix.len() {
+                            continue;
+                        }
+                        let Ok(email) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
+                            continue;
+                        };
+                        let mem_key = Self::magic_link_tracker_key(realm_id, email);
+                        map.insert(
+                            mem_key,
+                            AttemptTracker {
+                                failed_count,
+                                last_failure_micros,
+                            },
+                        );
+                    }
+                }
+            }
+
+            // ── per-email password-reset rate-limit trackers ──────────────────
+            {
+                let prefix = keys::password_reset_rl_scan_prefix();
+                let end = keys::prefix_end(&prefix);
+                let mut map = self
+                    .password_reset_rate_trackers
+                    .lock()
+                    .expect("password reset tracker lock");
+                if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                    for entry in entries {
+                        let Some((failed_count, last_failure_micros)) = parse_blob(&entry.value)
+                        else {
+                            continue;
+                        };
+                        if failed_count >= Self::PASSWORD_RESET_MAX_REQUESTS
+                            && now - last_failure_micros >= Self::PASSWORD_RESET_RATE_WINDOW_MICROS
+                        {
+                            continue;
+                        }
+                        if entry.key.len() <= prefix.len() {
+                            continue;
+                        }
+                        let Ok(email) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
+                            continue;
+                        };
+                        let mem_key = Self::password_reset_tracker_key(realm_id, email);
+                        map.insert(
+                            mem_key,
+                            AttemptTracker {
+                                failed_count,
+                                last_failure_micros,
+                            },
+                        );
+                    }
+                }
+            }
+
+            // ── per-email registration rate-limit trackers ────────────────────
+            {
+                let prefix = keys::registration_email_rl_scan_prefix();
+                let end = keys::prefix_end(&prefix);
+                let mut map = self
+                    .registration_email_rate_trackers
+                    .lock()
+                    .expect("registration email tracker lock");
+                if let Ok(entries) = self.storage.scan(realm_id, &prefix, &end) {
+                    for entry in entries {
+                        let Some((failed_count, last_failure_micros)) = parse_blob(&entry.value)
+                        else {
+                            continue;
+                        };
+                        if failed_count >= Self::REGISTRATION_EMAIL_MAX_REQUESTS
+                            && now - last_failure_micros >= Self::REGISTRATION_RATE_WINDOW_MICROS
+                        {
+                            continue;
+                        }
+                        if entry.key.len() <= prefix.len() {
+                            continue;
+                        }
+                        let Ok(email) = std::str::from_utf8(&entry.key[prefix.len()..]) else {
+                            continue;
+                        };
+                        let mem_key = Self::registration_email_tracker_key(realm_id, email);
+                        map.insert(
+                            mem_key,
+                            AttemptTracker {
+                                failed_count,
+                                last_failure_micros,
+                            },
+                        );
+                    }
+                }
             }
         }
         Ok(())
@@ -1404,6 +1589,9 @@ impl EmbeddedIdentityEngine {
         // duplicate-realm error. `new()` propagates; this constructor does not.
         if let Err(e) = engine.seed_system_realm_if_absent() {
             tracing::warn!(error = %e, "with_signing_key: seed_system_realm_if_absent failed");
+        }
+        if let Err(e) = engine.restore_attempt_trackers_from_wal() {
+            tracing::warn!(error = %e, "with_signing_key: restore_attempt_trackers_from_wal failed");
         }
         if let Err(e) = engine.populate_realm_status_cache() {
             tracing::warn!(error = %e, "with_signing_key: populate_realm_status_cache failed");
@@ -1735,8 +1923,9 @@ impl EmbeddedIdentityEngine {
 
     /// Records a failed login attempt for the given IP.
     ///
-    /// Emits `IpLoginLimitExceeded` to the audit log the first time the count
-    /// reaches `config.rate_limit.ip_max_attempts` within the window.
+    /// Updates the in-memory tracker and persists to WAL so counts survive
+    /// process restarts. Emits `IpLoginLimitExceeded` to the audit log the
+    /// first time the count reaches `config.rate_limit.ip_max_attempts`.
     pub fn record_ip_login_attempt(&self, realm_id: &RealmId, ip: &str) {
         if ip.is_empty() {
             return;
@@ -1756,6 +1945,17 @@ impl EmbeddedIdentityEngine {
             tracker.last_failure_micros = now;
             tracker.failed_count
         };
+
+        // Persist to WAL so counts survive restarts (best-effort).
+        let wal_key = keys::encode_ip_login_tracker(ip);
+        let blob = serde_json::json!({
+            "failed_count": new_count,
+            "last_failure_micros": now,
+        });
+        if let Ok(bytes) = serde_json::to_vec(&blob) {
+            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+        }
+
         if new_count == self.config.rate_limit.ip_max_attempts {
             let ctx = AuditContext {
                 actor: Actor::Anonymous,
@@ -1803,24 +2003,38 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Records a failed MFA attempt.
+    /// Records a failed MFA attempt and persists to WAL.
     fn record_mfa_failed_attempt(&self, realm_id: &RealmId, user_id: &UserId) {
         let key = Self::mfa_tracker_key(realm_id, user_id);
         let now = self.clock.now().as_micros();
-        let mut trackers = self.mfa_attempt_trackers.lock().expect("mfa tracker lock");
-        let tracker = trackers.entry(key).or_insert(AttemptTracker {
-            failed_count: 0,
-            last_failure_micros: now,
+        let new_count = {
+            let mut trackers = self.mfa_attempt_trackers.lock().expect("mfa tracker lock");
+            let tracker = trackers.entry(key).or_insert(AttemptTracker {
+                failed_count: 0,
+                last_failure_micros: now,
+            });
+            tracker.failed_count += 1;
+            tracker.last_failure_micros = now;
+            tracker.failed_count
+        };
+        let wal_key = keys::encode_mfa_tracker(user_id);
+        let blob = serde_json::json!({
+            "failed_count": new_count,
+            "last_failure_micros": now,
         });
-        tracker.failed_count += 1;
-        tracker.last_failure_micros = now;
+        if let Ok(bytes) = serde_json::to_vec(&blob) {
+            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+        }
     }
 
-    /// Clears MFA failed attempts on success.
+    /// Clears MFA failed attempts on success and removes the WAL entry.
     fn clear_mfa_attempts(&self, realm_id: &RealmId, user_id: &UserId) {
         let key = Self::mfa_tracker_key(realm_id, user_id);
         let mut trackers = self.mfa_attempt_trackers.lock().expect("mfa tracker lock");
         trackers.remove(&key);
+        drop(trackers);
+        let wal_key = keys::encode_mfa_tracker(user_id);
+        let _ = self.storage.delete(realm_id, &wal_key);
     }
 
     // ===== Magic link rate limiting helpers =====
@@ -1858,20 +2072,31 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Records a magic link request for rate limiting.
+    /// Records a magic link request for rate limiting and persists to WAL.
     fn record_magic_link_request(&self, realm_id: &RealmId, email: &str) {
         let key = Self::magic_link_tracker_key(realm_id, email);
         let now = self.clock.now().as_micros();
-        let mut trackers = self
-            .magic_link_rate_trackers
-            .lock()
-            .expect("magic link tracker lock");
-        let tracker = trackers.entry(key).or_insert(AttemptTracker {
-            failed_count: 0,
-            last_failure_micros: now,
+        let new_count = {
+            let mut trackers = self
+                .magic_link_rate_trackers
+                .lock()
+                .expect("magic link tracker lock");
+            let tracker = trackers.entry(key).or_insert(AttemptTracker {
+                failed_count: 0,
+                last_failure_micros: now,
+            });
+            tracker.failed_count += 1;
+            tracker.last_failure_micros = now;
+            tracker.failed_count
+        };
+        let wal_key = keys::encode_magic_link_rl_tracker(email);
+        let blob = serde_json::json!({
+            "failed_count": new_count,
+            "last_failure_micros": now,
         });
-        tracker.failed_count += 1;
-        tracker.last_failure_micros = now;
+        if let Ok(bytes) = serde_json::to_vec(&blob) {
+            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+        }
     }
 
     // ===== Password reset rate limiting helpers =====
@@ -1909,20 +2134,31 @@ impl EmbeddedIdentityEngine {
         Ok(())
     }
 
-    /// Records a password reset request for rate limiting.
+    /// Records a password reset request for rate limiting and persists to WAL.
     fn record_password_reset_request(&self, realm_id: &RealmId, email: &str) {
         let key = Self::password_reset_tracker_key(realm_id, email);
         let now = self.clock.now().as_micros();
-        let mut trackers = self
-            .password_reset_rate_trackers
-            .lock()
-            .expect("password reset tracker lock");
-        let tracker = trackers.entry(key).or_insert(AttemptTracker {
-            failed_count: 0,
-            last_failure_micros: now,
+        let new_count = {
+            let mut trackers = self
+                .password_reset_rate_trackers
+                .lock()
+                .expect("password reset tracker lock");
+            let tracker = trackers.entry(key).or_insert(AttemptTracker {
+                failed_count: 0,
+                last_failure_micros: now,
+            });
+            tracker.failed_count += 1;
+            tracker.last_failure_micros = now;
+            tracker.failed_count
+        };
+        let wal_key = keys::encode_password_reset_rl_tracker(email);
+        let blob = serde_json::json!({
+            "failed_count": new_count,
+            "last_failure_micros": now,
         });
-        tracker.failed_count += 1;
-        tracker.last_failure_micros = now;
+        if let Ok(bytes) = serde_json::to_vec(&blob) {
+            let _ = self.storage.put(realm_id, &wal_key, &bytes);
+        }
     }
 
     // ===== Self-service registration rate limiting helpers =====
@@ -1983,6 +2219,10 @@ impl EmbeddedIdentityEngine {
     }
 
     /// Records a registration attempt against both email and IP buckets.
+    ///
+    /// Persists the per-email counter to WAL so it survives restarts.
+    /// The per-IP counter remains in-memory only (IP churn makes persistence
+    /// low-value; WAL cleanup would require scanning across all realms).
     fn record_registration_attempt(
         &self,
         realm_id: &RealmId,
@@ -1992,7 +2232,7 @@ impl EmbeddedIdentityEngine {
         let now = self.clock.now().as_micros();
 
         let email_key = Self::registration_email_tracker_key(realm_id, email);
-        {
+        let new_count = {
             let mut trackers = self
                 .registration_email_rate_trackers
                 .lock()
@@ -2003,6 +2243,15 @@ impl EmbeddedIdentityEngine {
             });
             tracker.failed_count += 1;
             tracker.last_failure_micros = now;
+            tracker.failed_count
+        };
+        let wal_key = keys::encode_registration_email_rl_tracker(email);
+        let blob = serde_json::json!({
+            "failed_count": new_count,
+            "last_failure_micros": now,
+        });
+        if let Ok(bytes) = serde_json::to_vec(&blob) {
+            let _ = self.storage.put(realm_id, &wal_key, &bytes);
         }
 
         if let Some(ip) = client_ip {
@@ -11407,6 +11656,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
     // ===== Periodic cleanup =====
 
+    #[allow(clippy::too_many_lines)]
     fn sweep_expired(
         &self,
         realm_id: &RealmId,
@@ -11418,10 +11668,8 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             &self.config.cleanup,
         );
 
-        // Prune in-memory rate-tracker maps. These are not backed by storage
-        // so they are not swept by the storage-level sweep above. Each map
-        // uses 2× its window as the cutoff: an entry older than two full
-        // windows is guaranteed to be outside any active rate-limit window.
+        // Prune in-memory rate-tracker maps. Each map uses 2× its window as the
+        // cutoff: an entry older than two full windows is outside any active window.
         let now = self.clock.now().as_micros();
         stats.rate_trackers_pruned += prune_rate_tracker(
             &mut self
@@ -11458,6 +11706,56 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .expect("ip login tracker lock"),
             now - self.config.rate_limit.ip_window_micros * 2,
         );
+
+        // Purge stale WAL entries for the 5 WAL-persisted rate-limit tracker
+        // types.  We delete any entry whose last-failure timestamp is older than
+        // 2× its window — the same threshold used for the in-memory prune above.
+        // Best-effort: storage errors are silently swallowed (stats.errors is
+        // incremented for the audit log entry).
+        let rl_sweep_specs: &[(&[u8], i64)] = &[
+            (
+                &keys::ip_login_tracker_scan_prefix(),
+                self.config.rate_limit.ip_window_micros * 2,
+            ),
+            (
+                &keys::mfa_tracker_scan_prefix(),
+                Self::MFA_LOCKOUT_MICROS * 2,
+            ),
+            (
+                &keys::magic_link_rl_scan_prefix(),
+                Self::MAGIC_LINK_RATE_WINDOW_MICROS * 2,
+            ),
+            (
+                &keys::password_reset_rl_scan_prefix(),
+                Self::PASSWORD_RESET_RATE_WINDOW_MICROS * 2,
+            ),
+            (
+                &keys::registration_email_rl_scan_prefix(),
+                Self::REGISTRATION_RATE_WINDOW_MICROS * 2,
+            ),
+        ];
+        for (prefix, cutoff_age) in rl_sweep_specs {
+            let end = keys::prefix_end(prefix);
+            let Ok(entries) = self.storage.scan(realm_id, prefix, &end) else {
+                stats.errors += 1;
+                continue;
+            };
+            for entry in entries {
+                let Ok(blob) = serde_json::from_slice::<serde_json::Value>(&entry.value) else {
+                    continue;
+                };
+                let Some(last_micros) = blob["last_failure_micros"].as_i64() else {
+                    continue;
+                };
+                if now - last_micros >= *cutoff_age {
+                    if self.storage.delete(realm_id, &entry.key).is_err() {
+                        stats.errors += 1;
+                    } else {
+                        stats.rate_trackers_pruned += 1;
+                    }
+                }
+            }
+        }
 
         // D.6: evict idle agent-rate windows to bound memory.
         self.agent_rate_monitor
@@ -15154,19 +15452,19 @@ mod tests {
         );
     }
 
-    // ===== Rate-limit durability: in-memory trackers cleared on restart (HEA-1139) =====
+    // ===== Rate-limit durability: WAL-persisted trackers survive restart (HEA-1669) =====
 
     #[test]
-    #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-    fn restart_clears_in_memory_rate_trackers() {
-        // Per CONFIGURATION.md §security.rate_limiting: magic-link, password-reset,
-        // IP-login, and registration rate trackers are in-memory only and do NOT
-        // survive a server restart. Only `attempt_trackers` (password brute-force)
-        // are WAL-persisted. This test pins that contract so any future WAL-persist
-        // change is forced to also update the documentation.
+    #[allow(clippy::too_many_lines)]
+    fn wal_rate_trackers_survive_restart() {
+        // HEA-1669: all five secondary rate-limit trackers are now WAL-persisted and
+        // must survive a process restart.  Only registration_ip_rate_trackers remains
+        // in-memory only (IP churn makes persistence low-value).
         let lockout_micros = 60_000_000; // 60 s — well beyond test duration
         let dir = tempfile::tempdir().expect("tempdir");
         let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let ip = "192.0.2.1";
+        let test_email = "addr@example.com";
 
         let realm;
         {
@@ -15181,60 +15479,30 @@ mod tests {
                     &CleartextPassword::from_string("correct-pw".to_string()),
                 )
                 .expect("set password");
+
             // One failed attempt → written to WAL by record_failed_attempt
             let _ = engine.verify_password(
                 &realm,
                 &user_id,
                 &CleartextPassword::from_string("wrong-pw".to_string()),
             );
-            // Inject one live entry into each in-memory-only tracker
+
+            // Drive each WAL-backed tracker via its official record path.
+            engine.record_ip_login_attempt(&realm, ip);
+            engine.record_mfa_failed_attempt(&realm, &user_id);
+            engine.record_magic_link_request(&realm, test_email);
+            engine.record_password_reset_request(&realm, test_email);
+            engine.record_registration_attempt(&realm, test_email, None);
+
+            // Registration-IP tracker is still in-memory only — seed it directly
+            // to confirm it does NOT survive.
             let now = clock.now().as_micros();
-            engine
-                .magic_link_rate_trackers
-                .lock()
-                .expect("lock")
-                .insert(
-                    "magic:test:addr@example.com".to_string(),
-                    AttemptTracker {
-                        failed_count: 2,
-                        last_failure_micros: now,
-                    },
-                );
-            engine
-                .password_reset_rate_trackers
-                .lock()
-                .expect("lock")
-                .insert(
-                    "reset:test:addr@example.com".to_string(),
-                    AttemptTracker {
-                        failed_count: 1,
-                        last_failure_micros: now,
-                    },
-                );
-            engine.ip_login_rate_trackers.lock().expect("lock").insert(
-                "test:127.0.0.1".to_string(),
-                AttemptTracker {
-                    failed_count: 3,
-                    last_failure_micros: now,
-                },
-            );
-            engine
-                .registration_email_rate_trackers
-                .lock()
-                .expect("lock")
-                .insert(
-                    "reg-email:test:new@example.com".to_string(),
-                    AttemptTracker {
-                        failed_count: 1,
-                        last_failure_micros: now,
-                    },
-                );
             engine
                 .registration_ip_rate_trackers
                 .lock()
                 .expect("lock")
                 .insert(
-                    "reg-ip:test:10.0.0.1".to_string(),
+                    "10.0.0.1".to_string(),
                     AttemptTracker {
                         failed_count: 1,
                         last_failure_micros: now,
@@ -15245,52 +15513,97 @@ mod tests {
         // Reopen from the same storage directory
         let engine2 = open_engine_at(&dir, 3, lockout_micros, Arc::clone(&clock));
 
-        // attempt_trackers are WAL-persisted and must survive restart
+        // All WAL-persisted trackers must survive restart
         assert_eq!(
             engine2.attempt_trackers.lock().expect("lock").len(),
             1,
-            "password attempt_trackers must survive restart (WAL-persisted)"
+            "attempt_trackers must survive restart"
         );
-        // All in-memory-only trackers must be empty after restart
-        assert!(
-            engine2
-                .magic_link_rate_trackers
-                .lock()
-                .expect("lock")
-                .is_empty(),
-            "magic_link_rate_trackers are in-memory only — must be cleared on restart"
+        assert_eq!(
+            engine2.ip_login_rate_trackers.lock().expect("lock").len(),
+            1,
+            "ip_login_rate_trackers must survive restart (HEA-1669)"
         );
-        assert!(
+        assert_eq!(
+            engine2.mfa_attempt_trackers.lock().expect("lock").len(),
+            1,
+            "mfa_attempt_trackers must survive restart (HEA-1669)"
+        );
+        assert_eq!(
+            engine2.magic_link_rate_trackers.lock().expect("lock").len(),
+            1,
+            "magic_link_rate_trackers must survive restart (HEA-1669)"
+        );
+        assert_eq!(
             engine2
                 .password_reset_rate_trackers
                 .lock()
                 .expect("lock")
-                .is_empty(),
-            "password_reset_rate_trackers are in-memory only — must be cleared on restart"
+                .len(),
+            1,
+            "password_reset_rate_trackers must survive restart (HEA-1669)"
         );
-        assert!(
-            engine2
-                .ip_login_rate_trackers
-                .lock()
-                .expect("lock")
-                .is_empty(),
-            "ip_login_rate_trackers are in-memory only — must be cleared on restart"
-        );
-        assert!(
+        assert_eq!(
             engine2
                 .registration_email_rate_trackers
                 .lock()
                 .expect("lock")
-                .is_empty(),
-            "registration_email_rate_trackers are in-memory only — must be cleared on restart"
+                .len(),
+            1,
+            "registration_email_rate_trackers must survive restart (HEA-1669)"
         );
+
+        // Per-IP registration tracker is intentionally still in-memory only
         assert!(
             engine2
                 .registration_ip_rate_trackers
                 .lock()
                 .expect("lock")
                 .is_empty(),
-            "registration_ip_rate_trackers are in-memory only — must be cleared on restart"
+            "registration_ip_rate_trackers are in-memory only — should not survive restart"
+        );
+    }
+
+    #[test]
+    fn ip_login_rate_limit_survives_restart_mid_brute_force() {
+        // Regression test for HEA-1669: an IP that has accrued failed login attempts
+        // must remain rate-limited after a process restart.
+        let lockout_micros = 60_000_000; // 60 s
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clock = Arc::new(FakeClock::new(Timestamp::from_micros(1_000_000)));
+        let test_ip = "10.0.0.99";
+
+        let realm;
+        {
+            let engine = open_engine_at(&dir, 3, lockout_micros, Arc::clone(&clock));
+            realm = create_test_realm(&engine);
+
+            // Accumulate ip_max_attempts failed login attempts from one IP
+            let ip_max = engine.config.rate_limit.ip_max_attempts;
+            for _ in 0..ip_max {
+                engine.record_ip_login_attempt(&realm, test_ip);
+            }
+
+            // Confirm the IP is now rate-limited
+            assert!(
+                matches!(
+                    engine.check_ip_login_rate_limit(&realm, test_ip),
+                    Err(IdentityError::RateLimited)
+                ),
+                "IP should be rate-limited before restart"
+            );
+        } // engine dropped — simulates restart
+
+        // Reopen from the same storage directory
+        let engine2 = open_engine_at(&dir, 3, lockout_micros, Arc::clone(&clock));
+
+        // The IP must still be rate-limited (WAL-persisted counter survived restart)
+        assert!(
+            matches!(
+                engine2.check_ip_login_rate_limit(&realm, test_ip),
+                Err(IdentityError::RateLimited)
+            ),
+            "IP rate limit must persist across restart (HEA-1669)"
         );
     }
 
@@ -18679,5 +18992,68 @@ mod tests {
             !rsa_kids.contains(&expired_kid.as_str()),
             "expired retiring kid must be omitted from JWKS; got {rsa_kids:?}"
         );
+    }
+
+    // ===== Property test: per-account lockout is independent of source IP (HEA-1669) =====
+
+    mod rate_limit_property {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(proptest::test_runner::Config {
+                cases: 32,
+                ..Default::default()
+            })]
+
+            /// A per-account lockout (via `attempt_trackers`) must trigger even when
+            /// every failed attempt comes from a different source IP.  This verifies
+            /// that the account-level rate limiter is independent of the IP limiter
+            /// and cannot be bypassed by rotating source addresses.
+            #[test]
+            fn per_account_lockout_triggers_independent_of_source_ip(
+                // Each iteration gets a distinct attempt count in [1..10].
+                max_attempts in 1u32..=5u32,
+            ) {
+                let lockout_micros = 60_000_000_i64; // 60 s
+                let (_dir, engine, _clock) = setup_engine_with_rate_limit(
+                    max_attempts,
+                    lockout_micros,
+                );
+                let realm = create_test_realm(&engine);
+                let user = create_test_user(&engine, &realm);
+
+                let pw = CleartextPassword::from_string("secret".to_string());
+                engine
+                    .set_password(&realm, user.id(), &pw)
+                    .expect("set password");
+
+                // Drive max_attempts failures from distinct IPs — the account-level
+                // counter should trigger regardless of the IP diversity.
+                for i in 0..max_attempts {
+                    let distinct_ip = format!("10.{}.{}.{}", i / 256, i % 256, 1);
+                    // Record the IP attempt (should NOT cause the account block alone).
+                    engine.record_ip_login_attempt(&realm, &distinct_ip);
+                    // The actual account failure goes through verify_password.
+                    let _ = engine.verify_password(
+                        &realm,
+                        user.id(),
+                        &CleartextPassword::from_string(format!("wrong-{i}")),
+                    );
+                }
+
+                // The account must be locked out regardless of IP diversity.
+                let result = engine.verify_password(
+                    &realm,
+                    user.id(),
+                    &CleartextPassword::from_string("secret".to_string()),
+                );
+                prop_assert!(
+                    matches!(result, Err(IdentityError::RateLimited)),
+                    "account must be locked out after {max_attempts} failures from \
+                     distinct IPs; got: {result:?}"
+                );
+            }
+        }
     }
 }
