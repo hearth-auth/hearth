@@ -110,6 +110,14 @@ const OAUTH_PENDING_AUTH_PREFIX: &str = "oauth:pending_auth:";
 /// Prefix for MFA TOTP state per user.
 const MFA_TOTP_PREFIX: &str = "mfa:totp:";
 
+/// Prefix for burned MFA pending cookie nonces.
+///
+/// Format: `mfa:nonce:{nonce_b64url}` → 8-byte LE u64 Unix-second expiry.
+/// Written at the moment a pending cookie is successfully consumed; read to
+/// detect replay on subsequent submits with the same cookie. Entries are
+/// self-expiring: the stored timestamp lets startup pruning skip dead entries.
+const MFA_NONCE_PREFIX: &str = "mfa:nonce:";
+
 /// Prefix for `WebAuthn` credential storage.
 const WEBAUTHN_CRED_PREFIX: &str = "webauthn:cred:";
 
@@ -709,6 +717,17 @@ pub(crate) fn user_code_scan_prefix() -> Vec<u8> {
 /// Format: `mfa:totp:{user_uuid}`
 pub(crate) fn encode_mfa_totp_key(user_id: &UserId) -> Vec<u8> {
     format!("{MFA_TOTP_PREFIX}{}", user_id.as_uuid()).into_bytes()
+}
+
+/// Encodes the storage key for a burned MFA pending cookie nonce.
+///
+/// Format: `mfa:nonce:{nonce_b64url}`
+///
+/// The value is an 8-byte little-endian `u64` Unix-second expiry. Entries
+/// remain in storage until realm deletion or an explicit pruning pass; the
+/// stored expiry allows callers to skip stale entries cheaply.
+pub(crate) fn encode_mfa_nonce_key(nonce: &str) -> Vec<u8> {
+    format!("{MFA_NONCE_PREFIX}{nonce}").into_bytes()
 }
 
 /// Encodes the storage key for a `WebAuthn` credential.

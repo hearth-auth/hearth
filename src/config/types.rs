@@ -226,8 +226,9 @@ impl Default for StorageSection {
 pub struct MetricsConfig {
     /// Whether to expose the Prometheus `/metrics` HTTP endpoint.
     ///
-    /// Set to `false` to disable the endpoint (e.g., when metrics are
-    /// collected via a sidecar instead of a direct scrape).
+    /// Defaults to `false` (disabled). Set to `true` to enable the endpoint;
+    /// when doing so, also set `bearer_token` to protect the scrape endpoint
+    /// from unauthenticated callers, or restrict access at the network layer.
     #[serde(default = "MetricsConfig::default_enabled")]
     pub enabled: bool,
 
@@ -245,7 +246,7 @@ pub struct MetricsConfig {
 
 impl MetricsConfig {
     const fn default_enabled() -> bool {
-        true
+        false
     }
 }
 

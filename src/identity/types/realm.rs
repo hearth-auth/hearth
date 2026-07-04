@@ -459,11 +459,33 @@ pub struct PreTokenWebhookConfig {
     pub on_error: PreTokenWebhookErrorPolicy,
     /// HMAC-SHA256 signing secret.
     ///
-    /// When set, the request body is signed and the signature is sent in
-    /// `X-Hearth-Signature-256: sha256=<hex>` so the endpoint can verify
-    /// authenticity. `None` skips signing.
+    /// **Required.** When set, the request body is signed and the signature
+    /// is sent in `X-Hearth-Signature-256: sha256=<hex>` so the endpoint
+    /// can verify authenticity. Omitting this field is rejected at realm
+    /// update/create time — an unauthenticated webhook endpoint is a direct
+    /// claim-injection path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac_secret: Option<String>,
+}
+
+impl PreTokenWebhookConfig {
+    /// Validates the webhook configuration.
+    ///
+    /// Returns `Err` with a human-readable reason when the configuration is
+    /// insecure. Currently enforces:
+    /// - `hmac_secret` MUST be set: an unsigned webhook endpoint allows any
+    ///   network-reachable caller to inject arbitrary JWT claims.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.hmac_secret.as_deref().map_or(true, str::is_empty) {
+            return Err(
+                "pre_token_webhook.hmac_secret is required: an unsigned webhook endpoint \
+                 allows any caller reachable from the webhook URL to inject arbitrary JWT \
+                 claims into issued tokens"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 fn default_webhook_timeout_ms() -> u64 {
@@ -901,4 +923,50 @@ pub struct UpdateRealmRequest {
     pub status: Option<RealmStatus>,
     /// New configuration overrides.
     pub config: Option<RealmConfig>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_token_webhook_config_validate_rejects_none_secret() {
+        let cfg = PreTokenWebhookConfig {
+            url: "http://localhost:9999/enrich".to_string(),
+            timeout_ms: 1000,
+            on_error: PreTokenWebhookErrorPolicy::FailOpen,
+            hmac_secret: None,
+        };
+        let err = cfg.validate().expect_err("None secret must be rejected");
+        assert!(
+            err.contains("hmac_secret"),
+            "error must mention hmac_secret, got: {err}"
+        );
+    }
+
+    #[test]
+    fn pre_token_webhook_config_validate_rejects_empty_secret() {
+        let cfg = PreTokenWebhookConfig {
+            url: "http://localhost:9999/enrich".to_string(),
+            timeout_ms: 1000,
+            on_error: PreTokenWebhookErrorPolicy::FailOpen,
+            hmac_secret: Some(String::new()),
+        };
+        let err = cfg.validate().expect_err("empty secret must be rejected");
+        assert!(
+            err.contains("hmac_secret"),
+            "error must mention hmac_secret, got: {err}"
+        );
+    }
+
+    #[test]
+    fn pre_token_webhook_config_validate_accepts_non_empty_secret() {
+        let cfg = PreTokenWebhookConfig {
+            url: "http://localhost:9999/enrich".to_string(),
+            timeout_ms: 1000,
+            on_error: PreTokenWebhookErrorPolicy::FailOpen,
+            hmac_secret: Some("my-secret".to_string()),
+        };
+        cfg.validate().expect("non-empty secret must be accepted");
+    }
 }

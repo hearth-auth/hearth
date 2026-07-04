@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use ring::digest;
+use ring::hmac;
+use ring::rand::SecureRandom as _;
 
 use crate::core::{AuditEventId, Clock, RealmId, Timestamp};
 use crate::storage::StorageEngine;
@@ -26,6 +27,11 @@ const GENESIS_HASH: &str = "genesis";
 /// mutex ensures each `append` observes the previous event's hash before
 /// computing its own. The hash chain is inherently sequential, so this is
 /// correctness, not just a performance cache.
+///
+/// Each realm gets a unique 32-byte HMAC-SHA256 key stored under
+/// `audit:hmac:key` (KEK-wrapped when a key-encryption key is configured).
+/// This prevents a storage-layer attacker from recomputing a valid chain
+/// without knowledge of the key.
 pub struct EmbeddedAuditEngine {
     /// Storage backend.
     storage: Arc<dyn StorageEngine>,
@@ -35,6 +41,12 @@ pub struct EmbeddedAuditEngine {
     /// with an optional cached last hash to avoid the `O(n)` scan on every
     /// append after the first.
     chain_locks: Mutex<HashMap<RealmId, Arc<Mutex<Option<String>>>>>,
+    /// Optional key-encryption key; when set, per-realm HMAC keys are
+    /// AES-256-GCM-wrapped at rest.
+    kek: Option<[u8; 32]>,
+    /// Cached per-realm HMAC key material (32 bytes each). Lazy-initialized
+    /// on first access per realm; never evicted (realm IDs are stable).
+    hmac_key_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
 }
 
 impl EmbeddedAuditEngine {
@@ -44,7 +56,69 @@ impl EmbeddedAuditEngine {
             storage,
             clock,
             chain_locks: Mutex::new(HashMap::new()),
+            kek: None,
+            hmac_key_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Configures a KEK so that per-realm audit HMAC keys are wrapped at rest.
+    ///
+    /// Must be called before any `append` or `verify_integrity` — keys are
+    /// generated on first use and the wrapping applied at generation time.
+    #[must_use]
+    pub fn with_kek(mut self, kek: Option<[u8; 32]>) -> Self {
+        self.kek = kek;
+        self
+    }
+
+    /// Returns (or lazily creates) the per-realm HMAC key.
+    fn get_realm_hmac_key(&self, realm_id: &RealmId) -> Result<[u8; 32], AuditError> {
+        {
+            let cache = self.hmac_key_cache.lock().expect("hmac_key_cache poisoned");
+            if let Some(k) = cache.get(realm_id) {
+                return Ok(*k);
+            }
+        }
+
+        let storage_key = keys::audit_hmac_key();
+        let key_bytes: [u8; 32] = match self.storage.get(realm_id, &storage_key)? {
+            Some(raw) => {
+                let plaintext =
+                    crate::identity::key_encryption::unwrap_key(&raw, self.kek.as_ref()).map_err(
+                        |e| AuditError::Serialization {
+                            reason: format!("audit HMAC key unwrap failed: {e}"),
+                        },
+                    )?;
+                if plaintext.len() != 32 {
+                    return Err(AuditError::Serialization {
+                        reason: format!(
+                            "audit HMAC key has wrong length: {} (expected 32)",
+                            plaintext.len()
+                        ),
+                    });
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&plaintext);
+                arr
+            }
+            None => {
+                let rng = ring::rand::SystemRandom::new();
+                let mut key = [0u8; 32];
+                rng.fill(&mut key).map_err(|_| AuditError::Serialization {
+                    reason: "failed to generate audit HMAC key".into(),
+                })?;
+                let wrapped = crate::identity::key_encryption::wrap_key(&key, self.kek.as_ref())
+                    .map_err(|e| AuditError::Serialization {
+                        reason: format!("audit HMAC key wrap failed: {e}"),
+                    })?;
+                self.storage.put(realm_id, &storage_key, &wrapped)?;
+                key
+            }
+        };
+
+        let mut cache = self.hmac_key_cache.lock().expect("hmac_key_cache poisoned");
+        cache.insert(realm_id.clone(), key_bytes);
+        Ok(key_bytes)
     }
 
     /// Returns the per-realm chain lock, creating it on first access.
@@ -59,12 +133,14 @@ impl EmbeddedAuditEngine {
         }
     }
 
-    /// Computes the SHA-256 integrity hash for an event.
+    /// Computes the HMAC-SHA256 integrity hash for an event.
     ///
-    /// `Hash = SHA-256(prev_hash || event_data_json)`
-    /// where `event_data_json` is the event serialized without the `integrity_hash` field.
-    fn compute_hash(prev_hash: &str, event: &AuditEvent) -> String {
-        // Serialize the event without the integrity_hash for hashing
+    /// `Hash = HMAC-SHA256(realm_hmac_key, prev_hash || event_data_json)`
+    ///
+    /// The keyed MAC prevents a storage-layer attacker from recomputing a valid
+    /// chain after deleting or modifying events — they would need the per-realm
+    /// HMAC key (KEK-protected when configured) to forge a tag.
+    fn compute_hmac_hash(hmac_key_bytes: &[u8], prev_hash: &str, event: &AuditEvent) -> String {
         let hashable = serde_json::json!({
             "id": event.id,
             "realm_id": event.realm_id,
@@ -81,8 +157,9 @@ impl EmbeddedAuditEngine {
         data.extend_from_slice(prev_hash.as_bytes());
         data.extend_from_slice(event_bytes.as_bytes());
 
-        let hash = digest::digest(&digest::SHA256, &data);
-        hex_encode(hash.as_ref())
+        let key = hmac::Key::new(hmac::HMAC_SHA256, hmac_key_bytes);
+        let tag = hmac::sign(&key, &data);
+        hex_encode(tag.as_ref())
     }
 
     /// Gets the last event's integrity hash for a realm, or `GENESIS_HASH` if none.
@@ -120,6 +197,8 @@ impl AuditEngine for EmbeddedAuditEngine {
             None => self.get_last_hash(&request.realm_id)?,
         };
 
+        let hmac_key = self.get_realm_hmac_key(&request.realm_id)?;
+
         let event_id = AuditEventId::generate();
         let timestamp = self.clock.now();
 
@@ -136,8 +215,8 @@ impl AuditEngine for EmbeddedAuditEngine {
             integrity_hash: String::new(),
         };
 
-        // Compute and set integrity hash
-        event.integrity_hash = Self::compute_hash(&prev_hash, &event);
+        // Compute and set HMAC-SHA256 integrity hash.
+        event.integrity_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
 
         // Serialize the complete event
         let value = serde_json::to_vec(&event).map_err(|e| AuditError::Serialization {
@@ -256,13 +335,15 @@ impl AuditEngine for EmbeddedAuditEngine {
             }
         };
 
+        let hmac_key = self.get_realm_hmac_key(realm_id)?;
+
         for entry in entries {
             let event: AuditEvent =
                 serde_json::from_slice(&entry.value).map_err(|e| AuditError::Serialization {
                     reason: e.to_string(),
                 })?;
 
-            let expected_hash = Self::compute_hash(&prev_hash, &event);
+            let expected_hash = Self::compute_hmac_hash(&hmac_key, &prev_hash, &event);
             if event.integrity_hash != expected_hash {
                 crate::metrics::metrics()
                     .audit_integrity_failures_total
@@ -309,15 +390,15 @@ impl AuditEngine for EmbeddedAuditEngine {
                 serde_json::from_slice(&entry.value).map_err(|e| AuditError::Serialization {
                     reason: e.to_string(),
                 })?;
-            // Delete primary key
-            self.storage.delete(realm_id, &entry.key)?;
-            // Delete actor index
             let actor_key = keys::encode_actor_index(&event.actor, event.timestamp, &event.id);
-            self.storage.delete(realm_id, &actor_key)?;
-            // Delete action index
             let action_key =
                 keys::encode_action_index(event.action.as_str(), event.timestamp, &event.id);
-            self.storage.delete(realm_id, &action_key)?;
+            // Atomic: primary + both indexes deleted together or not at all.
+            // A crash between individual deletes previously left orphaned index
+            // entries pointing at a missing primary — write_batch eliminates
+            // that window.
+            self.storage
+                .write_batch(realm_id, &[], &[entry.key, actor_key, action_key])?;
             deleted += 1;
         }
         Ok(deleted)
@@ -345,12 +426,11 @@ impl AuditEngine for EmbeddedAuditEngine {
                 serde_json::from_slice(&entry.value).map_err(|e| AuditError::Serialization {
                     reason: e.to_string(),
                 })?;
-            self.storage.delete(realm_id, &entry.key)?;
             let actor_key = keys::encode_actor_index(&event.actor, event.timestamp, &event.id);
-            self.storage.delete(realm_id, &actor_key)?;
             let action_key =
                 keys::encode_action_index(event.action.as_str(), event.timestamp, &event.id);
-            self.storage.delete(realm_id, &action_key)?;
+            self.storage
+                .write_batch(realm_id, &[], &[entry.key, actor_key, action_key])?;
             deleted += 1;
         }
         Ok(deleted)

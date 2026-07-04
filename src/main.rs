@@ -1055,6 +1055,18 @@ async fn run_serve(
         );
     }
 
+    // HSEC-005: Warn when the metrics endpoint is exposed without a bearer
+    // token in production. This is a non-fatal warning because network-level
+    // firewalling is a valid alternative, but operators must make a conscious
+    // choice. In dev mode the warning is skipped to avoid noise.
+    if config.metrics.enabled && config.metrics.bearer_token.is_none() && !config.dev_mode {
+        warn!(
+            "metrics endpoint is enabled without a bearer_token; /metrics is accessible \
+             to any caller that can reach the server. Set metrics.bearer_token in \
+             hearth.yaml or restrict access at the network layer (firewall / private subnet)."
+        );
+    }
+
     // HSEC-003/004: Production startup security checks against the system realm.
     if !config.dev_mode {
         let sys_realm_id = hearth::core::RealmId::new(uuid::Uuid::nil());

@@ -10,8 +10,9 @@ use super::error::ConfigError;
 use super::types::{
     parse_duration_to_micros, AgentAuthConfig, AuthConfig, BrandingConfig, CompactionSection,
     Config, DemoConfig, EmailConfig, EmailTransport, MetricsConfig, ObservabilityConfig,
-    OidcYamlConfig, OnboardingConfig, OperationalConfig, RealmYamlConfig, SecurityYaml,
-    ServerConfig, SmsConfig, SmsTransport, StorageSection, TokenYamlConfig, ValidationIssue,
+    OidcYamlConfig, OnboardingConfig, OperationalConfig, RealmYamlConfig, RegistrationModeYaml,
+    SecurityYaml, ServerConfig, SmsConfig, SmsTransport, StorageSection, TokenYamlConfig,
+    ValidationIssue,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -298,6 +299,12 @@ impl Config {
         validate_realm_applications_all(self.realms.as_ref(), &mut issues);
         validate_realm_organizations_all(self.realms.as_ref(), &mut issues);
 
+        // HSEC-010: Mirror the fail-fast check in validate_all so the admin
+        // config-check panel surfaces this error alongside other issues.
+        if !self.dev_mode && self.email.transport == EmailTransport::Log {
+            validate_email_transport_log_prod_all(self.realms.as_ref(), &mut issues);
+        }
+
         if let Some(addr) = &self.onboarding.notification_email {
             if addr.parse::<lettre::message::Mailbox>().is_err() {
                 issues.push(ValidationIssue {
@@ -440,6 +447,14 @@ impl Config {
         validate_realm_applications(self.realms.as_ref())?;
         validate_realm_organizations(self.realms.as_ref())?;
 
+        // HSEC-010: In production mode, the log email transport silently
+        // discards all messages. This is a hard error when any realm has
+        // features that depend on email delivery (magic_link auth or any form
+        // of self-registration). Operators must configure a real transport.
+        if !self.dev_mode && self.email.transport == EmailTransport::Log {
+            validate_email_transport_log_prod(self.realms.as_ref())?;
+        }
+
         if let Some(addr) = &self.onboarding.notification_email {
             addr.parse::<lettre::message::Mailbox>().map_err(|e| {
                 invalid(
@@ -529,6 +544,81 @@ fn validate_trusted_proxies(server: &ServerConfig, issues: &mut Vec<ValidationIs
                      this entry is likely a misconfiguration. \
                      If your proxy truly runs on localhost, bind the server to 127.0.0.1.",
                     server.bind_address
+                ),
+            });
+        }
+    }
+}
+
+/// HSEC-010: Returns an error when `email.transport = log` in production and
+/// at least one realm relies on email delivery (magic_link auth or any
+/// self-registration mode other than `disabled`).
+///
+/// Called only when `!config.dev_mode && config.email.transport == Log`.
+fn validate_email_transport_log_prod(
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+) -> Result<(), ConfigError> {
+    let Some(realms) = realms else {
+        return Ok(());
+    };
+    for (name, realm) in realms {
+        let auth = realm.auth.as_ref();
+
+        let has_magic_link = auth
+            .and_then(|a| a.allowed_auth_methods.as_ref())
+            .map(|methods| methods.iter().any(|m| m == "magic_link"))
+            .unwrap_or(false);
+
+        let has_self_reg = auth
+            .and_then(|a| a.registration.as_ref())
+            .map(|r| !matches!(r.mode, RegistrationModeYaml::Disabled))
+            .unwrap_or(false);
+
+        if has_magic_link || has_self_reg {
+            return Err(invalid(
+                "email.transport",
+                format!(
+                    "realm '{name}' requires email delivery \
+                     (magic_link auth or self-registration is enabled) but \
+                     email.transport = log — no emails will be delivered in \
+                     production. Configure a real transport: smtp, sendgrid, \
+                     postmark, mailgun, or mailtrap."
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Accumulating variant of [`validate_email_transport_log_prod`] for
+/// [`Config::validate_all`].
+fn validate_email_transport_log_prod_all(
+    realms: Option<&std::collections::HashMap<String, RealmYamlConfig>>,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    let Some(realms) = realms else { return };
+    for (name, realm) in realms {
+        let auth = realm.auth.as_ref();
+
+        let has_magic_link = auth
+            .and_then(|a| a.allowed_auth_methods.as_ref())
+            .map(|methods| methods.iter().any(|m| m == "magic_link"))
+            .unwrap_or(false);
+
+        let has_self_reg = auth
+            .and_then(|a| a.registration.as_ref())
+            .map(|r| !matches!(r.mode, RegistrationModeYaml::Disabled))
+            .unwrap_or(false);
+
+        if has_magic_link || has_self_reg {
+            issues.push(ValidationIssue {
+                field: "email.transport".to_string(),
+                reason: format!(
+                    "realm '{name}' requires email delivery \
+                     (magic_link auth or self-registration is enabled) but \
+                     email.transport = log — no emails will be delivered in \
+                     production. Configure a real transport: smtp, sendgrid, \
+                     postmark, mailgun, or mailtrap."
                 ),
             });
         }
@@ -679,20 +769,44 @@ fn validate_realm_auth_configs(
         }
         if let Some(token) = &auth.token {
             if let Some(ttl) = &token.access_token_ttl {
-                parse_duration_to_micros(ttl).map_err(|e| {
+                let micros = parse_duration_to_micros(ttl).map_err(|e| {
                     invalid(
                         &format!("realms.{name}.auth.token.access_token_ttl"),
                         format!("invalid duration: {e}"),
                     )
                 })?;
+                if micros > ACCESS_TOKEN_TTL_MAX_MICROS {
+                    return Err(invalid(
+                        &format!("realms.{name}.auth.token.access_token_ttl"),
+                        "access token TTL must not exceed 1 hour (HEA-SEC-27)",
+                    ));
+                }
+                if micros > ACCESS_TOKEN_TTL_WARN_MICROS {
+                    tracing::warn!(
+                        field = format!("realms.{name}.auth.token.access_token_ttl"),
+                        "access token TTL exceeds 15 minutes (HEA-SEC-27)"
+                    );
+                }
             }
             if let Some(ttl) = &token.refresh_token_ttl {
-                parse_duration_to_micros(ttl).map_err(|e| {
+                let micros = parse_duration_to_micros(ttl).map_err(|e| {
                     invalid(
                         &format!("realms.{name}.auth.token.refresh_token_ttl"),
                         format!("invalid duration: {e}"),
                     )
                 })?;
+                if micros > REFRESH_TOKEN_TTL_MAX_MICROS {
+                    return Err(invalid(
+                        &format!("realms.{name}.auth.token.refresh_token_ttl"),
+                        "refresh token TTL must not exceed 30 days (HEA-SEC-27)",
+                    ));
+                }
+                if micros > REFRESH_TOKEN_TTL_WARN_MICROS {
+                    tracing::warn!(
+                        field = format!("realms.{name}.auth.token.refresh_token_ttl"),
+                        "refresh token TTL exceeds 24 hours (HEA-SEC-27)"
+                    );
+                }
             }
         }
         if let Some(rl) = &auth.rate_limit {
@@ -864,6 +978,15 @@ fn validate_oidc(oidc: &OidcYamlConfig, dev_mode: bool) -> Result<(), ConfigErro
     Ok(())
 }
 
+/// Hard cap: access token TTL must not exceed 1 hour (HEA-SEC-27).
+const ACCESS_TOKEN_TTL_MAX_MICROS: i64 = 3_600 * 1_000_000;
+/// Hard cap: refresh token TTL must not exceed 30 days (HEA-SEC-27).
+const REFRESH_TOKEN_TTL_MAX_MICROS: i64 = 30 * 86_400 * 1_000_000;
+/// Warning threshold: access token TTL > 15 minutes warrants an operator alert.
+const ACCESS_TOKEN_TTL_WARN_MICROS: i64 = 900 * 1_000_000;
+/// Warning threshold: refresh token TTL > 24 hours warrants an operator alert.
+const REFRESH_TOKEN_TTL_WARN_MICROS: i64 = 86_400 * 1_000_000;
+
 fn validate_token(token: &TokenYamlConfig) -> Result<(), ConfigError> {
     if let Some(issuer) = &token.issuer {
         if issuer.is_empty() {
@@ -871,12 +994,39 @@ fn validate_token(token: &TokenYamlConfig) -> Result<(), ConfigError> {
         }
     }
     if let Some(ttl) = &token.access_token_ttl {
-        parse_duration_to_micros(ttl)
+        let micros = parse_duration_to_micros(ttl)
             .map_err(|e| invalid("token.access_token_ttl", format!("invalid duration: {e}")))?;
+        if micros > ACCESS_TOKEN_TTL_MAX_MICROS {
+            return Err(invalid(
+                "token.access_token_ttl",
+                "access token TTL must not exceed 1 hour (HEA-SEC-27); \
+                 long-lived access tokens significantly widen the stolen-token window",
+            ));
+        }
+        if micros > ACCESS_TOKEN_TTL_WARN_MICROS {
+            tracing::warn!(
+                field = "token.access_token_ttl",
+                "access token TTL exceeds 15 minutes; consider reducing it to limit \
+                 the window for stolen tokens (HEA-SEC-27)"
+            );
+        }
     }
     if let Some(ttl) = &token.refresh_token_ttl {
-        parse_duration_to_micros(ttl)
+        let micros = parse_duration_to_micros(ttl)
             .map_err(|e| invalid("token.refresh_token_ttl", format!("invalid duration: {e}")))?;
+        if micros > REFRESH_TOKEN_TTL_MAX_MICROS {
+            return Err(invalid(
+                "token.refresh_token_ttl",
+                "refresh token TTL must not exceed 30 days (HEA-SEC-27)",
+            ));
+        }
+        if micros > REFRESH_TOKEN_TTL_WARN_MICROS {
+            tracing::warn!(
+                field = "token.refresh_token_ttl",
+                "refresh token TTL exceeds 24 hours; consider reducing it or enabling \
+                 refresh token rotation to limit the stolen-token blast radius (HEA-SEC-27)"
+            );
+        }
     }
     Ok(())
 }
@@ -1136,19 +1286,43 @@ fn validate_token_all(token: &TokenYamlConfig, issues: &mut Vec<ValidationIssue>
         }
     }
     if let Some(ttl) = &token.access_token_ttl {
-        if parse_duration_to_micros(ttl).is_err() {
-            issues.push(ValidationIssue {
+        match parse_duration_to_micros(ttl) {
+            Err(_) => issues.push(ValidationIssue {
                 field: "token.access_token_ttl".to_string(),
                 reason: "invalid duration format".to_string(),
-            });
+            }),
+            Ok(micros) if micros > ACCESS_TOKEN_TTL_MAX_MICROS => issues.push(ValidationIssue {
+                field: "token.access_token_ttl".to_string(),
+                reason: "access token TTL must not exceed 1 hour (HEA-SEC-27); \
+                         long-lived access tokens significantly widen the stolen-token window"
+                    .to_string(),
+            }),
+            Ok(micros) if micros > ACCESS_TOKEN_TTL_WARN_MICROS => {
+                tracing::warn!(
+                    field = "token.access_token_ttl",
+                    "access token TTL exceeds 15 minutes; consider reducing it (HEA-SEC-27)"
+                );
+            }
+            Ok(_) => {}
         }
     }
     if let Some(ttl) = &token.refresh_token_ttl {
-        if parse_duration_to_micros(ttl).is_err() {
-            issues.push(ValidationIssue {
+        match parse_duration_to_micros(ttl) {
+            Err(_) => issues.push(ValidationIssue {
                 field: "token.refresh_token_ttl".to_string(),
                 reason: "invalid duration format".to_string(),
-            });
+            }),
+            Ok(micros) if micros > REFRESH_TOKEN_TTL_MAX_MICROS => issues.push(ValidationIssue {
+                field: "token.refresh_token_ttl".to_string(),
+                reason: "refresh token TTL must not exceed 30 days (HEA-SEC-27)".to_string(),
+            }),
+            Ok(micros) if micros > REFRESH_TOKEN_TTL_WARN_MICROS => {
+                tracing::warn!(
+                    field = "token.refresh_token_ttl",
+                    "refresh token TTL exceeds 24 hours; consider enabling rotation (HEA-SEC-27)"
+                );
+            }
+            Ok(_) => {}
         }
     }
 }
@@ -1401,19 +1575,47 @@ fn validate_realm_auth_configs_all(
         }
         if let Some(token) = &auth.token {
             if let Some(ttl) = &token.access_token_ttl {
-                if parse_duration_to_micros(ttl).is_err() {
-                    issues.push(ValidationIssue {
+                match parse_duration_to_micros(ttl) {
+                    Err(_) => issues.push(ValidationIssue {
                         field: format!("realms.{name}.auth.token.access_token_ttl"),
                         reason: "invalid duration format".to_string(),
-                    });
+                    }),
+                    Ok(micros) if micros > ACCESS_TOKEN_TTL_MAX_MICROS => {
+                        issues.push(ValidationIssue {
+                            field: format!("realms.{name}.auth.token.access_token_ttl"),
+                            reason: "access token TTL must not exceed 1 hour (HEA-SEC-27)"
+                                .to_string(),
+                        });
+                    }
+                    Ok(micros) if micros > ACCESS_TOKEN_TTL_WARN_MICROS => {
+                        tracing::warn!(
+                            field = format!("realms.{name}.auth.token.access_token_ttl"),
+                            "access token TTL exceeds 15 minutes (HEA-SEC-27)"
+                        );
+                    }
+                    Ok(_) => {}
                 }
             }
             if let Some(ttl) = &token.refresh_token_ttl {
-                if parse_duration_to_micros(ttl).is_err() {
-                    issues.push(ValidationIssue {
+                match parse_duration_to_micros(ttl) {
+                    Err(_) => issues.push(ValidationIssue {
                         field: format!("realms.{name}.auth.token.refresh_token_ttl"),
                         reason: "invalid duration format".to_string(),
-                    });
+                    }),
+                    Ok(micros) if micros > REFRESH_TOKEN_TTL_MAX_MICROS => {
+                        issues.push(ValidationIssue {
+                            field: format!("realms.{name}.auth.token.refresh_token_ttl"),
+                            reason: "refresh token TTL must not exceed 30 days (HEA-SEC-27)"
+                                .to_string(),
+                        });
+                    }
+                    Ok(micros) if micros > REFRESH_TOKEN_TTL_WARN_MICROS => {
+                        tracing::warn!(
+                            field = format!("realms.{name}.auth.token.refresh_token_ttl"),
+                            "refresh token TTL exceeds 24 hours (HEA-SEC-27)"
+                        );
+                    }
+                    Ok(_) => {}
                 }
             }
             if let Some(ttl) = &token.password_reset_token_ttl {
@@ -1737,5 +1939,122 @@ mod tests {
         std::env::remove_var("HEARTH_SMS_OTP_HMAC_KEY");
         let result = validate_sms(&sms_log());
         assert!(result.is_ok(), "log transport should not require HMAC key");
+    }
+
+    // ===== HEA-SEC-27: TTL cap enforcement =====
+
+    use crate::config::types::TokenYamlConfig;
+
+    /// SEC-27: Access token TTL > 1 hour is rejected at global scope.
+    #[test]
+    fn sec27_access_token_ttl_over_1h_is_rejected() {
+        let token = TokenYamlConfig {
+            access_token_ttl: Some("2h".to_string()),
+            ..Default::default()
+        };
+        let result = validate_token(&token);
+        let Err(ConfigError::ValidationError { field, reason }) = result else {
+            panic!("expected ValidationError; got: {result:?}");
+        };
+        assert_eq!(field, "token.access_token_ttl");
+        assert!(
+            reason.contains("1 hour"),
+            "reason should mention 1 hour: {reason}"
+        );
+    }
+
+    /// SEC-27: Refresh token TTL > 30 days is rejected at global scope.
+    #[test]
+    fn sec27_refresh_token_ttl_over_30d_is_rejected() {
+        let token = TokenYamlConfig {
+            refresh_token_ttl: Some("31d".to_string()),
+            ..Default::default()
+        };
+        let result = validate_token(&token);
+        let Err(ConfigError::ValidationError { field, reason }) = result else {
+            panic!("expected ValidationError; got: {result:?}");
+        };
+        assert_eq!(field, "token.refresh_token_ttl");
+        assert!(
+            reason.contains("30 days"),
+            "reason should mention 30 days: {reason}"
+        );
+    }
+
+    /// SEC-27: Access token TTL at exactly 1 hour is accepted.
+    #[test]
+    fn sec27_access_token_ttl_at_cap_is_accepted() {
+        let token = TokenYamlConfig {
+            access_token_ttl: Some("1h".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            validate_token(&token).is_ok(),
+            "TTL exactly at cap must be accepted"
+        );
+    }
+
+    /// SEC-27: Refresh token TTL at exactly 30 days is accepted.
+    #[test]
+    fn sec27_refresh_token_ttl_at_cap_is_accepted() {
+        let token = TokenYamlConfig {
+            refresh_token_ttl: Some("30d".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            validate_token(&token).is_ok(),
+            "TTL exactly at cap must be accepted"
+        );
+    }
+
+    /// SEC-27: Per-realm access token TTL > 1 hour is rejected.
+    #[test]
+    fn sec27_per_realm_access_token_ttl_over_1h_is_rejected() {
+        let mut realms = std::collections::HashMap::new();
+        realms.insert(
+            "default".to_string(),
+            RealmYamlConfig {
+                auth: Some(RealmAuthYaml {
+                    token: Some(crate::config::types::RealmTokenYaml {
+                        access_token_ttl: Some("2h".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let result = validate_realm_auth_configs(Some(&realms), &sms_log());
+        let Err(ConfigError::ValidationError { field, reason }) = result else {
+            panic!("expected ValidationError; got: {result:?}");
+        };
+        assert!(
+            field.contains("access_token_ttl"),
+            "field should mention access_token_ttl: {field}"
+        );
+        assert!(
+            reason.contains("1 hour"),
+            "reason should mention 1 hour: {reason}"
+        );
+    }
+
+    /// SEC-27: validate_all accumulates TTL cap violations as issues.
+    #[test]
+    fn sec27_validate_all_accumulates_ttl_cap_violations() {
+        let token = TokenYamlConfig {
+            access_token_ttl: Some("90m".to_string()),
+            refresh_token_ttl: Some("45d".to_string()),
+            ..Default::default()
+        };
+        let mut issues = Vec::new();
+        validate_token_all(&token, &mut issues);
+        assert!(
+            issues.iter().any(|i| i.field == "token.access_token_ttl"),
+            "expected access_token_ttl issue; got: {issues:?}"
+        );
+        assert!(
+            issues.iter().any(|i| i.field == "token.refresh_token_ttl"),
+            "expected refresh_token_ttl issue; got: {issues:?}"
+        );
     }
 }

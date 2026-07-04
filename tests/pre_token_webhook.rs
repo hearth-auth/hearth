@@ -37,7 +37,8 @@ fn setup_webhook_config(url: &str, on_error: PreTokenWebhookErrorPolicy) -> PreT
         url: url.to_string(),
         timeout_ms: 1000,
         on_error,
-        hmac_secret: None,
+        // SEC-20: hmac_secret is required; omitting it is rejected at update_realm time.
+        hmac_secret: Some("test-webhook-secret".to_string()),
     }
 }
 
@@ -633,66 +634,73 @@ async fn webhook_hmac_sig_forwarded_to_transport_when_secret_configured() {
     );
 }
 
-/// When `hmac_secret` is NOT configured, the transport must receive `None`
-/// for `hmac_sig` (no spurious header).
+/// SEC-20: `update_realm` MUST reject a webhook config with no `hmac_secret`.
+///
+/// An unsigned webhook endpoint lets any caller reachable from the webhook URL
+/// inject arbitrary JWT claims. The engine enforces `hmac_secret` presence so
+/// neither HTTP nor gRPC callers can persist an insecure configuration.
 #[tokio::test]
-async fn webhook_no_sig_forwarded_when_no_secret() {
-    struct SigCheckTransport {
-        received_sig: Arc<Mutex<Option<Option<String>>>>,
-    }
-
-    impl PreTokenWebhookTransport for SigCheckTransport {
-        fn fire(
-            &self,
-            _url: &str,
-            _timeout_ms: u64,
-            _body: &[u8],
-            hmac_sig: Option<&str>,
-        ) -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
-            *self.received_sig.lock().expect("lock") = Some(hmac_sig.map(str::to_string));
-            Ok(PreTokenWebhookResponse {
-                extra_claims: BTreeMap::new(),
-            })
-        }
-    }
-
-    let received = Arc::new(Mutex::new(None::<Option<String>>));
-    let transport = SigCheckTransport {
-        received_sig: Arc::clone(&received),
-    };
-
-    let harness = common::TestHarness::embedded_with_pre_token_transport(Arc::new(transport))
+async fn webhook_without_hmac_secret_is_rejected_by_update_realm() {
+    let harness = common::TestHarness::embedded()
         .await
         .expect("harness setup");
-
     let realm = harness.create_realm();
-    harness
-        .identity()
-        .update_realm(
-            &realm,
-            &UpdateRealmRequest {
-                config: Some(hearth::identity::RealmConfig {
-                    pre_token_webhook: Some(setup_webhook_config(
-                        "http://localhost:9999/enrich",
-                        PreTokenWebhookErrorPolicy::FailOpen,
-                    )),
-                    ..Default::default()
+
+    let result = harness.identity().update_realm(
+        &realm,
+        &UpdateRealmRequest {
+            config: Some(hearth::identity::RealmConfig {
+                pre_token_webhook: Some(PreTokenWebhookConfig {
+                    url: "http://localhost:9999/enrich".to_string(),
+                    timeout_ms: 1000,
+                    on_error: PreTokenWebhookErrorPolicy::FailOpen,
+                    hmac_secret: None,
                 }),
                 ..Default::default()
-            },
-        )
-        .expect("update realm");
+            }),
+            ..Default::default()
+        },
+    );
 
-    let _ = authorize_and_exchange(&harness, &realm);
-
-    let captured = received
-        .lock()
-        .expect("lock")
-        .clone()
-        .expect("transport must have been called");
     assert!(
-        captured.is_none(),
-        "hmac_sig must be None when no secret is configured, got: {captured:?}"
+        result.is_err(),
+        "update_realm must reject a webhook config with no hmac_secret"
+    );
+    let err = result.expect_err("update_realm must reject no hmac_secret");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("hmac_secret"),
+        "error message must mention hmac_secret, got: {err_str}"
+    );
+}
+
+/// SEC-20: `update_realm` MUST also reject a webhook config with an empty `hmac_secret`.
+#[tokio::test]
+async fn webhook_with_empty_hmac_secret_is_rejected_by_update_realm() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = harness.create_realm();
+
+    let result = harness.identity().update_realm(
+        &realm,
+        &UpdateRealmRequest {
+            config: Some(hearth::identity::RealmConfig {
+                pre_token_webhook: Some(PreTokenWebhookConfig {
+                    url: "http://localhost:9999/enrich".to_string(),
+                    timeout_ms: 1000,
+                    on_error: PreTokenWebhookErrorPolicy::FailOpen,
+                    hmac_secret: Some(String::new()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    );
+
+    assert!(
+        result.is_err(),
+        "update_realm must reject a webhook config with an empty hmac_secret"
     );
 }
 

@@ -13,6 +13,7 @@ use ring::rand::SystemRandom;
 use ring::signature::{self, Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use uuid::Uuid;
 use zeroize::Zeroize;
 
 use crate::core::Timestamp;
@@ -22,6 +23,13 @@ use crate::identity::types::RequiredAction;
 
 /// The only supported JWT algorithm.
 const JWT_ALGORITHM: &str = "EdDSA";
+
+/// Maximum clock skew tolerated when validating `nbf` (not-before) and `exp`.
+///
+/// RFC 7519 §4.1.5 permits a small clock-skew allowance. 60 seconds is the
+/// industry-standard tolerance; it handles NTP drift without widening the
+/// window enough to be exploitable.
+const CLOCK_SKEW_SECS: i64 = 60;
 
 /// Token type value used in the `token_type` claim of required-action JWTs.
 pub const REQUIRED_ACTION_TOKEN_TYPE: &str = "ra";
@@ -223,11 +231,19 @@ pub struct TokenClaims {
     pub oid: Option<String>,
     /// Token type: `"access"` or `"refresh"`.
     pub token_type: String,
+    /// Not-before time (Unix seconds, RFC 7519 §4.1.5).
+    ///
+    /// When present, the token MUST NOT be accepted before this time.
+    /// Validation applies a [`CLOCK_SKEW_SECS`] tolerance to account for
+    /// NTP drift between issuer and verifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nbf: Option<i64>,
     /// JWT ID — unique identifier for this token (RFC 7519 §4.1.7).
     ///
     /// Ensures each issued JWT is unique even when all other claims
     /// are identical (e.g., during refresh token rotation within the
-    /// same clock second).
+    /// same clock second). REQUIRED on all access tokens so JTI-based
+    /// revocation checks never silently skip session-bound tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
     /// Grant family ID — links tokens from the same authorization grant.
@@ -692,11 +708,12 @@ impl SigningKey {
             aud: aud.clone(),
             exp: iat + request.config.access_token_ttl_secs,
             iat,
+            nbf: None,
             sid: request.sid.to_string(),
             tid: request.tid.to_string(),
             oid: request.oid.map(str::to_string),
             token_type: "access".to_string(),
-            jti: None,
+            jti: Some(Uuid::new_v4().to_string()),
             fid: None,
             scope: request.scope.clone(),
             nonce: None,
@@ -721,6 +738,7 @@ impl SigningKey {
             aud,
             exp: iat + request.config.refresh_token_ttl_secs,
             iat,
+            nbf: None,
             sid: request.sid.to_string(),
             tid: request.tid.to_string(),
             oid: request.oid.map(str::to_string),
@@ -860,9 +878,11 @@ pub fn verify_token_signature(
     Ok(claims)
 }
 
-/// Validates a JWT's signature and checks expiration against the given time.
+/// Validates a JWT's signature, expiration, and not-before time against `now`.
 ///
-/// Returns `Err(TokenExpired)` if `now >= exp`.
+/// Returns:
+/// - `Err(TokenExpired)` if `now >= exp`
+/// - `Err(InvalidToken)` if `nbf` is present and `now < nbf - CLOCK_SKEW_SECS`
 pub fn validate_token_with_time(
     token: &str,
     public_key_bytes: &[u8],
@@ -872,6 +892,11 @@ pub fn validate_token_with_time(
     let now_secs = now.as_micros() / MICROS_PER_SEC;
     if now_secs >= claims.exp {
         return Err(IdentityError::TokenExpired);
+    }
+    if let Some(nbf) = claims.nbf {
+        if now_secs < nbf - CLOCK_SKEW_SECS {
+            return Err(IdentityError::InvalidToken);
+        }
     }
     Ok(claims)
 }
@@ -1361,6 +1386,7 @@ mod tests {
             aud: Audience::single("hearth"),
             exp: now_secs + 900, // 15 min
             iat: now_secs,
+            nbf: None,
             sid: "session_660e8400-e29b-41d4-a716-446655440000".to_string(),
             tid: "realm_770e8400-e29b-41d4-a716-446655440000".to_string(),
             oid: None,
@@ -1953,6 +1979,156 @@ mod tests {
         );
         assert!(claims.aud.contains("hearth"));
         assert!(!claims.aud.contains("other"));
+    }
+
+    // ===== HEA-SEC-27: nbf validation, universal JTI =====
+
+    /// SEC-27 Unit 1: Tokens with `nbf` in the future are rejected.
+    ///
+    /// An attacker cannot use a token before its intended valid-from time.
+    /// The [`CLOCK_SKEW_SECS`] tolerance is applied: tokens valid in less than
+    /// 60 s are still accepted; tokens not valid for another 61+ seconds are rejected.
+    #[test]
+    fn sec27_nbf_in_future_is_rejected() {
+        let key = test_signing_key();
+        let base_secs = 1_700_000_000_i64;
+
+        // Token whose nbf is 120 s in the future relative to `now`.
+        let mut claims = test_claims(base_secs);
+        claims.nbf = Some(base_secs + 120);
+        let token = key.issue_token(&claims).expect("issue");
+
+        let now = Timestamp::from_micros(base_secs * MICROS_PER_SEC);
+        let result = validate_token_with_time(&token, key.public_key_bytes(), now);
+        assert!(
+            matches!(result, Err(IdentityError::InvalidToken)),
+            "token with nbf 120 s ahead must be rejected; got: {result:?}"
+        );
+    }
+
+    /// SEC-27 Unit 2: Tokens with `nbf` within clock-skew tolerance are accepted.
+    #[test]
+    fn sec27_nbf_within_clock_skew_is_accepted() {
+        let key = test_signing_key();
+        let base_secs = 1_700_000_000_i64;
+
+        // nbf is 30 s ahead — within the 60 s clock-skew window.
+        let mut claims = test_claims(base_secs);
+        claims.nbf = Some(base_secs + 30);
+        let token = key.issue_token(&claims).expect("issue");
+
+        let now = Timestamp::from_micros(base_secs * MICROS_PER_SEC);
+        let result = validate_token_with_time(&token, key.public_key_bytes(), now);
+        assert!(
+            result.is_ok(),
+            "token with nbf within clock-skew must be accepted; got: {result:?}"
+        );
+    }
+
+    /// SEC-27 Unit 3: Tokens with `nbf` in the past are accepted.
+    #[test]
+    fn sec27_nbf_in_past_is_accepted() {
+        let key = test_signing_key();
+        let base_secs = 1_700_000_000_i64;
+
+        let mut claims = test_claims(base_secs);
+        claims.nbf = Some(base_secs - 300); // became valid 5 min ago
+        let token = key.issue_token(&claims).expect("issue");
+
+        let now = Timestamp::from_micros(base_secs * MICROS_PER_SEC);
+        let result = validate_token_with_time(&token, key.public_key_bytes(), now);
+        assert!(
+            result.is_ok(),
+            "token with past nbf must be accepted; got: {result:?}"
+        );
+    }
+
+    /// SEC-27 Unit 4: Tokens without `nbf` are accepted unconditionally (backward compat).
+    #[test]
+    fn sec27_absent_nbf_is_accepted() {
+        let key = test_signing_key();
+        let base_secs = 1_700_000_000_i64;
+
+        let claims = test_claims(base_secs); // nbf: None
+        let token = key.issue_token(&claims).expect("issue");
+
+        let now = Timestamp::from_micros(base_secs * MICROS_PER_SEC);
+        let result = validate_token_with_time(&token, key.public_key_bytes(), now);
+        assert!(
+            result.is_ok(),
+            "token without nbf must be accepted for backward compat; got: {result:?}"
+        );
+    }
+
+    /// SEC-27 Unit 5: `issue_token_pair` always assigns a non-empty JTI to access tokens.
+    ///
+    /// This ensures JTI-based revocation checks can never silently skip
+    /// session-bound access tokens because `jti` was `None`.
+    #[test]
+    fn sec27_issue_token_pair_access_always_has_jti() {
+        let key = test_signing_key();
+        let now = Timestamp::from_micros(1_700_000_000 * MICROS_PER_SEC);
+        let config = TokenConfig::default();
+
+        let pair = key
+            .issue_token_pair(&IssueTokenRequest {
+                sub: "user_abc",
+                sid: "session_xyz",
+                tid: "realm_123",
+                oid: None,
+                now,
+                config: &config,
+                issuer_override: None,
+                roles: &[],
+                groups: &[],
+                org_slug: None,
+                permissions: &[],
+                custom: BTreeMap::new(),
+                resource: None,
+                dpop_jkt: None,
+                sv: None,
+                scope: None,
+            })
+            .expect("issue pair");
+
+        let access_claims =
+            verify_token_signature(pair.access_token(), key.public_key_bytes()).expect("valid");
+        assert!(
+            access_claims.jti.is_some(),
+            "access token must always carry a JTI (HEA-SEC-27)"
+        );
+        assert!(
+            !access_claims.jti.as_deref().unwrap_or("").is_empty(),
+            "access token JTI must not be empty"
+        );
+
+        // Two tokens issued at the same timestamp must have distinct JTIs.
+        let pair2 = key
+            .issue_token_pair(&IssueTokenRequest {
+                sub: "user_abc",
+                sid: "session_xyz",
+                tid: "realm_123",
+                oid: None,
+                now,
+                config: &config,
+                issuer_override: None,
+                roles: &[],
+                groups: &[],
+                org_slug: None,
+                permissions: &[],
+                custom: BTreeMap::new(),
+                resource: None,
+                dpop_jkt: None,
+                sv: None,
+                scope: None,
+            })
+            .expect("issue pair2");
+        let second_access_claims =
+            verify_token_signature(pair2.access_token(), key.public_key_bytes()).expect("valid");
+        assert_ne!(
+            access_claims.jti, second_access_claims.jti,
+            "JTI must be unique across tokens with identical claims (collision would break revocation)"
+        );
     }
 
     /// New multi-audience tokens serialize as JSON arrays.

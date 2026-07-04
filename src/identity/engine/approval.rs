@@ -379,6 +379,7 @@ impl EmbeddedIdentityEngine {
             aud: crate::identity::tokens::Audience::Single("hearth:capability".to_string()),
             exp,
             iat: now_secs,
+            nbf: None,
             sid: String::new(),
             tid: realm_id.as_uuid().to_string(),
             oid: None,

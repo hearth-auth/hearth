@@ -886,6 +886,25 @@ pub trait IdentityEngine: Send + Sync {
     /// Returns whether MFA is currently enabled for a user.
     fn mfa_enabled(&self, realm_id: &RealmId, user_id: &UserId) -> Result<bool, IdentityError>;
 
+    /// Records a burned MFA pending cookie nonce in WAL storage.
+    ///
+    /// `exp_secs` is the Unix-second timestamp at which the nonce entry may be
+    /// considered stale (it equals the cookie issue time plus
+    /// `MFA_PENDING_TTL_SECS`). Must be called after a successful MFA
+    /// verification, before creating the session — prevents replay of a
+    /// captured pending cookie across server restarts.
+    fn burn_mfa_nonce(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        exp_secs: u64,
+    ) -> Result<(), IdentityError>;
+
+    /// Returns `true` if the nonce has already been burned (replay detected).
+    ///
+    /// Reads directly from WAL storage so the check survives server restarts.
+    fn is_mfa_nonce_burned(&self, realm_id: &RealmId, nonce: &str) -> Result<bool, IdentityError>;
+
     /// Generates a new set of recovery codes, replacing any existing ones.
     ///
     /// Requires MFA to be already enabled. Returns the new plaintext codes

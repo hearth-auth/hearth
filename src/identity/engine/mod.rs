@@ -2839,6 +2839,7 @@ impl EmbeddedIdentityEngine {
             tid: realm_id.to_string(),
             oid: claims.oid.clone(),
             token_type: "access".to_string(),
+            nbf: None,
             jti: Some(uuid::Uuid::new_v4().to_string()),
             fid: Some(fid.to_string()),
             scope: claims.scope.clone(),
@@ -2867,6 +2868,7 @@ impl EmbeddedIdentityEngine {
             tid: realm_id.to_string(),
             oid: claims.oid.clone(),
             token_type: "refresh".to_string(),
+            nbf: None,
             jti: Some(uuid::Uuid::new_v4().to_string()),
             fid: Some(fid.to_string()),
             scope: claims.scope.clone(),
@@ -3724,6 +3726,9 @@ impl EmbeddedIdentityEngine {
             &b"ses:id:"[..],
             &b"ses:user:"[..],
             &b"mfa:totp:"[..],
+            // Burned MFA pending cookie nonces (HEA-SEC-25). Persisted to
+            // WAL to survive restarts; must be swept on realm deletion.
+            &b"mfa:nonce:"[..],
             &b"webauthn:cred:"[..],
             &b"webauthn:disc:"[..],
             &b"magic:link:"[..],
@@ -4554,6 +4559,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         &b"ses:id:"[..],
                         &b"ses:user:"[..],
                         &b"mfa:totp:"[..],
+                        &b"mfa:nonce:"[..],
                         &b"webauthn:cred:"[..],
                         &b"webauthn:disc:"[..],
                         &b"magic:link:"[..],
@@ -4894,6 +4900,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 tid: claims.tid.clone(),
                 oid: None,
                 token_type: REQUIRED_ACTION_TOKEN_TYPE.to_string(),
+                nbf: None,
                 jti: Some(uuid::Uuid::new_v4().to_string()),
                 fid: None,
                 scope: None,
@@ -7203,6 +7210,27 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             Some(state) => Ok(state.enabled),
             None => Ok(false),
         }
+    }
+
+    fn burn_mfa_nonce(
+        &self,
+        realm_id: &RealmId,
+        nonce: &str,
+        exp_secs: u64,
+    ) -> Result<(), IdentityError> {
+        let key = keys::encode_mfa_nonce_key(nonce);
+        self.storage
+            .put(realm_id, &key, &exp_secs.to_le_bytes())
+            .map_err(Self::storage_err)
+    }
+
+    fn is_mfa_nonce_burned(&self, realm_id: &RealmId, nonce: &str) -> Result<bool, IdentityError> {
+        let key = keys::encode_mfa_nonce_key(nonce);
+        let result = self
+            .storage
+            .get(realm_id, &key)
+            .map_err(Self::storage_err)?;
+        Ok(result.is_some())
     }
 
     fn load_pending_recovery_codes(
@@ -13058,6 +13086,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             tid: realm_id.to_string(),
             oid: subject_claims.oid.clone(),
             token_type: "access".to_string(),
+            nbf: None,
             jti: Some(jti.clone()),
             fid: subject_claims.fid.clone(),
             scope: Some(effective_scope.clone()),

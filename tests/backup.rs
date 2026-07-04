@@ -246,6 +246,7 @@ async fn test_restore_preserves_signing_keys() {
         // deterministic regardless of wall-clock skew.
         exp: 4_102_444_800, // 2100-01-01
         iat: 1_700_000_000,
+        nbf: None,
         sid: "none".to_string(),
         tid: realm_src.to_string(),
         oid: None,

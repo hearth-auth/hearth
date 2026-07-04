@@ -16,29 +16,18 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::audit::{AuditAction, CreateAuditEvent};
-use crate::core::{OrganizationId, UserId};
+use crate::core::{OrganizationId, RealmId, UserId};
 use crate::identity::{
     CreateOrganizationRequest, Organization, OrganizationRole, UpdateOrganizationRequest,
 };
-use crate::protocol::http::{extract_admin_auth, AdminAuth, AppState};
+use crate::protocol::http::AppState;
+use crate::protocol::scim::auth::{authenticate, ScimAuth};
 use crate::protocol::scim::error::{from_identity_error, ScimError};
 use crate::protocol::scim::filter::{self, FilterExpr};
 use crate::protocol::scim::patch_apply::apply_group_patch;
 use crate::protocol::scim::types::{
     ListResponse, Meta, PatchRequest, ScimGroup, ScimMember, GROUP_SCHEMA,
 };
-
-fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<AdminAuth, ScimError> {
-    extract_admin_auth(headers, state).map_err(|(status, body)| {
-        let detail = body
-            .0
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("authentication failed")
-            .to_string();
-        ScimError::new(status, detail)
-    })
-}
 
 fn iso8601(micros: i64) -> String {
     let nanos = i128::from(micros) * 1_000;
@@ -120,14 +109,15 @@ fn load_members(
 
 fn audit(
     state: &AppState,
-    auth: &AdminAuth,
+    realm_id: &RealmId,
+    actor: &str,
     action: AuditAction,
     org_id: &OrganizationId,
     external_id: Option<&str>,
 ) {
     let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: auth.realm_id.clone(),
-        actor: auth.user_id.as_uuid().to_string(),
+        realm_id: realm_id.clone(),
+        actor: actor.to_string(),
         action,
         resource_type: "organization".to_string(),
         resource_id: org_id.as_uuid().to_string(),
@@ -137,7 +127,7 @@ fn audit(
 
 fn reconcile_members(
     state: &AppState,
-    auth: &AdminAuth,
+    auth: &ScimAuth,
     org_id: &OrganizationId,
     desired: &[ScimMember],
 ) -> Result<(), ScimError> {
@@ -249,7 +239,8 @@ pub async fn create_group(
 
     audit(
         &state,
-        &auth,
+        &auth.realm_id,
+        &auth.actor,
         AuditAction::ScimGroupCreated,
         org.id(),
         body.external_id.as_deref(),
@@ -435,7 +426,8 @@ pub async fn replace_group(
 
     audit(
         &state,
-        &auth,
+        &auth.realm_id,
+        &auth.actor,
         AuditAction::ScimGroupUpdated,
         &org_id,
         body.external_id.as_deref(),
@@ -532,7 +524,8 @@ pub async fn patch_group(
 
     audit(
         &state,
-        &auth,
+        &auth.realm_id,
+        &auth.actor,
         AuditAction::ScimGroupUpdated,
         &org_id,
         scim.external_id.as_deref(),
@@ -570,7 +563,14 @@ pub async fn delete_group(
 
     match state.identity.delete_organization(&auth.realm_id, &org_id) {
         Ok(()) => {
-            audit(&state, &auth, AuditAction::ScimGroupDeleted, &org_id, None);
+            audit(
+                &state,
+                &auth.realm_id,
+                &auth.actor,
+                AuditAction::ScimGroupDeleted,
+                &org_id,
+                None,
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => from_identity_error(&e).into_response(),

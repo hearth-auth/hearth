@@ -209,16 +209,6 @@ pub struct WebState {
     /// the CSRF bypass must call `.with_dev_mode(true)` explicitly.
     /// Production startup calls `.with_dev_mode(config.dev_mode)` in `main.rs`.
     pub dev_mode: bool,
-    /// Burned MFA-pending cookie nonces.
-    ///
-    /// When a pending cookie is successfully consumed to create a session, its
-    /// nonce is recorded here (value = Unix-second expiry). Re-use of the same
-    /// cookie is rejected even if the HMAC is still valid. Expired entries are
-    /// pruned lazily on each lookup to bound memory use.
-    ///
-    /// Wrapped in `Arc<Mutex<…>>` so the value survives `WebState::clone()`
-    /// (the struct is cloned per request handler via `axum::extract::State`).
-    pub burned_mfa_nonces: Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>,
 }
 
 /// A logo loaded from a local file path at startup.
@@ -278,7 +268,6 @@ impl WebState {
             sms_otp_hmac_key: None,
             captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
             dev_mode: false, // fail-closed default; tests must call .with_dev_mode(true) explicitly
-            burned_mfa_nonces: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

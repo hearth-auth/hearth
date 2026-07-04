@@ -10,30 +10,16 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::audit::{AuditAction, CreateAuditEvent};
-use crate::core::UserId;
+use crate::core::{RealmId, UserId};
 use crate::identity::{CreateUserRequest, UpdateUserRequest, User, UserStatus};
-use crate::protocol::http::{extract_admin_auth, AppState};
+use crate::protocol::http::AppState;
+use crate::protocol::scim::auth::authenticate;
 use crate::protocol::scim::error::{from_identity_error, ScimError};
 use crate::protocol::scim::filter::{self, FilterExpr};
 use crate::protocol::scim::patch_apply::apply_user_patch;
 use crate::protocol::scim::types::{
     ListResponse, Meta, PatchRequest, ScimEmail, ScimName, ScimUser, USER_SCHEMA,
 };
-
-fn authenticate(
-    headers: &HeaderMap,
-    state: &AppState,
-) -> Result<crate::protocol::http::AdminAuth, ScimError> {
-    extract_admin_auth(headers, state).map_err(|(status, body)| {
-        let detail = body
-            .0
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("authentication failed")
-            .to_string();
-        ScimError::new(status, detail)
-    })
-}
 
 /// Converts a stored `User` to a SCIM wire resource. `base_path` is the
 /// absolute request path prefix up to `/scim/v2/Users`.
@@ -128,7 +114,8 @@ fn require_name(u: &ScimUser) -> Result<(String, String), ScimError> {
 
 fn audit(
     state: &AppState,
-    auth: &crate::protocol::http::AdminAuth,
+    realm_id: &RealmId,
+    actor: &str,
     action: AuditAction,
     user_id: &UserId,
     external_id: Option<&str>,
@@ -138,8 +125,8 @@ fn audit(
         "external_id": external_id,
     });
     let _ = state.audit.append(&CreateAuditEvent {
-        realm_id: auth.realm_id.clone(),
-        actor: auth.user_id.as_uuid().to_string(),
+        realm_id: realm_id.clone(),
+        actor: actor.to_string(),
         action,
         resource_type: "user".to_string(),
         resource_id: user_id.as_uuid().to_string(),
@@ -233,7 +220,8 @@ pub async fn create_user(
 
     audit(
         &state,
-        &auth,
+        &auth.realm_id,
+        &auth.actor,
         AuditAction::ScimUserCreated,
         refreshed.id(),
         body.external_id.as_deref(),
@@ -443,7 +431,8 @@ pub async fn replace_user(
 
     audit(
         &state,
-        &auth,
+        &auth.realm_id,
+        &auth.actor,
         AuditAction::ScimUserUpdated,
         &user_id,
         body.external_id.as_deref(),
@@ -573,7 +562,8 @@ pub async fn patch_user(
 
     audit(
         &state,
-        &auth,
+        &auth.realm_id,
+        &auth.actor,
         AuditAction::ScimUserUpdated,
         &user_id,
         scim.external_id.as_deref(),
@@ -610,7 +600,14 @@ pub async fn delete_user(
 
     match state.identity.delete_user(&auth.realm_id, &user_id) {
         Ok(()) => {
-            audit(&state, &auth, AuditAction::ScimUserDeleted, &user_id, None);
+            audit(
+                &state,
+                &auth.realm_id,
+                &auth.actor,
+                AuditAction::ScimUserDeleted,
+                &user_id,
+                None,
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => from_identity_error(&e).into_response(),

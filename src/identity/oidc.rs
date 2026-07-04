@@ -1623,6 +1623,9 @@ pub struct IntrospectionResponse {
     /// Issued-at time (Unix seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iat: Option<i64>,
+    /// Not-before time (Unix seconds, RFC 7662 §2.2 / RFC 7519 §4.1.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nbf: Option<i64>,
     /// Token type (e.g., "access" or "refresh").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_type: Option<String>,
@@ -1659,6 +1662,7 @@ impl IntrospectionResponse {
             sub: None,
             exp: None,
             iat: None,
+            nbf: None,
             token_type: None,
             iss: None,
             aud: None,

@@ -1742,25 +1742,33 @@ pub async fn mfa_challenge_submit(
     }
 
     // MFA passed — enforce single-use nonce before creating the session.
-    // If this nonce was already burned (replay), reject and force re-login.
+    // Nonce is persisted in WAL storage so replay is rejected even after a
+    // server restart (fixes HSS-009 / HEA-SEC-25).
     {
-        let now_secs = std::time::SystemTime::now()
+        let nonce = &pending.nonce;
+        match state.identity.is_mfa_nonce_burned(&pending.realm_id, nonce) {
+            Ok(true) => {
+                // Nonce already consumed — replayed pending cookie.
+                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "mfa-challenge: nonce replay check failed");
+                return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
+            }
+            Ok(false) => {}
+        }
+        let exp_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
-        let nonce = pending.nonce.clone();
-        let mut nonces = state
-            .burned_mfa_nonces
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // Prune expired entries on each access.
-        nonces.retain(|_, &mut exp| exp > now_secs);
-        if nonces.contains_key(&nonce) {
-            // Nonce already consumed — this is a replayed pending cookie.
-            drop(nonces);
+            .as_secs()
+            .saturating_add(super::auth::MFA_PENDING_TTL_SECS);
+        if let Err(e) = state
+            .identity
+            .burn_mfa_nonce(&pending.realm_id, nonce, exp_secs)
+        {
+            tracing::warn!(error = %e, "mfa-challenge: failed to persist burned nonce");
             return mfa_expired_response(state.product_name.clone(), state.logo_url.clone());
         }
-        nonces.insert(nonce, now_secs + super::auth::MFA_PENDING_TTL_SECS as u64);
     }
 
     // A-41: Destroy any pre-existing session cookie before issuing a new one.

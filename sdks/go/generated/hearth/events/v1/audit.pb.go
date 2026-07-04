@@ -159,6 +159,7 @@ const (
 	AuditAction_AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED AuditAction = 113
 	AuditAction_AUDIT_ACTION_SPIFFE_ID_MAPPED         AuditAction = 114
 	AuditAction_AUDIT_ACTION_SPIFFE_AUTH_SUCCESS      AuditAction = 115
+	AuditAction_AUDIT_ACTION_AUDIT_LOG_PRUNED         AuditAction = 116
 )
 
 // Enum value maps for AuditAction.
@@ -280,6 +281,7 @@ var (
 		113: "AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED",
 		114: "AUDIT_ACTION_SPIFFE_ID_MAPPED",
 		115: "AUDIT_ACTION_SPIFFE_AUTH_SUCCESS",
+		116: "AUDIT_ACTION_AUDIT_LOG_PRUNED",
 	}
 	AuditAction_value = map[string]int32{
 		"AUDIT_ACTION_UNSPECIFIED":                     0,
@@ -398,6 +400,7 @@ var (
 		"AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED":        113,
 		"AUDIT_ACTION_SPIFFE_ID_MAPPED":                114,
 		"AUDIT_ACTION_SPIFFE_AUTH_SUCCESS":             115,
+		"AUDIT_ACTION_AUDIT_LOG_PRUNED":                116,
 	}
 )
 
@@ -904,7 +907,7 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"\x12broken_at_event_id\x18\x02 \x01(\tH\x00R\x0fbrokenAtEventId\x88\x01\x01\x12\x1f\n" +
 	"\vevent_count\x18\x03 \x01(\x04R\n" +
 	"eventCountB\x15\n" +
-	"\x13_broken_at_event_id*\xaf\"\n" +
+	"\x13_broken_at_event_id*\xd2\"\n" +
 	"\vAuditAction\x12\x1c\n" +
 	"\x18AUDIT_ACTION_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19AUDIT_ACTION_USER_CREATED\x10\x01\x12\x1d\n" +
@@ -1022,7 +1025,8 @@ const file_hearth_events_v1_audit_proto_rawDesc = "" +
 	"%AUDIT_ACTION_TRANSACTION_TOKEN_ISSUED\x10p\x12)\n" +
 	"%AUDIT_ACTION_CROSS_REALM_TOKEN_ISSUED\x10q\x12!\n" +
 	"\x1dAUDIT_ACTION_SPIFFE_ID_MAPPED\x10r\x12$\n" +
-	" AUDIT_ACTION_SPIFFE_AUTH_SUCCESS\x10s2\xda\x01\n" +
+	" AUDIT_ACTION_SPIFFE_AUTH_SUCCESS\x10s\x12!\n" +
+	"\x1dAUDIT_ACTION_AUDIT_LOG_PRUNED\x10t2\xda\x01\n" +
 	"\fAuditService\x12b\n" +
 	"\n" +
 	"ListEvents\x12\x1c.hearth.events.v1.AuditQuery\x1a .hearth.events.v1.AuditEventPage\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/admin/audit\x12f\n" +
