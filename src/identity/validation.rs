@@ -20,6 +20,12 @@ const MAX_DISPLAY_NAME_LENGTH: usize = 256;
 /// 1 KiB is generous for any reasonable password while capping cost.
 const MAX_PASSWORD_LENGTH: usize = 1024;
 
+/// Minimum password length enforced unconditionally (HSEC-003 hard floor).
+///
+/// Realm `password_policy.min_length` may raise this higher but cannot lower it.
+/// The floor applies even when no `PasswordPolicy` is configured for the realm.
+pub(crate) const MIN_PASSWORD_LENGTH_FLOOR: usize = 8;
+
 /// Maximum length for an OAuth client name.
 const MAX_CLIENT_NAME_LENGTH: usize = 256;
 
@@ -159,6 +165,20 @@ pub(crate) fn validate_name_part(name: &str, field: &str) -> Result<String, Iden
     Ok(normalized)
 }
 
+/// Enforces the built-in minimum password length (HSEC-003 hard floor).
+///
+/// Called unconditionally at every password-setting site regardless of whether
+/// a realm `PasswordPolicy` is configured. The floor is [`MIN_PASSWORD_LENGTH_FLOOR`]
+/// characters and cannot be overridden downward by operator configuration.
+pub(crate) fn validate_password_floor(password_bytes: &[u8]) -> Result<(), IdentityError> {
+    if password_bytes.len() < MIN_PASSWORD_LENGTH_FLOOR {
+        return Err(IdentityError::InvalidInput {
+            reason: format!("password must be at least {MIN_PASSWORD_LENGTH_FLOOR} characters"),
+        });
+    }
+    Ok(())
+}
+
 /// Enforces a realm's [`PasswordPolicy`] against a candidate password.
 ///
 /// The `username` and `email` parameters are used for `not_username` /
@@ -166,19 +186,24 @@ pub(crate) fn validate_name_part(name: &str, field: &str) -> Result<String, Iden
 /// context (e.g., admin `set_password` without a user object loaded).
 ///
 /// Complements `validate_password_length` (which only guards against the
-/// hashing DoS bound).
+/// hashing DoS bound) and `validate_password_floor` (which is called
+/// unconditionally before this function).
 pub(crate) fn validate_password_against_policy(
     password_bytes: &[u8],
     policy: &PasswordPolicy,
     username: Option<&str>,
     email: Option<&str>,
 ) -> Result<(), IdentityError> {
-    if let Some(min) = policy.min_length {
-        if password_bytes.len() < min {
-            return Err(IdentityError::InvalidInput {
-                reason: format!("password must be at least {min} characters"),
-            });
-        }
+    // HSEC-003: The effective minimum is the greater of the realm-configured
+    // length and the built-in floor. Operators cannot configure below the floor.
+    let effective_min = policy
+        .min_length
+        .unwrap_or(0)
+        .max(MIN_PASSWORD_LENGTH_FLOOR);
+    if password_bytes.len() < effective_min {
+        return Err(IdentityError::InvalidInput {
+            reason: format!("password must be at least {effective_min} characters"),
+        });
     }
     let as_str = std::str::from_utf8(password_bytes).map_err(|_| IdentityError::InvalidInput {
         reason: "password must be valid UTF-8".to_string(),

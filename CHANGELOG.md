@@ -18,6 +18,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **Password minimum length enforced unconditionally** — A hard floor of 8 characters is
+  now applied at every password-setting and self-registration call site regardless of
+  whether a realm `password_policy` is configured. Previously, an absent policy allowed
+  any password including empty strings. The floor cannot be overridden downward by
+  per-realm operator configuration; a higher `min_length` in the policy is still respected.
+  A production startup warning is emitted when the system realm has no explicit
+  `password_policy` configured (HSEC-003 / HEA-SEC-23).
+- **System realm MFA default changed to required** — `create_session` in the nil-UUID
+  system realm now defaults `mfa_required` to `true` when the field is not explicitly set
+  in the realm config. Previously, an admin-realm user without MFA enrolled could
+  authenticate without any second factor. Explicitly setting `mfa_required: false` on the
+  system realm is now a hard startup error in production mode (HSEC-004 / HEA-SEC-23).
+- **Token substitution rejected at introspection** — `POST /introspect` now returns
+  `{"active": false}` for any token whose `token_type` claim is not `"access"`. Previously
+  a valid ID token or refresh token could be presented to the introspection endpoint and
+  return `active: true`, allowing a confused-deputy attack against resource servers that
+  use introspection for authorization (OAUTH-08 / HEA-SEC-22).
+- **Authorization code TOCTOU closed** — The auth-code exchange now holds a per-code
+  advisory mutex across the load → delete → issue window. Previously two concurrent
+  requests with the same code could both load the code before either deleted it, producing
+  two valid token sets from one authorization grant (OAUTH-06 / HEA-SEC-22).
+- **Audit log integrity hardened** — three STOR-class fixes (HEA-SEC-21):
+  (1) Administrative prune operations are now recorded as `AuditLogPruned` events in the
+  audit log *before* deletion, so a crash-interrupted prune always leaves a trace.
+  (2) Per-event deletion in `prune_before` / `prune_oldest` is now atomic via `write_batch`,
+  eliminating orphaned actor and action index entries on crash.
+  (3) The hash chain is upgraded from unkeyed SHA-256 to HMAC-SHA256 with a per-realm key
+  stored at rest (KEK-wrapped when a key-encryption key is configured), preventing a
+  storage-layer attacker from recomputing a valid chain after deleting events.
 - **JWT issuer validation** — `validate_token` now enforces RFC 7519 §4.1.1: the `iss`
   claim must exactly match the configured `token.issuer` value. Previously this claim was
   never verified, allowing tokens from foreign Hearth instances to pass validation when

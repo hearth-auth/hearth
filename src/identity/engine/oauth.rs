@@ -651,7 +651,6 @@ impl EmbeddedIdentityEngine {
             code_challenge_method: request.code_challenge_method.clone(),
             created_at: now,
             expires_at,
-            used: false,
             nonce: request.nonce.clone(),
             resource: request.resource.clone(),
             amr_values: request.amr_values.clone(),
@@ -743,22 +742,37 @@ impl EmbeddedIdentityEngine {
         let code_hash = Self::sha256_hex(request.code.as_bytes());
         let code_key = keys::encode_oauth_code(&code_hash);
 
-        // 2. Load the stored code
-        let code_bytes = self
-            .storage
-            .get(realm_id, &code_key)
-            .map_err(Self::storage_err)?
-            .ok_or(IdentityError::InvalidAuthorizationCode)?;
+        // 2. Acquire per-code advisory lock and load+consume under it.
+        //
+        // TOCTOU fix (OAUTH-06 / HEA-SEC-22): two concurrent requests with the same
+        // code would both see the key present if we only relied on an unconditional
+        // delete. The per-code lock serializes the get → delete window so the second
+        // request finds the key absent after the first has consumed it.
+        //
+        // INVARIANT: outer map guard is released inside `code_exchange_lock()`;
+        // the inner per-code guard is held only across this sync block (no .await).
+        let stored_code: StoredAuthorizationCode = {
+            let lock = self.code_exchange_lock(&code_hash);
+            let _guard = lock.lock().expect("code_exchange_lock poisoned");
 
-        let mut stored_code: StoredAuthorizationCode = serde_json::from_slice(&code_bytes)
-            .map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+            let code_bytes = self
+                .storage
+                .get(realm_id, &code_key)
+                .map_err(Self::storage_err)?
+                .ok_or(IdentityError::InvalidAuthorizationCode)?;
 
-        // 3. Check if already used (single-use enforcement)
-        if stored_code.used {
-            return Err(IdentityError::InvalidAuthorizationCode);
-        }
+            let code: StoredAuthorizationCode =
+                serde_json::from_slice(&code_bytes).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+
+            // Delete as the first write — second caller finds nothing here.
+            self.storage
+                .delete(realm_id, &code_key)
+                .map_err(Self::storage_err)?;
+
+            code
+        }; // inner per-code lock released here
 
         // 4. Check expiration
         let now = self.clock.now();
@@ -938,15 +952,7 @@ impl EmbeddedIdentityEngine {
         let access_custom =
             crate::identity::pre_token_webhook::merge_extra_claims(access_custom, webhook_extra);
 
-        // 9. Mark the code as used
-        stored_code.used = true;
-        let updated_bytes =
-            serde_json::to_vec(&stored_code).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
-        self.storage
-            .put(realm_id, &code_key, &updated_bytes)
-            .map_err(Self::storage_err)?;
+        // 9. (Code already consumed atomically in step 3 — no further write needed.)
 
         // 10. Create a session for the user (OAuth code exchange — no browser context)
         let session =
@@ -2642,7 +2648,15 @@ impl EmbeddedIdentityEngine {
             return Ok(IntrospectionResponse::inactive());
         }
 
-        // 2a. RFC 7519 §4.1.3 — audience must include the configured value.
+        // 2a. Token-type guard: introspection is defined for access tokens only
+        // (RFC 7662 §2.1). Returning `active: true` for ID tokens or refresh tokens
+        // would allow token substitution — a resource server accepting any valid
+        // Hearth-signed token as an access token (OAUTH-08 / HEA-SEC-22).
+        if claims.token_type != "access" {
+            return Ok(IntrospectionResponse::inactive());
+        }
+
+        // 2b. RFC 7519 §4.1.3 — audience must include the configured value.
         if !claims.aud.contains(&self.config.token.audience) {
             return Ok(IntrospectionResponse::inactive());
         }

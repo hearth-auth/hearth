@@ -1109,8 +1109,6 @@ pub(crate) struct StoredAuthorizationCode {
     pub(crate) created_at: Timestamp,
     /// When the code expires.
     pub(crate) expires_at: Timestamp,
-    /// Whether the code has already been used.
-    pub(crate) used: bool,
     /// The nonce from the authorization request (echoed in ID token per OIDC Core §2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) nonce: Option<String>,
@@ -1848,7 +1846,6 @@ mod tests {
             code_challenge_method: Some(CodeChallengeMethod::S256),
             created_at: Timestamp::from_micros(1_000_000),
             expires_at: Timestamp::from_micros(2_000_000),
-            used: false,
             nonce: Some("test-nonce-abc".to_string()),
             resource: None,
             amr_values: Vec::new(),
@@ -1858,7 +1855,7 @@ mod tests {
         let deserialized: StoredAuthorizationCode =
             serde_json::from_str(&json).expect("deserialize");
         assert_eq!(deserialized.code_hash, code.code_hash);
-        assert!(!deserialized.used);
+        assert_eq!(deserialized.nonce, code.nonce);
     }
 
     #[test]

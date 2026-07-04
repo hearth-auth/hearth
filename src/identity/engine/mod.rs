@@ -688,6 +688,18 @@ pub struct EmbeddedIdentityEngine {
     revoked_jti_cache: ArcSwap<HashMap<String, i64>>,
     // INVARIANT: guard released before method returns; no .await in scope.
     agent_rate_monitor: crate::abuse::agent_monitor::AgentRateMonitor,
+    /// Per-code-hash advisory lock for single-use enforcement of authorization codes.
+    ///
+    /// Eliminates the TOCTOU race between the `get` (reads the stored code) and
+    /// the `delete` (consumes it). Without this lock, two concurrent requests for
+    /// the same code can both load it before either deletes it, resulting in two
+    /// successful exchanges. Callers hold this lock across the entire
+    /// get → validate → delete → issue-tokens sequence. Key: SHA-256 hex of the
+    /// raw code value (same value used as the storage key via `encode_oauth_code`).
+    ///
+    // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
+    // INVARIANT: inner (per-code) guard held only across the sync load + validate + delete window; no .await in scope.
+    code_exchange_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl std::fmt::Debug for EmbeddedIdentityEngine {
@@ -1015,6 +1027,8 @@ impl EmbeddedIdentityEngine {
             approval_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-txn lock is acquired.
             txn_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
+            code_exchange_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -1575,6 +1589,8 @@ impl EmbeddedIdentityEngine {
             approval_locks: Mutex::new(HashMap::new()),
             // INVARIANT: outer guard released in scoped block before inner per-txn lock is acquired.
             txn_locks: Mutex::new(HashMap::new()),
+            // INVARIANT: outer guard released in scoped block before inner per-code lock is acquired.
+            code_exchange_locks: Mutex::new(HashMap::new()),
             // INVARIANT: guard held for entire sync realm lifecycle op; released when method returns.
             realm_ops_lock: Mutex::new(()),
             // INVARIANT: guard held for entire sync org write op; released when method returns.
@@ -3097,27 +3113,19 @@ impl EmbeddedIdentityEngine {
             .unwrap_or_else(|_| Arc::clone(&self.signing_key))
     }
 
-    /// Verifies a JWT signature against the realm key, with a fallback to
-    /// the legacy global key for backward compatibility.
+    /// Verifies a JWT signature against the realm-specific signing key.
+    ///
+    /// Fails closed (HEA-SEC-18): if the realm has no per-realm key, or if
+    /// verification against the realm key fails, returns an error. The legacy
+    /// global-key fallback has been removed — every realm is provisioned with
+    /// its own key at creation time.
     fn verify_token_signature_for_realm(
         &self,
         realm_id: &RealmId,
         token: &str,
     ) -> Result<TokenClaims, IdentityError> {
-        let global_verify =
-            || tokens::verify_token_signature(token, self.signing_key.public_key_bytes());
-
-        match self.get_or_load_realm_signing_key(realm_id) {
-            Ok(realm_key) => {
-                match tokens::verify_token_signature(token, realm_key.public_key_bytes()) {
-                    Ok(claims) => Ok(claims),
-                    Err(IdentityError::InvalidToken) => global_verify(),
-                    Err(other) => Err(other),
-                }
-            }
-            Err(IdentityError::RealmNotFound) => global_verify(),
-            Err(other) => Err(other),
-        }
+        let realm_key = self.get_or_load_realm_signing_key(realm_id)?;
+        tokens::verify_token_signature(token, realm_key.public_key_bytes())
     }
 
     /// Parses a `session_`-prefixed session ID claim.
@@ -3520,6 +3528,22 @@ impl EmbeddedIdentityEngine {
             .expect("token_redemption_locks poisoned");
         Arc::clone(
             map.entry(token_hash.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Returns the per-code-hash advisory lock for authorization code single-use enforcement.
+    ///
+    /// Callers hold this lock across the entire get → validate → delete →
+    /// issue-tokens sequence to prevent two concurrent requests for the same
+    /// code from both loading it before either deletes it (TOCTOU / OAUTH-06).
+    fn code_exchange_lock(&self, code_hash: &str) -> Arc<Mutex<()>> {
+        let mut map = self
+            .code_exchange_locks
+            .lock()
+            .expect("code_exchange_locks poisoned");
+        Arc::clone(
+            map.entry(code_hash.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     }
@@ -4159,6 +4183,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let realm_id = RealmId::generate();
         let config = request.config.clone().unwrap_or_default();
 
+        // SEC-20: reject webhook config without HMAC secret (claim-injection risk).
+        if let Some(ref wh) = config.pre_token_webhook {
+            wh.validate()
+                .map_err(|reason| IdentityError::InvalidInput { reason })?;
+        }
+
         // Generate a per-realm signing key
         let realm_signing_key = SigningKey::generate()?;
 
@@ -4321,6 +4351,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         let now = self.clock.now();
         let old_name = realm.name().to_string();
+
+        // SEC-20: reject webhook config without HMAC secret before mutating state.
+        if let Some(ref config) = request.config {
+            if let Some(ref wh) = config.pre_token_webhook {
+                wh.validate()
+                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
+            }
+        }
 
         if let Some(ref name) = request.name {
             realm.set_name(name.clone());
@@ -5468,8 +5506,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         user_id: &UserId,
         password: &CleartextPassword,
     ) -> Result<(), IdentityError> {
-        // Validate password length
+        // Validate password length (DoS bound) and HSEC-003 floor.
         validation::validate_password_length(password.as_bytes())?;
+        validation::validate_password_floor(password.as_bytes())?;
 
         // Ensure the user exists.
         let user = self
@@ -5773,7 +5812,12 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // passkey ceremony (passkeys are inherently multi-factor).
         if !context.satisfies_mfa_via_passkey {
             if let Ok(Some(realm)) = self.get_realm(realm_id) {
-                if realm.config().mfa_required.unwrap_or(false) {
+                // HSEC-004: System realm (nil UUID) defaults MFA to required even when
+                // `mfa_required` is not explicitly configured — the admin control plane
+                // must not silently accept unauthenticated sessions. User realms default
+                // to opt-in (false) unless explicitly enabled.
+                let mfa_default = keys::is_system_realm(realm_id);
+                if realm.config().mfa_required.unwrap_or(mfa_default) {
                     let has_mfa = self.mfa_enabled(realm_id, user_id).unwrap_or(false);
                     if !has_mfa {
                         return Err(IdentityError::MfaRequired);
@@ -6557,6 +6601,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // RFC 7519 §4.1.3 — audience must include the configured value.
         if !claims.aud.contains(&self.config.token.audience) {
+            return Err(IdentityError::InvalidToken);
+        }
+
+        // RFC 7519 §4.1.1 — issuer must exactly match the configured value.
+        // Prevents tokens from a foreign Hearth instance from being accepted
+        // even when they carry a valid signature and correct realm binding.
+        if claims.iss != self.config.token.issuer {
             return Err(IdentityError::InvalidToken);
         }
 
@@ -7743,7 +7794,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // 2. Normalize and validate basic inputs before any storage.
         let email = validation::validate_email(&request.email)?;
         let display_name = validation::validate_display_name(&request.display_name)?;
+        // DoS bound check then HSEC-003 floor (unconditional, policy-independent).
         validation::validate_password_length(request.password.as_bytes())?;
+        validation::validate_password_floor(request.password.as_bytes())?;
         if let Some(pw_policy) = realm.config().password_policy.as_ref() {
             validation::validate_password_against_policy(
                 request.password.as_bytes(),
@@ -16221,6 +16274,144 @@ mod tests {
             )
             .expect_err("should fail");
         assert!(matches!(err, IdentityError::RealmNotFound));
+    }
+
+    // --- SEC-20: pre-token webhook HMAC enforcement ---
+
+    #[test]
+    fn update_realm_rejects_webhook_config_without_hmac_secret() {
+        use crate::identity::types::{PreTokenWebhookConfig, PreTokenWebhookErrorPolicy};
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: "webhook-realm".to_string(),
+                config: None,
+            })
+            .expect("create realm");
+
+        let err = engine
+            .update_realm(
+                realm.id(),
+                &UpdateRealmRequest {
+                    config: Some(RealmConfig {
+                        pre_token_webhook: Some(PreTokenWebhookConfig {
+                            url: "http://localhost:9999/enrich".to_string(),
+                            timeout_ms: 1000,
+                            on_error: PreTokenWebhookErrorPolicy::FailOpen,
+                            hmac_secret: None,
+                        }),
+                        ..RealmConfig::default()
+                    }),
+                    ..UpdateRealmRequest::default()
+                },
+            )
+            .expect_err("must reject webhook without hmac_secret");
+
+        assert!(
+            matches!(err, IdentityError::InvalidInput { .. }),
+            "expected InvalidInput, got {err:?}"
+        );
+        if let IdentityError::InvalidInput { reason } = err {
+            assert!(
+                reason.contains("hmac_secret"),
+                "error reason must mention hmac_secret, got: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_realm_rejects_webhook_config_with_empty_hmac_secret() {
+        use crate::identity::types::{PreTokenWebhookConfig, PreTokenWebhookErrorPolicy};
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: "webhook-realm-empty".to_string(),
+                config: None,
+            })
+            .expect("create realm");
+
+        let err = engine
+            .update_realm(
+                realm.id(),
+                &UpdateRealmRequest {
+                    config: Some(RealmConfig {
+                        pre_token_webhook: Some(PreTokenWebhookConfig {
+                            url: "http://localhost:9999/enrich".to_string(),
+                            timeout_ms: 1000,
+                            on_error: PreTokenWebhookErrorPolicy::FailOpen,
+                            hmac_secret: Some(String::new()),
+                        }),
+                        ..RealmConfig::default()
+                    }),
+                    ..UpdateRealmRequest::default()
+                },
+            )
+            .expect_err("must reject webhook with empty hmac_secret");
+
+        assert!(
+            matches!(err, IdentityError::InvalidInput { .. }),
+            "expected InvalidInput, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn update_realm_accepts_webhook_config_with_hmac_secret() {
+        use crate::identity::types::{PreTokenWebhookConfig, PreTokenWebhookErrorPolicy};
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = engine
+            .create_realm(&CreateRealmRequest {
+                name: "webhook-realm-ok".to_string(),
+                config: None,
+            })
+            .expect("create realm");
+
+        engine
+            .update_realm(
+                realm.id(),
+                &UpdateRealmRequest {
+                    config: Some(RealmConfig {
+                        pre_token_webhook: Some(PreTokenWebhookConfig {
+                            url: "http://localhost:9999/enrich".to_string(),
+                            timeout_ms: 1000,
+                            on_error: PreTokenWebhookErrorPolicy::FailOpen,
+                            hmac_secret: Some("my-strong-secret".to_string()),
+                        }),
+                        ..RealmConfig::default()
+                    }),
+                    ..UpdateRealmRequest::default()
+                },
+            )
+            .expect("webhook config with hmac_secret must be accepted");
+    }
+
+    #[test]
+    fn create_realm_rejects_webhook_config_without_hmac_secret() {
+        use crate::identity::types::{PreTokenWebhookConfig, PreTokenWebhookErrorPolicy};
+
+        let (_dir, engine, _clock) = setup_engine();
+
+        let err = engine
+            .create_realm(&CreateRealmRequest {
+                name: "webhook-realm-create".to_string(),
+                config: Some(RealmConfig {
+                    pre_token_webhook: Some(PreTokenWebhookConfig {
+                        url: "http://localhost:9999/enrich".to_string(),
+                        timeout_ms: 1000,
+                        on_error: PreTokenWebhookErrorPolicy::FailOpen,
+                        hmac_secret: None,
+                    }),
+                    ..RealmConfig::default()
+                }),
+            })
+            .expect_err("must reject webhook without hmac_secret on create");
+
+        assert!(
+            matches!(err, IdentityError::InvalidInput { .. }),
+            "expected InvalidInput, got {err:?}"
+        );
     }
 
     // --- Unit Scenario 5: Cascading realm deletion ---

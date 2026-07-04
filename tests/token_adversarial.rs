@@ -28,9 +28,38 @@ mod common;
 use base64::Engine as _;
 use hearth::core::RealmId;
 use hearth::identity::{
-    CreateRealmRequest, CreateUserRequest, IdentityError, RealmStatus, SessionContext,
+    AuthorizationRequest, CodeChallengeMethod, CreateRealmRequest, CreateUserRequest,
+    IdentityError, RealmStatus, RegisterClientRequest, SessionContext, TokenExchangeRequest,
     TokenIntrospectionRequest, TokenRevocationRequest, UpdateRealmRequest, User,
 };
+
+// PKCE helpers shared by the auth-code tests below.
+fn pkce_challenge(verifier: &str) -> String {
+    use data_encoding::BASE64URL_NOPAD;
+    BASE64URL_NOPAD
+        .encode(ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes()).as_ref())
+}
+const ADV_PKCE_VERIFIER: &str = "AdvTestVerifierForHEASEC22ConurrentTest_ABCDEF";
+
+/// Registers a minimal public OAuth client for adversarial tests.
+fn register_adv_client(
+    engine: &dyn hearth::identity::IdentityEngine,
+    realm: &RealmId,
+) -> hearth::identity::OAuthClient {
+    engine
+        .register_client(
+            realm,
+            &RegisterClientRequest {
+                client_name: format!("adv-client-{}", uuid::Uuid::new_v4()),
+                redirect_uris: vec!["https://adv.test/callback".to_string()],
+                grant_types: vec!["authorization_code".to_string()],
+                require_consent: false,
+                client_logo_url: None,
+                ..Default::default()
+            },
+        )
+        .expect("register client")
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1224,5 +1253,196 @@ async fn suspend_realm_revokes_sessions() {
     assert!(
         after.is_none(),
         "session must not be returned by get_session after realm suspension"
+    );
+}
+
+// ── Token substitution — ID token presented to introspect (HEA-SEC-22) ────────
+
+/// Vulnerability class: Token Substitution (OAUTH-08 / HEA-SEC-22).
+///
+/// An ID token is a cryptographically valid Hearth-signed JWT, but it must
+/// NEVER introspect as `active: true`. Resource servers using introspection
+/// to guard API access would incorrectly accept it as a bearer credential
+/// if the endpoint returned active for non-access token_types.
+///
+/// Fix: `introspect_token_inner` now rejects any token whose `token_type`
+/// claim is not `"access"` before reaching the active-response path.
+#[tokio::test]
+async fn id_token_on_introspect_returns_inactive() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = harness.create_realm();
+    let user = create_user(&harness, &realm);
+    let client = register_adv_client(harness.identity(), &realm);
+
+    // Full auth code exchange — the only path that issues an ID token.
+    let auth = harness
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: "https://adv.test/callback".to_string(),
+                scope: "openid".to_string(),
+                state: "adv-state-idtoken".to_string(),
+                response_type: "code".to_string(),
+                user_id: user.id().clone(),
+                code_challenge: Some(pkce_challenge(ADV_PKCE_VERIFIER)),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                nonce: None,
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        )
+        .expect("authorize");
+
+    let token_resp = harness
+        .identity()
+        .exchange_authorization_code(
+            &realm,
+            &TokenExchangeRequest {
+                client_id: client.client_id().clone(),
+                code: auth.code().to_string(),
+                redirect_uri: "https://adv.test/callback".to_string(),
+                code_verifier: Some(ADV_PKCE_VERIFIER.to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("exchange code");
+
+    // Confirm the access token introspects as active (baseline).
+    let access_resp = harness
+        .identity()
+        .introspect_token(
+            &realm,
+            &TokenIntrospectionRequest {
+                token: token_resp.access_token().to_string(),
+                token_type_hint: None,
+                introspecting_client_id: None,
+            },
+        )
+        .expect("introspect access token must not error");
+    assert!(
+        access_resp.active,
+        "access token baseline must introspect as active"
+    );
+
+    // Present the ID token — must be inactive (token substitution rejected).
+    let id_resp = harness
+        .identity()
+        .introspect_token(
+            &realm,
+            &TokenIntrospectionRequest {
+                token: token_resp.id_token().to_string(),
+                token_type_hint: None,
+                introspecting_client_id: None,
+            },
+        )
+        .expect("introspect_token must not return an error for an ID token");
+    assert!(
+        !id_resp.active,
+        "ID token must introspect as inactive — token substitution (OAUTH-08) must be rejected"
+    );
+}
+
+// ── TOCTOU — concurrent auth code exchange (HEA-SEC-22) ──────────────────────
+
+/// Vulnerability class: TOCTOU on authorization code single-use (OAUTH-06 /
+/// HEA-SEC-22).
+///
+/// Two goroutines race to exchange the same authorization code. The
+/// delete-on-use fix (atomically delete the storage entry as the first write)
+/// guarantees exactly one winner — the concurrent second request finds no
+/// entry and returns `InvalidAuthorizationCode`.
+///
+/// Historically the code set `used = true` after all token-issuance work,
+/// giving a race window where both requests could pass the check before
+/// either wrote the flag back.
+#[tokio::test]
+async fn concurrent_auth_code_exchange_only_one_succeeds() {
+    use std::sync::{Arc, Barrier};
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = harness.create_realm();
+    let user = create_user(&harness, &realm);
+    let client = register_adv_client(harness.identity(), &realm);
+
+    let auth = harness
+        .identity()
+        .authorize(
+            &realm,
+            &AuthorizationRequest {
+                client_id: client.client_id().clone(),
+                redirect_uri: "https://adv.test/callback".to_string(),
+                scope: "openid".to_string(),
+                state: "adv-state-race".to_string(),
+                response_type: "code".to_string(),
+                user_id: user.id().clone(),
+                code_challenge: Some(pkce_challenge(ADV_PKCE_VERIFIER)),
+                code_challenge_method: Some(CodeChallengeMethod::S256),
+                nonce: None,
+                resource: None,
+                amr_values: Vec::new(),
+                response_mode: None,
+                request: None,
+                via_par: false,
+            },
+        )
+        .expect("authorize");
+
+    let code = auth.code().to_string();
+    let engine = harness.identity_arc();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let engine = Arc::clone(&engine);
+            let barrier = Arc::clone(&barrier);
+            let realm = realm.clone();
+            let client_id = client.client_id().clone();
+            let code = code.clone();
+            std::thread::spawn(move || {
+                // Both threads reach this point before either calls exchange.
+                barrier.wait();
+                engine.exchange_authorization_code(
+                    &realm,
+                    &TokenExchangeRequest {
+                        client_id,
+                        code,
+                        redirect_uri: "https://adv.test/callback".to_string(),
+                        code_verifier: Some(ADV_PKCE_VERIFIER.to_string()),
+                        dpop_jkt: None,
+                        client_assertion_type: None,
+                        client_assertion: None,
+                    },
+                )
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|h| h.join().expect("thread panicked"))
+        .collect();
+
+    let ok_count = results.iter().filter(|r| r.is_ok()).count();
+    let err_count = results.iter().filter(|r| r.is_err()).count();
+
+    assert_eq!(
+        ok_count, 1,
+        "exactly one exchange must succeed; got {ok_count} successes"
+    );
+    assert_eq!(
+        err_count, 1,
+        "exactly one exchange must fail; got {err_count} failures"
+    );
+    let failed = results.iter().find(|r| r.is_err()).unwrap();
+    assert!(
+        matches!(failed, Err(IdentityError::InvalidAuthorizationCode)),
+        "losing thread must get InvalidAuthorizationCode, got: {failed:?}"
     );
 }

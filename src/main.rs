@@ -965,6 +965,10 @@ async fn run_serve(
         }
     };
 
+    // Capture KEK bytes for the audit engine before storage_kek is consumed
+    // by identity_config (it is moved on the non-dev_mode path).
+    let audit_kek: Option<[u8; 32]> = storage_kek.as_ref().map(|k| *k.as_bytes());
+
     let identity_config = if config.dev_mode {
         IdentityConfig {
             credential: CredentialConfig::fast_for_testing(),
@@ -1000,10 +1004,13 @@ async fn run_serve(
     ));
     let rbac_engine: Arc<dyn RbacEngine> = Arc::clone(&raw_rbac_engine) as Arc<dyn RbacEngine>;
 
-    let audit_engine: Arc<dyn hearth::audit::AuditEngine> = Arc::new(EmbeddedAuditEngine::new(
-        Arc::clone(&storage) as Arc<dyn StorageEngine>,
-        Arc::clone(&clock),
-    ));
+    let audit_engine: Arc<dyn hearth::audit::AuditEngine> = Arc::new(
+        EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        )
+        .with_kek(audit_kek),
+    );
 
     let raw_identity_engine = Arc::new(EmbeddedIdentityEngine::with_rbac(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
@@ -1046,6 +1053,33 @@ async fn run_serve(
         return Err(
             "email.transport = mailcatcher is only allowed in dev mode (start with --dev)".into(),
         );
+    }
+
+    // HSEC-003/004: Production startup security checks against the system realm.
+    if !config.dev_mode {
+        let sys_realm_id = hearth::core::RealmId::new(uuid::Uuid::nil());
+        if let Ok(Some(sys_realm)) = identity_engine.get_realm(&sys_realm_id) {
+            // HSEC-004: Hard error — explicitly disabling MFA on the admin control
+            // plane is a misconfiguration that blocks startup in production.
+            if sys_realm.config().mfa_required == Some(false) {
+                return Err(
+                    "security: system realm mfa_required is explicitly set to false; \
+                     MFA may not be disabled on the admin realm in production. \
+                     Remove the override or set mfa_required: true."
+                        .into(),
+                );
+            }
+            // HSEC-003: Non-fatal warning — the 8-character floor is always enforced
+            // at validation time, but an explicit policy is recommended in production.
+            if sys_realm.config().password_policy.is_none() {
+                warn!(
+                    "no password_policy configured for the system realm; \
+                     the built-in 8-character floor is enforced at runtime but \
+                     an explicit policy (auth.password_policy.min_length) is \
+                     recommended for production hardening"
+                );
+            }
+        }
     }
 
     // A-43: Resolve effective reflection_enabled and apply the production guard.
@@ -1568,10 +1602,13 @@ async fn run_serve(
     let (webhook_tx, webhook_rx) = hearth::webhook::dispatcher::audit_event_channel();
 
     // Wrap the raw audit engine so every append broadcasts to the dispatcher.
-    let raw_audit: Arc<dyn hearth::audit::AuditEngine> = Arc::new(EmbeddedAuditEngine::new(
-        Arc::clone(&storage) as Arc<dyn StorageEngine>,
-        Arc::clone(&clock),
-    ));
+    let raw_audit: Arc<dyn hearth::audit::AuditEngine> = Arc::new(
+        EmbeddedAuditEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+        )
+        .with_kek(audit_kek),
+    );
     let audit_engine: Arc<dyn hearth::audit::AuditEngine> = Arc::new(
         hearth::webhook::NotifyingAuditEngine::new(Arc::clone(&raw_audit), webhook_tx),
     );
