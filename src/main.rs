@@ -675,6 +675,16 @@ async fn run_serve(
         "Hearth identity server starting"
     );
 
+    if config.dev_mode {
+        error!(
+            "DEV MODE ACTIVE — security reductions in effect: \
+             (1) Argon2 parameters weakened to fast_for_testing (256 KiB / 1 iter); \
+             (2) CSRF cookie enforcement bypassed on pre-auth forms; \
+             (3) setup token printed (truncated) in startup logs. \
+             DO NOT expose this server on a non-loopback address."
+        );
+    }
+
     // Canary: verify the embedded admin UI CSS contains the Hearth theme layer.
     // Catches a silent regression where a Tailwind build sheds every `bg-ht-*`
     // / `btn-ember` class and the admin UI renders as unstyled HTML.
@@ -2220,7 +2230,10 @@ fn print_startup_panel(
     }
     if let Some(token) = setup_token {
         if dev_mode {
-            tracing::info!("  Setup:   {base}/ui/setup?token={token}");
+            let preview: String = token.chars().take(8).collect();
+            tracing::info!(
+                "  Setup:   {base}/ui/setup  (token prefix: {preview}… — read .setup_token for full token)"
+            );
         } else {
             tracing::info!(
                 "  Setup:   {base}/ui/setup  (token redacted in prod — set HEARTH_SETUP_TOKEN)"
@@ -3955,5 +3968,21 @@ mod tests {
             "non-dev mode must not override smtp"
         );
         assert!(!warned);
+    }
+
+    // ── HEA-SEC-10: setup token truncation ───────────────────────────────────
+
+    /// Dev-mode startup panel truncates the setup token to 8 characters.
+    /// Full token must NOT appear in the log line.
+    #[test]
+    fn setup_token_preview_is_8_chars_and_omits_full_token() {
+        let full_token = "abcdefghijklmnopqrstuvwxyz0123456789"; // 36 chars
+        let preview: String = full_token.chars().take(8).collect();
+        assert_eq!(preview.len(), 8, "preview must be exactly 8 chars");
+        assert_eq!(&preview, "abcdefgh");
+        assert!(
+            !preview.contains(&full_token[8..]),
+            "preview must not include chars beyond the 8-char prefix"
+        );
     }
 }

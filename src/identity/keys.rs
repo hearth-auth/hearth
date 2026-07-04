@@ -637,6 +637,28 @@ pub(crate) fn parse_retiring_key_deadline(key_bytes: &[u8]) -> Option<u64> {
     deadline_str.parse::<u64>().ok()
 }
 
+/// Returns `true` when `key` holds raw cryptographic material (private keys,
+/// HMAC secrets) that MUST NOT appear in admin exports or storage scans.
+///
+/// Covered prefixes / exact keys:
+/// - `realm:key:*`           — per-realm Ed25519 signing keys (PKCS#8 DER)
+/// - `realm:retiring:*`      — retiring per-realm Ed25519 signing keys
+/// - `realm:saml_key:*`      — per-realm SAML signing keys
+/// - `sys:global:key`        — server-wide Phase-0 fallback signing key
+/// - `sys:oidc:rsa:key`      — server-wide OIDC RSA-2048 signing key
+/// - `sys:oidc:rsa:retiring:*` — retiring OIDC RSA keys
+/// - `agt:dpop:nonce-secret` — per-realm DPoP nonce HMAC secret
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn is_key_material(key: &[u8]) -> bool {
+    key.starts_with(REALM_KEY_PREFIX.as_bytes())
+        || key.starts_with(REALM_RETIRING_KEY_PREFIX.as_bytes())
+        || key.starts_with(REALM_SAML_KEY_PREFIX.as_bytes())
+        || key.starts_with(b"sys:oidc:rsa:retiring:")
+        || key == b"sys:global:key"
+        || key == b"sys:oidc:rsa:key"
+        || key == DPOP_NONCE_SECRET_KEY.as_bytes()
+}
+
 /// Encodes the storage key for a grant family (refresh token rotation).
 ///
 /// Format: `oauth:family:{family_id}`

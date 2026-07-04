@@ -13,7 +13,7 @@ use base64::Engine as _;
 use hearth::core::RealmId;
 use hearth::identity::{CreateUserRequest, SessionContext};
 use hearth::protocol::http::{router, AppState};
-use hearth::rbac::{AssignRoleRequest, Scope, Subject};
+use hearth::rbac::{AssignRoleRequest, CreateGroupRequest, Scope, Subject};
 use tower::ServiceExt as _;
 
 async fn build_app(harness: &common::TestHarness) -> axum::Router {
@@ -399,6 +399,93 @@ async fn sub_admin_realm_denied_users_endpoint() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// HEA-1679: hearth.agents.admin outer-gate allowlist regression tests
+// ---------------------------------------------------------------------------
+// Regression guard for HEA-SEC-11: tokens carrying ONLY `hearth.agents.admin`
+// must pass the outer gate (extract_admin_auth) but still be denied on
+// endpoints that require a different sub-permission.
+
+/// Builds an Axum router identical to [`build_app`] but with agent identity
+/// routes enabled so `/v1/agents` is registered.
+async fn build_app_with_agent_routes(harness: &common::TestHarness) -> axum::Router {
+    use hearth::protocol::http::AppState;
+    let state = Arc::new(
+        AppState::new(
+            harness.identity_arc(),
+            harness.rbac_arc(),
+            harness.audit_arc(),
+        )
+        .with_agent_identity(true),
+    );
+    router(state)
+}
+
+/// `hearth.agents.admin` passes the outer gate and reaches `/v1/agents`
+/// (response may be 200; must NOT be 403).
+#[tokio::test]
+async fn agents_admin_passes_outer_gate_to_agent_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token =
+        issue_sub_admin_token(&h, &realm, "agentsadmin@example.com", "hearth.agents.admin").await;
+    let app = build_app_with_agent_routes(&h).await;
+
+    let status = http_get(app, &token, &realm, "/v1/agents").await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.agents.admin must pass the outer gate and not receive 403 on /v1/agents"
+    );
+}
+
+/// `hearth.agents.admin` is denied on `/admin/users` (wrong sub-permission).
+#[tokio::test]
+async fn agents_admin_denied_on_users_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "agentsadmin2@example.com",
+        "hearth.agents.admin",
+    )
+    .await;
+    let app = build_app(&h).await;
+
+    let status = http_get(app, &token, &realm, "/admin/users").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.agents.admin must be denied on /admin/users (requires hearth.users.admin)"
+    );
+}
+
+/// `hearth.agents.admin` is denied on `/admin/roles` (wrong sub-permission).
+#[tokio::test]
+async fn agents_admin_denied_on_realm_endpoint() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "agentsadmin3@example.com",
+        "hearth.agents.admin",
+    )
+    .await;
+    let app = build_app(&h).await;
+
+    let status = http_get(app, &token, &realm, "/admin/roles").await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.agents.admin must be denied on /admin/roles (requires hearth.realm.admin)"
+    );
+}
+
 /// hearth.admin (full superuser) still grants access to all domains.
 #[tokio::test]
 async fn full_admin_accesses_all_domains() {
@@ -417,4 +504,257 @@ async fn full_admin_accesses_all_domains() {
             "hearth.admin must be allowed on {uri}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// HEA-1680 / HEA-SEC-12: Group membership permission checks
+// ---------------------------------------------------------------------------
+
+async fn http_post_json(
+    app: axum::Router,
+    token: &str,
+    realm: &RealmId,
+    uri: &str,
+    body: &str,
+) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Realm-ID", realm.as_uuid().to_string())
+            .header("Content-Type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("req"),
+    )
+    .await
+    .expect("resp")
+    .status()
+}
+
+async fn http_delete(app: axum::Router, token: &str, realm: &RealmId, uri: &str) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Realm-ID", realm.as_uuid().to_string())
+            .body(Body::empty())
+            .expect("req"),
+    )
+    .await
+    .expect("resp")
+    .status()
+}
+
+/// HEA-SEC-12: hearth.users.admin is denied on POST /admin/groups/{id}/members.
+/// A sub-admin must not be able to add themselves to a group and inherit roles.
+#[tokio::test]
+async fn users_admin_denied_add_group_member() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "usersadmin-grp@example.com",
+        "hearth.users.admin",
+    )
+    .await;
+    let app = build_app(&h).await;
+
+    // Group need not exist — permission check fires before DB lookup.
+    let group_id = uuid::Uuid::new_v4();
+    let user_id = uuid::Uuid::new_v4();
+    let body = format!(r#"{{"id":"{user_id}","member_type":"user"}}"#);
+    let status = http_post_json(
+        app,
+        &token,
+        &realm,
+        &format!("/admin/groups/{group_id}/members"),
+        &body,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.users.admin must be denied on POST /admin/groups/:id/members"
+    );
+}
+
+/// HEA-SEC-12: hearth.users.admin is denied on DELETE /admin/groups/{id}/members/{member_id}.
+#[tokio::test]
+async fn users_admin_denied_remove_group_member() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "usersadmin-grp2@example.com",
+        "hearth.users.admin",
+    )
+    .await;
+    let app = build_app(&h).await;
+
+    let group_id = uuid::Uuid::new_v4();
+    let member_id = uuid::Uuid::new_v4();
+    let status = http_delete(
+        app,
+        &token,
+        &realm,
+        &format!("/admin/groups/{group_id}/members/{member_id}?type=user"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.users.admin must be denied on DELETE /admin/groups/:id/members/:member_id"
+    );
+}
+
+/// HEA-SEC-12: hearth.users.admin is allowed on GET /admin/groups/{id}.
+#[tokio::test]
+async fn users_admin_allowed_get_group() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+
+    let group = h
+        .rbac()
+        .create_group(
+            &realm,
+            &CreateGroupRequest {
+                name: "Test Group".into(),
+                slug: "test-group-get".into(),
+                description: None,
+            },
+        )
+        .expect("create group");
+
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "usersadmin-grp3@example.com",
+        "hearth.users.admin",
+    )
+    .await;
+    let app = build_app(&h).await;
+
+    let status = http_get(
+        app,
+        &token,
+        &realm,
+        &format!("/admin/groups/{}", group.id.as_uuid()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hearth.users.admin must be allowed on GET /admin/groups/:id"
+    );
+}
+
+/// HEA-SEC-12: hearth.users.admin is allowed on GET /admin/groups/{id}/members.
+#[tokio::test]
+async fn users_admin_allowed_list_group_members() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+
+    let group = h
+        .rbac()
+        .create_group(
+            &realm,
+            &CreateGroupRequest {
+                name: "Test Group Members".into(),
+                slug: "test-group-members".into(),
+                description: None,
+            },
+        )
+        .expect("create group");
+
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "usersadmin-grp4@example.com",
+        "hearth.users.admin",
+    )
+    .await;
+    let app = build_app(&h).await;
+
+    let status = http_get(
+        app,
+        &token,
+        &realm,
+        &format!("/admin/groups/{}/members", group.id.as_uuid()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "hearth.users.admin must be allowed on GET /admin/groups/:id/members"
+    );
+}
+
+/// HEA-SEC-12: hearth.realm.admin can add a member to a group.
+#[tokio::test]
+async fn realm_admin_allowed_add_group_member() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+
+    let group = h
+        .rbac()
+        .create_group(
+            &realm,
+            &CreateGroupRequest {
+                name: "Realm Admin Group".into(),
+                slug: "realm-admin-group".into(),
+                description: None,
+            },
+        )
+        .expect("create group");
+
+    let token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "realmadmin-grp@example.com",
+        "hearth.realm.admin",
+    )
+    .await;
+
+    let target_user = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "member-grp@example.com".into(),
+                display_name: "Member".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create member user");
+
+    let app = build_app(&h).await;
+
+    let body = format!(
+        r#"{{"id":"{}","member_type":"user"}}"#,
+        target_user.id().as_uuid()
+    );
+    let status = http_post_json(
+        app,
+        &token,
+        &realm,
+        &format!("/admin/groups/{}/members", group.id.as_uuid()),
+        &body,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "hearth.realm.admin must be allowed on POST /admin/groups/:id/members"
+    );
 }

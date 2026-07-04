@@ -44,8 +44,6 @@ use crate::storage::fs::{Fs, FsFile};
 use crate::storage::migrations::{self, WAL_MAGIC, WAL_VERSION_CURRENT, WAL_VERSION_HEADER_SIZE};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -388,11 +386,17 @@ impl Default for WalConfig {
     }
 }
 
-/// Rotation state: the per-segment DEK and encryption header.
-/// Protected by its own Mutex for safe interior mutability during rotation.
+/// Rotation state: per-segment DEK, encryption header, and nonce counter.
+///
+/// All three fields are protected by a single `Mutex` so the DEK swap and
+/// counter reset in `rotate_locked` are one atomic critical section, closing
+/// the (old-DEK, nonce-0) reuse window described in HEA-SEC-08.
 struct RotationState {
     dek: DataEncryptionKey,
     enc_header: EncryptionHeader,
+    /// Monotonic record counter used as the AES-GCM nonce input.
+    /// Reset to zero atomically with the DEK swap during rotation.
+    record_counter: u64,
 }
 
 /// Write-ahead log providing durable, ordered storage of mutations.
@@ -403,10 +407,12 @@ pub struct Wal {
     file: Mutex<Box<dyn FsFile>>,
     path: PathBuf,
     config: WalConfig,
-    /// Rotation state (DEK + encryption header), locked separately.
+    /// Rotation state (DEK, enc header, and nonce counter), locked together.
+    ///
+    /// The counter lives in `RotationState` rather than as a separate
+    /// `AtomicU64` so the DEK swap and counter reset in `rotate_locked` are
+    /// a single atomic critical section (HEA-SEC-08).
     rotation: Mutex<RotationState>,
-    /// Monotonic record counter used as the encryption nonce.
-    record_counter: AtomicU64,
     /// Key encryption key (unused currently, reserved for key rotation).
     #[allow(dead_code)]
     kek: encryption::KeyEncryptionKey,
@@ -523,8 +529,11 @@ impl Wal {
             file: Mutex::new(file),
             path: path.to_path_buf(),
             config,
-            rotation: Mutex::new(RotationState { dek, enc_header }),
-            record_counter: AtomicU64::new(record_count),
+            rotation: Mutex::new(RotationState {
+                dek,
+                enc_header,
+                record_counter: record_count,
+            }),
             pre_rotate_fn: None,
             kek: kek.clone_key(),
             kek_id,
@@ -591,24 +600,27 @@ impl Wal {
             self.rotate_locked(&mut **file)?;
         }
 
-        // Load record counter AFTER rotation check (rotation resets to 0)
-        let record_num = self.record_counter.load(Ordering::Relaxed);
-
-        // Encrypt with current DEK
-        let nonce = counter_nonce(record_num);
-        let aad = record_num.to_le_bytes();
-        let (ciphertext, crc) = {
-            let rot = self
+        // Atomically read-and-increment the nonce counter and snapshot the DEK
+        // under a single mutex lock (HEA-SEC-08).  This ensures (DEK, counter)
+        // are always consistent: no thread can observe the new DEK with a
+        // pre-reset counter after a rotation.
+        let (nonce, aad, dek) = {
+            let mut rot = self
                 .rotation
                 .lock()
                 .map_err(|_| StorageError::Io(std::io::Error::other("rotation mutex poisoned")))?;
+            let record_num = rot.record_counter;
+            rot.record_counter += 1;
+            let nonce = counter_nonce(record_num);
+            let aad = record_num.to_le_bytes();
             let mut dek_bytes = [0u8; 32];
             dek_bytes.copy_from_slice(rot.dek.as_bytes());
-            let dek = DataEncryptionKey::from_bytes(dek_bytes);
-            let ct = encryption::encrypt_section(&plaintext, &dek, &nonce, &aad)?;
-            let c = crc32fast::hash(&ct);
-            (ct, c)
+            (nonce, aad, DataEncryptionKey::from_bytes(dek_bytes))
         };
+
+        // Encrypt outside the rotation mutex — crypto does not need the lock.
+        let ciphertext = encryption::encrypt_section(&plaintext, &dek, &nonce, &aad)?;
+        let crc = crc32fast::hash(&ciphertext);
 
         // Write: [payload_length: u32 LE][ciphertext][crc32: u32 LE]
         #[allow(clippy::cast_possible_truncation)]
@@ -620,8 +632,6 @@ impl Wal {
         if self.config.sync_mode == SyncMode::EveryWrite {
             file.sync_all()?;
         }
-
-        self.record_counter.fetch_add(1, Ordering::Relaxed);
 
         Ok(())
     }
@@ -791,7 +801,9 @@ impl Wal {
             file.sync_all()?;
         }
 
-        // Update rotation state
+        // Swap DEK, enc header, and nonce counter atomically under one mutex
+        // lock (HEA-SEC-08).  Separating the counter reset from the DEK swap
+        // would reopen the (old-DEK, nonce-0) reuse window.
         {
             let mut rot = self
                 .rotation
@@ -799,8 +811,8 @@ impl Wal {
                 .map_err(|_| StorageError::Io(std::io::Error::other("rotation mutex poisoned")))?;
             rot.dek = new_dek;
             rot.enc_header = new_enc_header;
+            rot.record_counter = 0;
         }
-        self.record_counter.store(0, Ordering::Relaxed);
 
         Ok(())
     }
@@ -808,13 +820,15 @@ impl Wal {
 
 impl std::fmt::Debug for Wal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let record_counter = self
+            .rotation
+            .try_lock()
+            .map(|r| r.record_counter)
+            .unwrap_or(0);
         f.debug_struct("Wal")
             .field("path", &self.path)
             .field("config", &self.config)
-            .field(
-                "record_counter",
-                &self.record_counter.load(Ordering::Relaxed),
-            )
+            .field("record_counter", &record_counter)
             .finish_non_exhaustive()
     }
 }
@@ -1144,6 +1158,117 @@ mod tests {
             entries.iter().any(|e| e.key == b"post-rotate"),
             "post-rotation entry should be readable"
         );
+    }
+
+    // --- HEA-SEC-08: nonce counter atomicity ---
+
+    /// After a WAL rotation the record counter must reset to zero atomically
+    /// with the DEK swap.  If they are split (counter reset outside the mutex)
+    /// a writer encrypts with the new DEK but a nonce derived from the old
+    /// counter; `read_all` then tries counter_nonce(0..N) — GCM tag mismatch
+    /// → records silently dropped.
+    ///
+    /// Size arithmetic (key≈6 B, value≈6 B → ~69 B/record):
+    ///   Header = 82 B.  82 + 8×69 = 634 > 600 → rotation fires on fill-7.
+    ///   After rotation: 82 B. 4 fills + 3 post ≈ 7×69 = 483 B.
+    ///   82 + 483 = 565 < 600 → no second rotation.
+    #[test]
+    fn rotation_counter_resets_atomically_with_dek() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("rot_atomic.wal");
+
+        let config = WalConfig {
+            max_size: 600,
+            sync_mode: SyncMode::EveryWrite,
+        };
+
+        let post1 = make_entry(b"post-rotate-1", b"val-1", WalOperation::Put);
+        let post2 = make_entry(b"post-rotate-2", b"val-2", WalOperation::Put);
+        let post3 = make_entry(b"post-rotate-3", b"val-3", WalOperation::Put);
+
+        {
+            let wal = open_test_wal(&wal_path, config.clone());
+            for i in 0..10u8 {
+                wal.append(&make_entry(
+                    format!("fill-{i}").as_bytes(),
+                    b"filler",
+                    WalOperation::Put,
+                ))
+                .expect("fill");
+            }
+            wal.append(&post1).expect("post1");
+            wal.append(&post2).expect("post2");
+            wal.append(&post3).expect("post3");
+
+            let entries = wal.read_all().expect("read live");
+            assert!(
+                entries.iter().any(|e| e.key == b"post-rotate-1"),
+                "post1 must be readable after rotation"
+            );
+            assert!(
+                entries.iter().any(|e| e.key == b"post-rotate-2"),
+                "post2 must be readable after rotation"
+            );
+            assert!(
+                entries.iter().any(|e| e.key == b"post-rotate-3"),
+                "post3 must be readable after rotation"
+            );
+        }
+
+        {
+            let wal = open_test_wal(&wal_path, config);
+            assert!(
+                wal.read_all()
+                    .expect("read after reopen")
+                    .iter()
+                    .any(|e| e.key == b"post-rotate-1"),
+                "post1 must survive WAL reopen"
+            );
+            wal.append(&make_entry(b"after-reopen", b"ok", WalOperation::Put))
+                .expect("append after reopen");
+            assert!(
+                wal.read_all()
+                    .expect("read after extra append")
+                    .iter()
+                    .any(|e| e.key == b"after-reopen"),
+                "entry written after reopen must be readable"
+            );
+        }
+    }
+
+    /// Counter reconstructed from on-disk state on reopen; writing another
+    /// entry must not produce a nonce collision with existing records.
+    #[test]
+    fn counter_reconstructed_from_disk_on_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wal_path = dir.path().join("counter_reopen.wal");
+        const N: usize = 5;
+
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            for i in 0..N {
+                wal.append(&make_entry(
+                    format!("k{i}").as_bytes(),
+                    format!("v{i}").as_bytes(),
+                    WalOperation::Put,
+                ))
+                .expect("write");
+            }
+        }
+
+        {
+            let wal = open_test_wal(&wal_path, WalConfig::default());
+            assert_eq!(
+                wal.read_all().expect("read before extra").len(),
+                N,
+                "expected {N} entries before extra write"
+            );
+            wal.append(&make_entry(b"extra", b"e", WalOperation::Put))
+                .expect("extra write");
+            let after = wal.read_all().expect("read after extra");
+            assert_eq!(after.len(), N + 1, "expected {} entries", N + 1);
+            assert_eq!(after.last().expect("last").key, b"extra");
+        }
     }
 
     #[test]
