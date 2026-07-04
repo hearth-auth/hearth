@@ -18,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **Host header allowlist enforcement** — `security.allowed_hosts` in `hearth.yaml` is
+  now enforced by an outermost Tower middleware. Requests whose `Host` header is not in
+  the allowlist are rejected with HTTP 400 before any route dispatch. An empty list
+  (the default) preserves fail-open behavior for existing deployments (HEA-SEC-16).
 - **At-rest encryption for signing keys and DPoP secrets** — Per-realm Ed25519
   signing keys, the global signing key, the OIDC RSA key, SAML RSA keys, and
   DPoP nonce secrets are now wrapped with AES-256-GCM before being written to

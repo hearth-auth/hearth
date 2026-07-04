@@ -3,6 +3,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use crate::abuse::shaper::RequestShaper;
 use crate::audit::AuditEngine;
 use crate::cluster::ClusterEngine;
 use crate::identity::IdentityEngine;
@@ -98,6 +99,20 @@ pub struct AppState {
     /// When `false`, all AAT, transaction-token, SPIFFE, and cross-realm
     /// trust routes are absent from the router.
     pub agent_advanced_enabled: bool,
+    /// Allowlist of `Host` header values the server accepts (A-40).
+    ///
+    /// When non-empty, any request whose `Host` header does not match an
+    /// entry is rejected with HTTP 400. An empty list means accept any host
+    /// (fail-open, preserves backward compatibility with existing deployments
+    /// that predate this control). Sourced from
+    /// `security.allowed_hosts` in `hearth.yaml`.
+    pub allowed_hosts: Vec<String>,
+    /// Global per-IP and per-realm request shaper (A-2).
+    ///
+    /// Shared with the gRPC surface via `Arc` so a caller cannot evade the
+    /// limit by switching protocols. Defaults to production-safe limits;
+    /// override via `with_request_shaper` using an operator-configured instance.
+    pub request_shaper: Arc<RequestShaper>,
 }
 
 impl AppState {
@@ -128,6 +143,8 @@ impl AppState {
             agent_identity_enabled: false,
             agent_approval_enabled: false,
             agent_advanced_enabled: false,
+            allowed_hosts: Vec::new(),
+            request_shaper: Arc::new(RequestShaper::new()),
         }
     }
 
@@ -164,6 +181,8 @@ impl AppState {
             agent_identity_enabled: false,
             agent_approval_enabled: false,
             agent_advanced_enabled: false,
+            allowed_hosts: Vec::new(),
+            request_shaper: Arc::new(RequestShaper::new()),
         }
     }
 
@@ -197,6 +216,8 @@ impl AppState {
             agent_identity_enabled: false,
             agent_approval_enabled: false,
             agent_advanced_enabled: false,
+            allowed_hosts: Vec::new(),
+            request_shaper: Arc::new(RequestShaper::new()),
         }
     }
 
@@ -292,6 +313,26 @@ impl AppState {
     /// compiled-in default.
     pub fn with_jwks_rate_limiter(mut self, limiter: Arc<JwksRateLimiter>) -> Self {
         self.jwks_rate_limiter = limiter;
+        self
+    }
+
+    /// Sets the `Host` header allowlist (A-40).
+    ///
+    /// An empty list (the default) means accept any `Host` value. Non-empty
+    /// lists cause the [`enforce_host_allowlist`] middleware to reject any
+    /// request whose `Host` header is not among the listed values.
+    pub fn with_allowed_hosts(mut self, hosts: Vec<String>) -> Self {
+        self.allowed_hosts = hosts;
+        self
+    }
+
+    /// Replaces the default request shaper with a pre-configured or shared instance (A-2).
+    ///
+    /// Pass the same `Arc` to both `AppState` and the gRPC state so that per-IP
+    /// counters accumulate across HTTP and gRPC, preventing limit evasion by
+    /// switching protocols.
+    pub fn with_request_shaper(mut self, shaper: Arc<RequestShaper>) -> Self {
+        self.request_shaper = shaper;
         self
     }
 }

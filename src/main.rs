@@ -1778,6 +1778,11 @@ async fn run_serve(
         ))
     };
 
+    let allowed_hosts = config.security.allowed_hosts.clone();
+    if !allowed_hosts.is_empty() {
+        info!(count = allowed_hosts.len(), "loaded allowed_hosts");
+    }
+
     let app_state = if config.dev_mode {
         Arc::new(
             AppState::new_dev(
@@ -1792,6 +1797,7 @@ async fn run_serve(
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
+            .with_allowed_hosts(allowed_hosts.clone())
             // In --dev, enable all agent-auth capability phases regardless of
             // what hearth.yaml says, so developers can exercise Phase D routes
             // without manually setting every capability flag.
@@ -1813,6 +1819,7 @@ async fn run_serve(
             .with_trusted_proxies(api_trusted_proxies.clone())
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
+            .with_allowed_hosts(allowed_hosts)
             .with_agent_identity(config.agent_auth.capabilities.identity)
             .with_agent_approval(config.agent_auth.capabilities.approval)
             .with_agent_advanced(config.agent_auth.capabilities.advanced),
@@ -1994,6 +2001,21 @@ async fn run_serve(
         .with_reload_notify(Arc::clone(&reload_notify))
         .with_tls_enabled(config.server.tls_cert_path.is_some())
         .with_trust_forwarded_proto(config.server.trust_forwarded_proto);
+
+    // HEA-SEC-19: Warn operators when neither direct TLS nor proxy-forwarded
+    // HTTPS is configured. In this state session cookies are issued without the
+    // `Secure` attribute, which exposes them to theft over plain HTTP.
+    let tls_active = config.server.tls_cert_path.is_some();
+    if !config.dev_mode && !tls_active && !config.server.trust_forwarded_proto {
+        error!(
+            "Session cookies will be issued without the Secure attribute. \
+             Set `server.tls_cert_path` for direct TLS, or set \
+             `server.trust_forwarded_proto = true` when behind a TLS-terminating \
+             reverse proxy. Running without either in production exposes session \
+             cookies to interception."
+        );
+    }
+
     if let Some(ref cfg_path) = reload_config_path {
         web_state = web_state.with_config_path(cfg_path.clone());
     }

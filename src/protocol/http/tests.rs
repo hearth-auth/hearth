@@ -346,6 +346,125 @@ async fn bootstrap_generates_unique_passwords_per_fresh_install() {
     assert_eq!(pwd_b.len(), 32, "password b must be 32 chars");
 }
 
+// ── A-40: Host header allowlist tests ────────────────────────────────────────
+
+/// Builds a test state with the given `allowed_hosts` list.
+fn test_state_with_allowed_hosts(temp_dir: &std::path::Path, hosts: Vec<String>) -> Arc<AppState> {
+    let config = StorageConfig::dev(temp_dir.to_path_buf());
+    let engine = Arc::new(EmbeddedStorageEngine::open(config).expect("open storage"));
+    let clock = Arc::new(crate::core::SystemClock) as Arc<dyn crate::core::Clock>;
+    let identity_config = crate::identity::IdentityConfig {
+        credential: crate::identity::CredentialConfig::fast_for_testing(),
+        ..crate::identity::IdentityConfig::default()
+    };
+    let rbac_engine: Arc<dyn crate::rbac::RbacEngine> =
+        Arc::new(crate::rbac::EmbeddedRbacEngine::new(
+            Arc::clone(&engine) as Arc<dyn crate::storage::StorageEngine>,
+            Arc::clone(&clock),
+        ));
+    let audit_engine = Arc::new(crate::audit::EmbeddedAuditEngine::new(
+        Arc::clone(&engine) as Arc<dyn crate::storage::StorageEngine>,
+        Arc::clone(&clock),
+    ));
+    let identity_engine = crate::identity::EmbeddedIdentityEngine::with_rbac(
+        Arc::clone(&engine) as Arc<dyn crate::storage::StorageEngine>,
+        Arc::clone(&clock),
+        identity_config,
+        Arc::clone(&rbac_engine),
+        Arc::clone(&audit_engine) as Arc<dyn crate::audit::AuditEngine>,
+    )
+    .expect("identity engine");
+    Arc::new(
+        AppState::new(
+            Arc::new(identity_engine),
+            rbac_engine,
+            audit_engine as Arc<dyn crate::audit::AuditEngine>,
+        )
+        .with_allowed_hosts(hosts),
+    )
+}
+
+/// A-40: A non-allowlisted Host header must be rejected with 400.
+#[tokio::test]
+async fn host_allowlist_blocks_unlisted_host() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state =
+        test_state_with_allowed_hosts(temp_dir.path(), vec!["allowed.example.com".to_string()]);
+    let app = router(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/health")
+                .header("host", "evil.attacker.com")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "unlisted Host must return 400"
+    );
+}
+
+/// A-40: A request with an allowlisted Host header must be forwarded normally.
+#[tokio::test]
+async fn host_allowlist_allows_listed_host() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state =
+        test_state_with_allowed_hosts(temp_dir.path(), vec!["allowed.example.com".to_string()]);
+    let app = router(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/health")
+                .header("host", "allowed.example.com")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "allowlisted Host must pass through"
+    );
+}
+
+/// A-40: When allowed_hosts is empty the middleware is fail-open (any Host passes).
+#[tokio::test]
+async fn host_allowlist_empty_allows_any_host() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    // Default state has allowed_hosts = vec![]
+    let state = test_state(temp_dir.path());
+    let app = router(state);
+
+    let resp = app
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri("/health")
+                .header("host", "whatever.arbitrary.host")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "empty allowed_hosts must accept any Host value"
+    );
+}
+
 /// PAR with a signed JAR JWT in the request body is accepted under FAPI Advanced.
 ///
 /// Regression for HEA-1019: `HttpParRequest` was missing the `request` field,

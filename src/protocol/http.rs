@@ -170,6 +170,43 @@ async fn strip_server_header(req: Request, next: Next) -> Response {
     resp
 }
 
+/// A-40: Host header allowlist enforcement (DNS rebinding protection).
+///
+/// When `allowed_hosts` is non-empty in [`AppState`], rejects requests whose
+/// `Host` header is absent or does not match any entry (case-insensitive).
+/// An empty list means accept any host (fail-open for backward compatibility
+/// with existing deployments that predate this control).
+///
+/// Applied as the outermost layer so the check runs before route dispatch and
+/// before any handler logic can execute.
+async fn enforce_host_allowlist(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if state.allowed_hosts.is_empty() {
+        return next.run(req).await;
+    }
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if state
+        .allowed_hosts
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case(host))
+    {
+        next.run(req).await
+    } else {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"error": "host not allowed"})),
+        )
+            .into_response()
+    }
+}
+
 /// Fail-closed bearer-token presence guard for the agent router (HEA-1412).
 ///
 /// Checks that an `Authorization: Bearer …` header is present before the
@@ -261,5 +298,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
         // A-26: strip Server: header so the runtime identity is not disclosed.
         .layer(axum::middleware::from_fn(strip_server_header))
+        // A-40: Host header allowlist — outermost layer so it runs before route
+        // dispatch. Uses from_fn_with_state so the middleware can read
+        // state.allowed_hosts without a separate Arc capture.
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            enforce_host_allowlist,
+        ))
         .with_state(state)
 }
