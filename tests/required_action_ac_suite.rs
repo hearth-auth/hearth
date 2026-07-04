@@ -125,7 +125,8 @@ fn build_rig(default_actions: Vec<RequiredAction>) -> Rig {
         onboarding,
         CookieSecret::from_bytes(COOKIE_SECRET),
         Some(null_email()),
-    );
+    )
+    .with_dev_mode(true);
 
     Rig {
         app: web::router(state),

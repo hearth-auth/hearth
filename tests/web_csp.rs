@@ -89,6 +89,7 @@ fn make_web_state() -> WebState {
         CookieSecret::random(),
         None,
     )
+    .with_dev_mode(true)
 }
 
 // ---------------------------------------------------------------------------

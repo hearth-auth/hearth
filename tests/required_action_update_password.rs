@@ -122,7 +122,8 @@ fn build_rig(clock: Arc<dyn Clock>, realm_config: RealmConfig) -> Rig {
         onboarding,
         CookieSecret::from_bytes(COOKIE_SECRET),
         None,
-    );
+    )
+    .with_dev_mode(true);
 
     Rig {
         app: web::router(state),

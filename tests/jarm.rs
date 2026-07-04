@@ -664,7 +664,8 @@ async fn build_http_test_env(
         onboarding,
         secret.clone(),
         Some(email_svc),
-    );
+    )
+    .with_dev_mode(true);
     let router = web::router(state);
 
     let issued = issue_auth_cookies(&secret, realm_id, session.id(), false);

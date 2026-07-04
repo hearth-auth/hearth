@@ -202,12 +202,12 @@ pub struct WebState {
     pub captcha_provider: Arc<dyn crate::abuse::challenge::CaptchaProvider>,
     /// When `true`, the CSRF cookie check on pre-auth forms (login, register,
     /// MFA challenge) is bypassed if the cookie is absent — allows direct-POST
-    /// tooling in dev mode. When `false` (production default via
-    /// [`WebState::with_dev_mode`]), a missing cookie returns 422.
+    /// tooling in dev mode. When `false` (the secure default), a missing cookie
+    /// returns 422.
     ///
-    /// Defaults to `true` in [`WebState::new`] so the 30+ test helpers that
-    /// call the embedded constructor keep working unchanged. Production always
-    /// calls `.with_dev_mode(config.dev_mode)` in `main.rs`.
+    /// Defaults to `false` in [`WebState::new`] (fail-closed). Tests that need
+    /// the CSRF bypass must call `.with_dev_mode(true)` explicitly.
+    /// Production startup calls `.with_dev_mode(config.dev_mode)` in `main.rs`.
     pub dev_mode: bool,
     /// Burned MFA-pending cookie nonces.
     ///
@@ -277,7 +277,7 @@ impl WebState {
             sms: None,
             sms_otp_hmac_key: None,
             captcha_provider: Arc::new(crate::abuse::challenge::NoopCaptchaProvider),
-            dev_mode: true, // permissive default for tests; production overrides via with_dev_mode
+            dev_mode: false, // fail-closed default; tests must call .with_dev_mode(true) explicitly
             burned_mfa_nonces: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }

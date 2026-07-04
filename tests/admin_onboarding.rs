@@ -156,7 +156,8 @@ fn build_rig(pre_create_realm: bool) -> Rig {
         onboarding,
         CookieSecret::from_bytes(COOKIE_SECRET_BYTES),
         Some(null_email_service()),
-    );
+    )
+    .with_dev_mode(true);
     let app = web::router(state);
 
     Rig {

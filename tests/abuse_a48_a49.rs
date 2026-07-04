@@ -146,6 +146,7 @@ fn build_rig() -> Rig {
         CookieSecret::from_bytes(COOKIE_SECRET),
         Some(null_email_service()),
     )
+    .with_dev_mode(true)
     .with_federation_http(stub as Arc<dyn hearth::identity::federation::FederationHttpTransport>);
 
     Rig {

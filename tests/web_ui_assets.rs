@@ -93,6 +93,7 @@ fn minimal_web_state() -> WebState {
         CookieSecret::random(),
         None,
     )
+    .with_dev_mode(true)
 }
 
 async fn body_str(resp: axum::response::Response) -> String {

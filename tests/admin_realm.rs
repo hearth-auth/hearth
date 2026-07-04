@@ -406,7 +406,8 @@ async fn admin_login_route_renders_form() {
         onboarding,
         hearth::protocol::web::CookieSecret::from_bytes([7u8; 32]),
         None,
-    );
+    )
+    .with_dev_mode(true);
     let app = hearth::protocol::web::router(state);
 
     // /ui/admin/login is reachable regardless of tenant-realm state.
@@ -544,7 +545,8 @@ async fn admin_setup_verify_login_end_to_end() {
         onboarding,
         hearth::protocol::web::CookieSecret::from_bytes([9u8; 32]),
         Some(email),
-    );
+    )
+    .with_dev_mode(true);
     let app = hearth::protocol::web::router(state);
 
     // Hit the admin verify-email route. MUST succeed and activate the admin.

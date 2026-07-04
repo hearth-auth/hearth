@@ -196,6 +196,17 @@ impl Config {
             });
         }
 
+        if self.dev_mode && !is_loopback_str(&self.server.bind_address) {
+            issues.push(ValidationIssue {
+                field: "server.bind_address".to_string(),
+                reason: format!(
+                    "dev_mode = true is only permitted with a loopback bind address; \
+                     '{}' is not loopback. Use 127.0.0.1 or ::1, or disable dev_mode.",
+                    self.server.bind_address
+                ),
+            });
+        }
+
         match (&self.server.tls_cert_path, &self.server.tls_key_path) {
             (Some(_), None) => issues.push(ValidationIssue {
                 field: "server.tls_key_path".to_string(),
@@ -321,6 +332,20 @@ impl Config {
             return Err(ConfigError::ValidationError {
                 field: "server.port".to_string(),
                 reason: "must be between 1 and 65535".to_string(),
+            });
+        }
+
+        // Dev mode must not be used with a non-loopback bind address — doing
+        // so exposes all security bypasses (weak Argon2, CSRF skip, plaintext
+        // setup token) to the network.
+        if self.dev_mode && !is_loopback_str(&self.server.bind_address) {
+            return Err(ConfigError::ValidationError {
+                field: "server.bind_address".to_string(),
+                reason: format!(
+                    "dev_mode = true is only permitted with a loopback bind address; \
+                     '{}' is not loopback. Use 127.0.0.1 or ::1, or disable dev_mode.",
+                    self.server.bind_address
+                ),
             });
         }
 
