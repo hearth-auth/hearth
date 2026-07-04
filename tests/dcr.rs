@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use hearth::identity::{CreateRealmRequest, DcrPolicy, RealmConfig};
+use hearth::identity::{
+    CleartextPassword, CreateRealmRequest, CreateUserRequest, DcrPolicy, PasswordGrantRequest,
+    RealmConfig,
+};
 use hearth::protocol::http::{router, AppState};
 use tower::ServiceExt as _;
 
@@ -379,4 +382,144 @@ async fn dcr_unknown_realm_returns_404() {
         .expect("resp");
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ===== Scenario D9: Authenticated DCR policy rejects anonymous callers (HEA-1671) =====
+
+/// RFC 7591 §3.1: when the realm requires `Authenticated` DCR, anonymous
+/// POST /register must be rejected with 401. Encodes the OAUTH-03 fix.
+#[tokio::test]
+async fn dcr_authenticated_policy_rejects_anonymous() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: "dcr-auth-policy".to_string(),
+            config: Some(RealmConfig {
+                dcr_policy: Some(DcrPolicy::Authenticated),
+                ..Default::default()
+            }),
+        })
+        .expect("create realm");
+    let realm_id_str = realm.id().as_uuid().to_string();
+
+    let app = build_app(&h).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/register")
+                .header("X-Realm-ID", &realm_id_str)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&dcr_body("Secret App", &["https://app.example.com/cb"]))
+                        .unwrap(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("resp");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "anonymous DCR must be rejected when policy is Authenticated"
+    );
+}
+
+// ===== Scenario D10: Authenticated DCR policy accepts a valid bearer token (HEA-1671) =====
+
+/// RFC 7591 §3.1 positive path: a valid realm bearer token must be accepted.
+#[tokio::test]
+async fn dcr_authenticated_policy_accepts_valid_token() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: "dcr-auth-accept".to_string(),
+            config: Some(RealmConfig {
+                dcr_policy: Some(DcrPolicy::Authenticated),
+                ..Default::default()
+            }),
+        })
+        .expect("create realm");
+    let realm_id = realm.id().clone();
+    let realm_id_str = realm_id.as_uuid().to_string();
+
+    let user = h
+        .identity()
+        .create_user(
+            &realm_id,
+            &CreateUserRequest {
+                email: "dcr-test@example.com".to_string(),
+                display_name: "DCR Test".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+    h.identity()
+        .set_password(
+            &realm_id,
+            user.id(),
+            &CleartextPassword::from_string("HearthDcr123!".to_string()),
+        )
+        .expect("set password");
+
+    let token_resp = tokio::task::spawn_blocking({
+        let identity = h.identity_arc();
+        let realm_id = realm_id.clone();
+        move || {
+            identity.password_grant_token(
+                &realm_id,
+                &PasswordGrantRequest {
+                    email: "dcr-test@example.com".to_string(),
+                    password: "HearthDcr123!".to_string(),
+                    scope: None,
+                    client_ip: None,
+                    user_agent: None,
+                },
+            )
+        }
+    })
+    .await
+    .expect("spawn_blocking")
+    .expect("password_grant_token");
+
+    let app = build_app(&h).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/register")
+                .header("X-Realm-ID", &realm_id_str)
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", token_resp.access_token()),
+                )
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&dcr_body("Auth App", &["https://auth.example.com/cb"]))
+                        .unwrap(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("resp");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "valid bearer token must be accepted for Authenticated DCR"
+    );
+
+    let body_bytes = to_bytes(resp.into_body(), 1024 * 1024).await.expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("json");
+    assert!(
+        body["client_id"].as_str().is_some_and(|s| !s.is_empty()),
+        "response must include client_id: {body}"
+    );
 }

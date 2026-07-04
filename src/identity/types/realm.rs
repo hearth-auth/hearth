@@ -63,7 +63,14 @@ pub enum DcrPolicy {
     #[default]
     Disabled,
     /// Any caller may register an OAuth client via `POST /register`.
+    ///
+    /// # Security Warning
+    /// Unauthenticated — production deployments should prefer `Authenticated`.
     Open,
+    /// Requires a valid realm bearer token (RFC 7591 §3.1 initial access token).
+    /// The caller must present `Authorization: Bearer <token>` with a token
+    /// issued by this realm.
+    Authenticated,
 }
 
 /// Password complexity policy stored in a realm's configuration.

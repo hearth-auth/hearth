@@ -18,6 +18,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **CORS allowed-origins decoupled from redirect URIs** — `OAuthClient` gains an
+  explicit `cors_origins` field distinct from `redirect_uris`. The token endpoint
+  now only reflects `Access-Control-Allow-Origin` for origins listed in `cors_origins`;
+  a redirect URI no longer implicitly grants cross-origin token access. The
+  `Access-Control-Allow-Credentials: true` header is removed from the token endpoint
+  entirely — PKCE flows use authorization codes, not cookies. DCR accepts an optional
+  `cors_origins` array; the admin REST API and gRPC surface expose the field for
+  update (HEA-1674).
+- **DCR `Authenticated` policy (RFC 7591 §3.1)** — `DcrPolicy` gains an
+  `Authenticated` variant requiring a valid realm bearer token before any client
+  may self-register via `POST /register`. The prior `Open` policy accepted
+  anonymous callers; it still works but now emits a tracing warn. Configurable as
+  `dcr.mode: authenticated` in `hearth.yaml` (HEA-1671).
+- **ROPC gated per-client via `grant_types`** — `POST /token` with
+  `grant_type=password` now returns `400 unauthorized_client` if the presented
+  `client_id` belongs to a client whose registered `grant_types` do not include
+  `"password"`. Prevents any client from being silently usable for ROPC (HEA-1671).
 - **Rate-limit counters persisted to WAL** — five secondary rate-limit trackers
   (`ip_login`, `mfa`, `magic_link`, `password_reset`, `registration_email`) were
   previously in-memory only and reset to zero on every process restart, allowing

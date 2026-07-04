@@ -109,7 +109,11 @@ pub(crate) fn extract_admin_auth(
     let is_admin = claims.permissions.iter().any(|p| {
         matches!(
             p.as_str(),
-            "hearth.admin" | "hearth.users.admin" | "hearth.clients.admin" | "hearth.realm.admin"
+            "hearth.admin"
+                | "hearth.users.admin"
+                | "hearth.clients.admin"
+                | "hearth.realm.admin"
+                | "hearth.agents.admin"
         )
     });
     if !is_admin {

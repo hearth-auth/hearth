@@ -18,7 +18,7 @@ use crate::protocol::proto::identity::v1 as pb;
 use crate::protocol::proto::identity::v1::application_admin_service_server::ApplicationAdminService;
 use crate::protocol::proto::identity::v1::identity_admin_service_server::IdentityAdminService;
 
-use super::auth::authenticate_admin;
+use super::auth::{authenticate_admin, grpc_require_permission};
 use super::convert::identity_to_status;
 use super::server::GrpcState;
 
@@ -101,6 +101,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::ListUsersRequest>,
     ) -> Result<Response<pb::UserPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.users.admin")?;
         let body = req.into_inner();
         let limit = body.limit.unwrap_or(50) as u32;
         // Cursor field repurposed as decimal offset for backward compat.
@@ -125,6 +126,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::GetUserRequest>,
     ) -> Result<Response<pb::User>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.users.admin")?;
         let body = req.into_inner();
         let user_id = parse_user_id(&body.id)?;
         let user = self
@@ -141,6 +143,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::CreateUserRequest>,
     ) -> Result<Response<pb::User>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.users.admin")?;
         let body: CreateUserRequest = req.into_inner().into();
         let user = self
             .state
@@ -155,6 +158,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::UpdateUserCall>,
     ) -> Result<Response<pb::User>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.users.admin")?;
         let call = req.into_inner();
         let user_id = parse_user_id(&call.id)?;
         let body: UpdateUserRequest = call
@@ -174,6 +178,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::DeleteUserRequest>,
     ) -> Result<Response<pb::Empty>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.users.admin")?;
         let body = req.into_inner();
         let user_id = parse_user_id(&body.id)?;
         self.state
@@ -190,6 +195,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::ListRealmsRequest>,
     ) -> Result<Response<pb::RealmPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
         let limit = body.limit.unwrap_or(50) as u32;
         let offset: u64 = body
@@ -229,6 +235,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::GetRealmRequest>,
     ) -> Result<Response<pb::Realm>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
         let realm_id = parse_realm_id(&body.id)?;
         if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
@@ -248,6 +255,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::CreateRealmRequest>,
     ) -> Result<Response<pb::Realm>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         // Only system-realm admins may create new realms.
         if !crate::identity::keys::is_system_realm(&auth.realm_id) {
             return Err(Status::new(Code::PermissionDenied, "forbidden"));
@@ -275,6 +283,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::UpdateRealmCall>,
     ) -> Result<Response<pb::Realm>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let call = req.into_inner();
         let realm_id = parse_realm_id(&call.id)?;
         if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
@@ -297,6 +306,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::DeleteRealmRequest>,
     ) -> Result<Response<pb::Empty>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
         let realm_id = parse_realm_id(&body.id)?;
         if realm_id != auth.realm_id && !crate::identity::keys::is_system_realm(&auth.realm_id) {
@@ -316,6 +326,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::ListOrganizationsRequest>,
     ) -> Result<Response<pb::OrganizationPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
         let limit = body.limit.unwrap_or(50) as u32;
         let offset: u64 = body
@@ -346,6 +357,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::GetOrganizationRequest>,
     ) -> Result<Response<pb::Organization>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
         let org_id = parse_org_id(&body.id)?;
         let org = self
@@ -362,6 +374,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::CreateOrganizationRequest>,
     ) -> Result<Response<pb::Organization>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
         let req = CreateOrganizationRequest {
             name: body.display_name,
@@ -385,6 +398,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::UpdateOrganizationCall>,
     ) -> Result<Response<pb::Organization>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let call = req.into_inner();
         let org_id = parse_org_id(&call.id)?;
         let body = call
@@ -419,6 +433,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::DeleteOrganizationRequest>,
     ) -> Result<Response<pb::Empty>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let body = req.into_inner();
         let org_id = parse_org_id(&body.id)?;
         self.state
@@ -435,6 +450,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::ListAgentsRequest>,
     ) -> Result<Response<pb::AgentPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.agents.admin")?;
         let body = req.into_inner();
         let limit = body.limit.unwrap_or(50) as usize;
         let query = domain::ListAgentsQuery::default();
@@ -454,6 +470,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::GetAgentRequest>,
     ) -> Result<Response<pb::Agent>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.agents.admin")?;
         let body = req.into_inner();
         let agent_id = parse_agent_id(&body.id)?;
         let agent = self
@@ -470,6 +487,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::CreateAgentRequest>,
     ) -> Result<Response<pb::Agent>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.agents.admin")?;
         let body = req.into_inner();
         let owner = parse_agent_owner(&body.owner_type, &body.owner_id)?;
         let request = CreateAgentRequest {
@@ -493,6 +511,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::UpdateAgentCall>,
     ) -> Result<Response<pb::Agent>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.agents.admin")?;
         let call = req.into_inner();
         let agent_id = parse_agent_id(&call.id)?;
         let body = call
@@ -522,6 +541,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::DeleteAgentRequest>,
     ) -> Result<Response<pb::Empty>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.agents.admin")?;
         let body = req.into_inner();
         let agent_id = parse_agent_id(&body.id)?;
         self.state
@@ -536,6 +556,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::CreateAgentApiKeyRequest>,
     ) -> Result<Response<pb::CreateAgentApiKeyResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.agents.admin")?;
         let body = req.into_inner();
         let agent_id = parse_agent_id(&body.agent_id)?;
         let resp = self
@@ -559,6 +580,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::ListAgentCredentialsRequest>,
     ) -> Result<Response<pb::AgentCredentialPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.agents.admin")?;
         let body = req.into_inner();
         let agent_id = parse_agent_id(&body.agent_id)?;
         let creds = self
@@ -576,6 +598,7 @@ impl IdentityAdminService for IdentityAdminSvc {
         req: Request<pb::RevokeAgentCredentialRequest>,
     ) -> Result<Response<pb::Empty>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.agents.admin")?;
         let body = req.into_inner();
         let agent_id = parse_agent_id(&body.agent_id)?;
         let cred_id = parse_cred_id(&body.credential_id)?;
@@ -673,6 +696,7 @@ impl ApplicationAdminService for AppAdminSvc {
         req: Request<pb::ListApplicationsRequest>,
     ) -> Result<Response<pb::OAuthClientPage>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.clients.admin")?;
         let body = req.into_inner();
         let limit = body.limit.unwrap_or(50) as u32;
         let offset: u64 = body
@@ -696,6 +720,7 @@ impl ApplicationAdminService for AppAdminSvc {
         req: Request<pb::GetApplicationRequest>,
     ) -> Result<Response<pb::OAuthClient>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.clients.admin")?;
         let body = req.into_inner();
         let client_id = parse_client_id(&body.client_id)?;
         let client = self
@@ -712,6 +737,7 @@ impl ApplicationAdminService for AppAdminSvc {
         req: Request<pb::RegisterClientRequest>,
     ) -> Result<Response<pb::OAuthClient>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.clients.admin")?;
         let body: RegisterClientRequest = req.into_inner().into();
         let client = self
             .state
@@ -726,6 +752,7 @@ impl ApplicationAdminService for AppAdminSvc {
         req: Request<pb::UpdateApplicationCall>,
     ) -> Result<Response<pb::OAuthClient>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.clients.admin")?;
         let call = req.into_inner();
         let client_id = parse_client_id(&call.client_id)?;
         let body: UpdateClientRequest = call
@@ -745,6 +772,7 @@ impl ApplicationAdminService for AppAdminSvc {
         req: Request<pb::DeleteApplicationRequest>,
     ) -> Result<Response<pb::OAuthEmpty>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.clients.admin")?;
         let body = req.into_inner();
         let client_id = parse_client_id(&body.client_id)?;
         self.state

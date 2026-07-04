@@ -337,6 +337,7 @@ pub async fn admin_onboarding_app_post(
     let req = crate::identity::oidc::RegisterClientRequest {
         client_name: app_name.clone(),
         redirect_uris: vec![redirect_uri.clone()],
+        cors_origins: Vec::new(),
         client_secret: None,
         grant_types,
         require_consent: true,

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tonic::{Code, Request, Response, Status};
 
 use crate::core::{OrganizationId, RealmId, UserId};
+use crate::protocol::grpc::auth::grpc_require_permission;
 use crate::rbac::{
     AssignRoleRequest, CreateGroupRequest, CreateRoleRequest, GroupId, GroupMember, Permission,
     RoleId, Scope, Subject, UpdateGroupRequest, UpdateRoleRequest,
@@ -226,6 +227,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListRolesRequest>,
     ) -> Result<Response<pb::ListRolesResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -250,6 +252,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::CreateRoleRequest>,
     ) -> Result<Response<pb::Role>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -282,6 +285,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::GetRoleRequest>,
     ) -> Result<Response<pb::Role>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -302,6 +306,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::UpdateRoleRequest>,
     ) -> Result<Response<pb::Role>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -344,6 +349,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::DeleteRoleRequest>,
     ) -> Result<Response<pb::DeleteRoleResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -360,6 +366,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListGroupsRequest>,
     ) -> Result<Response<pb::ListGroupsResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -392,6 +399,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::CreateGroupRequest>,
     ) -> Result<Response<pb::Group>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -420,6 +428,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::GetGroupRequest>,
     ) -> Result<Response<pb::Group>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -440,6 +449,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::UpdateGroupRequest>,
     ) -> Result<Response<pb::Group>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -480,6 +490,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::DeleteGroupRequest>,
     ) -> Result<Response<pb::DeleteGroupResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -496,6 +507,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListGroupMembersRequest>,
     ) -> Result<Response<pb::ListGroupMembersResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -521,6 +533,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::AddGroupMemberRequest>,
     ) -> Result<Response<pb::GroupMembership>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -551,6 +564,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::RemoveGroupMemberRequest>,
     ) -> Result<Response<pb::RemoveGroupMemberResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -571,6 +585,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::AssignUserRoleRequest>,
     ) -> Result<Response<pb::RoleAssignment>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -598,6 +613,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::UnassignUserRoleRequest>,
     ) -> Result<Response<pb::UnassignUserRoleResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -614,6 +630,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListUserAssignmentsRequest>,
     ) -> Result<Response<pb::ListUserAssignmentsResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -633,6 +650,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::AssignGroupRoleRequest>,
     ) -> Result<Response<pb::RoleAssignment>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -660,6 +678,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::UnassignGroupRoleRequest>,
     ) -> Result<Response<pb::UnassignGroupRoleResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -676,6 +695,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListRoleMembersRequest>,
     ) -> Result<Response<pb::ListRoleMembersResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -717,6 +737,7 @@ impl RbacAdminService for RbacAdminSvc {
         use crate::core::Timestamp;
         use crate::rbac::UserPermissionGrant;
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -758,6 +779,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::RevokeUserPermissionRequest>,
     ) -> Result<Response<pb::RevokeUserPermissionResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -786,6 +808,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListUserPermissionsRequest>,
     ) -> Result<Response<pb::ListUserPermissionsResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -825,6 +848,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::AddAdditionalRoleRequest>,
     ) -> Result<Response<pb::AddAdditionalRoleResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -856,6 +880,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::RemoveAdditionalRoleRequest>,
     ) -> Result<Response<pb::RemoveAdditionalRoleResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -876,6 +901,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListAdditionalRolesRequest>,
     ) -> Result<Response<pb::ListAdditionalRolesResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -899,6 +925,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListRealmPermissionsRequest>,
     ) -> Result<Response<pb::ListRealmPermissionsResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -937,6 +964,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListRealmRolesRequest>,
     ) -> Result<Response<pb::ListRealmRolesResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -977,6 +1005,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ResolveEffectivePermissionsRequest>,
     ) -> Result<Response<pb::ResolveEffectivePermissionsResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -1021,6 +1050,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::RevokeConsentRequest>,
     ) -> Result<Response<pb::RevokeConsentResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.users.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;
@@ -1041,6 +1071,7 @@ impl RbacAdminService for RbacAdminSvc {
         req: Request<pb::ListUserConsentsRequest>,
     ) -> Result<Response<pb::ListUserConsentsResponse>, Status> {
         let auth = authenticate_admin(req.metadata(), &self.state)?;
+        grpc_require_permission(&auth, "hearth.users.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
         let realm_id = auth.realm_id;

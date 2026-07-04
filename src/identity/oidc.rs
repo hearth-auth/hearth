@@ -166,6 +166,12 @@ pub struct RegisterClientRequest {
     /// When `Some(true)`, users must have an enrolled MFA factor to complete
     /// the authorization code flow for this client.
     pub mfa_required: Option<bool>,
+    /// Explicit CORS allowed origins for the token endpoint.
+    ///
+    /// Defaults to empty (no CORS permitted). Separate from `redirect_uris` —
+    /// an origin may be a redirect-URI base without being allowed to make
+    /// credentialed cross-origin token requests.
+    pub cors_origins: Vec<String>,
 }
 
 impl Default for RegisterClientRequest {
@@ -173,6 +179,7 @@ impl Default for RegisterClientRequest {
         Self {
             client_name: String::new(),
             redirect_uris: Vec::new(),
+            cors_origins: Vec::new(),
             client_secret: None,
             grant_types: Vec::new(),
             require_consent: true,
@@ -223,6 +230,13 @@ pub struct OAuthClient {
     slug: String,
     /// Allowed redirect URIs.
     redirect_uris: Vec<String>,
+    /// Explicit CORS allowed origins for the token endpoint.
+    ///
+    /// Distinct from `redirect_uris` — an origin may be a redirect-URI base
+    /// without being allowed to make credentialed cross-origin token requests.
+    /// Defaults to empty (no CORS permitted) for backward compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cors_origins: Vec<String>,
     /// When the client was registered.
     created_at: Timestamp,
     /// Argon2id hash of the client secret (confidential clients only).
@@ -336,6 +350,7 @@ impl OAuthClient {
             client_name,
             slug: String::new(),
             redirect_uris,
+            cors_origins: Vec::new(),
             created_at,
             client_secret_hash: None,
             grant_types: vec!["authorization_code".to_string()],
@@ -372,6 +387,7 @@ impl OAuthClient {
             client_name,
             slug: String::new(),
             redirect_uris,
+            cors_origins: Vec::new(),
             created_at,
             client_secret_hash: Some(client_secret_hash),
             grant_types,
@@ -447,6 +463,16 @@ impl OAuthClient {
     /// Sets the redirect URIs. Used internally during updates.
     pub(crate) fn set_redirect_uris(&mut self, uris: Vec<String>) {
         self.redirect_uris = uris;
+    }
+
+    /// Returns the explicit CORS allowed origins for the token endpoint.
+    pub fn cors_origins(&self) -> &[String] {
+        &self.cors_origins
+    }
+
+    /// Sets the CORS allowed origins. Used internally during registration/updates.
+    pub(crate) fn set_cors_origins(&mut self, origins: Vec<String>) {
+        self.cors_origins = origins;
     }
 
     /// Sets the client secret hash. Used internally during secret regeneration.
@@ -685,6 +711,10 @@ pub struct UpdateClientRequest {
     /// `None` leaves unchanged; `Some(Some(true))` enables; `Some(Some(false))`
     /// disables; `Some(None)` clears the override (reverts to no requirement).
     pub mfa_required: Option<Option<bool>>,
+    /// Updated CORS allowed origins for the token endpoint.
+    ///
+    /// `None` leaves unchanged; `Some(vec)` replaces the entire list.
+    pub cors_origins: Option<Vec<String>>,
 }
 
 // ===== RP-Initiated Logout =====

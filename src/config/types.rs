@@ -1378,7 +1378,10 @@ pub enum DcrModeYaml {
     #[default]
     Disabled,
     /// Any caller may register an OAuth client via `POST /register`.
+    /// Unauthenticated — only suitable for developer sandboxes.
     Open,
+    /// DCR requires a valid bearer token (RFC 7591 §3.1 initial access token).
+    Authenticated,
 }
 
 impl DcrPolicyYaml {
@@ -1387,6 +1390,7 @@ impl DcrPolicyYaml {
         match self.mode {
             DcrModeYaml::Disabled => crate::identity::DcrPolicy::Disabled,
             DcrModeYaml::Open => crate::identity::DcrPolicy::Open,
+            DcrModeYaml::Authenticated => crate::identity::DcrPolicy::Authenticated,
         }
     }
 }

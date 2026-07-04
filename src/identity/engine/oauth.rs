@@ -319,6 +319,9 @@ impl EmbeddedIdentityEngine {
         if request.mfa_required.is_some() {
             client.set_mfa_required(request.mfa_required);
         }
+        if !request.cors_origins.is_empty() {
+            client.set_cors_origins(request.cors_origins.clone());
+        }
 
         // Serialize and persist
         let client_bytes =
@@ -3152,6 +3155,9 @@ impl EmbeddedIdentityEngine {
         }
         if let Some(mfa_req) = request.mfa_required {
             client.set_mfa_required(mfa_req);
+        }
+        if let Some(cors) = &request.cors_origins {
+            client.set_cors_origins(cors.clone());
         }
 
         let updated_bytes =

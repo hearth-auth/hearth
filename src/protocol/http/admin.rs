@@ -2028,6 +2028,9 @@ struct AdminUpdateClientBody {
     /// of this client. `null`/omitted leaves unchanged.
     #[serde(default)]
     mfa_required: Option<bool>,
+    /// Replaces the CORS allowed origins list. `null`/omitted leaves unchanged;
+    /// `[]` clears all CORS origins.
+    cors_origins: Option<Vec<String>>,
 }
 
 /// Deserializes an optional nullable string field.
@@ -2094,6 +2097,7 @@ async fn admin_update_client(
         require_consent: body.require_consent,
         access_token_authorization,
         mfa_required: body.mfa_required.map(Some),
+        cors_origins: body.cors_origins,
         ..Default::default()
     };
 

@@ -43,6 +43,10 @@ pub(crate) const SEED_PERMISSIONS: &[(&str, &str)] = &[
         "Manage realm settings, roles, groups, role assignments, webhooks, and audit logs within the current realm. Enables sub-admin delegation for realm configuration without full superuser access.",
     ),
     (
+        "hearth.agents.admin",
+        "Manage agent identities, API keys, and credential lifecycle within the current realm.",
+    ),
+    (
         "hearth.export",
         "Export realm data (backup archives, user CSV, audit logs) — required in addition to hearth.admin for all data-export endpoints (A-30).",
     ),
@@ -138,6 +142,7 @@ const SEED_ROLES: &[SeedRoleSpec] = &[
             "hearth.users.admin",
             "hearth.clients.admin",
             "hearth.realm.admin",
+            "hearth.agents.admin",
             "hearth.export",
             "hearth.sv_feed",
             "realm.read",
@@ -169,6 +174,12 @@ const SEED_ROLES: &[SeedRoleSpec] = &[
     SeedRoleSpec {
         name: "hearth.realm.admin",
         permissions: &["hearth.realm.admin"],
+        parent_names: &[],
+        scope_kind: RoleScopeKind::Realm,
+    },
+    SeedRoleSpec {
+        name: "hearth.agents.admin",
+        permissions: &["hearth.agents.admin"],
         parent_names: &[],
         scope_kind: RoleScopeKind::Realm,
     },

@@ -405,6 +405,7 @@ fn parse_app_create_form(form: &AppCreateForm) -> RegisterClientRequest {
         declared_scopes,
         consent_spans_orgs: false,
         access_token_authorization,
+        cors_origins: Vec::new(),
         jwks: None,
         jwks_uri: None,
         authorization_signed_response_alg: None,
@@ -727,6 +728,7 @@ pub async fn admin_app_edit_submit(
     });
 
     let req = UpdateClientRequest {
+        cors_origins: None,
         client_name: if form.client_name.is_empty() {
             None
         } else {

@@ -27,6 +27,8 @@ pub struct AdminAuth {
     pub realm_id: RealmId,
     /// The authenticated admin user.
     pub user_id: UserId,
+    /// Full permission set from the validated token claims.
+    pub permissions: Vec<String>,
 }
 
 /// Validates an admin caller and returns their realm + user id.
@@ -60,7 +62,11 @@ pub fn authenticate_admin(md: &MetadataMap, state: &GrpcState) -> Result<AdminAu
     let is_admin = claims.permissions.iter().any(|p| {
         matches!(
             p.as_str(),
-            "hearth.admin" | "hearth.users.admin" | "hearth.clients.admin" | "hearth.realm.admin"
+            "hearth.admin"
+                | "hearth.users.admin"
+                | "hearth.clients.admin"
+                | "hearth.realm.admin"
+                | "hearth.agents.admin"
         )
     });
     if !is_admin {
@@ -69,7 +75,29 @@ pub fn authenticate_admin(md: &MetadataMap, state: &GrpcState) -> Result<AdminAu
 
     check_rate_limit(&state.admin_rate_limiter, &user_id)?;
 
-    Ok(AdminAuth { realm_id, user_id })
+    Ok(AdminAuth {
+        realm_id,
+        user_id,
+        permissions: claims.permissions,
+    })
+}
+
+/// Checks that the authenticated admin token carries `hearth.admin` (full
+/// superuser) or the specific granular sub-permission `required`.
+///
+/// Returns `PERMISSION_DENIED` when neither is present.
+///
+/// The `Result` **must** be used — discarding it silently bypasses authorization.
+#[must_use = "discarding this Result bypasses authorization; bind the return value"]
+pub fn grpc_require_permission(auth: &AdminAuth, required: &str) -> Result<(), Status> {
+    let permitted = auth
+        .permissions
+        .iter()
+        .any(|p| p == "hearth.admin" || p == required);
+    if !permitted {
+        return Err(Status::new(Code::PermissionDenied, "forbidden"));
+    }
+    Ok(())
 }
 
 fn extract_bearer_token(md: &MetadataMap) -> Result<String, Status> {

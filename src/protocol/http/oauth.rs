@@ -21,9 +21,9 @@ use crate::protocol::proto::identity::v1 as pb;
 
 use super::now_micros;
 use super::{
-    check_token_rate_limit, extract_realm_id, extract_user_auth, identity_error_to_response,
-    make_ip_rate_limit_response, proto_to_rest_json, rbac_error_to_response, resolve_realm_by_name,
-    AppState, FALLBACK_PEER,
+    check_token_rate_limit, extract_bearer_token, extract_realm_id, extract_user_auth,
+    identity_error_to_response, make_ip_rate_limit_response, proto_to_rest_json,
+    rbac_error_to_response, resolve_realm_by_name, AppState, FALLBACK_PEER,
 };
 
 /// Registers global OAuth/OIDC routes.
@@ -379,10 +379,11 @@ fn verify_endpoint_client(
 }
 
 /// Returns the CORS `Access-Control-Allow-Origin` value for `origin` if it
-/// matches any base origin of a registered client's `redirect_uris`.
+/// matches an entry in the client's dedicated `cors_origins` allowlist.
 ///
-/// Base origin = scheme + "://" + host (+ optional port). E.g.
-/// `https://app.example.com` extracted from `https://app.example.com/callback`.
+/// Deliberately does NOT fall back to `redirect_uris` — those serve a
+/// different security purpose (post-auth redirect target validation) and must
+/// not implicitly grant cross-origin token-endpoint access.
 fn cors_origin_for_client(
     state: &AppState,
     realm_id: &RealmId,
@@ -391,8 +392,8 @@ fn cors_origin_for_client(
 ) -> Option<axum::http::HeaderValue> {
     let client = state.identity.get_client(realm_id, client_id).ok()??;
     let origin_base = extract_origin_base(request_origin)?;
-    let allowed = client.redirect_uris().iter().any(|uri| {
-        extract_origin_base(uri)
+    let allowed = client.cors_origins().iter().any(|allowed_origin| {
+        extract_origin_base(allowed_origin)
             .map(|base| base == origin_base)
             .unwrap_or(false)
     });
@@ -434,10 +435,8 @@ fn apply_cors_to_response(
             axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
             allow_origin,
         );
-        h.insert(
-            axum::http::HeaderName::from_static("access-control-allow-credentials"),
-            axum::http::HeaderValue::from_static("true"),
-        );
+        // Deliberately omit Access-Control-Allow-Credentials: PKCE token flows
+        // use authorization codes, not cookies.
     }
 }
 
@@ -458,7 +457,7 @@ async fn token_options_preflight(
     let Some(origin_base) = extract_origin_base(origin_str) else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    // Check whether any registered client accepts this origin.
+    // Check whether any registered client has this origin in its cors_origins allowlist.
     let allowed = state
         .identity
         .list_clients(
@@ -468,8 +467,8 @@ async fn token_options_preflight(
         .ok()
         .map(|page| {
             page.items.iter().any(|c| {
-                c.redirect_uris().iter().any(|uri| {
-                    extract_origin_base(uri)
+                c.cors_origins().iter().any(|allowed_origin| {
+                    extract_origin_base(allowed_origin)
                         .map(|base| base == origin_base)
                         .unwrap_or(false)
                 })
@@ -496,10 +495,8 @@ async fn token_options_preflight(
         axum::http::HeaderName::from_static("access-control-allow-headers"),
         axum::http::HeaderValue::from_static("Authorization, Content-Type"),
     );
-    h.insert(
-        axum::http::HeaderName::from_static("access-control-allow-credentials"),
-        axum::http::HeaderValue::from_static("true"),
-    );
+    // Deliberately omit Access-Control-Allow-Credentials: PKCE token flows
+    // use authorization codes, not cookies.
     h.insert(
         axum::http::HeaderName::from_static("access-control-max-age"),
         axum::http::HeaderValue::from_static("86400"),
@@ -598,12 +595,37 @@ async fn register_client_dynamic(
 
     let dcr_policy = realm.config().dcr_policy.clone().unwrap_or_default();
 
-    if !matches!(dcr_policy, crate::identity::DcrPolicy::Open) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "dynamic client registration is disabled for this realm"})),
-        )
-            .into_response();
+    match dcr_policy {
+        crate::identity::DcrPolicy::Disabled => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "dynamic client registration is disabled for this realm"})),
+            )
+                .into_response();
+        }
+        crate::identity::DcrPolicy::Open => {
+            tracing::warn!(
+                realm_id = %realm_id.as_uuid(),
+                "Open DCR policy allows unauthenticated client registration; \
+                 consider switching to `authenticated` mode"
+            );
+        }
+        crate::identity::DcrPolicy::Authenticated => {
+            let token = match extract_bearer_token(&headers) {
+                Ok(t) => t,
+                Err((status, body)) => return (status, body).into_response(),
+            };
+            if state.identity.validate_token(&realm_id, &token).is_err() {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "unauthorized",
+                        "error_description": "a valid bearer token is required to register clients in this realm"
+                    })),
+                )
+                    .into_response();
+            }
+        }
     }
 
     // Strip any client-supplied secret — the server generates its own.
@@ -1241,6 +1263,27 @@ async fn token_exchange_impl(
             }
         }
         "password" => {
+            // Gate: per-client grant type check (RFC 9700 §2.4). If the client_id
+            // resolves to a registered client, it must declare the "password" grant.
+            if let Ok(client_uuid) = body.client_id.parse::<uuid::Uuid>() {
+                let ropc_client_id = ClientId::new(client_uuid);
+                match state.identity.get_client(&realm_id, &ropc_client_id) {
+                    Ok(Some(client)) => {
+                        if !client.grant_types().contains(&"password".to_string()) {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({
+                                    "error": "unauthorized_client",
+                                    "error_description": "this client is not authorized for the password grant type"
+                                })),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Ok(None) => {} // Unknown client — password_grant_token will reject it.
+                    Err(e) => return identity_error_to_response(&e).into_response(),
+                }
+            }
             let (Some(email), Some(password)) = (body.username, body.password) else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -2198,6 +2241,26 @@ async fn realm_token_exchange(
             }
         }
         "password" => {
+            // Per-client grant type gate — mirrors the check in token_exchange_impl.
+            if let Ok(client_uuid) = body.client_id.parse::<uuid::Uuid>() {
+                let ropc_client_id = ClientId::new(client_uuid);
+                match state.identity.get_client(&realm_id, &ropc_client_id) {
+                    Ok(Some(client)) => {
+                        if !client.grant_types().contains(&"password".to_string()) {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({
+                                    "error": "unauthorized_client",
+                                    "error_description": "this client is not authorized for the password grant type"
+                                })),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => return identity_error_to_response(&e).into_response(),
+                }
+            }
             let (Some(email), Some(password)) = (body.username, body.password) else {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -2571,6 +2634,7 @@ async fn realm_device_authorization(
 async fn realm_register_client_dynamic(
     State(state): State<Arc<AppState>>,
     Path(realm_name): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let realm_id = match resolve_realm_by_name(&state, &realm_name) {
@@ -2589,14 +2653,37 @@ async fn realm_register_client_dynamic(
         Err(e) => return identity_error_to_response(&e).into_response(),
     };
     let dcr_policy = realm.config().dcr_policy.clone().unwrap_or_default();
-    if !matches!(dcr_policy, crate::identity::DcrPolicy::Open) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(
-                serde_json::json!({"error": "dynamic client registration is disabled for this realm"}),
-            ),
-        )
-            .into_response();
+    match dcr_policy {
+        crate::identity::DcrPolicy::Disabled => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "dynamic client registration is disabled for this realm"})),
+            )
+                .into_response();
+        }
+        crate::identity::DcrPolicy::Open => {
+            tracing::warn!(
+                realm_id = %realm_id.as_uuid(),
+                "Open DCR policy allows unauthenticated client registration; \
+                 consider switching to `authenticated` mode"
+            );
+        }
+        crate::identity::DcrPolicy::Authenticated => {
+            let token = match extract_bearer_token(&headers) {
+                Ok(t) => t,
+                Err((status, body)) => return (status, body).into_response(),
+            };
+            if state.identity.validate_token(&realm_id, &token).is_err() {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "unauthorized",
+                        "error_description": "a valid bearer token is required to register clients in this realm"
+                    })),
+                )
+                    .into_response();
+            }
+        }
     }
     let client_name = body
         .get("client_name")
@@ -2621,6 +2708,7 @@ async fn realm_register_client_dynamic(
     let request = crate::identity::RegisterClientRequest {
         client_name,
         redirect_uris,
+        cors_origins: Vec::new(),
         client_secret: None,
         grant_types: vec!["authorization_code".to_string()],
         require_consent: true,

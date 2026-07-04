@@ -63,6 +63,7 @@ impl From<pb::RegisterClientRequest> for domain::RegisterClientRequest {
         Self {
             client_name: r.client_name,
             redirect_uris: r.redirect_uris,
+            cors_origins: Vec::new(),
             client_secret: r.client_secret,
             grant_types: if r.grant_types.is_empty() {
                 vec!["authorization_code".to_string()]
@@ -106,6 +107,7 @@ impl From<pb::UpdateClientRequest> for domain::UpdateClientRequest {
             slug: None,
             trust_level: None,
             declared_scopes: None,
+            cors_origins: None,
             consent_spans_orgs: None,
             backchannel_logout_uri: None,
             frontchannel_logout_uri: None,
