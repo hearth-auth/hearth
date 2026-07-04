@@ -18,6 +18,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **Host key file integrity framing** — `hearth.host_key` is now written and verified with
+  a magic header (`HRTHHKY1`) and an HMAC-SHA256 integrity tag covering the magic and key
+  bytes. A file that is the correct length but has corrupt content (or is a random 32-byte
+  blob left by another tool) is now rejected at startup with a clear error. A startup
+  warning is also emitted on non-Unix platforms where OS file ACLs cannot be enforced,
+  directing operators to use `HEARTH_MASTER_KEY` instead (STOR-003 / HEA-SEC-26).
+- **CRC-corrupt KEK entries block startup** — A CRC mismatch in a `hearth.keys` entry now
+  returns `StorageError::CorruptedKeks` and blocks startup rather than silently skipping the
+  entry and leaving the realm's SSTs silently unreadable. The error names all affected realm
+  IDs so operators know exactly which data requires restore from backup
+  (STOR-004 / HEA-SEC-26).
 - **`nbf` claim validation enforced** — `validate_token_with_time` now rejects tokens whose
   `nbf` (not-before) claim is in the future, with a configurable 60-second clock-skew
   tolerance per RFC 7519 §4.1.5. Previously, a future-dated token would be accepted

@@ -24,6 +24,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
 use crate::core::RealmId;
 use crate::storage::encryption::{
     decrypt_kek, encrypt_kek, generate_host_key, generate_kek, HostKey, KekId, KeyEncryptionKey,
@@ -35,6 +38,18 @@ use crate::storage::fs::{Fs, RealFs};
 /// File version: 2 bytes, u16 LE.
 const KEY_FILE_VERSION: u16 = 0x0001;
 const KEY_FILE_VERSION_SIZE: usize = 2;
+
+// ── Host key file format ─────────────────────────────────────────────────────
+//
+// Layout: [8B magic][32B key][32B HMAC-SHA256] = 72 bytes total
+//
+// The HMAC covers the magic and key bytes (magic || key).
+// HOST_KEY_HMAC_CONTEXT is the HMAC key — a domain-separation constant, not a
+// secret. Its role is detecting accidental file corruption, not third-party
+// authentication.
+const HOST_KEY_MAGIC: &[u8; 8] = b"HRTHHKY1";
+const HOST_KEY_FILE_SIZE: usize = 8 + 32 + 32; // magic + key + HMAC
+const HOST_KEY_HMAC_CONTEXT: &[u8] = b"hearth:host-key-file:integrity:v1";
 
 /// Maps realm IDs to their decrypted KEKs.
 type KekMap = HashMap<RealmId, KeyEncryptionKey>;
@@ -91,6 +106,17 @@ impl KeyRegistry {
         } else {
             LoadKeksResult::empty()
         };
+
+        // Block startup when any KEK entry has CRC corruption — silent realm
+        // unavailability is worse than a loud startup refusal (fail-closed).
+        if !load_result.corrupted.is_empty() {
+            let affected_realms = load_result
+                .corrupted
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>();
+            return Err(StorageError::CorruptedKeks { affected_realms });
+        }
 
         // Block startup when any KEK cannot be decrypted with either key.
         if !load_result.failed.is_empty() {
@@ -287,6 +313,8 @@ struct LoadKeksResult {
     needs_reencrypt: Vec<RealmId>,
     /// Realms whose KEK passed CRC but could not be decrypted with either key.
     failed: Vec<RealmId>,
+    /// Realms whose KEK entry failed CRC verification — data integrity compromise.
+    corrupted: Vec<RealmId>,
 }
 
 impl LoadKeksResult {
@@ -295,6 +323,7 @@ impl LoadKeksResult {
             keks: KekMap::new(),
             needs_reencrypt: Vec::new(),
             failed: Vec::new(),
+            corrupted: Vec::new(),
         }
     }
 }
@@ -327,18 +356,51 @@ fn load_or_create_host_key(
     // 2. Check file
     let host_key_path = data_dir.join("hearth.host_key");
     if host_key_path.exists() {
+        // Warn on non-Unix platforms where OS file ACLs cannot be enforced.
+        // On Unix the file is written with mode 0o600 (owner read/write only).
+        #[cfg(not(unix))]
+        tracing::warn!(
+            path = %host_key_path.display(),
+            "hearth.host_key file permissions cannot be enforced on this platform; \
+             use the HEARTH_MASTER_KEY environment variable to protect the host key"
+        );
+
         let data = fs.read(&host_key_path)?;
-        if data.len() != 32 {
+
+        // Verify file length: [8B magic][32B key][32B HMAC] = 72 bytes.
+        if data.len() != HOST_KEY_FILE_SIZE {
             return Err(StorageError::Crypto {
                 reason: format!(
-                    "hearth.host_key has wrong length: {} bytes (expected 32)",
+                    "hearth.host_key has unexpected length: {} bytes \
+                     (expected {HOST_KEY_FILE_SIZE} for magic+key+HMAC framing)",
                     data.len()
                 ),
             });
         }
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&data);
-        return Ok(HostKey::from_bytes(bytes));
+
+        // Verify magic header.
+        if &data[..8] != HOST_KEY_MAGIC {
+            return Err(StorageError::Crypto {
+                reason: "hearth.host_key has invalid magic header; \
+                         file may be corrupted or is from an incompatible version"
+                    .to_string(),
+            });
+        }
+
+        // Extract key bytes.
+        let mut key_bytes = [0u8; 32];
+        key_bytes.copy_from_slice(&data[8..40]);
+
+        // Verify HMAC-SHA256 integrity tag (constant-time comparison).
+        if !verify_host_key_file_hmac(&key_bytes, &data[40..72]) {
+            return Err(StorageError::Crypto {
+                reason: "hearth.host_key: HMAC integrity check failed; \
+                         file is corrupted — restore from backup or delete and restart"
+                    .to_string(),
+            });
+        }
+
+        return Ok(HostKey::from_bytes(key_bytes));
     }
 
     // 3. Auto-generate — only allowed in dev mode
@@ -363,10 +425,20 @@ fn load_or_create_host_key(
     Ok(host_key)
 }
 
-/// Writes the host key file with mode `0o600` (owner read/write only).
+/// Writes the host key file with HMAC-SHA256 integrity framing and mode `0o600`.
 ///
+/// File layout: `[8B magic][32B key][32B HMAC-SHA256]` = 72 bytes total.
 /// Uses `create_new` semantics to prevent silently overwriting an existing key.
+///
+/// On non-Unix platforms the mode flag is a no-op; callers should use
+/// `HEARTH_MASTER_KEY` instead of the file to maintain access control.
 fn write_host_key_private(path: &Path, key: &HostKey) -> Result<(), StorageError> {
+    let hmac_tag = host_key_file_hmac(key.as_bytes());
+    let mut content = Vec::with_capacity(HOST_KEY_FILE_SIZE);
+    content.extend_from_slice(HOST_KEY_MAGIC);
+    content.extend_from_slice(key.as_bytes());
+    content.extend_from_slice(&hmac_tag);
+
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -375,8 +447,30 @@ fn write_host_key_private(path: &Path, key: &HostKey) -> Result<(), StorageError
         opts.mode(0o600);
     }
     let mut file = opts.open(path)?;
-    std::io::Write::write_all(&mut file, key.as_bytes())?;
+    std::io::Write::write_all(&mut file, &content)?;
     Ok(())
+}
+
+/// Computes the HMAC-SHA256 integrity tag for a host key file.
+///
+/// Covers `HOST_KEY_MAGIC || key_bytes` so that both magic and key must be
+/// intact for the tag to verify. The HMAC key is a compile-time
+/// domain-separation constant, not a runtime secret.
+fn host_key_file_hmac(key_bytes: &[u8; 32]) -> [u8; 32] {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(HOST_KEY_HMAC_CONTEXT)
+        .expect("HMAC-SHA256 accepts any key length");
+    mac.update(HOST_KEY_MAGIC);
+    mac.update(key_bytes);
+    mac.finalize().into_bytes().into()
+}
+
+/// Verifies the HMAC-SHA256 integrity tag of a host key file (constant-time).
+fn verify_host_key_file_hmac(key_bytes: &[u8; 32], stored_tag: &[u8]) -> bool {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(HOST_KEY_HMAC_CONTEXT)
+        .expect("HMAC-SHA256 accepts any key length");
+    mac.update(HOST_KEY_MAGIC);
+    mac.update(key_bytes);
+    mac.verify_slice(stored_tag).is_ok()
 }
 
 /// Loads the previous host key from `HEARTH_PREVIOUS_MASTER_KEY`, if set.
@@ -522,10 +616,15 @@ fn load_keks_from_file(
         let entry_bytes = &data[entry_start..pos - 4];
         let computed_crc = crc32fast::hash(entry_bytes);
         if stored_crc != computed_crc {
-            tracing::warn!(
+            // Promote to corrupted — do NOT silently skip. Startup will be blocked
+            // so the operator knows this realm's SSTs are unreadable, not just
+            // mysteriously absent. (STOR-004 / HEA-SEC-26)
+            tracing::error!(
                 realm_id = %realm_id,
-                "hearth.keys: CRC mismatch for entry; skipping corrupted entry"
+                "hearth.keys: CRC mismatch for entry; data integrity compromised — \
+                 startup will be blocked; restore hearth.keys from backup"
             );
+            result.corrupted.push(realm_id);
             continue;
         }
 
@@ -689,7 +788,7 @@ mod tests {
     }
 
     #[test]
-    fn key_registry_crc_corruption_is_detected() {
+    fn key_registry_crc_corruption_blocks_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let realm = RealmId::generate();
 
@@ -710,13 +809,17 @@ mod tests {
             std::fs::write(&key_file, &data).expect("write corrupt");
         }
 
-        // Re-load: corrupted entry should be skipped, realm has no KEK
-        {
-            let registry = KeyRegistry::load(dir.path(), true).expect("reload");
-            assert!(
-                registry.get_kek_for_realm(&realm).is_none(),
-                "corrupted entry should be skipped"
-            );
+        // Re-load: CRC corruption MUST block startup (not silently skip).
+        let err = KeyRegistry::load(dir.path(), true)
+            .expect_err("CRC-corrupt KEK entry must block startup");
+        match err {
+            StorageError::CorruptedKeks { affected_realms } => {
+                assert!(
+                    !affected_realms.is_empty(),
+                    "affected_realms must name at least one realm"
+                );
+            }
+            other => panic!("expected StorageError::CorruptedKeks, got: {other:?}"),
         }
     }
 
@@ -881,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn host_key_rotation_crc_corrupt_entries_still_skipped() {
+    fn host_key_rotation_crc_corrupt_entries_block_startup_not_host_key_mismatch() {
         let dir = tempfile::tempdir().expect("tempdir");
         let realm = RealmId::generate();
         let key1 = make_test_key_bytes();
@@ -902,14 +1005,22 @@ mod tests {
             std::fs::write(&key_file, &data).expect("write corrupt");
         }
 
-        // CRC-corrupt entry should be skipped — not treated as a decryption
-        // failure — so HostKeyMismatch must NOT be returned even with a wrong key.
-        let registry = load_with_two_keys(dir.path(), key2, None)
-            .expect("CRC-corrupt entries must not trigger HostKeyMismatch");
-        assert!(
-            registry.get_kek_for_realm(&realm).is_none(),
-            "CRC-corrupt entry is skipped; realm has no KEK"
-        );
+        // CRC-corrupt entry must produce CorruptedKeks, NOT HostKeyMismatch
+        // (the entry is corrupt before decryption is even attempted).
+        let err = load_with_two_keys(dir.path(), key2, None)
+            .expect_err("CRC-corrupt entry must block startup");
+        match err {
+            StorageError::CorruptedKeks { affected_realms } => {
+                assert!(
+                    !affected_realms.is_empty(),
+                    "affected_realms must name at least one realm"
+                );
+            }
+            StorageError::HostKeyMismatch { .. } => {
+                panic!("CRC-corrupt entries must not be misreported as HostKeyMismatch")
+            }
+            other => panic!("expected StorageError::CorruptedKeks, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -939,6 +1050,134 @@ mod tests {
                 assert_eq!(affected_realms.len(), 2, "both realms should be reported");
             }
             other => panic!("expected HostKeyMismatch, got: {other:?}"),
+        }
+    }
+
+    // ── HEA-SEC-26 security regression tests ─────────────────────────────────
+
+    #[test]
+    fn host_key_file_truncated_to_32_bytes_is_rejected() {
+        // STOR-003: a legacy 32-byte raw key file must be rejected at startup;
+        // only the [magic][key][HMAC] = 72-byte format is accepted.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Generate a valid registry (creates the 72-byte framed host key file).
+        {
+            let _r = KeyRegistry::load(dir.path(), true).expect("initial load");
+        }
+
+        // Overwrite with a 32-byte raw key (the old format / accidental truncation).
+        {
+            let hk_path = dir.path().join("hearth.host_key");
+            let raw = [0xABu8; 32];
+            // write_host_key_private uses create_new, so remove first.
+            std::fs::remove_file(&hk_path).expect("remove");
+            std::fs::write(&hk_path, raw).expect("write truncated");
+        }
+
+        let err =
+            KeyRegistry::load(dir.path(), true).expect_err("32-byte raw host key must be rejected");
+        match err {
+            StorageError::Crypto { reason } => {
+                assert!(
+                    reason.contains("unexpected length") || reason.contains("magic"),
+                    "error should mention length or magic, got: {reason}"
+                );
+            }
+            other => panic!("expected StorageError::Crypto, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_key_file_corrupt_bytes_rejected_via_hmac() {
+        // STOR-003: flipping any byte within the key region must invalidate the HMAC.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let _r = KeyRegistry::load(dir.path(), true).expect("initial load");
+        }
+
+        {
+            let hk_path = dir.path().join("hearth.host_key");
+            let mut data = std::fs::read(&hk_path).expect("read");
+            data[10] ^= 0xFF; // corrupt a key byte (positions 8..40)
+            std::fs::write(&hk_path, &data).expect("write corrupt");
+        }
+
+        let err =
+            KeyRegistry::load(dir.path(), true).expect_err("corrupted host key must be rejected");
+        match err {
+            StorageError::Crypto { reason } => {
+                assert!(
+                    reason.contains("HMAC"),
+                    "error must mention HMAC integrity, got: {reason}"
+                );
+            }
+            other => panic!("expected StorageError::Crypto, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_key_file_wrong_magic_rejected() {
+        // STOR-003: wrong magic header must be caught before HMAC check.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        {
+            let _r = KeyRegistry::load(dir.path(), true).expect("initial load");
+        }
+
+        {
+            let hk_path = dir.path().join("hearth.host_key");
+            let mut data = std::fs::read(&hk_path).expect("read");
+            data[0] ^= 0xFF; // corrupt the magic header
+            std::fs::write(&hk_path, &data).expect("write corrupt");
+        }
+
+        let err = KeyRegistry::load(dir.path(), true).expect_err("wrong magic must be rejected");
+        match err {
+            StorageError::Crypto { reason } => {
+                assert!(
+                    reason.contains("magic"),
+                    "error must mention magic header, got: {reason}"
+                );
+            }
+            other => panic!("expected StorageError::Crypto, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn crc_corrupt_kek_entry_blocks_startup_with_named_realm() {
+        // STOR-004: a CRC-corrupt KEK entry must block startup and name the realm,
+        // not cause silent availability degradation.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realm = RealmId::generate();
+
+        {
+            let registry = KeyRegistry::load(dir.path(), true).expect("load");
+            registry.ensure_kek_for_realm(&realm).expect("ensure");
+        }
+
+        // Corrupt the CRC of the KEK entry (last 4 bytes of the file).
+        {
+            let key_file = dir.path().join("hearth.keys");
+            let mut data = std::fs::read(&key_file).expect("read keys");
+            let len = data.len();
+            data[len - 1] ^= 0xFF;
+            std::fs::write(&key_file, &data).expect("write corrupt");
+        }
+
+        let err =
+            KeyRegistry::load(dir.path(), true).expect_err("CRC-corrupt KEK must block startup");
+        match err {
+            StorageError::CorruptedKeks { affected_realms } => {
+                assert_eq!(affected_realms.len(), 1, "exactly one realm is corrupt");
+                // The realm ID string must appear so operators can identify affected data.
+                assert!(
+                    !affected_realms[0].is_empty(),
+                    "affected realm must be identified"
+                );
+            }
+            other => panic!("expected StorageError::CorruptedKeks, got: {other:?}"),
         }
     }
 

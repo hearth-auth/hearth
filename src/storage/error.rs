@@ -52,6 +52,16 @@ pub enum StorageError {
         /// Display names of the realms whose KEKs could not be decrypted.
         affected_realms: Vec<String>,
     },
+    /// One or more realm KEK entries in `hearth.keys` have CRC corruption.
+    ///
+    /// Startup is blocked to prevent silent realm unavailability. The operator
+    /// must restore `hearth.keys` from backup or remove the corrupted entries.
+    /// Individual realm data encrypted under the corrupted KEK is unrecoverable
+    /// without backup.
+    CorruptedKeks {
+        /// Display names of the realms whose KEK entries failed CRC verification.
+        affected_realms: Vec<String>,
+    },
 }
 
 impl fmt::Display for StorageError {
@@ -89,6 +99,14 @@ impl fmt::Display for StorageError {
                      affected realms: {realms}"
                 )
             }
+            Self::CorruptedKeks { affected_realms } => {
+                let realms = affected_realms.join(", ");
+                write!(
+                    f,
+                    "CRC corruption detected in hearth.keys; startup blocked to prevent \
+                     silent realm unavailability; restore from backup; affected realms: {realms}"
+                )
+            }
         }
     }
 }
@@ -104,7 +122,8 @@ impl std::error::Error for StorageError {
             | Self::HotTierFull
             | Self::Crypto { .. }
             | Self::UnsupportedWalVersion { .. }
-            | Self::HostKeyMismatch { .. } => None,
+            | Self::HostKeyMismatch { .. }
+            | Self::CorruptedKeks { .. } => None,
         }
     }
 }
