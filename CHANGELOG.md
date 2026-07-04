@@ -18,6 +18,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **Bootstrap admin password is now randomly generated** — `POST /admin/bootstrap` generates
+  a cryptographically random 32-character password via `ring::rand::SystemRandom` on first
+  call and returns it once in `admin_password`. Re-bootstrap no longer resets the existing
+  password (previously reset to the hardcoded `HearthTest123!` on every call, allowing
+  credential recovery by anyone who could trigger bootstrap). Re-bootstrap now requires a
+  valid Bearer token from the initial call (HEA-1670).
 - **Per-operation gRPC permission checks** — `RbacAdminService`, `IdentityAdminService`, and
   `ApplicationAdminService` now enforce the same per-operation sub-permission that the HTTP
   surface does. Previously the outer gate admitted any sub-admin token and no handler-level
