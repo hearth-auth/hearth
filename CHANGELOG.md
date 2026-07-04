@@ -18,6 +18,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **`nbf` claim validation enforced** — `validate_token_with_time` now rejects tokens whose
+  `nbf` (not-before) claim is in the future, with a configurable 60-second clock-skew
+  tolerance per RFC 7519 §4.1.5. Previously, a future-dated token would be accepted
+  immediately after issuance (HEA-SEC-27).
+- **JTI assigned to all access tokens** — `issue_token_pair` now generates a UUID JTI for
+  every issued access token. Previously, session-bound tokens had `jti: None`, causing
+  JTI-based revocation checks to silently skip them (HEA-SEC-27).
+- **Hard TTL caps on access and refresh tokens** — Config validation now enforces a hard
+  cap of 1 hour on `token.access_token_ttl` (global and per-realm) and 30 days on
+  `token.refresh_token_ttl`, regardless of `allow_unsafe_ttl`. Operator warnings are
+  emitted at startup when TTLs exceed 15 minutes (access) or 24 hours (refresh)
+  (HEA-SEC-27). The `nbf` field is also now surfaced in introspection responses
+  (RFC 7662 §2.2).
 - **Password minimum length enforced unconditionally** — A hard floor of 8 characters is
   now applied at every password-setting and self-registration call site regardless of
   whether a realm `password_policy` is configured. Previously, an absent policy allowed

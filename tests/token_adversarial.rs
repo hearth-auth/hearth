@@ -1440,7 +1440,10 @@ async fn concurrent_auth_code_exchange_only_one_succeeds() {
         err_count, 1,
         "exactly one exchange must fail; got {err_count} failures"
     );
-    let failed = results.iter().find(|r| r.is_err()).unwrap();
+    let failed = results
+        .iter()
+        .find(|r| r.is_err())
+        .expect("one result must be Err");
     assert!(
         matches!(failed, Err(IdentityError::InvalidAuthorizationCode)),
         "losing thread must get InvalidAuthorizationCode, got: {failed:?}"
