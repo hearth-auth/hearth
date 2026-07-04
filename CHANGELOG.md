@@ -18,6 +18,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **Per-operation gRPC permission checks** — `RbacAdminService`, `IdentityAdminService`, and
+  `ApplicationAdminService` now enforce the same per-operation sub-permission that the HTTP
+  surface does. Previously the outer gate admitted any sub-admin token and no handler-level
+  check narrowed it, allowing `hearth.users.admin` to invoke `create_role` / `delete_realm`
+  and similarly for all other sub-admin/operation mismatches. `grpc_require_permission()`
+  mirrors `require_admin_permission()` on the HTTP path; `hearth.admin` still bypasses all
+  per-handler checks. `hearth.agents.admin` is now accepted at the gRPC outer gate, the HTTP
+  outer gate, and a new seeded role and permission record. 17 regression tests added in
+  `tests/grpc_sub_admin_bfla.rs` (HEA-SEC-04).
 - **CORS allowed-origins decoupled from redirect URIs** — `OAuthClient` gains an
   explicit `cors_origins` field distinct from `redirect_uris`. The token endpoint
   now only reflects `Access-Control-Allow-Origin` for origins listed in `cors_origins`;

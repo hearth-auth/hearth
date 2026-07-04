@@ -2424,35 +2424,43 @@ async fn admin_get_user_effective_permissions(
 
 // === Dev Bootstrap Endpoint ===
 
-/// Seeds a system-realm admin user (`admin@hearth.test` / `HearthTest123!`)
-/// so the admin UI (`/ui/admin/login`) is usable immediately after bootstrap.
+/// Generates a random 32-character alphanumeric password using the OS CSPRNG.
+fn generate_dev_password() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const LEN: usize = 32;
+    let rng = ring::rand::SystemRandom::new();
+    let mut raw = [0u8; LEN];
+    // SAFETY: ring SystemRandom never fails; only errors on OS-level RNG failure.
+    ring::rand::SecureRandom::fill(&rng, &mut raw)
+        .expect("OS CSPRNG unavailable — cannot generate bootstrap password");
+    raw.iter()
+        .map(|b| CHARSET[(*b as usize) % CHARSET.len()] as char)
+        .collect()
+}
+
+/// Seeds a system-realm admin user (`admin@hearth.test`) the first time a dev
+/// server is bootstrapped. Returns `Some(password)` when the user was newly
+/// created (caller should include it in the response). Returns `None` if the
+/// user already existed — the existing password is left untouched.
 ///
 /// Best-effort: logs on error but never returns a failure to the caller.
-/// Called from both the first-time and idempotent bootstrap paths.
-fn dev_seed_system_admin(state: &AppState) {
+fn dev_seed_system_admin(state: &AppState) -> Option<String> {
     let sys = crate::identity::keys::system_realm_id();
 
     // Ensure the system realm has RBAC roles seeded.
     if let Err(e) = state.rbac.seed_realm(&sys) {
         tracing::warn!(error = %e, "dev bootstrap: RBAC seed for system realm failed");
-        return;
+        return None;
     }
 
-    // If the user already exists, reset the password so re-bootstrap always
-    // restores the known dev credential (fixes HEA-1644: login failed after
-    // server restart with persistent data).
+    // If the user already exists, leave the password unchanged. Re-bootstrap
+    // only issues fresh tokens — it never resets credentials (HEA-1670).
     match state.identity.get_user_by_email(&sys, "admin@hearth.test") {
-        Ok(Some(existing)) => {
-            let pwd = crate::identity::CleartextPassword::from_string("HearthTest123!".to_string());
-            if let Err(e) = state.identity.set_password(&sys, existing.id(), &pwd) {
-                tracing::warn!(error = %e, "dev bootstrap: system realm password reset failed");
-            }
-            return;
-        }
+        Ok(Some(_)) => return None,
         Ok(None) => {}
         Err(e) => {
             tracing::warn!(error = %e, "dev bootstrap: system realm user lookup failed");
-            return;
+            return None;
         }
     }
 
@@ -2466,7 +2474,7 @@ fn dev_seed_system_admin(state: &AppState) {
         Ok(u) => u,
         Err(e) => {
             tracing::warn!(error = %e, "dev bootstrap: system realm user creation failed");
-            return;
+            return None;
         }
     };
 
@@ -2481,21 +2489,22 @@ fn dev_seed_system_admin(state: &AppState) {
         },
     );
 
-    let pwd = crate::identity::CleartextPassword::from_string("HearthTest123!".to_string());
+    let password = generate_dev_password();
+    let pwd = crate::identity::CleartextPassword::from_string(password.clone());
     if let Err(e) = state.identity.set_password(&sys, admin.id(), &pwd) {
         tracing::warn!(error = %e, "dev bootstrap: system realm password set failed");
-        return;
+        return None;
     }
 
     let role = match state.rbac.get_role_by_name(&sys, "realm.admin") {
         Ok(Some(r)) => r,
         Ok(None) => {
             tracing::warn!("dev bootstrap: realm.admin role missing from system realm");
-            return;
+            return None;
         }
         Err(e) => {
             tracing::warn!(error = %e, "dev bootstrap: system realm role lookup failed");
-            return;
+            return None;
         }
     };
 
@@ -2510,6 +2519,8 @@ fn dev_seed_system_admin(state: &AppState) {
     ) {
         tracing::warn!(error = %e, "dev bootstrap: system realm role assignment failed");
     }
+
+    Some(password)
 }
 
 /// POST /admin/bootstrap — creates a realm, admin user, session, assigns
