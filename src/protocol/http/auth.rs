@@ -233,6 +233,34 @@ pub(crate) fn require_admin_permission(
     Ok(())
 }
 
+/// Checks that the caller holds `hearth.admin` or **any one** of the listed
+/// granular sub-permissions. Use on read-only endpoints that are safely
+/// accessible to multiple sub-admin roles (e.g. both `hearth.realm.admin` and
+/// `hearth.users.admin` may read group details without being able to mutate
+/// membership).
+///
+/// Returns `403 Forbidden` when no accepted permission is present.
+pub(crate) fn require_any_admin_permission(
+    auth: &AdminAuth,
+    accepted: &[&str],
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let permitted = auth
+        .permissions
+        .iter()
+        .any(|p| p == "hearth.admin" || accepted.iter().any(|a| p == a));
+    if !permitted {
+        let list = accepted.join(", ");
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "error_description": format!("one of [{list}] or hearth.admin permission required")
+            })),
+        ));
+    }
+    Ok(())
+}
+
 /// Checks the per-user export rate limit (A-30).
 ///
 /// Returns `429 Too Many Requests` when the user has exceeded the export quota

@@ -44,7 +44,10 @@ pub use state::AppState;
 // ── Crate-internal re-exports (used by scim, cluster_admin, and handler mods) ──
 
 pub(crate) use auth::AdminAuth;
-pub(crate) use auth::{extract_admin_auth, extract_cluster_admin_auth, require_admin_permission};
+pub(crate) use auth::{
+    extract_admin_auth, extract_cluster_admin_auth, require_admin_permission,
+    require_any_admin_permission,
+};
 
 // Re-export all shared helpers so child handler modules can use `super::name`.
 // Child modules need these accessible at the `crate::protocol::http` level.
