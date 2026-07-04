@@ -1149,6 +1149,16 @@ impl RbacEngine for EmbeddedRbacEngine {
 
     // ---------- Assignments ----------
 
+    fn resolve_role_permissions(
+        &self,
+        realm_id: &RealmId,
+        role_id: &RoleId,
+    ) -> Result<Vec<Permission>, RbacError> {
+        Ok(resolve::expand_role_permissions(self, realm_id, role_id)?
+            .into_iter()
+            .collect())
+    }
+
     fn assign_role(
         &self,
         realm_id: &RealmId,

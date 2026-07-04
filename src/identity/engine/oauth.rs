@@ -129,6 +129,11 @@ impl EmbeddedIdentityEngine {
             return vec![];
         };
 
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
         let mut out = Vec::new();
         for entry in entries {
             let Some(deadline) = keys::parse_oidc_rsa_retiring_deadline(&entry.key) else {
@@ -137,7 +142,11 @@ impl EmbeddedIdentityEngine {
             if deadline <= now_secs {
                 continue; // Grace period expired — omit.
             }
-            let Ok(stored) = serde_json::from_slice::<StoredRsaKey>(&entry.value) else {
+            let Ok(json_bytes) = crate::identity::key_encryption::unwrap_key(&entry.value, kek)
+            else {
+                continue;
+            };
+            let Ok(stored) = serde_json::from_slice::<StoredRsaKey>(&json_bytes) else {
                 continue;
             };
             let Ok(key) = crate::identity::tokens::RsaSigningKey::from_pkcs8_and_cert(

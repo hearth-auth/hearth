@@ -655,6 +655,32 @@ fn expand_role<R: Resolver + ?Sized>(
     Ok(())
 }
 
+/// Resolves the transitive (direct + inherited via parent chain) permission set of a single role.
+///
+/// Used by protocol handlers to enforce privilege-ceiling checks on role assignment:
+/// the assigning principal must hold a superset of the assigned role's effective permissions.
+pub(crate) fn expand_role_permissions<R: Resolver + ?Sized>(
+    resolver: &R,
+    realm_id: &RealmId,
+    role_id: &RoleId,
+) -> Result<BTreeSet<Permission>, RbacError> {
+    let mut role_names = BTreeSet::new();
+    let mut perms = BTreeSet::new();
+    let mut visited = HashSet::new();
+    let mut path = HashSet::new();
+    expand_role(
+        resolver,
+        realm_id,
+        role_id,
+        &mut role_names,
+        &mut perms,
+        &mut visited,
+        &mut path,
+        0,
+    )?;
+    Ok(perms)
+}
+
 /// Narrow a permission set by an OAuth scope's declared permissions.
 ///
 /// If the scope resolves to `None`, no narrowing occurs (e.g. `openid`,

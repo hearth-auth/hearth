@@ -247,6 +247,18 @@ pub trait RbacEngine: Send + Sync {
 
     // ------- Assignments -------
 
+    /// Resolves the transitive (direct + inherited) permission set of a role.
+    ///
+    /// Expands `parent_roles` transitively using the same DFS as token-issuance
+    /// permission resolution. Protocol handlers use this to enforce the
+    /// privilege-ceiling rule: an assigning principal may not grant a role whose
+    /// effective permissions exceed their own.
+    fn resolve_role_permissions(
+        &self,
+        realm_id: &RealmId,
+        role_id: &RoleId,
+    ) -> Result<Vec<Permission>, RbacError>;
+
     /// Assigns a role to a user or group, optionally scoped to an organization.
     fn assign_role(
         &self,

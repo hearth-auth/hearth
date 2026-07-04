@@ -16,6 +16,7 @@ mod engine;
 pub mod error;
 pub mod federation;
 pub mod hibp;
+pub mod key_encryption;
 pub(crate) mod keys;
 pub mod ldap;
 pub(crate) mod magic_link;
@@ -37,6 +38,34 @@ pub(crate) mod totp;
 mod types;
 mod validation;
 pub(crate) mod webauthn;
+
+/// Public re-implementations of key-storage helpers for integration tests and
+/// the `test-hooks` feature.  Not part of the stable public API.
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod keys_test_helpers {
+    use crate::core::RealmId;
+
+    /// Returns the nil-UUID system realm used for internal key storage.
+    pub fn system_realm_id() -> RealmId {
+        RealmId::new(uuid::Uuid::nil())
+    }
+
+    /// Returns the storage key for the global Ed25519 signing key.
+    pub fn encode_global_signing_key() -> Vec<u8> {
+        b"sys:global:key".to_vec()
+    }
+
+    /// Returns the storage key for a per-realm Ed25519 signing key.
+    pub fn encode_realm_signing_key(realm_id: &RealmId) -> Vec<u8> {
+        format!("realm:key:{}", realm_id.as_uuid()).into_bytes()
+    }
+
+    /// Returns `true` when the given storage key holds cryptographic key
+    /// material that must never appear in admin exports or scans.
+    pub fn is_key_material(key: &[u8]) -> bool {
+        super::keys::is_key_material(key)
+    }
+}
 
 pub use credentials::{
     hash_password, verify_password_with_pepper, CleartextPassword, CredentialConfig, PepperConfig,

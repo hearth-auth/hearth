@@ -18,6 +18,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **At-rest encryption for signing keys and DPoP secrets** — Per-realm Ed25519
+  signing keys, the global signing key, the OIDC RSA key, SAML RSA keys, and
+  DPoP nonce secrets are now wrapped with AES-256-GCM before being written to
+  the WAL when `security.key_encryption_key` (or the `HEARTH_KEK` env var) is
+  set. Existing plaintext entries in legacy WALs continue to load transparently
+  and are re-encrypted on the next key rotation. A `realm:key:*`,
+  `sys:global:key`, `sys:oidc:rsa:*`, and `agt:dpop:nonce-secret` prefix guard
+  (`is_key_material`) is added to identify key-material entries that must be
+  excluded from admin export and storage scan paths (HEA-SEC-09).
+- **Privilege-ceiling enforcement on role assignment** — `POST /admin/users/:id/roles`
+  and the gRPC `AssignUserRole`/`AssignGroupRole` RPCs now enforce that a sub-admin
+  may only assign roles whose effective (transitive) permission set is a subset of
+  their own. Previously a `hearth.realm.admin` caller could assign the `realm.admin`
+  role (which carries `hearth.admin`) to any user, achieving full privilege escalation.
+  `hearth.admin` callers bypass the ceiling check and may assign any role. A new
+  `RbacEngine::resolve_role_permissions` method expands the role's parent chain to
+  compute the transitive set used for the check. Blocked attempts are logged at WARN.
+  Regression tests in `tests/admin_rbac_auth.rs` (HEA-SEC-13).
 - **Dev mode fail-closed defaults** — Server refuses to start with `--dev` when
   `server.bind_address` is non-loopback (blocks network exposure of weak Argon2,
   CSRF bypass, and plaintext token logging). `WebState::new()` now defaults
@@ -115,6 +133,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Recovery code entropy increased from 40 bits (8 chars) to 80 bits (16 chars) of the same
   32-symbol unambiguous alphabet. Legacy plaintext records are transparently migrated on first
   write (HEA-1675).
+- **Backup restore now requires `hearth.export` capability** — `POST /admin/backup/restore`
+  previously admitted any sub-admin token; it now enforces `check_export_capability` and
+  `check_export_rate_limit` (same gates as `POST /admin/backup`) immediately after auth.
+  A `BackupRestored` audit event is emitted before the destructive import begins so the
+  attempt is recorded even if the server is killed mid-stream (HEA-1682).
 - **Cross-realm BOLA hardening in REST admin handlers** — introduced `scoped_realm(auth, path_realm_id)`
   accessor that enforces `auth.realm_id == path_realm_id` (system realm bypasses as superuser) for
   every endpoint that carries a `{realm_id}` path parameter. Fixes 10 handlers previously vulnerable

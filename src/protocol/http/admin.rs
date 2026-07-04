@@ -32,8 +32,8 @@ use tracing::error;
 use super::{
     check_export_capability, check_export_rate_limit, emit_export_watermark, extract_admin_auth,
     identity_error_to_response, proto_to_rest_json, rbac_error_to_response,
-    require_admin_permission, verify_manifest_signature, AdminAuth, AppState,
-    BACKUP_RESTORE_BODY_LIMIT,
+    require_admin_permission, require_any_admin_permission, verify_manifest_signature, AdminAuth,
+    AppState, BACKUP_RESTORE_BODY_LIMIT,
 };
 
 /// Registers all admin API routes (mounted under `/admin` by the parent router).
@@ -3166,6 +3166,11 @@ async fn admin_get_group(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) =
+        require_any_admin_permission(&auth, &["hearth.realm.admin", "hearth.users.admin"])
+    {
+        return e.into_response();
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -3244,6 +3249,11 @@ async fn admin_list_group_members(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) =
+        require_any_admin_permission(&auth, &["hearth.realm.admin", "hearth.users.admin"])
+    {
+        return e.into_response();
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -3276,6 +3286,9 @@ async fn admin_add_group_member(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -3316,6 +3329,9 @@ async fn admin_remove_group_member(
         Ok(a) => a,
         Err(e) => return e.into_response(),
     };
+    if let Err(e) = require_admin_permission(&auth, "hearth.realm.admin") {
+        return e.into_response();
+    }
     let group_id = match parse_group_id(&id) {
         Ok(g) => g,
         Err(e) => return e.into_response(),
@@ -3390,6 +3406,39 @@ async fn admin_assign_role(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
+    // Privilege-ceiling check (HEA-SEC-13): a sub-admin (hearth.realm.admin) may only
+    // assign roles whose effective permissions are a subset of their own. hearth.admin
+    // bypasses this — they unconditionally hold all permissions.
+    if !auth.permissions.iter().any(|p| p == "hearth.admin") {
+        let role_perms = match state
+            .rbac
+            .resolve_role_permissions(&auth.realm_id, &role_id)
+        {
+            Ok(perms) => perms,
+            Err(e) => return rbac_error_to_response(&e).into_response(),
+        };
+        let assigner_perms: std::collections::HashSet<&str> =
+            auth.permissions.iter().map(String::as_str).collect();
+        if let Some(p) = role_perms
+            .iter()
+            .find(|p| !assigner_perms.contains(p.as_str()))
+        {
+            tracing::warn!(
+                assigner = %auth.user_id,
+                realm_id = %auth.realm_id,
+                missing_permission = %p,
+                "role assignment blocked: role contains permission assigner does not hold"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "error_description": "role contains permissions the assigner does not hold"
+                })),
+            )
+                .into_response();
+        }
+    }
     let scope = match body.org_id {
         Some(s) => {
             let stripped = s.strip_prefix("org_").unwrap_or(&s);
@@ -4098,6 +4147,16 @@ async fn admin_backup_restore(
         Err(e) => return e.into_response(),
     };
 
+    // SEC-14: require hearth.export capability for restore (destructive write operation).
+    if let Err(e) = check_export_capability(&auth) {
+        return e.into_response();
+    }
+
+    // SEC-14: per-user rate limit shared with export operations (A-30).
+    if let Err(e) = check_export_rate_limit(&state, &auth.user_id) {
+        return e.into_response();
+    }
+
     let mode_str = params.mode.as_deref().unwrap_or("skip").to_string();
     let realm_filter = params.realm.clone();
     let dry_run = params.dry_run;
@@ -4183,6 +4242,20 @@ async fn admin_backup_restore(
         )
             .into_response();
     }
+
+    // SEC-14: emit audit event at restore start, before any destructive write.
+    let _ = state.audit.append(&CreateAuditEvent {
+        realm_id: auth.realm_id.clone(),
+        actor: auth.user_id.as_uuid().to_string(),
+        action: crate::audit::AuditAction::BackupRestored,
+        resource_type: "backup".to_string(),
+        resource_id: "restore".to_string(),
+        metadata: Some(serde_json::json!({
+            "dry_run": dry_run,
+            "mode": mode_str,
+            "realm_filter": realm_filter,
+        })),
+    });
 
     let identity = Arc::clone(&state.identity);
     let rbac = Arc::clone(&state.rbac);
@@ -4295,19 +4368,6 @@ async fn admin_backup_restore(
                     }));
                 }
             }
-
-            let restored_slugs: Vec<String> = reports.keys().cloned().collect();
-            let _ = state.audit.append(&CreateAuditEvent {
-                realm_id: auth.realm_id,
-                actor: auth.user_id.as_uuid().to_string(),
-                action: crate::audit::AuditAction::BackupRestored,
-                resource_type: "backup".to_string(),
-                resource_id: "restore".to_string(),
-                metadata: Some(serde_json::json!({
-                    "dry_run": dry_run,
-                    "realms": restored_slugs.join(","),
-                })),
-            });
 
             (
                 StatusCode::OK,

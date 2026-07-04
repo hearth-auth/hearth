@@ -4,6 +4,8 @@
 //! - `POST /admin/backup` — create and download a backup archive
 //! - `POST /admin/backup/restore` — restore from a backup archive
 //! - Auth gating (403 for non-admin, 401 for missing token)
+//! - SEC-14: restore requires `hearth.export` capability (403 without it)
+//! - SEC-14: pre-restore audit event recorded before destructive write
 //! - Dry-run restore returns counts without writing
 //! - Round-trip: backup a realm, restore to a fresh realm
 
@@ -13,6 +15,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use hearth::audit::{AuditAction, AuditQuery};
 use hearth::backup::BackupArchive;
 use hearth::core::RealmId;
 use hearth::identity::{CreateUserRequest, SessionContext};
@@ -307,6 +310,158 @@ async fn backup_restore_requires_auth() {
         .expect("response");
 
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ===== POST /admin/backup/restore — SEC-14: export capability gate =====
+
+/// Creates a user with only the `hearth.realm.admin` role, which does NOT
+/// include `hearth.export`. The token passes `extract_admin_auth` (has
+/// `hearth.realm.admin` permission) but fails `check_export_capability`.
+async fn make_realm_admin_token_no_export(h: &common::TestHarness, realm: &RealmId) -> String {
+    let user = h
+        .identity()
+        .create_user(
+            realm,
+            &CreateUserRequest {
+                email: format!("realm-admin-{}@backup-test.example", uuid::Uuid::new_v4()),
+                display_name: "Realm Admin".into(),
+                first_name: "Realm".into(),
+                last_name: "Admin".into(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create realm admin user");
+
+    let role = h
+        .rbac()
+        .get_role_by_name(realm, "hearth.realm.admin")
+        .expect("look up hearth.realm.admin role")
+        .expect("hearth.realm.admin must be seeded");
+
+    h.rbac()
+        .assign_role(
+            realm,
+            &AssignRoleRequest {
+                subject: Subject::User(user.id().clone()),
+                role_id: role.id,
+                scope: Scope::Realm,
+                assigned_by: None,
+            },
+        )
+        .expect("assign hearth.realm.admin role");
+
+    let session = h
+        .identity()
+        .create_session(realm, user.id(), &SessionContext::default())
+        .expect("create session");
+
+    h.identity()
+        .issue_tokens(realm, user.id(), session.id())
+        .expect("issue tokens")
+        .access_token()
+        .to_string()
+}
+
+/// A token with `hearth.realm.admin` (sub-admin) but without `hearth.export`
+/// must receive 403 from the restore endpoint (SEC-14).
+///
+/// The capability check runs before multipart streaming, so no valid archive is
+/// required — the response must be 403 regardless of the request body.
+#[tokio::test]
+async fn backup_restore_requires_export_capability() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+
+    let token = make_realm_admin_token_no_export(&h, &realm).await;
+    let app = build_app(&h).await;
+
+    let body = "--boundary\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\ndata\r\n--boundary--\r\n";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", "multipart/form-data; boundary=boundary")
+                .body(Body::from(body))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "restore must be 403 for a token without hearth.export"
+    );
+    let json = resp_json(resp).await;
+    assert!(
+        json["error_description"]
+            .as_str()
+            .unwrap_or("")
+            .contains("hearth.export"),
+        "error_description must mention hearth.export: {json}"
+    );
+}
+
+/// The restore endpoint emits a `BackupRestored` audit event BEFORE the
+/// destructive import begins (SEC-14). We verify this with a dry-run: even
+/// though no data is written, the audit record must be present.
+#[tokio::test]
+async fn backup_restore_emits_pre_restore_audit_event() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+    let token = make_admin_token(&h, &realm).await;
+
+    let archive = make_test_archive(&h, &realm);
+    let (ct, body_bytes) = multipart_body(&archive);
+
+    let app = build_app(&h).await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/backup/restore?dry_run=true")
+                .header("Authorization", format!("Bearer {token}"))
+                .header("X-Realm-ID", realm.as_uuid().to_string())
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .expect("req"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "dry-run with valid admin token must succeed"
+    );
+
+    // The audit event must be present regardless of dry_run status — it is
+    // emitted before the import runs, not inside the success branch.
+    let events = h
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::BackupRestored),
+            ..AuditQuery::for_realm(realm.clone())
+        })
+        .expect("audit query");
+
+    assert!(
+        !events.is_empty(),
+        "BackupRestored audit event must be recorded before restore completes"
+    );
+    let ev = &events[0];
+    assert_eq!(ev.resource_type, "backup");
+    let meta = ev.metadata.as_ref().expect("metadata must be present");
+    assert_eq!(
+        meta.get("dry_run").and_then(|v| v.as_bool()),
+        Some(true),
+        "audit metadata must reflect dry_run=true"
+    );
 }
 
 // ===== POST /admin/backup/restore — missing file field =====

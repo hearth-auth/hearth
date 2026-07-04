@@ -936,6 +936,35 @@ async fn run_serve(
         .collect();
     let slug_cooldown_secs = u64::from(config.security.slug_cooldown_days) * 86_400;
 
+    // Resolve the storage key-encryption key (KEK). Env var takes precedence.
+    // Accepted format: 64 lowercase hex characters (32 bytes / AES-256).
+    let storage_kek: Option<hearth::identity::key_encryption::StorageKek> = {
+        let hex_opt = std::env::var("HEARTH_KEK")
+            .ok()
+            .or_else(|| config.security.key_encryption_key.clone());
+        match hex_opt {
+            None => None,
+            Some(hex) => {
+                if hex == "0".repeat(64) {
+                    return Err(
+                        "security.key_encryption_key / HEARTH_KEK must not be the all-zero key \
+                         — generate a random 32-byte (64 hex char) value"
+                            .into(),
+                    );
+                }
+                let bytes = hex::decode(&hex).map_err(|e| {
+                    format!("security.key_encryption_key / HEARTH_KEK is not valid hex: {e}")
+                })?;
+                let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                    "security.key_encryption_key / HEARTH_KEK must be exactly 64 hex characters \
+                     (32 bytes / AES-256)"
+                        .to_string()
+                })?;
+                Some(hearth::identity::key_encryption::StorageKek::new(arr))
+            }
+        }
+    };
+
     let identity_config = if config.dev_mode {
         IdentityConfig {
             credential: CredentialConfig::fast_for_testing(),
@@ -944,6 +973,7 @@ async fn run_serve(
             rate_limit: rate_limit_config,
             reserved_slugs: reserved_slugs.clone(),
             slug_cooldown_secs,
+            key_encryption_key: storage_kek.clone(),
             ..IdentityConfig::default()
         }
     } else {
@@ -953,6 +983,7 @@ async fn run_serve(
             rate_limit: rate_limit_config,
             reserved_slugs: reserved_slugs.clone(),
             slug_cooldown_secs,
+            key_encryption_key: storage_kek,
             ..IdentityConfig::default()
         }
     };

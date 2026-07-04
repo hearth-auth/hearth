@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tonic::{Code, Request, Response, Status};
 
 use crate::core::{OrganizationId, RealmId, UserId};
-use crate::protocol::grpc::auth::grpc_require_permission;
+use crate::protocol::grpc::auth::{grpc_require_permission, AdminAuth};
 use crate::rbac::{
     AssignRoleRequest, CreateGroupRequest, CreateRoleRequest, GroupId, GroupMember, Permission,
     RoleId, Scope, Subject, UpdateGroupRequest, UpdateRoleRequest,
@@ -216,6 +216,44 @@ fn proto_to_scope(s: Option<&pb::Scope>) -> Result<Scope, Status> {
             })
         }
     }
+}
+
+/// Privilege-ceiling enforcement (HEA-SEC-13): verifies that every permission
+/// carried by `role_id` is held by the authenticated caller.  Callers with
+/// `hearth.admin` bypass this check — they unconditionally hold all permissions.
+///
+/// Returns `PERMISSION_DENIED` if the role contains a permission the assigner
+/// does not hold.
+fn check_role_permission_ceiling(
+    auth: &AdminAuth,
+    state: &GrpcState,
+    realm_id: &RealmId,
+    role_id: &RoleId,
+) -> Result<(), Status> {
+    if auth.permissions.iter().any(|p| p == "hearth.admin") {
+        return Ok(());
+    }
+    let role_perms = state
+        .rbac
+        .resolve_role_permissions(realm_id, role_id)
+        .map_err(super::convert::rbac_to_status)?;
+    let assigner_perms: std::collections::HashSet<&str> =
+        auth.permissions.iter().map(String::as_str).collect();
+    if let Some(p) = role_perms
+        .iter()
+        .find(|p| !assigner_perms.contains(p.as_str()))
+    {
+        tracing::warn!(
+            realm_id = %realm_id,
+            missing_permission = %p,
+            "gRPC role assignment blocked: role contains permission assigner does not hold"
+        );
+        return Err(Status::new(
+            Code::PermissionDenied,
+            "role contains permissions the assigner does not hold",
+        ));
+    }
+    Ok(())
 }
 
 // --- trait impl ---------------------------------------------------------
@@ -588,10 +626,12 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let user_id = parse_user_id(&inner.user_id)?;
         let role_id = parse_role_id(&inner.role_id)?;
         let scope = proto_to_scope(inner.scope.as_ref())?;
+        // Privilege-ceiling check (HEA-SEC-13).
+        check_role_permission_ceiling(&auth, &self.state, &realm_id, &role_id)?;
         let assignment = self
             .state
             .rbac
@@ -653,10 +693,12 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let group_id = parse_group_id(&inner.group_id)?;
         let role_id = parse_role_id(&inner.role_id)?;
         let scope = proto_to_scope(inner.scope.as_ref())?;
+        // Privilege-ceiling check (HEA-SEC-13).
+        check_role_permission_ceiling(&auth, &self.state, &realm_id, &role_id)?;
         let assignment = self
             .state
             .rbac

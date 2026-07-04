@@ -1,6 +1,8 @@
 //! Integration tests for admin HTTP auth (permission-gated via `hearth.admin`
 //! and the granular sub-permissions `hearth.users.admin`, `hearth.clients.admin`,
 //! `hearth.realm.admin`).
+//!
+//! HEA-SEC-13 tests are at the bottom: privilege-ceiling enforcement for role assignment.
 
 mod common;
 
@@ -566,7 +568,7 @@ async fn users_admin_denied_add_group_member() {
     // Group need not exist — permission check fires before DB lookup.
     let group_id = uuid::Uuid::new_v4();
     let user_id = uuid::Uuid::new_v4();
-    let body = format!(r#"{{"id":"{user_id}","member_type":"user"}}"#);
+    let body = format!(r#"{{"id":"{user_id}","type":"user"}}"#);
     let status = http_post_json(
         app,
         &token,
@@ -740,10 +742,7 @@ async fn realm_admin_allowed_add_group_member() {
 
     let app = build_app(&h).await;
 
-    let body = format!(
-        r#"{{"id":"{}","member_type":"user"}}"#,
-        target_user.id().as_uuid()
-    );
+    let body = format!(r#"{{"id":"{}","type":"user"}}"#, target_user.id().as_uuid());
     let status = http_post_json(
         app,
         &token,
@@ -756,5 +755,113 @@ async fn realm_admin_allowed_add_group_member() {
         status,
         StatusCode::CREATED,
         "hearth.realm.admin must be allowed on POST /admin/groups/:id/members"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HEA-SEC-13: Privilege-ceiling enforcement on role assignment
+// ---------------------------------------------------------------------------
+
+/// A hearth.realm.admin token MUST NOT be able to assign the `realm.admin` role
+/// because that role carries `hearth.admin` (and other permissions the caller
+/// does not hold).  Doing so would be a privilege-escalation attack.
+#[tokio::test]
+async fn realm_admin_cannot_assign_role_exceeding_own_permissions() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+
+    let sub_admin_token = issue_sub_admin_token(
+        &h,
+        &realm,
+        "realmadmin-ceiling@example.com",
+        "hearth.realm.admin",
+    )
+    .await;
+
+    // Target user who will receive the attempted escalated assignment.
+    let target = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "target-ceiling@example.com".into(),
+                display_name: "Target".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create target user");
+
+    // `realm.admin` role carries `hearth.admin` — the sub-admin must not be able to assign it.
+    let full_role = h
+        .rbac()
+        .get_role_by_name(&realm, "realm.admin")
+        .expect("lookup")
+        .expect("seeded realm.admin role");
+
+    let app = build_app(&h).await;
+    let body = serde_json::json!({ "role_id": full_role.id.to_string() }).to_string();
+    let status = http_post_json(
+        app,
+        &sub_admin_token,
+        &realm,
+        &format!("/admin/users/{}/roles", target.id().as_uuid()),
+        &body,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "hearth.realm.admin must be forbidden from assigning realm.admin (HEA-SEC-13)"
+    );
+}
+
+/// A hearth.admin (full superuser) token MUST be able to assign ANY role,
+/// including roles that carry hearth.admin itself.
+#[tokio::test]
+async fn full_admin_can_assign_any_role() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let realm = h.create_realm();
+    h.rbac().seed_realm(&realm).expect("seed");
+
+    // Full admin: assigned the `realm.admin` seeded role, which includes `hearth.admin`.
+    let full_admin_token = issue_token_for(&h, &realm, "fulladmin-ceiling@example.com", true).await;
+
+    let target = h
+        .identity()
+        .create_user(
+            &realm,
+            &CreateUserRequest {
+                email: "target-full@example.com".into(),
+                display_name: "Target".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create target user");
+
+    let full_role = h
+        .rbac()
+        .get_role_by_name(&realm, "realm.admin")
+        .expect("lookup")
+        .expect("seeded realm.admin role");
+
+    let app = build_app(&h).await;
+    let body = serde_json::json!({ "role_id": full_role.id.to_string() }).to_string();
+    let status = http_post_json(
+        app,
+        &full_admin_token,
+        &realm,
+        &format!("/admin/users/{}/roles", target.id().as_uuid()),
+        &body,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "hearth.admin must be allowed to assign realm.admin (HEA-SEC-13)"
     );
 }

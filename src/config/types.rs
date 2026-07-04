@@ -863,6 +863,17 @@ pub struct SecurityYaml {
     /// `Retry-After: 1` header.  Default: `60`.
     #[serde(default = "SecurityYaml::default_jwks_rps_limit")]
     pub jwks_rps_limit: u32,
+    /// AES-256 key-encryption key (KEK) for protecting Ed25519 signing keys,
+    /// the OIDC RSA key, SAML keys, and DPoP nonce secrets at rest in the WAL.
+    ///
+    /// Supply a 64-character lowercase hex string (32 bytes). The `HEARTH_KEK`
+    /// environment variable takes precedence over this field. When absent, key
+    /// material is stored unencrypted — suitable for dev or when the filesystem
+    /// or volume is already encrypted. Existing plaintext keys continue to load
+    /// transparently and are re-encrypted on the next rotation. The all-zero
+    /// key `0000…` is rejected at startup.
+    #[serde(default)]
+    pub key_encryption_key: Option<String>,
 }
 
 impl SecurityYaml {

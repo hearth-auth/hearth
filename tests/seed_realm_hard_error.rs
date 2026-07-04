@@ -231,6 +231,14 @@ impl RbacEngine for FailSeedRbac {
             .list_group_members(realm_id, group_id, cursor, limit)
     }
 
+    fn resolve_role_permissions(
+        &self,
+        realm_id: &RealmId,
+        role_id: &hearth::rbac::RoleId,
+    ) -> Result<Vec<Permission>, RbacError> {
+        self.inner.resolve_role_permissions(realm_id, role_id)
+    }
+
     fn assign_role(
         &self,
         realm_id: &RealmId,
