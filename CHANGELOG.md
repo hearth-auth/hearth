@@ -108,6 +108,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is stored in the system realm under `sys:oidc:rsa:key` (WAL-synced) so previously-issued ID tokens
   remain verifiable after a restart. JWKS includes retiring keys during the configured grace window
   so tokens signed before an explicit key rotation continue to validate (HEA-1655).
+- **TOTP secrets and recovery codes encrypted at rest** — `StoredMfaState.secret_base32` and
+  pending recovery codes are now AES-256-GCM encrypted before being written to the WAL. The
+  encryption key is a per-realm DEK derived via HKDF-SHA256 from the realm's Ed25519 signing key
+  with domain label `hearth-totp-at-rest-v1`, providing cryptographic isolation between realms.
+  Recovery code entropy increased from 40 bits (8 chars) to 80 bits (16 chars) of the same
+  32-symbol unambiguous alphabet. Legacy plaintext records are transparently migrated on first
+  write (HEA-1675).
 - **Cross-realm BOLA hardening in REST admin handlers** — introduced `scoped_realm(auth, path_realm_id)`
   accessor that enforces `auth.realm_id == path_realm_id` (system realm bypasses as superuser) for
   every endpoint that carries a `{realm_id}` path parameter. Fixes 10 handlers previously vulnerable
