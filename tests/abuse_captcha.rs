@@ -153,6 +153,23 @@ fn turnstile_widget_html_site_key_is_attribute_safe() {
 }
 
 #[test]
+fn turnstile_widget_html_site_key_special_chars_escaped() {
+    // WEB-005: site_key with `"`, `<`, `>`, `&` must be HTML-escaped so that a
+    // config-injection attacker cannot break out of the data-sitekey attribute.
+    let cfg = TurnstileConfig {
+        site_key: r#"key"<script>alert(1)</script>&"#.to_string(),
+        secret_key: "sec".to_string(),
+        verify_url: "http://127.0.0.1:1/siteverify".to_string(),
+    };
+    let provider = TurnstileCaptchaProvider::new(cfg);
+    let html = provider.widget_html();
+    assert!(!html.contains("<script>"), "raw <script> tag must be escaped (WEB-005)");
+    assert!(html.contains("&lt;"), "< must be escaped to &lt; (WEB-005)");
+    assert!(html.contains("&amp;"), "& must be escaped to &amp; (WEB-005)");
+    assert!(html.contains("&quot;"), "\" must be escaped to &quot; (WEB-005)");
+}
+
+#[test]
 fn turnstile_empty_secret_key_accepted_at_construction() {
     // Construction must not panic even with an empty secret key.
     // Runtime verify() with an empty secret returns false at the API level

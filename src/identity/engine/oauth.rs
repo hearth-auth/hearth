@@ -2098,7 +2098,11 @@ impl EmbeddedIdentityEngine {
         let user_code = Self::generate_user_code(&rng)?;
 
         let now = self.clock.now();
-        let expires_in = 600_i64; // 10 minutes
+        // HSEC-008: prefer per-realm TTL from config; fall back to 600 s (10 min).
+        let expires_in = self
+            .get_realm(realm_id)?
+            .and_then(|r| r.config().device_code_ttl_secs)
+            .unwrap_or(600_i64);
         let interval = 5_i64;
         let device_code_hash = Self::sha256_hex(device_code.as_bytes());
 

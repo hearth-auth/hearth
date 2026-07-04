@@ -23,6 +23,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   existing TLS 1.2+1.3 behaviour. Recommended for high-security deployments (HEA-SEC-33).
 
 ### Security
+- **HSS-010 (Argon2 parallelism rehash)** — `argon2_params_need_rehash` now includes
+  the `p` (parallelism) parameter; a stale value triggers rehash on next login (HEA-SEC-34).
+- **WEB-005 (Captcha site_key XSS)** — Turnstile `site_key` is HTML-attribute-escaped
+  before insertion into widget HTML (HEA-SEC-34).
+- **OAUTH-04 (Redirect URI schemes)** — Non-reverse-DNS custom URI schemes emit a
+  `tracing::warn` at client registration; advises RFC 8252 §7.1 format (HEA-SEC-34).
+- **HSEC-008 (Device code TTL)** — Device code lifetime is now configurable per realm
+  via `auth.token.device_code_ttl`; hard-capped at 30 minutes (HEA-SEC-34).
+- **HSS-008 (Magic link invalidation)** — Requesting a new magic link invalidates all
+  existing unexpired tokens for the same email (HEA-SEC-34).
+- **WEB-009 (gRPC reflection auth)** — Reflection service now requires
+  `Authorization: Bearer <token>`; unauthenticated callers get `UNAUTHENTICATED` (HEA-SEC-34).
 - **Minimal security headers on all REST API responses** — `X-Content-Type-Options: nosniff`
   and `Referrer-Policy: no-referrer` are now applied to every HTTP response from the REST API,
   not only the web UI. Prevents MIME-type sniffing and referrer leakage (HEA-SEC-33).

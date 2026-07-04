@@ -277,12 +277,6 @@ pub enum AuditAction {
     /// Failure policy: `LogOnly`. The password was accepted (fail-open).
     /// Metadata carries `user_id` and `reason`.
     BreachCheckUnavailable,
-    /// TOTP enrollment was confirmed — the user verified their first TOTP code,
-    /// activating authenticator-app MFA on the account. Metadata: `user_id`.
-    MfaEnabled,
-    /// TOTP MFA was disabled for a user (by the user or an admin).
-    /// Metadata: `user_id`.
-    MfaDisabled,
     /// Adaptive MFA step-up was triggered because the login arrived from an
     /// unrecognised device or IP subnet.
     ///
@@ -540,8 +534,6 @@ impl AuditAction {
             Self::RequiredActionAutoCleared,
             Self::PasswordCompromisedRejected,
             Self::BreachCheckUnavailable,
-            Self::MfaEnabled,
-            Self::MfaDisabled,
             Self::StepUpMfaTriggered,
             Self::StepUpMfaCompleted,
             Self::SmsOtpEnrollmentStarted,
@@ -674,8 +666,6 @@ impl AuditAction {
             Self::RequiredActionAutoCleared => "required_action_auto_cleared",
             Self::PasswordCompromisedRejected => "password_compromised_rejected",
             Self::BreachCheckUnavailable => "breach_check_unavailable",
-            Self::MfaEnabled => "mfa_enabled",
-            Self::MfaDisabled => "mfa_disabled",
             Self::StepUpMfaTriggered => "step_up_mfa_triggered",
             Self::StepUpMfaCompleted => "step_up_mfa_completed",
             Self::SmsOtpEnrollmentStarted => "sms_otp_enrollment_started",
@@ -806,8 +796,6 @@ impl std::str::FromStr for AuditAction {
             "required_action_auto_cleared" => Ok(Self::RequiredActionAutoCleared),
             "password_compromised_rejected" => Ok(Self::PasswordCompromisedRejected),
             "breach_check_unavailable" => Ok(Self::BreachCheckUnavailable),
-            "mfa_enabled" => Ok(Self::MfaEnabled),
-            "mfa_disabled" => Ok(Self::MfaDisabled),
             "step_up_mfa_triggered" => Ok(Self::StepUpMfaTriggered),
             "step_up_mfa_completed" => Ok(Self::StepUpMfaCompleted),
             "sms_otp_enrollment_started" => Ok(Self::SmsOtpEnrollmentStarted),

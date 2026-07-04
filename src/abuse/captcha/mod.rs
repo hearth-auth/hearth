@@ -220,10 +220,19 @@ impl CaptchaProvider for TurnstileCaptchaProvider {
 /// `<!-- captcha-widget-slot -->` comment.  The snippet loads the Turnstile
 /// JavaScript and renders the interactive widget; Cloudflare's JS populates a
 /// hidden `cf-turnstile-response` field that the form submits as `captcha_token`.
+/// HTML-escapes a string for safe embedding as an HTML attribute value (WEB-005).
+fn html_attr_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 fn build_widget_html(site_key: &str) -> String {
+    let safe_key = html_attr_escape(site_key);
     format!(
         r#"<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-<div class="cf-turnstile mt-2" data-sitekey="{site_key}" data-response-field-name="captcha_token" data-theme="dark"></div>"#,
+<div class="cf-turnstile mt-2" data-sitekey="{safe_key}" data-response-field-name="captcha_token" data-theme="dark"></div>"#,
     )
 }
 

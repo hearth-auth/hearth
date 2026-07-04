@@ -7691,6 +7691,31 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .get_user_by_email(realm_id, &normalized)?
             .map(|u| u.id().as_uuid().to_string());
 
+        // HSS-008: invalidate all existing unexpired magic link tokens for this
+        // email before issuing a new one. Prevents a previously-intercepted link
+        // from remaining valid after the account holder requests a fresh one.
+        let ml_prefix = keys::magic_link_token_scan_prefix();
+        let ml_end = crate::storage::prefix_scan_end(&ml_prefix);
+        let now_micros = self.clock.now().as_micros();
+        if let Ok(entries) = self.storage.scan(realm_id, &ml_prefix, &ml_end) {
+            for entry in entries {
+                if let Ok(mut prior) =
+                    serde_json::from_slice::<StoredMagicLink>(&entry.value)
+                {
+                    let age = now_micros - prior.created_at_micros;
+                    if !prior.used
+                        && prior.email == normalized
+                        && age < MAGIC_LINK_EXPIRY_MICROS
+                    {
+                        prior.used = true;
+                        if let Ok(val) = serde_json::to_vec(&prior) {
+                            let _ = self.storage.put(realm_id, &entry.key, &val);
+                        }
+                    }
+                }
+            }
+        }
+
         // 4. Generate random token
         let token = magic_link::generate_magic_link_token()?;
 

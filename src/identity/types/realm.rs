@@ -393,6 +393,12 @@ pub struct RealmConfig {
     /// 30 minutes unless `allow_unsafe_ttl` is also set in the realm's YAML.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub magic_link_ttl_micros: Option<i64>,
+    /// Per-realm device authorization code TTL in seconds (HSEC-008).
+    ///
+    /// `None` falls back to the compiled default (600 seconds / 10 minutes).
+    /// Hard-capped at 1800 seconds unless `allow_unsafe_ttl` is set in YAML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_code_ttl_secs: Option<i64>,
     /// WebAuthn attestation policy for this realm (A-13).
     ///
     /// `None` means no policy — attestation format and AAGUID are unrestricted
