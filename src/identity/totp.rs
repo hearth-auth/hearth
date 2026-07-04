@@ -6,8 +6,11 @@
 
 use std::fmt;
 
+use base64::Engine as _;
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use ring::hkdf;
 use ring::hmac;
-use ring::rand::SecureRandom;
+use ring::rand::{generate, SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq as _;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -28,7 +31,10 @@ const TOTP_WINDOW: u64 = 1;
 const RECOVERY_CODE_COUNT: usize = 8;
 
 /// Length of each recovery code (characters).
-const RECOVERY_CODE_LENGTH: usize = 8;
+///
+/// 16 chars × 5 bits/char (32-symbol alphabet) = 80-bit entropy, which is
+/// brute-force-proof for single-use codes even offline.
+const RECOVERY_CODE_LENGTH: usize = 16;
 
 /// Character set for recovery codes — excludes confusable characters (0, O, 1, I).
 const RECOVERY_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -337,6 +343,203 @@ pub(crate) fn verify_recovery_code(
     Ok(None)
 }
 
+// ===== At-rest encryption for MFA state (CRYPTO-001, CRYPTO-002) =====
+
+/// Encrypted on-disk representation of [`StoredMfaState`].
+///
+/// Sensitive fields (`secret_enc`, `pending_codes_enc`) are AES-256-GCM
+/// ciphertexts. Non-sensitive fields (`enabled`, `recovery_code_hashes`, …)
+/// are stored plaintext so they can be updated without a full decrypt cycle.
+///
+/// Wire format for encrypted fields: `base64std(nonce[12] || ciphertext || GCM-tag[16])`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct StoredMfaOnDisk {
+    /// AES-256-GCM encrypted base32-encoded TOTP secret.
+    pub secret_enc: String,
+    pub enabled: bool,
+    /// Argon2id hashes of recovery codes — already one-way, stored plaintext.
+    pub recovery_code_hashes: Vec<Option<String>>,
+    pub last_used_step: Option<u64>,
+    pub enabled_at: Option<i64>,
+    /// AES-256-GCM encrypted JSON-serialized `Vec<String>` of pending plaintext codes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_codes_enc: Option<String>,
+}
+
+/// Derives a 32-byte AES-256-GCM key from a realm signing key via HKDF-SHA256.
+///
+/// The domain label `b"hearth-totp-at-rest-v1"` scopes this DEK to TOTP
+/// secret storage and prevents cross-purpose key reuse.
+pub(crate) fn derive_totp_dek(signing_key_pkcs8: &[u8]) -> Result<[u8; 32], IdentityError> {
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"hearth-totp-at-rest-v1");
+    let prk = salt.extract(signing_key_pkcs8);
+    let mut key = [0u8; 32];
+    prk.expand(&[b"aes-256-gcm"], hkdf::HKDF_SHA256)
+        .and_then(|okm| okm.fill(&mut key))
+        .map_err(|_| IdentityError::SigningError {
+            reason: "TOTP DEK HKDF expansion failed".to_string(),
+        })?;
+    Ok(key)
+}
+
+/// AES-256-GCM encrypts `plaintext`.
+///
+/// Returns `base64std(nonce[12] || ciphertext || GCM-tag[16])`.
+pub(crate) fn encrypt_totp_field(
+    plaintext: &[u8],
+    key_bytes: &[u8; 32],
+) -> Result<String, IdentityError> {
+    let rng = SystemRandom::new();
+    let nonce_bytes = generate::<[u8; 12]>(&rng)
+        .map_err(|_| IdentityError::SigningError {
+            reason: "TOTP nonce generation failed".to_string(),
+        })?
+        .expose();
+
+    let unbound =
+        UnboundKey::new(&AES_256_GCM, key_bytes).map_err(|_| IdentityError::SigningError {
+            reason: "TOTP AES key init failed".to_string(),
+        })?;
+    let aes_key = LessSafeKey::new(unbound);
+    let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+
+    let mut buf = plaintext.to_vec();
+    aes_key
+        .seal_in_place_append_tag(nonce, Aad::empty(), &mut buf)
+        .map_err(|_| IdentityError::SigningError {
+            reason: "TOTP field encryption failed".to_string(),
+        })?;
+
+    let mut combined = Vec::with_capacity(12 + buf.len());
+    combined.extend_from_slice(&nonce_bytes);
+    combined.extend_from_slice(&buf);
+    Ok(base64::engine::general_purpose::STANDARD.encode(&combined))
+}
+
+/// Decrypts a blob produced by [`encrypt_totp_field`].
+///
+/// Returns the original plaintext bytes on success, or an error if the
+/// data is truncated, the base64 is invalid, or GCM authentication fails.
+pub(crate) fn decrypt_totp_field(
+    encoded: &str,
+    key_bytes: &[u8; 32],
+) -> Result<Vec<u8>, IdentityError> {
+    use base64::Engine as _;
+    let combined = base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|e| IdentityError::Serialization {
+            reason: format!("TOTP field base64 decode failed: {e}"),
+        })?;
+
+    // nonce (12) + at least GCM tag (16)
+    if combined.len() < 28 {
+        return Err(IdentityError::Serialization {
+            reason: "TOTP encrypted field too short (expected ≥28 bytes)".to_string(),
+        });
+    }
+    let nonce_bytes: [u8; 12] = combined[..12].try_into().expect("12-byte slice");
+    let mut buf = combined[12..].to_vec();
+
+    let unbound =
+        UnboundKey::new(&AES_256_GCM, key_bytes).map_err(|_| IdentityError::SigningError {
+            reason: "TOTP AES key init failed".to_string(),
+        })?;
+    let aes_key = LessSafeKey::new(unbound);
+    let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+
+    let plaintext = aes_key
+        .open_in_place(nonce, Aad::empty(), &mut buf)
+        .map_err(|_| IdentityError::SigningError {
+            reason: "TOTP field decryption failed — corrupted data or wrong key".to_string(),
+        })?;
+    Ok(plaintext.to_vec())
+}
+
+/// Serializes `state` to AES-256-GCM-encrypted JSON bytes for WAL storage.
+///
+/// `secret_base32` and `pending_recovery_codes` are encrypted under `dek`.
+/// All other fields are stored in the clear (they are non-sensitive).
+pub(crate) fn serialize_mfa_state(
+    state: &StoredMfaState,
+    dek: &[u8; 32],
+) -> Result<Vec<u8>, IdentityError> {
+    let secret_enc = encrypt_totp_field(state.secret_base32.as_bytes(), dek)?;
+
+    let pending_codes_enc = state
+        .pending_recovery_codes
+        .as_ref()
+        .map(|codes| -> Result<String, IdentityError> {
+            let json = serde_json::to_string(codes).map_err(|e| IdentityError::Serialization {
+                reason: e.to_string(),
+            })?;
+            encrypt_totp_field(json.as_bytes(), dek)
+        })
+        .transpose()?;
+
+    let on_disk = StoredMfaOnDisk {
+        secret_enc,
+        enabled: state.enabled,
+        recovery_code_hashes: state.recovery_code_hashes.clone(),
+        last_used_step: state.last_used_step,
+        enabled_at: state.enabled_at,
+        pending_codes_enc,
+    };
+
+    serde_json::to_vec(&on_disk).map_err(|e| IdentityError::Serialization {
+        reason: e.to_string(),
+    })
+}
+
+/// Deserializes WAL bytes into a [`StoredMfaState`], decrypting sensitive fields.
+///
+/// Handles both v2 (encrypted `StoredMfaOnDisk`) and v1 (legacy plaintext
+/// `StoredMfaState`) formats transparently.  On a legacy record a warning is
+/// emitted; the next `save_mfa_state` call will upgrade the record to v2.
+pub(crate) fn deserialize_mfa_state(
+    bytes: &[u8],
+    dek: &[u8; 32],
+) -> Result<StoredMfaState, IdentityError> {
+    // v2: `secret_enc` is a required field — present only in encrypted records.
+    match serde_json::from_slice::<StoredMfaOnDisk>(bytes) {
+        Ok(on_disk) => {
+            let secret_bytes = decrypt_totp_field(&on_disk.secret_enc, dek)?;
+            let secret_base32 =
+                String::from_utf8(secret_bytes).map_err(|_| IdentityError::Serialization {
+                    reason: "TOTP secret UTF-8 decode failed".to_string(),
+                })?;
+
+            let pending_recovery_codes = on_disk
+                .pending_codes_enc
+                .as_ref()
+                .map(|enc| -> Result<Vec<String>, IdentityError> {
+                    let json_bytes = decrypt_totp_field(enc, dek)?;
+                    serde_json::from_slice(&json_bytes).map_err(|e| IdentityError::Serialization {
+                        reason: e.to_string(),
+                    })
+                })
+                .transpose()?;
+
+            Ok(StoredMfaState {
+                secret_base32,
+                enabled: on_disk.enabled,
+                recovery_code_hashes: on_disk.recovery_code_hashes,
+                last_used_step: on_disk.last_used_step,
+                enabled_at: on_disk.enabled_at,
+                pending_recovery_codes,
+            })
+        }
+        // v1 legacy plaintext — migrate transparently on next write.
+        Err(_) => {
+            tracing::warn!("loaded legacy plaintext MFA state — will be re-encrypted on next save");
+            serde_json::from_slice::<StoredMfaState>(bytes).map_err(|e| {
+                IdentityError::Serialization {
+                    reason: e.to_string(),
+                }
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,6 +755,134 @@ mod tests {
             !debug.contains(&secret.to_base32()),
             "debug must not reveal secret"
         );
+    }
+
+    // ===== CRYPTO-001: secret not in plaintext in storage =====
+
+    #[test]
+    fn serialize_mfa_state_secret_not_plaintext_in_wal() {
+        let secret = TotpSecret::generate().expect("generate");
+        let secret_base32 = secret.to_base32();
+        let state = StoredMfaState {
+            secret_base32: secret_base32.clone(),
+            enabled: false,
+            recovery_code_hashes: Vec::new(),
+            last_used_step: None,
+            enabled_at: None,
+            pending_recovery_codes: None,
+        };
+        let dek = [42u8; 32];
+        let bytes = serialize_mfa_state(&state, &dek).expect("serialize");
+        let serialized_str = String::from_utf8_lossy(&bytes);
+        assert!(
+            !serialized_str.contains(&secret_base32),
+            "plaintext TOTP secret must not appear in WAL bytes; got: {serialized_str}"
+        );
+        // Must also not contain the field name from the legacy format.
+        assert!(
+            !serialized_str.contains("secret_base32"),
+            "legacy field name 'secret_base32' must not appear in WAL bytes"
+        );
+    }
+
+    // ===== CRYPTO-002: pending recovery codes not in plaintext in storage =====
+
+    #[test]
+    fn serialize_mfa_state_pending_codes_not_plaintext_in_wal() {
+        let codes = vec![
+            "ABCDEFGHABCDEFGH".to_string(),
+            "XYZXYZXYZXYZXYZX".to_string(),
+        ];
+        let state = StoredMfaState {
+            secret_base32: "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".to_string(),
+            enabled: false,
+            recovery_code_hashes: Vec::new(),
+            last_used_step: None,
+            enabled_at: None,
+            pending_recovery_codes: Some(codes.clone()),
+        };
+        let dek = [7u8; 32];
+        let bytes = serialize_mfa_state(&state, &dek).expect("serialize");
+        let serialized_str = String::from_utf8_lossy(&bytes);
+        for code in &codes {
+            assert!(
+                !serialized_str.contains(code.as_str()),
+                "plaintext recovery code '{code}' must not appear in WAL bytes"
+            );
+        }
+        assert!(
+            !serialized_str.contains("pending_recovery_codes"),
+            "legacy field name must not appear in WAL bytes"
+        );
+    }
+
+    // ===== Encrypt/decrypt roundtrip =====
+
+    #[test]
+    fn serialize_deserialize_mfa_state_roundtrip() {
+        let codes = generate_recovery_codes().expect("generate");
+        let state = StoredMfaState {
+            secret_base32: TotpSecret::generate().expect("gen").to_base32(),
+            enabled: false,
+            recovery_code_hashes: Vec::new(),
+            last_used_step: None,
+            enabled_at: None,
+            pending_recovery_codes: Some(codes),
+        };
+        let dek = [99u8; 32];
+        let bytes = serialize_mfa_state(&state, &dek).expect("serialize");
+        let restored = deserialize_mfa_state(&bytes, &dek).expect("deserialize");
+        assert_eq!(restored.secret_base32, state.secret_base32);
+        assert_eq!(
+            restored.pending_recovery_codes,
+            state.pending_recovery_codes
+        );
+        assert_eq!(restored.enabled, state.enabled);
+    }
+
+    // ===== Wrong key fails decryption =====
+
+    #[test]
+    fn deserialize_mfa_state_wrong_key_returns_error() {
+        let state = StoredMfaState {
+            secret_base32: TotpSecret::generate().expect("gen").to_base32(),
+            enabled: false,
+            recovery_code_hashes: Vec::new(),
+            last_used_step: None,
+            enabled_at: None,
+            pending_recovery_codes: None,
+        };
+        let dek_correct = [1u8; 32];
+        let dek_wrong = [2u8; 32];
+        let bytes = serialize_mfa_state(&state, &dek_correct).expect("serialize");
+        let result = deserialize_mfa_state(&bytes, &dek_wrong);
+        assert!(
+            result.is_err(),
+            "decryption with wrong key must fail, not silently return garbage"
+        );
+    }
+
+    // ===== CRYPTO-003: recovery codes are 16 chars (80-bit entropy) =====
+
+    #[test]
+    fn recovery_codes_have_16_char_80_bit_entropy() {
+        let codes = generate_recovery_codes().expect("generate");
+        assert_eq!(
+            codes.len(),
+            RECOVERY_CODE_COUNT,
+            "must generate {RECOVERY_CODE_COUNT} codes"
+        );
+        for code in &codes {
+            assert_eq!(
+                code.len(),
+                16,
+                "each code must be 16 chars (80-bit entropy); got {} chars",
+                code.len()
+            );
+        }
+        // All codes are unique
+        let unique: std::collections::HashSet<&String> = codes.iter().collect();
+        assert_eq!(unique.len(), codes.len(), "all codes must be unique");
     }
 
     // ===== TotpEnrollment Debug is redacted =====

@@ -175,7 +175,8 @@ fn build_rig() -> Rig {
         onboarding,
         CookieSecret::from_bytes(COOKIE_SECRET),
         None,
-    );
+    )
+    .with_dev_mode(true);
     let app = web::router(state);
 
     Rig {

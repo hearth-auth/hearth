@@ -375,6 +375,15 @@ pub struct IdentityConfig {
     ///
     /// Default: `30 * 86_400` (30 days).
     pub slug_cooldown_secs: u64,
+    /// AES-256-GCM key-encryption key (KEK) for protecting cryptographic key
+    /// material stored in the WAL at rest.
+    ///
+    /// When `None`, key bytes are stored unencrypted (legacy / dev mode).
+    /// When `Some`, every signing-key and DPoP-nonce-secret write is wrapped
+    /// in an HKEY envelope (see `key_encryption` module).  Existing plaintext
+    /// entries continue to be read transparently and are re-encrypted on the
+    /// next key rotation.
+    pub key_encryption_key: Option<crate::identity::key_encryption::StorageKek>,
 }
 
 impl Default for IdentityConfig {
@@ -391,6 +400,7 @@ impl Default for IdentityConfig {
             cascade_background_threshold: 1_000,
             reserved_slugs: Vec::new(),
             slug_cooldown_secs: 30 * 86_400,
+            key_encryption_key: None,
         }
     }
 }
@@ -959,7 +969,8 @@ impl EmbeddedIdentityEngine {
         audit: Arc<dyn AuditEngine>,
     ) -> Result<Self, IdentityError> {
         let dummy_hash = credentials::compute_dummy_hash(&config.credential);
-        let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage)?);
+        let kek = config.key_encryption_key.as_ref().map(|k| k.as_bytes());
+        let signing_key = Arc::new(Self::load_or_persist_global_signing_key(&storage, kek)?);
         let device_fp = Arc::new(DeviceFingerprintStore::new(Arc::clone(&storage)));
         let sv_store = Arc::new(SessionVersionStore::new(
             Arc::clone(&storage),
@@ -1665,7 +1676,13 @@ impl EmbeddedIdentityEngine {
         let key_storage_key = keys::encode_realm_signing_key(&sys_realm);
         // Zeroizing ensures the local PKCS#8 copy is actively overwritten
         // when dropped rather than relying on the allocator (HEA-750 M1).
-        let key_bytes = Zeroizing::new(realm_signing_key.pkcs8_bytes().to_vec());
+        let key_plaintext = Zeroizing::new(realm_signing_key.pkcs8_bytes().to_vec());
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let key_stored = crate::identity::key_encryption::wrap_key(&key_plaintext, kek)?;
         // Note: we intentionally do NOT write a name index entry — that
         // would let `get_realm_by_name("system")` find it, violating the
         // "invisible to lookups" invariant.
@@ -1673,10 +1690,7 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put_batch(
                 &sys_realm,
-                &[
-                    (realm_key, realm_bytes),
-                    (key_storage_key, key_bytes.to_vec()),
-                ],
+                &[(realm_key, realm_bytes), (key_storage_key, key_stored)],
             )
             .map_err(Self::storage_err)?;
 
@@ -1699,24 +1713,31 @@ impl EmbeddedIdentityEngine {
     /// Stored under the system realm namespace as `sys:global:key` — survives
     /// `kill -9` via WAL fsync before returning. Called before `Self` is
     /// constructed so it accepts `&Arc<dyn StorageEngine>` directly.
+    ///
+    /// When `kek` is `Some`, the stored bytes are AES-256-GCM-encrypted via the
+    /// HKEY envelope format (see `key_encryption` module).  Existing plaintext
+    /// entries written before encryption was enabled are read transparently.
     fn load_or_persist_global_signing_key(
         storage: &Arc<dyn StorageEngine>,
+        kek: Option<&[u8; 32]>,
     ) -> Result<SigningKey, IdentityError> {
         let sys_realm = keys::system_realm_id();
         let storage_key = keys::encode_global_signing_key();
 
-        if let Some(key_bytes) = storage
+        if let Some(raw) = storage
             .get(&sys_realm, &storage_key)
             .map_err(|e| IdentityError::Storage(Box::new(e)))?
         {
+            let key_bytes = crate::identity::key_encryption::unwrap_key(&raw, kek)?;
             return SigningKey::from_pkcs8(&key_bytes);
         }
 
         // First startup: generate, persist (WAL-synced), then return.
         let signing_key = SigningKey::generate()?;
-        let key_bytes = signing_key.pkcs8_bytes().to_vec();
+        let plaintext = Zeroizing::new(signing_key.pkcs8_bytes().to_vec());
+        let stored = crate::identity::key_encryption::wrap_key(&plaintext, kek)?;
         storage
-            .put(&sys_realm, &storage_key, &key_bytes)
+            .put(&sys_realm, &storage_key, &stored)
             .map_err(|e| IdentityError::Storage(Box::new(e)))?;
 
         Ok(signing_key)
@@ -2268,7 +2289,11 @@ impl EmbeddedIdentityEngine {
         }
     }
 
-    /// Loads the stored MFA state for a user.
+    /// Loads the stored MFA state for a user, decrypting sensitive fields.
+    ///
+    /// Uses HKDF-SHA256 keyed from the realm signing key to derive a per-realm
+    /// TOTP DEK. Handles both the v2 encrypted format and the legacy v1
+    /// plaintext format (migrated transparently on the next save).
     fn load_mfa_state(
         &self,
         realm_id: &RealmId,
@@ -2281,27 +2306,31 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
         match bytes {
             Some(b) => {
-                let state: StoredMfaState =
-                    serde_json::from_slice(&b).map_err(|e| IdentityError::Serialization {
-                        reason: e.to_string(),
-                    })?;
+                let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+                let mut dek = Zeroizing::new(totp::derive_totp_dek(signing_key.pkcs8_bytes())?);
+                let state = totp::deserialize_mfa_state(&b, &dek)?;
+                dek.zeroize();
                 Ok(Some(state))
             }
             None => Ok(None),
         }
     }
 
-    /// Persists MFA state for a user.
+    /// Persists MFA state for a user, encrypting sensitive fields before write.
+    ///
+    /// `secret_base32` and `pending_recovery_codes` are AES-256-GCM encrypted
+    /// with a DEK derived from the realm signing key via HKDF-SHA256.
     fn save_mfa_state(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         state: &StoredMfaState,
     ) -> Result<(), IdentityError> {
+        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+        let mut dek = Zeroizing::new(totp::derive_totp_dek(signing_key.pkcs8_bytes())?);
         let key = keys::encode_mfa_totp_key(user_id);
-        let bytes = serde_json::to_vec(state).map_err(|e| IdentityError::Serialization {
-            reason: e.to_string(),
-        })?;
+        let bytes = totp::serialize_mfa_state(state, &dek)?;
+        dek.zeroize();
         self.storage
             .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)
@@ -3158,11 +3187,17 @@ impl EmbeddedIdentityEngine {
         // Cache miss: load key bytes from storage.
         let sys_realm = keys::system_realm_id();
         let key_storage_key = keys::encode_realm_signing_key(realm_id);
-        let key_bytes = self
+        let raw = self
             .storage
             .get(&sys_realm, &key_storage_key)
             .map_err(Self::storage_err)?
             .ok_or(IdentityError::RealmNotFound)?;
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let key_bytes = crate::identity::key_encryption::unwrap_key(&raw, kek)?;
 
         let signing_key = Arc::new(SigningKey::from_pkcs8(&key_bytes)?);
 
@@ -4142,7 +4177,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let key_storage_key = keys::encode_realm_signing_key(&realm_id);
         // Zeroizing ensures the local PKCS#8 copy is actively overwritten
         // when dropped rather than relying on the allocator (HEA-750 M1).
-        let key_bytes = Zeroizing::new(realm_signing_key.pkcs8_bytes().to_vec());
+        let key_plaintext = Zeroizing::new(realm_signing_key.pkcs8_bytes().to_vec());
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let key_stored = crate::identity::key_encryption::wrap_key(&key_plaintext, kek)?;
 
         // Name index: realm:name:{name} → realm UUID bytes
         let name_key = keys::encode_realm_name(&request.name);
@@ -4155,7 +4196,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 &sys_realm,
                 &[
                     (realm_key, realm_bytes),
-                    (key_storage_key, key_bytes.to_vec()),
+                    (key_storage_key, key_stored),
                     (name_key, name_value),
                 ],
             )
@@ -4666,9 +4707,18 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 if deadline <= now_secs as u64 {
                     continue; // Grace period expired — omit from JWKS.
                 }
-                if let Ok(retiring_key) = SigningKey::from_pkcs8(&entry.value) {
-                    let retiring_jwk = retiring_key.to_jwks();
-                    jwks.keys.extend(retiring_jwk.keys);
+                let kek = self
+                    .config
+                    .key_encryption_key
+                    .as_ref()
+                    .map(|k| k.as_bytes());
+                if let Ok(plaintext) =
+                    crate::identity::key_encryption::unwrap_key(&entry.value, kek)
+                {
+                    if let Ok(retiring_key) = SigningKey::from_pkcs8(&plaintext) {
+                        let retiring_jwk = retiring_key.to_jwks();
+                        jwks.keys.extend(retiring_jwk.keys);
+                    }
                 }
             }
         }
@@ -4870,9 +4920,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // Generate and store the new active signing key.
         let new_key = SigningKey::generate()?;
         let new_pkcs8 = Zeroizing::new(new_key.pkcs8_bytes().to_vec());
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
         let key_storage_key = keys::encode_realm_signing_key(realm_id);
+        let new_stored = crate::identity::key_encryption::wrap_key(&new_pkcs8, kek)?;
         self.storage
-            .put(&sys_realm, &key_storage_key, &new_pkcs8)
+            .put(&sys_realm, &key_storage_key, &new_stored)
             .map_err(Self::storage_err)?;
 
         // Store the old key as a retiring key with its expiry deadline.
@@ -4880,8 +4936,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let deadline_secs = now_secs.saturating_add(grace_period_secs);
         let retiring_key_storage =
             keys::encode_realm_retiring_key(realm_id, deadline_secs, &old_key_id);
+        let old_stored = crate::identity::key_encryption::wrap_key(&old_pkcs8, kek)?;
         self.storage
-            .put(&sys_realm, &retiring_key_storage, &old_pkcs8)
+            .put(&sys_realm, &retiring_key_storage, &old_stored)
             .map_err(Self::storage_err)?;
 
         // Invalidate the active key cache so realm_jwks / token issuance pick up the new key.
@@ -11823,13 +11880,19 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             cert: Vec<u8>,
         }
 
-        let key = if let Some(bytes) = self
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let key = if let Some(raw) = self
             .storage
             .get(&sys_realm, &storage_key)
             .map_err(Self::storage_err)?
         {
+            let json_bytes = crate::identity::key_encryption::unwrap_key(&raw, kek)?;
             let stored: Stored =
-                serde_json::from_slice(&bytes).map_err(|e| IdentityError::Serialization {
+                serde_json::from_slice(&json_bytes).map_err(|e| IdentityError::Serialization {
                     reason: e.to_string(),
                 })?;
             crate::identity::tokens::RsaSigningKey::from_pkcs8_and_cert(
@@ -11838,13 +11901,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             )?
         } else {
             let generated = crate::identity::tokens::RsaSigningKey::generate(issuer_cn, 3650)?;
-            let stored = Stored {
+            let stored_struct = Stored {
                 pkcs8: generated.pkcs8_bytes().to_vec(),
                 cert: generated.cert_der().to_vec(),
             };
-            let body = serde_json::to_vec(&stored).map_err(|e| IdentityError::Serialization {
-                reason: e.to_string(),
-            })?;
+            let json_bytes =
+                serde_json::to_vec(&stored_struct).map_err(|e| IdentityError::Serialization {
+                    reason: e.to_string(),
+                })?;
+            let body = crate::identity::key_encryption::wrap_key(&json_bytes, kek)?;
             self.storage
                 .put(&sys_realm, &storage_key, &body)
                 .map_err(Self::storage_err)?;
@@ -12539,19 +12604,25 @@ impl IdentityEngine for EmbeddedIdentityEngine {
 
         // Slow path: load from storage or generate a fresh secret.
         let secret_key = keys::dpop_nonce_secret_key();
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
 
-        let secret: [u8; 32] = if let Some(stored) = self
+        let secret: [u8; 32] = if let Some(raw) = self
             .storage
             .get(realm_id, &secret_key)
             .map_err(Self::storage_err)?
         {
-            stored
+            let plaintext = crate::identity::key_encryption::unwrap_key(&raw, kek)?;
+            plaintext
                 .as_slice()
                 .try_into()
                 .map_err(|_| IdentityError::Internal {
                     reason: format!(
                         "dpop nonce secret has wrong length {} (expected 32)",
-                        stored.len()
+                        plaintext.len()
                     ),
                 })?
         } else {
@@ -12561,8 +12632,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             rng.fill(&mut bytes).map_err(|_| IdentityError::Internal {
                 reason: "dpop nonce secret: ring CSPRNG error".to_string(),
             })?;
+            let stored = crate::identity::key_encryption::wrap_key(&bytes, kek)?;
             self.storage
-                .put(realm_id, &secret_key, &bytes)
+                .put(realm_id, &secret_key, &stored)
                 .map_err(Self::storage_err)?;
             bytes
         };

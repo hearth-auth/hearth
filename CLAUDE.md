@@ -93,28 +93,38 @@ curl -X POST http://127.0.0.1:8420/admin/bootstrap  # dev-only, creates realm+ad
 
 ### Bootstrap & Browser Login (dev-only)
 
-The bootstrap endpoint is **idempotent** — safe to call multiple times.
+The bootstrap endpoint creates credentials on **first call only**. Re-bootstrap
+(when the dev-realm already exists) refreshes tokens but does **not** change the
+admin password — include the Bearer token from the first bootstrap.
 
 ```bash
 # 1. Start the server (in background or a separate terminal)
 make dev &
 # Wait for: "listening on 127.0.0.1:8420"
 
-# 2. Bootstrap — creates the system realm + an admin user + an API token
+# 2. First bootstrap — creates realm + admin user + API token.
+#    admin_password is returned ONLY on this first call — save it securely.
 BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap)
 REALM_ID=$(echo "$BOOTSTRAP" | jq -r '.realm_id')
 ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
+ADMIN_PASSWORD=$(echo "$BOOTSTRAP" | jq -r '.admin_password')
 
-echo "Realm:  $REALM_ID"
-echo "Token:  $ADMIN_TOKEN"
+echo "Realm:    $REALM_ID"
+echo "Token:    $ADMIN_TOKEN"
+echo "Password: $ADMIN_PASSWORD"   # store this — it will not be shown again
+
+# 3. Re-bootstrap (after server restart / token expiry) — requires the Bearer token.
+BOOTSTRAP=$(curl -sf -X POST http://127.0.0.1:8420/admin/bootstrap \
+  -H "Authorization: Bearer $ADMIN_TOKEN")
+ADMIN_TOKEN=$(echo "$BOOTSTRAP" | jq -r '.access_token')
 ```
 
 **Browser login:** navigate to `http://127.0.0.1:8420/ui/admin/login` and sign in with:
 
-| Field    | Value             |
-|----------|-------------------|
-| Email    | `admin@hearth.test` |
-| Password | `HearthTest123!`  |
+| Field    | Value                                      |
+|----------|--------------------------------------------|
+| Email    | `admin@hearth.test`                        |
+| Password | the `admin_password` from first bootstrap  |
 
 A successful login drops you at the admin dashboard (`/admin`).
 

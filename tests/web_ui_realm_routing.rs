@@ -108,6 +108,7 @@ fn build_rig(realm_names: &[&str], default_realm: Option<&str>) -> Rig {
         CookieSecret::from_bytes(COOKIE_SECRET),
         None,
     )
+    .with_dev_mode(true)
     .with_default_realm(default_realm.map(str::to_string));
     let app = web::router(state);
 

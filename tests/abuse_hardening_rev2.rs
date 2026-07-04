@@ -1,6 +1,11 @@
-//! Unit + integration tests for HEA-1213 hardening edges rev2.
+//! Unit + integration tests for HEA-1213 hardening edges rev2 + HEA-SEC-10.
 //!
 //! Coverage taxonomy (D-4 per feature):
+//!
+//! **HEA-SEC-10 — dev_mode non-loopback bind rejection**
+//! - Unit: `dev_mode = true` + `0.0.0.0` is rejected by `validate`
+//! - Unit: `dev_mode = true` + `0.0.0.0` appears in `validate_all` issues
+//! - Unit: `dev_mode = true` + `127.0.0.1` (loopback) passes `validate`
 //!
 //! **A-31 — Per-realm JWT leeway (federation)**
 //! - Unit: default leeway (60 s) allows token expired exactly 60 s ago
@@ -513,5 +518,61 @@ fn a36_agent_auth_capabilities_advanced_passes_with_identity() {
     assert!(
         issues.is_empty(),
         "capabilities.advanced=true with identity=true must produce NO validation error, got: {issues:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HEA-SEC-10 — dev_mode must not bind to non-loopback addresses
+// ---------------------------------------------------------------------------
+
+/// `dev_mode = true` with a non-loopback bind address must be rejected by
+/// `Config::validate` with a `server.bind_address` field error.
+#[test]
+fn sec10_dev_mode_with_public_bind_fails_validate() {
+    let yaml = "dev_mode: true\nserver:\n  bind_address: \"0.0.0.0\"\n";
+    let err = Config::from_yaml_str(yaml).expect_err("non-loopback dev_mode must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("server.bind_address"),
+        "error must name the field; got: {msg}"
+    );
+    assert!(
+        msg.contains("loopback"),
+        "error must explain the loopback requirement; got: {msg}"
+    );
+}
+
+/// `dev_mode = true` with a non-loopback bind address must appear in
+/// `validate_all` issues so the admin realm config editor surfaces it.
+#[test]
+fn sec10_dev_mode_with_public_bind_flagged_by_validate_all() {
+    let yaml = "dev_mode: true\nserver:\n  bind_address: \"0.0.0.0\"\n";
+    let cfg = Config::from_yaml_str_unchecked(yaml).expect("parse");
+    let issues: Vec<_> = cfg
+        .validate_all()
+        .into_iter()
+        .filter(|i| i.field == "server.bind_address")
+        .collect();
+    assert!(
+        !issues.is_empty(),
+        "validate_all must flag dev_mode + non-loopback bind_address"
+    );
+    assert!(
+        issues[0].reason.contains("loopback"),
+        "issue reason must explain the loopback requirement; got: {}",
+        issues[0].reason
+    );
+}
+
+/// `dev_mode = true` with `127.0.0.1` (loopback) must pass validation.
+/// This is the intended dev workflow — confirm no regression.
+#[test]
+fn sec10_dev_mode_with_loopback_bind_passes_validate() {
+    // Config::dev() uses 127.0.0.1; calling validate via from_yaml_str must pass.
+    let yaml = "dev_mode: true\nserver:\n  bind_address: \"127.0.0.1\"\n";
+    let cfg = Config::from_yaml_str(yaml);
+    assert!(
+        cfg.is_ok(),
+        "dev_mode with loopback bind must be valid, got: {cfg:?}"
     );
 }

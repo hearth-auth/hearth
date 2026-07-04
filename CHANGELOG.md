@@ -18,6 +18,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **Dev mode fail-closed defaults** — Server refuses to start with `--dev` when
+  `server.bind_address` is non-loopback (blocks network exposure of weak Argon2,
+  CSRF bypass, and plaintext token logging). `WebState::new()` now defaults
+  `dev_mode = false`; tests requiring the CSRF bypass must call
+  `.with_dev_mode(true)` explicitly. Setup token is truncated to an 8-char
+  prefix in dev-mode startup logs; full token remains readable from the
+  `.setup_token` file. ERROR-level startup log lists all active security
+  reductions when `dev_mode = true` (HEA-1678).
 - **Bootstrap admin password is now randomly generated** — `POST /admin/bootstrap` generates
   a cryptographically random 32-character password via `ring::rand::SystemRandom` on first
   call and returns it once in `admin_password`. Re-bootstrap no longer resets the existing

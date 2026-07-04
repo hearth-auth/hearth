@@ -105,6 +105,7 @@ fn minimal_web_state() -> WebState {
         CookieSecret::random(),
         None,
     )
+    .with_dev_mode(true)
 }
 
 /// Builds a minimal state and returns both the state and the seeded default realm id.

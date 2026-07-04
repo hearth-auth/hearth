@@ -479,3 +479,63 @@ async fn f6_mfa_challenge_mismatched_csrf_rejected() {
         "MFA challenge with invalid pending cookie must not succeed"
     );
 }
+
+// ============================================================================
+// HEA-SEC-10: WebState::new() must default to dev_mode = false (fail-closed)
+// ============================================================================
+
+/// `WebState::new()` must default `dev_mode = false` so CSRF enforcement
+/// is fail-closed. Tests that require the bypass must call `.with_dev_mode(true)`.
+#[test]
+fn web_state_new_dev_mode_defaults_to_false() {
+    use hearth::storage::StorageEngine;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().to_path_buf();
+    std::mem::forget(temp);
+
+    let storage = Arc::new(
+        EmbeddedStorageEngine::open(StorageConfig::dev(data_dir.clone())).expect("storage"),
+    );
+    let clock = Arc::new(hearth::core::SystemClock) as Arc<dyn hearth::core::Clock>;
+    let audit = Arc::new(EmbeddedAuditEngine::new(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    )) as Arc<dyn hearth::audit::AuditEngine>;
+    let identity = Arc::new(
+        EmbeddedIdentityEngine::new(
+            Arc::clone(&storage) as Arc<dyn StorageEngine>,
+            Arc::clone(&clock),
+            IdentityConfig {
+                credential: CredentialConfig::fast_for_testing(),
+                ..IdentityConfig::default()
+            },
+            Arc::clone(&audit),
+        )
+        .expect("identity"),
+    ) as Arc<dyn hearth::identity::IdentityEngine>;
+    let authz = Arc::new(EmbeddedRbacEngine::new(
+        Arc::clone(&storage) as Arc<dyn StorageEngine>,
+        Arc::clone(&clock),
+    )) as Arc<dyn hearth::rbac::RbacEngine>;
+    let onboarding = Arc::new(OnboardingService::new(
+        Arc::clone(&identity),
+        Arc::clone(&authz),
+        null_email(),
+        data_dir,
+    ));
+
+    let state = WebState::new(
+        identity,
+        authz,
+        audit,
+        onboarding,
+        CookieSecret::random(),
+        None,
+    );
+
+    assert!(
+        !state.dev_mode,
+        "WebState::new() must default to dev_mode = false (fail-closed); \
+         tests needing CSRF bypass must call .with_dev_mode(true) explicitly"
+    );
+}

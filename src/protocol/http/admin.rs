@@ -2528,8 +2528,15 @@ fn dev_seed_system_admin(state: &AppState) -> Option<String> {
 ///
 /// Only available when `AppState.dev_mode` is `true` (i.e., `--dev` flag).
 /// Returns 404 in production mode.
+///
+/// First call: creates the dev-realm and system admin; `admin_password` is
+/// returned once in the response body. Subsequent calls (re-bootstrap) require
+/// a valid Bearer token and do NOT change the existing admin password (HEA-1670).
 #[allow(clippy::too_many_lines)] // TODO: HEA-1354 split this function
-pub(super) async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub(super) async fn admin_bootstrap(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     if !state.dev_mode {
         return (
             StatusCode::NOT_FOUND,
@@ -2543,6 +2550,7 @@ pub(super) async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl 
     // in 15 minutes, so callers must be able to get fresh tokens without
     // wiping state. On DuplicateRealmName we look up the existing realm and
     // admin user, create a new session, and return fresh tokens as 200 OK.
+    // Re-bootstrap requires an existing valid Bearer token (HEA-1670).
     let realm = match state
         .identity
         .create_realm(&crate::identity::CreateRealmRequest {
@@ -2551,6 +2559,12 @@ pub(super) async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl 
         }) {
         Ok(t) => t,
         Err(crate::identity::IdentityError::DuplicateRealmName) => {
+            // Dev-realm already exists — this is a re-bootstrap. Require a
+            // valid Bearer token issued during the first bootstrap (HEA-1670).
+            let bearer = match super::auth::extract_bearer_token(&headers) {
+                Ok(t) => t,
+                Err(e) => return e.into_response(),
+            };
             let existing = match state.identity.get_realm_by_name("dev-realm") {
                 Ok(Some(r)) => r,
                 Ok(None) => {
@@ -2563,6 +2577,16 @@ pub(super) async fn admin_bootstrap(State(state): State<Arc<AppState>>) -> impl 
                 Err(e) => return identity_error_to_response(&e).into_response(),
             };
             let rid = existing.id().clone();
+
+            // Validate the Bearer token against the dev-realm to confirm the
+            // caller completed the first bootstrap.
+            if state.identity.validate_token(&rid, &bearer).is_err() {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "invalid or expired token"})),
+                )
+                    .into_response();
+            }
 
             // Reconciliation archives realms not in hearth.yaml. Re-activate
             // the dev-realm so create_session doesn't reject it as non-Active.
@@ -2648,6 +2672,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
 
 # 2. Full PKCE flow — see docs/guides/getting-started.md"#
             );
+            // Re-bootstrap: do not modify existing password (HEA-1670).
             dev_seed_system_admin(&state);
             return (
                 StatusCode::OK,
@@ -2657,6 +2682,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
                     access_token: at_str,
                     refresh_token: tokens.refresh_token().to_string(),
                     quickstart: qs,
+                    admin_password: String::new(),
                 }),
             )
                 .into_response();
@@ -2764,7 +2790,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
 # 2. Full PKCE flow — see docs/guides/getting-started.md"#
     );
 
-    dev_seed_system_admin(&state);
+    let admin_password = dev_seed_system_admin(&state).unwrap_or_default();
     (
         StatusCode::OK,
         Json(pb::BootstrapResponse {
@@ -2773,6 +2799,7 @@ curl -fsS -X POST http://127.0.0.1:8420/clients \
             access_token: access_token_str,
             refresh_token: tokens.refresh_token().to_string(),
             quickstart,
+            admin_password,
         }),
     )
         .into_response()

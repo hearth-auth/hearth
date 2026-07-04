@@ -217,6 +217,10 @@ message BootstrapResponse {
   // Ready-to-copy shell commands with actual realm_id and token interpolated.
   // Only populated in --dev mode.
   string quickstart = 5;
+  // Randomly generated admin password. Non-empty ONLY on the first bootstrap
+  // call. Empty on all subsequent re-bootstrap calls — store this value
+  // securely, it is never returned again.
+  string admin_password = 6;
 }
 
 // ---------------------------------------------------------------------------

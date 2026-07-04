@@ -43,7 +43,7 @@ export default function Login() {
         </button>
 
         <div className="demo-users">
-          <p className="hint">Demo users (password: <code>HearthTest123!</code>)</p>
+          <p className="hint">Demo users — use the password printed by <code>POST /admin/bootstrap</code> on first run.</p>
           <table>
             <thead>
               <tr><th>Email</th><th>Role</th><th>Unlocks</th></tr>

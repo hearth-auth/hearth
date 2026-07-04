@@ -152,16 +152,132 @@ async fn bootstrap_returns_admin_credentials_in_dev_mode() {
     assert!(!token.is_empty(), "access_token should not be empty");
 }
 
-/// Regression test for HEA-1644: re-bootstrapping a dev server that already has
-/// `admin@hearth.test` must reset the password to `HearthTest123!` so login
-/// always works after a restart with persistent data.
+/// HEA-1670: First bootstrap must return a non-empty `admin_password`; the
+/// password must actually authenticate the `admin@hearth.test` user.
 #[tokio::test]
-async fn bootstrap_resets_dev_admin_password_on_second_call() {
+async fn bootstrap_returns_random_admin_password_on_first_call() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let state = test_state_dev(temp_dir.path());
     let sys = crate::identity::keys::system_realm_id();
 
-    // First bootstrap — creates admin@hearth.test with HearthTest123!
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "first bootstrap");
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    let pwd_str = json["admin_password"]
+        .as_str()
+        .expect("admin_password field present");
+    assert!(
+        !pwd_str.is_empty(),
+        "admin_password must be non-empty on first bootstrap"
+    );
+    assert_eq!(pwd_str.len(), 32, "admin_password must be 32 characters");
+
+    let admin = state
+        .identity
+        .get_user_by_email(&sys, "admin@hearth.test")
+        .expect("lookup")
+        .expect("user exists");
+    let cleartext = crate::identity::CleartextPassword::from_string(pwd_str.to_string());
+    assert!(
+        state
+            .identity
+            .verify_password(&sys, admin.id(), &cleartext)
+            .expect("verify"),
+        "returned admin_password must authenticate the system admin user"
+    );
+}
+
+/// HEA-1670: Re-bootstrap must NOT reset the existing password.
+#[tokio::test]
+async fn bootstrap_does_not_reset_password_on_second_call() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+    let sys = crate::identity::keys::system_realm_id();
+
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "first bootstrap");
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let first: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let access_token = first["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    let admin = state
+        .identity
+        .get_user_by_email(&sys, "admin@hearth.test")
+        .expect("lookup")
+        .expect("user exists");
+    let new_pwd = crate::identity::CleartextPassword::from_string("ChangedPassword!99".to_string());
+    state
+        .identity
+        .set_password(&sys, admin.id(), &new_pwd)
+        .expect("set changed password");
+
+    let resp = router(Arc::clone(&state))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/admin/bootstrap")
+                .header("Authorization", format!("Bearer {access_token}"))
+                .body(axum::body::Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status(), StatusCode::OK, "re-bootstrap must succeed");
+    let body = axum::body::to_bytes(resp.into_body(), 10_000)
+        .await
+        .expect("body");
+    let second: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    let pwd_on_reboot = second
+        .get("admin_password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        pwd_on_reboot.is_empty(),
+        "admin_password must NOT be returned on re-bootstrap"
+    );
+    assert!(
+        state
+            .identity
+            .verify_password(&sys, admin.id(), &new_pwd)
+            .expect("verify"),
+        "re-bootstrap must NOT reset the admin password"
+    );
+}
+
+/// HEA-1670: Unauthenticated re-bootstrap must return 401 after first bootstrap.
+#[tokio::test]
+async fn bootstrap_requires_auth_on_second_call() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let state = test_state_dev(temp_dir.path());
+
     let resp = router(Arc::clone(&state))
         .oneshot(
             axum::http::Request::builder()
@@ -174,29 +290,6 @@ async fn bootstrap_resets_dev_admin_password_on_second_call() {
         .expect("response");
     assert_eq!(resp.status(), StatusCode::OK, "first bootstrap");
 
-    // Simulate a password change (e.g. admin changes their own password).
-    let admin = state
-        .identity
-        .get_user_by_email(&sys, "admin@hearth.test")
-        .expect("lookup")
-        .expect("user exists");
-    let changed = crate::identity::CleartextPassword::from_string("SomeOtherPassword!".to_string());
-    state
-        .identity
-        .set_password(&sys, admin.id(), &changed)
-        .expect("set changed password");
-
-    // Confirm HearthTest123! no longer works.
-    let dev_pwd = crate::identity::CleartextPassword::from_string("HearthTest123!".to_string());
-    assert!(
-        !state
-            .identity
-            .verify_password(&sys, admin.id(), &dev_pwd)
-            .expect("verify"),
-        "password should differ before re-bootstrap"
-    );
-
-    // Second bootstrap — must reset password back to HearthTest123!
     let resp = router(Arc::clone(&state))
         .oneshot(
             axum::http::Request::builder()
@@ -207,16 +300,50 @@ async fn bootstrap_resets_dev_admin_password_on_second_call() {
         )
         .await
         .expect("response");
-    assert_eq!(resp.status(), StatusCode::OK, "second bootstrap");
-
-    // HearthTest123! must work again.
-    assert!(
-        state
-            .identity
-            .verify_password(&sys, admin.id(), &dev_pwd)
-            .expect("verify after re-bootstrap"),
-        "re-bootstrap must restore HearthTest123! password"
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated re-bootstrap must return 401"
     );
+}
+
+/// HEA-1670: Fresh bootstraps must produce distinct passwords.
+#[tokio::test]
+async fn bootstrap_generates_unique_passwords_per_fresh_install() {
+    async fn first_password(dir: &std::path::Path) -> String {
+        let state = test_state_dev(dir);
+        let resp = router(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/bootstrap")
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 10_000)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        json["admin_password"]
+            .as_str()
+            .expect("admin_password")
+            .to_string()
+    }
+
+    let dir_a = tempfile::tempdir().expect("tempdir a");
+    let dir_b = tempfile::tempdir().expect("tempdir b");
+    let pwd_a = first_password(dir_a.path()).await;
+    let pwd_b = first_password(dir_b.path()).await;
+
+    assert_ne!(
+        pwd_a, pwd_b,
+        "distinct fresh bootstraps must produce distinct passwords"
+    );
+    assert_eq!(pwd_a.len(), 32, "password a must be 32 chars");
+    assert_eq!(pwd_b.len(), 32, "password b must be 32 chars");
 }
 
 /// PAR with a signed JAR JWT in the request body is accepted under FAPI Advanced.
