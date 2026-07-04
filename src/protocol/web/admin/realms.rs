@@ -518,6 +518,9 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::SpiffeIdMapped => "SPIFFE ID Mapped",
         A::SpiffeAuthSuccess => "SPIFFE Auth Success",
         A::AuditLogPruned => "Audit Log Pruned",
+        // MFA lifecycle
+        A::MfaEnabled => "MFA Enabled",
+        A::MfaDisabled => "MFA Disabled",
     }
 }
 
@@ -602,7 +605,9 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::SmsMfaChallengeSucceeded
         | A::SmsMfaChallengeFailed
         | A::SmsMfaLocked
-        | A::DeviceFingerprintsErased => "Security",
+        | A::DeviceFingerprintsErased
+        | A::MfaEnabled
+        | A::MfaDisabled => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
         // backup/restore, and internal cleanup jobs.
         A::RealmCreated

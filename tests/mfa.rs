@@ -6,6 +6,7 @@
 
 mod common;
 
+use hearth::audit::{AuditAction, AuditQuery};
 use hearth::core::RealmId;
 use hearth::identity::{CleartextPassword, CreateRealmRequest, CreateUserRequest, User};
 
@@ -337,4 +338,109 @@ async fn mfa_disable_flow() {
         matches!(err, hearth::identity::IdentityError::MfaNotEnabled),
         "should be MfaNotEnabled, got: {err:?}"
     );
+}
+
+// ===== Audit: MfaEnabled emitted on TOTP enrollment confirmation =====
+
+#[tokio::test]
+async fn audit_mfa_enabled_on_enrollment_confirm() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let user = create_user(&harness, &realm);
+
+    let pw = CleartextPassword::from_string("audit-mfa-enroll!".to_string());
+    harness
+        .identity()
+        .set_password(&realm, user.id(), &pw)
+        .expect("set_password");
+
+    let enrollment = harness
+        .identity()
+        .enroll_totp(&realm, user.id())
+        .expect("enroll_totp");
+
+    let unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&enrollment.secret_base32, unix_secs);
+
+    harness
+        .identity()
+        .verify_totp_enrollment(&realm, user.id(), &code)
+        .expect("verify_totp_enrollment");
+
+    let events = harness
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::MfaEnabled),
+            ..AuditQuery::for_realm(realm.clone())
+        })
+        .expect("query audit");
+
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one MfaEnabled event, got {}: {events:?}",
+        events.len()
+    );
+    assert_eq!(events[0].action, AuditAction::MfaEnabled);
+    assert_eq!(events[0].resource_id, user.id().as_uuid().to_string());
+}
+
+// ===== Audit: MfaDisabled emitted on disable_mfa =====
+
+#[tokio::test]
+async fn audit_mfa_disabled_on_disable_mfa() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let user = create_user(&harness, &realm);
+
+    let pw = CleartextPassword::from_string("audit-mfa-disable!".to_string());
+    harness
+        .identity()
+        .set_password(&realm, user.id(), &pw)
+        .expect("set_password");
+
+    let enrollment = harness
+        .identity()
+        .enroll_totp(&realm, user.id())
+        .expect("enroll_totp");
+
+    let unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs();
+    let code = compute_totp_code(&enrollment.secret_base32, unix_secs);
+
+    harness
+        .identity()
+        .verify_totp_enrollment(&realm, user.id(), &code)
+        .expect("verify_totp_enrollment");
+
+    harness
+        .identity()
+        .disable_mfa(&realm, user.id())
+        .expect("disable_mfa");
+
+    let events = harness
+        .audit()
+        .query(&AuditQuery {
+            action: Some(AuditAction::MfaDisabled),
+            ..AuditQuery::for_realm(realm.clone())
+        })
+        .expect("query audit");
+
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one MfaDisabled event, got {}: {events:?}",
+        events.len()
+    );
+    assert_eq!(events[0].action, AuditAction::MfaDisabled);
+    assert_eq!(events[0].resource_id, user.id().as_uuid().to_string());
 }

@@ -7074,7 +7074,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     actor: Actor::User(user_id.clone()),
                     metadata: None,
                 }),
-                AuditAction::CredentialVerified,
+                AuditAction::MfaEnabled,
                 "credential",
                 &user_id.as_uuid().to_string(),
             )?;
@@ -7186,7 +7186,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         actor: Actor::User(user_id.clone()),
                         metadata: None,
                     }),
-                    AuditAction::CredentialChanged,
+                    AuditAction::MfaDisabled,
                     "credential",
                     &user_id.as_uuid().to_string(),
                 )?;
