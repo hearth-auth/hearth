@@ -506,16 +506,43 @@ pub struct TestPingBody {
 ///
 /// Returns `application/json` with `{"success": bool, "message": "..."}` so
 /// the caller can display the result inline.
+///
+/// Returns HTTP 422 when the SSRF guard rejects the URL (non-`https://` scheme
+/// or destination resolves to a private/reserved IP).
 pub async fn admin_webhook_test_ping(
     RequireAdmin(_session): RequireAdmin,
     AxumPath(_realm_name): AxumPath<String>,
     axum::Json(body): axum::Json<TestPingBody>,
-) -> axum::response::Json<serde_json::Value> {
+) -> Response {
+    // SSRF guard: enforce https-only and block private/reserved destinations.
+    // Runs in spawn_blocking because check_webhook_url does DNS resolution.
+    let url_to_check = body.url.clone();
+    let ssrf_result =
+        tokio::task::spawn_blocking(move || crate::webhook::ssrf::check_webhook_url(&url_to_check))
+            .await
+            .unwrap_or_else(|_| {
+                Err(crate::webhook::WebhookError::InvalidUrl {
+                    reason: "SSRF check task panicked".to_string(),
+                })
+            });
+
+    if let Err(e) = ssrf_result {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            axum::response::Json(serde_json::json!({
+                "success": false,
+                "message": format!("Blocked: {e}"),
+            })),
+        )
+            .into_response();
+    }
+
     let (success, message) = fire_test_ping_result(body.url.as_str(), body.secret.as_deref()).await;
     axum::response::Json(serde_json::json!({
         "success": success,
         "message": message,
     }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -707,6 +734,13 @@ async fn fire_test_ping_result(url: &str, secret: Option<&str>) -> (bool, String
     let url = url.to_string();
     let secret = secret.map(ToString::to_string);
     tokio::task::spawn_blocking(move || {
+        // Defense-in-depth: re-check SSRF inside the blocking task so any
+        // future call path that bypasses the handler-level guard is still
+        // protected (e.g. DNS rebinding between the two checks).
+        if let Err(e) = crate::webhook::ssrf::check_webhook_url(&url) {
+            return (false, format!("Blocked: {e}"));
+        }
+
         let payload = serde_json::json!({
             "event": "ping",
             "realm_id": null,
