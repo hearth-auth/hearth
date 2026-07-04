@@ -153,6 +153,7 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         domain::AuditAction::CrossRealmTokenIssued => pb::AuditAction::CrossRealmTokenIssued,
         domain::AuditAction::SpiffeIdMapped => pb::AuditAction::SpiffeIdMapped,
         domain::AuditAction::SpiffeAuthSuccess => pb::AuditAction::SpiffeAuthSuccess,
+        domain::AuditAction::AuditLogPruned => pb::AuditAction::AuditLogPruned,
     }
 }
 
@@ -343,6 +344,7 @@ pub(crate) fn proto_audit_action_to_domain(a: pb::AuditAction) -> Option<domain:
         pb::AuditAction::CrossRealmTokenIssued => Some(domain::AuditAction::CrossRealmTokenIssued),
         pb::AuditAction::SpiffeIdMapped => Some(domain::AuditAction::SpiffeIdMapped),
         pb::AuditAction::SpiffeAuthSuccess => Some(domain::AuditAction::SpiffeAuthSuccess),
+        pb::AuditAction::AuditLogPruned => Some(domain::AuditAction::AuditLogPruned),
     }
 }
 

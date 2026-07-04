@@ -433,6 +433,12 @@ pub enum AuditAction {
     ///
     /// Metadata carries `agent_id` and `spiffe_id`.
     SpiffeAuthSuccess,
+    /// An administrative prune of the audit log was executed.
+    ///
+    /// Recorded **before** the deletion so that even a crash-interrupted
+    /// prune leaves a trace.  Metadata carries `cutoff_micros` (the
+    /// exclusive upper bound), `retention_days`, and `realm_id`.
+    AuditLogPruned,
 }
 
 impl AuditAction {
@@ -563,6 +569,7 @@ impl AuditAction {
             Self::CrossRealmTokenIssued,
             Self::SpiffeIdMapped,
             Self::SpiffeAuthSuccess,
+            Self::AuditLogPruned,
         ]);
         v.sort_by_key(|a| a.as_str());
         v
@@ -689,6 +696,7 @@ impl AuditAction {
             Self::CrossRealmTokenIssued => "cross_realm_token_issued",
             Self::SpiffeIdMapped => "spiffe_id_mapped",
             Self::SpiffeAuthSuccess => "spiffe_auth_success",
+            Self::AuditLogPruned => "audit_log_pruned",
         }
     }
 }
@@ -816,6 +824,7 @@ impl std::str::FromStr for AuditAction {
             "cross_realm_token_issued" => Ok(Self::CrossRealmTokenIssued),
             "spiffe_id_mapped" => Ok(Self::SpiffeIdMapped),
             "spiffe_auth_success" => Ok(Self::SpiffeAuthSuccess),
+            "audit_log_pruned" => Ok(Self::AuditLogPruned),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -937,7 +946,9 @@ impl AuditAction {
             | Self::TransactionTokenIssued
             | Self::CrossRealmTokenIssued
             | Self::SpiffeIdMapped
-            | Self::SpiffeAuthSuccess => LogOnly,
+            | Self::SpiffeAuthSuccess
+            // Meta-event about the audit log itself; loss is not critical.
+            | Self::AuditLogPruned => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged

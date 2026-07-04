@@ -56,7 +56,7 @@ impl StorageKek {
     }
 
     /// Returns a reference to the inner 32-byte key.
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }

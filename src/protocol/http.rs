@@ -8,15 +8,19 @@
 //! into domain calls on `IdentityEngine` and maps `IdentityError` to HTTP
 //! status codes. No business logic lives here.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, Request, State};
+use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
+
+use crate::abuse::shaper::ShaperOutcome;
 
 // ── Sub-modules ──────────────────────────────────────────────────────────────
 
@@ -232,6 +236,38 @@ async fn require_bearer_token(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// A-2: Global HTTP per-IP rate-limit middleware.
+///
+/// Applied to every matched route via [`Router::route_layer`] so 404 paths
+/// do not consume shaper budget.  Returns `429 Too Many Requests` with a
+/// `Retry-After: 1` hint when the per-IP (or per-realm) sliding-window limit
+/// is exceeded.  The shaper is shared with the gRPC surface via `Arc` so
+/// a caller cannot evade the limit by switching protocols.
+async fn http_rate_limit(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0)
+        .unwrap_or(FALLBACK_PEER);
+
+    let ip_str = crate::protocol::client_info::extract_client_ip(
+        req.headers(),
+        peer,
+        &state.trusted_proxies,
+    );
+    let ip: IpAddr = ip_str.parse().unwrap_or_else(|_| peer.ip());
+
+    match state.request_shaper.check(ip, "") {
+        ShaperOutcome::Allow => next.run(req).await,
+        _ => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", "1")],
+            axum::Json(serde_json::json!({"error": "too_many_requests"})),
+        )
+            .into_response(),
+    }
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 /// Builds the HTTP router with all configured routes.
@@ -286,6 +322,11 @@ pub fn router(state: Arc<AppState>) -> Router {
     base.route_layer(axum::middleware::from_fn(track_metrics))
         // A-21: JSON parse-bomb guard — runs before handler logic on all matched routes.
         .route_layer(axum::middleware::from_fn(json_depth_guard))
+        // A-2: global HTTP rate limiter — runs before body parsing on all matched routes.
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            http_rate_limit,
+        ))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(

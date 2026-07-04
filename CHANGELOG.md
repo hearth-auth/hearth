@@ -18,6 +18,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **JWT issuer validation** — `validate_token` now enforces RFC 7519 §4.1.1: the `iss`
+  claim must exactly match the configured `token.issuer` value. Previously this claim was
+  never verified, allowing tokens from foreign Hearth instances to pass validation when
+  they carried a valid signature and correct realm binding (HEA-SEC-18).
+- **Global signing-key fallback removed** — `verify_token_signature_for_realm` is now
+  fail-closed: signature verification uses only the realm's own per-realm key. The legacy
+  global-key fallback — which could accept global-key-signed tokens for any realm — has
+  been removed. Every realm has a dedicated key provisioned at creation time (HEA-SEC-18).
+- **HTTP rate limiting wired to REST router** — `RequestShaper` (per-IP + per-realm
+  sliding-window, 100 rps/IP default) is now applied as an axum Tower middleware on all
+  matched HTTP routes. The same `Arc<RequestShaper>` is shared with the gRPC server so
+  per-IP counters accumulate across protocols and callers cannot evade the limit by
+  switching from REST to gRPC. The limit is configurable via `security.request_shaper`
+  in `hearth.yaml` (HEA-SEC-17).
+- **DPoP nonce enforcement** — `POST /token` and `POST /realms/{name}/token` now require
+  a valid server-issued nonce in every DPoP proof. Proofs that omit or supply an expired
+  nonce are rejected with HTTP 401 `use_dpop_nonce`; the response includes a fresh
+  `DPoP-Nonce` header so clients can retry. Without this enforcement, a stolen DPoP
+  proof JWT was replayable within its 120-second `iat` window (HEA-SEC-17).
 - **Host header allowlist enforcement** — `security.allowed_hosts` in `hearth.yaml` is
   now enforced by an outermost Tower middleware. Requests whose `Host` header is not in
   the allowlist are rejected with HTTP 400 before any route dispatch. An empty list
@@ -40,6 +59,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `RbacEngine::resolve_role_permissions` method expands the role's parent chain to
   compute the transitive set used for the check. Blocked attempts are logged at WARN.
   Regression tests in `tests/admin_rbac_auth.rs` (HEA-SEC-13).
+- **Pre-token webhook HMAC secret enforced** — `update_realm` and `create_realm`
+  now reject any `pre_token_webhook` configuration that omits or supplies an empty
+  `hmac_secret`. An unsigned webhook endpoint allows any caller reachable from the
+  webhook URL to forge enrichment responses and inject arbitrary JWT claims into
+  issued tokens. Operators must supply a non-empty `hmac_secret` for webhook
+  configurations to be accepted (HEA-SEC-20).
 - **Dev mode fail-closed defaults** — Server refuses to start with `--dev` when
   `server.bind_address` is non-loopback (blocks network exposure of weak Argon2,
   CSRF bypass, and plaintext token logging). `WebState::new()` now defaults

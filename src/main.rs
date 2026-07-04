@@ -1778,6 +1778,20 @@ async fn run_serve(
         ))
     };
 
+    // A-2: build a shared RequestShaper from operator config (or defaults) and
+    // wire it to BOTH the HTTP AppState and the gRPC GrpcState so that per-IP
+    // counters accumulate across protocols — a caller cannot evade the limit by
+    // switching from REST to gRPC.
+    let request_shaper = Arc::new(match config.security.request_shaper.as_ref() {
+        Some(cfg) => {
+            hearth::abuse::shaper::RequestShaper::with_config(hearth::abuse::shaper::ShaperConfig {
+                ip_rps: Some(cfg.ip_rps),
+                realm_rps: Some(cfg.realm_rps),
+            })
+        }
+        None => hearth::abuse::shaper::RequestShaper::new(),
+    });
+
     let allowed_hosts = config.security.allowed_hosts.clone();
     if !allowed_hosts.is_empty() {
         info!(count = allowed_hosts.len(), "loaded allowed_hosts");
@@ -1798,6 +1812,7 @@ async fn run_serve(
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts.clone())
+            .with_request_shaper(Arc::clone(&request_shaper))
             // In --dev, enable all agent-auth capability phases regardless of
             // what hearth.yaml says, so developers can exercise Phase D routes
             // without manually setting every capability flag.
@@ -1820,6 +1835,7 @@ async fn run_serve(
             .with_dpop_nonce_secret(dpop_nonce_secret)
             .with_jwks_rate_limiter(Arc::clone(&jwks_rate_limiter))
             .with_allowed_hosts(allowed_hosts)
+            .with_request_shaper(Arc::clone(&request_shaper))
             .with_agent_identity(config.agent_auth.capabilities.identity)
             .with_agent_approval(config.agent_auth.capabilities.approval)
             .with_agent_advanced(config.agent_auth.capabilities.advanced),
@@ -2097,7 +2113,10 @@ async fn run_serve(
             Arc::clone(&rbac_engine),
             Arc::clone(&audit_engine),
             Arc::clone(&app_state.admin_rate_limiter),
-        );
+        )
+        // A-2: share the same RequestShaper so HTTP + gRPC per-IP counts
+        // accumulate in the same sliding window.
+        .with_shaper(Arc::clone(&request_shaper));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let handle = tokio::spawn(async move {
             let shutdown = async {

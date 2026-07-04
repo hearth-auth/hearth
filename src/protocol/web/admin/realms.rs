@@ -517,6 +517,7 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::CrossRealmTokenIssued => "Cross-Realm Token Issued",
         A::SpiffeIdMapped => "SPIFFE ID Mapped",
         A::SpiffeAuthSuccess => "SPIFFE Auth Success",
+        A::AuditLogPruned => "Audit Log Pruned",
     }
 }
 
@@ -657,7 +658,8 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::TransactionTokenIssued
         | A::CrossRealmTokenIssued
         | A::SpiffeIdMapped
-        | A::SpiffeAuthSuccess => "System",
+        | A::SpiffeAuthSuccess
+        | A::AuditLogPruned => "System",
     }
 }
 
@@ -1514,7 +1516,7 @@ pub async fn admin_api_audit_config_put(
 /// with `{"deleted": 0}` without touching any events.
 pub async fn admin_api_audit_prune(
     State(state): State<Arc<WebState>>,
-    RequireAdmin(_session): RequireAdmin,
+    RequireAdmin(session): RequireAdmin,
     target: TargetRealm,
     AxumPath(_realm_name): AxumPath<String>,
 ) -> Response {
@@ -1529,6 +1531,25 @@ pub async fn admin_api_audit_prune(
         return axum::response::Json(serde_json::json!({"deleted": 0})).into_response();
     }
     let cutoff = prune_cutoff_timestamp(config.retention_days);
+
+    // Record the prune BEFORE deleting so that a crash-interrupted prune
+    // always leaves a trace in the audit log.
+    let prune_event = crate::audit::CreateAuditEvent {
+        realm_id: target.id().clone(),
+        actor: session.user_id.as_uuid().to_string(),
+        action: crate::audit::AuditAction::AuditLogPruned,
+        resource_type: "audit_log".to_string(),
+        resource_id: target.id().as_uuid().to_string(),
+        metadata: Some(serde_json::json!({
+            "cutoff_micros": cutoff.as_micros(),
+            "retention_days": config.retention_days,
+        })),
+    };
+    if let Err(e) = state.audit.append(&prune_event) {
+        tracing::warn!(error = %e, "audit prune: failed to record prune event");
+        // LogOnly policy — continue with the prune even if the audit event failed.
+    }
+
     match state.audit.prune_before(target.id(), cutoff) {
         Ok(deleted) => {
             tracing::info!(
