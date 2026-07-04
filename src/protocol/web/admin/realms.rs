@@ -478,6 +478,8 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::RequiredActionAutoCleared => "Required Action Auto-Cleared",
         A::PasswordCompromisedRejected => "Password Compromised Rejected",
         A::BreachCheckUnavailable => "Breach Check Unavailable",
+        A::MfaEnabled => "MFA Enabled",
+        A::MfaDisabled => "MFA Disabled",
         A::StepUpMfaTriggered => "Step-Up MFA Triggered",
         A::StepUpMfaCompleted => "Step-Up MFA Completed",
         A::SmsOtpEnrollmentStarted => "SMS OTP Enrollment Started",
@@ -518,9 +520,6 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::SpiffeIdMapped => "SPIFFE ID Mapped",
         A::SpiffeAuthSuccess => "SPIFFE Auth Success",
         A::AuditLogPruned => "Audit Log Pruned",
-        // MFA lifecycle
-        A::MfaEnabled => "MFA Enabled",
-        A::MfaDisabled => "MFA Disabled",
     }
 }
 

@@ -99,6 +99,9 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
             pb::AuditAction::PasswordCompromisedRejected
         }
         domain::AuditAction::BreachCheckUnavailable => pb::AuditAction::BreachCheckUnavailable,
+        // MFA lifecycle
+        domain::AuditAction::MfaEnabled => pb::AuditAction::MfaEnabled,
+        domain::AuditAction::MfaDisabled => pb::AuditAction::MfaDisabled,
         // Adaptive MFA / step-up
         domain::AuditAction::StepUpMfaTriggered => pb::AuditAction::StepUpMfaTriggered,
         domain::AuditAction::StepUpMfaCompleted => pb::AuditAction::StepUpMfaCompleted,
@@ -154,9 +157,6 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
         domain::AuditAction::SpiffeIdMapped => pb::AuditAction::SpiffeIdMapped,
         domain::AuditAction::SpiffeAuthSuccess => pb::AuditAction::SpiffeAuthSuccess,
         domain::AuditAction::AuditLogPruned => pb::AuditAction::AuditLogPruned,
-        // MFA lifecycle
-        domain::AuditAction::MfaEnabled => pb::AuditAction::MfaEnabled,
-        domain::AuditAction::MfaDisabled => pb::AuditAction::MfaDisabled,
     }
 }
 
@@ -279,6 +279,8 @@ pub(crate) fn proto_audit_action_to_domain(a: pb::AuditAction) -> Option<domain:
         pb::AuditAction::BreachCheckUnavailable => {
             Some(domain::AuditAction::BreachCheckUnavailable)
         }
+        pb::AuditAction::MfaEnabled => Some(domain::AuditAction::MfaEnabled),
+        pb::AuditAction::MfaDisabled => Some(domain::AuditAction::MfaDisabled),
         pb::AuditAction::StepUpMfaTriggered => Some(domain::AuditAction::StepUpMfaTriggered),
         pb::AuditAction::StepUpMfaCompleted => Some(domain::AuditAction::StepUpMfaCompleted),
         pb::AuditAction::SmsOtpEnrollmentStarted => {
@@ -348,9 +350,6 @@ pub(crate) fn proto_audit_action_to_domain(a: pb::AuditAction) -> Option<domain:
         pb::AuditAction::SpiffeIdMapped => Some(domain::AuditAction::SpiffeIdMapped),
         pb::AuditAction::SpiffeAuthSuccess => Some(domain::AuditAction::SpiffeAuthSuccess),
         pb::AuditAction::AuditLogPruned => Some(domain::AuditAction::AuditLogPruned),
-        // MFA lifecycle
-        pb::AuditAction::MfaEnabled => Some(domain::AuditAction::MfaEnabled),
-        pb::AuditAction::MfaDisabled => Some(domain::AuditAction::MfaDisabled),
     }
 }
 
