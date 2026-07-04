@@ -18,6 +18,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `// auth-discard-lint-allow` suppression escape hatch for auth-boundary PRs (HEA-1657).
 
 ### Security
+- **Rust SDK: PKCE and OAuth state use OS entropy** — `rand::thread_rng()` (userspace CSPRNG)
+  replaced with `ring::rand::SystemRandom` (direct OS entropy, consistent with server-side)
+  in PKCE verifier generation and OAuth state token generation. The `rand` crate dependency
+  has been removed from the SDK (HEA-SEC-32).
+- **Nonce replay protection is now unconditional** — `oidc.enforce_nonces` opt-out config key
+  has been removed. Duplicate nonces are always rejected per OIDC Core §3.1.2.1. Setting
+  `enforce_nonces: false` in `hearth.yaml` is a hard startup error (HEA-SEC-29).
+- **PKCE required for all clients** — `oidc.require_pkce_for_confidential_clients` opt-out
+  config key has been removed. All authorization code flows, including confidential clients,
+  must supply `code_challenge` (S256). Setting `require_pkce_for_confidential_clients: false`
+  is a hard startup error (HEA-SEC-29).
+- **Authorization code TTL reduced to 60 seconds** — default `oidc.authorization_code_ttl`
+  is now 60 s (down from 600 s). Reduces exploitation window for intercepted auth codes.
+  Operators may configure a longer TTL via `oidc.authorization_code_ttl` (HEA-SEC-29).
+- **JWKS endpoint hardened** — Three improvements (HEA-SEC-28): (1) `GET /jwks` (and
+  aliases `/certs`, `/.well-known/jwks.json`) now returns `Cache-Control: max-age=3600,
+  must-revalidate` so clients know when to re-fetch and avoid serving stale keys after
+  rotation (JWT-015). (2) Each JWK object carries a non-standard `x-key-role` annotation
+  (`"access-token-signing"`, `"saml-signing"`, or `"ecdsa-compat"`) to disambiguate key
+  purpose for external relying parties (JWT-006). (3) The `OPTIONS /token` preflight
+  handler now returns the same 204 response structure regardless of whether the requesting
+  origin is registered, closing a CORS-oracle information-disclosure that allowed origin
+  enumeration by observing which preflights received CORS headers (OAUTH-10).
 - **Host key file integrity framing** — `hearth.host_key` is now written and verified with
   a magic header (`HRTHHKY1`) and an HMAC-SHA256 integrity tag covering the magic and key
   bytes. A file that is the correct length but has corrupt content (or is a random 32-byte
