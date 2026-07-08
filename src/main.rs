@@ -1059,6 +1059,17 @@ async fn run_serve(
                         .into(),
                 );
             }
+            // HSEC-004: Soft warning — when mfa_required is not configured at all,
+            // the system realm defaults to MFA not required. Operators should enroll
+            // a second factor for all admin accounts and then set mfa_required: true
+            // in hearth.yaml to enforce it.
+            if sys_realm.config().mfa_required.is_none() {
+                warn!(
+                    "system realm mfa_required is not configured; admin sessions do not \
+                     require a second factor. Enroll MFA for all admin accounts and set \
+                     mfa_required: true under the system realm config to enforce it."
+                );
+            }
             // HSEC-003: Non-fatal warning — the 8-character floor is always enforced
             // at validation time, but an explicit policy is recommended in production.
             if sys_realm.config().password_policy.is_none() {

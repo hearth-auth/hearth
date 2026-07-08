@@ -5819,11 +5819,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // passkey ceremony (passkeys are inherently multi-factor).
         if !context.satisfies_mfa_via_passkey {
             if let Ok(Some(realm)) = self.get_realm(realm_id) {
-                // HSEC-004: System realm (nil UUID) defaults MFA to required even when
-                // `mfa_required` is not explicitly configured — the admin control plane
-                // must not silently accept unauthenticated sessions. User realms default
-                // to opt-in (false) unless explicitly enabled.
-                let mfa_default = keys::is_system_realm(realm_id);
+                // HSEC-004 (revised): MFA defaults to opt-in for all realms. Operators
+                // enable it explicitly via `mfa_required: true` in hearth.yaml after
+                // enrolling a second factor. Defaulting to `true` for the system realm
+                // made fresh installs unbootable (no MFA enrollment path exists before
+                // the first admin session). The production hard-error in main.rs already
+                // blocks `mfa_required: false` from being set explicitly; a startup
+                // warning nudges operators who leave it `null` to enable it once enrolled.
+                let mfa_default = false;
                 if realm.config().mfa_required.unwrap_or(mfa_default) {
                     let has_mfa = self.mfa_enabled(realm_id, user_id).unwrap_or(false);
                     if !has_mfa {

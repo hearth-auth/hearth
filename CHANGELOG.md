@@ -113,11 +113,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   per-realm operator configuration; a higher `min_length` in the policy is still respected.
   A production startup warning is emitted when the system realm has no explicit
   `password_policy` configured (HSEC-003 / HEA-SEC-23).
-- **System realm MFA default changed to required** — `create_session` in the nil-UUID
-  system realm now defaults `mfa_required` to `true` when the field is not explicitly set
-  in the realm config. Previously, an admin-realm user without MFA enrolled could
-  authenticate without any second factor. Explicitly setting `mfa_required: false` on the
-  system realm is now a hard startup error in production mode (HSEC-004 / HEA-SEC-23).
+- **System realm MFA enforcement is opt-in; explicit disable is blocked** — MFA defaults
+  to not required for all realms including the system realm, preserving bootstrappability on
+  a fresh install (HSEC-004 revised — prior default-on broke bootstrap). Operators who want
+  second-factor enforcement on the admin control plane should enroll MFA for all admin
+  accounts and then set `mfa_required: true` in `hearth.yaml`. A production startup warning
+  is emitted when the system realm has no explicit `mfa_required` setting. Explicitly setting
+  `mfa_required: false` on the system realm remains a hard startup error (HSEC-004 / HEA-SEC-23).
 - **Token substitution rejected at introspection** — `POST /introspect` now returns
   `{"active": false}` for any token whose `token_type` claim is not `"access"`. Previously
   a valid ID token or refresh token could be presented to the introspection endpoint and
