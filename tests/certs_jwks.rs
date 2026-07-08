@@ -149,10 +149,7 @@ async fn global_jwks_includes_system_realm_signing_key() {
     // System realm is the nil UUID — mirrors identity::keys::system_realm_id()
     // which isn't re-exported from the public crate surface.
     let sys = hearth::core::RealmId::new(uuid::Uuid::nil());
-    let realm_doc = h
-        .identity()
-        .realm_jwks(&sys)
-        .expect("system realm JWKS");
+    let realm_doc = h.identity().realm_jwks(&sys).expect("system realm JWKS");
     assert!(
         !realm_doc.keys.is_empty(),
         "system realm must have at least one signing key"
