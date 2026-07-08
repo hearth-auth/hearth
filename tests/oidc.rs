@@ -224,6 +224,10 @@ async fn oidc_authorization_code_flow_via_http() {
         .as_str()
         .expect("realm_id in bootstrap response")
         .to_string();
+    let admin_token = bootstrap_resp["access_token"]
+        .as_str()
+        .expect("access_token in bootstrap response")
+        .to_string();
 
     // 1. Create a user via HTTP
     let user_resp = http_client
@@ -259,10 +263,12 @@ async fn oidc_authorization_code_flow_via_http() {
         .as_str()
         .expect("client_id in response");
 
-    // 3. Authorize: generate authorization code via HTTP (PKCE required for public clients)
+    // 3. Authorize: generate authorization code via HTTP (PKCE required for public clients).
+    // The admin token authenticates the caller; user_id in body is overridden by token sub (HEA-1721).
     let auth_resp = http_client
         .post(format!("{base}/authorize"))
         .header("X-Realm-ID", &realm_id)
+        .header("Authorization", format!("Bearer {admin_token}"))
         .json(&serde_json::json!({
             "client_id": client_id,
             "redirect_uri": "https://app.example.com/callback",

@@ -16,7 +16,9 @@ use crate::protocol::convert::oauth::{
 use crate::protocol::proto::identity::v1 as pb;
 use crate::protocol::proto::identity::v1::o_auth_service_server::OAuthService;
 
-use super::convert::{extract_realm_id, identity_to_status, verify_grpc_client_auth};
+use super::convert::{
+    extract_grpc_user_auth, extract_realm_id, identity_to_status, verify_grpc_client_auth,
+};
 use super::server::GrpcState;
 
 pub struct OAuthSvc {
@@ -35,18 +37,17 @@ impl OAuthService for OAuthSvc {
         &self,
         req: Request<pb::AuthorizationRequest>,
     ) -> Result<Response<pb::AuthorizationResponse>, Status> {
-        use crate::core::UserId;
         use crate::identity::{AuthorizationRequest, IdentityError};
 
         let realm_id = extract_realm_id(req.metadata())?;
+        // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
+        let authenticated_user_id =
+            extract_grpc_user_auth(req.metadata(), &realm_id, self.state.identity.as_ref())?;
         let body = req.into_inner();
 
         // PAR path: when `request_uri` is present, consume the stored entry to
         // obtain pre-validated parameters with `via_par = true`.
         let domain_req = if let Some(ref request_uri) = body.request_uri {
-            let user_id = uuid::Uuid::parse_str(&body.user_id)
-                .map(UserId::new)
-                .map_err(|_| Status::invalid_argument("invalid user_id"))?;
             let stored = self
                 .state
                 .identity
@@ -64,7 +65,7 @@ impl OAuthService for OAuthSvc {
                 state: stored.state,
                 resource: stored.resource,
                 response_type: stored.response_type,
-                user_id,
+                user_id: authenticated_user_id,
                 code_challenge: stored.code_challenge,
                 code_challenge_method: stored.code_challenge_method,
                 nonce: stored.nonce,
@@ -74,7 +75,10 @@ impl OAuthService for OAuthSvc {
                 via_par: true,
             }
         } else {
-            proto_authorize_to_domain(body).map_err(Status::invalid_argument)?
+            let mut r = proto_authorize_to_domain(body).map_err(Status::invalid_argument)?;
+            // Override body-supplied user_id with the authenticated identity (HEA-1721).
+            r.user_id = authenticated_user_id;
+            r
         };
 
         let resp = self

@@ -777,9 +777,13 @@ async fn generate_unique_slug(state: Arc<AppState>, realm_id: &RealmId, base: &s
 
 /// Initiate an OAuth 2.0 authorization code flow.
 ///
-/// Requires `X-Realm-ID` header. Returns an authorization code and state.
+/// Requires `X-Realm-ID` header and a valid Bearer token. The token's `sub`
+/// claim determines the user on whose behalf the code is issued — the caller
+/// cannot supply an arbitrary `user_id` (HEA-1721).
 async fn authorize(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     Json(body): Json<pb::AuthorizationRequest>,
 ) -> impl IntoResponse {
@@ -790,19 +794,19 @@ async fn authorize(
         Err(e) => return e.into_response(),
     };
 
+    // HEA-1721: authenticate the caller; their token's `sub` is the authoritative
+    // user identity.  The body's `user_id` field is ignored to prevent unauthenticated
+    // account takeover via caller-supplied user IDs.
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let authenticated_user_id =
+        match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
+            Ok(uid) => uid,
+            Err(e) => return e.into_response(),
+        };
+
     // PAR path: when `request_uri` is present, consume the stored entry to
     // obtain the pre-validated parameters and set `via_par = true`.
     let request = if let Some(ref request_uri) = body.request_uri {
-        let user_id = match uuid::Uuid::parse_str(&body.user_id) {
-            Ok(u) => UserId::new(u),
-            Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "invalid user_id"})),
-                )
-                    .into_response();
-            }
-        };
         let stored = match state.identity.consume_par(&realm_id, request_uri) {
             Ok(s) => s,
             Err(IdentityError::InvalidPushedAuthorizationRequest) => {
@@ -856,7 +860,7 @@ async fn authorize(
             state: stored.state,
             resource: stored.resource,
             response_type: stored.response_type,
-            user_id,
+            user_id: authenticated_user_id,
             code_challenge: stored.code_challenge,
             code_challenge_method: stored.code_challenge_method,
             nonce: stored.nonce,
@@ -866,7 +870,7 @@ async fn authorize(
             via_par: true,
         }
     } else {
-        match proto_authorize_to_domain(body) {
+        let r = match proto_authorize_to_domain(body) {
             Ok(r) => r,
             Err(msg) => {
                 return (
@@ -875,6 +879,11 @@ async fn authorize(
                 )
                     .into_response();
             }
+        };
+        // Override body-supplied user_id with the authenticated identity (HEA-1721).
+        AuthorizationRequest {
+            user_id: authenticated_user_id,
+            ..r
         }
     };
 
@@ -2045,6 +2054,9 @@ async fn realm_authorize_browser_redirect(
 
 async fn realm_authorize(
     State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
     Path(realm_name): Path<String>,
     Json(body): Json<pb::AuthorizationRequest>,
 ) -> impl IntoResponse {
@@ -2052,7 +2064,16 @@ async fn realm_authorize(
         Ok(id) => id,
         Err(e) => return e,
     };
-    let request = match proto_authorize_to_domain(body) {
+
+    // HEA-1721: authenticate the caller; their token's `sub` is the authoritative user identity.
+    let htu = format!("{}{}", state.identity.oidc_discovery().issuer, uri.path());
+    let authenticated_user_id =
+        match extract_user_auth(&headers, &state, &realm_id, method.as_str(), &htu) {
+            Ok(uid) => uid,
+            Err(e) => return e.into_response(),
+        };
+
+    let mut request = match proto_authorize_to_domain(body) {
         Ok(r) => r,
         Err(msg) => {
             return (
@@ -2062,6 +2083,8 @@ async fn realm_authorize(
                 .into_response()
         }
     };
+    // Override body-supplied user_id with the authenticated identity (HEA-1721).
+    request.user_id = authenticated_user_id;
     match state.identity.authorize(&realm_id, &request) {
         Ok(response) => (
             StatusCode::OK,

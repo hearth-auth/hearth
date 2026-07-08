@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Unauthenticated `POST /authorize` now rejected** — the machine-API authorization endpoint
+  previously accepted a caller-supplied `user_id` with no authentication, allowing any party who
+  knew a valid `client_id`, `redirect_uri`, and `user_id` (all non-secret) to mint an OAuth
+  authorization code for an arbitrary account — a pre-authentication account takeover. The
+  endpoint now requires a valid Bearer token; the token's `sub` is used as the authoritative
+  user identity and any body-supplied `user_id` is ignored. The same fix applies to
+  `POST /realms/{realm}/authorize` and the gRPC `Authorize` RPC (HEA-1721).
 - **WebAuthn discoverable-login userHandle spoofing fixed** — in the discoverable passkey flow,
   the server now rejects any assertion where the client-supplied `userHandle` does not match the
   credential owner resolved from the server-side discoverable index. Previously, an attacker with

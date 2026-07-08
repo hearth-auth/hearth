@@ -323,6 +323,34 @@ pub const CLIENT_ID_META_KEY: &str = "x-hearth-client-id";
 /// Metadata key carrying the OAuth client secret for protected RPC calls.
 pub const CLIENT_SECRET_META_KEY: &str = "x-hearth-client-secret";
 
+/// Extracts and validates a user bearer token from gRPC request metadata (HEA-1721).
+///
+/// Reads the `authorization` metadata key (`Bearer <token>`), validates the JWT
+/// for the given realm, and returns the authenticated [`UserId`].  Returns
+/// `UNAUTHENTICATED` if the header is absent, malformed, or carries an invalid token.
+pub fn extract_grpc_user_auth(
+    md: &MetadataMap,
+    realm_id: &RealmId,
+    identity: &dyn crate::identity::IdentityEngine,
+) -> Result<crate::core::UserId, Status> {
+    let raw = md
+        .get("authorization")
+        .ok_or_else(|| Status::unauthenticated("missing authorization header"))?
+        .to_str()
+        .map_err(|_| Status::unauthenticated("invalid authorization header"))?;
+    let token = raw
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| Status::unauthenticated("invalid authorization scheme"))?;
+    let claims = identity
+        .validate_token(realm_id, token)
+        .map_err(|_| Status::unauthenticated("invalid or expired token"))?;
+    // sub is "user_{uuid}" — strip the prefix before UUID parse.
+    let sub_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
+    uuid::Uuid::parse_str(sub_str)
+        .map(crate::core::UserId::new)
+        .map_err(|_| Status::unauthenticated("invalid token subject"))
+}
+
 /// Extracts and verifies OAuth client credentials from gRPC request metadata.
 ///
 /// Reads `x-hearth-client-id` and optional `x-hearth-client-secret` metadata
