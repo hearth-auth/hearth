@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **WebAuthn discoverable-login userHandle spoofing fixed** — in the discoverable passkey flow,
+  the server now rejects any assertion where the client-supplied `userHandle` does not match the
+  credential owner resolved from the server-side discoverable index. Previously, an attacker with
+  a valid discoverable credential in the target realm could substitute an arbitrary victim UUID
+  into `userHandle` (which is not covered by the WebAuthn signature) and receive a valid session
+  for the victim account — a pre-authentication account takeover (CWE-287 / CWE-639). The
+  discoverable index is now authoritative; `userHandle` is validated, not trusted (HEA-1719).
+
 ### Fixed
 - **Dev-mode `oidc.issuer` defaults to actual server URL** — when running `hearth serve --dev`
   without an explicit `oidc.issuer` config, the server now uses `http://127.0.0.1:{port}` as the

@@ -7573,6 +7573,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             origin,
         )?;
 
+        // SECURITY (HEA-1719): In the discoverable flow, `webauthn::complete_authentication`
+        // derives `user_id` from the client-supplied, unsigned `userHandle`. The discoverable
+        // index (keyed by credential_id) is authoritative for identity. Reject any mismatch to
+        // prevent userHandle-spoofing attacks that bypass authentication and take over accounts.
+        if pending.user_id.is_none() && result.user_id() != &owner_user_id {
+            return Err(IdentityError::InvalidAssertion {
+                reason: "userHandle does not match credential owner".into(),
+            });
+        }
+
         // Update sign counter
         let mut updated = stored;
         updated.sign_count = result.sign_count();
