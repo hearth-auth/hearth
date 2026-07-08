@@ -478,6 +478,8 @@ fn action_label(action: &crate::audit::AuditAction) -> &'static str {
         A::RequiredActionAutoCleared => "Required Action Auto-Cleared",
         A::PasswordCompromisedRejected => "Password Compromised Rejected",
         A::BreachCheckUnavailable => "Breach Check Unavailable",
+        A::MfaEnabled => "MFA Enabled",
+        A::MfaDisabled => "MFA Disabled",
         A::StepUpMfaTriggered => "Step-Up MFA Triggered",
         A::StepUpMfaCompleted => "Step-Up MFA Completed",
         A::SmsOtpEnrollmentStarted => "SMS OTP Enrollment Started",
@@ -602,7 +604,9 @@ fn action_category(action: &crate::audit::AuditAction) -> &'static str {
         | A::SmsMfaChallengeSucceeded
         | A::SmsMfaChallengeFailed
         | A::SmsMfaLocked
-        | A::DeviceFingerprintsErased => "Security",
+        | A::DeviceFingerprintsErased
+        | A::MfaEnabled
+        | A::MfaDisabled => "Security",
         // System — realm config, federation/SAML/SCIM integrations,
         // backup/restore, and internal cleanup jobs.
         A::RealmCreated

@@ -166,7 +166,7 @@ go vet ./...
 echo "    go vet: OK"
 
 DEMO_PORT=$(free_port)
-HEARTH_URL="$HEARTH_BASE_URL" REALM_ID="$HEARTH_REALM_ID" PORT="$DEMO_PORT" go run . &
+HEARTH_URL="$HEARTH_BASE_URL" REALM_ID="$HEARTH_REALM_ID" REALM_SLUG="dev-realm" PORT="$DEMO_PORT" go run . &
 DEMO_PID=$!
 
 echo "    Waiting for demo backend on port ${DEMO_PORT}"

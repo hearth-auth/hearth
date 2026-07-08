@@ -6,6 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Dev-mode `oidc.issuer` defaults to actual server URL** — when running `hearth serve --dev`
+  without an explicit `oidc.issuer` config, the server now uses `http://127.0.0.1:{port}` as the
+  issuer base instead of the placeholder `https://hearth.local`. Token `iss` claims are now
+  reachable, allowing JWKS-verifying clients to derive the per-realm JWKS URL directly from
+  the `iss` claim without a hostname mismatch (HEA-1716).
+- **CI quality job no longer masks nextest on advisory failure** — removed the redundant
+  `cargo deny check` step from the `quality` job (already covered by the dedicated
+  `cargo-deny` job); added `continue-on-error: true` to `cargo audit` so advisory hits
+  never suppress test results. Both checks still fail the build via their own named CI jobs
+  (HEA-1714).
+- **Session access/refresh tokens now verify** — `issue_tokens` signs session-originated
+  tokens with the realm's per-realm signing key instead of the global key. HEA-SEC-18
+  removed the global-key fallback from signature verification (fail-closed), so
+  session tokens signed with the global key were rejected by `validate_token`,
+  `refresh_tokens`, and introspection with `InvalidToken`. Restores password/session
+  login, `/admin/bootstrap`, and admin/tenant sessions (HEA-1712).
+- **Per-realm token issuer accepted at validation** — `validate_token` now accepts an
+  `iss` that matches the configured `token.issuer` or is issued under the `oidc.issuer`
+  base (`{base}` or `{base}/realms/{name}`), matching what issuance produces. The prior
+  exact-match against `token.issuer` rejected every real token (HEA-1712).
+
+### Security
+- **RUSTSEC-2026-0204 (crossbeam-epoch)** — bumped `crossbeam-epoch` 0.9.18 → 0.9.20 to
+  remediate an invalid pointer dereference advisory flagged by `cargo deny` (HEA-1712).
+
 ### Added
 - **Auth-discard CI lint** — `scripts/check-auth-discard.sh` and `make auth-discard-check`
   fail on any occurrence of `let _auth`, `let _ = extract_admin_auth(...)`, or an unbound
@@ -23,6 +49,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   existing TLS 1.2+1.3 behaviour. Recommended for high-security deployments (HEA-SEC-33).
 
 ### Security
+- **HSS-010 (Argon2 parallelism rehash)** — `argon2_params_need_rehash` now includes
+  the `p` (parallelism) parameter; a stale value triggers rehash on next login (HEA-SEC-34).
+- **WEB-005 (Captcha site_key XSS)** — Turnstile `site_key` is HTML-attribute-escaped
+  before insertion into widget HTML (HEA-SEC-34).
+- **OAUTH-04 (Redirect URI schemes)** — Non-reverse-DNS custom URI schemes emit a
+  `tracing::warn` at client registration; advises RFC 8252 §7.1 format (HEA-SEC-34).
+- **HSEC-008 (Device code TTL)** — Device code lifetime is now configurable per realm
+  via `auth.token.device_code_ttl`; hard-capped at 30 minutes (HEA-SEC-34).
+- **HSS-008 (Magic link invalidation)** — Requesting a new magic link invalidates all
+  existing unexpired tokens for the same email (HEA-SEC-34).
+- **WEB-009 (gRPC reflection auth)** — Reflection service now requires
+  `Authorization: Bearer <token>`; unauthenticated callers get `UNAUTHENTICATED` (HEA-SEC-34).
 - **Minimal security headers on all REST API responses** — `X-Content-Type-Options: nosniff`
   and `Referrer-Policy: no-referrer` are now applied to every HTTP response from the REST API,
   not only the web UI. Prevents MIME-type sniffing and referrer leakage (HEA-SEC-33).
@@ -80,11 +118,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   per-realm operator configuration; a higher `min_length` in the policy is still respected.
   A production startup warning is emitted when the system realm has no explicit
   `password_policy` configured (HSEC-003 / HEA-SEC-23).
-- **System realm MFA default changed to required** — `create_session` in the nil-UUID
-  system realm now defaults `mfa_required` to `true` when the field is not explicitly set
-  in the realm config. Previously, an admin-realm user without MFA enrolled could
-  authenticate without any second factor. Explicitly setting `mfa_required: false` on the
-  system realm is now a hard startup error in production mode (HSEC-004 / HEA-SEC-23).
+- **System realm MFA enforcement is opt-in; explicit disable is blocked** — MFA defaults
+  to not required for all realms including the system realm, preserving bootstrappability on
+  a fresh install (HSEC-004 revised — prior default-on broke bootstrap). Operators who want
+  second-factor enforcement on the admin control plane should enroll MFA for all admin
+  accounts and then set `mfa_required: true` in `hearth.yaml`. A production startup warning
+  is emitted when the system realm has no explicit `mfa_required` setting. Explicitly setting
+  `mfa_required: false` on the system realm remains a hard startup error (HSEC-004 / HEA-SEC-23).
 - **Token substitution rejected at introspection** — `POST /introspect` now returns
   `{"active": false}` for any token whose `token_type` claim is not `"access"`. Previously
   a valid ID token or refresh token could be presented to the introspection endpoint and

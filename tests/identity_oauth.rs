@@ -1119,16 +1119,21 @@ mod oauth_proptests {
                 old_refresh_tokens.push(current_refresh);
                 current_refresh = new_pair.refresh_token().to_string();
 
-                // Current refresh token should work for introspection
+                // The rotated access token must be active. Introspection is
+                // intentionally scoped to access tokens (HEA-SEC-22): refresh
+                // and ID tokens introspect as inactive to prevent confused-deputy
+                // token substitution, so the refresh token's continued validity
+                // is instead proven by the successful rotation at the top of the
+                // next loop iteration (and by the theft-detection checks below).
                 let resp = engine.introspect_token(
                     &realm_id,
                     &TokenIntrospectionRequest {
-                        token: current_refresh.clone(),
+                        token: new_pair.access_token().to_string(),
                         token_type_hint: None,
                         introspecting_client_id: None,
                     },
                 ).expect("introspect current");
-                prop_assert!(resp.active, "current refresh token must be active at rotation {}", i);
+                prop_assert!(resp.active, "rotated access token must be active at rotation {}", i);
             }
 
             // After all rotations, none of the old refresh tokens should work

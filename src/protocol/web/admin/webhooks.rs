@@ -750,7 +750,14 @@ async fn fire_test_ping_result(url: &str, secret: Option<&str>) -> (bool, String
             Ok(b) => b,
             Err(e) => return (false, format!("Failed to build payload: {e}")),
         };
-        let mut req = ureq::post(&url)
+        let agent = ureq::config::Config::builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(5)))
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .https_only(true)
+            .build()
+            .new_agent();
+        let mut req = agent
+            .post(&url)
             .header("Content-Type", "application/json")
             .header("User-Agent", "Hearth-Webhook/1.0");
 

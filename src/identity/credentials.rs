@@ -399,6 +399,7 @@ pub(crate) fn argon2_params_need_rehash(hash_str: &str, config: &CredentialConfi
     // Locate the params segment — the one that contains "m=" (memory cost).
     let mut m: Option<u32> = None;
     let mut t: Option<u32> = None;
+    let mut p: Option<u32> = None;
     for seg in hash_str.split('$') {
         if seg.contains("m=") {
             for kv in seg.split(',') {
@@ -406,12 +407,17 @@ pub(crate) fn argon2_params_need_rehash(hash_str: &str, config: &CredentialConfi
                     m = v.parse().ok();
                 } else if let Some(v) = kv.strip_prefix("t=") {
                     t = v.parse().ok();
+                } else if let Some(v) = kv.strip_prefix("p=") {
+                    // HSS-010: parallelism must match; a stale `p` forces rehash
+                    p = v.parse().ok();
                 }
             }
             break;
         }
     }
-    m.map_or(false, |v| v != config.memory_cost_kib) || t.map_or(false, |v| v != config.time_cost)
+    m.map_or(false, |v| v != config.memory_cost_kib)
+        || t.map_or(false, |v| v != config.time_cost)
+        || p.map_or(false, |v| v != config.parallelism)
 }
 
 /// Verifies a password against a hash string.
@@ -914,6 +920,28 @@ mod tests {
             ..config.clone()
         };
         assert!(argon2_params_need_rehash(&cred.hash, &new_config));
+    }
+
+    #[test]
+    fn params_need_rehash_detects_parallelism_change() {
+        // HSS-010: parallelism (`p`) must be included in the stale-params check.
+        let config = CredentialConfig {
+            memory_cost_kib: 512,
+            time_cost: 2,
+            parallelism: 1,
+            pepper: None,
+        };
+        let pw = CleartextPassword::from_string("pw".to_string());
+        let cred = hash_password(&pw, &config, 0).expect("hash");
+        assert!(!argon2_params_need_rehash(&cred.hash, &config));
+        let new_config = CredentialConfig {
+            parallelism: 2,
+            ..config.clone()
+        };
+        assert!(
+            argon2_params_need_rehash(&cred.hash, &new_config),
+            "parallelism change must trigger rehash (HSS-010)"
+        );
     }
 
     #[test]

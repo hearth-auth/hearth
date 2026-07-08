@@ -5819,11 +5819,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         // passkey ceremony (passkeys are inherently multi-factor).
         if !context.satisfies_mfa_via_passkey {
             if let Ok(Some(realm)) = self.get_realm(realm_id) {
-                // HSEC-004: System realm (nil UUID) defaults MFA to required even when
-                // `mfa_required` is not explicitly configured — the admin control plane
-                // must not silently accept unauthenticated sessions. User realms default
-                // to opt-in (false) unless explicitly enabled.
-                let mfa_default = keys::is_system_realm(realm_id);
+                // HSEC-004 (revised): MFA defaults to opt-in for all realms. Operators
+                // enable it explicitly via `mfa_required: true` in hearth.yaml after
+                // enrolling a second factor. Defaulting to `true` for the system realm
+                // made fresh installs unbootable (no MFA enrollment path exists before
+                // the first admin session). The production hard-error in main.rs already
+                // blocks `mfa_required: false` from being set explicitly; a startup
+                // warning nudges operators who leave it `null` to enable it once enrolled.
+                let mfa_default = false;
                 if realm.config().mfa_required.unwrap_or(mfa_default) {
                     let has_mfa = self.mfa_enabled(realm_id, user_id).unwrap_or(false);
                     if !has_mfa {
@@ -6482,7 +6485,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 None
             }
         });
-        self.signing_key.issue_token_pair(&IssueTokenRequest {
+        // Sign with the realm's per-realm signing key so tokens verify against
+        // the same key `validate_token`/`refresh_tokens` load for this realm.
+        // HEA-SEC-18 removed the global-key fallback from signature
+        // verification (fail-closed), so signing with the global `self.signing_key`
+        // here would produce tokens that never validate. Mirrors the refresh
+        // path, which already uses `get_signing_key_or_default`.
+        let realm_signing_key = self.get_signing_key_or_default(realm_id);
+        realm_signing_key.issue_token_pair(&IssueTokenRequest {
             sub: &user_id.to_string(),
             sid: &session_id.to_string(),
             tid: &realm_id.to_string(),
@@ -6611,10 +6621,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidToken);
         }
 
-        // RFC 7519 §4.1.1 — issuer must exactly match the configured value.
-        // Prevents tokens from a foreign Hearth instance from being accepted
-        // even when they carry a valid signature and correct realm binding.
-        if claims.iss != self.config.token.issuer {
+        // RFC 7519 §4.1.1 — issuer must originate from this Hearth instance.
+        // Tokens are minted with a per-realm issuer derived from `oidc.issuer`
+        // (`realm_issuer_url`: `{base}` or `{base}/realms/{name}`), while a few
+        // internal issuance paths fall back to the flat `token.issuer`. Accept
+        // either an exact `token.issuer` match or an issuer under the configured
+        // `oidc.issuer` base — a foreign instance carries neither, and the exact
+        // realm is already bound by the `tid` check above. Hot-path safe: string
+        // comparison and `strip_prefix` borrow, no allocation.
+        let oidc_base = self.config.oidc.issuer.as_str();
+        let issuer_ok = claims.iss == self.config.token.issuer
+            || claims
+                .iss
+                .strip_prefix(oidc_base)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with("/realms/"));
+        if !issuer_ok {
             return Err(IdentityError::InvalidToken);
         }
 
@@ -6780,6 +6801,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         match self.oidc_ecdsa_jwk() {
             Ok(jwk) => keys.push(jwk),
             Err(err) => tracing::error!(error = %err, "failed to materialize ES256 JWKS entry"),
+        }
+        // Since HEA-1712, issue_tokens_with_context signs with per-realm keys.
+        // The bootstrap / session tokens for the system realm carry the
+        // system-realm kid, which the global JWKS must include so clients
+        // verifying against /.well-known/jwks.json can match it. Public keys
+        // are non-secret; this only exposes the control-plane realm's key.
+        let sys_realm = keys::system_realm_id();
+        match self.realm_jwks(&sys_realm) {
+            Ok(realm_doc) => {
+                let seen: std::collections::HashSet<String> =
+                    keys.iter().map(|k| k.kid.clone()).collect();
+                for k in realm_doc.keys {
+                    if !seen.contains(&k.kid) {
+                        keys.push(k);
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to include system-realm key in global JWKS");
+            }
         }
         JwksDocument { keys }
     }
@@ -7074,7 +7115,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     actor: Actor::User(user_id.clone()),
                     metadata: None,
                 }),
-                AuditAction::CredentialVerified,
+                AuditAction::MfaEnabled,
                 "credential",
                 &user_id.as_uuid().to_string(),
             )?;
@@ -7186,7 +7227,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                         actor: Actor::User(user_id.clone()),
                         metadata: None,
                     }),
-                    AuditAction::CredentialChanged,
+                    AuditAction::MfaDisabled,
                     "credential",
                     &user_id.as_uuid().to_string(),
                 )?;
@@ -7690,6 +7731,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let user_id = self
             .get_user_by_email(realm_id, &normalized)?
             .map(|u| u.id().as_uuid().to_string());
+
+        // HSS-008: invalidate all existing unexpired magic link tokens for this
+        // email before issuing a new one. Prevents a previously-intercepted link
+        // from remaining valid after the account holder requests a fresh one.
+        let ml_prefix = keys::magic_link_token_scan_prefix();
+        let ml_end = crate::storage::prefix_scan_end(&ml_prefix);
+        let now_micros = self.clock.now().as_micros();
+        if let Ok(entries) = self.storage.scan(realm_id, &ml_prefix, &ml_end) {
+            for entry in entries {
+                if let Ok(mut prior) = serde_json::from_slice::<StoredMagicLink>(&entry.value) {
+                    let age = now_micros - prior.created_at_micros;
+                    if !prior.used && prior.email == normalized && age < MAGIC_LINK_EXPIRY_MICROS {
+                        prior.used = true;
+                        if let Ok(val) = serde_json::to_vec(&prior) {
+                            let _ = self.storage.put(realm_id, &entry.key, &val);
+                        }
+                    }
+                }
+            }
+        }
 
         // 4. Generate random token
         let token = magic_link::generate_magic_link_token()?;
@@ -12600,6 +12661,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         since: u64,
         limit: usize,
     ) -> Result<Option<crate::identity::session_version::SvDeltaResponse>, IdentityError> {
+        let enabled = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Err(IdentityError::SessionVersionDisabled);
+        }
         self.sv_store.list_deltas(realm_id, since, limit)
     }
 
@@ -15524,7 +15594,7 @@ mod tests {
                 .set_password(
                     &realm,
                     &user_id,
-                    &CleartextPassword::from_string("pw".to_string()),
+                    &CleartextPassword::from_string("password1".to_string()),
                 )
                 .expect("set password");
             // 3 failures → lockout written to WAL
@@ -15540,7 +15610,7 @@ mod tests {
                     engine.verify_password(
                         &realm,
                         &user_id,
-                        &CleartextPassword::from_string("pw".to_string())
+                        &CleartextPassword::from_string("password1".to_string())
                     ),
                     Err(IdentityError::RateLimited)
                 ),
@@ -15553,7 +15623,7 @@ mod tests {
         let result = engine2.verify_password(
             &realm,
             &user_id,
-            &CleartextPassword::from_string("pw".to_string()),
+            &CleartextPassword::from_string("password1".to_string()),
         );
         assert!(
             matches!(result, Err(IdentityError::RateLimited)),
@@ -15578,7 +15648,7 @@ mod tests {
                 .set_password(
                     &realm,
                     &user_id,
-                    &CleartextPassword::from_string("pw".to_string()),
+                    &CleartextPassword::from_string("password1".to_string()),
                 )
                 .expect("set password");
             for i in 0..3 {
@@ -15598,7 +15668,7 @@ mod tests {
         let result = engine2.verify_password(
             &realm,
             &user_id,
-            &CleartextPassword::from_string("pw".to_string()),
+            &CleartextPassword::from_string("password1".to_string()),
         );
         assert!(
             matches!(result, Ok(true)),
@@ -19223,7 +19293,7 @@ mod tests {
                 let realm = create_test_realm(&engine);
                 let user = create_test_user(&engine, &realm);
 
-                let pw = CleartextPassword::from_string("secret".to_string());
+                let pw = CleartextPassword::from_string("secret1a".to_string());
                 engine
                     .set_password(&realm, user.id(), &pw)
                     .expect("set password");

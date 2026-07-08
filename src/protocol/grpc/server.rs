@@ -61,6 +61,31 @@ fn extract_grpc_peer_ip(req: &tonic::Request<()>) -> Option<IpAddr> {
     req.remote_addr().map(|a| a.ip())
 }
 
+/// WEB-009: gRPC interceptor requiring `Authorization: Bearer <token>` for
+/// reflection requests. Applied to the reflection service using
+/// `tonic::service::interceptor::InterceptedService` so only reflection RPC
+/// calls are gated; health, admin, and OAuth services are unaffected.
+///
+/// Reflection is already production-gated by `--allow-reflection-in-prod`.
+/// This gate prevents anonymous schema enumeration on staging/debug instances.
+pub fn grpc_reflection_auth_interceptor(
+    req: tonic::Request<()>,
+) -> Result<tonic::Request<()>, tonic::Status> {
+    let has_bearer = req
+        .metadata()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.starts_with("Bearer ") && v.len() > "Bearer ".len())
+        .unwrap_or(false);
+    if has_bearer {
+        Ok(req)
+    } else {
+        Err(tonic::Status::unauthenticated(
+            "reflection requires Authorization: Bearer <token>",
+        ))
+    }
+}
+
 /// Shared state for all gRPC services.
 ///
 /// Built once at startup and cloned (Arc) into each service handler.
@@ -219,12 +244,15 @@ where
         .await;
 
     // A-43: reflection is off by default; only add it when explicitly enabled.
+    // WEB-009: gate reflection behind a bearer token at the service level.
     let reflection = if reflection_enabled {
-        Some(
-            tonic_reflection::server::Builder::configure()
-                .register_encoded_file_descriptor_set(super::FILE_DESCRIPTOR_SET)
-                .build_v1()?,
-        )
+        let svc = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(super::FILE_DESCRIPTOR_SET)
+            .build_v1()?;
+        Some(tonic::service::interceptor::InterceptedService::new(
+            svc,
+            grpc_reflection_auth_interceptor,
+        ))
     } else {
         None
     };

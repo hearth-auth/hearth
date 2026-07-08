@@ -477,7 +477,7 @@ fn verify_email_token_rejects_reuse() {
     let env = TestEnv::new();
     let _ = ensure_setup_token(env.identity.as_ref(), env.data_dir(), None, None, None);
     env.seed_realm("RealmZ");
-    let pw = CleartextPassword::new(b"pw".to_vec());
+    let pw = CleartextPassword::new(b"password1".to_vec());
     let outcome = env
         .service
         .complete_setup("reuse@example.com", "Reuse", &pw, "http://localhost:8420")
@@ -642,7 +642,7 @@ fn complete_setup_surfaces_email_delivery_failure() {
         })
         .expect("seed realm");
 
-    let pw = CleartextPassword::new(b"pw".to_vec());
+    let pw = CleartextPassword::new(b"password1".to_vec());
     let err = service
         .complete_setup("boom@example.com", "B", &pw, "http://localhost:8420")
         .expect_err("email failure");

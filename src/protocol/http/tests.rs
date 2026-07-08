@@ -152,10 +152,10 @@ async fn bootstrap_returns_admin_credentials_in_dev_mode() {
     assert!(!token.is_empty(), "access_token should not be empty");
 }
 
-/// HEA-1670: First bootstrap must return a non-empty `admin_password`; the
-/// password must actually authenticate the `admin@hearth.test` user.
+/// HEA-1670: First bootstrap must return `admin_password`; the password must
+/// authenticate the `admin@hearth.test` user.
 #[tokio::test]
-async fn bootstrap_returns_random_admin_password_on_first_call() {
+async fn bootstrap_returns_admin_password_on_first_call() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let state = test_state_dev(temp_dir.path());
     let sys = crate::identity::keys::system_realm_id();
@@ -183,7 +183,11 @@ async fn bootstrap_returns_random_admin_password_on_first_call() {
         !pwd_str.is_empty(),
         "admin_password must be non-empty on first bootstrap"
     );
-    assert_eq!(pwd_str.len(), 32, "admin_password must be 32 characters");
+    assert_eq!(
+        pwd_str,
+        super::admin::DEV_SYSTEM_ADMIN_PASSWORD,
+        "admin_password must match the well-known dev constant"
+    );
 
     let admin = state
         .identity
@@ -307,9 +311,12 @@ async fn bootstrap_requires_auth_on_second_call() {
     );
 }
 
-/// HEA-1670: Fresh bootstraps must produce distinct passwords.
+/// HEA-1716: Fresh bootstraps always return the fixed dev password constant.
+///
+/// The system admin now uses a stable password (DEV_SYSTEM_ADMIN_PASSWORD) so
+/// the Playwright UI test suite can log in without reading the bootstrap response.
 #[tokio::test]
-async fn bootstrap_generates_unique_passwords_per_fresh_install() {
+async fn bootstrap_returns_fixed_dev_password_on_first_call() {
     async fn first_password(dir: &std::path::Path) -> String {
         let state = test_state_dev(dir);
         let resp = router(state)
@@ -338,12 +345,16 @@ async fn bootstrap_generates_unique_passwords_per_fresh_install() {
     let pwd_a = first_password(dir_a.path()).await;
     let pwd_b = first_password(dir_b.path()).await;
 
-    assert_ne!(
-        pwd_a, pwd_b,
-        "distinct fresh bootstraps must produce distinct passwords"
+    assert_eq!(
+        pwd_a,
+        super::admin::DEV_SYSTEM_ADMIN_PASSWORD,
+        "first bootstrap must return the well-known dev constant"
     );
-    assert_eq!(pwd_a.len(), 32, "password a must be 32 chars");
-    assert_eq!(pwd_b.len(), 32, "password b must be 32 chars");
+    assert_eq!(
+        pwd_b,
+        super::admin::DEV_SYSTEM_ADMIN_PASSWORD,
+        "second fresh install must also return the well-known dev constant"
+    );
 }
 
 // ── A-40: Host header allowlist tests ────────────────────────────────────────

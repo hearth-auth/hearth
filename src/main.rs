@@ -817,6 +817,12 @@ async fn run_serve(
         let mut oc = OidcConfig::default();
         if let Some(issuer) = &config.oidc.issuer {
             oc.issuer.clone_from(issuer);
+        } else if config.dev_mode {
+            // In --dev mode without an explicit oidc.issuer, default to the
+            // actual server address so token iss claims are reachable.  This
+            // lets JWKS-verifying clients derive the per-realm JWKS URL from
+            // the iss claim without a hostname mismatch.
+            oc.issuer = format!("http://127.0.0.1:{}", config.server.port);
         }
         if let Some(ttl) = &config.oidc.authorization_code_ttl {
             if let Ok(micros) = hearth::config::parse_duration_to_micros(ttl) {
@@ -1057,6 +1063,17 @@ async fn run_serve(
                      MFA may not be disabled on the admin realm in production. \
                      Remove the override or set mfa_required: true."
                         .into(),
+                );
+            }
+            // HSEC-004: Soft warning — when mfa_required is not configured at all,
+            // the system realm defaults to MFA not required. Operators should enroll
+            // a second factor for all admin accounts and then set mfa_required: true
+            // in hearth.yaml to enforce it.
+            if sys_realm.config().mfa_required.is_none() {
+                warn!(
+                    "system realm mfa_required is not configured; admin sessions do not \
+                     require a second factor. Enroll MFA for all admin accounts and set \
+                     mfa_required: true under the system realm config to enforce it."
                 );
             }
             // HSEC-003: Non-fatal warning — the 8-character floor is always enforced

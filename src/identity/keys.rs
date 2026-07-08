@@ -769,6 +769,14 @@ pub(crate) fn encode_magic_link_token(token_hash: &str) -> Vec<u8> {
     format!("{MAGIC_LINK_PREFIX}{token_hash}").into_bytes()
 }
 
+/// Returns the scan prefix for all magic link tokens in a realm.
+///
+/// Used by `request_magic_link` to invalidate prior tokens for the same email
+/// (HSS-008). Pair with `storage::prefix_scan_end` to get the half-open range.
+pub(crate) fn magic_link_token_scan_prefix() -> Vec<u8> {
+    MAGIC_LINK_PREFIX.as_bytes().to_vec()
+}
+
 /// Encodes the storage key for an email verification token.
 ///
 /// Format: `email:verify:{sha256_hex_of_token}`

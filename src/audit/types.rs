@@ -439,6 +439,16 @@ pub enum AuditAction {
     /// prune leaves a trace.  Metadata carries `cutoff_micros` (the
     /// exclusive upper bound), `retention_days`, and `realm_id`.
     AuditLogPruned,
+    /// TOTP enrollment was confirmed — MFA is now active for the user.
+    ///
+    /// Emitted from `verify_totp_enrollment` after `state.enabled` is
+    /// flipped to `true`.
+    MfaEnabled,
+    /// MFA was disabled for a user (admin action or self-service).
+    ///
+    /// Emitted from `disable_mfa`. All existing sessions are revoked
+    /// immediately after this event.
+    MfaDisabled,
 }
 
 impl AuditAction {
@@ -570,6 +580,9 @@ impl AuditAction {
             Self::SpiffeIdMapped,
             Self::SpiffeAuthSuccess,
             Self::AuditLogPruned,
+            // MFA lifecycle
+            Self::MfaEnabled,
+            Self::MfaDisabled,
         ]);
         v.sort_by_key(|a| a.as_str());
         v
@@ -697,6 +710,8 @@ impl AuditAction {
             Self::SpiffeIdMapped => "spiffe_id_mapped",
             Self::SpiffeAuthSuccess => "spiffe_auth_success",
             Self::AuditLogPruned => "audit_log_pruned",
+            Self::MfaEnabled => "mfa_enabled",
+            Self::MfaDisabled => "mfa_disabled",
         }
     }
 }
@@ -825,6 +840,8 @@ impl std::str::FromStr for AuditAction {
             "spiffe_id_mapped" => Ok(Self::SpiffeIdMapped),
             "spiffe_auth_success" => Ok(Self::SpiffeAuthSuccess),
             "audit_log_pruned" => Ok(Self::AuditLogPruned),
+            "mfa_enabled" => Ok(Self::MfaEnabled),
+            "mfa_disabled" => Ok(Self::MfaDisabled),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -948,7 +965,9 @@ impl AuditAction {
             | Self::SpiffeIdMapped
             | Self::SpiffeAuthSuccess
             // Meta-event about the audit log itself; loss is not critical.
-            | Self::AuditLogPruned => LogOnly,
+            | Self::AuditLogPruned
+            // Enabling MFA strengthens auth posture; non-destructive.
+            | Self::MfaEnabled => LogOnly,
             // ---- FailOperation (destructive / security-sensitive) ----
             Self::UserDeleted
             | Self::CredentialChanged
@@ -987,7 +1006,9 @@ impl AuditAction {
             | Self::CrossRealmTrustRevoked
             | Self::ProtectedResourceDeleted
             // Phase D — AAT revocation is security-sensitive.
-            | Self::AatRevoked => FailOperation,
+            | Self::AatRevoked
+            // Disabling MFA weakens authentication posture — must not be lost.
+            | Self::MfaDisabled => FailOperation,
         }
     }
 }

@@ -138,6 +138,40 @@ async fn certs_returns_rfc7517_jwks_with_all_three_algorithms() {
     }
 }
 
+/// HEA-1716: since HEA-1712 tokens are signed with per-realm keys, the global
+/// JWKS includes the system-realm key so any client verifying tokens issued
+/// under the system realm (RealmId::nil()) can find the matching key.
+/// (Note: the bootstrap token is issued for the user-created dev-realm, not the
+/// system realm. The canonical fix for JWKS-verifying clients is to use the
+/// iss-derived realm JWKS; this test covers the system-realm inclusion as
+/// defence-in-depth.)
+#[tokio::test]
+async fn global_jwks_includes_system_realm_signing_key() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let app = build_app(&h).await;
+
+    // System realm is the nil UUID — mirrors identity::keys::system_realm_id()
+    // which isn't re-exported from the public crate surface.
+    let sys = hearth::core::RealmId::new(uuid::Uuid::nil());
+    let realm_doc = h.identity().realm_jwks(&sys).expect("system realm JWKS");
+    assert!(
+        !realm_doc.keys.is_empty(),
+        "system realm must have at least one signing key"
+    );
+    let sys_kid = &realm_doc.keys[0].kid;
+
+    let global = fetch_jwks(&app, "/.well-known/jwks.json").await;
+    let global_keys = global["keys"].as_array().expect("keys array");
+    let found = global_keys
+        .iter()
+        .any(|k| k["kid"].as_str() == Some(sys_kid.as_str()));
+    assert!(
+        found,
+        "global JWKS must contain system-realm kid '{sys_kid}' so \
+         bootstrap tokens can be verified"
+    );
+}
+
 #[tokio::test]
 async fn jwks_aliases_return_same_document() {
     let h = common::TestHarness::embedded().await.expect("harness");
@@ -204,8 +238,13 @@ async fn jwt_kid_header_matches_a_jwks_entry() {
         serde_json::from_slice(&header_bytes).expect("parse JWT header");
     let token_kid = header["kid"].as_str().expect("JWT must carry kid");
 
-    let app = build_app(&h).await;
-    let jwks = fetch_jwks(&app, "/certs").await;
+    // Tokens are signed with per-realm keys (HEA-1712); the global /certs endpoint
+    // only carries system-realm keys. Fetch JWKS from the realm directly.
+    let jwks_doc = h
+        .identity()
+        .realm_jwks(&realm_id)
+        .expect("realm_jwks must succeed");
+    let jwks = serde_json::to_value(&jwks_doc).expect("jwks to json");
     let keys = jwks["keys"].as_array().expect("keys array");
 
     let matched = keys

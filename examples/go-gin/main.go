@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/hearth-auth/hearth/sdks/go/hearth"
 	"github.com/gin-gonic/gin"
@@ -17,9 +20,9 @@ import (
 
 // server holds shared dependencies.
 type server struct {
-	hearth  *hearth.Client
-	jwksURL string
-	jwksSet jwk.Set
+	hearth    *hearth.Client
+	baseURL   string     // trusted base URL — used to guard iss-derived JWKS fetches
+	jwksCache sync.Map   // map[issuerURL]jwk.Set — refreshed on key miss
 }
 
 func main() {
@@ -28,18 +31,8 @@ func main() {
 	port := getenv("PORT", "8080")
 
 	client := hearth.NewClient(baseURL, realmID)
-	jwksURL := fmt.Sprintf("%s/.well-known/jwks.json", baseURL)
 
-	ctx := context.Background()
-
-	// Fetch the JWKS on startup; the cache refreshes automatically on a key miss.
-	jwksSet, err := fetchJWKS(ctx, jwksURL)
-	if err != nil {
-		slog.Error("failed to fetch JWKS", "err", err)
-		os.Exit(1)
-	}
-
-	s := &server{hearth: client, jwksURL: jwksURL, jwksSet: jwksSet}
+	s := &server{hearth: client, baseURL: baseURL}
 
 	r := gin.Default()
 
@@ -101,6 +94,10 @@ func (s *server) handleAdminOnly(c *gin.Context) {
 }
 
 // requireAuth validates the Bearer token and stores the parsed JWT in the context.
+//
+// The JWKS URL is derived from the token's iss claim so the middleware works
+// correctly for multi-realm Hearth deployments — each realm signs tokens with
+// its own key, and the realm-scoped JWKS lives at {iss}/.well-known/jwks.json.
 func (s *server) requireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw, ok := bearerToken(c)
@@ -109,15 +106,34 @@ func (s *server) requireAuth() gin.HandlerFunc {
 			return
 		}
 
-		// Try to parse with the cached key set first.
-		tok, err := parseJWT(raw, s.jwksSet)
+		// Derive the JWKS URL from the token's iss claim.
+		issuer, err := extractIssuer(raw)
 		if err != nil {
-			// On a key-miss (e.g., after a server key rotation), re-fetch once.
-			refreshed, fetchErr := fetchJWKS(c.Request.Context(), s.jwksURL)
-			if fetchErr == nil {
-				s.jwksSet = refreshed
-				tok, err = parseJWT(raw, s.jwksSet)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+		// Guard against SSRF: the issuer must be rooted at the configured base URL.
+		if !strings.HasPrefix(issuer, s.baseURL) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "untrusted issuer"})
+			return
+		}
+		jwksURL := issuer + "/.well-known/jwks.json"
+
+		// Try the cached key set first; fetch from JWKS endpoint on cache miss or
+		// key-not-found error (e.g. after a server-side key rotation).
+		var tok jwt.Token
+		if cached, ok := s.jwksCache.Load(jwksURL); ok {
+			tok, _ = parseJWT(raw, cached.(jwk.Set))
+		}
+		if tok == nil {
+			refreshed, fetchErr := fetchJWKS(c.Request.Context(), jwksURL)
+			if fetchErr != nil {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+				return
 			}
+			s.jwksCache.Store(jwksURL, refreshed)
+			var err error
+			tok, err = parseJWT(raw, refreshed)
 			if err != nil {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 				return
@@ -128,6 +144,28 @@ func (s *server) requireAuth() gin.HandlerFunc {
 		c.Set("raw_token", raw)
 		c.Next()
 	}
+}
+
+// extractIssuer decodes the JWT payload without verification and returns the iss claim.
+func extractIssuer(raw string) (string, error) {
+	parts := strings.SplitN(raw, ".", 3)
+	if len(parts) != 3 {
+		return "", fmt.Errorf("malformed JWT: expected 3 parts, got %d", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("invalid JWT payload encoding: %w", err)
+	}
+	var claims struct {
+		Iss string `json:"iss"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("invalid JWT claims: %w", err)
+	}
+	if claims.Iss == "" {
+		return "", fmt.Errorf("JWT missing iss claim")
+	}
+	return claims.Iss, nil
 }
 
 // requirePermission aborts with 403 when the JWT does not contain the permission.

@@ -6,8 +6,10 @@
 //!   even when no `PasswordPolicy` is configured on the realm.
 //! - A policy `min_length` lower than 8 does not lower the floor below 8.
 //! - A policy `min_length` higher than 8 is respected as the effective minimum.
-//! - Creating a session in the system realm without MFA enrolled is rejected
-//!   even when `mfa_required` is not explicitly set in the realm config.
+//! - Creating a session in the system realm without MFA enrolled SUCCEEDS when
+//!   `mfa_required` is not explicitly set (opt-in default).
+//! - Creating a session in the system realm fails with `MfaRequired` when
+//!   `mfa_required: true` is explicitly configured and no MFA is enrolled.
 
 mod common;
 
@@ -301,10 +303,15 @@ async fn self_registration_short_password_rejected_without_policy() {
     );
 }
 
-// ─── HSEC-004: system realm defaults to MFA required ─────────────────────
+// ─── HSEC-004: system realm MFA is opt-in, not default ───────────────────
 
+/// HSEC-004 (revised): When `mfa_required` is not configured on the system
+/// realm, session creation must SUCCEED. The admin control plane must be
+/// bootable on a fresh install — there is no way to pre-enroll MFA before
+/// the first admin session. Operators enable MFA enforcement explicitly after
+/// enrollment via `mfa_required: true` in hearth.yaml.
 #[tokio::test]
-async fn system_realm_session_requires_mfa_by_default() {
+async fn system_realm_session_succeeds_without_mfa_when_not_configured() {
     let harness = common::TestHarness::embedded().await.expect("harness");
     let sys_realm = RealmId::new(uuid::Uuid::nil());
 
@@ -330,12 +337,60 @@ async fn system_realm_session_requires_mfa_by_default() {
         )
         .expect("set password");
 
-    // Session creation must be rejected because the system realm defaults
-    // mfa_required to true and the user has no MFA enrolled (HSEC-004).
-    let err = harness
+    // With mfa_required not configured (None), session creation must succeed.
+    harness
         .identity()
         .create_session(&sys_realm, user.id(), &plain_session_context())
-        .expect_err("session without MFA must be rejected in system realm");
+        .expect("session without MFA must succeed when mfa_required is not configured");
+}
+
+/// HSEC-004: When `mfa_required: true` is explicitly set on a realm, session
+/// creation for a user without MFA enrolled must be rejected. Tests the same
+/// code path as the system realm check (update_realm rejects system-realm edits,
+/// so we use a user realm which exercises the identical enforcement block).
+#[tokio::test]
+async fn realm_session_requires_mfa_when_explicitly_configured() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+
+    let realm = harness
+        .identity()
+        .create_realm(&hearth::identity::CreateRealmRequest {
+            name: format!("mfa-test-{}", uuid::Uuid::new_v4()),
+            config: Some(RealmConfig {
+                mfa_required: Some(true),
+                ..Default::default()
+            }),
+        })
+        .expect("create realm with mfa_required");
+    let realm_id = realm.id().clone();
+
+    let user = harness
+        .identity()
+        .create_user(
+            &realm_id,
+            &CreateUserRequest {
+                email: format!("user-{}@hearth.test", uuid::Uuid::new_v4()),
+                display_name: "User".to_string(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create user");
+
+    harness
+        .identity()
+        .set_password(
+            &realm_id,
+            user.id(),
+            &CleartextPassword::from_string("Adm1nP@ssw0rd!".to_string()),
+        )
+        .expect("set password");
+
+    let err = harness
+        .identity()
+        .create_session(&realm_id, user.id(), &plain_session_context())
+        .expect_err("session without MFA must be rejected when mfa_required=true");
 
     assert!(
         matches!(err, IdentityError::MfaRequired),

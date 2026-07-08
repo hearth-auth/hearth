@@ -142,6 +142,9 @@ enum AuditAction {
   AUDIT_ACTION_SPIFFE_ID_MAPPED = 114;
   AUDIT_ACTION_SPIFFE_AUTH_SUCCESS = 115;
   AUDIT_ACTION_AUDIT_LOG_PRUNED = 116;
+  // MFA lifecycle
+  AUDIT_ACTION_MFA_ENABLED = 117;
+  AUDIT_ACTION_MFA_DISABLED = 118;
 }
 
 // A recorded audit event in the append-only log.

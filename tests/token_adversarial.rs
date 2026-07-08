@@ -538,6 +538,59 @@ async fn cross_realm_replay_rejected_by_validate_token() {
     );
 }
 
+// ── Per-realm issuer round-trip — HEA-1712 regression ────────────────────────
+
+/// Decodes a JWT payload segment to UTF-8 without verifying the signature.
+fn decode_jwt_payload(token: &str) -> String {
+    let payload_b64 = token.split('.').nth(1).expect("jwt payload segment");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .expect("decode payload");
+    String::from_utf8(bytes).expect("utf8 payload")
+}
+
+/// A freshly issued access token carries a per-realm issuer URL
+/// (`{oidc.issuer}/realms/{name}`) and MUST validate successfully.
+///
+/// Regression for HEA-1712: HEA-SEC-22 added an exact issuer check against the
+/// flat `token.issuer` (`"hearth"`), which rejected every real token because
+/// issuance derives `iss` from `oidc.issuer` via `realm_issuer_url`.
+/// `validate_token` must accept an issuer under the configured `oidc.issuer`
+/// base while still rejecting foreign issuers (covered by the cross-realm and
+/// alg-confusion suites above).
+#[tokio::test]
+async fn per_realm_issuer_token_validates() {
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let realm = harness.create_realm();
+    let user = create_user(&harness, &realm);
+    let session = harness
+        .identity()
+        .create_session(&realm, user.id(), &SessionContext::default())
+        .expect("session");
+    let pair = harness
+        .identity()
+        .issue_tokens(&realm, user.id(), session.id())
+        .expect("tokens");
+
+    // The token must carry a per-realm URL issuer, not the flat "hearth".
+    let payload = decode_jwt_payload(pair.access_token());
+    assert!(
+        payload.contains("/realms/"),
+        "issued access token should carry a per-realm issuer URL, payload: {payload}"
+    );
+
+    // And validate_token must accept that per-realm issuer (the HEA-1712 fix).
+    let claims = harness
+        .identity()
+        .validate_token(&realm, pair.access_token())
+        .expect("per-realm issuer token must validate");
+    assert!(
+        claims.iss.contains("/realms/"),
+        "validated issuer must be the per-realm URL, got: {}",
+        claims.iss
+    );
+}
+
 // ── Cross-realm replay — refresh_tokens ──────────────────────────────────────
 
 /// Vulnerability class: Cross-realm token replay

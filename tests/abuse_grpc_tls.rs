@@ -243,6 +243,7 @@ fn a44_build_server_config_with_crl_path_succeeds() {
         client_ca_path: Some(ca_path),
         require_client_cert: true,
         crl_paths: vec![crl_path],
+        tls13_only: false,
     };
     build_server_config(params).expect("build_server_config must succeed with valid CRL path");
 }
@@ -262,6 +263,7 @@ fn a44_build_server_config_with_bad_crl_path_errors() {
         client_ca_path: Some(ca_path),
         require_client_cert: true,
         crl_paths: vec![PathBuf::from("/nonexistent/bad.crl.pem")],
+        tls13_only: false,
     };
     let result = build_server_config(params);
     result.expect_err("must error when a CRL path does not exist");

@@ -108,10 +108,13 @@ async fn token_issuance_and_validation_roundtrip() {
     assert_eq!(claims.tid, realm.to_string());
     assert_eq!(claims.token_type, "access");
 
-    // JWKS should contain the Ed25519 signing key that issued the token
-    // (plus RS256/ES256 ecosystem-compat entries from HEA-51 — those are
-    // verification-only and not the signer for this access token).
-    let jwks = harness.identity().jwks();
+    // The realm's JWKS should contain the Ed25519 signing key that issued the
+    // token. Session tokens are signed with the per-realm key (HEA-SEC-18 made
+    // signature verification fail-closed on the per-realm key), so external
+    // verifiers must use the realm JWKS — the same key issuance uses.
+    // (Plus RS256/ES256 ecosystem-compat entries from HEA-51 — those are
+    // verification-only and not the signer for this access token.)
+    let jwks = harness.identity().realm_jwks(&realm).expect("realm jwks");
     let jwk = jwks
         .keys
         .iter()

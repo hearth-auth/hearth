@@ -8,6 +8,17 @@ use unicode_normalization::UnicodeNormalization;
 use crate::identity::error::IdentityError;
 use crate::identity::types::PasswordPolicy;
 
+/// Returns `true` if `scheme` looks like a reverse-DNS custom scheme
+/// (e.g. `com.example.myapp`). Used to warn on OAUTH-04.
+fn is_reverse_dns_scheme(scheme: &str) -> bool {
+    let parts: Vec<&str> = scheme.split('.').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    let tld = parts[0];
+    tld.len() >= 2 && tld.len() <= 6 && tld.chars().all(|c| c.is_ascii_lowercase())
+}
+
 /// Maximum length for an email address (RFC 5321).
 const MAX_EMAIL_LENGTH: usize = 254;
 
@@ -354,8 +365,18 @@ pub(crate) fn validate_redirect_uri(uri: &str) -> Result<(), IdentityError> {
                 reason: format!("redirect URI scheme '{scheme}' is not permitted"),
             });
         }
-        // Custom/private schemes allowed for native app deep links (RFC 8252)
-        _ => {}
+        // Custom/private schemes allowed for native app deep links (RFC 8252).
+        // OAUTH-04: warn when the scheme does not follow reverse-DNS convention.
+        _ => {
+            if !is_reverse_dns_scheme(&scheme) {
+                tracing::warn!(
+                    scheme = %scheme,
+                    uri = %uri,
+                    "redirect URI uses a non-reverse-DNS custom scheme; \
+                     prefer reverse-DNS format (e.g. com.example.myapp) per RFC 8252 §7.1"
+                );
+            }
+        }
     }
     Ok(())
 }

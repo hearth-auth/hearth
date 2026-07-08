@@ -40,8 +40,12 @@ fn open_dcr_realm_config() -> RealmConfig {
 // ===== Test 1: redirect_uri origin does NOT get CORS headers =====
 //
 // Register a client with redirect_uri https://app.example.com/callback but
-// NO cors_origins. A preflight from https://app.example.com must be rejected
-// (no Access-Control-Allow-Origin header in the 204 response).
+// NO cors_origins. A POST token request from https://app.example.com must NOT
+// receive Access-Control-Allow-Origin in the response.
+//
+// HEA-SEC-28: OPTIONS preflights now echo any origin uniformly (closing the
+// CORS-oracle leak). The real security boundary is the POST /token response —
+// only origins in cors_origins are reflected there.
 
 #[tokio::test]
 async fn cors_redirect_uri_origin_gets_no_cors_headers() {
@@ -55,13 +59,16 @@ async fn cors_redirect_uri_origin_gets_no_cors_headers() {
         .expect("create realm");
     let realm_id = realm.id().as_uuid().to_string();
 
-    // Register a client with a redirect_uri but no cors_origins.
-    h.identity()
+    // Register a client with a redirect_uri but NO cors_origins.
+    let client = h
+        .identity()
         .register_client(
             realm.id(),
             &RegisterClientRequest {
                 client_name: "No-CORS App".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                client_secret: Some("no-cors-secret-123!".to_string()),
+                grant_types: vec!["client_credentials".to_string()],
                 // cors_origins deliberately left empty (default)
                 ..Default::default()
             },
@@ -70,29 +77,31 @@ async fn cors_redirect_uri_origin_gets_no_cors_headers() {
 
     let app = build_app(&h).await;
 
-    // OPTIONS preflight from the redirect_uri base origin.
+    // POST token request from the redirect_uri base origin.
+    let body = serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": client.client_id().as_uuid().to_string(),
+        "client_secret": "no-cors-secret-123!",
+    });
     let resp = app
         .oneshot(
             Request::builder()
-                .method("OPTIONS")
+                .method("POST")
                 .uri("/token")
                 .header("X-Realm-ID", &realm_id)
+                .header("Content-Type", "application/json")
                 .header("Origin", "https://app.example.com")
-                .header("Access-Control-Request-Method", "POST")
-                .body(Body::empty())
+                .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
                 .expect("build request"),
         )
         .await
         .expect("response");
 
-    // Must respond 204 (no content) ...
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-
-    // ... but MUST NOT reflect the origin or set Allow-Credentials.
+    // Must NOT reflect the origin — redirect_uri base must not grant CORS access.
     let headers = resp.headers();
     assert!(
         headers.get("access-control-allow-origin").is_none(),
-        "redirect_uri origin must not appear in Access-Control-Allow-Origin"
+        "redirect_uri origin must not appear in Access-Control-Allow-Origin on POST response"
     );
     assert!(
         headers.get("access-control-allow-credentials").is_none(),

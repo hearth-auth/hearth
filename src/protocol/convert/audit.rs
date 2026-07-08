@@ -99,6 +99,9 @@ pub(crate) fn domain_audit_action_to_proto(a: &domain::AuditAction) -> pb::Audit
             pb::AuditAction::PasswordCompromisedRejected
         }
         domain::AuditAction::BreachCheckUnavailable => pb::AuditAction::BreachCheckUnavailable,
+        // MFA lifecycle
+        domain::AuditAction::MfaEnabled => pb::AuditAction::MfaEnabled,
+        domain::AuditAction::MfaDisabled => pb::AuditAction::MfaDisabled,
         // Adaptive MFA / step-up
         domain::AuditAction::StepUpMfaTriggered => pb::AuditAction::StepUpMfaTriggered,
         domain::AuditAction::StepUpMfaCompleted => pb::AuditAction::StepUpMfaCompleted,
@@ -276,6 +279,8 @@ pub(crate) fn proto_audit_action_to_domain(a: pb::AuditAction) -> Option<domain:
         pb::AuditAction::BreachCheckUnavailable => {
             Some(domain::AuditAction::BreachCheckUnavailable)
         }
+        pb::AuditAction::MfaEnabled => Some(domain::AuditAction::MfaEnabled),
+        pb::AuditAction::MfaDisabled => Some(domain::AuditAction::MfaDisabled),
         pb::AuditAction::StepUpMfaTriggered => Some(domain::AuditAction::StepUpMfaTriggered),
         pb::AuditAction::StepUpMfaCompleted => Some(domain::AuditAction::StepUpMfaCompleted),
         pb::AuditAction::SmsOtpEnrollmentStarted => {
