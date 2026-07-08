@@ -13,7 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a valid discoverable credential in the target realm could substitute an arbitrary victim UUID
   into `userHandle` (which is not covered by the WebAuthn signature) and receive a valid session
   for the victim account — a pre-authentication account takeover (CWE-287 / CWE-639). The
-  discoverable index is now authoritative; `userHandle` is validated, not trusted (HEA-1719).
+  discoverable index is now authoritative; `userHandle` is validated, not trusted (HEA-1720).
 
 ### Fixed
 - **Dev-mode `oidc.issuer` defaults to actual server URL** — when running `hearth serve --dev`

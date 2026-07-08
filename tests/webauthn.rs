@@ -862,7 +862,7 @@ async fn webauthn_cbor_malformed_auth_data_rejected() {
     );
 }
 
-// ===== HEA-1719 regression: discoverable-login userHandle spoofing =====
+// ===== HEA-1720 regression: discoverable-login userHandle spoofing =====
 //
 // Attack: attacker holds a discoverable credential; submits a valid assertion
 // but substitutes the victim's UUID into userHandle (which is unsigned). The

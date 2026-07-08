@@ -7573,7 +7573,7 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             origin,
         )?;
 
-        // SECURITY (HEA-1719): In the discoverable flow, `webauthn::complete_authentication`
+        // SECURITY (HEA-1720): In the discoverable flow, `webauthn::complete_authentication`
         // derives `user_id` from the client-supplied, unsigned `userHandle`. The discoverable
         // index (keyed by credential_id) is authoritative for identity. Reject any mismatch to
         // prevent userHandle-spoofing attacks that bypass authentication and take over accounts.
