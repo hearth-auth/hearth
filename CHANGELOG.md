@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **CI quality job no longer masks nextest on advisory failure** — removed the redundant
+  `cargo deny check` step from the `quality` job (already covered by the dedicated
+  `cargo-deny` job); added `continue-on-error: true` to `cargo audit` so advisory hits
+  never suppress test results. Both checks still fail the build via their own named CI jobs
+  (HEA-1714).
 - **Session access/refresh tokens now verify** — `issue_tokens` signs session-originated
   tokens with the realm's per-realm signing key instead of the global key. HEA-SEC-18
   removed the global-key fallback from signature verification (fail-closed), so

@@ -221,26 +221,18 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
-        with:
-          tool: cargo-deny
-
       - name: Install cargo-audit
         uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2.77.7
         with:
           tool: cargo-audit
 
-      # HEA-779: enforce deny.toml policy (advisories + licenses + bans + sources).
-      # Runs before the longer make targets so a policy violation fails fast
-      # without burning a full clippy + nextest cycle.
-      - name: Dependency policy (cargo deny check)
-        run: cargo deny check
-
       # HEA-1370: cargo-audit complements cargo-deny with the RustSec advisory
       # database. --deny warnings promotes unmaintained/unsound advisories to
       # hard failures; .cargo/audit.toml carries the sim-only bincode exception.
+      # HEA-1714: continue-on-error so an advisory never masks nextest failures.
+      # cargo-deny advisory/license/ban checks run in the dedicated cargo-deny job.
       - name: Security audit (cargo audit --deny warnings)
+        continue-on-error: true
         run: cargo audit --deny warnings
 
       - name: make test-quality (block false-confidence test patterns — HEA-571)
