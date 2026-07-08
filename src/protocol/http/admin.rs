@@ -2425,18 +2425,13 @@ async fn admin_get_user_effective_permissions(
 // === Dev Bootstrap Endpoint ===
 
 /// Generates a random 32-character alphanumeric password using the OS CSPRNG.
-fn generate_dev_password() -> String {
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    const LEN: usize = 32;
-    let rng = ring::rand::SystemRandom::new();
-    let mut raw = [0u8; LEN];
-    // SAFETY: ring SystemRandom never fails; only errors on OS-level RNG failure.
-    ring::rand::SecureRandom::fill(&rng, &mut raw)
-        .expect("OS CSPRNG unavailable — cannot generate bootstrap password");
-    raw.iter()
-        .map(|b| CHARSET[(*b as usize) % CHARSET.len()] as char)
-        .collect()
-}
+/// Fixed dev-mode password for `admin@hearth.test`.
+///
+/// Using a stable value (rather than a random one) lets the Playwright UI
+/// test suite log in without needing to propagate the password through the
+/// bootstrap response. Acceptable in dev mode; `admin_bootstrap` is a 404
+/// in production.
+pub(super) const DEV_SYSTEM_ADMIN_PASSWORD: &str = "HearthTest123!";
 
 /// Seeds a system-realm admin user (`admin@hearth.test`) the first time a dev
 /// server is bootstrapped. Returns `Some(password)` when the user was newly
@@ -2489,7 +2484,7 @@ fn dev_seed_system_admin(state: &AppState) -> Option<String> {
         },
     );
 
-    let password = generate_dev_password();
+    let password = DEV_SYSTEM_ADMIN_PASSWORD.to_string();
     let pwd = crate::identity::CleartextPassword::from_string(password.clone());
     if let Err(e) = state.identity.set_password(&sys, admin.id(), &pwd) {
         tracing::warn!(error = %e, "dev bootstrap: system realm password set failed");

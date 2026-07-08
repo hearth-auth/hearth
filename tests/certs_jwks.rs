@@ -138,6 +138,39 @@ async fn certs_returns_rfc7517_jwks_with_all_three_algorithms() {
     }
 }
 
+/// HEA-1716: since HEA-1712 tokens are signed with per-realm keys; the global
+/// JWKS must include the system-realm key so the go-gin (and any JWKS-verifying)
+/// client can validate bootstrap / session tokens issued for the system realm.
+#[tokio::test]
+async fn global_jwks_includes_system_realm_signing_key() {
+    let h = common::TestHarness::embedded().await.expect("harness");
+    let app = build_app(&h).await;
+
+    // System realm is the nil UUID — mirrors identity::keys::system_realm_id()
+    // which isn't re-exported from the public crate surface.
+    let sys = hearth::core::RealmId::new(uuid::Uuid::nil());
+    let realm_doc = h
+        .identity()
+        .realm_jwks(&sys)
+        .expect("system realm JWKS");
+    assert!(
+        !realm_doc.keys.is_empty(),
+        "system realm must have at least one signing key"
+    );
+    let sys_kid = &realm_doc.keys[0].kid;
+
+    let global = fetch_jwks(&app, "/.well-known/jwks.json").await;
+    let global_keys = global["keys"].as_array().expect("keys array");
+    let found = global_keys
+        .iter()
+        .any(|k| k["kid"].as_str() == Some(sys_kid.as_str()));
+    assert!(
+        found,
+        "global JWKS must contain system-realm kid '{sys_kid}' so \
+         bootstrap tokens can be verified"
+    );
+}
+
 #[tokio::test]
 async fn jwks_aliases_return_same_document() {
     let h = common::TestHarness::embedded().await.expect("harness");

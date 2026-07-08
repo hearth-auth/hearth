@@ -6802,6 +6802,26 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             Ok(jwk) => keys.push(jwk),
             Err(err) => tracing::error!(error = %err, "failed to materialize ES256 JWKS entry"),
         }
+        // Since HEA-1712, issue_tokens_with_context signs with per-realm keys.
+        // The bootstrap / session tokens for the system realm carry the
+        // system-realm kid, which the global JWKS must include so clients
+        // verifying against /.well-known/jwks.json can match it. Public keys
+        // are non-secret; this only exposes the control-plane realm's key.
+        let sys_realm = keys::system_realm_id();
+        match self.realm_jwks(&sys_realm) {
+            Ok(realm_doc) => {
+                let seen: std::collections::HashSet<String> =
+                    keys.iter().map(|k| k.kid.clone()).collect();
+                for k in realm_doc.keys {
+                    if !seen.contains(&k.kid) {
+                        keys.push(k);
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "failed to include system-realm key in global JWKS");
+            }
+        }
         JwksDocument { keys }
     }
 
