@@ -138,9 +138,13 @@ async fn certs_returns_rfc7517_jwks_with_all_three_algorithms() {
     }
 }
 
-/// HEA-1716: since HEA-1712 tokens are signed with per-realm keys; the global
-/// JWKS must include the system-realm key so the go-gin (and any JWKS-verifying)
-/// client can validate bootstrap / session tokens issued for the system realm.
+/// HEA-1716: since HEA-1712 tokens are signed with per-realm keys, the global
+/// JWKS includes the system-realm key so any client verifying tokens issued
+/// under the system realm (RealmId::nil()) can find the matching key.
+/// (Note: the bootstrap token is issued for the user-created dev-realm, not the
+/// system realm. The canonical fix for JWKS-verifying clients is to use the
+/// iss-derived realm JWKS; this test covers the system-realm inclusion as
+/// defence-in-depth.)
 #[tokio::test]
 async fn global_jwks_includes_system_realm_signing_key() {
     let h = common::TestHarness::embedded().await.expect("harness");
