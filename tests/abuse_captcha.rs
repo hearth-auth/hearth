@@ -163,10 +163,19 @@ fn turnstile_widget_html_site_key_special_chars_escaped() {
     };
     let provider = TurnstileCaptchaProvider::new(cfg);
     let html = provider.widget_html();
-    assert!(!html.contains("<script>"), "raw <script> tag must be escaped (WEB-005)");
+    assert!(
+        !html.contains("<script>"),
+        "raw <script> tag must be escaped (WEB-005)"
+    );
     assert!(html.contains("&lt;"), "< must be escaped to &lt; (WEB-005)");
-    assert!(html.contains("&amp;"), "& must be escaped to &amp; (WEB-005)");
-    assert!(html.contains("&quot;"), "\" must be escaped to &quot; (WEB-005)");
+    assert!(
+        html.contains("&amp;"),
+        "& must be escaped to &amp; (WEB-005)"
+    );
+    assert!(
+        html.contains("&quot;"),
+        "\" must be escaped to &quot; (WEB-005)"
+    );
 }
 
 #[test]

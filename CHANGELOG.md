@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Session access/refresh tokens now verify** — `issue_tokens` signs session-originated
+  tokens with the realm's per-realm signing key instead of the global key. HEA-SEC-18
+  removed the global-key fallback from signature verification (fail-closed), so
+  session tokens signed with the global key were rejected by `validate_token`,
+  `refresh_tokens`, and introspection with `InvalidToken`. Restores password/session
+  login, `/admin/bootstrap`, and admin/tenant sessions (HEA-1712).
+- **Per-realm token issuer accepted at validation** — `validate_token` now accepts an
+  `iss` that matches the configured `token.issuer` or is issued under the `oidc.issuer`
+  base (`{base}` or `{base}/realms/{name}`), matching what issuance produces. The prior
+  exact-match against `token.issuer` rejected every real token (HEA-1712).
+
+### Security
+- **RUSTSEC-2026-0204 (crossbeam-epoch)** — bumped `crossbeam-epoch` 0.9.18 → 0.9.20 to
+  remediate an invalid pointer dereference advisory flagged by `cargo deny` (HEA-1712).
+
 ### Added
 - **Auth-discard CI lint** — `scripts/check-auth-discard.sh` and `make auth-discard-check`
   fail on any occurrence of `let _auth`, `let _ = extract_admin_auth(...)`, or an unbound

@@ -6482,7 +6482,14 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 None
             }
         });
-        self.signing_key.issue_token_pair(&IssueTokenRequest {
+        // Sign with the realm's per-realm signing key so tokens verify against
+        // the same key `validate_token`/`refresh_tokens` load for this realm.
+        // HEA-SEC-18 removed the global-key fallback from signature
+        // verification (fail-closed), so signing with the global `self.signing_key`
+        // here would produce tokens that never validate. Mirrors the refresh
+        // path, which already uses `get_signing_key_or_default`.
+        let realm_signing_key = self.get_signing_key_or_default(realm_id);
+        realm_signing_key.issue_token_pair(&IssueTokenRequest {
             sub: &user_id.to_string(),
             sid: &session_id.to_string(),
             tid: &realm_id.to_string(),
@@ -6611,10 +6618,21 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             return Err(IdentityError::InvalidToken);
         }
 
-        // RFC 7519 §4.1.1 — issuer must exactly match the configured value.
-        // Prevents tokens from a foreign Hearth instance from being accepted
-        // even when they carry a valid signature and correct realm binding.
-        if claims.iss != self.config.token.issuer {
+        // RFC 7519 §4.1.1 — issuer must originate from this Hearth instance.
+        // Tokens are minted with a per-realm issuer derived from `oidc.issuer`
+        // (`realm_issuer_url`: `{base}` or `{base}/realms/{name}`), while a few
+        // internal issuance paths fall back to the flat `token.issuer`. Accept
+        // either an exact `token.issuer` match or an issuer under the configured
+        // `oidc.issuer` base — a foreign instance carries neither, and the exact
+        // realm is already bound by the `tid` check above. Hot-path safe: string
+        // comparison and `strip_prefix` borrow, no allocation.
+        let oidc_base = self.config.oidc.issuer.as_str();
+        let issuer_ok = claims.iss == self.config.token.issuer
+            || claims
+                .iss
+                .strip_prefix(oidc_base)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with("/realms/"));
+        if !issuer_ok {
             return Err(IdentityError::InvalidToken);
         }
 
@@ -7699,14 +7717,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let now_micros = self.clock.now().as_micros();
         if let Ok(entries) = self.storage.scan(realm_id, &ml_prefix, &ml_end) {
             for entry in entries {
-                if let Ok(mut prior) =
-                    serde_json::from_slice::<StoredMagicLink>(&entry.value)
-                {
+                if let Ok(mut prior) = serde_json::from_slice::<StoredMagicLink>(&entry.value) {
                     let age = now_micros - prior.created_at_micros;
-                    if !prior.used
-                        && prior.email == normalized
-                        && age < MAGIC_LINK_EXPIRY_MICROS
-                    {
+                    if !prior.used && prior.email == normalized && age < MAGIC_LINK_EXPIRY_MICROS {
                         prior.used = true;
                         if let Ok(val) = serde_json::to_vec(&prior) {
                             let _ = self.storage.put(realm_id, &entry.key, &val);
