@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **Dev-mode `oidc.issuer` defaults to actual server URL** — when running `hearth serve --dev`
+  without an explicit `oidc.issuer` config, the server now uses `http://127.0.0.1:{port}` as the
+  issuer base instead of the placeholder `https://hearth.local`. Token `iss` claims are now
+  reachable, allowing JWKS-verifying clients to derive the per-realm JWKS URL directly from
+  the `iss` claim without a hostname mismatch (HEA-1716).
 - **CI quality job no longer masks nextest on advisory failure** — removed the redundant
   `cargo deny check` step from the `quality` job (already covered by the dedicated
   `cargo-deny` job); added `continue-on-error: true` to `cargo audit` so advisory hits
