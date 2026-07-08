@@ -19,6 +19,20 @@ use super::types::{
 // Valid-value tables
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Minimal helper for extracting `dev_mode` from raw YAML before `Config` is fully parsed.
+///
+/// `Config.dev_mode` is `#[serde(skip)]` because it is set programmatically via
+/// `Config::dev()` / `Config::from_file_as_dev()`, never by the operator through
+/// YAML. However, tests (and the `hearth serve --dev` CLI path) embed
+/// `dev_mode: true` at the top of a YAML string and expect `from_yaml_str` to
+/// honour it. This thin struct captures only that one field so we can read it
+/// out of the raw YAML and apply it after the main `serde` pass.
+#[derive(serde::Deserialize)]
+struct DevModeYaml {
+    #[serde(default)]
+    dev_mode: bool,
+}
+
 /// Valid UI theme names — must match `protocol::web::themes::VALID_THEMES`.
 pub(super) const VALID_UI_THEMES: &[&str] =
     &["ember", "ocean", "midnight", "forest", "cloud", "slate"];
@@ -66,6 +80,12 @@ impl Config {
         let mut config: Self = serde_norway::from_str(&substituted)
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.config_warnings = warnings;
+        // `dev_mode` is #[serde(skip)] so serde never sets it from YAML.
+        // Extract it separately so YAML callers that embed `dev_mode: true`
+        // (tests, `hearth serve --dev` paths) still get the relaxed validation.
+        if let Ok(dm) = serde_norway::from_str::<DevModeYaml>(&substituted) {
+            config.dev_mode = dm.dev_mode;
+        }
         config.validate()?;
         Ok(config)
     }
@@ -179,6 +199,9 @@ impl Config {
         let mut config: Self = serde_norway::from_str(&substituted)
             .map_err(|e| ConfigError::ParseError(e.to_string()))?;
         config.config_warnings = warnings;
+        if let Ok(dm) = serde_norway::from_str::<DevModeYaml>(&substituted) {
+            config.dev_mode = dm.dev_mode;
+        }
         Ok(config)
     }
 

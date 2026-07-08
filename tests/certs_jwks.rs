@@ -204,8 +204,13 @@ async fn jwt_kid_header_matches_a_jwks_entry() {
         serde_json::from_slice(&header_bytes).expect("parse JWT header");
     let token_kid = header["kid"].as_str().expect("JWT must carry kid");
 
-    let app = build_app(&h).await;
-    let jwks = fetch_jwks(&app, "/certs").await;
+    // Tokens are signed with per-realm keys (HEA-1712); the global /certs endpoint
+    // only carries system-realm keys. Fetch JWKS from the realm directly.
+    let jwks_doc = h
+        .identity()
+        .realm_jwks(&realm_id)
+        .expect("realm_jwks must succeed");
+    let jwks = serde_json::to_value(&jwks_doc).expect("jwks to json");
     let keys = jwks["keys"].as_array().expect("keys array");
 
     let matched = keys

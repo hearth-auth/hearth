@@ -317,6 +317,7 @@ fn register_cors_client(state: &AppState, realm_id: &RealmId) -> ClientId {
             &RegisterClientRequest {
                 client_name: "CORS Test Client".to_string(),
                 redirect_uris: vec!["https://app.example.com/callback".to_string()],
+                cors_origins: vec!["https://app.example.com".to_string()],
                 client_secret: Some("cors-test-secret-1234".to_string()),
                 grant_types: vec!["client_credentials".to_string()],
                 require_consent: false,
@@ -364,35 +365,42 @@ async fn cors_preflight_allowed_origin_returns_headers() {
     );
 }
 
-/// OPTIONS `/token` from an unregistered origin → 204 with NO CORS headers.
+/// POST `/token` from an unregistered origin → response has NO CORS headers.
+///
+/// HEA-SEC-28: the OPTIONS preflight now echoes any origin uniformly (closing
+/// the CORS-oracle leak), so the real security boundary is the POST response.
+/// An origin not in `cors_origins` must NOT appear in `Access-Control-Allow-Origin`
+/// on the actual token response.
 #[tokio::test]
 async fn cors_preflight_unregistered_origin_no_cors_headers() {
     let (state, realm_id) = make_app_state();
-    register_cors_client(&state, &realm_id);
+    let client_id = register_cors_client(&state, &realm_id);
     let app = http_router(Arc::clone(&state));
+
+    let body = serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": client_id.as_uuid().to_string(),
+        "client_secret": "cors-test-secret-1234",
+        "scope": null,
+    });
 
     let resp = app
         .oneshot(
             Request::builder()
-                .method("OPTIONS")
+                .method("POST")
                 .uri("/token")
+                .header("content-type", "application/json")
                 .header("x-realm-id", realm_id.as_uuid().to_string())
                 .header("origin", "https://evil.com")
-                .header("access-control-request-method", "POST")
-                .body(Body::empty())
+                .body(Body::from(serde_json::to_vec(&body).expect("serialize")))
                 .expect("build request"),
         )
         .await
         .expect("oneshot");
 
-    assert_eq!(
-        resp.status(),
-        StatusCode::NO_CONTENT,
-        "preflight should still be 204"
-    );
     assert!(
         !resp.headers().contains_key("access-control-allow-origin"),
-        "unregistered origin must NOT get CORS headers"
+        "unregistered origin must NOT get CORS header on POST /token response"
     );
 }
 

@@ -183,11 +183,11 @@ fn account_lockout_blocks_after_n_failures() {
         .set_password(
             &realm,
             user.id(),
-            &CleartextPassword::from_string("correct".to_string()),
+            &CleartextPassword::from_string("correct1".to_string()),
         )
         .expect("set password");
 
-    let wrong = CleartextPassword::from_string("wrong".to_string());
+    let wrong = CleartextPassword::from_string("wrong1111".to_string());
 
     // First MAX wrong attempts return Ok(false) — the attempt counter increments
     // on each false verification, but the lockout is not yet applied.
@@ -218,13 +218,13 @@ fn account_lockout_blocks_correct_password_during_window() {
     let user = engine
         .create_user(&realm, &new_user_req("lockout-correct"))
         .expect("create user");
-    let correct = CleartextPassword::from_string("correct".to_string());
+    let correct = CleartextPassword::from_string("correct1".to_string());
     engine
         .set_password(&realm, user.id(), &correct)
         .expect("set password");
 
     // Exhaust the attempt budget.
-    let wrong = CleartextPassword::from_string("wrong".to_string());
+    let wrong = CleartextPassword::from_string("wrong1111".to_string());
     for _ in 0..MAX {
         let _ = engine.verify_password(&realm, user.id(), &wrong);
     }

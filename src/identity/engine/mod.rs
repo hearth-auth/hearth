@@ -12641,6 +12641,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         since: u64,
         limit: usize,
     ) -> Result<Option<crate::identity::session_version::SvDeltaResponse>, IdentityError> {
+        let enabled = self
+            .get_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|r| r.config().session_version.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Err(IdentityError::SessionVersionDisabled);
+        }
         self.sv_store.list_deltas(realm_id, since, limit)
     }
 
@@ -15565,7 +15574,7 @@ mod tests {
                 .set_password(
                     &realm,
                     &user_id,
-                    &CleartextPassword::from_string("pw".to_string()),
+                    &CleartextPassword::from_string("password1".to_string()),
                 )
                 .expect("set password");
             // 3 failures → lockout written to WAL
@@ -15581,7 +15590,7 @@ mod tests {
                     engine.verify_password(
                         &realm,
                         &user_id,
-                        &CleartextPassword::from_string("pw".to_string())
+                        &CleartextPassword::from_string("password1".to_string())
                     ),
                     Err(IdentityError::RateLimited)
                 ),
@@ -15594,7 +15603,7 @@ mod tests {
         let result = engine2.verify_password(
             &realm,
             &user_id,
-            &CleartextPassword::from_string("pw".to_string()),
+            &CleartextPassword::from_string("password1".to_string()),
         );
         assert!(
             matches!(result, Err(IdentityError::RateLimited)),
@@ -15619,7 +15628,7 @@ mod tests {
                 .set_password(
                     &realm,
                     &user_id,
-                    &CleartextPassword::from_string("pw".to_string()),
+                    &CleartextPassword::from_string("password1".to_string()),
                 )
                 .expect("set password");
             for i in 0..3 {
@@ -15639,7 +15648,7 @@ mod tests {
         let result = engine2.verify_password(
             &realm,
             &user_id,
-            &CleartextPassword::from_string("pw".to_string()),
+            &CleartextPassword::from_string("password1".to_string()),
         );
         assert!(
             matches!(result, Ok(true)),
@@ -19264,7 +19273,7 @@ mod tests {
                 let realm = create_test_realm(&engine);
                 let user = create_test_user(&engine, &realm);
 
-                let pw = CleartextPassword::from_string("secret".to_string());
+                let pw = CleartextPassword::from_string("secret1a".to_string());
                 engine
                     .set_password(&realm, user.id(), &pw)
                     .expect("set password");

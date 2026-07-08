@@ -94,14 +94,6 @@ fn make_dpop_proof(key: &DPopKey, htm: &str, htu: &str, nonce: Option<&str>) -> 
     format!("{header_b64}.{claims_b64}.{sig_b64}")
 }
 
-fn current_test_nonce(secret: &[u8; 32]) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    hearth::identity::dpop::current_dpop_nonce(secret, now)
-}
-
 /// Builds the router with a deterministic DPoP nonce secret so nonces are predictable.
 async fn build_app_with_key(harness: &common::TestHarness, nonce_secret: [u8; 32]) -> axum::Router {
     let state = AppState::new(
@@ -149,24 +141,46 @@ async fn setup_realm_and_client(harness: &common::TestHarness) -> (String, Strin
 async fn dpop_client_credentials_bound_token() {
     let h = common::TestHarness::embedded().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
-    let app = build_app_with_key(&h, [0u8; 32]).await;
+    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
 
     let dpop_key = DPopKey::generate();
-    let nonce = current_test_nonce(&[0u8; 32]);
+    let body = serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": &client_id,
+        "client_secret": &client_secret
+    });
+
+    // Step 1: send proof without nonce to get the server-issued nonce.
+    let proof_no_nonce = make_dpop_proof(&dpop_key, "POST", "https://hearth.local/token", None);
+    let nonce_resp = router(Arc::clone(&state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", &realm_id)
+                .header("Content-Type", "application/json")
+                .header("DPoP", proof_no_nonce)
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let nonce = nonce_resp
+        .headers()
+        .get("DPoP-Nonce")
+        .expect("401 must carry DPoP-Nonce")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Step 2: retry with the server-issued nonce.
     let proof = make_dpop_proof(
         &dpop_key,
         "POST",
         "https://hearth.local/token",
         Some(&nonce),
     );
-
-    let body = serde_json::json!({
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret
-    });
-
-    let resp = app
+    let resp = router(Arc::clone(&state))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -206,24 +220,46 @@ async fn dpop_client_credentials_bound_token() {
 async fn dpop_access_token_carries_cnf_jkt() {
     let h = common::TestHarness::embedded().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
-    let app = build_app_with_key(&h, [0u8; 32]).await;
+    let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
 
     let dpop_key = DPopKey::generate();
-    let nonce = current_test_nonce(&[0u8; 32]);
+    let body = serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": &client_id,
+        "client_secret": &client_secret
+    });
+
+    // Step 1: send proof without nonce to get the server-issued nonce.
+    let proof_no_nonce = make_dpop_proof(&dpop_key, "POST", "https://hearth.local/token", None);
+    let nonce_resp = router(Arc::clone(&state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", &realm_id)
+                .header("Content-Type", "application/json")
+                .header("DPoP", proof_no_nonce)
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let nonce = nonce_resp
+        .headers()
+        .get("DPoP-Nonce")
+        .expect("401 must carry DPoP-Nonce")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Step 2: retry with the server-issued nonce.
     let proof = make_dpop_proof(
         &dpop_key,
         "POST",
         "https://hearth.local/token",
         Some(&nonce),
     );
-
-    let body = serde_json::json!({
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret
-    });
-
-    let resp = app
+    let resp = router(Arc::clone(&state))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -264,15 +300,42 @@ async fn dpop_access_token_carries_cnf_jkt() {
 async fn dpop_replay_rejected() {
     let h = common::TestHarness::embedded().await.unwrap();
     let (realm_id, client_id, client_secret) = setup_realm_and_client(&h).await;
-    // Share the same AppState (and JTI cache) across both requests
+    // Share the same AppState (and JTI cache) across all requests.
     let state = Arc::new(AppState::new(h.identity_arc(), h.rbac_arc(), h.audit_arc()));
-    let app1 = router(Arc::clone(&state));
-    let app2 = router(Arc::clone(&state));
 
     let dpop_key = DPopKey::generate();
-    // Use the same proof for both requests (same jti) to trigger replay rejection.
-    // AppState::new defaults to nonce secret [0u8; 32].
-    let nonce = current_test_nonce(&[0u8; 32]);
+    let body_json = serde_json::json!({
+        "grant_type": "client_credentials",
+        "client_id": &client_id,
+        "client_secret": &client_secret
+    });
+
+    let mk_req = |proof: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/token")
+            .header("X-Realm-ID", &realm_id)
+            .header("Content-Type", "application/json")
+            .header("DPoP", proof)
+            .body(Body::from(serde_json::to_string(&body_json).unwrap()))
+            .unwrap()
+    };
+
+    // Step 0: get the server-issued nonce (nonce grab).
+    let proof_no_nonce = make_dpop_proof(&dpop_key, "POST", "https://hearth.local/token", None);
+    let nonce_resp = router(Arc::clone(&state))
+        .oneshot(mk_req(&proof_no_nonce))
+        .await
+        .unwrap();
+    let nonce = nonce_resp
+        .headers()
+        .get("DPoP-Nonce")
+        .expect("401 must carry DPoP-Nonce")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Use the same proof (same jti) for both replay-test requests to trigger replay rejection.
     let proof = make_dpop_proof(
         &dpop_key,
         "POST",
@@ -280,21 +343,8 @@ async fn dpop_replay_rejected() {
         Some(&nonce),
     );
 
-    let mk_req = |proof: &str| {
-        let body = serde_json::json!({
-            "grant_type": "client_credentials",
-            "client_id": &client_id,
-            "client_secret": &client_secret
-        });
-        Request::builder()
-            .method("POST")
-            .uri("/token")
-            .header("X-Realm-ID", &realm_id)
-            .header("Content-Type", "application/json")
-            .header("DPoP", proof)
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap()
-    };
+    let app1 = router(Arc::clone(&state));
+    let app2 = router(Arc::clone(&state));
 
     // First request should succeed
     let resp1 = app1.oneshot(mk_req(&proof)).await.unwrap();
@@ -578,12 +628,42 @@ async fn dpop_cnf_bound_token_without_proof_at_resource_endpoint_is_401() {
 
     // Issue a DPoP-bound access token.
     let dpop_key = DPopKey::generate();
-    let token_proof = make_dpop_proof(&dpop_key, "POST", "https://hearth.local/token", None);
     let body = serde_json::json!({
         "grant_type": "client_credentials",
         "client_id": &client_id,
         "client_secret": &client_secret
     });
+
+    // Step 0: get the server-issued nonce.
+    let nonce_proof = make_dpop_proof(&dpop_key, "POST", "https://hearth.local/token", None);
+    let nonce_resp = router(Arc::clone(&state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", &realm_id)
+                .header("Content-Type", "application/json")
+                .header("DPoP", nonce_proof)
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let nonce = nonce_resp
+        .headers()
+        .get("DPoP-Nonce")
+        .expect("401 must carry DPoP-Nonce")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // Issue DPoP-bound token with the server-provided nonce.
+    let token_proof = make_dpop_proof(
+        &dpop_key,
+        "POST",
+        "https://hearth.local/token",
+        Some(&nonce),
+    );
     let token_resp = token_app
         .oneshot(
             Request::builder()
@@ -655,14 +735,43 @@ async fn dpop_cnf_bound_token_with_valid_proof_at_resource_endpoint_passes_auth(
     let token_app = router(Arc::clone(&state));
     let resource_app = router(Arc::clone(&state));
 
-    // Issue a DPoP-bound access token.
+    // Issue a DPoP-bound access token via two-step nonce flow.
     let dpop_key = DPopKey::generate();
-    let token_proof = make_dpop_proof(&dpop_key, "POST", "https://hearth.local/token", None);
     let body = serde_json::json!({
         "grant_type": "client_credentials",
         "client_id": &client_id,
         "client_secret": &client_secret
     });
+
+    // Step 0: get the server-issued nonce.
+    let nonce_proof = make_dpop_proof(&dpop_key, "POST", "https://hearth.local/token", None);
+    let nonce_resp = router(Arc::clone(&state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header("X-Realm-ID", &realm_id)
+                .header("Content-Type", "application/json")
+                .header("DPoP", nonce_proof)
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let nonce = nonce_resp
+        .headers()
+        .get("DPoP-Nonce")
+        .expect("401 must carry DPoP-Nonce")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let token_proof = make_dpop_proof(
+        &dpop_key,
+        "POST",
+        "https://hearth.local/token",
+        Some(&nonce),
+    );
     let token_resp = token_app
         .oneshot(
             Request::builder()
