@@ -575,8 +575,11 @@ async fn realm_admin_cannot_grant_permission_it_does_not_hold() {
 #[tokio::test]
 async fn realm_admin_can_grant_permission_it_holds() {
     let svc = setup().await;
-    let token =
-        issue_sub_admin_token(&svc, "realm-admin-own-grant@hea1722.test", "hearth.realm.admin");
+    let token = issue_sub_admin_token(
+        &svc,
+        "realm-admin-own-grant@hea1722.test",
+        "hearth.realm.admin",
+    );
     let target = svc
         .h
         .identity()
@@ -652,8 +655,11 @@ async fn full_admin_can_grant_any_permission() {
 #[tokio::test]
 async fn realm_admin_cannot_add_role_exceeding_ceiling() {
     let svc = setup().await;
-    let token =
-        issue_sub_admin_token(&svc, "realm-admin-addrole@hea1722.test", "hearth.realm.admin");
+    let token = issue_sub_admin_token(
+        &svc,
+        "realm-admin-addrole@hea1722.test",
+        "hearth.realm.admin",
+    );
 
     let org = svc
         .h
@@ -764,8 +770,11 @@ async fn full_admin_can_add_any_role() {
 #[tokio::test]
 async fn realm_admin_cannot_create_role_with_elevated_permission() {
     let svc = setup().await;
-    let token =
-        issue_sub_admin_token(&svc, "realm-admin-createrole@hea1734.test", "hearth.realm.admin");
+    let token = issue_sub_admin_token(
+        &svc,
+        "realm-admin-createrole@hea1734.test",
+        "hearth.realm.admin",
+    );
 
     let err = svc
         .rbac_svc
@@ -795,8 +804,11 @@ async fn realm_admin_cannot_create_role_with_elevated_permission() {
 #[tokio::test]
 async fn realm_admin_cannot_update_role_to_set_elevated_permission() {
     let svc = setup().await;
-    let token =
-        issue_sub_admin_token(&svc, "realm-admin-updaterole@hea1734.test", "hearth.realm.admin");
+    let token = issue_sub_admin_token(
+        &svc,
+        "realm-admin-updaterole@hea1734.test",
+        "hearth.realm.admin",
+    );
 
     // First create a benign role as a full admin so there is something to update.
     let admin_token = issue_sub_admin_token(&svc, "admin-creates-role@hea1734.test", "realm.admin");
@@ -843,8 +855,7 @@ async fn realm_admin_cannot_update_role_to_set_elevated_permission() {
 #[tokio::test]
 async fn full_admin_can_create_role_with_any_permission() {
     let svc = setup().await;
-    let token =
-        issue_sub_admin_token(&svc, "full-admin-createrole@hea1734.test", "realm.admin");
+    let token = issue_sub_admin_token(&svc, "full-admin-createrole@hea1734.test", "realm.admin");
 
     svc.rbac_svc
         .create_role(with_token(

@@ -80,13 +80,10 @@ async fn invoke_tool(
         Ok(id) => id,
         Err(e) => return e.into_response(),
     };
-
-    // Extract and validate the bearer token.
     let raw_token = match super::auth::extract_bearer_token(&headers) {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
-
     let claims = match state.identity.validate_token(&realm_id, &raw_token) {
         Ok(c) => c,
         Err(_) => {
@@ -98,97 +95,16 @@ async fn invoke_tool(
         }
     };
 
-    // M4 — DPoP enforcement at the tool gate.
-    // When the access token carries a `cnf.jkt` binding, the caller MUST
-    // present a matching DPoP proof. A stolen bound token replayed as plain
-    // bearer is rejected here.
+    // M4 — When the access token carries a `cnf.jkt` binding, require a matching DPoP proof.
     if let Some(cnf) = &claims.cnf {
-        let expected_jkt = &cnf.jkt;
-        let proof = match headers.get("DPoP").and_then(|v| v.to_str().ok()) {
-            Some(p) => p,
-            None => {
-                // Bound token with no DPoP proof — reject with 401 + DPoP-Nonce.
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                let nonce = state
-                    .identity
-                    .get_realm_dpop_nonce_secret(&realm_id)
-                    .ok()
-                    .map(|s| crate::identity::dpop::current_dpop_nonce(&s, now_secs))
-                    .unwrap_or_else(|| state.dpop.current_nonce(now_secs));
-                let mut resp = (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({"error": "use_dpop_nonce", "error_description": "DPoP proof required for bound access token"})),
-                )
-                    .into_response();
-                if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
-                    resp.headers_mut().insert("DPoP-Nonce", val);
-                }
-                return resp;
-            }
-        };
-
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-
-        let expected_htu = format!(
-            "{}/v1/tools/invoke",
-            state.identity.oidc_discovery().issuer
-        );
-        let nonce_secret = state
-            .identity
-            .get_realm_dpop_nonce_secret(&realm_id)
-            .ok();
-
-        let validated = match crate::identity::dpop::validate_dpop_proof(
-            proof,
-            "POST",
-            &expected_htu,
-            now_secs,
-            None, // nonce optional on resource endpoints (no nonce-challenge loop here)
-            Some(raw_token.as_str()),
-        ) {
-            Ok(v) => v,
-            Err(e) => return identity_error_to_response(&e).into_response(),
-        };
-
-        // Nonce check — accept current or previous window.
-        if let Some(presented_nonce) = validated.nonce.as_deref() {
-            let valid = nonce_secret
-                .map(|s| crate::identity::dpop::is_valid_dpop_nonce(&s, presented_nonce, now_secs))
-                .unwrap_or_else(|| state.dpop.is_valid_nonce(presented_nonce, now_secs));
-            if !valid {
-                return identity_error_to_response(
-                    &crate::identity::IdentityError::DPopNonceInvalid,
-                )
-                .into_response();
-            }
-        }
-
-        // JTI replay prevention.
-        if let Err(e) = state
-            .identity
-            .check_and_record_dpop_jti(&realm_id, &validated.jti, now_secs)
+        if let Err(resp) =
+            validate_dpop_if_bound(&state, &headers, &realm_id, &cnf.jkt, raw_token.as_str())
         {
-            return identity_error_to_response(&e).into_response();
-        }
-
-        // Thumbprint binding check.
-        if validated.jkt != *expected_jkt {
-            return identity_error_to_response(
-                &crate::identity::IdentityError::DPopBindingMismatch,
-            )
-            .into_response();
+            return resp;
         }
     }
 
-    // H2 — Load the realm's tool-group map from stored realm config.
-    // Fail closed: if the realm can't be loaded, deny the invocation rather
-    // than silently falling back to an empty map that would bypass group denies.
+    // H2 — Fail closed: load realm config so tool-group denies are never bypassed.
     let tool_groups = match state.identity.get_realm(&realm_id) {
         Ok(Some(realm)) => realm.config().tool_groups.clone(),
         Ok(None) => {
@@ -209,11 +125,9 @@ async fn invoke_tool(
         }
     };
 
-    let decision = evaluate_tool_access(&claims.permissions, &body.tool, &tool_groups);
-
-    match decision {
+    match evaluate_tool_access(&claims.permissions, &body.tool, &tool_groups) {
         ToolAccessDecision::Allow => {
-            // M6 — Audit every authorized (Allow) invocation.
+            // M6 — Audit every authorized invocation.
             let _ = state.audit.append(&CreateAuditEvent {
                 realm_id: realm_id.clone(),
                 actor: claims.sub.clone(),
@@ -231,67 +145,136 @@ async fn invoke_tool(
             )
                 .into_response()
         }
-
         ToolAccessDecision::Deny => {
             identity_error_to_response(&crate::identity::IdentityError::ToolAccessDenied {
                 tool: body.tool.clone(),
             })
             .into_response()
         }
-
         ToolAccessDecision::RequireApproval => {
-            // Check for X-Capability-Token header.
-            let cap_token = headers
-                .get("x-capability-token")
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_string);
+            check_capability_token(&state, &realm_id, &headers, &body, &claims.sub).await
+        }
+    }
+}
 
-            let Some(cap_token) = cap_token else {
-                // No capability token present — tell the caller to obtain approval.
-                return identity_error_to_response(
-                    &crate::identity::IdentityError::ToolApprovalRequired {
-                        tool: body.tool.clone(),
-                    },
-                )
+/// M4 — Validates the DPoP proof when the access token carries a `cnf.jkt` binding.
+///
+/// Returns `Err(response)` with the appropriate HTTP response on any failure,
+/// `Ok(())` when the proof is valid and the JTI has been consumed.
+fn validate_dpop_if_bound(
+    state: &AppState,
+    headers: &HeaderMap,
+    realm_id: &crate::core::RealmId,
+    expected_jkt: &str,
+    raw_token: &str,
+) -> Result<(), axum::response::Response> {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let nonce_secret = state.identity.get_realm_dpop_nonce_secret(realm_id).ok();
+
+    let proof = match headers.get("DPoP").and_then(|v| v.to_str().ok()) {
+        Some(p) => p,
+        None => {
+            let nonce = nonce_secret
+                .as_ref()
+                .map(|s| crate::identity::dpop::current_dpop_nonce(s, now_secs))
+                .unwrap_or_else(|| state.dpop.current_nonce(now_secs));
+            let mut resp = (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "use_dpop_nonce",
+                    "error_description": "DPoP proof required for bound access token"})),
+            )
                 .into_response();
-            };
-
-            // Validate the capability token (signature, type, aud, exp, tool/action, JTI).
-            // M5 — pass caller sub so the engine can verify the token was minted for this caller.
-            let tool = body.tool.clone();
-            let action = body.action.clone();
-            let caller_sub = claims.sub.clone();
-            let identity = Arc::clone(&state.identity);
-            let realm_id_c = realm_id.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                identity.validate_capability_token(
-                    &realm_id_c,
-                    &cap_token,
-                    &tool,
-                    &action,
-                    &caller_sub,
-                )
-            })
-            .await;
-
-            match result {
-                Ok(Ok(agent_id)) => {
-                    // Capability token valid and consumed (JTI written to blocklist in engine).
-                    (
-                        StatusCode::OK,
-                        Json(InvokeToolResponse {
-                            authorized: true,
-                            agent_id: Some(agent_id.to_string()),
-                        }),
-                    )
-                        .into_response()
-                }
-                Ok(Err(e)) => identity_error_to_response(&e).into_response(),
-                Err(e) => {
-                    tracing::error!(error = %e, "invoke_tool spawn_blocking panicked");
-                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                }
+            if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
+                resp.headers_mut().insert("DPoP-Nonce", val);
             }
+            return Err(resp);
+        }
+    };
+
+    let expected_htu = format!("{}/v1/tools/invoke", state.identity.oidc_discovery().issuer);
+    let validated = crate::identity::dpop::validate_dpop_proof(
+        proof,
+        "POST",
+        &expected_htu,
+        now_secs,
+        None,
+        Some(raw_token),
+    )
+    .map_err(|e| identity_error_to_response(&e).into_response())?;
+
+    if let Some(presented_nonce) = validated.nonce.as_deref() {
+        let valid = nonce_secret
+            .map(|s| crate::identity::dpop::is_valid_dpop_nonce(&s, presented_nonce, now_secs))
+            .unwrap_or_else(|| state.dpop.is_valid_nonce(presented_nonce, now_secs));
+        if !valid {
+            return Err(identity_error_to_response(
+                &crate::identity::IdentityError::DPopNonceInvalid,
+            )
+            .into_response());
+        }
+    }
+
+    state
+        .identity
+        .check_and_record_dpop_jti(realm_id, &validated.jti, now_secs)
+        .map_err(|e| identity_error_to_response(&e).into_response())?;
+
+    if validated.jkt != expected_jkt {
+        return Err(identity_error_to_response(
+            &crate::identity::IdentityError::DPopBindingMismatch,
+        )
+        .into_response());
+    }
+    Ok(())
+}
+
+/// M5 — Validates the `X-Capability-Token` header for `RequireApproval` decisions.
+async fn check_capability_token(
+    state: &Arc<AppState>,
+    realm_id: &crate::core::RealmId,
+    headers: &HeaderMap,
+    body: &InvokeToolBody,
+    caller_sub: &str,
+) -> axum::response::Response {
+    let Some(cap_token) = headers
+        .get("x-capability-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+    else {
+        return identity_error_to_response(&crate::identity::IdentityError::ToolApprovalRequired {
+            tool: body.tool.clone(),
+        })
+        .into_response();
+    };
+
+    let tool = body.tool.clone();
+    let action = body.action.clone();
+    let sub = caller_sub.to_string();
+    let identity = Arc::clone(state);
+    let realm_id_c = realm_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        identity
+            .identity
+            .validate_capability_token(&realm_id_c, &cap_token, &tool, &action, &sub)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(agent_id)) => (
+            StatusCode::OK,
+            Json(InvokeToolResponse {
+                authorized: true,
+                agent_id: Some(agent_id.to_string()),
+            }),
+        )
+            .into_response(),
+        Ok(Err(e)) => identity_error_to_response(&e).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "invoke_tool spawn_blocking panicked");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
 }

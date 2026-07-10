@@ -389,6 +389,7 @@ async fn missing_capability_token_returns_tool_approval_required() {
         "not-a-real-token",
         "delete_file",
         "invoke",
+        "test-caller",
     );
     assert!(
         matches!(
@@ -406,6 +407,7 @@ async fn capability_token_single_use_enforcement() {
     let h = TestHarness::embedded().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
+    let agent_sub = agent_id.as_uuid().to_string();
 
     // Obtain a real capability token through the approval flow.
     let req = CreateApprovalRequestInput {
@@ -427,18 +429,26 @@ async fn capability_token_single_use_enforcement() {
     let cap = response.capability_token.expect("capability token present");
 
     // First use: must succeed.
-    let first =
-        h.identity()
-            .validate_capability_token(&realm_id, &cap.token, "send_email", "invoke");
+    let first = h.identity().validate_capability_token(
+        &realm_id,
+        &cap.token,
+        "send_email",
+        "invoke",
+        &agent_sub,
+    );
     assert!(
         first.is_ok(),
         "first use of valid capability token must succeed, got: {first:?}"
     );
 
     // Second use of the same token: must be rejected (JTI blocklist).
-    let second =
-        h.identity()
-            .validate_capability_token(&realm_id, &cap.token, "send_email", "invoke");
+    let second = h.identity().validate_capability_token(
+        &realm_id,
+        &cap.token,
+        "send_email",
+        "invoke",
+        &agent_sub,
+    );
     assert!(
         matches!(
             second,
@@ -511,6 +521,7 @@ async fn capability_token_tool_mismatch_rejected() {
     let h = TestHarness::embedded().await.expect("harness init");
     let realm_id = make_realm(&h);
     let agent_id = make_agent(&h, &realm_id);
+    let agent_sub = agent_id.as_uuid().to_string();
 
     let req = CreateApprovalRequestInput {
         agent_id,
@@ -531,9 +542,13 @@ async fn capability_token_tool_mismatch_rejected() {
     let cap = response.capability_token.expect("capability token");
 
     // Use the send_email token to try to invoke delete_file — must be rejected.
-    let result =
-        h.identity()
-            .validate_capability_token(&realm_id, &cap.token, "delete_file", "invoke");
+    let result = h.identity().validate_capability_token(
+        &realm_id,
+        &cap.token,
+        "delete_file",
+        "invoke",
+        &agent_sub,
+    );
     assert!(
         matches!(result, Err(IdentityError::ToolApprovalRequired { .. })),
         "token for send_email must not authorize delete_file: {result:?}"

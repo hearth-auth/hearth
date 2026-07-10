@@ -208,7 +208,7 @@ async fn webhook_extra_claims_appear_in_access_token() {
             &UpdateRealmRequest {
                 config: Some(hearth::identity::RealmConfig {
                     pre_token_webhook: Some(setup_webhook_config(
-                        "http://localhost:9999/enrich",
+                        "https://localhost:9999/enrich",
                         PreTokenWebhookErrorPolicy::FailOpen,
                     )),
                     ..Default::default()
@@ -263,7 +263,7 @@ async fn webhook_cannot_override_reserved_claims() {
             &UpdateRealmRequest {
                 config: Some(hearth::identity::RealmConfig {
                     pre_token_webhook: Some(setup_webhook_config(
-                        "http://localhost:9999/enrich",
+                        "https://localhost:9999/enrich",
                         PreTokenWebhookErrorPolicy::FailOpen,
                     )),
                     ..Default::default()
@@ -309,7 +309,7 @@ async fn webhook_fail_open_issues_token_despite_error() {
             &UpdateRealmRequest {
                 config: Some(hearth::identity::RealmConfig {
                     pre_token_webhook: Some(setup_webhook_config(
-                        "http://localhost:9999/enrich",
+                        "https://localhost:9999/enrich",
                         PreTokenWebhookErrorPolicy::FailOpen,
                     )),
                     ..Default::default()
@@ -378,7 +378,7 @@ async fn webhook_fail_closed_rejects_token_on_error() {
             &UpdateRealmRequest {
                 config: Some(hearth::identity::RealmConfig {
                     pre_token_webhook: Some(setup_webhook_config(
-                        "http://localhost:9999/enrich",
+                        "https://localhost:9999/enrich",
                         PreTokenWebhookErrorPolicy::FailClosed,
                     )),
                     ..Default::default()
@@ -500,7 +500,7 @@ async fn webhook_request_contains_expected_context() {
             &UpdateRealmRequest {
                 config: Some(hearth::identity::RealmConfig {
                     pre_token_webhook: Some(setup_webhook_config(
-                        "http://localhost:9999/enrich",
+                        "https://localhost:9999/enrich",
                         PreTokenWebhookErrorPolicy::FailOpen,
                     )),
                     ..Default::default()
@@ -579,7 +579,7 @@ async fn webhook_hmac_sig_forwarded_to_transport_when_secret_configured() {
             &UpdateRealmRequest {
                 config: Some(hearth::identity::RealmConfig {
                     pre_token_webhook: Some(PreTokenWebhookConfig {
-                        url: "http://localhost:9999/enrich".to_string(),
+                        url: "https://localhost:9999/enrich".to_string(),
                         timeout_ms: 1000,
                         on_error: PreTokenWebhookErrorPolicy::FailOpen,
                         hmac_secret: Some(secret.to_string()),
@@ -651,7 +651,7 @@ async fn webhook_without_hmac_secret_is_rejected_by_update_realm() {
         &UpdateRealmRequest {
             config: Some(hearth::identity::RealmConfig {
                 pre_token_webhook: Some(PreTokenWebhookConfig {
-                    url: "http://localhost:9999/enrich".to_string(),
+                    url: "https://localhost:9999/enrich".to_string(),
                     timeout_ms: 1000,
                     on_error: PreTokenWebhookErrorPolicy::FailOpen,
                     hmac_secret: None,
@@ -687,7 +687,7 @@ async fn webhook_with_empty_hmac_secret_is_rejected_by_update_realm() {
         &UpdateRealmRequest {
             config: Some(hearth::identity::RealmConfig {
                 pre_token_webhook: Some(PreTokenWebhookConfig {
-                    url: "http://localhost:9999/enrich".to_string(),
+                    url: "https://localhost:9999/enrich".to_string(),
                     timeout_ms: 1000,
                     on_error: PreTokenWebhookErrorPolicy::FailOpen,
                     hmac_secret: Some(String::new()),

@@ -730,6 +730,7 @@ pub(crate) fn encode_mfa_totp_key(user_id: &UserId) -> Vec<u8> {
 /// Returns the scan-start prefix for all MFA TOTP blobs in a realm.
 ///
 /// Used by `rotate_realm_signing_key` to enumerate blobs for re-encryption.
+#[allow(dead_code)]
 pub(crate) fn mfa_totp_scan_prefix() -> Vec<u8> {
     MFA_TOTP_PREFIX.as_bytes().to_vec()
 }

@@ -151,8 +151,7 @@ impl ApprovalWebhookClient {
         config: &ApprovalWebhookConfig,
         payload: &ApprovalWebhookPayload,
     ) -> Result<(), String> {
-        let body =
-            serde_json::to_vec(payload).map_err(|e| format!("serialization error: {e}"))?;
+        let body = serde_json::to_vec(payload).map_err(|e| format!("serialization error: {e}"))?;
         let signature = config.secret.as_deref().map(|s| sign_body(s, &body));
 
         self.transport.send(

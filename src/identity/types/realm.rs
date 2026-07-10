@@ -494,9 +494,7 @@ impl PreTokenWebhookConfig {
     ///   network-reachable caller to inject arbitrary JWT claims.
     pub fn validate(&self) -> Result<(), String> {
         if !self.url.starts_with("https://") {
-            return Err(
-                "pre_token_webhook.url must use the https:// scheme".to_string(),
-            );
+            return Err("pre_token_webhook.url must use the https:// scheme".to_string());
         }
         if self.hmac_secret.as_deref().map_or(true, str::is_empty) {
             return Err(

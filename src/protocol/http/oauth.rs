@@ -1514,6 +1514,19 @@ async fn token_exchange_impl(
         }
         // RFC 8693 Token Exchange (AGENT_AUTH.md §3.3 / B.4)
         "urn:ietf:params:oauth:grant-type:token-exchange" => {
+            // M2: token-exchange MUST authenticate the requesting client (RFC 8693 §2.1).
+            // Derive actor_sub from the authenticated identity, not the unauthenticated body.
+            let authenticated_client_id = match verify_endpoint_client(
+                &state,
+                &realm_id,
+                &headers,
+                Some(&body.client_id),
+                body.client_secret.as_deref(),
+            ) {
+                Ok(id) => id,
+                Err(resp) => return resp,
+            };
+
             let subject_token = match body.subject_token {
                 Some(t) => t,
                 None => return (
@@ -1525,21 +1538,8 @@ async fn token_exchange_impl(
                 )
                     .into_response(),
             };
-            let client_uuid = match uuid::Uuid::parse_str(&body.client_id) {
-                Ok(u) => u,
-                Err(_) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "error": "invalid_client",
-                            "error_description": "invalid client_id"
-                        })),
-                    )
-                        .into_response()
-                }
-            };
             let request = crate::identity::Rfc8693Request {
-                client_id: crate::core::ClientId::new(client_uuid),
+                client_id: authenticated_client_id,
                 subject_token,
                 subject_token_type: body
                     .subject_token_type

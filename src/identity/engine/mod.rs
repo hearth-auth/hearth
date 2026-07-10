@@ -1689,9 +1689,7 @@ impl EmbeddedIdentityEngine {
     /// as `with_pre_token_transport`.
     pub fn with_approval_transport(
         mut self,
-        transport: std::sync::Arc<
-            dyn crate::identity::approval_notifier::ApprovalWebhookTransport,
-        >,
+        transport: std::sync::Arc<dyn crate::identity::approval_notifier::ApprovalWebhookTransport>,
     ) -> Self {
         self.approval_client = Arc::new(
             crate::identity::approval_notifier::ApprovalWebhookClient::with_transport(transport),
@@ -2361,51 +2359,55 @@ impl EmbeddedIdentityEngine {
             }
         }
 
-        let kek = self.config.key_encryption_key.as_ref().map(|k| k.as_bytes());
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
         let storage_key = keys::mfa_dek_key();
 
-        let key_bytes: [u8; 32] = match self
-            .storage
-            .get(realm_id, &storage_key)
-            .map_err(Self::storage_err)?
-        {
-            Some(raw) => {
-                let plaintext =
-                    crate::identity::key_encryption::unwrap_key(&raw, kek).map_err(|e| {
-                        IdentityError::SigningError {
+        let key_bytes: [u8; 32] =
+            match self
+                .storage
+                .get(realm_id, &storage_key)
+                .map_err(Self::storage_err)?
+            {
+                Some(raw) => {
+                    let plaintext = crate::identity::key_encryption::unwrap_key(&raw, kek)
+                        .map_err(|e| IdentityError::SigningError {
                             reason: format!("MFA DEK unwrap failed: {e}"),
-                        }
-                    })?;
-                if plaintext.len() != 32 {
-                    return Err(IdentityError::SigningError {
-                        reason: format!(
-                            "MFA DEK has wrong length: {} bytes (expected 32)",
-                            plaintext.len()
-                        ),
-                    });
+                        })?;
+                    if plaintext.len() != 32 {
+                        return Err(IdentityError::SigningError {
+                            reason: format!(
+                                "MFA DEK has wrong length: {} bytes (expected 32)",
+                                plaintext.len()
+                            ),
+                        });
+                    }
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&plaintext);
+                    arr
                 }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&plaintext);
-                arr
-            }
-            None => {
-                let rng = ring::rand::SystemRandom::new();
-                let mut key = [0u8; 32];
-                rng.fill(&mut key).map_err(|_| IdentityError::SigningError {
-                    reason: "MFA DEK generation failed".into(),
-                })?;
-                let wrapped =
-                    crate::identity::key_encryption::wrap_key(&key, kek).map_err(|e| {
-                        IdentityError::SigningError {
-                            reason: format!("MFA DEK wrap failed: {e}"),
-                        }
-                    })?;
-                self.storage
-                    .put(realm_id, &storage_key, &wrapped)
-                    .map_err(Self::storage_err)?;
-                key
-            }
-        };
+                None => {
+                    let rng = ring::rand::SystemRandom::new();
+                    let mut key = [0u8; 32];
+                    rng.fill(&mut key)
+                        .map_err(|_| IdentityError::SigningError {
+                            reason: "MFA DEK generation failed".into(),
+                        })?;
+                    let wrapped =
+                        crate::identity::key_encryption::wrap_key(&key, kek).map_err(|e| {
+                            IdentityError::SigningError {
+                                reason: format!("MFA DEK wrap failed: {e}"),
+                            }
+                        })?;
+                    self.storage
+                        .put(realm_id, &storage_key, &wrapped)
+                        .map_err(Self::storage_err)?;
+                    key
+                }
+            };
 
         let mut cache = self.mfa_dek_cache.lock().expect("mfa_dek_cache poisoned");
         cache.insert(realm_id.clone(), key_bytes);
@@ -3010,9 +3012,10 @@ impl EmbeddedIdentityEngine {
             act: None,
             amr: Vec::new(),
             // M1 (RFC 9449 §5): propagate DPoP key binding to the rotated refresh token.
-            cnf: family.bound_jkt.as_ref().map(|jkt| crate::identity::tokens::CnfClaim {
-                jkt: jkt.clone(),
-            }),
+            cnf: family
+                .bound_jkt
+                .as_ref()
+                .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.clone() }),
             custom: claims.custom.clone(),
             sv: None,
         };

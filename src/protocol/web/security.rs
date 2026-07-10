@@ -251,11 +251,18 @@ mod tests {
         });
         let svc = layer.layer(tower::service_fn(html_handler));
         let resp = svc
-            .oneshot(Request::builder().uri("/").body(Body::empty()).expect("req"))
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
             .await
             .expect("service call");
         assert_eq!(
-            resp.headers().get("cache-control").and_then(|v| v.to_str().ok()),
+            resp.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
             Some("no-store"),
             "HTML responses must carry Cache-Control: no-store"
         );
@@ -269,7 +276,12 @@ mod tests {
         });
         let svc = layer.layer(tower::service_fn(css_handler));
         let resp = svc
-            .oneshot(Request::builder().uri("/").body(Body::empty()).expect("req"))
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("req"),
+            )
             .await
             .expect("service call");
         assert!(

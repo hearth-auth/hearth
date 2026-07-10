@@ -252,9 +252,10 @@ async fn h2_group_deny_wins_over_direct_invoke() {
 
     // Create realm with tool_groups: dangerous_suite → [dangerous_op]
     let mut realm_config = RealmConfig::default();
-    realm_config
-        .tool_groups
-        .insert("dangerous_suite".to_string(), vec!["dangerous_op".to_string()]);
+    realm_config.tool_groups.insert(
+        "dangerous_suite".to_string(),
+        vec!["dangerous_op".to_string()],
+    );
 
     let realm = h
         .identity()
@@ -280,8 +281,7 @@ async fn h2_group_deny_wins_over_direct_invoke() {
         )
         .expect("create user");
 
-    let perm_invoke =
-        Permission::new("tool.dangerous_op.invoke").expect("valid permission");
+    let perm_invoke = Permission::new("tool.dangerous_op.invoke").expect("valid permission");
     let perm_group_deny =
         Permission::new("toolgroup.dangerous_suite.deny").expect("valid permission");
     let role = h
@@ -425,20 +425,16 @@ async fn m4_bound_token_without_dpop_proof_rejected() {
     );
 }
 
-/// M5 regression: agent A presenting a capability token minted for agent B must
-/// be rejected — the confused-deputy attack must fail even with a valid token.
-#[tokio::test]
-async fn m5_capability_token_caller_mismatch_rejected() {
-    use hearth::identity::{
-        AgentOwner, ApprovalRequestStatus, CreateAgentRequest, CreateApprovalRequestInput,
-        CreateRealmRequest, CreateUserRequest, SessionContext,
-    };
-    use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
+// Setup for M5 confused-deputy test: creates realm, agent B (the victim), and user A (the intruder).
+struct M5Entities {
+    realm: hearth::core::RealmId,
+    agent_b_id: hearth::core::AgentId,
+    user_a_id: hearth::core::UserId,
+}
 
-    let h = common::TestHarness::server_with_agent_approval()
-        .await
-        .expect("harness");
-    let base = h.base_url().expect("server mode").to_string();
+fn setup_m5_entities(h: &common::TestHarness) -> M5Entities {
+    use hearth::identity::{AgentOwner, CreateAgentRequest, CreateRealmRequest, CreateUserRequest};
+    use hearth::rbac::{AssignRoleRequest, CreateRoleRequest, Permission, Scope, Subject};
 
     let realm = h
         .identity()
@@ -451,7 +447,6 @@ async fn m5_capability_token_caller_mismatch_rejected() {
         .clone();
     h.rbac().seed_realm(&realm).expect("seed realm");
 
-    // Create a proper Agent entity for B (the approval is minted for this agent).
     let owner_b = h
         .identity()
         .create_user(
@@ -478,7 +473,6 @@ async fn m5_capability_token_caller_mismatch_rejected() {
         )
         .expect("create agent b");
 
-    // Create user A (the intruder who will attempt to steal B's cap token).
     let user_a = h
         .identity()
         .create_user(
@@ -491,7 +485,6 @@ async fn m5_capability_token_caller_mismatch_rejected() {
         )
         .expect("create user a");
 
-    // User A needs invoke_with_approval permission to reach the capability-token check.
     let perm = Permission::new("tool.secret_tool.invoke_with_approval").expect("valid");
     let role = h
         .rbac()
@@ -516,13 +509,36 @@ async fn m5_capability_token_caller_mismatch_rejected() {
         )
         .expect("assign role to user_a");
 
+    M5Entities {
+        realm,
+        agent_b_id: agent_b.id().clone(),
+        user_a_id: user_a.id().clone(),
+    }
+}
+
+/// M5 regression: agent A presenting a capability token minted for agent B must
+/// be rejected — the confused-deputy attack must fail even with a valid token.
+#[tokio::test]
+async fn m5_capability_token_caller_mismatch_rejected() {
+    use hearth::identity::{ApprovalRequestStatus, CreateApprovalRequestInput, SessionContext};
+
+    let h = common::TestHarness::server_with_agent_approval()
+        .await
+        .expect("harness");
+    let base = h.base_url().expect("server mode").to_string();
+    let M5Entities {
+        realm,
+        agent_b_id,
+        user_a_id,
+    } = setup_m5_entities(&h);
+
     // Mint a capability token for agent B (sub = agent_b UUID).
     let approval = h
         .identity()
         .create_approval_request(
             &realm,
             &CreateApprovalRequestInput {
-                agent_id: agent_b.id().clone(),
+                agent_id: agent_b_id,
                 tool: "secret_tool".to_string(),
                 action: "invoke".to_string(),
                 context: serde_json::json!({}),
@@ -544,18 +560,17 @@ async fn m5_capability_token_caller_mismatch_rejected() {
     // Issue a bearer token for user A (sub = user_a UUID, different from agent_b UUID).
     let session_a = h
         .identity()
-        .create_session(&realm, user_a.id(), &SessionContext::default())
+        .create_session(&realm, &user_a_id, &SessionContext::default())
         .expect("session a");
     let tokens_a = h
         .identity()
-        .issue_tokens(&realm, user_a.id(), session_a.id())
+        .issue_tokens(&realm, &user_a_id, session_a.id())
         .expect("tokens a");
     let bearer_a = tokens_a.access_token().to_string();
     let realm_id_str = realm.as_uuid().to_string();
 
     // User A presents agent B's capability token — M5 must reject (sub mismatch).
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = reqwest::Client::new()
         .post(format!("{base}/v1/tools/invoke"))
         .header("Authorization", format!("Bearer {bearer_a}"))
         .header("X-Realm-ID", &realm_id_str)
@@ -577,6 +592,7 @@ async fn m5_capability_token_caller_mismatch_rejected() {
 /// audit record. Before HEA-1723, only the approval (capability-token) path emitted
 /// audit events; plain `Allow` returned 200 silently.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn m6_allow_path_emits_audit_record() {
     use hearth::audit::{AuditAction, AuditQuery};
     use hearth::identity::{CreateRealmRequest, CreateUserRequest, SessionContext};
@@ -682,9 +698,14 @@ async fn m6_allow_path_emits_audit_record() {
     );
     // The resource_id should encode the tool and action.
     assert!(
-        tool_events.iter().any(|e| e.resource_id.contains("list_files")),
+        tool_events
+            .iter()
+            .any(|e| e.resource_id.contains("list_files")),
         "audit record must reference the invoked tool; got: {:?}",
-        tool_events.iter().map(|e| &e.resource_id).collect::<Vec<_>>()
+        tool_events
+            .iter()
+            .map(|e| &e.resource_id)
+            .collect::<Vec<_>>()
     );
 }
 

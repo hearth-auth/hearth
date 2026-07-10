@@ -67,6 +67,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tab rendered `serde_json` output verbatim inside `<script type="application/json">` elements;
   a stored config value containing `</script>` would prematurely close the tag, creating a latent
   stored-XSS vector. JSON is now `</` → `<\/` escaped before template injection (HEA-1728).
+- **Refresh tokens now DPoP sender-constrained (M1 — RFC 9449 §5)** — refresh tokens were
+  minted with no `cnf` claim and the refresh path never verified DPoP key binding, so a stolen
+  refresh token was usable by any holder regardless of key possession. The grant family now records
+  the `bound_jkt` (JWK thumbprint) from the DPoP proof presented at authorization-code exchange;
+  the refresh token carries the matching `cnf.jkt` claim; and subsequent refresh calls are rejected
+  with `invalid_token` if the caller presents a different or absent JKT. Non-DPoP flows are
+  unaffected (HEA-1725).
+- **Token-exchange grant now requires client authentication (M2 — RFC 8693 §2.1)** — the
+  `urn:ietf:params:oauth:grant-type:token-exchange` handler previously accepted an
+  unauthenticated `client_id` body parameter and derived the `act.sub` claim and
+  `AgentDelegation` audit actor from it, allowing any caller to forge the acting-party identity
+  by supplying an arbitrary UUID. The handler now calls the standard client authentication path
+  (`verify_endpoint_client`); confidential clients must present a matching secret (via body
+  parameter or HTTP Basic Auth); `act.sub` is derived from the verified identity (HEA-1725).
 - **Email-verify token now protected by per-token redemption lock (L6)** — the email-verification
   token lacked the TOCTOU guard already present on password-reset and magic-link redemption. Two
   concurrent requests with the same token could both pass the used-check. A per-hash mutex

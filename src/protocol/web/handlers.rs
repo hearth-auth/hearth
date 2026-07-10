@@ -3149,10 +3149,7 @@ fn register_error_message(err: &IdentityError) -> String {
 ///
 /// Delegates to `extract_client_ip` so a spoofed `X-Forwarded-For` from an
 /// untrusted hop is ignored when `trusted_proxies` is empty (the default).
-fn register_client_ip(
-    headers: &HeaderMap,
-    trusted_proxies: &[std::net::IpAddr],
-) -> Option<String> {
+fn register_client_ip(headers: &HeaderMap, trusted_proxies: &[std::net::IpAddr]) -> Option<String> {
     Some(crate::protocol::client_info::extract_client_ip(
         headers,
         FALLBACK_PEER,

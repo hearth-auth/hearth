@@ -184,14 +184,15 @@ async fn actor_with_no_permissions_yields_empty_delegated_permissions() {
         .validate_token(&realm, &subject_token)
         .expect("validate subject token");
     assert!(
-        subject_claims.permissions.contains(&"app.admin".to_string()),
+        subject_claims
+            .permissions
+            .contains(&"app.admin".to_string()),
         "test setup: subject token must have app.admin"
     );
 
     // Actor has zero RBAC grants (new client, no role assignments).
     // Use the same "openid" scope so the scope intersection is non-empty.
-    let (actor_client_id, actor_token) =
-        make_actor_token_no_rbac(h.identity(), &realm, "openid");
+    let (actor_client_id, actor_token) = make_actor_token_no_rbac(h.identity(), &realm, "openid");
 
     // Confirm actor token has no RBAC permissions (verifies test setup).
     let actor_claims = h

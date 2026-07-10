@@ -1045,7 +1045,9 @@ impl EmbeddedIdentityEngine {
             cnf: request
                 .dpop_jkt
                 .as_deref()
-                .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.to_string() }),
+                .map(|jkt| crate::identity::tokens::CnfClaim {
+                    jkt: jkt.to_string(),
+                }),
             custom: access_claims.custom.clone(),
             sv: None,
         };

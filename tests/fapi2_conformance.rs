@@ -725,9 +725,10 @@ async fn fapi2_token04_refresh_with_dpop_accepted() {
         )
         .expect("initial token exchange with DPoP");
 
-    const REFRESH_THUMBPRINT: &str = "refresh_dpop_thumbprint";
+    // RFC 9449 §5: refresh MUST present the same key used at the initial exchange.
+    const REFRESH_THUMBPRINT: &str = "initial_thumbprint";
 
-    // Refresh WITH a new DPoP thumbprint — must succeed.
+    // Refresh WITH the bound DPoP thumbprint — must succeed.
     let refreshed = h
         .identity()
         .refresh_tokens(
@@ -743,7 +744,7 @@ async fn fapi2_token04_refresh_with_dpop_accepted() {
         "refreshed access token must be non-empty"
     );
 
-    // Refreshed access token must carry cnf.jkt bound to the new thumbprint.
+    // Refreshed access token must carry cnf.jkt matching the bound DPoP thumbprint.
     let claims =
         decode_claims_unverified(refreshed.access_token()).expect("decode refreshed access token");
     let cnf = claims
@@ -751,7 +752,7 @@ async fn fapi2_token04_refresh_with_dpop_accepted() {
         .expect("refreshed FAPI2 access token must carry cnf claim");
     assert_eq!(
         cnf.jkt, REFRESH_THUMBPRINT,
-        "cnf.jkt must match the DPoP thumbprint provided at refresh"
+        "cnf.jkt must match the DPoP thumbprint bound at exchange (RFC 9449 §5)"
     );
 }
 

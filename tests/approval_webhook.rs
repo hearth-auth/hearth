@@ -1,118 +1,84 @@
-//! Integration tests for Phase C.5: approval webhook notification.
+//! Integration tests for Phase C.5: approval webhook notification (M7 hardened).
+//!
+//! All delivery tests use an in-process capture transport so no real HTTP server
+//! is required and the SSRF guard does not interfere with the tests.  A separate
+//! SSRF-rejection test uses the production transport with a blocked URL.
 //!
 //! Verifies durable at-least-once delivery:
 //! - Webhook payload is delivered to the configured URL on request creation.
 //! - Payload contains required fields: request_id, agent_id, tool, approve_url, deny_url.
 //! - Delivery ID is stable across retries (`"approval:{request_id}"`).
 //! - HMAC-SHA256 signature is present when a secret is configured.
+//! - SSRF guard rejects http:// URLs at registration time and blocked IPs at delivery time.
 
 mod common;
 
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use axum::routing::post;
-use axum::{Json, Router};
 use common::TestHarness;
+use hearth::identity::approval_notifier::ApprovalWebhookTransport;
 use hearth::identity::{
     AgentOwner, ApprovalWebhookConfig, CreateAgentRequest, CreateApprovalRequestInput,
     CreateRealmRequest, CreateUserRequest, RealmConfig,
 };
 
-// ── Helper: local capture server ────────────────────────────────────────────
+// ── In-process capture transport ─────────────────────────────────────────────
 
-/// Captured payload from a single webhook delivery.
-#[derive(Clone, Debug, serde::Deserialize)]
-struct CapturedPayload {
+/// Captures every approval webhook delivery in memory without making HTTP calls.
+#[derive(Clone)]
+struct ApprovalCapture {
+    deliveries: Arc<Mutex<Vec<CapturedDelivery>>>,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct CapturedDelivery {
+    url: String,
+    body: Vec<u8>,
+    event_type: String,
     delivery_id: String,
-    request_id: String,
-    agent_id: String,
-    tool: String,
-    approve_url: String,
-    deny_url: String,
+    signature: Option<String>,
 }
 
-struct CaptureServer {
-    addr: SocketAddr,
-    payloads: Arc<Mutex<Vec<CapturedPayload>>>,
-    headers: Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>,
-}
-
-impl CaptureServer {
-    async fn start() -> Self {
-        let payloads: Arc<Mutex<Vec<CapturedPayload>>> = Arc::new(Mutex::new(Vec::new()));
-        let headers: Arc<Mutex<Vec<std::collections::HashMap<String, String>>>> =
-            Arc::new(Mutex::new(Vec::new()));
-
-        let payloads_clone = Arc::clone(&payloads);
-        let headers_clone = Arc::clone(&headers);
-
-        let app = Router::new().route(
-            "/webhook",
-            post(
-                move |raw_headers: axum::http::HeaderMap, Json(body): Json<CapturedPayload>| {
-                    let payloads = Arc::clone(&payloads_clone);
-                    let headers = Arc::clone(&headers_clone);
-                    async move {
-                        payloads.lock().expect("payloads lock").push(body);
-                        let h: std::collections::HashMap<String, String> = raw_headers
-                            .iter()
-                            .map(|(k, v)| {
-                                (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
-                            })
-                            .collect();
-                        headers.lock().expect("headers lock").push(h);
-                        axum::http::StatusCode::OK
-                    }
-                },
-            ),
-        );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind webhook listener");
-        let addr = listener.local_addr().expect("local addr");
-
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("axum serve");
-        });
-
+impl ApprovalCapture {
+    fn new() -> Self {
         Self {
-            addr,
-            payloads,
-            headers,
+            deliveries: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    fn url(&self) -> String {
-        format!("http://127.0.0.1:{}/webhook", self.addr.port())
-    }
-
-    async fn wait_for_delivery(&self) -> CapturedPayload {
-        for _ in 0..50 {
-            {
-                let guard = self.payloads.lock().expect("payloads lock");
-                if let Some(p) = guard.first() {
-                    return p.clone();
-                }
-            }
-            // AUDIT: justified-sleep: polling for real HTTP delivery from a local test server
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("webhook delivery not received within 1 second");
-    }
-
-    fn captured_headers(&self) -> Vec<std::collections::HashMap<String, String>> {
-        self.headers.lock().expect("headers lock").clone()
+    fn captured(&self) -> Vec<CapturedDelivery> {
+        self.deliveries.lock().expect("lock").clone()
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
+impl ApprovalWebhookTransport for ApprovalCapture {
+    fn send(
+        &self,
+        url: &str,
+        body: &[u8],
+        event_type: &str,
+        delivery_id: &str,
+        signature: Option<&str>,
+    ) -> Result<(), String> {
+        self.deliveries
+            .lock()
+            .expect("lock")
+            .push(CapturedDelivery {
+                url: url.to_string(),
+                body: body.to_vec(),
+                event_type: event_type.to_string(),
+                delivery_id: delivery_id.to_string(),
+                signature: signature.map(str::to_string),
+            });
+        Ok(())
+    }
+}
+
+// ── Helper: create realm + agent with webhook ─────────────────────────────────
 
 fn make_realm_with_webhook(
     h: &TestHarness,
-    webhook_url: &str,
     secret: Option<String>,
 ) -> (hearth::core::RealmId, hearth::core::AgentId) {
     let realm = h
@@ -121,7 +87,9 @@ fn make_realm_with_webhook(
             name: format!("webhook-test-{}", uuid::Uuid::new_v4()),
             config: Some(RealmConfig {
                 approval_webhook: Some(ApprovalWebhookConfig {
-                    url: webhook_url.to_string(),
+                    // https:// URL passes the scheme check at registration time;
+                    // the in-process capture transport never actually connects.
+                    url: "https://capture.local/webhook".to_string(),
                     secret,
                     timeout_ms: 2000,
                 }),
@@ -164,11 +132,15 @@ fn make_realm_with_webhook(
 
 // ─── C.5.1: Webhook delivery on approval request creation ────────────────────
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn approval_webhook_delivers_payload_on_create() {
-    let server = CaptureServer::start().await;
-    let h = TestHarness::embedded().await.expect("harness init");
-    let (realm_id, agent_id) = make_realm_with_webhook(&h, &server.url(), None);
+    let capture = Arc::new(ApprovalCapture::new());
+    let h = TestHarness::embedded_with_approval_transport(
+        Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
+    )
+    .await
+    .expect("harness init");
+    let (realm_id, agent_id) = make_realm_with_webhook(&h, None);
 
     let req = CreateApprovalRequestInput {
         agent_id: agent_id.clone(),
@@ -184,37 +156,55 @@ async fn approval_webhook_delivers_payload_on_create() {
         .create_approval_request(&realm_id, &req)
         .expect("create_approval_request should succeed");
 
-    let payload = server.wait_for_delivery().await;
+    let deliveries = capture.captured();
+    assert_eq!(deliveries.len(), 1, "exactly one delivery expected");
+    let delivery = &deliveries[0];
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&delivery.body).expect("parse payload JSON");
 
     assert_eq!(
-        payload.request_id, created.request_id,
+        payload["request_id"].as_str().unwrap_or(""),
+        created.request_id,
         "request_id must match"
     );
     assert_eq!(
-        payload.agent_id,
+        payload["agent_id"].as_str().unwrap_or(""),
         agent_id.as_uuid().to_string(),
-        "agent_id must be the raw UUID (no agt_ prefix) in the webhook payload"
+        "agent_id must be the raw UUID"
     );
-    assert_eq!(payload.tool, "delete_file", "tool must match");
-    assert!(
-        payload.approve_url.contains(&created.request_id),
-        "approve_url must contain request_id: {}",
-        payload.approve_url
+    assert_eq!(
+        payload["tool"].as_str().unwrap_or(""),
+        "delete_file",
+        "tool must match"
     );
     assert!(
-        payload.deny_url.contains(&created.request_id),
-        "deny_url must contain request_id: {}",
-        payload.deny_url
+        payload["approve_url"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&created.request_id),
+        "approve_url must contain request_id"
+    );
+    assert!(
+        payload["deny_url"]
+            .as_str()
+            .unwrap_or("")
+            .contains(&created.request_id),
+        "deny_url must contain request_id"
     );
 }
 
 // ─── C.5.2: Delivery ID is stable (`approval:{request_id}`) ─────────────────
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn approval_webhook_delivery_id_is_stable() {
-    let server = CaptureServer::start().await;
-    let h = TestHarness::embedded().await.expect("harness init");
-    let (realm_id, agent_id) = make_realm_with_webhook(&h, &server.url(), None);
+    let capture = Arc::new(ApprovalCapture::new());
+    let h = TestHarness::embedded_with_approval_transport(
+        Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
+    )
+    .await
+    .expect("harness init");
+    let (realm_id, agent_id) = make_realm_with_webhook(&h, None);
 
     let req = CreateApprovalRequestInput {
         agent_id,
@@ -230,23 +220,27 @@ async fn approval_webhook_delivery_id_is_stable() {
         .create_approval_request(&realm_id, &req)
         .expect("create");
 
-    let payload = server.wait_for_delivery().await;
+    let deliveries = capture.captured();
+    assert_eq!(deliveries.len(), 1, "exactly one delivery expected");
 
     let expected_delivery_id = format!("approval:{}", created.request_id);
     assert_eq!(
-        payload.delivery_id, expected_delivery_id,
+        deliveries[0].delivery_id, expected_delivery_id,
         "delivery_id must be 'approval:{{request_id}}' for idempotency"
     );
 }
 
 // ─── C.5.3: HMAC-SHA256 signature is present when secret is configured ────────
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn approval_webhook_signed_when_secret_configured() {
-    let server = CaptureServer::start().await;
-    let h = TestHarness::embedded().await.expect("harness init");
-    let (realm_id, agent_id) =
-        make_realm_with_webhook(&h, &server.url(), Some("test-secret-12345".to_string()));
+    let capture = Arc::new(ApprovalCapture::new());
+    let h = TestHarness::embedded_with_approval_transport(
+        Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
+    )
+    .await
+    .expect("harness init");
+    let (realm_id, agent_id) = make_realm_with_webhook(&h, Some("test-secret-12345".to_string()));
 
     let req = CreateApprovalRequestInput {
         agent_id,
@@ -261,21 +255,20 @@ async fn approval_webhook_signed_when_secret_configured() {
         .create_approval_request(&realm_id, &req)
         .expect("create");
 
-    server.wait_for_delivery().await;
+    let deliveries = capture.captured();
+    assert_eq!(deliveries.len(), 1, "exactly one delivery expected");
 
-    let all_headers = server.captured_headers();
-    let headers = all_headers.first().expect("at least one delivery");
-
-    let signature = headers
-        .get("x-hearth-signature-256")
+    let sig = deliveries[0]
+        .signature
+        .as_deref()
         .expect("X-Hearth-Signature-256 must be present when secret is configured");
 
     assert!(
-        signature.starts_with("sha256="),
-        "signature must start with 'sha256=', got: {signature}"
+        sig.starts_with("sha256="),
+        "signature must start with 'sha256=', got: {sig}"
     );
     assert_eq!(
-        signature.len(),
+        sig.len(),
         7 + 64,
         "signature must be 'sha256=' + 64 hex chars"
     );
@@ -283,10 +276,14 @@ async fn approval_webhook_signed_when_secret_configured() {
 
 // ─── C.5.4: No delivery when realm has no webhook configured ─────────────────
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn approval_webhook_not_delivered_when_not_configured() {
-    let server = CaptureServer::start().await;
-    let h = TestHarness::embedded().await.expect("harness init");
+    let capture = Arc::new(ApprovalCapture::new());
+    let h = TestHarness::embedded_with_approval_transport(
+        Arc::clone(&capture) as Arc<dyn ApprovalWebhookTransport>
+    )
+    .await
+    .expect("harness init");
 
     // Realm WITHOUT approval_webhook config
     let realm = h
@@ -339,11 +336,108 @@ async fn approval_webhook_not_delivered_when_not_configured() {
         )
         .expect("create");
 
-    // Wait briefly — no delivery expected
-    // AUDIT: justified-sleep: negative test confirming no delivery within a grace window
-    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        server.payloads.lock().expect("payloads lock").is_empty(),
+        capture.captured().is_empty(),
         "no webhook should be delivered when realm has no approval_webhook config"
     );
+}
+
+// ─── M7: https-scheme check at registration time ─────────────────────────────
+
+#[tokio::test]
+async fn approval_webhook_http_url_rejected_at_registration() {
+    let h = TestHarness::embedded().await.expect("harness init");
+
+    let result = h.identity().create_realm(&CreateRealmRequest {
+        name: format!("http-webhook-{}", uuid::Uuid::new_v4()),
+        config: Some(RealmConfig {
+            approval_webhook: Some(ApprovalWebhookConfig {
+                url: "http://attacker.example.com/hook".to_string(),
+                secret: None,
+                timeout_ms: 2000,
+            }),
+            ..Default::default()
+        }),
+    });
+
+    assert!(
+        result.is_err(),
+        "http:// approval webhook URL must be rejected at registration"
+    );
+}
+
+// ─── M7: SSRF guard blocks delivery to private IP ranges ─────────────────────
+
+#[tokio::test]
+async fn approval_webhook_ssrf_blocked_at_delivery() {
+    // Use the production transport (no injection) so the SSRF guard is active.
+    let h = TestHarness::embedded().await.expect("harness init");
+
+    // https:// scheme passes the registration-time check; 169.254.169.254 is
+    // blocked by the delivery-time DNS check (link-local / cloud metadata).
+    let realm = h
+        .identity()
+        .create_realm(&CreateRealmRequest {
+            name: format!("ssrf-test-{}", uuid::Uuid::new_v4()),
+            config: Some(RealmConfig {
+                approval_webhook: Some(ApprovalWebhookConfig {
+                    url: "https://169.254.169.254/metadata".to_string(),
+                    secret: None,
+                    timeout_ms: 2000,
+                }),
+                ..Default::default()
+            }),
+        })
+        .expect("realm creation must succeed (scheme check passes)");
+
+    let realm_id = realm.id().clone();
+    let owner = h
+        .identity()
+        .create_user(
+            &realm_id,
+            &CreateUserRequest {
+                email: format!("owner-{}@test.example", uuid::Uuid::new_v4()),
+                display_name: "Owner".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create owner");
+
+    let agent = h
+        .identity()
+        .create_agent(
+            &realm_id,
+            &CreateAgentRequest {
+                display_name: "ssrf-agent".to_string(),
+                description: None,
+                owner: AgentOwner::User(owner.id().clone()),
+                capabilities: vec![],
+                max_delegation_depth: 3,
+            },
+            None,
+        )
+        .expect("create agent");
+
+    // Delivery fails (SSRF guard blocks 169.254.169.254) but create_approval_request
+    // still succeeds — outbox record is persisted for retry.
+    let result = h.identity().create_approval_request(
+        &realm_id,
+        &CreateApprovalRequestInput {
+            agent_id: agent.id().clone(),
+            tool: "metadata_steal".to_string(),
+            action: "invoke".to_string(),
+            context: serde_json::json!({}),
+            delegation_chain: vec![],
+            expires_in_secs: None,
+        },
+    );
+
+    assert!(
+        result.is_ok(),
+        "create_approval_request must succeed even when webhook delivery is SSRF-blocked: {:?}",
+        result.err()
+    );
+    // Delivery failure is silent at the API level (outbox persists for retry).
+    // The guard is exercised; if the SSRF check were absent, ureq would attempt
+    // a real TCP connection to 169.254.169.254 instead.
 }

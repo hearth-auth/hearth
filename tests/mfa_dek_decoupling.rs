@@ -65,10 +65,7 @@ async fn totp_verify_survives_signing_key_rotation() {
         .unwrap();
 
     // Step 1 — enroll TOTP.
-    let enrollment = harness
-        .identity()
-        .enroll_totp(&realm, user.id())
-        .unwrap();
+    let enrollment = harness.identity().enroll_totp(&realm, user.id()).unwrap();
     let secret = enrollment.secret_base32.clone();
 
     // Step 2 — activate enrollment with current time step.
@@ -83,10 +80,7 @@ async fn totp_verify_survives_signing_key_rotation() {
         .expect("verify_totp_enrollment before rotation");
 
     assert!(
-        harness
-            .identity()
-            .mfa_enabled(&realm, user.id())
-            .unwrap(),
+        harness.identity().mfa_enabled(&realm, user.id()).unwrap(),
         "MFA must be enabled before testing rotation"
     );
 
@@ -138,10 +132,7 @@ async fn recovery_code_survives_signing_key_rotation() {
         )
         .unwrap();
 
-    let enrollment = harness
-        .identity()
-        .enroll_totp(&realm, user.id())
-        .unwrap();
+    let enrollment = harness.identity().enroll_totp(&realm, user.id()).unwrap();
     let secret = enrollment.secret_base32.clone();
     let recovery_code = enrollment.recovery_codes.as_slice()[0].clone();
 
@@ -197,10 +188,7 @@ async fn totp_survives_multiple_signing_key_rotations() {
         )
         .unwrap();
 
-    let enrollment = harness
-        .identity()
-        .enroll_totp(&realm, user.id())
-        .unwrap();
+    let enrollment = harness.identity().enroll_totp(&realm, user.id()).unwrap();
     let secret = enrollment.secret_base32.clone();
 
     let now_secs = std::time::SystemTime::now()

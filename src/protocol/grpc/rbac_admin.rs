@@ -269,7 +269,11 @@ fn check_direct_permission_ceiling(
     if auth.permissions.iter().any(|p| p == "hearth.admin") {
         return Ok(());
     }
-    if !auth.permissions.iter().any(|p| p.as_str() == permission.as_str()) {
+    if !auth
+        .permissions
+        .iter()
+        .any(|p| p.as_str() == permission.as_str())
+    {
         tracing::warn!(
             realm_id = %auth.realm_id,
             missing_permission = %permission,
