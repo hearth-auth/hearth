@@ -119,14 +119,14 @@ async fn change_password_flow() {
     let user = create_user(&harness, &realm);
 
     // Set initial password
-    let pw = CleartextPassword::from_string("original-pw".to_string());
+    let pw = CleartextPassword::from_string("original-pass!".to_string());
     harness
         .identity()
         .set_password(&realm, user.id(), &pw)
         .expect("set password");
 
     // Authenticate with original
-    let pw = CleartextPassword::from_string("original-pw".to_string());
+    let pw = CleartextPassword::from_string("original-pass!".to_string());
     let ok = harness
         .identity()
         .verify_password(&realm, user.id(), &pw)
@@ -134,15 +134,15 @@ async fn change_password_flow() {
     assert!(ok, "original password should authenticate");
 
     // Change password
-    let old = CleartextPassword::from_string("original-pw".to_string());
-    let new = CleartextPassword::from_string("updated-pw".to_string());
+    let old = CleartextPassword::from_string("original-pass!".to_string());
+    let new = CleartextPassword::from_string("updated-pass!".to_string());
     harness
         .identity()
         .change_password(&realm, user.id(), &old, &new)
         .expect("change password");
 
     // Re-authenticate with new password
-    let new_check = CleartextPassword::from_string("updated-pw".to_string());
+    let new_check = CleartextPassword::from_string("updated-pass!".to_string());
     let ok = harness
         .identity()
         .verify_password(&realm, user.id(), &new_check)
@@ -150,7 +150,7 @@ async fn change_password_flow() {
     assert!(ok, "new password should authenticate");
 
     // Old password should fail
-    let old_check = CleartextPassword::from_string("original-pw".to_string());
+    let old_check = CleartextPassword::from_string("original-pass!".to_string());
     let ok = harness
         .identity()
         .verify_password(&realm, user.id(), &old_check)
@@ -727,7 +727,7 @@ async fn delete_user_removes_credential() {
     let user = create_user(&harness, &realm);
 
     // Set password
-    let pw = CleartextPassword::from_string("delete-me".to_string());
+    let pw = CleartextPassword::from_string("delete-mepass!".to_string());
     harness
         .identity()
         .set_password(&realm, user.id(), &pw)
@@ -740,7 +740,7 @@ async fn delete_user_removes_credential() {
         .expect("delete user");
 
     // Verify should fail (user gone) — returns generic credential error
-    let pw = CleartextPassword::from_string("delete-me".to_string());
+    let pw = CleartextPassword::from_string("delete-mepass!".to_string());
     let err = harness
         .identity()
         .verify_password(&realm, user.id(), &pw)

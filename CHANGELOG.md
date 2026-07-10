@@ -101,6 +101,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   audit HMAC key), KEK-wrapped when `security.key_encryption_key` is configured. Signing-key
   rotation no longer touches MFA data. Any blobs still encrypted under the old signing-key-derived
   DEK are re-encrypted atomically during the next rotation call (HEA-1724).
+- **Pre-token and approval webhooks now routed through SSRF guard (M7)** — webhook delivery
+  previously bypassed the `check_webhook_url` SSRF check, allowing a configured webhook URL to
+  target RFC 1918 / loopback / link-local / ULA addresses (cloud-metadata SSRF). Both the
+  pre-token enrichment webhook and the approval-notification webhook are now checked at
+  registration time (https:// scheme required; http:// rejected) and at delivery time (DNS
+  resolution blocks private ranges). Tests updated to use https:// URLs (HEA-1727).
+- **Client IP extraction now trusted-proxy-aware (M8)** — `register_client_ip` and
+  `captcha_client_ip` previously trusted the leftmost `X-Forwarded-For` header value, allowing a
+  remote attacker to spoof their source IP by prepending an arbitrary address to XFF. Both
+  extraction sites now use `extract_client_ip(headers, fallback_peer, trusted_proxies)`, which
+  walks XFF right-to-left and stops at the first non-trusted hop — returning the true client IP
+  regardless of attacker-controlled XFF values (HEA-1727).
+- **`SessionCreated` and `TokenIssued` audit events now include client IP and user-agent (M9)**
+  — success-path authentication events previously emitted no metadata, making IP- or UA-based
+  forensics impossible after a breach. `SessionContext` IP and UA are now threaded into
+  `AuditContext.metadata` (`client_ip`, `user_agent`) for `SessionCreated` and `TokenIssued`
+  audit events (HEA-1727).
+- **HIBP breach check now enabled by default** — `BreachCheckConfig::default()` previously
+  had `enabled: false` (safe migration default for existing deployments). The default is now
+  `enabled: true` so new realms get breach checking out of the box without explicit
+  configuration. Existing configs that explicitly set `enabled: false` are unaffected.
+  Integration tests inject a no-network stub transport to avoid HIBP API calls in CI
+  (HEA-1727).
+
+### Changed
+- **Password minimum length floor raised from 8 to 12 characters (NIST SP 800-63B §5.1.1.1)**
+  — the unconditional hard floor for all password-setting and self-registration call sites has
+  been raised from 8 to 12 characters. Realm `password_policy.min_length` may still raise this
+  higher but cannot lower it below 12. Deployments where users have passwords shorter than 12
+  characters are unaffected at login (existing hashes remain valid); the floor applies at the
+  next password change (HEA-1727).
 
 ### Fixed
 - **Dev-mode `oidc.issuer` defaults to actual server URL** — when running `hearth serve --dev`

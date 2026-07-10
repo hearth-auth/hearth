@@ -1076,12 +1076,12 @@ async fn run_serve(
                      mfa_required: true under the system realm config to enforce it."
                 );
             }
-            // HSEC-003: Non-fatal warning — the 8-character floor is always enforced
-            // at validation time, but an explicit policy is recommended in production.
+            // HSEC-003: Non-fatal warning — the 12-character floor (NIST SP 800-63B) is always
+            // enforced at validation time, but an explicit policy is recommended in production.
             if sys_realm.config().password_policy.is_none() {
                 warn!(
                     "no password_policy configured for the system realm; \
-                     the built-in 8-character floor is enforced at runtime but \
+                     the built-in 12-character floor (NIST SP 800-63B) is enforced at runtime but \
                      an explicit policy (auth.password_policy.min_length) is \
                      recommended for production hardening"
                 );

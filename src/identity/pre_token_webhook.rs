@@ -68,6 +68,13 @@ pub const RESERVED_CLAIM_KEYS: &[&str] = &[
     "amr",
     "cnf",
     "sv",
+    // Delegation + client-identity claims — a compromised webhook must not
+    // be able to inject an `act` chain or impersonate the authorized party.
+    "act",
+    "azp",
+    "client_id",
+    "auth_time",
+    "acr",
 ];
 
 // ──────────────────── error ────────────────────────────────

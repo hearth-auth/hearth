@@ -85,7 +85,7 @@ async fn move_copies_users_and_deletes_source() {
     let dst = make_realm(identity, "migration-move-dst");
 
     let user = make_user(identity, &src, "alice@example.com");
-    set_password(identity, &src, user.id(), "hunter2!");
+    set_password(identity, &src, user.id(), "hunter2!-pass");
 
     let report = execute_cross_realm_migration(
         identity,
@@ -113,7 +113,7 @@ async fn move_copies_users_and_deletes_source() {
         .verify_password(
             &dst,
             user.id(),
-            &CleartextPassword::from_string("hunter2!".to_string()),
+            &CleartextPassword::from_string("hunter2!-pass".to_string()),
         )
         .expect("verify dst password");
     assert!(ok, "password should verify in destination realm");
@@ -151,7 +151,7 @@ async fn copy_leaves_source_intact() {
     let dst = make_realm(identity, "migration-copy-dst");
 
     let user = make_user(identity, &src, "bob@example.com");
-    set_password(identity, &src, user.id(), "password123");
+    set_password(identity, &src, user.id(), "password123!!");
 
     let report = execute_cross_realm_migration(
         identity,

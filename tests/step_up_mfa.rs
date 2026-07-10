@@ -22,7 +22,7 @@ use secrecy::SecretString;
 // Shared helpers
 // ──────────────────────────────────────────────────────────────
 
-const PASSWORD: &str = "S3cur3P@ss!";
+const PASSWORD: &str = "S3cur3P@ss!1";
 
 fn realm_cfg_with_adaptive(enabled: bool, secret: &str, window_days: u32) -> RealmConfig {
     RealmConfig {

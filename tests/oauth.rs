@@ -851,7 +851,7 @@ async fn password_grant_wrong_password_returns_invalid_credential() {
         .set_password(
             &realm,
             user.id(),
-            &CleartextPassword::from_string("rightful1".to_string()),
+            &CleartextPassword::from_string("rightful1-pass".to_string()),
         )
         .expect("set password");
 

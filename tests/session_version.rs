@@ -194,7 +194,7 @@ async fn sv_bumped_on_password_change() {
         .set_password(
             &realm,
             user.id(),
-            &CleartextPassword::from_string("OldPass1!".to_string()),
+            &CleartextPassword::from_string("OldPass1!-pass".to_string()),
         )
         .expect("set pw");
 
@@ -214,8 +214,8 @@ async fn sv_bumped_on_password_change() {
         .change_password(
             &realm,
             user.id(),
-            &CleartextPassword::from_string("OldPass1!".to_string()),
-            &CleartextPassword::from_string("NewPass2@".to_string()),
+            &CleartextPassword::from_string("OldPass1!-pass".to_string()),
+            &CleartextPassword::from_string("NewPass2@-pass".to_string()),
         )
         .expect("change pw");
 

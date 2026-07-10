@@ -783,8 +783,9 @@ impl PartialEq for BreachCheckConfig {
 impl Default for BreachCheckConfig {
     fn default() -> Self {
         Self {
-            // Safe migration default: disabled so existing realms are unaffected.
-            enabled: false,
+            // NIST SP 800-63B: breach-check is on by default. Tests inject a
+            // stub transport via `with_hibp_transport` to avoid network calls.
+            enabled: true,
             timeout_ms: 3000,
             hibp_api_key: SecretString::new(String::new()),
         }
@@ -965,7 +966,7 @@ mod tests {
     #[test]
     fn pre_token_webhook_config_validate_rejects_none_secret() {
         let cfg = PreTokenWebhookConfig {
-            url: "http://localhost:9999/enrich".to_string(),
+            url: "https://localhost:9999/enrich".to_string(),
             timeout_ms: 1000,
             on_error: PreTokenWebhookErrorPolicy::FailOpen,
             hmac_secret: None,
@@ -980,7 +981,7 @@ mod tests {
     #[test]
     fn pre_token_webhook_config_validate_rejects_empty_secret() {
         let cfg = PreTokenWebhookConfig {
-            url: "http://localhost:9999/enrich".to_string(),
+            url: "https://localhost:9999/enrich".to_string(),
             timeout_ms: 1000,
             on_error: PreTokenWebhookErrorPolicy::FailOpen,
             hmac_secret: Some(String::new()),
@@ -995,7 +996,7 @@ mod tests {
     #[test]
     fn pre_token_webhook_config_validate_accepts_non_empty_secret() {
         let cfg = PreTokenWebhookConfig {
-            url: "http://localhost:9999/enrich".to_string(),
+            url: "https://localhost:9999/enrich".to_string(),
             timeout_ms: 1000,
             on_error: PreTokenWebhookErrorPolicy::FailOpen,
             hmac_secret: Some("my-secret".to_string()),

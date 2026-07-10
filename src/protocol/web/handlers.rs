@@ -1295,11 +1295,12 @@ fn passkey_login_begin_with_realm(
 ) -> Response {
     use base64::Engine as _;
 
-    let host_str = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost");
-    let rp_id = host_str
+    // Pin RP ID to the configured public origin (strip scheme and port) so that
+    // a forged Host header cannot redirect the ceremony to a different origin.
+    let origin = state.public_origin_str(&headers);
+    let rp_id = origin
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
         .split(':')
         .next()
         .unwrap_or("localhost")
@@ -1420,16 +1421,9 @@ fn passkey_login_complete_impl(
     };
     let user_handle_bytes = body.user_handle.as_deref().and_then(|h| b64.decode(h).ok());
 
-    let host_str = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost");
-    let scheme = if host_str.starts_with("localhost") || host_str.starts_with("127.0.0.1") {
-        "http"
-    } else {
-        "https"
-    };
-    let origin = format!("{scheme}://{host_str}");
+    // Pin origin to the configured public origin so a forged Host header
+    // cannot redirect the ceremony to an attacker-controlled origin (L5).
+    let origin = state.public_origin_str(&headers);
 
     // Parse the user handle into a UserId.
     let Some(ref uh_bytes) = user_handle_bytes else {
@@ -2875,7 +2869,7 @@ fn reset_password_submit_impl(
     if form.password.len() < 8 {
         return reset_err(
             form.token,
-            "Password must be at least 8 characters.".to_string(),
+            "Password must be at least 12 characters.".to_string(),
         );
     }
 
@@ -3296,7 +3290,7 @@ fn register_submit_impl(
     }
     if form.password.len() < 8 {
         return render_err(
-            "Password must be at least 8 characters.".to_string(),
+            "Password must be at least 12 characters.".to_string(),
             form.email,
         );
     }
@@ -4008,7 +4002,7 @@ pub async fn ra_update_password_submit(
     if form.password.len() < 8 {
         return render_err(
             form.ra_token,
-            "Password must be at least 8 characters.".to_string(),
+            "Password must be at least 12 characters.".to_string(),
         );
     }
 

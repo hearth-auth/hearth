@@ -4,8 +4,8 @@
 //! Assertions:
 //! - Empty and short passwords are rejected at `set_password` and self-registration
 //!   even when no `PasswordPolicy` is configured on the realm.
-//! - A policy `min_length` lower than 8 does not lower the floor below 8.
-//! - A policy `min_length` higher than 8 is respected as the effective minimum.
+//! - A policy `min_length` lower than 12 does not lower the floor below 12.
+//! - A policy `min_length` higher than 12 is respected as the effective minimum.
 //! - Creating a session in the system realm without MFA enrolled SUCCEEDS when
 //!   `mfa_required` is not explicitly set (opt-in default).
 //! - Creating a session in the system realm fails with `MfaRequired` when
@@ -97,15 +97,15 @@ async fn short_password_rejected_without_policy() {
         )
         .expect("create user");
 
-    // 7 characters — one below the 8-char floor.
+    // 11 characters — one below the 12-char floor.
     let err = harness
         .identity()
         .set_password(
             realm.id(),
             user.id(),
-            &CleartextPassword::from_string("short7x".to_string()),
+            &CleartextPassword::from_string("short11char".to_string()),
         )
-        .expect_err("7-char password must be rejected by floor");
+        .expect_err("11-char password must be rejected by floor");
 
     assert!(
         matches!(err, IdentityError::InvalidInput { .. }),
@@ -114,7 +114,7 @@ async fn short_password_rejected_without_policy() {
 }
 
 #[tokio::test]
-async fn eight_char_password_accepted_without_policy() {
+async fn twelve_char_password_accepted_without_policy() {
     let harness = common::TestHarness::embedded().await.expect("harness");
     let realm = harness
         .identity()
@@ -143,12 +143,12 @@ async fn eight_char_password_accepted_without_policy() {
         .set_password(
             realm.id(),
             user.id(),
-            &CleartextPassword::from_string("exactly8".to_string()),
+            &CleartextPassword::from_string("exactly12pwd".to_string()),
         )
-        .expect("8-char password must be accepted at the floor");
+        .expect("12-char password must be accepted at the floor");
 }
 
-// ─── HSEC-003: floor wins when policy min_length < 8 ─────────────────────
+// ─── HSEC-003: floor wins when policy min_length < 12 ────────────────────
 
 #[tokio::test]
 async fn policy_min_length_below_floor_still_enforces_floor() {
@@ -159,7 +159,7 @@ async fn policy_min_length_below_floor_still_enforces_floor() {
             name: format!("floor-test-{}", uuid::Uuid::new_v4()),
             config: Some(RealmConfig {
                 password_policy: Some(PasswordPolicy {
-                    // Operator sets 4, but the hard floor is 8.
+                    // Operator sets 4, but the hard floor is 12.
                     min_length: Some(4),
                     ..PasswordPolicy::default()
                 }),
@@ -182,7 +182,7 @@ async fn policy_min_length_below_floor_still_enforces_floor() {
         )
         .expect("create user");
 
-    // 5 chars satisfies the operator policy (min_length=4) but not the floor (8).
+    // 5 chars satisfies the operator policy (min_length=4) but not the floor (12).
     let err = harness
         .identity()
         .set_password(
@@ -197,15 +197,15 @@ async fn policy_min_length_below_floor_still_enforces_floor() {
         "expected InvalidInput, got: {err}"
     );
 
-    // 8 chars meets the floor and satisfies the policy.
+    // 12 chars meets the floor and satisfies the policy.
     harness
         .identity()
         .set_password(
             realm.id(),
             user.id(),
-            &CleartextPassword::from_string("exactly8".to_string()),
+            &CleartextPassword::from_string("exactly12pwd".to_string()),
         )
-        .expect("8-char password must be accepted when policy min_length < 8");
+        .expect("12-char password must be accepted when policy min_length < 12");
 }
 
 #[tokio::test]
@@ -217,7 +217,7 @@ async fn policy_min_length_above_floor_is_respected() {
             name: format!("floor-test-{}", uuid::Uuid::new_v4()),
             config: Some(RealmConfig {
                 password_policy: Some(PasswordPolicy {
-                    min_length: Some(12),
+                    min_length: Some(15),
                     ..PasswordPolicy::default()
                 }),
                 ..RealmConfig::default()
@@ -239,30 +239,30 @@ async fn policy_min_length_above_floor_is_respected() {
         )
         .expect("create user");
 
-    // 8 chars meets the floor but not the policy (min=12).
+    // 12 chars meets the floor but not the policy (min=15).
     let err = harness
         .identity()
         .set_password(
             realm.id(),
             user.id(),
-            &CleartextPassword::from_string("exactly8".to_string()),
+            &CleartextPassword::from_string("exactly12pwd".to_string()),
         )
-        .expect_err("8-char password must fail when policy requires 12");
+        .expect_err("12-char password must fail when policy requires 15");
 
     assert!(
         matches!(err, IdentityError::InvalidInput { .. }),
         "expected InvalidInput, got: {err}"
     );
 
-    // 12 chars satisfies the policy.
+    // 15 chars satisfies the policy.
     harness
         .identity()
         .set_password(
             realm.id(),
             user.id(),
-            &CleartextPassword::from_string("longenough12".to_string()),
+            &CleartextPassword::from_string("longenoughpwd15".to_string()),
         )
-        .expect("12-char password must be accepted when policy min_length=12");
+        .expect("15-char password must be accepted when policy min_length=15");
 }
 
 // ─── HSEC-003: floor on self-registration ─────────────────────────────────

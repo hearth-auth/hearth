@@ -15,11 +15,24 @@ use std::sync::Arc;
 use hearth::audit::{AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, SystemClock};
 use hearth::identity::{
-    device_fp::DeviceFingerprintStore, CreateRealmRequest, CredentialConfig,
-    EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
+    device_fp::DeviceFingerprintStore,
+    hibp::{HibpError, HibpTransport},
+    CreateRealmRequest, CredentialConfig, EmbeddedIdentityEngine, IdentityConfig, IdentityEngine,
 };
 use hearth::rbac::{EmbeddedRbacEngine, RbacEngine, SvBumper};
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+
+/// Stub HIBP transport used in all embedded test harnesses.
+///
+/// Always reports "not pwned" without any network I/O. Without this, the
+/// HIBP-enabled-by-default config would attempt real HTTP calls on every
+/// password-setting test, causing failures or timeouts in offline CI.
+struct NotPwnedStub;
+impl HibpTransport for NotPwnedStub {
+    fn get_range(&self, _prefix: &str, _api_key: Option<&str>) -> Result<String, HibpError> {
+        Ok(String::new()) // empty body → no suffix match → not pwned
+    }
+}
 
 // Kept alongside the harness so tests can hand the engines to gRPC / HTTP
 // rigs that require `Arc<dyn Trait>`.
@@ -128,7 +141,8 @@ impl TestHarness {
             Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
             Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
         )
-        .expect("identity engine creation");
+        .expect("identity engine creation")
+        .with_hibp_transport(Arc::new(NotPwnedStub));
         let identity_engine = Arc::new(identity_engine);
         // Wire session-version bumper so RBAC mutations trigger sv invalidation.
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
@@ -177,6 +191,7 @@ impl TestHarness {
             Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
         )
         .expect("identity engine creation")
+        .with_hibp_transport(Arc::new(NotPwnedStub))
         .with_pre_token_transport(transport);
         let identity_engine = Arc::new(identity_engine);
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
@@ -225,6 +240,7 @@ impl TestHarness {
             Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
         )
         .expect("identity engine creation")
+        .with_hibp_transport(Arc::new(NotPwnedStub))
         .with_approval_transport(transport);
         let identity_engine = Arc::new(identity_engine);
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
@@ -270,7 +286,8 @@ impl TestHarness {
             Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
             Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
         )
-        .expect("identity engine creation");
+        .expect("identity engine creation")
+        .with_hibp_transport(Arc::new(NotPwnedStub));
         let identity_engine = Arc::new(identity_engine);
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
 
@@ -336,7 +353,8 @@ impl TestHarness {
             Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
             Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
         )
-        .expect("identity engine creation");
+        .expect("identity engine creation")
+        .with_hibp_transport(Arc::new(NotPwnedStub));
         let identity_engine = Arc::new(identity_engine);
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
 
@@ -399,7 +417,8 @@ impl TestHarness {
             Arc::clone(&rbac_engine) as Arc<dyn RbacEngine>,
             Arc::clone(&audit_engine) as Arc<dyn AuditEngine>,
         )
-        .expect("identity engine creation");
+        .expect("identity engine creation")
+        .with_hibp_transport(Arc::new(NotPwnedStub));
         let identity_engine = Arc::new(identity_engine);
         rbac_engine.init_sv_bumper(Arc::clone(&identity_engine) as Arc<dyn SvBumper>);
 

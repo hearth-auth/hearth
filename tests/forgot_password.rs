@@ -179,7 +179,7 @@ async fn forgot_password_invalidates_sessions() {
         .set_password(
             &realm,
             user.id(),
-            &CleartextPassword::from_string("BobPass1!".to_string()),
+            &CleartextPassword::from_string("BobPass1!-pass".to_string()),
         )
         .expect("set password");
 
@@ -249,7 +249,7 @@ fn forgot_password_token_single_use() {
         .reset_password_with_token(
             &realm,
             &token,
-            &CleartextPassword::from_string("NewValid1!".to_string()),
+            &CleartextPassword::from_string("NewValid1!-pass".to_string()),
         )
         .expect("first use must succeed");
 

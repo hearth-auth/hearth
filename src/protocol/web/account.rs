@@ -903,16 +903,15 @@ pub async fn passkey_register_begin(
     session: UiSession,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    use axum::http::{header, StatusCode};
+    use axum::http::StatusCode;
     use axum::Json;
     use base64::Engine as _;
 
-    // Derive RP ID from Host header (strip port if present).
-    let host_str = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost");
-    let rp_id = host_str
+    // Pin RP ID to the configured public origin (strip scheme and port).
+    let origin = state.public_origin_str(&headers);
+    let rp_id = origin
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
         .split(':')
         .next()
         .unwrap_or("localhost")
@@ -1002,7 +1001,7 @@ pub async fn passkey_register_complete(
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<PasskeyRegisterCompleteBody>,
 ) -> Response {
-    use axum::http::{header, StatusCode};
+    use axum::http::StatusCode;
     use base64::Engine as _;
 
     let Ok(client_data_json) =
@@ -1016,17 +1015,8 @@ pub async fn passkey_register_complete(
         return (StatusCode::BAD_REQUEST, "Invalid attestation_object").into_response();
     };
 
-    // Derive origin from Host header.
-    let host_str = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost");
-    let scheme = if host_str.starts_with("localhost") || host_str.starts_with("127.0.0.1") {
-        "http"
-    } else {
-        "https"
-    };
-    let origin = format!("{scheme}://{host_str}");
+    // Pin origin to the configured public origin (L5).
+    let origin = state.public_origin_str(&headers);
 
     match state.identity.complete_webauthn_registration(
         &session.realm_id,
