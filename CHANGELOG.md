@@ -63,6 +63,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   into `userHandle` (which is not covered by the WebAuthn signature) and receive a valid session
   for the victim account — a pre-authentication account takeover (CWE-287 / CWE-639). The
   discoverable index is now authoritative; `userHandle` is validated, not trusted (HEA-1720).
+- **JSON embedded in `<script>` tags now HTML-escaped (M10)** — the admin config editor and roles
+  tab rendered `serde_json` output verbatim inside `<script type="application/json">` elements;
+  a stored config value containing `</script>` would prematurely close the tag, creating a latent
+  stored-XSS vector. JSON is now `</` → `<\/` escaped before template injection (HEA-1728).
+- **Email-verify token now protected by per-token redemption lock (L6)** — the email-verification
+  token lacked the TOCTOU guard already present on password-reset and magic-link redemption. Two
+  concurrent requests with the same token could both pass the used-check. A per-hash mutex
+  (`token_redemption_lock`) is now acquired before any read-modify-write (HEA-1728).
+- **Token introspection scoped to intended audience (L7)** — any authenticated realm client could
+  previously introspect any token regardless of whether the token was issued to it. The endpoint
+  now returns `active: false` if the introspecting client is not the token's `azp` or `sub`
+  (client_credentials self-introspect) (HEA-1728).
+- **`Cache-Control: no-store` added to all authenticated HTML responses (L8)** — the
+  `SecurityHeadersLayer` now emits `Cache-Control: no-store` on any `text/html` response,
+  preventing sensitive admin and account pages from being retained by shared or private caches.
+  Static assets (CSS, JS, fonts) are unaffected (HEA-1728).
 - **MFA at-rest DEK decoupled from signing key (H3)** — TOTP secrets and recovery-code blobs were
   previously encrypted with an HKDF-derived DEK keyed from the realm's Ed25519 signing key.
   Rotating the signing key (an advertised operator feature) silently changed the DEK, making every
