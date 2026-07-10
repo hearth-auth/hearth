@@ -13041,9 +13041,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let subject_remaining = subject_claims.exp.saturating_sub(now_secs);
 
         // 3. Validate actor_token if present (B.5 OBO).
-        // Returns (actor_sub, actor_scope_owned) where actor_scope_owned is the space-separated
-        // scope string the actor is permitted to hold (RFC 8693 §4.4).
-        let (actor_sub, actor_scope_owned) =
+        // Returns (actor_sub, actor_scope_owned, actor_permissions_owned) — the actor's scope
+        // ceiling (RFC 8693 §4.4) and the actor's own RBAC permission set (AUTHORIZATION.md § 16,
+        // HEA-1726). Both are used to intersect the delegated token's effective authorization.
+        let (actor_sub, actor_scope_owned, actor_permissions_owned) =
             if let Some(ref actor_jwt) = request.actor_token {
                 // F3 (HEA-1466): verify actor_token signature with the realm key before reading any
                 // claims. The prior jwt_payload_json path was unverified — fresh forgeries with
@@ -13097,14 +13098,15 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .scope
                     .unwrap_or_else(|| subject_claims.scope.clone().unwrap_or_default());
 
-                (actor_claims.sub, scope)
+                (actor_claims.sub, scope, actor_claims.permissions.clone())
             } else {
                 // No actor_token: the client is acting on its own behalf (no delegation chain).
                 // Preserve the original behavior — actor ceiling matches the subject's own scope
                 // so this path doesn't further restrict scope beyond subject ∩ requested.
+                // For permissions, use the subject's full set as the ceiling (no attenuation).
                 let actor_sub = request.client_id.as_uuid().to_string();
                 let actor_scope = subject_claims.scope.clone().unwrap_or_default();
-                (actor_sub, actor_scope)
+                (actor_sub, actor_scope, subject_claims.permissions.clone())
             };
 
         // 4. Delegation depth check.
@@ -13176,10 +13178,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .dpop_jkt
                 .as_ref()
                 .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.clone() }),
-            roles: subject_claims.roles.clone(),
-            groups: subject_claims.groups.clone(),
-            org_groups: subject_claims.org_groups.clone(),
-            permissions: subject_claims.permissions.clone(),
+            // AUTHORIZATION.md § 16 (HEA-1726): effective permissions are the intersection of the
+            // subject's grants and the actor's own grants. roles/groups are cleared because they
+            // reflect only the subject's identity and do not represent the effective actor grants.
+            roles: Vec::new(),
+            groups: Vec::new(),
+            org_groups: Vec::new(),
+            permissions: {
+                let actor_perm_set: std::collections::HashSet<&str> =
+                    actor_permissions_owned.iter().map(|s| s.as_str()).collect();
+                subject_claims
+                    .permissions
+                    .iter()
+                    .filter(|p| actor_perm_set.contains(p.as_str()))
+                    .cloned()
+                    .collect()
+            },
             required_actions: Vec::new(),
             act: Some(new_act),
             amr: subject_claims.amr.clone(),
@@ -13328,8 +13342,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         token: &str,
         tool_name: &str,
         action: &str,
+        caller_sub: &str,
     ) -> Result<crate::core::AgentId, IdentityError> {
-        self.validate_capability_token_inner(realm_id, token, tool_name, action)
+        self.validate_capability_token_inner(realm_id, token, tool_name, action, caller_sub)
     }
 
     // ── Phase D.1: AATs ─────────────────────────────────────────────────────

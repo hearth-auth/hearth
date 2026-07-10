@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Delegated (`act`) token RBAC permissions now attenuated** — token exchange previously copied
+  the subject's full `permissions` claim verbatim into the delegated token, allowing any actor
+  (regardless of its own RBAC grants) to acquire admin-level access by exchanging an admin's
+  token. Effective permissions on `act`-bearing tokens are now the intersection of the subject's
+  and actor's own permission sets. `roles` and `groups` are cleared on delegated tokens. Decision
+  documented in `AUTHORIZATION.md § 16` (HEA-1726).
 - **Privilege-assignment ceiling enforced on `GrantUserPermission` and `AddAdditionalRole`** —
   a sub-admin holding `hearth.realm.admin` could previously call the gRPC `GrantUserPermission`
   RPC or `AddAdditionalRole` to grant themselves or any user the `hearth.admin` permission (or a

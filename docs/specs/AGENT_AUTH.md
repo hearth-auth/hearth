@@ -258,17 +258,10 @@ Hearth **MUST** implement the token exchange grant type (`urn:ietf:params:oauth:
 - The `subject_token_type` **MUST** be `urn:ietf:params:oauth:token-type:access_token`.
 - The `actor_token_type` **MUST** be `urn:ietf:params:oauth:token-type:jwt`.
 - The resulting token's scope **MUST** be the intersection of: the subject token's scope, the agent's permitted scopes (derived from its own RBAC permission claims), and the `scope` parameter in the exchange request.
+- The resulting token's `permissions` claim **MUST** be the intersection of the subject token's `permissions` and the actor token's `permissions`. An actor cannot gain RBAC permissions that it does not already hold in its own token, regardless of what the subject holds. (CTO decision — AUTHORIZATION.md § 16.3, HEA-1726.)
+- The resulting token's `roles` and `groups` claims **MUST** be empty on delegated tokens. These claims are informational and reflect a single principal's identity; they have no meaningful value when two principals are involved.
 - The resulting token **MUST** carry the `act` claim documenting the delegation.
 - The resulting token's lifetime **MUST NOT** exceed the subject token's remaining lifetime.
-
-> **Open design question — RBAC `permissions` claim on `act`-bearing tokens (HEA-1726):**
-> The rules above cover `scope` attenuation. However the `permissions`, `roles`, and `groups`
-> claims — which are the authoritative authorization source per AUTHORIZATION.md § 5.1 —
-> are currently copied verbatim from the subject token without analogous attenuation.
-> A normative decision on whether to (A) intersect permissions with the actor's own grants
-> or (B) clear RBAC claims on all `act`-bearing tokens is pending CTO review.
-> See [AUTHORIZATION.md § 16](/docs/specs/AUTHORIZATION.md#16-delegated-act-token-rbac-permissions)
-> and [HEA-1726](/HEA/issues/HEA-1726). This section will be updated once the decision lands.
 
 ### 3.4 Delegation Chains
 
