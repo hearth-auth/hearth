@@ -206,6 +206,7 @@ async fn rbac_assignments_translated_by_role_name() {
                 permissions: vec![],
                 scope_kind: RoleScopeKind::Realm,
                 parent_roles: vec![],
+                allow_reserved_permissions: false,
             },
         )
         .expect("create src role");
@@ -218,6 +219,7 @@ async fn rbac_assignments_translated_by_role_name() {
                 permissions: vec![],
                 scope_kind: RoleScopeKind::Realm,
                 parent_roles: vec![],
+                allow_reserved_permissions: false,
             },
         )
         .expect("create dst role");
@@ -283,6 +285,7 @@ async fn org_scoped_assignments_stripped_when_orgs_false() {
                 permissions: vec![],
                 scope_kind: RoleScopeKind::Realm,
                 parent_roles: vec![],
+                allow_reserved_permissions: false,
             },
         )
         .expect("create role");
@@ -295,6 +298,7 @@ async fn org_scoped_assignments_stripped_when_orgs_false() {
             permissions: vec![],
             scope_kind: RoleScopeKind::Realm,
             parent_roles: vec![],
+            allow_reserved_permissions: false,
         },
     )
     .expect("create dst role");

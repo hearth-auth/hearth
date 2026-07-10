@@ -15,11 +15,20 @@ use std::sync::Arc;
 
 use hearth::audit::{AuditAction, AuditEngine, EmbeddedAuditEngine};
 use hearth::core::{Clock, FakeClock, RealmId, Timestamp, UserId};
+use hearth::identity::hibp::{HibpError, HibpTransport};
 use hearth::identity::{
     CreateRealmRequest, CreateUserRequest, CredentialConfig, EmbeddedIdentityEngine,
     IdentityConfig, IdentityEngine,
 };
 use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+
+/// No-op HIBP transport — prevents real network calls in integration tests.
+struct NoOpHibpTransport;
+impl HibpTransport for NoOpHibpTransport {
+    fn get_range(&self, _prefix: &str, _api_key: Option<&str>) -> Result<String, HibpError> {
+        Ok(String::new())
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -52,7 +61,8 @@ fn make_timed_engine(
         cfg,
         audit,
     )
-    .expect("engine");
+    .expect("engine")
+    .with_hibp_transport(Arc::new(NoOpHibpTransport));
     (dir, engine, clock)
 }
 

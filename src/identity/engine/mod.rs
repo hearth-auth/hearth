@@ -19161,6 +19161,103 @@ mod tests {
         assert!(depth > max, "depth-{} chain should exceed the cap", max + 1);
     }
 
+    // L2 regression: chain_depth_ceiling uses the minimum of all prior agents' limits.
+    //
+    // A strict delegator (max_delegation_depth=2) in the act chain must cap all
+    // subsequent sub-delegations even when the next actor has a higher limit (10).
+
+    #[test]
+    fn chain_depth_ceiling_honors_strict_prior_delegator() {
+        use crate::identity::tokens::ActClaim;
+        use crate::identity::{AgentOwner, CreateAgentRequest};
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        // Register agent A with max_delegation_depth = 2 (the strict cap).
+        let owner = create_test_user(&engine, &realm);
+        let agent_a = engine
+            .create_agent(
+                &realm,
+                &CreateAgentRequest {
+                    display_name: "strict-agent".to_string(),
+                    description: None,
+                    owner: AgentOwner::User(owner.id().clone()),
+                    capabilities: vec![],
+                    max_delegation_depth: 2,
+                },
+                None,
+            )
+            .expect("create agent A");
+
+        // Build an act chain that includes agent A as a prior delegator.
+        // This represents a token already delegated through agent A.
+        let agent_a_sub = format!("{}", agent_a.id());
+        let existing_act = ActClaim {
+            sub: agent_a_sub,
+            act: None,
+        };
+
+        // A new actor arrives with a much looser limit (10).
+        // The ceiling should be min(10, agent_a.max_delegation_depth=2) = 2.
+        let ceiling = engine.chain_depth_ceiling(&realm, Some(&existing_act), 10);
+        assert_eq!(
+            ceiling, 2,
+            "strict prior delegator (max=2) must cap the ceiling even when new actor allows 10"
+        );
+    }
+
+    #[test]
+    fn chain_depth_ceiling_new_actor_is_the_binding_constraint() {
+        use crate::identity::tokens::ActClaim;
+        use crate::identity::{AgentOwner, CreateAgentRequest};
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        // Register agent A with a generous limit (max_delegation_depth = 10).
+        let owner = create_test_user(&engine, &realm);
+        let agent_a = engine
+            .create_agent(
+                &realm,
+                &CreateAgentRequest {
+                    display_name: "loose-agent".to_string(),
+                    description: None,
+                    owner: AgentOwner::User(owner.id().clone()),
+                    capabilities: vec![],
+                    max_delegation_depth: 10,
+                },
+                None,
+            )
+            .expect("create agent A");
+
+        let agent_a_sub = format!("{}", agent_a.id());
+        let existing_act = ActClaim {
+            sub: agent_a_sub,
+            act: None,
+        };
+
+        // New actor has a tighter ceiling (3) — that should be the result.
+        let ceiling = engine.chain_depth_ceiling(&realm, Some(&existing_act), 3);
+        assert_eq!(
+            ceiling, 3,
+            "new actor ceiling (3) must win when it is stricter than the chain agent (10)"
+        );
+    }
+
+    #[test]
+    fn chain_depth_ceiling_no_existing_act_returns_actor_ceiling() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        // With no prior act chain, the ceiling equals the actor's own limit.
+        let ceiling = engine.chain_depth_ceiling(&realm, None, 5);
+        assert_eq!(
+            ceiling, 5,
+            "no prior act chain: ceiling must equal actor's own max_delegation_depth"
+        );
+    }
+
     // ===== DPoP storage tests (HEA-1410) =====
 
     #[test]

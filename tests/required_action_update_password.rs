@@ -505,7 +505,7 @@ async fn post_policy_violation_rerenders_form_with_error() {
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(header::COOKIE, format!("hearth_ra_session={ra_token}"))
                 .body(Body::from(
-                    "new_password=tooshort1&confirm_password=tooshort1",
+                    "new_password=twelve-chars!&confirm_password=twelve-chars!",
                 ))
                 .expect("req"),
         )

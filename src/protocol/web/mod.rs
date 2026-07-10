@@ -223,6 +223,29 @@ pub struct CustomLogo {
     pub content_type: &'static str,
 }
 
+/// Computes the public origin from a configured issuer URL or a Host-header
+/// fallback. Extracted as a pure function for testability (L5 WebAuthn RP ID
+/// pinning regression guard).
+///
+/// When `issuer` is `Some`, the authority portion is extracted and returned
+/// (path component stripped). When `None`, the scheme is derived from
+/// `is_secure` and the host from the request `Host` header.
+fn resolve_public_origin(issuer: Option<&str>, is_secure: bool, host: &str) -> String {
+    if let Some(issuer) = issuer {
+        // Extract bare origin: strip path at the first "/" after the authority.
+        if let Some(after_scheme) = issuer.find("://").map(|i| i + 3) {
+            let authority_end = issuer[after_scheme..]
+                .find('/')
+                .map(|i| i + after_scheme)
+                .unwrap_or(issuer.len());
+            return issuer[..authority_end].to_string();
+        }
+        return issuer.to_string();
+    }
+    // Dev/test fallback: build origin from Host header + TLS scheme.
+    format!("{}://{}", if is_secure { "https" } else { "http" }, host)
+}
+
 impl WebState {
     /// Builds a new [`WebState`].
     #[must_use]
@@ -519,28 +542,13 @@ impl WebState {
     /// environments where `oidc.issuer` is not set.
     #[must_use]
     pub fn public_origin_str(&self, headers: &axum::http::HeaderMap) -> String {
-        if let Some(issuer) = self.config.as_ref().and_then(|c| c.oidc.issuer.as_deref()) {
-            // Extract bare origin: strip path at the first "/" after the authority.
-            if let Some(after_scheme) = issuer.find("://").map(|i| i + 3) {
-                let authority_end = issuer[after_scheme..]
-                    .find('/')
-                    .map(|i| i + after_scheme)
-                    .unwrap_or(issuer.len());
-                return issuer[..authority_end].to_string();
-            }
-            return issuer.to_string();
-        }
-        // Dev/test fallback: build origin from Host header + TLS scheme.
-        let scheme = if self.is_secure_request(headers) {
-            "https"
-        } else {
-            "http"
-        };
+        let issuer = self.config.as_ref().and_then(|c| c.oidc.issuer.as_deref());
+        let is_secure = self.is_secure_request(headers);
         let host = headers
             .get(axum::http::header::HOST)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("localhost");
-        format!("{}://{}", scheme, host)
+        resolve_public_origin(issuer, is_secure, host)
     }
 
     /// Looks up the per-realm theme CSS for a specific realm, bypassing
@@ -2189,6 +2197,51 @@ mod tests {
     #[test]
     fn is_not_modified_absent_header_returns_false() {
         assert!(!is_not_modified(&HeaderMap::new(), "\"any\""));
+    }
+
+    // ── L5 regression: WebAuthn RP ID must come from config, not Host header ──
+
+    #[test]
+    fn resolve_public_origin_prefers_config_issuer_over_host_header() {
+        // When a config issuer is set, the Host header must be completely ignored.
+        let origin = resolve_public_origin(
+            Some("https://auth.example.com"),
+            false,
+            "evil-host.attacker.com",
+        );
+        assert_eq!(
+            origin, "https://auth.example.com",
+            "config issuer must override Host header"
+        );
+    }
+
+    #[test]
+    fn resolve_public_origin_strips_path_from_issuer() {
+        // Issuer may include a path component — only the bare origin should be
+        // returned so the WebAuthn RP ID matches what browsers derive from it.
+        let origin =
+            resolve_public_origin(Some("https://auth.example.com/oidc/v2"), false, "any-host");
+        assert_eq!(origin, "https://auth.example.com");
+    }
+
+    #[test]
+    fn resolve_public_origin_falls_back_to_host_when_no_issuer() {
+        // Without a configured issuer, the Host-header fallback must be used.
+        let origin = resolve_public_origin(None, false, "localhost:8420");
+        assert_eq!(origin, "http://localhost:8420");
+    }
+
+    #[test]
+    fn resolve_public_origin_uses_https_scheme_on_secure_request() {
+        let origin = resolve_public_origin(None, true, "dev.local:8420");
+        assert_eq!(origin, "https://dev.local:8420");
+    }
+
+    #[test]
+    fn resolve_public_origin_no_double_strip_when_no_path() {
+        // Issuer without a trailing path must be returned verbatim.
+        let origin = resolve_public_origin(Some("https://auth.example.com"), true, "any-host");
+        assert_eq!(origin, "https://auth.example.com");
     }
 
     #[test]

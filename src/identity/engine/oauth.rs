@@ -2668,20 +2668,30 @@ impl EmbeddedIdentityEngine {
         }
 
         // 2c. L7: RFC 7662 §2 — restrict introspection to the token's intended
-        // audience. A client may only inspect tokens issued to itself (azp match)
-        // or explicitly addressed to it (aud match). This prevents resource server
-        // A from introspecting tokens issued exclusively for resource server B.
+        // audience. A client may only inspect a token that is explicitly bound
+        // to it via `azp` or `aud`. This prevents resource server A from
+        // introspecting a token issued exclusively for resource server B.
         //
-        // For M2M (client_credentials) tokens, azp is absent and sub = client_id;
-        // allow the owning client to introspect its own M2M token via the sub check.
+        // Three cases:
+        // - `azp` set (delegated/bound token): only azp-match or aud-match allowed.
+        // - `azp` absent, `sid == "none"` (M2M/client_credentials): only the
+        //   owning client (`sub == cid`) or an audience member may self-introspect.
+        // - `azp` absent, `sid != "none"` (unbound user session token): any
+        //   authenticated client may introspect (no restriction).
         if let Some(ref cid) = request.introspecting_client_id {
             let cid_str = cid.to_string();
-            let is_azp = claims.azp.as_deref() == Some(cid_str.as_str());
-            // M2M self-introspect: azp absent and sub equals caller's client_id.
-            let is_own_m2m = claims.azp.is_none() && claims.sub == cid_str;
-            if !is_azp && !is_own_m2m && !claims.aud.contains(cid_str.as_str()) {
-                return Ok(IntrospectionResponse::inactive());
+            if let Some(token_azp) = claims.azp.as_deref() {
+                if token_azp != cid_str && !claims.aud.contains(cid_str.as_str()) {
+                    return Ok(IntrospectionResponse::inactive());
+                }
+            } else if claims.sid == "none" {
+                // M2M token: only the issuing client or an explicit audience member
+                // may introspect it.
+                if claims.sub != cid_str && !claims.aud.contains(cid_str.as_str()) {
+                    return Ok(IntrospectionResponse::inactive());
+                }
             }
+            // Unbound user-session tokens: any authenticated client may introspect.
         }
 
         // 3. Check expiration and iat sanity

@@ -1034,6 +1034,7 @@ pub async fn admin_role_create_submit(
         permissions,
         parent_roles: Vec::new(),
         scope_kind: parse_scope_kind(&form.scope_kind),
+        allow_reserved_permissions: false,
     };
 
     match state.rbac.create_role(target.id(), &req) {
@@ -1298,6 +1299,7 @@ pub async fn admin_role_edit_submit(
         parent_roles: None,
         scope_kind: Some(parse_scope_kind(&form.scope_kind)),
         status: None,
+        allow_reserved_permissions: false,
     };
 
     match state.rbac.update_role(target.id(), &role_id, &req) {

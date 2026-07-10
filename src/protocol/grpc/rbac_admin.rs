@@ -338,6 +338,7 @@ impl RbacAdminService for RbacAdminSvc {
         } else {
             Some(inner.description)
         };
+        let is_full_admin = auth.permissions.iter().any(|p| p == "hearth.admin");
         let role = self
             .state
             .rbac
@@ -349,6 +350,7 @@ impl RbacAdminService for RbacAdminSvc {
                     permissions,
                     parent_roles,
                     scope_kind: crate::rbac::RoleScopeKind::Realm,
+                    allow_reserved_permissions: is_full_admin,
                 },
             )
             .map_err(rbac_to_status)?;
@@ -407,6 +409,7 @@ impl RbacAdminService for RbacAdminSvc {
         }
         let permissions = Some(parsed_permissions);
         let parent_roles = Some(parent_role_ids_from_strings(&inner.parent_role_ids)?);
+        let is_full_admin = auth.permissions.iter().any(|p| p == "hearth.admin");
         let updated = self
             .state
             .rbac
@@ -420,6 +423,7 @@ impl RbacAdminService for RbacAdminSvc {
                     parent_roles,
                     scope_kind: None,
                     status: None,
+                    allow_reserved_permissions: is_full_admin,
                 },
             )
             .map_err(rbac_to_status)?;
