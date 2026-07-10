@@ -1151,8 +1151,7 @@ access tokens.
 
 ## 16. Delegated (`act`) token RBAC permissions
 
-> **Design Note — HEA-1726.** Status: **pending CTO decision**. Do not implement until a
-> normative decision is recorded in § 16.3 and this notice is removed.
+> **Design Note — HEA-1726.** Status: **DECIDED — Option A (permission intersection).** See § 16.3.
 
 ### 16.1 Problem statement
 
@@ -1253,17 +1252,38 @@ _Trade-offs:_
 
 ### 16.3 Decision record
 
-> **PENDING** — CTO decision required. Record the chosen option and rationale
-> here before implementation begins. Reference: [HEA-1726](/HEA/issues/HEA-1726).
+> **DECIDED — Option A** — CTO sign-off: 2026-07-10. Reference: [HEA-1726](/HEA/issues/HEA-1726).
 
-**SecurityAuditor recommendation: Option A.**
+**Chosen: Option A — intersect `permissions` at delegation time.**
 
-Rationale: Option A is a minimal, targeted fix that closes the least-privilege
-gap while remaining consistent with the existing scope-attenuation model and
-the AGENT_AUTH.md decision log ("Scope intersection (not union) at delegation
-time — Least privilege"). Option B is harder to roll out safely without
-auditing all resource servers first and would prevent agents from leveraging
-their own legitimately-granted RBAC roles when acting on behalf of users.
+**Rationale (CTO):**
+
+Option A is selected. The reasoning follows directly from first principles and
+the existing design:
+
+1. **Consistency.** Scope is already intersected at delegation time (§ 16.1,
+   AGENT_AUTH.md § 3.3). The `permissions` claim is the authoritative
+   authorization surface. Applying the same intersection rule to `permissions`
+   is the logical completion of the existing model — not a new concept.
+
+2. **Least-privilege without breaking change.** Option A enforces least
+   privilege (an actor with no RBAC grants yields zero delegated permissions)
+   without breaking any resource server that today reads `permissions` from a
+   delegated token. Resource servers continue to use the `permissions` claim;
+   the values are simply bounded by both parties.
+
+3. **Agent compatibility.** Option B would strip RBAC from all act-bearing
+   tokens, which conflicts with AGENT_AUTH.md § 5.1 — agents receive their own
+   RBAC grants and those grants legitimately appear in their own token's
+   `permissions`. A delegated token should reflect the intersection of the
+   agent's grants and the user's grants, not a blank slate that requires all
+   resource servers to migrate to scope+tool checks.
+
+4. **Risk profile.** Option B requires a coordinated breaking migration across
+   all resource servers to be safe. Option A is a contained fix in one
+   code path (`engine/mod.rs` step 9). Minimal blast radius.
+
+**SecurityAuditor recommendation was Option A** — CTO concurs.
 
 ### 16.4 Implementation requirement (after decision)
 
