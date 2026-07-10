@@ -4311,6 +4311,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             wh.validate()
                 .map_err(|reason| IdentityError::InvalidInput { reason })?;
         }
+        // M7: reject approval webhook URL with non-HTTPS scheme at registration time.
+        if let Some(ref wh) = config.approval_webhook {
+            wh.validate()
+                .map_err(|reason| IdentityError::InvalidInput { reason })?;
+        }
 
         // Generate a per-realm signing key
         let realm_signing_key = SigningKey::generate()?;
@@ -4476,8 +4481,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let old_name = realm.name().to_string();
 
         // SEC-20: reject webhook config without HMAC secret before mutating state.
+        // M7: also reject approval webhook URL with non-HTTPS scheme.
         if let Some(ref config) = request.config {
             if let Some(ref wh) = config.pre_token_webhook {
+                wh.validate()
+                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
+            }
+            if let Some(ref wh) = config.approval_webhook {
                 wh.validate()
                     .map_err(|reason| IdentityError::InvalidInput { reason })?;
             }
@@ -6088,9 +6098,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &user_session_key, &[])
             .map_err(Self::storage_err)?;
 
+        let session_audit_ctx = AuditContext {
+            actor: Actor::User(user_id.clone()),
+            metadata: Some(serde_json::json!({
+                "ip": context.ip_address,
+                "ua": context.user_agent_raw,
+            })),
+        };
         self.record_audit(
             realm_id,
-            None,
+            Some(&session_audit_ctx),
             AuditAction::SessionCreated,
             "session",
             &session_id.as_uuid().to_string(),
@@ -6571,9 +6588,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )?;
         let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
 
+        let token_audit_ctx = AuditContext {
+            actor: Actor::User(user_id.clone()),
+            metadata: Some(serde_json::json!({
+                "ip": session.ip_address(),
+                "ua": session.user_agent_raw(),
+            })),
+        };
         self.record_audit(
             realm_id,
-            None,
+            Some(&token_audit_ctx),
             AuditAction::TokenIssued,
             "token",
             &session_id.as_uuid().to_string(),

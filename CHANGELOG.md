@@ -63,6 +63,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   into `userHandle` (which is not covered by the WebAuthn signature) and receive a valid session
   for the victim account — a pre-authentication account takeover (CWE-287 / CWE-639). The
   discoverable index is now authoritative; `userHandle` is validated, not trusted (HEA-1720).
+- **MFA at-rest DEK decoupled from signing key (H3)** — TOTP secrets and recovery-code blobs were
+  previously encrypted with an HKDF-derived DEK keyed from the realm's Ed25519 signing key.
+  Rotating the signing key (an advertised operator feature) silently changed the DEK, making every
+  TOTP verification fail immediately after rotation and locking all MFA-enrolled users out of their
+  accounts. Each realm now receives a dedicated 32-byte random MFA DEK stored separately (like the
+  audit HMAC key), KEK-wrapped when `security.key_encryption_key` is configured. Signing-key
+  rotation no longer touches MFA data. Any blobs still encrypted under the old signing-key-derived
+  DEK are re-encrypted atomically during the next rotation call (HEA-1724).
 
 ### Fixed
 - **Dev-mode `oidc.issuer` defaults to actual server URL** — when running `hearth serve --dev`
