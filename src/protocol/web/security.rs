@@ -132,6 +132,18 @@ where
                      interest-cohort=()",
                 );
             }
+            // L8: Prevent authenticated HTML pages from being stored in shared or
+            // private caches. Applied to HTML only so that static assets (CSS, JS,
+            // fonts) remain cacheable; cache-busting for assets is handled by the
+            // server-side build pipeline.
+            let is_html = headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|ct| ct.starts_with("text/html"))
+                .unwrap_or(false);
+            if is_html {
+                insert(headers, "cache-control", "no-store");
+            }
             Ok(resp)
         })
     }
@@ -209,5 +221,60 @@ mod tests {
             "HSTS missing includeSubDomains"
         );
         assert!(hsts.contains("preload"), "HSTS missing preload directive");
+    }
+
+    // ===== L8: Cache-Control: no-store for HTML responses =====
+
+    async fn html_handler(_req: Request<Body>) -> Result<axum::response::Response, Infallible> {
+        Ok((
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            "<html></html>",
+        )
+            .into_response())
+    }
+
+    async fn css_handler(_req: Request<Body>) -> Result<axum::response::Response, Infallible> {
+        Ok((
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/css")],
+            "body {}",
+        )
+            .into_response())
+    }
+
+    #[tokio::test]
+    async fn cache_control_no_store_on_html_responses() {
+        let layer = SecurityHeadersLayer::new(SecurityConfig {
+            hsts_enabled: false,
+            coop_coep_enabled: false,
+        });
+        let svc = layer.layer(tower::service_fn(html_handler));
+        let resp = svc
+            .oneshot(Request::builder().uri("/").body(Body::empty()).expect("req"))
+            .await
+            .expect("service call");
+        assert_eq!(
+            resp.headers().get("cache-control").and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "HTML responses must carry Cache-Control: no-store"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_control_no_store_absent_for_non_html() {
+        let layer = SecurityHeadersLayer::new(SecurityConfig {
+            hsts_enabled: false,
+            coop_coep_enabled: false,
+        });
+        let svc = layer.layer(tower::service_fn(css_handler));
+        let resp = svc
+            .oneshot(Request::builder().uri("/").body(Body::empty()).expect("req"))
+            .await
+            .expect("service call");
+        assert!(
+            resp.headers().get("cache-control").is_none(),
+            "non-HTML responses must not get Cache-Control: no-store"
+        );
     }
 }

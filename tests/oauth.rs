@@ -940,3 +940,108 @@ fn per_ip_rate_limit_different_ips_independent() {
         "unaffected IP must not be rate limited"
     );
 }
+
+// ===== L7: Introspection audience scoping =====
+
+/// A client may not introspect a token that was not issued to it.
+///
+/// Token is issued via client-credentials for client_a. Client_b
+/// has no relationship with that token and must receive `active: false`.
+#[tokio::test]
+async fn introspection_scoped_to_intended_audience() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+
+    let register_confidential = |name: &str| {
+        harness
+            .identity()
+            .register_client(
+                &realm,
+                &RegisterClientRequest {
+                    client_name: name.to_string(),
+                    redirect_uris: vec![],
+                    client_secret: Some("secret-value".to_string()),
+                    grant_types: vec!["client_credentials".to_string()],
+                    require_consent: false,
+                    client_logo_url: None,
+                    ..Default::default()
+                },
+            )
+            .expect("register client")
+    };
+
+    let client_a = register_confidential("ClientA");
+    let client_b = register_confidential("ClientB");
+
+    // Issue token for client_a (scope required for third-party clients).
+    let token_resp = harness
+        .identity()
+        .client_credentials_token(
+            &realm,
+            &ClientCredentialsRequest {
+                client_id: client_a.client_id().clone(),
+                client_secret: Some("secret-value".to_string()),
+                scope: Some("read".to_string()),
+                dpop_jkt: None,
+                client_assertion_type: None,
+                client_assertion: None,
+            },
+        )
+        .expect("token for client_a");
+
+    // client_b introspects client_a's token — must get inactive (L7).
+    let scoped_inactive = harness
+        .identity()
+        .introspect_token(
+            &realm,
+            &hearth::identity::TokenIntrospectionRequest {
+                token: token_resp.access_token().to_string(),
+                token_type_hint: None,
+                introspecting_client_id: Some(client_b.client_id().clone()),
+            },
+        )
+        .expect("introspect call should not error");
+
+    assert!(
+        !scoped_inactive.active,
+        "client_b must not see client_a's token as active"
+    );
+
+    // client_a introspects its OWN M2M token — must return active (sub == client_id).
+    let self_introspect = harness
+        .identity()
+        .introspect_token(
+            &realm,
+            &hearth::identity::TokenIntrospectionRequest {
+                token: token_resp.access_token().to_string(),
+                token_type_hint: None,
+                introspecting_client_id: Some(client_a.client_id().clone()),
+            },
+        )
+        .expect("self-introspect should not error");
+
+    assert!(
+        self_introspect.active,
+        "client_a must be able to introspect its own M2M token"
+    );
+
+    // No introspecting_client_id (privileged / server-side) still returns active.
+    let unscoped_active = harness
+        .identity()
+        .introspect_token(
+            &realm,
+            &hearth::identity::TokenIntrospectionRequest {
+                token: token_resp.access_token().to_string(),
+                token_type_hint: None,
+                introspecting_client_id: None,
+            },
+        )
+        .expect("unscoped introspect should not error");
+
+    assert!(
+        unscoped_active.active,
+        "unscoped introspect (server-side) must still return active"
+    );
+}

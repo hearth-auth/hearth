@@ -2880,6 +2880,16 @@ impl EmbeddedIdentityEngine {
             }
         }
 
+        // M1 (RFC 9449 §5): enforce DPoP key binding on the refresh path.
+        // If the grant family was bound to a DPoP key at issuance, the
+        // presented thumbprint must match — a stolen refresh token is unusable
+        // without the original private key.
+        if let Some(ref required_jkt) = family.bound_jkt {
+            if dpop_jkt != Some(required_jkt.as_str()) {
+                return Err(IdentityError::DPopBindingMismatch);
+            }
+        }
+
         // A-49: detect refresh-context drift (UA hash / ASN change) and score.
         // Fail-open: no bind_ctx or no stored hash → skip check.
         if let Some(ctx) = bind_ctx {
@@ -2999,7 +3009,10 @@ impl EmbeddedIdentityEngine {
             required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
-            cnf: None,
+            // M1 (RFC 9449 §5): propagate DPoP key binding to the rotated refresh token.
+            cnf: family.bound_jkt.as_ref().map(|jkt| crate::identity::tokens::CnfClaim {
+                jkt: jkt.clone(),
+            }),
             custom: claims.custom.clone(),
             sv: None,
         };
@@ -8348,6 +8361,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn verify_email_token(&self, realm_id: &RealmId, token: &str) -> Result<UserId, IdentityError> {
         let token_hash = Self::sha256_hex(token.as_bytes());
         let key = keys::encode_email_verify_token(&token_hash);
+
+        // Acquire per-token lock to prevent TOCTOU: two concurrent requests
+        // with the same token must not both transition the user to Active.
+        let lock = self.token_redemption_lock(&token_hash);
+        let _guard = lock.lock().expect("token_redemption_lock poisoned");
 
         let bytes = self
             .storage
@@ -19492,5 +19510,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ===== L6: Email-verify token redemption lock =====
+
+    /// Verify that `verify_email_token` is idempotent-safe: the second call with
+    /// the same token returns `VerificationTokenInvalid` after the first succeeds.
+    /// This regression-tests the TOCTOU fix (token_redemption_lock added to
+    /// verify_email_token).
+    #[test]
+    fn email_verify_token_cannot_be_redeemed_twice() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+
+        let token = engine
+            .issue_email_verification_token(&realm, user.id())
+            .expect("issue token");
+
+        // First redemption must succeed.
+        let result1 = engine.verify_email_token(&realm, &token);
+        assert!(result1.is_ok(), "first redemption should succeed");
+
+        // Second redemption with the same token must fail — token is deleted on use.
+        let result2 = engine.verify_email_token(&realm, &token);
+        assert!(
+            matches!(result2, Err(IdentityError::VerificationTokenInvalid)),
+            "second redemption must fail; got: {result2:?}"
+        );
     }
 }

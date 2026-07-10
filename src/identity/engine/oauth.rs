@@ -1041,7 +1041,11 @@ impl EmbeddedIdentityEngine {
             required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
-            cnf: None,
+            // M1 (RFC 9449 §5): bind refresh token to the DPoP key presented at exchange.
+            cnf: request
+                .dpop_jkt
+                .as_deref()
+                .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.to_string() }),
             custom: access_claims.custom.clone(),
             sv: None,
         };
@@ -1077,6 +1081,8 @@ impl EmbeddedIdentityEngine {
             // UA/ASN binding context (A-49) recorded on first refresh exchange.
             ua_hash: None,
             bound_asn: None,
+            // M1 (RFC 9449 §5): persist the DPoP key thumbprint for sender-constraint enforcement.
+            bound_jkt: request.dpop_jkt.clone(),
         };
         let family_bytes =
             serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -2657,6 +2663,23 @@ impl EmbeddedIdentityEngine {
         // 2b. RFC 7519 §4.1.3 — audience must include the configured value.
         if !claims.aud.contains(&self.config.token.audience) {
             return Ok(IntrospectionResponse::inactive());
+        }
+
+        // 2c. L7: RFC 7662 §2 — restrict introspection to the token's intended
+        // audience. A client may only inspect tokens issued to itself (azp match)
+        // or explicitly addressed to it (aud match). This prevents resource server
+        // A from introspecting tokens issued exclusively for resource server B.
+        //
+        // For M2M (client_credentials) tokens, azp is absent and sub = client_id;
+        // allow the owning client to introspect its own M2M token via the sub check.
+        if let Some(ref cid) = request.introspecting_client_id {
+            let cid_str = cid.to_string();
+            let is_azp = claims.azp.as_deref() == Some(cid_str.as_str());
+            // M2M self-introspect: azp absent and sub equals caller's client_id.
+            let is_own_m2m = claims.azp.is_none() && claims.sub == cid_str;
+            if !is_azp && !is_own_m2m && !claims.aud.contains(cid_str.as_str()) {
+                return Ok(IntrospectionResponse::inactive());
+            }
         }
 
         // 3. Check expiration and iat sanity

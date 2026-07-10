@@ -847,8 +847,9 @@ pub async fn admin_user_detail(
         .iter()
         .map(|r| (r.id.as_str(), r.permissions.as_slice()))
         .collect();
-    let role_perms_json =
-        serde_json::to_string(&role_perms_map).unwrap_or_else(|_| "{}".to_string());
+    let role_perms_json = escape_json_for_script(
+        &serde_json::to_string(&role_perms_map).unwrap_or_else(|_| "{}".to_string()),
+    );
 
     // All orgs in this realm (for the scope picker).
     let available_orgs = build_available_orgs(&state, target.id());
@@ -2190,6 +2191,16 @@ fn format_ts_admin(ts: crate::core::Timestamp) -> String {
     format_ts(ts)
 }
 
+/// Escapes JSON for safe inline embedding inside a `<script>` tag.
+///
+/// `serde_json` does not escape `</`, so a string value containing
+/// `</script>` would prematurely close the enclosing script element.
+/// Replacing `</` → `<\/` is inert to JSON consumers and invisible to
+/// the HTML parser (M10).
+fn escape_json_for_script(json: &str) -> String {
+    json.replace("</", r"<\/")
+}
+
 // ---------------------------------------------------------------------------
 // User role / permission HTMX handlers (render_roles_tab, render_permissions_tab)
 // and mutation handlers
@@ -2265,8 +2276,9 @@ pub(super) fn render_roles_tab(
         .iter()
         .map(|r| (r.id.as_str(), r.permissions.as_slice()))
         .collect();
-    let role_perms_json =
-        serde_json::to_string(&role_perms_map).unwrap_or_else(|_| "{}".to_string());
+    let role_perms_json = escape_json_for_script(
+        &serde_json::to_string(&role_perms_map).unwrap_or_else(|_| "{}".to_string()),
+    );
     let available_orgs = build_available_orgs(state, realm_id);
     render(&UserRolesTabTemplate {
         realm_name: realm_name.to_string(),
