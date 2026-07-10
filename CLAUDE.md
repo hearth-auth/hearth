@@ -153,7 +153,7 @@ Read these before writing code. They are the canonical source of truth:
 - `docs/specs/IMPLEMENTATION_ORDER.md` — **mandatory build sequence.** Do not skip ahead.
 - `docs/specs/PROTO.md` — **proto authoring guide.** RPC naming, `google.api.http` conventions, `json_name`, backward-compat rules. Read before touching `proto/`.
 - `docs/specs/SDK.md` — common SDK contract every Hearth client SDK must satisfy.
-- `docs/specs/AGENT_AUTH.md` — agent identity & authorization. **Partial: DPoP + token exchange foundations shipped; Agent entity, delegation, MCP, approval, AATs NOT YET IMPLEMENTED.** Check the status banner at the top before coding against any section.
+- `docs/specs/AGENT_AUTH.md` — agent identity & authorization. **All phases shipped (M1–M5): agent entity, DPoP/RFC 9449, token exchange/RFC 8693, MCP authorization, tool-permission grammar, approval lifecycle, AATs, Phase D advanced routes.** Refer to the status banner at the top for the definitive capability list.
 - `docs/vision/VISION.md` — design rationale, performance targets, competitive positioning.
 - `docs/specs/THEME.md` — mandatory design theme for all UI code.
 
