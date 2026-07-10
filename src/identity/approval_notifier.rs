@@ -19,7 +19,7 @@
 //! X-Hearth-Delivery: <delivery_id>
 //! ```
 
-use std::time::Duration;
+use std::sync::Arc;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -31,55 +31,137 @@ type HmacSha256 = Hmac<Sha256>;
 
 const EVENT_TYPE: &str = "approval_requested";
 
-/// Delivers `payload` to the endpoint described by `config`.
+// ── Transport trait ──────────────────────────────────────────────────────────
+
+/// Injectable HTTP transport for approval webhook delivery.
 ///
-/// Returns `Ok(())` on HTTP 2xx, `Err(reason)` on any failure.
-/// Uses `block_in_place` when called from a multi-threaded Tokio runtime so
-/// the blocking `ureq` call does not stall the async executor.
-pub(crate) fn deliver_approval_webhook(
-    config: &ApprovalWebhookConfig,
-    payload: &ApprovalWebhookPayload,
-) -> Result<(), String> {
-    let body = serde_json::to_vec(payload).map_err(|e| format!("serialization error: {e}"))?;
+/// Trait-based so tests can capture deliveries without making real HTTP calls.
+/// The production implementation adds an SSRF guard (M7) before each send.
+pub trait ApprovalWebhookTransport: Send + Sync {
+    /// Sends the signed webhook payload to `url`.
+    ///
+    /// - `body`: pre-serialized JSON payload bytes
+    /// - `event_type`: value for `X-Hearth-Event` header
+    /// - `delivery_id`: value for `X-Hearth-Delivery` header
+    /// - `signature`: optional `X-Hearth-Signature-256` value (`"sha256=<hex>"`)
+    fn send(
+        &self,
+        url: &str,
+        body: &[u8],
+        event_type: &str,
+        delivery_id: &str,
+        signature: Option<&str>,
+    ) -> Result<(), String>;
+}
 
-    let url = config.url.clone();
-    let secret = config.secret.clone();
-    let delivery_id = payload.delivery_id.clone();
-    let timeout = Duration::from_millis(config.timeout_ms);
+// ── Production ureq transport (with SSRF guard) ──────────────────────────────
 
-    let do_request = move || -> Result<(), String> {
-        let signature = secret.as_deref().map(|s| sign_body(s, &body));
+/// Production `ureq`-backed transport.
+///
+/// Runs the blocking ureq call inside `block_in_place` when invoked from a
+/// multi-thread Tokio runtime. Applies `check_webhook_url` as a pre-flight
+/// SSRF guard on every delivery attempt (DNS-rebinding-resistant).
+pub(crate) struct UreqApprovalTransport;
 
-        let mut req = ureq::post(&url)
-            .header("Content-Type", "application/json")
-            .header("X-Hearth-Event", EVENT_TYPE)
-            .header("X-Hearth-Delivery", &delivery_id);
+impl ApprovalWebhookTransport for UreqApprovalTransport {
+    fn send(
+        &self,
+        url: &str,
+        body: &[u8],
+        event_type: &str,
+        delivery_id: &str,
+        signature: Option<&str>,
+    ) -> Result<(), String> {
+        let url = url.to_string();
+        let body = body.to_vec();
+        let event_type = event_type.to_string();
+        let delivery_id = delivery_id.to_string();
+        let signature = signature.map(str::to_string);
 
-        if let Some(sig) = &signature {
-            req = req.header("X-Hearth-Signature-256", sig.as_str());
+        let do_request = move || -> Result<(), String> {
+            // SSRF guard: resolve destination and reject private/reserved ranges.
+            // Called pre-flight on every attempt to defend against DNS rebinding.
+            crate::webhook::ssrf::check_webhook_url(&url)
+                .map_err(|e| format!("SSRF guard rejected approval webhook URL: {e}"))?;
+
+            let mut req = ureq::post(&url)
+                .header("Content-Type", "application/json")
+                .header("X-Hearth-Event", &event_type)
+                .header("X-Hearth-Delivery", &delivery_id);
+
+            if let Some(ref sig) = signature {
+                req = req.header("X-Hearth-Signature-256", sig.as_str());
+            }
+
+            req.send(&body[..])
+                .map_err(|e| format!("HTTP error: {e}"))
+                .and_then(|resp| {
+                    let status: u16 = resp.status().into();
+                    if (200..300).contains(&status) {
+                        Ok(())
+                    } else {
+                        Err(format!("non-2xx response: {status}"))
+                    }
+                })
+        };
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(do_request)
+            }
+            _ => do_request(),
         }
+    }
+}
 
-        // ureq 3.x sets a default 30s timeout; honour the configured value
-        // by constructing a custom agent when it differs from ureq's default.
-        let _ = timeout; // future: wire via ureq::AgentBuilder
+// ── Client ────────────────────────────────────────────────────────────────────
 
-        req.send(&body[..])
-            .map_err(|e| format!("HTTP error: {e}"))
-            .and_then(|resp| {
-                let status: u16 = resp.status().into();
-                if (200..300).contains(&status) {
-                    Ok(())
-                } else {
-                    Err(format!("non-2xx response: {status}"))
-                }
-            })
-    };
+/// Approval webhook delivery client.
+///
+/// Wraps a transport, handles signing and header assembly. Injectable via
+/// [`ApprovalWebhookClient::with_transport`] for tests.
+pub struct ApprovalWebhookClient {
+    transport: Arc<dyn ApprovalWebhookTransport>,
+}
 
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(do_request)
+impl Default for ApprovalWebhookClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ApprovalWebhookClient {
+    /// Creates a production client backed by [`UreqApprovalTransport`].
+    pub fn new() -> Self {
+        Self {
+            transport: Arc::new(UreqApprovalTransport),
         }
-        _ => do_request(),
+    }
+
+    /// Creates a client with an injected transport (for tests).
+    pub fn with_transport(transport: Arc<dyn ApprovalWebhookTransport>) -> Self {
+        Self { transport }
+    }
+
+    /// Delivers `payload` to the endpoint described by `config`.
+    ///
+    /// Returns `Ok(())` on HTTP 2xx, `Err(reason)` on any failure.
+    pub(crate) fn deliver(
+        &self,
+        config: &ApprovalWebhookConfig,
+        payload: &ApprovalWebhookPayload,
+    ) -> Result<(), String> {
+        let body =
+            serde_json::to_vec(payload).map_err(|e| format!("serialization error: {e}"))?;
+        let signature = config.secret.as_deref().map(|s| sign_body(s, &body));
+
+        self.transport.send(
+            &config.url,
+            &body,
+            EVENT_TYPE,
+            &payload.delivery_id,
+            signature.as_deref(),
+        )
     }
 }
 

@@ -13,6 +13,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   token. Effective permissions on `act`-bearing tokens are now the intersection of the subject's
   and actor's own permission sets. `roles` and `groups` are cleared on delegated tokens. Decision
   documented in `AUTHORIZATION.md § 16` (HEA-1726).
+- **Privilege-ceiling enforced on `create_role` and `update_role`** — a sub-admin holding
+  `hearth.realm.admin` could previously create a role with arbitrary permissions (including
+  `hearth.admin`) or update an existing role to include permissions the caller does not hold.
+  Both gRPC handlers now reject any permission set where the caller does not already hold each
+  listed permission, unless the caller has `hearth.admin`. Prevents role-definition poisoning
+  and the direct self-escalation path (update own assigned role → receive `hearth.admin` on
+  next token issuance) (HEA-1734).
 - **Privilege-assignment ceiling enforced on `GrantUserPermission` and `AddAdditionalRole`** —
   a sub-admin holding `hearth.realm.admin` could previously call the gRPC `GrantUserPermission`
   RPC or `AddAdditionalRole` to grant themselves or any user the `hearth.admin` permission (or a
@@ -27,6 +34,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   endpoint now requires a valid Bearer token; the token's `sub` is used as the authoritative
   user identity and any body-supplied `user_id` is ignored. The same fix applies to
   `POST /realms/{realm}/authorize` and the gRPC `Authorize` RPC (HEA-1721).
+- **Tool-gate H2: realm tool-group map now loaded from config; fail-closed on error** — `POST /v1/tools/invoke`
+  previously built an empty `ToolGroupMap` on every request, so `toolgroup.{g}.deny` permissions
+  could never fire and the `Allow` outcome was always returned for group-member tools. The handler
+  now loads the realm's `tool_registry.groups` map from stored config; if the realm cannot be
+  loaded the request is rejected with 500 (fail-closed) rather than silently bypassing group denies
+  (HEA-1723).
+- **Tool-gate M4: DPoP proof now enforced when token carries `cnf.jkt`** — a stolen DPoP-bound
+  access token could previously be replayed as a plain bearer against `POST /v1/tools/invoke`
+  because the endpoint never checked for a matching DPoP proof. The handler now requires a valid
+  DPoP proof (signature, `htu`, `htm`, nonce, JTI replay, jkt thumbprint binding) when the token
+  has a `cnf.jkt` claim; missing or mismatched proofs return 401 with a `DPoP-Nonce` header
+  (HEA-1723).
+- **Tool-gate M5: capability token caller binding enforced** — `validate_capability_token_inner`
+  previously validated a capability token's signature, expiry, tool/action, and single-use JTI
+  without checking that the presenting agent is the one the approval was minted for. Agent A could
+  consume an approval minted for Agent B (confused-deputy attack). The engine now requires
+  `capability.sub == caller_sub` (the `sub` from the caller's bearer token), rejecting cross-agent
+  capability token presentation (HEA-1723).
+- **Tool-gate M6: `Allow`-path invocations now emit `AgentToolInvocation` audit records** — only
+  the capability-token (approval) path previously emitted an audit event; a plain `Allow` returned
+  200 with no record, creating a blind spot for all non-approval tool invocations. The `Allow` arm
+  now writes an `AgentToolInvocation` audit event before returning (HEA-1723).
 - **WebAuthn discoverable-login userHandle spoofing fixed** — in the discoverable passkey flow,
   the server now rejects any assertion where the client-supplied `userHandle` does not match the
   credential owner resolved from the server-side discoverable index. Previously, an attacker with

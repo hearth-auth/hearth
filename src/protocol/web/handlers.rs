@@ -3145,43 +3145,34 @@ fn register_error_message(err: &IdentityError) -> String {
     }
 }
 
-/// Extracts the caller's IP from proxy-aware headers, if present.
-fn register_client_ip(headers: &HeaderMap) -> Option<String> {
-    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = v.split(',').next() {
-            let trimmed = first.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
+/// Extracts the caller's IP via the trusted-proxy-aware algorithm (M8).
+///
+/// Delegates to `extract_client_ip` so a spoofed `X-Forwarded-For` from an
+/// untrusted hop is ignored when `trusted_proxies` is empty (the default).
+fn register_client_ip(
+    headers: &HeaderMap,
+    trusted_proxies: &[std::net::IpAddr],
+) -> Option<String> {
+    Some(crate::protocol::client_info::extract_client_ip(
+        headers,
+        FALLBACK_PEER,
+        trusted_proxies,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CAPTCHA helpers (P-1 — HEA-1202)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Extracts the best-effort client IP from request headers for CAPTCHA
-/// verification.  Falls back to `127.0.0.1` when headers are absent or
-/// unparseable.
-fn captcha_client_ip(headers: &HeaderMap) -> std::net::IpAddr {
-    let ip_str = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| {
-            headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .map(str::trim)
-        });
-
-    ip_str
-        .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+/// Extracts the client IP for CAPTCHA verification via the trusted-proxy-aware
+/// algorithm (M8).  Falls back to `127.0.0.1` only when the resolved string
+/// fails to parse (should not occur in practice).
+fn captcha_client_ip(
+    headers: &HeaderMap,
+    trusted_proxies: &[std::net::IpAddr],
+) -> std::net::IpAddr {
+    crate::protocol::client_info::extract_client_ip(headers, FALLBACK_PEER, trusted_proxies)
+        .parse()
         .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }
 
@@ -3199,7 +3190,7 @@ async fn captcha_check(state: &Arc<super::WebState>, headers: &HeaderMap, token:
     if state.captcha_provider.widget_html().is_empty() {
         return true;
     }
-    let ip = captcha_client_ip(headers);
+    let ip = captcha_client_ip(headers, &state.trusted_proxies);
     let provider = Arc::clone(&state.captcha_provider);
     let token = token.to_string();
     tokio::task::spawn_blocking(move || provider.verify(&token, ip))
@@ -3319,7 +3310,7 @@ fn register_submit_impl(
         first_name: form.first_name.clone(),
         last_name: form.last_name.clone(),
         password: CleartextPassword::from_string(form.password.clone()),
-        client_ip: register_client_ip(&headers),
+        client_ip: register_client_ip(&headers, &state.trusted_proxies),
         invitation_token: form.invitation_token.clone(),
     };
 

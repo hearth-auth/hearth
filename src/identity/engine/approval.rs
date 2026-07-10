@@ -455,7 +455,7 @@ impl EmbeddedIdentityEngine {
             expires_at_secs: request.expires_at.as_micros() / 1_000_000,
         };
 
-        match approval_notifier::deliver_approval_webhook(&cfg, &payload) {
+        match self.approval_client.deliver(&cfg, &payload) {
             Ok(()) => {
                 approval_notifier::log_delivery_success(&request.request_id, &cfg.url);
                 // Remove the outbox entry — delivery confirmed.
@@ -535,6 +535,7 @@ impl EmbeddedIdentityEngine {
     /// - Token not expired
     /// - `tool` and `action` custom claims match `tool_name` / `action`
     /// - JTI has not been used before (single-use; writes JTI to blocklist on success)
+    /// - `sub` of the capability token matches `caller_sub` (M5 — caller binding)
     ///
     /// Returns the `AgentId` embedded in the token's `sub` claim on success.
     /// All failure modes return `ToolApprovalRequired { tool }` to avoid leaking
@@ -545,6 +546,7 @@ impl EmbeddedIdentityEngine {
         token: &str,
         tool_name: &str,
         action: &str,
+        caller_sub: &str,
     ) -> Result<AgentId, IdentityError> {
         let deny = || IdentityError::ToolApprovalRequired {
             tool: tool_name.to_string(),
@@ -603,6 +605,12 @@ impl EmbeddedIdentityEngine {
         self.storage
             .put(realm_id, &jti_key, b"1")
             .map_err(Self::storage_err)?;
+
+        // M5 — caller binding: capability token must have been minted for the caller.
+        // Prevents agent A from consuming an approval that was issued for agent B.
+        if claims.sub != caller_sub {
+            return Err(deny());
+        }
 
         // Parse agent ID from `sub`.
         let agent_uuid = uuid::Uuid::parse_str(&claims.sub).map_err(|_| deny())?;

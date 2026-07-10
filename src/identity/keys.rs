@@ -110,6 +110,14 @@ const OAUTH_PENDING_AUTH_PREFIX: &str = "oauth:pending_auth:";
 /// Prefix for MFA TOTP state per user.
 const MFA_TOTP_PREFIX: &str = "mfa:totp:";
 
+/// Storage key for the per-realm MFA at-rest DEK.
+///
+/// A 32-byte random key stored in the realm namespace, KEK-wrapped when a
+/// `key_encryption_key` is configured.  Completely independent of the signing
+/// key so that signing-key rotation cannot invalidate existing TOTP blobs
+/// (HEA-1724).
+const MFA_DEK_KEY: &str = "mfa:dek:key";
+
 /// Prefix for burned MFA pending cookie nonces.
 ///
 /// Format: `mfa:nonce:{nonce_b64url}` → 8-byte LE u64 Unix-second expiry.
@@ -717,6 +725,20 @@ pub(crate) fn user_code_scan_prefix() -> Vec<u8> {
 /// Format: `mfa:totp:{user_uuid}`
 pub(crate) fn encode_mfa_totp_key(user_id: &UserId) -> Vec<u8> {
     format!("{MFA_TOTP_PREFIX}{}", user_id.as_uuid()).into_bytes()
+}
+
+/// Returns the scan-start prefix for all MFA TOTP blobs in a realm.
+///
+/// Used by `rotate_realm_signing_key` to enumerate blobs for re-encryption.
+pub(crate) fn mfa_totp_scan_prefix() -> Vec<u8> {
+    MFA_TOTP_PREFIX.as_bytes().to_vec()
+}
+
+/// Returns the storage key for the per-realm MFA at-rest DEK.
+///
+/// Value is a 32-byte random key, KEK-wrapped when configured (HEA-1724).
+pub(crate) fn mfa_dek_key() -> Vec<u8> {
+    MFA_DEK_KEY.as_bytes().to_vec()
 }
 
 /// Encodes the storage key for a burned MFA pending cookie nonce.

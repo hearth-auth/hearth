@@ -320,8 +320,14 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let permissions = permissions_from_strings(&inner.permissions)?;
+        // Privilege-ceiling check (HEA-1734): sub-admins must not define a role
+        // whose permission set exceeds their own — prevents role-definition
+        // poisoning and indirect self-escalation via a future assignment.
+        for permission in &permissions {
+            check_direct_permission_ceiling(&auth, permission)?;
+        }
         let parent_roles = parent_role_ids_from_strings(&inner.parent_role_ids)?;
         let description = if inner.description.is_empty() {
             None
@@ -374,7 +380,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let role_id = parse_role_id(&inner.role_id)?;
         // The proto uses "empty string = unchanged" semantics for name/description
         // and "always replace" semantics for permissions/parent_role_ids.
@@ -388,7 +394,14 @@ impl RbacAdminService for RbacAdminSvc {
         } else {
             Some(Some(inner.description))
         };
-        let permissions = Some(permissions_from_strings(&inner.permissions)?);
+        let parsed_permissions = permissions_from_strings(&inner.permissions)?;
+        // Privilege-ceiling check (HEA-1734): sub-admins may not replace a role's
+        // permission set with permissions they don't hold — this is the direct
+        // self-escalation path described in the issue (update own role → hearth.admin).
+        for permission in &parsed_permissions {
+            check_direct_permission_ceiling(&auth, permission)?;
+        }
+        let permissions = Some(parsed_permissions);
         let parent_roles = Some(parent_role_ids_from_strings(&inner.parent_role_ids)?);
         let updated = self
             .state

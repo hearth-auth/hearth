@@ -10,10 +10,12 @@
 //! # Decision flow
 //!
 //! 1. Validate the caller's bearer token and extract permissions.
-//! 2. Call `evaluate_tool_access()` with the permissions.
-//!    - `Allow` → 200 OK — the invocation is authorized.
+//!    - If the token has `cnf.jkt`, require + validate a matching DPoP proof (M4).
+//! 2. Load the realm's tool-group map from config. Fail closed on error (H2).
+//! 3. Call `evaluate_tool_access()` with the permissions and tool-group map.
+//!    - `Allow` → emit `AgentToolInvocation` audit record, then 200 OK (M6).
 //!    - `RequireApproval` → require `X-Capability-Token` header.
-//!      - Present + valid → 200 OK (single-use JTI is consumed).
+//!      - Present + valid for this caller (M5) → 200 OK (single-use JTI consumed).
 //!      - Absent or invalid → 403 `HEARTH_TOOL_APPROVAL_REQUIRED`.
 //!    - `Deny` → 403 `HEARTH_TOOL_ACCESS_DENIED`.
 
@@ -25,7 +27,8 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::identity::tool_permissions::{evaluate_tool_access, ToolAccessDecision, ToolGroupMap};
+use crate::audit::{AuditAction, CreateAuditEvent};
+use crate::identity::tool_permissions::{evaluate_tool_access, ToolAccessDecision};
 
 use super::{auth::extract_realm_id, identity_error_to_response, AppState};
 
@@ -79,12 +82,12 @@ async fn invoke_tool(
     };
 
     // Extract and validate the bearer token.
-    let token = match super::auth::extract_bearer_token(&headers) {
+    let raw_token = match super::auth::extract_bearer_token(&headers) {
         Ok(t) => t,
         Err(e) => return e.into_response(),
     };
 
-    let claims = match state.identity.validate_token(&realm_id, &token) {
+    let claims = match state.identity.validate_token(&realm_id, &raw_token) {
         Ok(c) => c,
         Err(_) => {
             return (
@@ -95,21 +98,139 @@ async fn invoke_tool(
         }
     };
 
-    // Tool groups come from realm config; fall back to empty map when not configured.
-    // Empty map is safe: groups can only expand access, never restrict it.
-    let tool_groups = ToolGroupMap::default();
+    // M4 — DPoP enforcement at the tool gate.
+    // When the access token carries a `cnf.jkt` binding, the caller MUST
+    // present a matching DPoP proof. A stolen bound token replayed as plain
+    // bearer is rejected here.
+    if let Some(cnf) = &claims.cnf {
+        let expected_jkt = &cnf.jkt;
+        let proof = match headers.get("DPoP").and_then(|v| v.to_str().ok()) {
+            Some(p) => p,
+            None => {
+                // Bound token with no DPoP proof — reject with 401 + DPoP-Nonce.
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let nonce = state
+                    .identity
+                    .get_realm_dpop_nonce_secret(&realm_id)
+                    .ok()
+                    .map(|s| crate::identity::dpop::current_dpop_nonce(&s, now_secs))
+                    .unwrap_or_else(|| state.dpop.current_nonce(now_secs));
+                let mut resp = (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "use_dpop_nonce", "error_description": "DPoP proof required for bound access token"})),
+                )
+                    .into_response();
+                if let Ok(val) = axum::http::HeaderValue::from_str(&nonce) {
+                    resp.headers_mut().insert("DPoP-Nonce", val);
+                }
+                return resp;
+            }
+        };
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let expected_htu = format!(
+            "{}/v1/tools/invoke",
+            state.identity.oidc_discovery().issuer
+        );
+        let nonce_secret = state
+            .identity
+            .get_realm_dpop_nonce_secret(&realm_id)
+            .ok();
+
+        let validated = match crate::identity::dpop::validate_dpop_proof(
+            proof,
+            "POST",
+            &expected_htu,
+            now_secs,
+            None, // nonce optional on resource endpoints (no nonce-challenge loop here)
+            Some(raw_token.as_str()),
+        ) {
+            Ok(v) => v,
+            Err(e) => return identity_error_to_response(&e).into_response(),
+        };
+
+        // Nonce check — accept current or previous window.
+        if let Some(presented_nonce) = validated.nonce.as_deref() {
+            let valid = nonce_secret
+                .map(|s| crate::identity::dpop::is_valid_dpop_nonce(&s, presented_nonce, now_secs))
+                .unwrap_or_else(|| state.dpop.is_valid_nonce(presented_nonce, now_secs));
+            if !valid {
+                return identity_error_to_response(
+                    &crate::identity::IdentityError::DPopNonceInvalid,
+                )
+                .into_response();
+            }
+        }
+
+        // JTI replay prevention.
+        if let Err(e) = state
+            .identity
+            .check_and_record_dpop_jti(&realm_id, &validated.jti, now_secs)
+        {
+            return identity_error_to_response(&e).into_response();
+        }
+
+        // Thumbprint binding check.
+        if validated.jkt != *expected_jkt {
+            return identity_error_to_response(
+                &crate::identity::IdentityError::DPopBindingMismatch,
+            )
+            .into_response();
+        }
+    }
+
+    // H2 — Load the realm's tool-group map from stored realm config.
+    // Fail closed: if the realm can't be loaded, deny the invocation rather
+    // than silently falling back to an empty map that would bypass group denies.
+    let tool_groups = match state.identity.get_realm(&realm_id) {
+        Ok(Some(realm)) => realm.config().tool_groups.clone(),
+        Ok(None) => {
+            tracing::error!(realm_id = %realm_id, "invoke_tool: realm not found");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "realm_not_found"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(error = %e, realm_id = %realm_id, "invoke_tool: failed to load realm config");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal_error"})),
+            )
+                .into_response();
+        }
+    };
 
     let decision = evaluate_tool_access(&claims.permissions, &body.tool, &tool_groups);
 
     match decision {
-        ToolAccessDecision::Allow => (
-            StatusCode::OK,
-            Json(InvokeToolResponse {
-                authorized: true,
-                agent_id: None,
-            }),
-        )
-            .into_response(),
+        ToolAccessDecision::Allow => {
+            // M6 — Audit every authorized (Allow) invocation.
+            let _ = state.audit.append(&CreateAuditEvent {
+                realm_id: realm_id.clone(),
+                actor: claims.sub.clone(),
+                action: AuditAction::AgentToolInvocation,
+                resource_type: "tool".to_string(),
+                resource_id: format!("{}.{}", body.tool, body.action),
+                metadata: None,
+            });
+            (
+                StatusCode::OK,
+                Json(InvokeToolResponse {
+                    authorized: true,
+                    agent_id: None,
+                }),
+            )
+                .into_response()
+        }
 
         ToolAccessDecision::Deny => {
             identity_error_to_response(&crate::identity::IdentityError::ToolAccessDenied {
@@ -136,12 +257,20 @@ async fn invoke_tool(
             };
 
             // Validate the capability token (signature, type, aud, exp, tool/action, JTI).
+            // M5 — pass caller sub so the engine can verify the token was minted for this caller.
             let tool = body.tool.clone();
             let action = body.action.clone();
+            let caller_sub = claims.sub.clone();
             let identity = Arc::clone(&state.identity);
             let realm_id_c = realm_id.clone();
             let result = tokio::task::spawn_blocking(move || {
-                identity.validate_capability_token(&realm_id_c, &cap_token, &tool, &action)
+                identity.validate_capability_token(
+                    &realm_id_c,
+                    &cap_token,
+                    &tool,
+                    &action,
+                    &caller_sub,
+                )
             })
             .await;
 

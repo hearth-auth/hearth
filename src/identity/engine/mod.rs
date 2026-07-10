@@ -506,6 +506,14 @@ pub struct EmbeddedIdentityEngine {
     ///
     // INVARIANT: guard released before method returns; all callers are non-async helpers.
     mfa_attempt_trackers: Mutex<HashMap<String, AttemptTracker>>,
+    /// Cached per-realm MFA at-rest DEK (32-byte random key, HEA-1724).
+    ///
+    /// Decoupled from the signing key so signing-key rotation cannot invalidate
+    /// TOTP blobs.  Lazy-initialized on first MFA operation per realm; never
+    /// evicted (realm IDs are stable and the key is write-once).
+    ///
+    // INVARIANT: guard released before method returns; no .await in scope.
+    mfa_dek_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
     /// Used nonces for replay protection (when nonce enforcement is enabled).
     ///
     /// Maps nonce value to the timestamp it was first seen. Entries are swept
@@ -633,6 +641,12 @@ pub struct EmbeddedIdentityEngine {
     /// `pre_token_webhook` configured. Uses an injectable transport so tests
     /// can stub out network I/O without a real HTTP server.
     pre_token_client: Arc<crate::identity::pre_token_webhook::PreTokenWebhookClient>,
+    /// Approval webhook delivery client (Phase C.5, M7).
+    ///
+    /// Delivers `ApprovalWebhookPayload` when an approval request is created.
+    /// Injectable via `with_approval_transport` so tests capture deliveries
+    /// in-process without a real HTTP server.
+    approval_client: Arc<crate::identity::approval_notifier::ApprovalWebhookClient>,
     /// Device fingerprint store for adaptive (risk-based) MFA.
     ///
     /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
@@ -1006,6 +1020,8 @@ impl EmbeddedIdentityEngine {
             attempt_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; no .await in scope.
+            mfa_dek_cache: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1036,6 +1052,9 @@ impl EmbeddedIdentityEngine {
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
                 crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
+            ),
+            approval_client: Arc::new(
+                crate::identity::approval_notifier::ApprovalWebhookClient::new(),
             ),
             device_fp,
             sv_store,
@@ -1568,6 +1587,8 @@ impl EmbeddedIdentityEngine {
             attempt_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; no .await in scope.
+            mfa_dek_cache: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1598,6 +1619,9 @@ impl EmbeddedIdentityEngine {
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
                 crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
+            ),
+            approval_client: Arc::new(
+                crate::identity::approval_notifier::ApprovalWebhookClient::new(),
             ),
             device_fp,
             sv_store,
@@ -1654,6 +1678,23 @@ impl EmbeddedIdentityEngine {
     ) -> Self {
         self.pre_token_client = Arc::new(
             crate::identity::pre_token_webhook::PreTokenWebhookClient::with_transport(transport),
+        );
+        self
+    }
+
+    /// Replaces the approval webhook transport (M7).
+    ///
+    /// Used in integration tests to capture approval webhook deliveries
+    /// in-process without making real HTTP calls. Follows the same pattern
+    /// as `with_pre_token_transport`.
+    pub fn with_approval_transport(
+        mut self,
+        transport: std::sync::Arc<
+            dyn crate::identity::approval_notifier::ApprovalWebhookTransport,
+        >,
+    ) -> Self {
+        self.approval_client = Arc::new(
+            crate::identity::approval_notifier::ApprovalWebhookClient::with_transport(transport),
         );
         self
     }
@@ -2305,11 +2346,78 @@ impl EmbeddedIdentityEngine {
         }
     }
 
+    /// Returns (or lazily creates) the dedicated per-realm MFA at-rest DEK.
+    ///
+    /// The DEK is a 32-byte random key stored under `mfa:dek:key` in the realm
+    /// namespace, independent of the Ed25519 signing key.  This decoupling
+    /// ensures signing-key rotation cannot invalidate existing TOTP blobs
+    /// (HEA-1724).  The key is KEK-wrapped when `key_encryption_key` is
+    /// configured.
+    fn get_or_create_realm_mfa_dek(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError> {
+        {
+            let cache = self.mfa_dek_cache.lock().expect("mfa_dek_cache poisoned");
+            if let Some(k) = cache.get(realm_id) {
+                return Ok(*k);
+            }
+        }
+
+        let kek = self.config.key_encryption_key.as_ref().map(|k| k.as_bytes());
+        let storage_key = keys::mfa_dek_key();
+
+        let key_bytes: [u8; 32] = match self
+            .storage
+            .get(realm_id, &storage_key)
+            .map_err(Self::storage_err)?
+        {
+            Some(raw) => {
+                let plaintext =
+                    crate::identity::key_encryption::unwrap_key(&raw, kek).map_err(|e| {
+                        IdentityError::SigningError {
+                            reason: format!("MFA DEK unwrap failed: {e}"),
+                        }
+                    })?;
+                if plaintext.len() != 32 {
+                    return Err(IdentityError::SigningError {
+                        reason: format!(
+                            "MFA DEK has wrong length: {} bytes (expected 32)",
+                            plaintext.len()
+                        ),
+                    });
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&plaintext);
+                arr
+            }
+            None => {
+                let rng = ring::rand::SystemRandom::new();
+                let mut key = [0u8; 32];
+                rng.fill(&mut key).map_err(|_| IdentityError::SigningError {
+                    reason: "MFA DEK generation failed".into(),
+                })?;
+                let wrapped =
+                    crate::identity::key_encryption::wrap_key(&key, kek).map_err(|e| {
+                        IdentityError::SigningError {
+                            reason: format!("MFA DEK wrap failed: {e}"),
+                        }
+                    })?;
+                self.storage
+                    .put(realm_id, &storage_key, &wrapped)
+                    .map_err(Self::storage_err)?;
+                key
+            }
+        };
+
+        let mut cache = self.mfa_dek_cache.lock().expect("mfa_dek_cache poisoned");
+        cache.insert(realm_id.clone(), key_bytes);
+        Ok(key_bytes)
+    }
+
     /// Loads the stored MFA state for a user, decrypting sensitive fields.
     ///
-    /// Uses HKDF-SHA256 keyed from the realm signing key to derive a per-realm
-    /// TOTP DEK. Handles both the v2 encrypted format and the legacy v1
-    /// plaintext format (migrated transparently on the next save).
+    /// Uses the dedicated per-realm MFA DEK (HEA-1724).  Falls back to the
+    /// signing-key-derived DEK for blobs written before the dedicated key was
+    /// introduced, re-encrypting them under the new key on first access so
+    /// future loads don't require the signing key at all.
     fn load_mfa_state(
         &self,
         realm_id: &RealmId,
@@ -2322,11 +2430,22 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
         match bytes {
             Some(b) => {
-                let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-                let mut dek = Zeroizing::new(totp::derive_totp_dek(signing_key.pkcs8_bytes())?);
-                let state = totp::deserialize_mfa_state(&b, &dek)?;
-                dek.zeroize();
-                Ok(Some(state))
+                let dek = self.get_or_create_realm_mfa_dek(realm_id)?;
+                match totp::deserialize_mfa_state(&b, &dek) {
+                    Ok(state) => Ok(Some(state)),
+                    Err(_) => {
+                        // Migration path: blob was encrypted under the signing-key-derived
+                        // DEK before HEA-1724. Fall back to the current signing key's DEK,
+                        // then re-encrypt so subsequent loads use the dedicated key.
+                        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+                        let legacy_dek =
+                            Zeroizing::new(totp::derive_totp_dek(signing_key.pkcs8_bytes())?);
+                        let state = totp::deserialize_mfa_state(&b, &legacy_dek)?;
+                        drop(legacy_dek);
+                        self.save_mfa_state(realm_id, user_id, &state)?;
+                        Ok(Some(state))
+                    }
+                }
             }
             None => Ok(None),
         }
@@ -2334,19 +2453,18 @@ impl EmbeddedIdentityEngine {
 
     /// Persists MFA state for a user, encrypting sensitive fields before write.
     ///
-    /// `secret_base32` and `pending_recovery_codes` are AES-256-GCM encrypted
-    /// with a DEK derived from the realm signing key via HKDF-SHA256.
+    /// Always uses the dedicated per-realm MFA DEK (HEA-1724); never the
+    /// signing key.  `secret_base32` and `pending_recovery_codes` are
+    /// AES-256-GCM encrypted under that DEK.
     fn save_mfa_state(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         state: &StoredMfaState,
     ) -> Result<(), IdentityError> {
-        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-        let mut dek = Zeroizing::new(totp::derive_totp_dek(signing_key.pkcs8_bytes())?);
+        let dek = self.get_or_create_realm_mfa_dek(realm_id)?;
         let key = keys::encode_mfa_totp_key(user_id);
         let bytes = totp::serialize_mfa_state(state, &dek)?;
-        dek.zeroize();
         self.storage
             .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)
