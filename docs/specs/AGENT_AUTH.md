@@ -261,6 +261,15 @@ Hearth **MUST** implement the token exchange grant type (`urn:ietf:params:oauth:
 - The resulting token **MUST** carry the `act` claim documenting the delegation.
 - The resulting token's lifetime **MUST NOT** exceed the subject token's remaining lifetime.
 
+> **Open design question — RBAC `permissions` claim on `act`-bearing tokens (HEA-1726):**
+> The rules above cover `scope` attenuation. However the `permissions`, `roles`, and `groups`
+> claims — which are the authoritative authorization source per AUTHORIZATION.md § 5.1 —
+> are currently copied verbatim from the subject token without analogous attenuation.
+> A normative decision on whether to (A) intersect permissions with the actor's own grants
+> or (B) clear RBAC claims on all `act`-bearing tokens is pending CTO review.
+> See [AUTHORIZATION.md § 16](/docs/specs/AUTHORIZATION.md#16-delegated-act-token-rbac-permissions)
+> and [HEA-1726](/HEA/issues/HEA-1726). This section will be updated once the decision lands.
+
 ### 3.4 Delegation Chains
 
 When agent A delegates to agent B, the delegation chain grows. Hearth **MUST** support and enforce multi-hop delegation.

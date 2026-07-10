@@ -1147,6 +1147,138 @@ access tokens.
 | `introspection` | Reflected within the next `/introspect` call — session liveness re-checked. |
 | `decision` | Reflected within the next `/oauth/authorize` call — session liveness re-checked. |
 
+---
+
+## 16. Delegated (`act`) token RBAC permissions
+
+> **Design Note — HEA-1726.** Status: **pending CTO decision**. Do not implement until a
+> normative decision is recorded in § 16.3 and this notice is removed.
+
+### 16.1 Problem statement
+
+When an agent requests a delegated token via RFC 8693 token exchange
+(`urn:ietf:params:oauth:grant-type:token-exchange`), the engine in
+`src/identity/engine/mod.rs` applies a three-way scope intersection:
+
+```
+effective_scope = intersection(subject.scope, actor.scope, requested_scope)
+```
+
+This is correct. However, the issued token then copies `permissions`, `roles`,
+and `groups` verbatim from the subject token:
+
+```rust
+// src/identity/engine/mod.rs — token exchange, step 9 (issue token)
+roles:       subject_claims.roles.clone(),       // ← no attenuation
+groups:      subject_claims.groups.clone(),      // ← no attenuation
+permissions: subject_claims.permissions.clone(), // ← no attenuation
+```
+
+Since `permissions` is the **sole authoritative claim for all authorization
+decisions** (`src/identity/tokens.rs` — "Client and server authorization checks
+read exclusively from this field"), an `act`-bearing token grants the actor
+every RBAC permission the subject holds, regardless of what the actor is
+authorized to do.
+
+**Attack path.** User Alice holds `{hearth.admin, docs.delete, billing.admin}`.
+Agent Foo holds only `{tool.search_emails.invoke}` from its own role assignments.
+Agent Foo performs a token exchange against Alice's access token. The issued
+delegated token carries `sub: alice, act: {sub: foo}` but retains
+`permissions: [hearth.admin, docs.delete, billing.admin, ...]`. Agent Foo can
+now perform admin operations with Alice's full RBAC authority — a clear
+least-privilege violation.
+
+**Scope vs. permissions asymmetry.** The vulnerability exists only for RBAC
+permissions. OAuth `scope` is correctly attenuated. The gap is that AGENT_AUTH.md
+§ 3.3 mandates scope intersection but says nothing about the `permissions` claim.
+
+### 16.2 Options
+
+**Option A — Intersect `permissions` at delegation time (recommended)**
+
+Compute:
+
+```
+effective_permissions = intersection(subject.permissions, actor.permissions)
+```
+
+The same logic applies to `roles` and `groups` (though those claims are
+informational and the `permissions` intersection is sufficient for security).
+
+Implementation change in `engine/mod.rs` step 9:
+
+```rust
+permissions: intersect_permissions(
+    &subject_claims.permissions,
+    &actor_claims.permissions,
+),
+roles: Vec::new(),   // informational; cleared for simplicity (actor's roles differ)
+groups: Vec::new(),  // informational; cleared for simplicity
+```
+
+This requires that `actor_claims` (the actor's parsed token) be retained
+through to step 9 (currently only `actor_sub` and `actor_scope` survive the
+match block). The actor's `permissions` must be extracted and threaded through.
+
+_Trade-offs:_
+- Mirrors the existing scope attenuation exactly. Consistent and predictable.
+- Aligns with AGENT_AUTH.md § 3.3 ("the resulting token's scope MUST be the
+  intersection of the subject token's scope, the agent's permitted scopes…") —
+  extending "scope" to mean the full authorization surface including permissions.
+- Least-privilege: an actor with no RBAC assignments (typical for a new service
+  account) yields zero effective RBAC permissions. Operators must explicitly
+  grant the actor the permissions it legitimately needs.
+- No change to resource servers or SDKs — the `permissions` claim still governs.
+
+**Option B — Prohibit RBAC permissions on `act`-bearing tokens**
+
+When the issued token carries an `act` claim, the `permissions`, `roles`, and
+`groups` claims MUST be cleared regardless of what the subject holds.
+Authorization for delegated tokens is scope-only and tool-claim-only.
+
+Implementation change: clear all three claims when `new_act` is `Some`.
+
+_Trade-offs:_
+- Stronger guarantee: no RBAC escalation via delegation is possible under any
+  conditions. Simpler reasoning.
+- Breaking change for any resource server or SDK that currently reads
+  `permissions` from a delegated token. All such callers must migrate to
+  scope + `tool.*` checks.
+- Requires audit of all protected resources to confirm they handle
+  `permissions: []` on act-bearing tokens correctly before this is safe to ship.
+- Misaligned with how agents are described in AGENT_AUTH.md § 5.1 (agents
+  receive RBAC grants and those appear in their token's `permissions` claim) —
+  Option B would mean agents cannot use their own RBAC grants when acting on
+  behalf of a user.
+
+### 16.3 Decision record
+
+> **PENDING** — CTO decision required. Record the chosen option and rationale
+> here before implementation begins. Reference: [HEA-1726](/HEA/issues/HEA-1726).
+
+**SecurityAuditor recommendation: Option A.**
+
+Rationale: Option A is a minimal, targeted fix that closes the least-privilege
+gap while remaining consistent with the existing scope-attenuation model and
+the AGENT_AUTH.md decision log ("Scope intersection (not union) at delegation
+time — Least privilege"). Option B is harder to roll out safely without
+auditing all resource servers first and would prevent agents from leveraging
+their own legitimately-granted RBAC roles when acting on behalf of users.
+
+### 16.4 Implementation requirement (after decision)
+
+Whichever option is chosen, the implementation MUST:
+
+1. Update this section to mark the decision as **DECIDED** with the chosen
+   option and CTO sign-off.
+2. Modify `src/identity/engine/mod.rs` — token exchange step 9 — per the
+   chosen option.
+3. Update AGENT_AUTH.md § 3.3 to explicitly cover `permissions` attenuation
+   (not just scope).
+4. Add a regression test that asserts an actor with permission set A cannot
+   exercise a permission in B \ A via a delegated token, where B is the
+   subject's permission set. Test MUST fail against the pre-fix code.
+
 For tighter revocation bounds in `embedded` mode, configure a shorter `access_token_ttl`
 or enable session-version (`sv`) revocation — see
 [§ 14](#14-session-version-sv-revocation) and the
