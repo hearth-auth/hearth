@@ -1,35 +1,41 @@
 //! Regression tests for HEA-SEC-04: per-operation gRPC permission checks.
+//! HEA-1722: privilege-ceiling enforcement on GrantUserPermission / AddAdditionalRole.
 //!
 //! ## Coverage matrix
 //!
 //! Each row is (caller permission, target service/method, expected outcome).
 //!
-//! | Caller                | Method                          | Expected          |
-//! |---------------------- |---------------------------------|-------------------|
-//! | hearth.users.admin    | RbacAdmin::create_role          | PERMISSION_DENIED |
-//! | hearth.clients.admin  | RbacAdmin::create_role          | PERMISSION_DENIED |
-//! | hearth.agents.admin   | RbacAdmin::create_role          | PERMISSION_DENIED |
-//! | hearth.realm.admin    | Identity::list_users            | PERMISSION_DENIED |
-//! | hearth.realm.admin    | Identity::create_user           | PERMISSION_DENIED |
-//! | hearth.realm.admin    | AppAdmin::list_applications     | PERMISSION_DENIED |
-//! | hearth.users.admin    | AppAdmin::list_applications     | PERMISSION_DENIED |
-//! | hearth.agents.admin   | AppAdmin::list_applications     | PERMISSION_DENIED |
-//! | hearth.clients.admin  | Identity::list_users            | PERMISSION_DENIED |
-//! | hearth.realm.admin    | Identity::list_agents           | PERMISSION_DENIED |
-//! | hearth.users.admin    | RbacAdmin::revoke_consent       | OK                |
-//! | hearth.realm.admin    | RbacAdmin::create_role          | OK                |
-//! | hearth.agents.admin   | Identity::list_agents           | OK                |
-//! | hearth.clients.admin  | AppAdmin::list_applications     | OK                |
-//! | hearth.admin (full)   | RbacAdmin::create_role          | OK                |
-//! | hearth.admin (full)   | Identity::list_users            | OK                |
-//! | hearth.admin (full)   | AppAdmin::list_applications     | OK                |
+//! | Caller                | Method                               | Expected          |
+//! |---------------------- |--------------------------------------|-------------------|
+//! | hearth.users.admin    | RbacAdmin::create_role               | PERMISSION_DENIED |
+//! | hearth.clients.admin  | RbacAdmin::create_role               | PERMISSION_DENIED |
+//! | hearth.agents.admin   | RbacAdmin::create_role               | PERMISSION_DENIED |
+//! | hearth.realm.admin    | Identity::list_users                 | PERMISSION_DENIED |
+//! | hearth.realm.admin    | Identity::create_user                | PERMISSION_DENIED |
+//! | hearth.realm.admin    | AppAdmin::list_applications          | PERMISSION_DENIED |
+//! | hearth.users.admin    | AppAdmin::list_applications          | PERMISSION_DENIED |
+//! | hearth.agents.admin   | AppAdmin::list_applications          | PERMISSION_DENIED |
+//! | hearth.clients.admin  | Identity::list_users                 | PERMISSION_DENIED |
+//! | hearth.realm.admin    | Identity::list_agents                | PERMISSION_DENIED |
+//! | hearth.realm.admin    | grant_user_permission(hearth.admin)  | PERMISSION_DENIED |
+//! | hearth.realm.admin    | add_additional_role(realm.admin)     | PERMISSION_DENIED |
+//! | hearth.users.admin    | RbacAdmin::revoke_consent            | OK                |
+//! | hearth.realm.admin    | RbacAdmin::create_role               | OK                |
+//! | hearth.agents.admin   | Identity::list_agents                | OK                |
+//! | hearth.clients.admin  | AppAdmin::list_applications          | OK                |
+//! | hearth.realm.admin    | grant_user_permission(hearth.realm.admin) | OK           |
+//! | hearth.admin (full)   | RbacAdmin::create_role               | OK                |
+//! | hearth.admin (full)   | Identity::list_users                 | OK                |
+//! | hearth.admin (full)   | AppAdmin::list_applications          | OK                |
+//! | hearth.admin (full)   | grant_user_permission(hearth.admin)  | OK                |
+//! | hearth.admin (full)   | add_additional_role(realm.admin)     | OK                |
 
 mod common;
 
 use std::sync::Arc;
 
 use hearth::core::RealmId;
-use hearth::identity::{CreateUserRequest, SessionContext};
+use hearth::identity::{CreateOrganizationRequest, CreateUserRequest, SessionContext};
 use hearth::protocol::admin_auth::AdminRateLimiter;
 use hearth::protocol::grpc::identity::{AppAdminSvc, IdentityAdminSvc};
 use hearth::protocol::grpc::rbac_admin::RbacAdminSvc;
@@ -512,4 +518,236 @@ async fn full_admin_allowed_on_list_applications() {
         ))
         .await
         .expect("hearth.admin must bypass all sub-permission checks for list_applications");
+}
+
+// ─── HEA-1722: Privilege-ceiling enforcement on GrantUserPermission ───────────
+
+/// A hearth.realm.admin token MUST NOT be able to grant hearth.admin to anyone —
+/// that would be a vertical privilege-escalation (sub-admin self-escalates to superuser).
+#[tokio::test]
+async fn realm_admin_cannot_grant_permission_it_does_not_hold() {
+    let svc = setup().await;
+    let token = issue_sub_admin_token(&svc, "realm-admin-grant@hea1722.test", "hearth.realm.admin");
+    let target = svc
+        .h
+        .identity()
+        .create_user(
+            &svc.realm,
+            &CreateUserRequest {
+                email: "target-escalate@hea1722.test".into(),
+                display_name: "Target".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create target user");
+
+    let err = svc
+        .rbac_svc
+        .grant_user_permission(with_token(
+            &token,
+            &svc.realm,
+            pb::GrantUserPermissionRequest {
+                realm_id: svc.realm.as_uuid().to_string(),
+                user_id: format!("user_{}", target.id().as_uuid()),
+                permission: "hearth.admin".to_string(),
+                scope_type: "realm".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect_err("hearth.realm.admin must not grant hearth.admin (HEA-1722)");
+
+    assert_eq!(
+        err.code(),
+        Code::PermissionDenied,
+        "hearth.realm.admin granting hearth.admin must return PERMISSION_DENIED (HEA-1722)"
+    );
+}
+
+/// A hearth.realm.admin token CAN grant a permission it already holds.
+#[tokio::test]
+async fn realm_admin_can_grant_permission_it_holds() {
+    let svc = setup().await;
+    let token =
+        issue_sub_admin_token(&svc, "realm-admin-own-grant@hea1722.test", "hearth.realm.admin");
+    let target = svc
+        .h
+        .identity()
+        .create_user(
+            &svc.realm,
+            &CreateUserRequest {
+                email: "target-own-perm@hea1722.test".into(),
+                display_name: "Target".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create target user");
+
+    svc.rbac_svc
+        .grant_user_permission(with_token(
+            &token,
+            &svc.realm,
+            pb::GrantUserPermissionRequest {
+                realm_id: svc.realm.as_uuid().to_string(),
+                user_id: format!("user_{}", target.id().as_uuid()),
+                // hearth.realm.admin holds this permission — ceiling allows it
+                permission: "hearth.realm.admin".to_string(),
+                scope_type: "realm".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("hearth.realm.admin must be able to grant hearth.realm.admin (HEA-1722)");
+}
+
+/// A hearth.admin (full superuser) token can grant ANY permission including itself.
+#[tokio::test]
+async fn full_admin_can_grant_any_permission() {
+    let svc = setup().await;
+    let token = issue_sub_admin_token(&svc, "full-admin-grant@hea1722.test", "realm.admin");
+    let target = svc
+        .h
+        .identity()
+        .create_user(
+            &svc.realm,
+            &CreateUserRequest {
+                email: "target-full-grant@hea1722.test".into(),
+                display_name: "Target".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create target user");
+
+    svc.rbac_svc
+        .grant_user_permission(with_token(
+            &token,
+            &svc.realm,
+            pb::GrantUserPermissionRequest {
+                realm_id: svc.realm.as_uuid().to_string(),
+                user_id: format!("user_{}", target.id().as_uuid()),
+                permission: "hearth.admin".to_string(),
+                scope_type: "realm".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("hearth.admin must be able to grant any permission (HEA-1722)");
+}
+
+// ─── HEA-1722: Privilege-ceiling enforcement on AddAdditionalRole ─────────────
+
+/// A hearth.realm.admin token MUST NOT be able to add the realm.admin role
+/// to an org member — that role carries hearth.admin, which would be an escalation.
+#[tokio::test]
+async fn realm_admin_cannot_add_role_exceeding_ceiling() {
+    let svc = setup().await;
+    let token =
+        issue_sub_admin_token(&svc, "realm-admin-addrole@hea1722.test", "hearth.realm.admin");
+
+    let org = svc
+        .h
+        .identity()
+        .create_organization(
+            &svc.realm,
+            &CreateOrganizationRequest {
+                name: "Test Org 1722-a".to_string(),
+                slug: "test-org-1722-a".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create org");
+
+    let target = svc
+        .h
+        .identity()
+        .create_user(
+            &svc.realm,
+            &CreateUserRequest {
+                email: "target-addrole@hea1722.test".into(),
+                display_name: "Target".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create target user");
+
+    let err = svc
+        .rbac_svc
+        .add_additional_role(with_token(
+            &token,
+            &svc.realm,
+            pb::AddAdditionalRoleRequest {
+                realm_id: svc.realm.as_uuid().to_string(),
+                org_id: org.id().as_uuid().to_string(),
+                user_id: format!("user_{}", target.id().as_uuid()),
+                // realm.admin carries hearth.admin — sub-admin must not add it
+                role_name: "realm.admin".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect_err("hearth.realm.admin must not add realm.admin role (HEA-1722)");
+
+    assert_eq!(
+        err.code(),
+        Code::PermissionDenied,
+        "adding role that exceeds assigner's permissions must return PERMISSION_DENIED (HEA-1722)"
+    );
+}
+
+/// A hearth.admin (full superuser) token can add ANY role via add_additional_role.
+#[tokio::test]
+async fn full_admin_can_add_any_role() {
+    let svc = setup().await;
+    let token = issue_sub_admin_token(&svc, "full-admin-addrole@hea1722.test", "realm.admin");
+
+    let org = svc
+        .h
+        .identity()
+        .create_organization(
+            &svc.realm,
+            &CreateOrganizationRequest {
+                name: "Test Org 1722-b".to_string(),
+                slug: "test-org-1722-b".to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("create org");
+
+    let target = svc
+        .h
+        .identity()
+        .create_user(
+            &svc.realm,
+            &CreateUserRequest {
+                email: "target-full-addrole@hea1722.test".into(),
+                display_name: "Target".into(),
+                first_name: String::new(),
+                last_name: String::new(),
+                attributes: Default::default(),
+            },
+        )
+        .expect("create target user");
+
+    svc.rbac_svc
+        .add_additional_role(with_token(
+            &token,
+            &svc.realm,
+            pb::AddAdditionalRoleRequest {
+                realm_id: svc.realm.as_uuid().to_string(),
+                org_id: org.id().as_uuid().to_string(),
+                user_id: format!("user_{}", target.id().as_uuid()),
+                role_name: "realm.admin".to_string(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("hearth.admin must be able to add any role (HEA-1722)");
 }

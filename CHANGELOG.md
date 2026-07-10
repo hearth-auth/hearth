@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Privilege-assignment ceiling enforced on `GrantUserPermission` and `AddAdditionalRole`** —
+  a sub-admin holding `hearth.realm.admin` could previously call the gRPC `GrantUserPermission`
+  RPC or `AddAdditionalRole` to grant themselves or any user the `hearth.admin` permission (or a
+  role carrying it), escalating to full realm superuser. Both RPCs now reject any grant where the
+  assigner does not already hold the permission (or every permission in the target role) unless the
+  caller has `hearth.admin`. The fix mirrors the existing ceiling already enforced on the role
+  assignment path (HEA-1722).
 - **Unauthenticated `POST /authorize` now rejected** — the machine-API authorization endpoint
   previously accepted a caller-supplied `user_id` with no authentication, allowing any party who
   knew a valid `client_id`, `redirect_uri`, and `user_id` (all non-secret) to mint an OAuth
