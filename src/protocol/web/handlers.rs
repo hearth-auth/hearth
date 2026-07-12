@@ -4024,12 +4024,12 @@ pub async fn ra_update_password_submit(
                     Some(crate::identity::RequiredAction::VerifyEmail) => {
                         format!(
                             "/ui/required-actions/verify-email?ra_token={}",
-                            &response.access_token
+                            response.access_token
                         )
                     }
                     _ => format!(
                         "/ui/required-actions/update-password?ra_token={}",
-                        &response.access_token
+                        response.access_token
                     ),
                 };
                 return Redirect::to(&path).into_response();
@@ -4155,7 +4155,7 @@ pub async fn ra_verify_email_resend(
 
     let return_url = format!(
         "/ui/required-actions/verify-email?ra_token={}",
-        &form.ra_token
+        form.ra_token
     );
 
     match state

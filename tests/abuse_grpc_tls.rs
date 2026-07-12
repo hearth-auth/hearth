@@ -291,8 +291,8 @@ fn sec33_tls_min_version_config_round_trips() {
     assert_eq!(sec_absent.tls.min_version, TlsMinVersionYaml::Tls12);
 
     // Verify the mapping to tls13_only used by build_server_config
-    assert!(sec13.tls.min_version == TlsMinVersionYaml::Tls13);
-    assert!(sec12.tls.min_version != TlsMinVersionYaml::Tls13);
+    assert_eq!(sec13.tls.min_version, TlsMinVersionYaml::Tls13);
+    assert_ne!(sec12.tls.min_version, TlsMinVersionYaml::Tls13);
 }
 
 /// Config deserialization: `security.tls.crl_paths` round-trips correctly.

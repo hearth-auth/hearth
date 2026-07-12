@@ -274,7 +274,34 @@ On successful logout, Hearth fans out back-channel logout tokens to all register
 The OIDC discovery document advertises `authorization_endpoint` as `{issuer}/authorize`. Browser-based PKCE clients (SPAs) redirect the user's browser there via `GET`. The interactive login+consent UI lives at `/ui/realms/{realm}/oauth/authorize`, so:
 
 - `GET /realms/{realm}/authorize` — 302-redirects to the UI authorize page, preserving all query parameters.
-- `POST /realms/{realm}/authorize` — machine API path returning JSON authorization codes (unchanged).
+- `POST /realms/{realm}/authorize` — machine API path for server-to-server flows. Returns a JSON authorization code that the caller can exchange at `/token`.
+
+**Authentication required.** `POST /realms/{realm}/authorize` requires a valid Bearer token (HEA-1721). The token's `sub` claim is the authoritative user identity; any `user_id` field in the request body is ignored. This prevents unauthenticated callers from minting authorization codes for arbitrary accounts.
+
+```http
+POST /realms/{realm_id}/authorize
+Authorization: Bearer <access_token>
+X-Realm-ID: <realm_uuid>
+Content-Type: application/json
+
+{
+  "client_id": "<client_uuid>",
+  "redirect_uri": "https://app.example.com/callback",
+  "scope": "openid profile",
+  "code_challenge": "<S256-hash>",
+  "code_challenge_method": "S256",
+  "state": "<csrf-state>"
+}
+```
+
+```json
+{
+  "code": "<single-use-authorization-code>",
+  "state": "<csrf-state>"
+}
+```
+
+The same Bearer-auth requirement applies to the equivalent gRPC `Authorize` RPC.
 
 ---
 

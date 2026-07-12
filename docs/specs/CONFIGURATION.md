@@ -774,7 +774,8 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 | `refresh_token_ttl` | duration | inherits `token.refresh_token_ttl` | Per-realm refresh token lifetime. |
 | `password_reset_token_ttl` | duration | `"30m"` | Per-realm password reset token lifetime. Hard-capped at `1h` unless `allow_unsafe_ttl: true`. |
 | `magic_link_ttl` | duration | `"15m"` | Per-realm magic link token lifetime. Hard-capped at `30m` unless `allow_unsafe_ttl: true`. |
-| `allow_unsafe_ttl` | bool | `false` | Lift the A-14 TTL hard caps for this realm. When `true`, `password_reset_token_ttl` may exceed 1 hour and `magic_link_ttl` may exceed 30 minutes. Operators accept the additional token-theft window by enabling this flag. Never enable without a documented operational justification. |
+| `device_code_ttl` | duration | `"10m"` | Per-realm device authorization code TTL (RFC 8628 / HSEC-008). Hard-capped at `30m` unless `allow_unsafe_ttl: true`. Only applies to clients with `device_code` in their `grant_types`. |
+| `allow_unsafe_ttl` | bool | `false` | Lift the A-14/HSEC-008 TTL hard caps for this realm. When `true`, `password_reset_token_ttl` may exceed 1 hour, `magic_link_ttl` may exceed 30 minutes, and `device_code_ttl` may exceed 30 minutes. Operators accept the additional token-theft window by enabling this flag. Never enable without a documented operational justification. |
 
 #### `realms.<name>.auth.rate_limit`
 
@@ -1323,6 +1324,39 @@ Return `2xx` with no body (or `{}`) to issue the token without extra claims. Any
 
 ---
 
+### `realms.<name>.tool_registry`
+
+Declares named tool groups for the realm. Used by the Phase C agent tool-permission grammar (`toolgroup.*` permissions).
+
+A **tool group** is a named collection of tool identifiers. Agents granted `toolgroup.<name>.invoke` (or `.deny` / `.invoke_with_approval`) receive that permission applied to every tool in the group. Membership is a static deployment configuration, not per-principal RBAC state.
+
+When `tool_registry` is absent (the default), no tool groups are defined and `toolgroup.*` permissions have no effect.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tool_registry.groups` | map | `{}` | Maps group name → list of tool identifiers belonging to that group. Group names and tool identifiers are arbitrary strings; they must match the values used in permission grants and tool invocation calls. |
+
+```yaml
+realms:
+  corp:
+    tool_registry:
+      groups:
+        email_suite:
+          - search_emails
+          - send_email
+          - get_email_thread
+        calendar_suite:
+          - list_events
+          - create_event
+          - delete_event
+```
+
+With this config, an agent granted `toolgroup.email_suite.invoke` can call any of `search_emails`, `send_email`, or `get_email_thread`. An agent granted `toolgroup.email_suite.deny` is blocked from all three regardless of other `tool.*` grants (deny-wins evaluation).
+
+**Related:** see [AGENT_AUTH.md](./AGENT_AUTH.md) § 4 for the full `tool.*`/`toolgroup.*` permission grammar, approval lifecycle, and capability-token flow.
+
+---
+
 ## Complete Example
 
 ```yaml
@@ -1479,6 +1513,7 @@ Every field's default value at a glance.
 | `realms.<name>.auth.webauthn_attestation` | `require_large_blob` | `false` |
 | `realms.<name>.auth.token` | `password_reset_token_ttl` | `"30m"` |
 | `realms.<name>.auth.token` | `magic_link_ttl` | `"15m"` |
+| `realms.<name>.auth.token` | `device_code_ttl` | `"10m"` |
 | `realms.<name>.auth.token` | `allow_unsafe_ttl` | `false` |
 | `realms.<name>.federation.providers.<idp>` | `leeway_seconds` | `60` |
 | `agent_auth.capabilities` | `identity` | `false` |

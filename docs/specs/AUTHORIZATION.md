@@ -681,6 +681,23 @@ All admin endpoints require the `hearth.admin` permission in the caller's access
 - `DELETE /admin/groups/{group_id}/roles/{assignment_id}` — remove.
 - `GET /admin/roles/{role_id}/members?cursor=...&limit=...` — list subjects (users + groups) assigned this role.
 
+#### Privilege-assignment ceiling (HEA-1722, HEA-1734)
+
+Sub-admins (callers who hold realm-scoped admin permissions but NOT `hearth.admin`) are subject to a **privilege ceiling** on all grant operations:
+
+- A sub-admin may only grant permissions that they themselves hold in their own token's `permissions` claim.
+- A sub-admin may only define (create/update) roles whose permission sets are subsets of their own permissions.
+- Attempting to grant or define a permission the caller does not hold returns `PERMISSION_DENIED` (HTTP 403 / gRPC `PERMISSION_DENIED`).
+
+Callers holding `hearth.admin` bypass this check — `hearth.admin` implicitly covers all permissions.
+
+**Why this matters:** Without this ceiling, a sub-admin with `docs.edit` could create a role containing `billing.admin` and assign it to themselves, escalating their own privileges. The ceiling closes this indirect self-escalation path.
+
+**Applies to:**
+- `POST /admin/roles` and `PATCH /admin/roles/{id}` — role permission set must be ⊆ caller's permissions
+- gRPC `GrantUserPermission` — granted permission must be held by caller
+- gRPC `AddAdditionalRole` — role permissions must be ⊆ caller's permissions
+
 ### 8.3 Error envelope
 
 All endpoints return errors in the shared envelope:
@@ -1125,6 +1142,15 @@ caller error (e.g. `400` when `permission` field is absent).
 - Resource servers MUST treat `active: false` as a deny. No fields other than `active`
   MUST be inspected on an inactive response.
 - Introspection responses SHOULD NOT be cached — caching defeats the freshness guarantee.
+- **Audience restriction (RFC 7662 §2 — HEA-1729):** A client may only introspect a token
+  that is explicitly bound to it. Hearth enforces:
+  - If the token carries an `azp` claim (delegated/bound token), only the `azp` client or a
+    member of the token's `aud` may introspect it.
+  - If the token has no `azp` and `sid == "none"` (M2M/`client_credentials` token), only
+    the issuing client (`sub == client_id`) or an explicit `aud` member may introspect it.
+  - User-session tokens with no `azp` may be introspected by any authenticated client.
+  - All other cases return `{ "active": false }`. This prevents resource server A from
+    introspecting a token issued exclusively for resource server B.
 
 **`decision` mode:**
 - The `allowed: false` outcome MUST be treated as a deny regardless of cause. The endpoint
