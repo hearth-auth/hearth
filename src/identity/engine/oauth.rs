@@ -1041,7 +1041,13 @@ impl EmbeddedIdentityEngine {
             required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
-            cnf: None,
+            // M1 (RFC 9449 §5): bind refresh token to the DPoP key presented at exchange.
+            cnf: request
+                .dpop_jkt
+                .as_deref()
+                .map(|jkt| crate::identity::tokens::CnfClaim {
+                    jkt: jkt.to_string(),
+                }),
             custom: access_claims.custom.clone(),
             sv: None,
         };
@@ -1077,6 +1083,8 @@ impl EmbeddedIdentityEngine {
             // UA/ASN binding context (A-49) recorded on first refresh exchange.
             ua_hash: None,
             bound_asn: None,
+            // M1 (RFC 9449 §5): persist the DPoP key thumbprint for sender-constraint enforcement.
+            bound_jkt: request.dpop_jkt.clone(),
         };
         let family_bytes =
             serde_json::to_vec(&family).map_err(|e| IdentityError::Serialization {
@@ -2657,6 +2665,33 @@ impl EmbeddedIdentityEngine {
         // 2b. RFC 7519 §4.1.3 — audience must include the configured value.
         if !claims.aud.contains(&self.config.token.audience) {
             return Ok(IntrospectionResponse::inactive());
+        }
+
+        // 2c. L7: RFC 7662 §2 — restrict introspection to the token's intended
+        // audience. A client may only inspect a token that is explicitly bound
+        // to it via `azp` or `aud`. This prevents resource server A from
+        // introspecting a token issued exclusively for resource server B.
+        //
+        // Three cases:
+        // - `azp` set (delegated/bound token): only azp-match or aud-match allowed.
+        // - `azp` absent, `sid == "none"` (M2M/client_credentials): only the
+        //   owning client (`sub == cid`) or an audience member may self-introspect.
+        // - `azp` absent, `sid != "none"` (unbound user session token): any
+        //   authenticated client may introspect (no restriction).
+        if let Some(ref cid) = request.introspecting_client_id {
+            let cid_str = cid.to_string();
+            if let Some(token_azp) = claims.azp.as_deref() {
+                if token_azp != cid_str && !claims.aud.contains(cid_str.as_str()) {
+                    return Ok(IntrospectionResponse::inactive());
+                }
+            } else if claims.sid == "none" {
+                // M2M token: only the issuing client or an explicit audience member
+                // may introspect it.
+                if claims.sub != cid_str && !claims.aud.contains(cid_str.as_str()) {
+                    return Ok(IntrospectionResponse::inactive());
+                }
+            }
+            // Unbound user-session tokens: any authenticated client may introspect.
         }
 
         // 3. Check expiration and iat sanity

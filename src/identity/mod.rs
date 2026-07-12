@@ -2420,8 +2420,10 @@ pub trait IdentityEngine: Send + Sync {
 
     /// Validates a capability token for a tool invocation (Phase C — Complete Mediation).
     ///
-    /// Verifies signature, token type, audience, expiry, tool/action match, and
-    /// single-use JTI. Returns the calling `AgentId` on success.
+    /// Verifies signature, token type, audience, expiry, tool/action match,
+    /// single-use JTI, and that the token's `sub` matches `caller_sub` (M5 —
+    /// prevents confused-deputy attacks where agent A presents a token minted
+    /// for agent B). Returns the calling `AgentId` on success.
     /// All failure modes return `ToolApprovalRequired { tool }`.
     fn validate_capability_token(
         &self,
@@ -2429,6 +2431,7 @@ pub trait IdentityEngine: Send + Sync {
         token: &str,
         tool_name: &str,
         action: &str,
+        caller_sub: &str,
     ) -> Result<crate::core::AgentId, IdentityError>;
 
     // ── Phase D.1: Attenuating Authorization Tokens ──────────────────────────

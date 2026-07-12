@@ -1976,6 +1976,25 @@ pub struct RealmYamlConfig {
     /// `demo.enabled` is `true`. See [`SeedingYamlConfig`].
     #[serde(default)]
     pub seeding: Option<SeedingYamlConfig>,
+    /// Per-realm tool-group registry (Phase C).
+    ///
+    /// Declares named groups and the tools that belong to each group. Used to
+    /// resolve `toolgroup.{name}.{action}` permissions in the tool-invocation
+    /// gate. When absent, no tool groups are configured for this realm.
+    #[serde(default)]
+    pub tool_registry: Option<ToolRegistryYamlConfig>,
+}
+
+/// YAML for `realms.{name}.tool_registry.*`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ToolRegistryYamlConfig {
+    /// Maps group name → list of tool names.
+    ///
+    /// Each entry declares a named group containing one or more tool identifiers.
+    /// Agents with `toolgroup.{name}.invoke` (or `.deny` / `.invoke_with_approval`)
+    /// in their permissions get those permissions applied to every tool in the group.
+    #[serde(default)]
+    pub groups: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// YAML for `realms.{name}.scim.*`.
@@ -2782,6 +2801,12 @@ impl RealmYamlConfig {
             pre_token_webhook: None,
             approval_webhook: None,
             mfa_required_roles: None,
+            // Tool-group registry: copy group → [tool] map directly from YAML.
+            tool_groups: self
+                .tool_registry
+                .as_ref()
+                .map(|r| r.groups.clone())
+                .unwrap_or_default(),
         })
     }
 }

@@ -6,6 +6,133 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **Delegated (`act`) token RBAC permissions now attenuated** — token exchange previously copied
+  the subject's full `permissions` claim verbatim into the delegated token, allowing any actor
+  (regardless of its own RBAC grants) to acquire admin-level access by exchanging an admin's
+  token. Effective permissions on `act`-bearing tokens are now the intersection of the subject's
+  and actor's own permission sets. `roles` and `groups` are cleared on delegated tokens. Decision
+  documented in `AUTHORIZATION.md § 16` (HEA-1726).
+- **Privilege-ceiling enforced on `create_role` and `update_role`** — a sub-admin holding
+  `hearth.realm.admin` could previously create a role with arbitrary permissions (including
+  `hearth.admin`) or update an existing role to include permissions the caller does not hold.
+  Both gRPC handlers now reject any permission set where the caller does not already hold each
+  listed permission, unless the caller has `hearth.admin`. Prevents role-definition poisoning
+  and the direct self-escalation path (update own assigned role → receive `hearth.admin` on
+  next token issuance) (HEA-1734).
+- **Privilege-assignment ceiling enforced on `GrantUserPermission` and `AddAdditionalRole`** —
+  a sub-admin holding `hearth.realm.admin` could previously call the gRPC `GrantUserPermission`
+  RPC or `AddAdditionalRole` to grant themselves or any user the `hearth.admin` permission (or a
+  role carrying it), escalating to full realm superuser. Both RPCs now reject any grant where the
+  assigner does not already hold the permission (or every permission in the target role) unless the
+  caller has `hearth.admin`. The fix mirrors the existing ceiling already enforced on the role
+  assignment path (HEA-1722).
+- **Unauthenticated `POST /authorize` now rejected** — the machine-API authorization endpoint
+  previously accepted a caller-supplied `user_id` with no authentication, allowing any party who
+  knew a valid `client_id`, `redirect_uri`, and `user_id` (all non-secret) to mint an OAuth
+  authorization code for an arbitrary account — a pre-authentication account takeover. The
+  endpoint now requires a valid Bearer token; the token's `sub` is used as the authoritative
+  user identity and any body-supplied `user_id` is ignored. The same fix applies to
+  `POST /realms/{realm}/authorize` and the gRPC `Authorize` RPC (HEA-1721).
+- **Tool-gate H2: realm tool-group map now loaded from config; fail-closed on error** — `POST /v1/tools/invoke`
+  previously built an empty `ToolGroupMap` on every request, so `toolgroup.{g}.deny` permissions
+  could never fire and the `Allow` outcome was always returned for group-member tools. The handler
+  now loads the realm's `tool_registry.groups` map from stored config; if the realm cannot be
+  loaded the request is rejected with 500 (fail-closed) rather than silently bypassing group denies
+  (HEA-1723).
+- **Tool-gate M4: DPoP proof now enforced when token carries `cnf.jkt`** — a stolen DPoP-bound
+  access token could previously be replayed as a plain bearer against `POST /v1/tools/invoke`
+  because the endpoint never checked for a matching DPoP proof. The handler now requires a valid
+  DPoP proof (signature, `htu`, `htm`, nonce, JTI replay, jkt thumbprint binding) when the token
+  has a `cnf.jkt` claim; missing or mismatched proofs return 401 with a `DPoP-Nonce` header
+  (HEA-1723).
+- **Tool-gate M5: capability token caller binding enforced** — `validate_capability_token_inner`
+  previously validated a capability token's signature, expiry, tool/action, and single-use JTI
+  without checking that the presenting agent is the one the approval was minted for. Agent A could
+  consume an approval minted for Agent B (confused-deputy attack). The engine now requires
+  `capability.sub == caller_sub` (the `sub` from the caller's bearer token), rejecting cross-agent
+  capability token presentation (HEA-1723).
+- **Tool-gate M6: `Allow`-path invocations now emit `AgentToolInvocation` audit records** — only
+  the capability-token (approval) path previously emitted an audit event; a plain `Allow` returned
+  200 with no record, creating a blind spot for all non-approval tool invocations. The `Allow` arm
+  now writes an `AgentToolInvocation` audit event before returning (HEA-1723).
+- **WebAuthn discoverable-login userHandle spoofing fixed** — in the discoverable passkey flow,
+  the server now rejects any assertion where the client-supplied `userHandle` does not match the
+  credential owner resolved from the server-side discoverable index. Previously, an attacker with
+  a valid discoverable credential in the target realm could substitute an arbitrary victim UUID
+  into `userHandle` (which is not covered by the WebAuthn signature) and receive a valid session
+  for the victim account — a pre-authentication account takeover (CWE-287 / CWE-639). The
+  discoverable index is now authoritative; `userHandle` is validated, not trusted (HEA-1720).
+- **JSON embedded in `<script>` tags now HTML-escaped (M10)** — the admin config editor and roles
+  tab rendered `serde_json` output verbatim inside `<script type="application/json">` elements;
+  a stored config value containing `</script>` would prematurely close the tag, creating a latent
+  stored-XSS vector. JSON is now `</` → `<\/` escaped before template injection (HEA-1728).
+- **Refresh tokens now DPoP sender-constrained (M1 — RFC 9449 §5)** — refresh tokens were
+  minted with no `cnf` claim and the refresh path never verified DPoP key binding, so a stolen
+  refresh token was usable by any holder regardless of key possession. The grant family now records
+  the `bound_jkt` (JWK thumbprint) from the DPoP proof presented at authorization-code exchange;
+  the refresh token carries the matching `cnf.jkt` claim; and subsequent refresh calls are rejected
+  with `invalid_token` if the caller presents a different or absent JKT. Non-DPoP flows are
+  unaffected (HEA-1725).
+- **Token-exchange grant now requires client authentication (M2 — RFC 8693 §2.1)** — the
+  `urn:ietf:params:oauth:grant-type:token-exchange` handler previously accepted an
+  unauthenticated `client_id` body parameter and derived the `act.sub` claim and
+  `AgentDelegation` audit actor from it, allowing any caller to forge the acting-party identity
+  by supplying an arbitrary UUID. The handler now calls the standard client authentication path
+  (`verify_endpoint_client`); confidential clients must present a matching secret (via body
+  parameter or HTTP Basic Auth); `act.sub` is derived from the verified identity (HEA-1725).
+- **Email-verify token now protected by per-token redemption lock (L6)** — the email-verification
+  token lacked the TOCTOU guard already present on password-reset and magic-link redemption. Two
+  concurrent requests with the same token could both pass the used-check. A per-hash mutex
+  (`token_redemption_lock`) is now acquired before any read-modify-write (HEA-1728).
+- **Token introspection scoped to intended audience (L7)** — any authenticated realm client could
+  previously introspect any token regardless of whether the token was issued to it. The endpoint
+  now returns `active: false` if the introspecting client is not the token's `azp` or `sub`
+  (client_credentials self-introspect) (HEA-1728).
+- **`Cache-Control: no-store` added to all authenticated HTML responses (L8)** — the
+  `SecurityHeadersLayer` now emits `Cache-Control: no-store` on any `text/html` response,
+  preventing sensitive admin and account pages from being retained by shared or private caches.
+  Static assets (CSS, JS, fonts) are unaffected (HEA-1728).
+- **MFA at-rest DEK decoupled from signing key (H3)** — TOTP secrets and recovery-code blobs were
+  previously encrypted with an HKDF-derived DEK keyed from the realm's Ed25519 signing key.
+  Rotating the signing key (an advertised operator feature) silently changed the DEK, making every
+  TOTP verification fail immediately after rotation and locking all MFA-enrolled users out of their
+  accounts. Each realm now receives a dedicated 32-byte random MFA DEK stored separately (like the
+  audit HMAC key), KEK-wrapped when `security.key_encryption_key` is configured. Signing-key
+  rotation no longer touches MFA data. Any blobs still encrypted under the old signing-key-derived
+  DEK are re-encrypted atomically during the next rotation call (HEA-1724).
+- **Pre-token and approval webhooks now routed through SSRF guard (M7)** — webhook delivery
+  previously bypassed the `check_webhook_url` SSRF check, allowing a configured webhook URL to
+  target RFC 1918 / loopback / link-local / ULA addresses (cloud-metadata SSRF). Both the
+  pre-token enrichment webhook and the approval-notification webhook are now checked at
+  registration time (https:// scheme required; http:// rejected) and at delivery time (DNS
+  resolution blocks private ranges). Tests updated to use https:// URLs (HEA-1727).
+- **Client IP extraction now trusted-proxy-aware (M8)** — `register_client_ip` and
+  `captcha_client_ip` previously trusted the leftmost `X-Forwarded-For` header value, allowing a
+  remote attacker to spoof their source IP by prepending an arbitrary address to XFF. Both
+  extraction sites now use `extract_client_ip(headers, fallback_peer, trusted_proxies)`, which
+  walks XFF right-to-left and stops at the first non-trusted hop — returning the true client IP
+  regardless of attacker-controlled XFF values (HEA-1727).
+- **`SessionCreated` and `TokenIssued` audit events now include client IP and user-agent (M9)**
+  — success-path authentication events previously emitted no metadata, making IP- or UA-based
+  forensics impossible after a breach. `SessionContext` IP and UA are now threaded into
+  `AuditContext.metadata` (`client_ip`, `user_agent`) for `SessionCreated` and `TokenIssued`
+  audit events (HEA-1727).
+- **HIBP breach check now enabled by default** — `BreachCheckConfig::default()` previously
+  had `enabled: false` (safe migration default for existing deployments). The default is now
+  `enabled: true` so new realms get breach checking out of the box without explicit
+  configuration. Existing configs that explicitly set `enabled: false` are unaffected.
+  Integration tests inject a no-network stub transport to avoid HIBP API calls in CI
+  (HEA-1727).
+
+### Changed
+- **Password minimum length floor raised from 8 to 12 characters (NIST SP 800-63B §5.1.1.1)**
+  — the unconditional hard floor for all password-setting and self-registration call sites has
+  been raised from 8 to 12 characters. Realm `password_policy.min_length` may still raise this
+  higher but cannot lower it below 12. Deployments where users have passwords shorter than 12
+  characters are unaffected at login (existing hashes remain valid); the floor applies at the
+  next password change (HEA-1727).
+
 ### Fixed
 - **Dev-mode `oidc.issuer` defaults to actual server URL** — when running `hearth serve --dev`
   without an explicit `oidc.issuer` config, the server now uses `http://127.0.0.1:{port}` as the

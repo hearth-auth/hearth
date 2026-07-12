@@ -1036,7 +1036,7 @@ pub struct AuditEvent {
     /// Optional additional context (e.g., IP address, user agent).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
-    /// SHA-256 hash chain link: `SHA256(prev_hash || event_data)`.
+    /// HMAC-SHA256 hash chain link: `HMAC-SHA256(realm_key, prev_hash || event_data)`.
     ///
     /// For the first event in a realm's log, `prev_hash` is the
     /// string "genesis".

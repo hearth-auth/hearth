@@ -183,7 +183,7 @@ fn account_lockout_blocks_after_n_failures() {
         .set_password(
             &realm,
             user.id(),
-            &CleartextPassword::from_string("correct1".to_string()),
+            &CleartextPassword::from_string("correct-pass-1!".to_string()),
         )
         .expect("set password");
 
@@ -218,7 +218,7 @@ fn account_lockout_blocks_correct_password_during_window() {
     let user = engine
         .create_user(&realm, &new_user_req("lockout-correct"))
         .expect("create user");
-    let correct = CleartextPassword::from_string("correct1".to_string());
+    let correct = CleartextPassword::from_string("correct-pass-1!".to_string());
     engine
         .set_password(&realm, user.id(), &correct)
         .expect("set password");

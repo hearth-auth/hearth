@@ -2,6 +2,7 @@
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::core::{RealmId, Timestamp};
@@ -405,6 +406,14 @@ pub struct RealmConfig {
     /// (fail-open per §6.1 of the abuse plan).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webauthn_attestation: Option<WebAuthnAttestationPolicy>,
+    /// Tool-group membership map (Phase C — `toolgroup.*` permission expansion).
+    ///
+    /// Maps group name → list of tool names that belong to the group. Used by
+    /// `evaluate_tool_access` to resolve `toolgroup.{name}.{action}` permissions.
+    /// Empty by default (no groups defined). Set via `tool_registry.groups` in
+    /// `hearth.yaml`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tool_groups: HashMap<String, Vec<String>>,
     /// Pre-token enrichment webhook (HEA-1324, Gap C-3).
     ///
     /// When set, Hearth POSTs a JSON context payload to the configured URL
@@ -478,10 +487,15 @@ impl PreTokenWebhookConfig {
     /// Validates the webhook configuration.
     ///
     /// Returns `Err` with a human-readable reason when the configuration is
-    /// insecure. Currently enforces:
+    /// insecure. Enforces:
+    /// - `url` MUST use the `https://` scheme (M7 SSRF guard — scheme check at
+    ///   registration time; DNS-based check runs pre-flight on each delivery).
     /// - `hmac_secret` MUST be set: an unsigned webhook endpoint allows any
     ///   network-reachable caller to inject arbitrary JWT claims.
     pub fn validate(&self) -> Result<(), String> {
+        if !self.url.starts_with("https://") {
+            return Err("pre_token_webhook.url must use the https:// scheme".to_string());
+        }
         if self.hmac_secret.as_deref().map_or(true, str::is_empty) {
             return Err(
                 "pre_token_webhook.hmac_secret is required: an unsigned webhook endpoint \
@@ -518,6 +532,19 @@ pub struct ApprovalWebhookConfig {
     /// Request timeout in milliseconds. Defaults to 5 000.
     #[serde(default = "default_approval_webhook_timeout_ms")]
     pub timeout_ms: u64,
+}
+
+impl ApprovalWebhookConfig {
+    /// Validates the approval webhook configuration.
+    ///
+    /// Enforces that `url` uses the `https://` scheme. The full SSRF DNS-based
+    /// check runs pre-flight on each delivery attempt in the production transport.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.url.starts_with("https://") {
+            return Err("approval_webhook.url must use the https:// scheme".to_string());
+        }
+        Ok(())
+    }
 }
 
 fn default_approval_webhook_timeout_ms() -> u64 {
@@ -756,8 +783,9 @@ impl PartialEq for BreachCheckConfig {
 impl Default for BreachCheckConfig {
     fn default() -> Self {
         Self {
-            // Safe migration default: disabled so existing realms are unaffected.
-            enabled: false,
+            // NIST SP 800-63B: breach-check is on by default. Tests inject a
+            // stub transport via `with_hibp_transport` to avoid network calls.
+            enabled: true,
             timeout_ms: 3000,
             hibp_api_key: SecretString::new(String::new()),
         }
@@ -938,7 +966,7 @@ mod tests {
     #[test]
     fn pre_token_webhook_config_validate_rejects_none_secret() {
         let cfg = PreTokenWebhookConfig {
-            url: "http://localhost:9999/enrich".to_string(),
+            url: "https://localhost:9999/enrich".to_string(),
             timeout_ms: 1000,
             on_error: PreTokenWebhookErrorPolicy::FailOpen,
             hmac_secret: None,
@@ -953,7 +981,7 @@ mod tests {
     #[test]
     fn pre_token_webhook_config_validate_rejects_empty_secret() {
         let cfg = PreTokenWebhookConfig {
-            url: "http://localhost:9999/enrich".to_string(),
+            url: "https://localhost:9999/enrich".to_string(),
             timeout_ms: 1000,
             on_error: PreTokenWebhookErrorPolicy::FailOpen,
             hmac_secret: Some(String::new()),
@@ -968,7 +996,7 @@ mod tests {
     #[test]
     fn pre_token_webhook_config_validate_accepts_non_empty_secret() {
         let cfg = PreTokenWebhookConfig {
-            url: "http://localhost:9999/enrich".to_string(),
+            url: "https://localhost:9999/enrich".to_string(),
             timeout_ms: 1000,
             on_error: PreTokenWebhookErrorPolicy::FailOpen,
             hmac_secret: Some("my-secret".to_string()),

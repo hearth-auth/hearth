@@ -242,7 +242,7 @@ async fn auth_plus_rbac_permission_grant_and_check() {
         )
         .expect("create user");
 
-    let password = CleartextPassword::from_string("BobsP@ss123".to_string());
+    let password = CleartextPassword::from_string("BobsP@ss1234".to_string());
     harness
         .identity()
         .set_password(&realm, user.id(), &password)

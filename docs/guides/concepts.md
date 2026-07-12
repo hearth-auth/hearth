@@ -134,7 +134,7 @@ Every use of a refresh token issues a *new* refresh token and invalidates the ol
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /authorize` | Starts auth code flow; returns a short-lived, single-use code |
+| `POST /authorize` | Starts auth code flow (machine path — requires `Authorization: Bearer <token>`); returns a short-lived, single-use code. Token `sub` is used as the user identity. |
 | `POST /token` | Exchanges code → tokens, or rotates a refresh token |
 | `GET  /userinfo` | Returns scope-filtered profile claims for a valid access token |
 | `POST /revoke` | Revokes a refresh token and its entire grant family |

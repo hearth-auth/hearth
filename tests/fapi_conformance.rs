@@ -39,7 +39,7 @@ use hearth::core::{ClientId, RealmId, UserId};
 use hearth::identity::oidc::CodeChallengeMethod;
 use hearth::identity::{
     AuthorizationRequest, CreateRealmRequest, CreateUserRequest, FapiProfile, IdentityError,
-    PushedAuthorizationRequest, RegisterClientRequest, UpdateRealmRequest,
+    PushedAuthorizationRequest, RegisterClientRequest, SessionContext, UpdateRealmRequest,
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -924,6 +924,7 @@ async fn start_fapi_http_server() -> (
     String,
     String,
     String,
+    String,
     tokio::sync::oneshot::Sender<()>,
 ) {
     use hearth::protocol::http::{router, AppState};
@@ -984,6 +985,18 @@ async fn start_fapi_http_server() -> (
     let client_uuid = client.client_id().as_uuid().to_string();
     let user_uuid = user.id().as_uuid().to_string();
 
+    // Issue a Bearer token for the test user so tests can authenticate POST /authorize (HEA-1721).
+    let session = harness
+        .identity()
+        .create_session(&realm_id, user.id(), &SessionContext::default())
+        .expect("create session for fapi test user");
+    let user_token = harness
+        .identity()
+        .issue_tokens(&realm_id, user.id(), session.id())
+        .expect("issue tokens for fapi test user")
+        .access_token()
+        .to_string();
+
     let state = Arc::new(AppState::new_dev(
         harness.identity_arc(),
         harness.rbac_arc(),
@@ -1011,6 +1024,7 @@ async fn start_fapi_http_server() -> (
         realm_uuid,
         client_uuid,
         user_uuid,
+        user_token,
         tx,
     )
 }
@@ -1024,7 +1038,8 @@ async fn start_fapi_http_server() -> (
 /// `request_uri` and returns a real auth code.
 #[tokio::test]
 async fn fapi_b07_http_par_authorize_flow_succeeds() {
-    let (base, realm_uuid, client_uuid, user_uuid, _shutdown) = start_fapi_http_server().await;
+    let (base, realm_uuid, client_uuid, user_uuid, user_token, _shutdown) =
+        start_fapi_http_server().await;
     let http = reqwest::Client::new();
 
     // Step 1: Push authorization parameters to /as/par to get a request_uri.
@@ -1061,6 +1076,7 @@ async fn fapi_b07_http_par_authorize_flow_succeeds() {
     let auth_resp = http
         .post(format!("{base}/authorize"))
         .header("X-Realm-ID", &realm_uuid)
+        .header("Authorization", format!("Bearer {user_token}"))
         .json(&serde_json::json!({
             "user_id": user_uuid,
             "request_uri": request_uri
@@ -1088,13 +1104,15 @@ async fn fapi_b07_http_par_authorize_flow_succeeds() {
 /// ensures the HTTP surface enforces the PAR-only gate (FAPI 2.0 §5.2.2).
 #[tokio::test]
 async fn fapi_b08_http_direct_authorize_without_par_rejected() {
-    let (base, realm_uuid, client_uuid, user_uuid, _shutdown) = start_fapi_http_server().await;
+    let (base, realm_uuid, client_uuid, user_uuid, user_token, _shutdown) =
+        start_fapi_http_server().await;
     let http = reqwest::Client::new();
 
     // Attempt authorize without a request_uri — must be rejected by the FAPI gate.
     let resp = http
         .post(format!("{base}/authorize"))
         .header("X-Realm-ID", &realm_uuid)
+        .header("Authorization", format!("Bearer {user_token}"))
         .json(&serde_json::json!({
             "user_id": user_uuid,
             "client_id": client_uuid,
@@ -1129,7 +1147,8 @@ async fn fapi_b08_http_direct_authorize_without_par_rejected() {
 /// call with the same `request_uri` must return 400 `invalid_request`.
 #[tokio::test]
 async fn fapi_b09_http_replay_request_uri_rejected() {
-    let (base, realm_uuid, client_uuid, user_uuid, _shutdown) = start_fapi_http_server().await;
+    let (base, realm_uuid, client_uuid, user_uuid, user_token, _shutdown) =
+        start_fapi_http_server().await;
     let http = reqwest::Client::new();
 
     // Push PAR to get a request_uri.
@@ -1161,6 +1180,7 @@ async fn fapi_b09_http_replay_request_uri_rejected() {
     let first_resp = http
         .post(format!("{base}/authorize"))
         .header("X-Realm-ID", &realm_uuid)
+        .header("Authorization", format!("Bearer {user_token}"))
         .json(&serde_json::json!({
             "user_id": user_uuid,
             "client_id": client_uuid,
@@ -1180,6 +1200,7 @@ async fn fapi_b09_http_replay_request_uri_rejected() {
     let replay_resp = http
         .post(format!("{base}/authorize"))
         .header("X-Realm-ID", &realm_uuid)
+        .header("Authorization", format!("Bearer {user_token}"))
         .json(&serde_json::json!({
             "user_id": user_uuid,
             "client_id": client_uuid,
@@ -1208,7 +1229,8 @@ async fn fapi_b09_http_replay_request_uri_rejected() {
 /// referrer leakage) could submit it using a different `client_id`.
 #[tokio::test]
 async fn fapi_b10_http_client_id_mismatch_rejected() {
-    let (base, realm_uuid, client_uuid, user_uuid, _shutdown) = start_fapi_http_server().await;
+    let (base, realm_uuid, client_uuid, user_uuid, user_token, _shutdown) =
+        start_fapi_http_server().await;
     let http = reqwest::Client::new();
 
     // Push PAR using the real client.
@@ -1241,6 +1263,7 @@ async fn fapi_b10_http_client_id_mismatch_rejected() {
     let mismatch_resp = http
         .post(format!("{base}/authorize"))
         .header("X-Realm-ID", &realm_uuid)
+        .header("Authorization", format!("Bearer {user_token}"))
         .json(&serde_json::json!({
             "user_id": user_uuid,
             "client_id": other_client_id,
@@ -1386,6 +1409,8 @@ struct FapiAdvancedServer {
     /// Prefixed form of the client ID used in JAR `iss`/`client_id` claims.
     client_id_str: String,
     user_uuid: String,
+    /// Bearer token for the test user — required by POST /authorize (HEA-1721).
+    user_token: String,
     pkcs8_bytes: Vec<u8>,
     _shutdown: tokio::sync::oneshot::Sender<()>,
 }
@@ -1464,6 +1489,18 @@ async fn start_fapi_advanced_http_server() -> FapiAdvancedServer {
     let client_id_str = client.client_id().to_string();
     let user_uuid = user.id().as_uuid().to_string();
 
+    // Issue a Bearer token for the test user so tests can authenticate POST /authorize (HEA-1721).
+    let session = harness
+        .identity()
+        .create_session(&realm_id, user.id(), &SessionContext::default())
+        .expect("create session for fapi advanced test user");
+    let user_token = harness
+        .identity()
+        .issue_tokens(&realm_id, user.id(), session.id())
+        .expect("issue tokens for fapi advanced test user")
+        .access_token()
+        .to_string();
+
     let state = Arc::new(AppState::new_dev(
         harness.identity_arc(),
         harness.rbac_arc(),
@@ -1493,6 +1530,7 @@ async fn start_fapi_advanced_http_server() -> FapiAdvancedServer {
         client_uuid,
         client_id_str,
         user_uuid,
+        user_token,
         pkcs8_bytes,
         _shutdown: tx,
     }
@@ -1554,6 +1592,7 @@ async fn fapi_a08_http_par_jar_authorize_flow_succeeds() {
     let auth_resp = http
         .post(format!("{}/authorize", srv.base))
         .header("X-Realm-ID", &srv.realm_uuid)
+        .header("Authorization", format!("Bearer {}", srv.user_token))
         .json(&serde_json::json!({
             "user_id": srv.user_uuid,
             "request_uri": request_uri
@@ -1587,6 +1626,7 @@ async fn fapi_a09_http_direct_authorize_without_par_rejected() {
     let resp = http
         .post(format!("{}/authorize", srv.base))
         .header("X-Realm-ID", &srv.realm_uuid)
+        .header("Authorization", format!("Bearer {}", srv.user_token))
         .json(&serde_json::json!({
             "user_id": srv.user_uuid,
             "client_id": srv.client_uuid,

@@ -506,6 +506,14 @@ pub struct EmbeddedIdentityEngine {
     ///
     // INVARIANT: guard released before method returns; all callers are non-async helpers.
     mfa_attempt_trackers: Mutex<HashMap<String, AttemptTracker>>,
+    /// Cached per-realm MFA at-rest DEK (32-byte random key, HEA-1724).
+    ///
+    /// Decoupled from the signing key so signing-key rotation cannot invalidate
+    /// TOTP blobs.  Lazy-initialized on first MFA operation per realm; never
+    /// evicted (realm IDs are stable and the key is write-once).
+    ///
+    // INVARIANT: guard released before method returns; no .await in scope.
+    mfa_dek_cache: Mutex<HashMap<RealmId, [u8; 32]>>,
     /// Used nonces for replay protection (when nonce enforcement is enabled).
     ///
     /// Maps nonce value to the timestamp it was first seen. Entries are swept
@@ -633,6 +641,12 @@ pub struct EmbeddedIdentityEngine {
     /// `pre_token_webhook` configured. Uses an injectable transport so tests
     /// can stub out network I/O without a real HTTP server.
     pre_token_client: Arc<crate::identity::pre_token_webhook::PreTokenWebhookClient>,
+    /// Approval webhook delivery client (Phase C.5, M7).
+    ///
+    /// Delivers `ApprovalWebhookPayload` when an approval request is created.
+    /// Injectable via `with_approval_transport` so tests capture deliveries
+    /// in-process without a real HTTP server.
+    approval_client: Arc<crate::identity::approval_notifier::ApprovalWebhookClient>,
     /// Device fingerprint store for adaptive (risk-based) MFA.
     ///
     /// Holds HMAC-SHA256 digests of `(user_id, ip/24, user_agent)` with expiry
@@ -1006,6 +1020,8 @@ impl EmbeddedIdentityEngine {
             attempt_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; no .await in scope.
+            mfa_dek_cache: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1036,6 +1052,9 @@ impl EmbeddedIdentityEngine {
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
                 crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
+            ),
+            approval_client: Arc::new(
+                crate::identity::approval_notifier::ApprovalWebhookClient::new(),
             ),
             device_fp,
             sv_store,
@@ -1568,6 +1587,8 @@ impl EmbeddedIdentityEngine {
             attempt_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             mfa_attempt_trackers: Mutex::new(HashMap::new()),
+            // INVARIANT: guard released before method returns; no .await in scope.
+            mfa_dek_cache: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
             magic_link_rate_trackers: Mutex::new(HashMap::new()),
             // INVARIANT: guard released before method returns; all callers are non-async helpers.
@@ -1598,6 +1619,9 @@ impl EmbeddedIdentityEngine {
             hibp: Arc::new(crate::identity::hibp::HibpClient::new()),
             pre_token_client: Arc::new(
                 crate::identity::pre_token_webhook::PreTokenWebhookClient::new(),
+            ),
+            approval_client: Arc::new(
+                crate::identity::approval_notifier::ApprovalWebhookClient::new(),
             ),
             device_fp,
             sv_store,
@@ -1654,6 +1678,21 @@ impl EmbeddedIdentityEngine {
     ) -> Self {
         self.pre_token_client = Arc::new(
             crate::identity::pre_token_webhook::PreTokenWebhookClient::with_transport(transport),
+        );
+        self
+    }
+
+    /// Replaces the approval webhook transport (M7).
+    ///
+    /// Used in integration tests to capture approval webhook deliveries
+    /// in-process without making real HTTP calls. Follows the same pattern
+    /// as `with_pre_token_transport`.
+    pub fn with_approval_transport(
+        mut self,
+        transport: std::sync::Arc<dyn crate::identity::approval_notifier::ApprovalWebhookTransport>,
+    ) -> Self {
+        self.approval_client = Arc::new(
+            crate::identity::approval_notifier::ApprovalWebhookClient::with_transport(transport),
         );
         self
     }
@@ -2305,11 +2344,82 @@ impl EmbeddedIdentityEngine {
         }
     }
 
+    /// Returns (or lazily creates) the dedicated per-realm MFA at-rest DEK.
+    ///
+    /// The DEK is a 32-byte random key stored under `mfa:dek:key` in the realm
+    /// namespace, independent of the Ed25519 signing key.  This decoupling
+    /// ensures signing-key rotation cannot invalidate existing TOTP blobs
+    /// (HEA-1724).  The key is KEK-wrapped when `key_encryption_key` is
+    /// configured.
+    fn get_or_create_realm_mfa_dek(&self, realm_id: &RealmId) -> Result<[u8; 32], IdentityError> {
+        {
+            let cache = self.mfa_dek_cache.lock().expect("mfa_dek_cache poisoned");
+            if let Some(k) = cache.get(realm_id) {
+                return Ok(*k);
+            }
+        }
+
+        let kek = self
+            .config
+            .key_encryption_key
+            .as_ref()
+            .map(|k| k.as_bytes());
+        let storage_key = keys::mfa_dek_key();
+
+        let key_bytes: [u8; 32] =
+            match self
+                .storage
+                .get(realm_id, &storage_key)
+                .map_err(Self::storage_err)?
+            {
+                Some(raw) => {
+                    let plaintext = crate::identity::key_encryption::unwrap_key(&raw, kek)
+                        .map_err(|e| IdentityError::SigningError {
+                            reason: format!("MFA DEK unwrap failed: {e}"),
+                        })?;
+                    if plaintext.len() != 32 {
+                        return Err(IdentityError::SigningError {
+                            reason: format!(
+                                "MFA DEK has wrong length: {} bytes (expected 32)",
+                                plaintext.len()
+                            ),
+                        });
+                    }
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&plaintext);
+                    arr
+                }
+                None => {
+                    let rng = ring::rand::SystemRandom::new();
+                    let mut key = [0u8; 32];
+                    rng.fill(&mut key)
+                        .map_err(|_| IdentityError::SigningError {
+                            reason: "MFA DEK generation failed".into(),
+                        })?;
+                    let wrapped =
+                        crate::identity::key_encryption::wrap_key(&key, kek).map_err(|e| {
+                            IdentityError::SigningError {
+                                reason: format!("MFA DEK wrap failed: {e}"),
+                            }
+                        })?;
+                    self.storage
+                        .put(realm_id, &storage_key, &wrapped)
+                        .map_err(Self::storage_err)?;
+                    key
+                }
+            };
+
+        let mut cache = self.mfa_dek_cache.lock().expect("mfa_dek_cache poisoned");
+        cache.insert(realm_id.clone(), key_bytes);
+        Ok(key_bytes)
+    }
+
     /// Loads the stored MFA state for a user, decrypting sensitive fields.
     ///
-    /// Uses HKDF-SHA256 keyed from the realm signing key to derive a per-realm
-    /// TOTP DEK. Handles both the v2 encrypted format and the legacy v1
-    /// plaintext format (migrated transparently on the next save).
+    /// Uses the dedicated per-realm MFA DEK (HEA-1724).  Falls back to the
+    /// signing-key-derived DEK for blobs written before the dedicated key was
+    /// introduced, re-encrypting them under the new key on first access so
+    /// future loads don't require the signing key at all.
     fn load_mfa_state(
         &self,
         realm_id: &RealmId,
@@ -2322,11 +2432,22 @@ impl EmbeddedIdentityEngine {
             .map_err(Self::storage_err)?;
         match bytes {
             Some(b) => {
-                let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-                let mut dek = Zeroizing::new(totp::derive_totp_dek(signing_key.pkcs8_bytes())?);
-                let state = totp::deserialize_mfa_state(&b, &dek)?;
-                dek.zeroize();
-                Ok(Some(state))
+                let dek = self.get_or_create_realm_mfa_dek(realm_id)?;
+                match totp::deserialize_mfa_state(&b, &dek) {
+                    Ok(state) => Ok(Some(state)),
+                    Err(_) => {
+                        // Migration path: blob was encrypted under the signing-key-derived
+                        // DEK before HEA-1724. Fall back to the current signing key's DEK,
+                        // then re-encrypt so subsequent loads use the dedicated key.
+                        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
+                        let legacy_dek =
+                            Zeroizing::new(totp::derive_totp_dek(signing_key.pkcs8_bytes())?);
+                        let state = totp::deserialize_mfa_state(&b, &legacy_dek)?;
+                        drop(legacy_dek);
+                        self.save_mfa_state(realm_id, user_id, &state)?;
+                        Ok(Some(state))
+                    }
+                }
             }
             None => Ok(None),
         }
@@ -2334,19 +2455,18 @@ impl EmbeddedIdentityEngine {
 
     /// Persists MFA state for a user, encrypting sensitive fields before write.
     ///
-    /// `secret_base32` and `pending_recovery_codes` are AES-256-GCM encrypted
-    /// with a DEK derived from the realm signing key via HKDF-SHA256.
+    /// Always uses the dedicated per-realm MFA DEK (HEA-1724); never the
+    /// signing key.  `secret_base32` and `pending_recovery_codes` are
+    /// AES-256-GCM encrypted under that DEK.
     fn save_mfa_state(
         &self,
         realm_id: &RealmId,
         user_id: &UserId,
         state: &StoredMfaState,
     ) -> Result<(), IdentityError> {
-        let signing_key = self.get_or_load_realm_signing_key(realm_id)?;
-        let mut dek = Zeroizing::new(totp::derive_totp_dek(signing_key.pkcs8_bytes())?);
+        let dek = self.get_or_create_realm_mfa_dek(realm_id)?;
         let key = keys::encode_mfa_totp_key(user_id);
         let bytes = totp::serialize_mfa_state(state, &dek)?;
-        dek.zeroize();
         self.storage
             .put(realm_id, &key, &bytes)
             .map_err(Self::storage_err)
@@ -2762,6 +2882,16 @@ impl EmbeddedIdentityEngine {
             }
         }
 
+        // M1 (RFC 9449 §5): enforce DPoP key binding on the refresh path.
+        // If the grant family was bound to a DPoP key at issuance, the
+        // presented thumbprint must match — a stolen refresh token is unusable
+        // without the original private key.
+        if let Some(ref required_jkt) = family.bound_jkt {
+            if dpop_jkt != Some(required_jkt.as_str()) {
+                return Err(IdentityError::DPopBindingMismatch);
+            }
+        }
+
         // A-49: detect refresh-context drift (UA hash / ASN change) and score.
         // Fail-open: no bind_ctx or no stored hash → skip check.
         if let Some(ctx) = bind_ctx {
@@ -2881,7 +3011,11 @@ impl EmbeddedIdentityEngine {
             required_actions: Vec::new(),
             act: None,
             amr: Vec::new(),
-            cnf: None,
+            // M1 (RFC 9449 §5): propagate DPoP key binding to the rotated refresh token.
+            cnf: family
+                .bound_jkt
+                .as_ref()
+                .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.clone() }),
             custom: claims.custom.clone(),
             sv: None,
         };
@@ -3154,26 +3288,6 @@ impl EmbeddedIdentityEngine {
             .ok_or(IdentityError::InvalidToken)?;
         let sub_uuid = uuid::Uuid::parse_str(sub_str).map_err(|_| IdentityError::InvalidToken)?;
         Ok(UserId::new(sub_uuid))
-    }
-
-    /// Returns the depth of an RFC 8693 `act` delegation chain (A-38).
-    ///
-    /// An `act` object with no nested `act` has depth 1.  Each level of
-    /// nesting increments the count.  The loop is bounded by
-    /// `MAX_ACT_CHAIN_DEPTH + 2` to prevent any theoretical overflow.
-    fn act_chain_depth(act: &serde_json::Value) -> usize {
-        let mut depth: usize = 0;
-        let mut cur = act;
-        loop {
-            depth += 1;
-            if depth > crate::abuse::MAX_ACT_CHAIN_DEPTH + 1 {
-                return depth;
-            }
-            match cur.get("act") {
-                Some(next) => cur = next,
-                None => return depth,
-            }
-        }
     }
 }
 
@@ -4193,6 +4307,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             wh.validate()
                 .map_err(|reason| IdentityError::InvalidInput { reason })?;
         }
+        // M7: reject approval webhook URL with non-HTTPS scheme at registration time.
+        if let Some(ref wh) = config.approval_webhook {
+            wh.validate()
+                .map_err(|reason| IdentityError::InvalidInput { reason })?;
+        }
 
         // Generate a per-realm signing key
         let realm_signing_key = SigningKey::generate()?;
@@ -4358,8 +4477,13 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let old_name = realm.name().to_string();
 
         // SEC-20: reject webhook config without HMAC secret before mutating state.
+        // M7: also reject approval webhook URL with non-HTTPS scheme.
         if let Some(ref config) = request.config {
             if let Some(ref wh) = config.pre_token_webhook {
+                wh.validate()
+                    .map_err(|reason| IdentityError::InvalidInput { reason })?;
+            }
+            if let Some(ref wh) = config.approval_webhook {
                 wh.validate()
                     .map_err(|reason| IdentityError::InvalidInput { reason })?;
             }
@@ -5970,9 +6094,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             .put(realm_id, &user_session_key, &[])
             .map_err(Self::storage_err)?;
 
+        let session_audit_ctx = AuditContext {
+            actor: Actor::User(user_id.clone()),
+            metadata: Some(serde_json::json!({
+                "ip": context.ip_address,
+                "ua": context.user_agent_raw,
+            })),
+        };
         self.record_audit(
             realm_id,
-            None,
+            Some(&session_audit_ctx),
             AuditAction::SessionCreated,
             "session",
             &session_id.as_uuid().to_string(),
@@ -6453,9 +6584,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         )?;
         let custom = crate::identity::pre_token_webhook::merge_extra_claims(custom, extra_claims);
 
+        let token_audit_ctx = AuditContext {
+            actor: Actor::User(user_id.clone()),
+            metadata: Some(serde_json::json!({
+                "ip": session.ip_address(),
+                "ua": session.user_agent_raw(),
+            })),
+        };
         self.record_audit(
             realm_id,
-            None,
+            Some(&token_audit_ctx),
             AuditAction::TokenIssued,
             "token",
             &session_id.as_uuid().to_string(),
@@ -6571,10 +6709,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         }
 
         // A-38: reject tokens with deeply-nested `act` delegation chains.
-        // The `act` claim lands in `custom` (flattened map) since Hearth does
-        // not issue RFC 8693 act chains itself.
-        if let Some(act_val) = claims.custom.get("act") {
-            if Self::act_chain_depth(act_val) > crate::abuse::MAX_ACT_CHAIN_DEPTH {
+        // `act` is a typed field on TokenClaims; reading from `custom` was dead code.
+        if let Some(act) = &claims.act {
+            if act.depth() > crate::abuse::MAX_ACT_CHAIN_DEPTH {
                 return Err(IdentityError::InvalidToken);
             }
         }
@@ -7573,6 +7710,16 @@ impl IdentityEngine for EmbeddedIdentityEngine {
             origin,
         )?;
 
+        // SECURITY (HEA-1720): In the discoverable flow, `webauthn::complete_authentication`
+        // derives `user_id` from the client-supplied, unsigned `userHandle`. The discoverable
+        // index (keyed by credential_id) is authoritative for identity. Reject any mismatch to
+        // prevent userHandle-spoofing attacks that bypass authentication and take over accounts.
+        if pending.user_id.is_none() && result.user_id() != &owner_user_id {
+            return Err(IdentityError::InvalidAssertion {
+                reason: "userHandle does not match credential owner".into(),
+            });
+        }
+
         // Update sign counter
         let mut updated = stored;
         updated.sign_count = result.sign_count();
@@ -8196,6 +8343,11 @@ impl IdentityEngine for EmbeddedIdentityEngine {
     fn verify_email_token(&self, realm_id: &RealmId, token: &str) -> Result<UserId, IdentityError> {
         let token_hash = Self::sha256_hex(token.as_bytes());
         let key = keys::encode_email_verify_token(&token_hash);
+
+        // Acquire per-token lock to prevent TOCTOU: two concurrent requests
+        // with the same token must not both transition the user to Active.
+        let lock = self.token_redemption_lock(&token_hash);
+        let _guard = lock.lock().expect("token_redemption_lock poisoned");
 
         let bytes = self
             .storage
@@ -13031,9 +13183,10 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         let subject_remaining = subject_claims.exp.saturating_sub(now_secs);
 
         // 3. Validate actor_token if present (B.5 OBO).
-        // Returns (actor_sub, actor_scope_owned) where actor_scope_owned is the space-separated
-        // scope string the actor is permitted to hold (RFC 8693 §4.4).
-        let (actor_sub, actor_scope_owned) =
+        // Returns (actor_sub, actor_scope_owned, actor_permissions_owned) — the actor's scope
+        // ceiling (RFC 8693 §4.4) and the actor's own RBAC permission set (AUTHORIZATION.md § 16,
+        // HEA-1726). Both are used to intersect the delegated token's effective authorization.
+        let (actor_sub, actor_scope_owned, actor_permissions_owned) =
             if let Some(ref actor_jwt) = request.actor_token {
                 // F3 (HEA-1466): verify actor_token signature with the realm key before reading any
                 // claims. The prior jwt_payload_json path was unverified — fresh forgeries with
@@ -13087,28 +13240,36 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                     .scope
                     .unwrap_or_else(|| subject_claims.scope.clone().unwrap_or_default());
 
-                (actor_claims.sub, scope)
+                (actor_claims.sub, scope, actor_claims.permissions.clone())
             } else {
                 // No actor_token: the client is acting on its own behalf (no delegation chain).
                 // Preserve the original behavior — actor ceiling matches the subject's own scope
                 // so this path doesn't further restrict scope beyond subject ∩ requested.
+                // For permissions, use the subject's full set as the ceiling (no attenuation).
                 let actor_sub = request.client_id.as_uuid().to_string();
                 let actor_scope = subject_claims.scope.clone().unwrap_or_default();
-                (actor_sub, actor_scope)
+                (actor_sub, actor_scope, subject_claims.permissions.clone())
             };
 
         // 4. Delegation depth check.
         let existing_depth = subject_claims.act.as_ref().map_or(0, |a| a.depth());
         let new_depth = existing_depth + 1;
 
-        // Resolve max_delegation_depth from the agent record if actor is an agent.
-        let max_depth = self
+        // The effective ceiling is the minimum of:
+        //   (a) the new actor's own max_delegation_depth, and
+        //   (b) every prior agent in the existing act chain — each agent's
+        //       limit acts as a ceiling over all sub-delegations it allows.
+        // This prevents an intermediate agent with a loose limit from
+        // extending a chain beyond what the original delegator permitted.
+        let actor_ceiling = self
             .resolve_agent_max_depth(realm_id, &actor_sub)
             .unwrap_or(crate::abuse::MAX_ACT_CHAIN_DEPTH as u8);
+        let chain_ceiling =
+            self.chain_depth_ceiling(realm_id, subject_claims.act.as_ref(), actor_ceiling);
 
-        if new_depth as u8 > max_depth {
+        if new_depth as u8 > chain_ceiling {
             return Err(IdentityError::DelegationDepthExceeded {
-                max: max_depth,
+                max: chain_ceiling,
                 attempted: new_depth as u8,
             });
         }
@@ -13166,10 +13327,22 @@ impl IdentityEngine for EmbeddedIdentityEngine {
                 .dpop_jkt
                 .as_ref()
                 .map(|jkt| crate::identity::tokens::CnfClaim { jkt: jkt.clone() }),
-            roles: subject_claims.roles.clone(),
-            groups: subject_claims.groups.clone(),
-            org_groups: subject_claims.org_groups.clone(),
-            permissions: subject_claims.permissions.clone(),
+            // AUTHORIZATION.md § 16 (HEA-1726): effective permissions are the intersection of the
+            // subject's grants and the actor's own grants. roles/groups are cleared because they
+            // reflect only the subject's identity and do not represent the effective actor grants.
+            roles: Vec::new(),
+            groups: Vec::new(),
+            org_groups: Vec::new(),
+            permissions: {
+                let actor_perm_set: std::collections::HashSet<&str> =
+                    actor_permissions_owned.iter().map(|s| s.as_str()).collect();
+                subject_claims
+                    .permissions
+                    .iter()
+                    .filter(|p| actor_perm_set.contains(p.as_str()))
+                    .cloned()
+                    .collect()
+            },
             required_actions: Vec::new(),
             act: Some(new_act),
             amr: subject_claims.amr.clone(),
@@ -13318,8 +13491,9 @@ impl IdentityEngine for EmbeddedIdentityEngine {
         token: &str,
         tool_name: &str,
         action: &str,
+        caller_sub: &str,
     ) -> Result<crate::core::AgentId, IdentityError> {
-        self.validate_capability_token_inner(realm_id, token, tool_name, action)
+        self.validate_capability_token_inner(realm_id, token, tool_name, action, caller_sub)
     }
 
     // ── Phase D.1: AATs ─────────────────────────────────────────────────────
@@ -13478,6 +13652,29 @@ impl EmbeddedIdentityEngine {
         }
         Some(agent.max_delegation_depth())
     }
+
+    /// Returns the effective delegation depth ceiling for the new token.
+    ///
+    /// Takes the minimum of `actor_ceiling` and every prior agent's
+    /// `max_delegation_depth` found in the existing `act` chain. This
+    /// prevents a loose-limit intermediate agent from extending a chain
+    /// beyond what an earlier, stricter delegator permitted (L2).
+    fn chain_depth_ceiling(
+        &self,
+        realm_id: &RealmId,
+        existing_act: Option<&crate::identity::tokens::ActClaim>,
+        actor_ceiling: u8,
+    ) -> u8 {
+        let mut ceiling = actor_ceiling;
+        let mut cur = existing_act;
+        while let Some(act) = cur {
+            if let Some(depth) = self.resolve_agent_max_depth(realm_id, &act.sub) {
+                ceiling = ceiling.min(depth);
+            }
+            cur = act.act.as_deref();
+        }
+        ceiling
+    }
 }
 
 /// Generates and stores a new OTP then dispatches the SMS.
@@ -13598,8 +13795,18 @@ mod tests {
     use super::*;
     use crate::audit::EmbeddedAuditEngine;
     use crate::core::{FakeClock, Timestamp};
+    use crate::identity::hibp::{HibpError, HibpTransport};
     use crate::identity::RealmConfig;
     use crate::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
+
+    /// Stub HIBP transport for unit tests — always reports passwords as not compromised.
+    /// Prevents unit tests from making real network calls when HIBP is default-on.
+    struct NeverPwnedStub;
+    impl HibpTransport for NeverPwnedStub {
+        fn get_range(&self, _prefix: &str, _api_key: Option<&str>) -> Result<String, HibpError> {
+            Ok(String::new())
+        }
+    }
 
     fn setup_engine() -> (tempfile::TempDir, EmbeddedIdentityEngine, Arc<FakeClock>) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -13621,7 +13828,8 @@ mod tests {
             identity_config,
             audit as Arc<dyn AuditEngine>,
         )
-        .expect("engine creation");
+        .expect("engine creation")
+        .with_hibp_transport(Arc::new(NeverPwnedStub));
         (dir, engine, clock)
     }
 
@@ -14339,7 +14547,7 @@ mod tests {
     fn set_password_nonexistent_user_fails() {
         let (_dir, engine, _clock) = setup_engine();
         let realm = create_test_realm(&engine);
-        let pw = CleartextPassword::from_string("password".to_string());
+        let pw = CleartextPassword::from_string("valid-password1".to_string());
 
         let err = engine
             .set_password(&realm, &UserId::generate(), &pw)
@@ -14442,7 +14650,7 @@ mod tests {
         let realm = create_test_realm(&engine);
         let user = create_test_user(&engine, &realm);
 
-        let pw = CleartextPassword::from_string("password".to_string());
+        let pw = CleartextPassword::from_string("valid-password1".to_string());
         engine
             .set_password(&realm, user.id(), &pw)
             .expect("set password");
@@ -14450,7 +14658,7 @@ mod tests {
         engine.delete_user(&realm, user.id()).expect("delete");
 
         // Verify should fail with generic InvalidCredential (enumeration resistance)
-        let pw_check = CleartextPassword::from_string("password".to_string());
+        let pw_check = CleartextPassword::from_string("valid-password1".to_string());
         let err = engine
             .verify_password(&realm, user.id(), &pw_check)
             .expect_err("should fail");
@@ -14466,7 +14674,7 @@ mod tests {
         let realm = create_test_realm(&engine);
         let user = create_test_user(&engine, &realm);
 
-        let pw = CleartextPassword::from_string("password".to_string());
+        let pw = CleartextPassword::from_string("valid-password1".to_string());
         engine
             .set_password(&realm, user.id(), &pw)
             .expect("set password");
@@ -15430,7 +15638,8 @@ mod tests {
             identity_config,
             audit as Arc<dyn AuditEngine>,
         )
-        .expect("engine creation");
+        .expect("engine creation")
+        .with_hibp_transport(Arc::new(NeverPwnedStub));
         (dir, engine, clock)
     }
 
@@ -15442,7 +15651,7 @@ mod tests {
         let realm = create_test_realm(&engine);
         let user = create_test_user(&engine, &realm);
 
-        let pw = CleartextPassword::from_string("correct-pw".to_string());
+        let pw = CleartextPassword::from_string("correct-pw12".to_string());
         engine
             .set_password(&realm, user.id(), &pw)
             .expect("set password");
@@ -15459,7 +15668,7 @@ mod tests {
         }
 
         // 4th attempt: should be rate limited even with the correct password
-        let correct = CleartextPassword::from_string("correct-pw".to_string());
+        let correct = CleartextPassword::from_string("correct-pw12".to_string());
         let result = engine.verify_password(&realm, user.id(), &correct);
         assert!(
             matches!(result, Err(IdentityError::RateLimited)),
@@ -15474,7 +15683,7 @@ mod tests {
         let realm = create_test_realm(&engine);
         let user = create_test_user(&engine, &realm);
 
-        let pw = CleartextPassword::from_string("my-password".to_string());
+        let pw = CleartextPassword::from_string("my-password1".to_string());
         engine
             .set_password(&realm, user.id(), &pw)
             .expect("set password");
@@ -15489,7 +15698,7 @@ mod tests {
         }
 
         // Correct password resets the counter
-        let correct = CleartextPassword::from_string("my-password".to_string());
+        let correct = CleartextPassword::from_string("my-password1".to_string());
         let result = engine
             .verify_password(&realm, user.id(), &correct)
             .expect("should succeed");
@@ -15512,7 +15721,7 @@ mod tests {
         let realm = create_test_realm(&engine);
         let user = create_test_user(&engine, &realm);
 
-        let pw = CleartextPassword::from_string("my-password".to_string());
+        let pw = CleartextPassword::from_string("my-password1".to_string());
         engine
             .set_password(&realm, user.id(), &pw)
             .expect("set password");
@@ -15524,7 +15733,7 @@ mod tests {
         }
 
         // Confirm locked out
-        let correct = CleartextPassword::from_string("my-password".to_string());
+        let correct = CleartextPassword::from_string("my-password1".to_string());
         assert!(
             matches!(
                 engine.verify_password(&realm, user.id(), &correct),
@@ -15537,7 +15746,7 @@ mod tests {
         clock.advance(lockout_micros + 1);
 
         // Should be able to verify again
-        let correct = CleartextPassword::from_string("my-password".to_string());
+        let correct = CleartextPassword::from_string("my-password1".to_string());
         let result = engine
             .verify_password(&realm, user.id(), &correct)
             .expect("should be allowed after lockout expires");
@@ -15594,7 +15803,7 @@ mod tests {
                 .set_password(
                     &realm,
                     &user_id,
-                    &CleartextPassword::from_string("password1".to_string()),
+                    &CleartextPassword::from_string("valid-password1".to_string()),
                 )
                 .expect("set password");
             // 3 failures → lockout written to WAL
@@ -15610,7 +15819,7 @@ mod tests {
                     engine.verify_password(
                         &realm,
                         &user_id,
-                        &CleartextPassword::from_string("password1".to_string())
+                        &CleartextPassword::from_string("valid-password1".to_string())
                     ),
                     Err(IdentityError::RateLimited)
                 ),
@@ -15623,7 +15832,7 @@ mod tests {
         let result = engine2.verify_password(
             &realm,
             &user_id,
-            &CleartextPassword::from_string("password1".to_string()),
+            &CleartextPassword::from_string("valid-password1".to_string()),
         );
         assert!(
             matches!(result, Err(IdentityError::RateLimited)),
@@ -15648,7 +15857,7 @@ mod tests {
                 .set_password(
                     &realm,
                     &user_id,
-                    &CleartextPassword::from_string("password1".to_string()),
+                    &CleartextPassword::from_string("valid-password1".to_string()),
                 )
                 .expect("set password");
             for i in 0..3 {
@@ -15668,7 +15877,7 @@ mod tests {
         let result = engine2.verify_password(
             &realm,
             &user_id,
-            &CleartextPassword::from_string("password1".to_string()),
+            &CleartextPassword::from_string("valid-password1".to_string()),
         );
         assert!(
             matches!(result, Ok(true)),
@@ -15700,7 +15909,7 @@ mod tests {
                 .set_password(
                     &realm,
                     &user_id,
-                    &CleartextPassword::from_string("correct-pw".to_string()),
+                    &CleartextPassword::from_string("correct-pw12".to_string()),
                 )
                 .expect("set password");
 
@@ -15855,7 +16064,8 @@ mod tests {
             identity_config,
             audit as Arc<dyn AuditEngine>,
         )
-        .expect("engine creation");
+        .expect("engine creation")
+        .with_hibp_transport(Arc::new(NeverPwnedStub));
         (dir, engine, clock)
     }
 
@@ -16327,7 +16537,7 @@ mod tests {
                 &UpdateRealmRequest {
                     config: Some(RealmConfig {
                         pre_token_webhook: Some(PreTokenWebhookConfig {
-                            url: "http://localhost:9999/enrich".to_string(),
+                            url: "https://localhost:9999/enrich".to_string(),
                             timeout_ms: 1000,
                             on_error: PreTokenWebhookErrorPolicy::FailOpen,
                             hmac_secret: None,
@@ -16369,7 +16579,7 @@ mod tests {
                 &UpdateRealmRequest {
                     config: Some(RealmConfig {
                         pre_token_webhook: Some(PreTokenWebhookConfig {
-                            url: "http://localhost:9999/enrich".to_string(),
+                            url: "https://localhost:9999/enrich".to_string(),
                             timeout_ms: 1000,
                             on_error: PreTokenWebhookErrorPolicy::FailOpen,
                             hmac_secret: Some(String::new()),
@@ -16405,7 +16615,7 @@ mod tests {
                 &UpdateRealmRequest {
                     config: Some(RealmConfig {
                         pre_token_webhook: Some(PreTokenWebhookConfig {
-                            url: "http://localhost:9999/enrich".to_string(),
+                            url: "https://localhost:9999/enrich".to_string(),
                             timeout_ms: 1000,
                             on_error: PreTokenWebhookErrorPolicy::FailOpen,
                             hmac_secret: Some("my-strong-secret".to_string()),
@@ -16429,7 +16639,7 @@ mod tests {
                 name: "webhook-realm-create".to_string(),
                 config: Some(RealmConfig {
                     pre_token_webhook: Some(PreTokenWebhookConfig {
-                        url: "http://localhost:9999/enrich".to_string(),
+                        url: "https://localhost:9999/enrich".to_string(),
                         timeout_ms: 1000,
                         on_error: PreTokenWebhookErrorPolicy::FailOpen,
                         hmac_secret: None,
@@ -16481,7 +16691,7 @@ mod tests {
             .expect("create user 2");
 
         // Set passwords
-        let pw = CleartextPassword::from_string("password123".to_string());
+        let pw = CleartextPassword::from_string("valid-password123".to_string());
         engine
             .set_password(realm.id(), user1.id(), &pw)
             .expect("set password");
@@ -18510,7 +18720,7 @@ mod tests {
         let user = create_test_user(&engine, &realm);
 
         // Enroll and activate TOTP.
-        let pw = CleartextPassword::from_string("password".to_string());
+        let pw = CleartextPassword::from_string("valid-password1".to_string());
         engine
             .set_password(&realm, user.id(), &pw)
             .expect("set password");
@@ -18539,7 +18749,7 @@ mod tests {
         // Submit one step-up request with a wrong MFA code.
         let request = crate::identity::oidc::StepUpMfaGrantRequest {
             email: user.email().to_string(),
-            password: "password".to_string(),
+            password: "valid-password1".to_string(),
             mfa_code: "000000".to_string(),
             scope: None,
             client_ip: Some(test_ip.to_string()),
@@ -18881,51 +19091,171 @@ mod tests {
         );
     }
 
-    // A-38: act_chain_depth unit tests
+    // A-38: typed ActClaim::depth() unit tests
     //
-    // `act_chain_depth(v)` counts the act object itself as 1; each
-    // nested `act` adds 1. Validation rejects depth > MAX (3).
+    // The hot-path guard now reads `claims.act` (typed field) and calls
+    // `act.depth()` directly. These tests verify `ActClaim::depth()` so that
+    // the guard and the chain-building code stay in sync.
 
     #[test]
-    fn act_chain_depth_leaf_is_1() {
-        let v = serde_json::json!({ "sub": "alice" });
-        assert_eq!(EmbeddedIdentityEngine::act_chain_depth(&v), 1);
+    fn act_claim_depth_leaf_is_1() {
+        use crate::identity::tokens::ActClaim;
+        let leaf = ActClaim {
+            sub: "alice".to_string(),
+            act: None,
+        };
+        assert_eq!(leaf.depth(), 1);
     }
 
     #[test]
-    fn act_chain_depth_one_nested_is_2() {
-        let v = serde_json::json!({ "sub": "alice", "act": { "sub": "bob" } });
-        assert_eq!(EmbeddedIdentityEngine::act_chain_depth(&v), 2);
+    fn act_claim_depth_one_nested_is_2() {
+        use crate::identity::tokens::ActClaim;
+        let inner = ActClaim {
+            sub: "bob".to_string(),
+            act: None,
+        };
+        let outer = ActClaim {
+            sub: "alice".to_string(),
+            act: Some(Box::new(inner)),
+        };
+        assert_eq!(outer.depth(), 2);
     }
 
     #[test]
-    fn act_chain_depth_at_max_accepted() {
-        // Build a chain exactly MAX_ACT_CHAIN_DEPTH deep; must pass the guard.
+    fn act_claim_depth_at_max_accepted() {
+        use crate::identity::tokens::ActClaim;
         let max = crate::abuse::MAX_ACT_CHAIN_DEPTH;
-        // Start with the innermost leaf, then wrap max-1 times.
-        let mut node = serde_json::json!({ "sub": "leaf" });
+        let mut chain = ActClaim {
+            sub: "leaf".to_string(),
+            act: None,
+        };
         for i in 0..(max - 1) {
-            node = serde_json::json!({ "sub": format!("a{i}"), "act": node });
+            chain = ActClaim {
+                sub: format!("a{i}"),
+                act: Some(Box::new(chain)),
+            };
         }
-        let depth = EmbeddedIdentityEngine::act_chain_depth(&node);
-        assert_eq!(
-            depth, max,
-            "depth-{max} chain should equal MAX_ACT_CHAIN_DEPTH"
+        assert_eq!(chain.depth(), max);
+        assert!(
+            chain.depth() <= max,
+            "depth-{max} chain must not exceed ceiling"
         );
-        assert!(depth <= max, "depth-{max} chain should be within the cap");
     }
 
     #[test]
-    fn act_chain_depth_over_max_rejected() {
-        // Build a chain MAX+1 deep; must exceed the cap.
+    fn act_claim_depth_over_max_exceeds_cap() {
+        use crate::identity::tokens::ActClaim;
         let max = crate::abuse::MAX_ACT_CHAIN_DEPTH;
-        let mut node = serde_json::json!({ "sub": "leaf" });
+        let mut chain = ActClaim {
+            sub: "leaf".to_string(),
+            act: None,
+        };
         for i in 0..max {
-            node = serde_json::json!({ "sub": format!("a{i}"), "act": node });
+            chain = ActClaim {
+                sub: format!("a{i}"),
+                act: Some(Box::new(chain)),
+            };
         }
-        let depth = EmbeddedIdentityEngine::act_chain_depth(&node);
-        assert_eq!(depth, max + 1, "depth-{} chain should equal MAX+1", max + 1);
+        let depth = chain.depth();
+        assert_eq!(depth, max + 1);
         assert!(depth > max, "depth-{} chain should exceed the cap", max + 1);
+    }
+
+    // L2 regression: chain_depth_ceiling uses the minimum of all prior agents' limits.
+    //
+    // A strict delegator (max_delegation_depth=2) in the act chain must cap all
+    // subsequent sub-delegations even when the next actor has a higher limit (10).
+
+    #[test]
+    fn chain_depth_ceiling_honors_strict_prior_delegator() {
+        use crate::identity::tokens::ActClaim;
+        use crate::identity::{AgentOwner, CreateAgentRequest};
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        // Register agent A with max_delegation_depth = 2 (the strict cap).
+        let owner = create_test_user(&engine, &realm);
+        let agent_a = engine
+            .create_agent(
+                &realm,
+                &CreateAgentRequest {
+                    display_name: "strict-agent".to_string(),
+                    description: None,
+                    owner: AgentOwner::User(owner.id().clone()),
+                    capabilities: vec![],
+                    max_delegation_depth: 2,
+                },
+                None,
+            )
+            .expect("create agent A");
+
+        // Build an act chain that includes agent A as a prior delegator.
+        // This represents a token already delegated through agent A.
+        let agent_a_sub = format!("{}", agent_a.id());
+        let existing_act = ActClaim {
+            sub: agent_a_sub,
+            act: None,
+        };
+
+        // A new actor arrives with a much looser limit (10).
+        // The ceiling should be min(10, agent_a.max_delegation_depth=2) = 2.
+        let ceiling = engine.chain_depth_ceiling(&realm, Some(&existing_act), 10);
+        assert_eq!(
+            ceiling, 2,
+            "strict prior delegator (max=2) must cap the ceiling even when new actor allows 10"
+        );
+    }
+
+    #[test]
+    fn chain_depth_ceiling_new_actor_is_the_binding_constraint() {
+        use crate::identity::tokens::ActClaim;
+        use crate::identity::{AgentOwner, CreateAgentRequest};
+
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        // Register agent A with a generous limit (max_delegation_depth = 10).
+        let owner = create_test_user(&engine, &realm);
+        let agent_a = engine
+            .create_agent(
+                &realm,
+                &CreateAgentRequest {
+                    display_name: "loose-agent".to_string(),
+                    description: None,
+                    owner: AgentOwner::User(owner.id().clone()),
+                    capabilities: vec![],
+                    max_delegation_depth: 10,
+                },
+                None,
+            )
+            .expect("create agent A");
+
+        let agent_a_sub = format!("{}", agent_a.id());
+        let existing_act = ActClaim {
+            sub: agent_a_sub,
+            act: None,
+        };
+
+        // New actor has a tighter ceiling (3) — that should be the result.
+        let ceiling = engine.chain_depth_ceiling(&realm, Some(&existing_act), 3);
+        assert_eq!(
+            ceiling, 3,
+            "new actor ceiling (3) must win when it is stricter than the chain agent (10)"
+        );
+    }
+
+    #[test]
+    fn chain_depth_ceiling_no_existing_act_returns_actor_ceiling() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+
+        // With no prior act chain, the ceiling equals the actor's own limit.
+        let ceiling = engine.chain_depth_ceiling(&realm, None, 5);
+        assert_eq!(
+            ceiling, 5,
+            "no prior act chain: ceiling must equal actor's own max_delegation_depth"
+        );
     }
 
     // ===== DPoP storage tests (HEA-1410) =====
@@ -19293,7 +19623,7 @@ mod tests {
                 let realm = create_test_realm(&engine);
                 let user = create_test_user(&engine, &realm);
 
-                let pw = CleartextPassword::from_string("secret1a".to_string());
+                let pw = CleartextPassword::from_string("secret1a-pass".to_string());
                 engine
                     .set_password(&realm, user.id(), &pw)
                     .expect("set password");
@@ -19325,5 +19655,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ===== L6: Email-verify token redemption lock =====
+
+    /// Verify that `verify_email_token` is idempotent-safe: the second call with
+    /// the same token returns `VerificationTokenInvalid` after the first succeeds.
+    /// This regression-tests the TOCTOU fix (token_redemption_lock added to
+    /// verify_email_token).
+    #[test]
+    fn email_verify_token_cannot_be_redeemed_twice() {
+        let (_dir, engine, _clock) = setup_engine();
+        let realm = create_test_realm(&engine);
+        let user = create_test_user(&engine, &realm);
+
+        let token = engine
+            .issue_email_verification_token(&realm, user.id())
+            .expect("issue token");
+
+        // First redemption must succeed.
+        let result1 = engine.verify_email_token(&realm, &token);
+        assert!(result1.is_ok(), "first redemption should succeed");
+
+        // Second redemption with the same token must fail — token is deleted on use.
+        let result2 = engine.verify_email_token(&realm, &token);
+        assert!(
+            matches!(result2, Err(IdentityError::VerificationTokenInvalid)),
+            "second redemption must fail; got: {result2:?}"
+        );
     }
 }

@@ -256,6 +256,37 @@ fn check_role_permission_ceiling(
     Ok(())
 }
 
+/// Privilege-ceiling enforcement for direct permission grants (HEA-1722): verifies
+/// that the authenticated caller holds the permission they are trying to grant.
+/// Callers with `hearth.admin` bypass this check unconditionally — they implicitly
+/// hold all permissions.
+///
+/// Returns `PERMISSION_DENIED` if the assigner does not hold the permission.
+fn check_direct_permission_ceiling(
+    auth: &AdminAuth,
+    permission: &Permission,
+) -> Result<(), Status> {
+    if auth.permissions.iter().any(|p| p == "hearth.admin") {
+        return Ok(());
+    }
+    if !auth
+        .permissions
+        .iter()
+        .any(|p| p.as_str() == permission.as_str())
+    {
+        tracing::warn!(
+            realm_id = %auth.realm_id,
+            missing_permission = %permission,
+            "gRPC permission grant blocked: grantor does not hold the permission being granted"
+        );
+        return Err(Status::new(
+            Code::PermissionDenied,
+            "grantor does not hold the permission being granted",
+        ));
+    }
+    Ok(())
+}
+
 // --- trait impl ---------------------------------------------------------
 
 #[tonic::async_trait]
@@ -293,14 +324,21 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let permissions = permissions_from_strings(&inner.permissions)?;
+        // Privilege-ceiling check (HEA-1734): sub-admins must not define a role
+        // whose permission set exceeds their own — prevents role-definition
+        // poisoning and indirect self-escalation via a future assignment.
+        for permission in &permissions {
+            check_direct_permission_ceiling(&auth, permission)?;
+        }
         let parent_roles = parent_role_ids_from_strings(&inner.parent_role_ids)?;
         let description = if inner.description.is_empty() {
             None
         } else {
             Some(inner.description)
         };
+        let is_full_admin = auth.permissions.iter().any(|p| p == "hearth.admin");
         let role = self
             .state
             .rbac
@@ -312,6 +350,7 @@ impl RbacAdminService for RbacAdminSvc {
                     permissions,
                     parent_roles,
                     scope_kind: crate::rbac::RoleScopeKind::Realm,
+                    allow_reserved_permissions: is_full_admin,
                 },
             )
             .map_err(rbac_to_status)?;
@@ -347,7 +386,7 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let role_id = parse_role_id(&inner.role_id)?;
         // The proto uses "empty string = unchanged" semantics for name/description
         // and "always replace" semantics for permissions/parent_role_ids.
@@ -361,8 +400,16 @@ impl RbacAdminService for RbacAdminSvc {
         } else {
             Some(Some(inner.description))
         };
-        let permissions = Some(permissions_from_strings(&inner.permissions)?);
+        let parsed_permissions = permissions_from_strings(&inner.permissions)?;
+        // Privilege-ceiling check (HEA-1734): sub-admins may not replace a role's
+        // permission set with permissions they don't hold — this is the direct
+        // self-escalation path described in the issue (update own role → hearth.admin).
+        for permission in &parsed_permissions {
+            check_direct_permission_ceiling(&auth, permission)?;
+        }
+        let permissions = Some(parsed_permissions);
         let parent_roles = Some(parent_role_ids_from_strings(&inner.parent_role_ids)?);
+        let is_full_admin = auth.permissions.iter().any(|p| p == "hearth.admin");
         let updated = self
             .state
             .rbac
@@ -376,6 +423,7 @@ impl RbacAdminService for RbacAdminSvc {
                     parent_roles,
                     scope_kind: None,
                     status: None,
+                    allow_reserved_permissions: is_full_admin,
                 },
             )
             .map_err(rbac_to_status)?;
@@ -782,10 +830,13 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let user_id = parse_user_id(&inner.user_id)?;
         let permission = Permission::new(inner.permission.clone())
             .map_err(|r| Status::invalid_argument(format!("invalid permission: {r}")))?;
+        // Privilege-ceiling check (HEA-1722): sub-admins may only grant permissions
+        // they themselves hold. hearth.admin bypasses this check unconditionally.
+        check_direct_permission_ceiling(&auth, &permission)?;
         let scope = if inner.scope_type == "org" {
             let stripped = inner.org_id.strip_prefix("org_").unwrap_or(&inner.org_id);
             let uuid = uuid::Uuid::parse_str(stripped)
@@ -893,12 +944,21 @@ impl RbacAdminService for RbacAdminSvc {
         grpc_require_permission(&auth, "hearth.realm.admin")?;
         let inner = req.into_inner();
         assert_realm_matches(&auth.realm_id, &inner.realm_id)?;
-        let realm_id = auth.realm_id;
+        let realm_id = auth.realm_id.clone();
         let org_stripped = inner.org_id.strip_prefix("org_").unwrap_or(&inner.org_id);
         let org_uuid = uuid::Uuid::parse_str(org_stripped)
             .map_err(|_| Status::invalid_argument("invalid org_id"))?;
         let org_id = OrganizationId::new(org_uuid);
         let user_id = parse_user_id(&inner.user_id)?;
+        // Privilege-ceiling check (HEA-1722): resolve the role's permissions and
+        // reject if the assigner does not hold all of them. hearth.admin bypasses.
+        let ceiling_role = self
+            .state
+            .rbac
+            .get_role_by_name(&realm_id, &inner.role_name)
+            .map_err(rbac_to_status)?
+            .ok_or_else(|| Status::not_found("role not found"))?;
+        check_role_permission_ceiling(&auth, &self.state, &realm_id, &ceiling_role.id)?;
         let granted_by = if inner.granted_by.is_empty() {
             None
         } else {

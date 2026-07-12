@@ -25,9 +25,10 @@ struct AlwaysPwnedTransport;
 
 impl HibpTransport for AlwaysPwnedTransport {
     fn get_range(&self, _prefix: &str, _api_key: Option<&str>) -> Result<String, HibpError> {
-        // Return the suffix for "password" (SHA-1("password") = 5BAA61E4C9B93F3F0682250B6CF8331B7EE68FD8).
-        // The prefix is "5BAA6", so the suffix is "1E4C9B93F3F0682250B6CF8331B7EE68FD8".
-        Ok("1E4C9B93F3F0682250B6CF8331B7EE68FD8:9545824".to_string())
+        // Return the suffix for "password-hibp!!" (15 chars, ≥12-char floor).
+        // SHA-1("password-hibp!!") = 2EA28D1DB5202398F3D7F9A6199E5410BA75FACC
+        // prefix = "2EA28", suffix = "D1DB5202398F3D7F9A6199E5410BA75FACC"
+        Ok("D1DB5202398F3D7F9A6199E5410BA75FACC:9545824".to_string())
     }
 }
 
@@ -132,8 +133,8 @@ fn compromised_password_rejected_with_correct_error() {
     let realm = create_realm_with_breach_check(&engine, true);
     let user = make_user(&engine, realm.id(), "ac1");
 
-    // "password" is known to be in HIBP; the stub returns its suffix.
-    let pw = CleartextPassword::from_string("password".to_string());
+    // "password-hibp!!" is flagged by the stub (see AlwaysPwnedTransport).
+    let pw = CleartextPassword::from_string("password-hibp!!".to_string());
     let err = engine
         .set_password(realm.id(), user.id(), &pw)
         .expect_err("should reject compromised password");
@@ -152,7 +153,7 @@ fn compromised_password_emits_rejected_audit_event() {
     let realm = create_realm_with_breach_check(&engine, true);
     let user = make_user(&engine, realm.id(), "ac1-audit");
 
-    let pw = CleartextPassword::from_string("password".to_string());
+    let pw = CleartextPassword::from_string("password-hibp!!".to_string());
     let _ = engine.set_password(realm.id(), user.id(), &pw);
 
     let events = audit
@@ -219,9 +220,9 @@ fn disabled_breach_check_skips_hibp_entirely() {
     let realm = create_realm_with_breach_check(&engine, false);
     let user = make_user(&engine, realm.id(), "ac4");
 
-    // "password" would be rejected if HIBP was consulted.
-    // Since breach_check.enabled=false, it should be accepted.
-    let pw = CleartextPassword::from_string("password".to_string());
+    // With AlwaysPwned transport any password would be rejected if HIBP was consulted.
+    // Since breach_check.enabled=false, the transport must not be called.
+    let pw = CleartextPassword::from_string("disabled-check-pw".to_string());
     engine
         .set_password(realm.id(), user.id(), &pw)
         .expect("should accept when breach check is disabled");
@@ -235,7 +236,7 @@ fn disabled_breach_check_emits_no_hibp_audit_events() {
     let realm = create_realm_with_breach_check(&engine, false);
     let user = make_user(&engine, realm.id(), "ac4-noaudit");
 
-    let pw = CleartextPassword::from_string("password".to_string());
+    let pw = CleartextPassword::from_string("disabled-check-pw".to_string());
     engine
         .set_password(realm.id(), user.id(), &pw)
         .expect("accepted");

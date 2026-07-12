@@ -90,6 +90,14 @@ impl MailcatcherState {
         let expected = self.session_cookie_value();
         ct_eq(expected.as_bytes(), candidate.as_bytes())
     }
+
+    /// Returns `true` when `candidate` matches the mailcatcher access password.
+    ///
+    /// Uses constant-time comparison to prevent timing oracle attacks even in
+    /// dev-only code paths.
+    pub fn verify_password(&self, candidate: &str) -> bool {
+        ct_eq(self.password.as_bytes(), candidate.as_bytes())
+    }
 }
 
 impl std::fmt::Debug for MailcatcherState {
@@ -313,6 +321,34 @@ mod tests {
             "wrong cookie must be rejected"
         );
         assert!(!state.verify_cookie(""), "empty cookie must be rejected");
+    }
+
+    // ── Unit: verify_password constant-time comparison ────────────────────
+
+    #[test]
+    fn verify_password_accepts_correct_password() {
+        let state = MailcatcherState::new("s3cr3t-pw".to_string());
+        assert!(
+            state.verify_password("s3cr3t-pw"),
+            "correct password must be accepted"
+        );
+    }
+
+    #[test]
+    fn verify_password_rejects_wrong_password() {
+        let state = MailcatcherState::new("s3cr3t-pw".to_string());
+        assert!(
+            !state.verify_password("wrong"),
+            "wrong password must be rejected"
+        );
+        assert!(
+            !state.verify_password(""),
+            "empty password must be rejected"
+        );
+        assert!(
+            !state.verify_password("s3cr3t-pw-extra"),
+            "password with extra suffix must be rejected"
+        );
     }
 
     // ── Unit: header injection rejected ──────────────────────────────────

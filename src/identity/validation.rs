@@ -33,9 +33,10 @@ const MAX_PASSWORD_LENGTH: usize = 1024;
 
 /// Minimum password length enforced unconditionally (HSEC-003 hard floor).
 ///
+/// Raised to 12 per NIST SP 800-63B §5.1.1.1.
 /// Realm `password_policy.min_length` may raise this higher but cannot lower it.
 /// The floor applies even when no `PasswordPolicy` is configured for the realm.
-pub(crate) const MIN_PASSWORD_LENGTH_FLOOR: usize = 8;
+pub(crate) const MIN_PASSWORD_LENGTH_FLOOR: usize = 12;
 
 /// Maximum length for an OAuth client name.
 const MAX_CLIENT_NAME_LENGTH: usize = 256;

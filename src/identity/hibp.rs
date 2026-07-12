@@ -37,6 +37,7 @@ pub trait HibpTransport: Send + Sync {
 /// Runs the blocking ureq call inside `block_in_place` when invoked from a
 /// multi-thread Tokio runtime, matching the pattern used by
 /// `src/identity/email/http.rs`.
+#[allow(dead_code)]
 pub(crate) struct UreqHibpTransport;
 
 impl HibpTransport for UreqHibpTransport {
@@ -80,6 +81,22 @@ impl HibpTransport for UreqHibpTransport {
     }
 }
 
+/// No-op HIBP transport — always reports passwords as not compromised.
+///
+/// Used automatically when compiled with `#[cfg(test)]` so that unit and
+/// integration tests do not make real network calls when HIBP is enabled by
+/// default. Tests that need to exercise the breach-check path (e.g.
+/// `hibp_breach_check`) inject their own stub via `with_hibp_transport`.
+#[cfg(test)]
+pub(crate) struct NoOpHibpTransport;
+
+#[cfg(test)]
+impl HibpTransport for NoOpHibpTransport {
+    fn get_range(&self, _prefix: &str, _api_key: Option<&str>) -> Result<String, HibpError> {
+        Ok(String::new())
+    }
+}
+
 /// HIBP k-anonymity breach-check client.
 ///
 /// Holds a shared transport (connection pool in production). The transport is
@@ -95,10 +112,24 @@ impl Default for HibpClient {
 }
 
 impl HibpClient {
-    /// Creates a production client backed by [`UreqHibpTransport`].
+    /// Creates a breach-check client.
+    ///
+    /// In production (`#[cfg(not(test))]`) uses the real `ureq` HTTP transport.
+    /// In tests (`#[cfg(test)]`) uses [`NoOpHibpTransport`] so that test engines
+    /// do not make real network calls when HIBP defaults to `enabled = true`.
+    /// Tests that exercise HIBP logic inject their own stub via `with_hibp_transport`.
     pub fn new() -> Self {
-        Self {
-            transport: Arc::new(UreqHibpTransport),
+        #[cfg(not(test))]
+        {
+            Self {
+                transport: Arc::new(UreqHibpTransport),
+            }
+        }
+        #[cfg(test)]
+        {
+            Self {
+                transport: Arc::new(NoOpHibpTransport),
+            }
         }
     }
 

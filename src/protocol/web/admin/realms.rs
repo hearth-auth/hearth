@@ -1779,7 +1779,9 @@ pub async fn admin_config_editor(
     Query(params): Query<ConfigEditorParams>,
 ) -> Response {
     let (yaml_content, read_only) = read_config_yaml(&state).await;
-    let config_json = yaml_to_editor_json(&yaml_content).unwrap_or_else(|_| "{}".to_string());
+    let config_json = escape_json_for_script(
+        &yaml_to_editor_json(&yaml_content).unwrap_or_else(|_| "{}".to_string()),
+    );
 
     let flash = params.flash.map(|msg| {
         let kind = params.flash_kind.as_deref().unwrap_or("success");
@@ -1958,7 +1960,9 @@ fn render_config_editor_with_flash(
     flash: Flash,
 ) -> Response {
     let read_only = state.config_path.is_none();
-    let config_json = yaml_to_editor_json(yaml_content).unwrap_or_else(|_| "{}".to_string());
+    let config_json = escape_json_for_script(
+        &yaml_to_editor_json(yaml_content).unwrap_or_else(|_| "{}".to_string()),
+    );
     render(&ConfigEditorTemplate {
         yaml_content: yaml_content.to_string(),
         config_json,
@@ -1986,6 +1990,17 @@ fn yaml_to_editor_json(yaml_str: &str) -> Result<String, String> {
     let value: serde_norway::Value =
         serde_norway::from_str(yaml_str).map_err(|e| format!("YAML parse error: {e}"))?;
     serde_json::to_string(&value).map_err(|e| format!("JSON serialization error: {e}"))
+}
+
+/// Escapes JSON for safe inline embedding inside a `<script>` tag.
+///
+/// `serde_json` does not escape `</`, so a string value containing
+/// `</script>` would prematurely close the enclosing script element and open
+/// a stored-XSS vector. Replacing `</` → `<\/` is inert to JSON consumers
+/// (the backslash is a valid escape in JSON strings) and invisible to the
+/// HTML parser.
+fn escape_json_for_script(json: &str) -> String {
+    json.replace("</", r"<\/")
 }
 
 /// Try to extract a dotted field path from a `serde_norway` parse error.
@@ -2952,5 +2967,30 @@ mod action_category_tests {
             A::SessionCreated.failure_policy(),
             AuditFailurePolicy::LogOnly,
         );
+    }
+
+    // ===== M10: JSON-in-<script> escaping =====
+
+    /// A JSON string containing `</script>` must have `</` escaped to `<\/`
+    /// so the HTML parser cannot prematurely close the enclosing script tag.
+    #[test]
+    fn escape_json_for_script_closes_script_tag_pattern() {
+        let input = r#"{"key":"</script><script>alert(1)</script>"}"#;
+        let output = super::escape_json_for_script(input);
+        assert!(
+            !output.contains("</script>"),
+            "escaped output must not contain raw </script>"
+        );
+        assert!(
+            output.contains(r"<\/script>"),
+            "escaped output must contain <\\/script>"
+        );
+    }
+
+    /// Pure JSON with no special characters must pass through unchanged.
+    #[test]
+    fn escape_json_for_script_passthrough_for_safe_json() {
+        let input = r#"{"realm":"test","enabled":true}"#;
+        assert_eq!(super::escape_json_for_script(input), input);
     }
 }

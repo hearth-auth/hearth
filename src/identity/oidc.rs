@@ -1558,6 +1558,14 @@ pub(crate) struct StoredGrantFamily {
     /// Originating ASN at grant creation (A-49, stub — P-4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) bound_asn: Option<u32>,
+
+    /// DPoP JWK thumbprint bound at grant issuance (M1 — RFC 9449 §5).
+    ///
+    /// When set, all refresh operations on this family MUST present a DPoP proof
+    /// whose JWK thumbprint matches this value. Prevents stolen refresh tokens
+    /// from being used without possession of the original private key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) bound_jkt: Option<String>,
 }
 
 // ===== Token Revocation (RFC 7009) =====

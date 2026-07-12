@@ -681,6 +681,23 @@ All admin endpoints require the `hearth.admin` permission in the caller's access
 - `DELETE /admin/groups/{group_id}/roles/{assignment_id}` — remove.
 - `GET /admin/roles/{role_id}/members?cursor=...&limit=...` — list subjects (users + groups) assigned this role.
 
+#### Privilege-assignment ceiling (HEA-1722, HEA-1734)
+
+Sub-admins (callers who hold realm-scoped admin permissions but NOT `hearth.admin`) are subject to a **privilege ceiling** on all grant operations:
+
+- A sub-admin may only grant permissions that they themselves hold in their own token's `permissions` claim.
+- A sub-admin may only define (create/update) roles whose permission sets are subsets of their own permissions.
+- Attempting to grant or define a permission the caller does not hold returns `PERMISSION_DENIED` (HTTP 403 / gRPC `PERMISSION_DENIED`).
+
+Callers holding `hearth.admin` bypass this check — `hearth.admin` implicitly covers all permissions.
+
+**Why this matters:** Without this ceiling, a sub-admin with `docs.edit` could create a role containing `billing.admin` and assign it to themselves, escalating their own privileges. The ceiling closes this indirect self-escalation path.
+
+**Applies to:**
+- `POST /admin/roles` and `PATCH /admin/roles/{id}` — role permission set must be ⊆ caller's permissions
+- gRPC `GrantUserPermission` — granted permission must be held by caller
+- gRPC `AddAdditionalRole` — role permissions must be ⊆ caller's permissions
+
 ### 8.3 Error envelope
 
 All endpoints return errors in the shared envelope:
@@ -1125,6 +1142,15 @@ caller error (e.g. `400` when `permission` field is absent).
 - Resource servers MUST treat `active: false` as a deny. No fields other than `active`
   MUST be inspected on an inactive response.
 - Introspection responses SHOULD NOT be cached — caching defeats the freshness guarantee.
+- **Audience restriction (RFC 7662 §2 — HEA-1729):** A client may only introspect a token
+  that is explicitly bound to it. Hearth enforces:
+  - If the token carries an `azp` claim (delegated/bound token), only the `azp` client or a
+    member of the token's `aud` may introspect it.
+  - If the token has no `azp` and `sid == "none"` (M2M/`client_credentials` token), only
+    the issuing client (`sub == client_id`) or an explicit `aud` member may introspect it.
+  - User-session tokens with no `azp` may be introspected by any authenticated client.
+  - All other cases return `{ "active": false }`. This prevents resource server A from
+    introspecting a token issued exclusively for resource server B.
 
 **`decision` mode:**
 - The `allowed: false` outcome MUST be treated as a deny regardless of cause. The endpoint
@@ -1146,6 +1172,158 @@ access tokens.
 | `embedded` | Stale permissions persist until `access_token_ttl` expires (default 15 min). |
 | `introspection` | Reflected within the next `/introspect` call — session liveness re-checked. |
 | `decision` | Reflected within the next `/oauth/authorize` call — session liveness re-checked. |
+
+---
+
+## 16. Delegated (`act`) token RBAC permissions
+
+> **Design Note — HEA-1726.** Status: **DECIDED — Option A (permission intersection).** See § 16.3.
+
+### 16.1 Problem statement
+
+When an agent requests a delegated token via RFC 8693 token exchange
+(`urn:ietf:params:oauth:grant-type:token-exchange`), the engine in
+`src/identity/engine/mod.rs` applies a three-way scope intersection:
+
+```
+effective_scope = intersection(subject.scope, actor.scope, requested_scope)
+```
+
+This is correct. However, the issued token then copies `permissions`, `roles`,
+and `groups` verbatim from the subject token:
+
+```rust
+// src/identity/engine/mod.rs — token exchange, step 9 (issue token)
+roles:       subject_claims.roles.clone(),       // ← no attenuation
+groups:      subject_claims.groups.clone(),      // ← no attenuation
+permissions: subject_claims.permissions.clone(), // ← no attenuation
+```
+
+Since `permissions` is the **sole authoritative claim for all authorization
+decisions** (`src/identity/tokens.rs` — "Client and server authorization checks
+read exclusively from this field"), an `act`-bearing token grants the actor
+every RBAC permission the subject holds, regardless of what the actor is
+authorized to do.
+
+**Attack path.** User Alice holds `{hearth.admin, docs.delete, billing.admin}`.
+Agent Foo holds only `{tool.search_emails.invoke}` from its own role assignments.
+Agent Foo performs a token exchange against Alice's access token. The issued
+delegated token carries `sub: alice, act: {sub: foo}` but retains
+`permissions: [hearth.admin, docs.delete, billing.admin, ...]`. Agent Foo can
+now perform admin operations with Alice's full RBAC authority — a clear
+least-privilege violation.
+
+**Scope vs. permissions asymmetry.** The vulnerability exists only for RBAC
+permissions. OAuth `scope` is correctly attenuated. The gap is that AGENT_AUTH.md
+§ 3.3 mandates scope intersection but says nothing about the `permissions` claim.
+
+### 16.2 Options
+
+**Option A — Intersect `permissions` at delegation time (recommended)**
+
+Compute:
+
+```
+effective_permissions = intersection(subject.permissions, actor.permissions)
+```
+
+The same logic applies to `roles` and `groups` (though those claims are
+informational and the `permissions` intersection is sufficient for security).
+
+Implementation change in `engine/mod.rs` step 9:
+
+```rust
+permissions: intersect_permissions(
+    &subject_claims.permissions,
+    &actor_claims.permissions,
+),
+roles: Vec::new(),   // informational; cleared for simplicity (actor's roles differ)
+groups: Vec::new(),  // informational; cleared for simplicity
+```
+
+This requires that `actor_claims` (the actor's parsed token) be retained
+through to step 9 (currently only `actor_sub` and `actor_scope` survive the
+match block). The actor's `permissions` must be extracted and threaded through.
+
+_Trade-offs:_
+- Mirrors the existing scope attenuation exactly. Consistent and predictable.
+- Aligns with AGENT_AUTH.md § 3.3 ("the resulting token's scope MUST be the
+  intersection of the subject token's scope, the agent's permitted scopes…") —
+  extending "scope" to mean the full authorization surface including permissions.
+- Least-privilege: an actor with no RBAC assignments (typical for a new service
+  account) yields zero effective RBAC permissions. Operators must explicitly
+  grant the actor the permissions it legitimately needs.
+- No change to resource servers or SDKs — the `permissions` claim still governs.
+
+**Option B — Prohibit RBAC permissions on `act`-bearing tokens**
+
+When the issued token carries an `act` claim, the `permissions`, `roles`, and
+`groups` claims MUST be cleared regardless of what the subject holds.
+Authorization for delegated tokens is scope-only and tool-claim-only.
+
+Implementation change: clear all three claims when `new_act` is `Some`.
+
+_Trade-offs:_
+- Stronger guarantee: no RBAC escalation via delegation is possible under any
+  conditions. Simpler reasoning.
+- Breaking change for any resource server or SDK that currently reads
+  `permissions` from a delegated token. All such callers must migrate to
+  scope + `tool.*` checks.
+- Requires audit of all protected resources to confirm they handle
+  `permissions: []` on act-bearing tokens correctly before this is safe to ship.
+- Misaligned with how agents are described in AGENT_AUTH.md § 5.1 (agents
+  receive RBAC grants and those appear in their token's `permissions` claim) —
+  Option B would mean agents cannot use their own RBAC grants when acting on
+  behalf of a user.
+
+### 16.3 Decision record
+
+> **DECIDED — Option A** — CTO sign-off: 2026-07-10. Reference: [HEA-1726](/HEA/issues/HEA-1726).
+
+**Chosen: Option A — intersect `permissions` at delegation time.**
+
+**Rationale (CTO):**
+
+Option A is selected. The reasoning follows directly from first principles and
+the existing design:
+
+1. **Consistency.** Scope is already intersected at delegation time (§ 16.1,
+   AGENT_AUTH.md § 3.3). The `permissions` claim is the authoritative
+   authorization surface. Applying the same intersection rule to `permissions`
+   is the logical completion of the existing model — not a new concept.
+
+2. **Least-privilege without breaking change.** Option A enforces least
+   privilege (an actor with no RBAC grants yields zero delegated permissions)
+   without breaking any resource server that today reads `permissions` from a
+   delegated token. Resource servers continue to use the `permissions` claim;
+   the values are simply bounded by both parties.
+
+3. **Agent compatibility.** Option B would strip RBAC from all act-bearing
+   tokens, which conflicts with AGENT_AUTH.md § 5.1 — agents receive their own
+   RBAC grants and those grants legitimately appear in their own token's
+   `permissions`. A delegated token should reflect the intersection of the
+   agent's grants and the user's grants, not a blank slate that requires all
+   resource servers to migrate to scope+tool checks.
+
+4. **Risk profile.** Option B requires a coordinated breaking migration across
+   all resource servers to be safe. Option A is a contained fix in one
+   code path (`engine/mod.rs` step 9). Minimal blast radius.
+
+**SecurityAuditor recommendation was Option A** — CTO concurs.
+
+### 16.4 Implementation requirement (after decision)
+
+Whichever option is chosen, the implementation MUST:
+
+1. Update this section to mark the decision as **DECIDED** with the chosen
+   option and CTO sign-off.
+2. Modify `src/identity/engine/mod.rs` — token exchange step 9 — per the
+   chosen option.
+3. Update AGENT_AUTH.md § 3.3 to explicitly cover `permissions` attenuation
+   (not just scope).
+4. Add a regression test that asserts an actor with permission set A cannot
+   exercise a permission in B \ A via a delegated token, where B is the
+   subject's permission set. Test MUST fail against the pre-fix code.
 
 For tighter revocation bounds in `embedded` mode, configure a shorter `access_token_ttl`
 or enable session-version (`sv`) revocation — see

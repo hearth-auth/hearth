@@ -259,6 +259,7 @@ async fn a28_rbac_assignment_is_idempotent() {
                 permissions: vec![Permission::new("docs.read").expect("valid perm")],
                 parent_roles: vec![],
                 scope_kind: hearth::rbac::RoleScopeKind::Realm,
+                allow_reserved_permissions: false,
             },
         )
         .expect("create role");
@@ -461,6 +462,7 @@ async fn a33_chunked_cascade_leaves_no_orphans() {
                 permissions: vec![Permission::new("docs.read").expect("valid perm")],
                 parent_roles: vec![],
                 scope_kind: hearth::rbac::RoleScopeKind::Realm,
+                allow_reserved_permissions: false,
             },
         )
         .expect("create role");

@@ -861,3 +861,91 @@ async fn webauthn_cbor_malformed_auth_data_rejected() {
         "expected CBOR/attestation error message, got: {err}"
     );
 }
+
+// ===== HEA-1720 regression: discoverable-login userHandle spoofing =====
+//
+// Attack: attacker holds a discoverable credential; submits a valid assertion
+// but substitutes the victim's UUID into userHandle (which is unsigned). The
+// server must reject the ceremony rather than issuing a session for the victim.
+
+#[tokio::test]
+async fn webauthn_discoverable_userhandle_spoofing_rejected() {
+    let harness = common::TestHarness::embedded()
+        .await
+        .expect("harness setup");
+    let realm = create_realm(&harness);
+    let origin = "https://example.com";
+
+    // Create attacker and victim accounts.
+    let attacker = create_user(&harness, &realm);
+    let victim = create_user(&harness, &realm);
+
+    let attacker_authenticator = webauthn_helper::TestAuthenticator::new("example.com");
+
+    // Register attacker's credential as discoverable (true → stored in discoverable index).
+    let reg_challenge = harness
+        .identity()
+        .start_webauthn_registration(
+            &realm,
+            attacker.id(),
+            &RegistrationOptions {
+                rp_id: "example.com".to_string(),
+                discoverable: true,
+            },
+        )
+        .expect("start registration");
+
+    let (reg_cdj, reg_att) =
+        attacker_authenticator.build_registration_response(&reg_challenge, origin);
+    harness
+        .identity()
+        .complete_webauthn_registration(
+            &realm,
+            attacker.id(),
+            &reg_cdj,
+            &reg_att,
+            origin,
+            true, // discoverable — writes credential_id → attacker into the index
+        )
+        .expect("complete registration");
+
+    // Start discoverable authentication (no user_id supplied → discoverable flow).
+    let auth_challenge = harness
+        .identity()
+        .start_webauthn_authentication(
+            &realm,
+            None, // discoverable: server does not commit to a user upfront
+            &AuthenticationOptions {
+                rp_id: "example.com".to_string(),
+            },
+        )
+        .expect("start authentication");
+
+    // Attacker builds a genuine assertion for their own credential …
+    let (auth_cdj, auth_data, sig, _) =
+        attacker_authenticator.build_authentication_response(&auth_challenge, origin, 1, None);
+
+    // … but substitutes the victim's UUID into userHandle (the spoofing step).
+    let victim_handle = victim.id().as_uuid().to_string();
+    let spoofed_handle = victim_handle.as_bytes().to_vec();
+
+    let err = harness
+        .identity()
+        .complete_webauthn_authentication(
+            &realm,
+            &CompleteAuthenticationParams {
+                credential_id: &attacker_authenticator.credential_id,
+                client_data_json: &auth_cdj,
+                authenticator_data: &auth_data,
+                signature: &sig,
+                user_handle: Some(&spoofed_handle),
+                origin,
+            },
+        )
+        .expect_err("userHandle spoofing must be rejected");
+
+    assert!(
+        matches!(err, IdentityError::InvalidAssertion { .. }),
+        "expected InvalidAssertion for spoofed userHandle, got: {err}"
+    );
+}

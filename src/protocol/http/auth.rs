@@ -926,7 +926,9 @@ pub(crate) fn extract_user_auth(
         enforce_dpop_binding(headers, state, realm_id, token, &cnf.jkt, htm, htu)?;
     }
 
-    uuid::Uuid::parse_str(&claims.sub)
+    // sub is "user_{uuid}" — strip the prefix before UUID parse.
+    let sub_str = claims.sub.strip_prefix("user_").unwrap_or(&claims.sub);
+    uuid::Uuid::parse_str(sub_str)
         .map(UserId::new)
         .map_err(|_| {
             (

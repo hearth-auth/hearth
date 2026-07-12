@@ -72,20 +72,24 @@ pub fn authenticate(headers: &HeaderMap, state: &AppState) -> Result<ScimAuth, S
         })
     } else {
         // No SCIM token configured: fall back to admin JWT.
-        extract_admin_auth(headers, state)
-            .map(|admin| ScimAuth {
-                actor: admin.user_id.as_uuid().to_string(),
-                realm_id: admin.realm_id,
-            })
-            .map_err(|(status, body)| {
-                let detail = body
-                    .0
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("authentication failed")
-                    .to_string();
-                ScimError::new(status, detail)
-            })
+        let admin = extract_admin_auth(headers, state).map_err(|(status, body)| {
+            let detail = body
+                .0
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("authentication failed")
+                .to_string();
+            ScimError::new(status, detail)
+        })?;
+        // Assert the JWT's realm matches the X-Realm-ID header to prevent
+        // cross-realm privilege escalation on the fallback path.
+        if admin.realm_id != realm_id {
+            return Err(ScimError::forbidden("realm mismatch"));
+        }
+        Ok(ScimAuth {
+            actor: admin.user_id.as_uuid().to_string(),
+            realm_id,
+        })
     }
 }
 

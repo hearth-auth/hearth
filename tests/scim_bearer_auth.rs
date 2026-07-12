@@ -263,6 +263,49 @@ async fn wrong_scim_bearer_token_rejected() {
     );
 }
 
+/// L13: A JWT issued for realm A must be rejected when the X-Realm-ID header
+/// identifies realm B (which has no SCIM bearer token configured and therefore
+/// falls through to the JWT fallback path). The realm mismatch guard in the
+/// JWT fallback branch must prevent cross-realm SCIM access.
+///
+/// In practice this is caught at JWT-signature validation (401), but the test
+/// exercises the security boundary regardless of which layer rejects first.
+#[tokio::test]
+async fn scim_jwt_fallback_rejects_cross_realm_jwt() {
+    let rig = build_rig();
+
+    // Realm A: obtain a valid admin JWT.
+    let (_, realm_a_jwt) = setup_realm_with_admin(&rig, "scim-crossrealm-a");
+
+    // Realm B: no SCIM bearer token configured → falls into JWT fallback.
+    let realm_b = rig
+        .identity
+        .create_realm(&CreateRealmRequest {
+            name: "scim-crossrealm-b".to_string(),
+            config: None,
+        })
+        .expect("create realm B");
+
+    // Send realm A's JWT to realm B's SCIM endpoint via X-Realm-ID: realm B.
+    let auth_header = format!("Bearer {realm_a_jwt}");
+    let (status, _) = post_scim_user(
+        &rig.app,
+        realm_b.id(),
+        &auth_header,
+        "should-fail@example.com",
+    )
+    .await;
+
+    assert!(
+        !status.is_success(),
+        "JWT from realm A must not grant SCIM access to realm B (got {status})"
+    );
+    assert!(
+        status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN,
+        "Expected 401 or 403 for cross-realm JWT attempt (got {status})"
+    );
+}
+
 /// When no SCIM token is configured, admin JWT is still accepted as a fallback.
 #[tokio::test]
 async fn admin_jwt_accepted_as_fallback_without_scim_token() {
@@ -276,5 +319,48 @@ async fn admin_jwt_accepted_as_fallback_without_scim_token() {
     assert!(
         status != StatusCode::UNAUTHORIZED && status != StatusCode::FORBIDDEN,
         "Admin JWT must be accepted when no SCIM token is configured (got {status})"
+    );
+}
+
+/// JWT fallback path rejects a JWT issued for realm-A when `X-Realm-ID` is realm-B.
+///
+/// The SCIM auth layer must not permit cross-realm privilege escalation even on
+/// the JWT fallback path. Rejection may come from the `tid` claim check inside
+/// `validate_token` (401) or the explicit SCIM realm-mismatch guard (403) —
+/// either counts as a successful defence.
+#[tokio::test]
+async fn scim_jwt_fallback_rejects_mismatched_realm_header() {
+    let rig = build_rig();
+
+    // realm_a has a valid admin JWT; realm_b has no SCIM token configured.
+    let (realm_a, admin_jwt_a) = setup_realm_with_admin(&rig, "scim-mismatch-realm-a");
+    let (realm_b, _) = setup_realm_with_admin(&rig, "scim-mismatch-realm-b");
+
+    // Sanity: JWT for realm_a works against realm_a.
+    let (ok_status, _) = post_scim_user(
+        &rig.app,
+        &realm_a,
+        &format!("Bearer {admin_jwt_a}"),
+        "good@example.com",
+    )
+    .await;
+    assert!(
+        ok_status.is_success(),
+        "JWT for realm_a must work against realm_a (got {ok_status})"
+    );
+
+    // Attack: send realm_a's JWT but claim to operate on realm_b via the header.
+    let (bad_status, _) = post_scim_user(
+        &rig.app,
+        &realm_b,
+        &format!("Bearer {admin_jwt_a}"),
+        "evil@example.com",
+    )
+    .await;
+
+    assert!(
+        bad_status.is_client_error(),
+        "JWT for realm_a must be rejected when X-Realm-ID is realm_b (got {bad_status}); \
+         expected 401 (tid mismatch) or 403 (SCIM realm guard)"
     );
 }

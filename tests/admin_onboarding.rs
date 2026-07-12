@@ -94,7 +94,7 @@ fn build_rig(pre_create_realm: bool) -> Rig {
         .set_password(
             &system_realm_id,
             admin.id(),
-            &CleartextPassword::from_string("hunter2!".to_string()),
+            &CleartextPassword::from_string("hunter2!-pass".to_string()),
         )
         .expect("set password");
     identity

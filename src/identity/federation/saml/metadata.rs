@@ -238,7 +238,7 @@ mod tests {
             parsed.sso_redirect_url.as_deref(),
             Some("https://idp.example/sso")
         );
-        assert!(parsed.signing_certs_pem.len() == 1);
+        assert_eq!(parsed.signing_certs_pem.len(), 1);
     }
 
     #[test]

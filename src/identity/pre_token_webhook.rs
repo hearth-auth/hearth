@@ -68,6 +68,13 @@ pub const RESERVED_CLAIM_KEYS: &[&str] = &[
     "amr",
     "cnf",
     "sv",
+    // Delegation + client-identity claims — a compromised webhook must not
+    // be able to inject an `act` chain or impersonate the authorized party.
+    "act",
+    "azp",
+    "client_id",
+    "auth_time",
+    "acr",
 ];
 
 // ──────────────────── error ────────────────────────────────
@@ -181,6 +188,13 @@ impl PreTokenWebhookTransport for UreqPreTokenWebhookTransport {
         let hmac_sig = hmac_sig.map(str::to_string);
 
         let do_request = move || -> Result<PreTokenWebhookResponse, PreTokenWebhookError> {
+            // SSRF guard: pre-flight DNS check (defends against DNS rebinding).
+            crate::webhook::ssrf::check_webhook_url(&url).map_err(|e| {
+                PreTokenWebhookError::TransportError {
+                    reason: format!("SSRF guard rejected pre-token webhook URL: {e}"),
+                }
+            })?;
+
             let agent = ureq::config::Config::builder()
                 .timeout_global(Some(timeout))
                 .build()

@@ -9,6 +9,7 @@ use axum::http::{header, Request, StatusCode};
 use hearth::core::{Clock, IdpId, RealmId, SessionId, SystemClock, Timestamp};
 use hearth::identity::email::{EmailBranding, EmailService, LoggingEmailSender};
 use hearth::identity::federation::{FederationSecret, IdpConfig, IdpKind};
+use hearth::identity::hibp::{HibpError, HibpTransport};
 use hearth::identity::onboarding::OnboardingService;
 use hearth::identity::{
     CleartextPassword, CreateRealmRequest, CreateUserRequest, CredentialConfig,
@@ -23,6 +24,18 @@ use hearth::storage::{EmbeddedStorageEngine, StorageConfig, StorageEngine};
 use tower::ServiceExt;
 
 const COOKIE_SECRET: [u8; 32] = [11u8; 32];
+
+/// No-op HIBP transport for integration tests.
+///
+/// Integration tests compile `hearth` without `#[cfg(test)]`, so the library
+/// uses the real `ureq` HTTP transport by default. This stub prevents real
+/// network calls to the HIBP API from within the test process.
+struct NoOpHibpTransport;
+impl HibpTransport for NoOpHibpTransport {
+    fn get_range(&self, _prefix: &str, _api_key: Option<&str>) -> Result<String, HibpError> {
+        Ok(String::new())
+    }
+}
 
 fn null_email_service() -> Arc<EmailService> {
     Arc::new(
@@ -70,7 +83,8 @@ fn build_rig() -> Rig {
             },
             Arc::clone(&audit),
         )
-        .expect("identity engine"),
+        .expect("identity engine")
+        .with_hibp_transport(Arc::new(NoOpHibpTransport)),
     ) as Arc<dyn IdentityEngine>;
     let authz = Arc::new(EmbeddedRbacEngine::new(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
@@ -128,7 +142,7 @@ fn build_rig() -> Rig {
         .set_password(
             &admin_realm_id,
             admin_user.id(),
-            &CleartextPassword::from_string("password123".to_string()),
+            &CleartextPassword::from_string("password123!!".to_string()),
         )
         .expect("set password");
     identity

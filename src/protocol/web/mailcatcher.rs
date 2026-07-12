@@ -118,7 +118,7 @@ pub async fn login_submit(
     State(state): State<Arc<MailcatcherState>>,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    if form.password == state.password {
+    if state.verify_password(&form.password) {
         let cookie_value = state.session_cookie_value();
         (
             [(header::SET_COOKIE, set_cookie_header(&cookie_value))],
