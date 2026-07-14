@@ -365,7 +365,7 @@ OIDC Discovery metadata and authorization code behavior.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `issuer` | string | — | The `iss` claim in ID tokens and the `issuer` in the discovery document. Must be a valid HTTPS URL. **Required in production — no safe default exists.** |
+| `issuer` | string | — | The `iss` claim in ID tokens and the `issuer` in the discovery document. Must be a valid HTTPS URL. **Required in production — no safe default exists.** Also used as the WebAuthn relying-party origin (scheme + host); passkey credentials registered under this origin will be unusable if the issuer URL later changes. |
 | `authorization_code_ttl` | duration | `"10m"` | How long an authorization code is valid after issuance. |
 | `enforce_nonces` | bool | `true` | When `true`, authorization requests must include a unique `nonce` parameter. Disable only for legacy clients that cannot supply a nonce. |
 | `require_pkce_for_confidential_clients` | bool | `true` | Require PKCE for confidential OAuth clients (RFC 9700 §2.1.1). Disable only for legacy clients that cannot supply `code_challenge`. |
@@ -726,6 +726,7 @@ Each realm entry supports:
 | `applications` | map | — | Declarative OAuth 2.0 client definitions. |
 | `organizations` | map | — | Declarative organization definitions. |
 | `fapi_profile` | string | — | FAPI 2.0 Security Profile for the realm: `"baseline"` or `"advanced"`. When set, all clients in the realm must comply. `"baseline"` requires PAR + PKCE (S256). `"advanced"` adds JAR + JARM. Absent means standard OAuth 2.0 / OIDC rules apply. Can also be set at runtime via `PATCH /admin/realms/{id}/config`. |
+| `breach_check` | object | — | HIBP k-anonymity breach check on every password set/change. See below. |
 
 ### `realms.<name>.email`
 
@@ -761,7 +762,7 @@ Per-realm authentication policy. These are policy declarations stored in `RealmC
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `min_length` | integer | — | Minimum password length. Must be >= 1. |
+| `min_length` | integer | — | Minimum password length. Must be >= 12 (NIST SP 800-63B §5.1.1.1 floor enforced by the server). Values below 12 are silently raised to 12 regardless of this setting. |
 | `require_uppercase` | bool | — | Require at least one uppercase letter. |
 | `require_number` | bool | — | Require at least one digit. |
 | `require_special` | bool | — | Require at least one special character. |
@@ -826,6 +827,31 @@ realms:
         aaguid_allowlist:
           - "08987058-cadc-4b81-b6e1-30de50dcbe96"  # YubiKey 5 series
 ```
+
+### `realms.<name>.breach_check`
+
+HIBP Pwned Passwords k-anonymity breach-check configuration. When enabled, every password-set or password-change call queries the [HIBP Range API](https://haveibeenpwned.com/API/v3#PwnedPasswords) before accepting the new credential. Only the first 5 hex characters of the SHA-1 hash are transmitted — no plaintext password or full hash leaves the process.
+
+On API timeout or network error the check **fails open**: the password is accepted and a `breach_check_unavailable` audit event is emitted. This prevents a third-party API outage from locking out all password changes.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Query the HIBP k-anonymity Range API on every password set or change. Enabled by default for new realms (NIST SP 800-63B). Existing realms deserialised without this key default to `false` for safe backwards-compatible migration — set `true` explicitly for upgraded realms. |
+| `timeout_ms` | integer | `3000` | HIBP API request timeout in milliseconds. On timeout the call fails open (password accepted, `breach_check_unavailable` audit event emitted). |
+| `hibp_api_key` | string | — | Optional HIBP API key sent as the `hibp-api-key` request header. Required for paid HIBP Enterprise plans. Supply via `${ENV_VAR}` — never commit a plaintext key. |
+
+```yaml
+realms:
+  corp:
+    breach_check:
+      enabled: true
+      timeout_ms: 3000
+      hibp_api_key: "${HEARTH_REALM_CORP_HIBP_API_KEY}"
+```
+
+> **Privacy note:** The k-anonymity model means only the first 5 characters of the SHA-1 hash are sent. The HIBP API returns all hash suffixes matching that prefix; the comparison is done locally. Hearth never sends the full hash or the plaintext password.
+
+---
 
 ### `realms.<name>.applications`
 
@@ -1278,7 +1304,7 @@ Hearth (equivalent to Auth0 Actions / Keycloak Token Mappers via HTTP).
 - `hmac_secret` **MUST** be set in production. Without it, any party that can reach your webhook endpoint can forge enrichment responses and inject arbitrary claims into issued tokens.
 - Use `on_error: fail_closed` together with `hmac_secret` for defense in depth. `fail_open` is the default only to avoid blocking token issuance during initial rollout.
 - Supply `hmac_secret` via an environment variable — never commit a plaintext secret.
-- The webhook cannot overwrite reserved JWT claims (`sub`, `iss`, `aud`, `exp`, `iat`, `sid`, `roles`, `permissions`, etc.). Those keys in `extra_claims` are silently dropped.
+- The webhook cannot overwrite reserved JWT claims. Keys silently dropped from `extra_claims`: `sub`, `iss`, `aud`, `exp`, `iat`, `nbf`, `jti`, `sid`, `nonce`, `roles`, `permissions`, `required_actions`, `amr`, `cnf`, `sv`, `oid`, `act`, `azp`, `client_id`, `auth_time`, `acr`. The `act`, `azp`, and `client_id` keys are blocked specifically to prevent a compromised enrichment endpoint from injecting a delegation chain or misrepresenting the authorized party.
 
 ```yaml
 realms:
@@ -1511,6 +1537,8 @@ Every field's default value at a glance.
 | `realms.<name>.auth.webauthn_attestation` | `allow_none` | `true` |
 | `realms.<name>.auth.webauthn_attestation` | `require_prf` | `false` |
 | `realms.<name>.auth.webauthn_attestation` | `require_large_blob` | `false` |
+| `realms.<name>.breach_check` | `enabled` | `true` (new realms); `false` (existing realms migrated without this key) |
+| `realms.<name>.breach_check` | `timeout_ms` | `3000` |
 | `realms.<name>.auth.token` | `password_reset_token_ttl` | `"30m"` |
 | `realms.<name>.auth.token` | `magic_link_ttl` | `"15m"` |
 | `realms.<name>.auth.token` | `device_code_ttl` | `"10m"` |
