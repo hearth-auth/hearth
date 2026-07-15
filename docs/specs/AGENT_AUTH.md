@@ -446,6 +446,20 @@ When a delegated token is re-bound at each hop:
 - Agent A performs a token exchange, presenting its DPoP proof. The resulting token is bound to agent B's key (agent B provides its public key in the exchange request).
 - Each hop re-binds the token to the next agent's key. The previous agent can no longer use the token.
 
+### 6.5 DPoP Refresh Token Binding (RFC 9449 §5)
+
+When the initial token request includes a DPoP proof, Hearth binds the entire grant family to the JWK thumbprint (`cnf.jkt`) of that proof key (HEA-1725). This means:
+
+- The issued refresh token is bound to the DPoP key pair that was active at grant issuance.
+- Every subsequent refresh request on that grant family **MUST** include a DPoP proof signed by the same key pair. A mismatch is rejected with `invalid_dpop_proof`.
+- **Key rotation invalidates the refresh token.** An agent that rotates its DPoP key pair must re-authorise from scratch (new authorization code flow). It cannot reuse an existing refresh token with the new key.
+
+**Practical guidance for agents:**
+
+1. Generate your DPoP key pair once and persist it (e.g., in a hardware-backed keystore or sealed secret) for the lifetime of the grant.
+2. If you must rotate the key (e.g., due to a suspected compromise), revoke all active sessions for the agent and start a new authorization flow.
+3. DPoP-bound grants are detected by the presence of `cnf.jkt` in the access token. Confirm this claim is present before relying on refresh token continuity.
+
 ---
 
 ## 7. Intent Binding

@@ -45,6 +45,32 @@ but this is STRONGLY DISCOURAGED and emits a startup warning.
 - The realm JWKS is published at `/.well-known/jwks.json` relative to the issuer URL.
 - HS256 and `alg:none` are never issued.
 
+### 1.3 DPoP Refresh Token Binding (RFC 9449 §5)
+
+When a token request includes a DPoP proof, Hearth binds the entire grant family to the JWK
+thumbprint (`cnf.jkt`) of the presented key. This binding propagates to refresh tokens and is
+enforced on every subsequent use of that grant family.
+
+**Server enforcement:**
+
+- The issued access token carries `cnf.jkt` equal to the SHA-256 thumbprint of the DPoP key used
+  at grant issuance.
+- The issued refresh token is stored against the same `cnf.jkt`. Subsequent refresh requests on
+  this grant family MUST present a DPoP proof signed by the same key pair.
+- A mismatch between the thumbprint in the stored grant and the thumbprint in the presented DPoP
+  proof is rejected with `invalid_dpop_proof`.
+- The rotated access and refresh tokens produced by a successful DPoP-bound refresh carry the same
+  `cnf.jkt`; the binding is never relaxed mid-family.
+
+**Key rotation:**
+
+Key rotation invalidates any DPoP-bound refresh token for that key pair. A client that must rotate
+its DPoP key pair (e.g., after suspected compromise) must revoke the affected grant family and begin
+a new authorization flow. There is no mechanism to re-bind an existing refresh token to a new key.
+
+> For agent-specific guidance on persisting DPoP key pairs across grant lifetimes, see
+> [AGENT_AUTH.md §6.5](./AGENT_AUTH.md#65-dpop-refresh-token-binding-rfc-9449-5).
+
 ---
 
 ## 2. FAPI 2.0 Security Profile

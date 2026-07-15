@@ -87,8 +87,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`token_redemption_lock`) is now acquired before any read-modify-write (HEA-1728).
 - **Token introspection scoped to intended audience (L7)** — any authenticated realm client could
   previously introspect any token regardless of whether the token was issued to it. The endpoint
-  now returns `active: false` if the introspecting client is not the token's `azp` or `sub`
-  (client_credentials self-introspect) (HEA-1728).
+  now enforces per-token-class audience restriction (RFC 7662 §2): (1) tokens carrying an `azp`
+  claim may only be introspected by the `azp` client or a member of the token's `aud`; (2)
+  M2M/`client_credentials` tokens (no `azp`, `sid == "none"`) may only be introspected by the
+  issuing client (`sub == client_id`) or an explicit `aud` member; (3) user-session tokens with
+  no `azp` may be introspected by any authenticated realm client. All other cases return
+  `{ "active": false }` (HEA-1728, HEA-1729).
 - **`Cache-Control: no-store` added to all authenticated HTML responses (L8)** — the
   `SecurityHeadersLayer` now emits `Cache-Control: no-store` on any `text/html` response,
   preventing sensitive admin and account pages from being retained by shared or private caches.
@@ -124,6 +128,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   configuration. Existing configs that explicitly set `enabled: false` are unaffected.
   Integration tests inject a no-network stub transport to avoid HIBP API calls in CI
   (HEA-1727).
+- **WebAuthn RP ID derived from `oidc.issuer` config, not `Host` header (L5)** — the
+  relying-party origin used during passkey registration and authentication was previously derived
+  from the request's `Host` header. An attacker who could manipulate the `Host` header during a
+  WebAuthn ceremony could redirect the server to validate assertions against a different origin
+  than the one the credential was bound to. `resolve_public_origin` now unconditionally prefers
+  `config.oidc.issuer` as the RP origin; the `Host` header is used only as a fallback when no
+  issuer is configured (HEA-1729).
+- **SCIM JWT-fallback path now rejects cross-realm JWTs** — when a SCIM endpoint received no
+  per-realm bearer token and fell back to validating a JWT in the `Authorization` header, the
+  server previously accepted any valid admin JWT regardless of which realm it was issued for. An
+  admin of realm A could present their JWT against realm B's SCIM endpoints (identified via
+  `X-Realm-ID`) and gain cross-realm user-provisioning access. The fallback path now asserts
+  `jwt.realm_id == X-Realm-ID`; a mismatch returns `403 Forbidden` with `"realm mismatch"` (HEA-1738).
 
 ### Changed
 - **Password minimum length floor raised from 8 to 12 characters (NIST SP 800-63B §5.1.1.1)**
