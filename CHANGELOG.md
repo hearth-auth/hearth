@@ -7,6 +7,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **SAML IdP SSO endpoints now require an authenticated session** — `GET`/`POST`
+  `/ui/realms/{realm}/saml/sso` and `GET /ui/realms/{realm}/saml/sso/init` previously minted a
+  signed SAML assertion for any anonymous caller (a signing oracle) using a fixed placeholder
+  subject. Both now require a valid Hearth UI session in the same realm and derive the assertion
+  `NameID` from the authenticated user; unauthenticated callers are redirected to login (S1,
+  HEA-1751).
+- **SAML HTTP-Redirect binding caps DEFLATE inflation** — inbound `SAMLRequest`/`SAMLResponse`
+  payloads are now bounded to 1 MiB of decompressed output, rejecting DEFLATE decompression bombs
+  before they can exhaust memory (S2, HEA-1751).
+- **SAML audience/destination no longer sourced from the `Host` header** — when
+  `onboarding.base_url` is configured, SAML assertion audience/destination validation uses that
+  trusted origin instead of the attacker-controllable request `Host`, closing a spoofing bypass
+  (S3, HEA-1751).
+- **SAML assertions without `Conditions/NotOnOrAfter` are rejected** — an assertion carrying no
+  expiry upper bound was previously accepted and would never age out, making it replayable
+  indefinitely; a missing `NotOnOrAfter` is now rejected (S4, HEA-1751).
+- **GitHub federation no longer trusts the public profile email as verified** — the
+  `/user.email` field is accepted as verified only when it also appears as a verified row in
+  `/user/emails`; unverified addresses are neither surfaced nor marked verified, preventing
+  auto-link account takeover (S5, HEA-1751).
 - **OAuth client registration now requires admin authorization** — `POST /clients` (REST) and
   `OAuthService.register_client` (gRPC) previously skipped every authorization gate, letting any
   unauthenticated caller mint OAuth clients (bypassing the realm's `dcr_policy` that guards

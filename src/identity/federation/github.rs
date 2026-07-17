@@ -5,10 +5,10 @@
 //! private emails) `GET /user/emails`. Both endpoints require the
 //! `User-Agent` header — GitHub rejects requests without one.
 //!
-//! `email_verified` is asserted as `true` whenever `/user/emails` returns
-//! a verified + primary row; this is GitHub's own signal. If the user's
-//! profile email is public and matches, we use that without a second
-//! round-trip.
+//! `email_verified` is asserted as `true` only for an address GitHub
+//! reports as verified in `/user/emails`. The public profile email
+//! (`/user.email`) is never trusted on its own — it is accepted only when
+//! it also appears as a verified row (S5 / HEA-1751).
 
 use std::sync::Arc;
 
@@ -158,13 +158,15 @@ impl IdpConnector for GithubConnector {
             }
         })?;
 
-        // 3. If /user.email is missing or user wants private email, call
-        //    /user/emails and pick the verified + primary row.
-        let (email, email_verified) = match user.email.clone() {
-            Some(e) if !e.is_empty() => (e, true),
-            _ => fetch_primary_email(&*self.http, &token.access_token)
-                .unwrap_or((String::new(), false)),
-        };
+        // 3. GitHub's `/user.email` is the account's *public profile* email,
+        //    which GitHub does NOT guarantee has been verified. Trusting it
+        //    as verified is an account-takeover vector (S5 / HEA-1751): a
+        //    user can set an arbitrary unverified address there and, if we
+        //    auto-link on verified email, take over a matching local
+        //    account. We therefore always confirm against `/user/emails`
+        //    and only accept an address that appears as a verified row.
+        let verified = fetch_verified_emails(&*self.http, &token.access_token);
+        let (email, email_verified) = resolve_verified_email(user.email.as_deref(), &verified);
 
         // GitHub doesn't split names; leave first/last empty so the engine
         // can synthesize display_name from the existing `display_name` field.
@@ -186,31 +188,37 @@ impl IdpConnector for GithubConnector {
     }
 }
 
-fn fetch_primary_email(
+/// Fetches the caller's GitHub email addresses and returns only the
+/// verified rows as `(email, primary)` pairs.
+///
+/// Unverified rows are dropped. Returns an empty vec when the call fails,
+/// the token lacks the `user:email` scope, or the body cannot be parsed —
+/// callers treat "no verified rows" as "no trusted email".
+fn fetch_verified_emails(
     http: &dyn FederationHttpTransport,
     access_token: &str,
-) -> Option<(String, bool)> {
-    let resp = http
-        .send(&FedHttpRequest {
-            method: "GET",
-            url: "https://api.github.com/user/emails".to_string(),
-            headers: vec![
-                (
-                    "Authorization".to_string(),
-                    format!("Bearer {access_token}"),
-                ),
-                (
-                    "Accept".to_string(),
-                    "application/vnd.github+json".to_string(),
-                ),
-                ("User-Agent".to_string(), "Hearth".to_string()),
-            ],
-            body: Vec::new(),
-            content_type: None,
-        })
-        .ok()?;
+) -> Vec<(String, bool)> {
+    let Ok(resp) = http.send(&FedHttpRequest {
+        method: "GET",
+        url: "https://api.github.com/user/emails".to_string(),
+        headers: vec![
+            (
+                "Authorization".to_string(),
+                format!("Bearer {access_token}"),
+            ),
+            (
+                "Accept".to_string(),
+                "application/vnd.github+json".to_string(),
+            ),
+            ("User-Agent".to_string(), "Hearth".to_string()),
+        ],
+        body: Vec::new(),
+        content_type: None,
+    }) else {
+        return Vec::new();
+    };
     if resp.status < 200 || resp.status >= 300 {
-        return None;
+        return Vec::new();
     }
     #[derive(Deserialize)]
     struct EmailRow {
@@ -218,9 +226,36 @@ fn fetch_primary_email(
         primary: bool,
         verified: bool,
     }
-    let rows: Vec<EmailRow> = serde_json::from_str(&resp.body).ok()?;
-    let chosen = rows.into_iter().find(|r| r.primary && r.verified)?;
-    Some((chosen.email, true))
+    let rows: Vec<EmailRow> = serde_json::from_str(&resp.body).unwrap_or_default();
+    rows.into_iter()
+        .filter(|r| r.verified)
+        .map(|r| (r.email, r.primary))
+        .collect()
+}
+
+/// Chooses a trusted email from GitHub's *verified* address list.
+///
+/// The public profile email (`/user.email`) is only accepted when it also
+/// appears among the verified rows. Otherwise we fall back to the verified
+/// primary, then any verified address. When nothing is verified we return
+/// an empty, unverified result so downstream auto-linking is disabled (a
+/// caller must never auto-link on an unverified address — see S5).
+fn resolve_verified_email(
+    public_email: Option<&str>,
+    verified: &[(String, bool)],
+) -> (String, bool) {
+    if let Some(p) = public_email.filter(|e| !e.is_empty()) {
+        if verified.iter().any(|(e, _)| e.eq_ignore_ascii_case(p)) {
+            return (p.to_string(), true);
+        }
+    }
+    if let Some((e, _)) = verified.iter().find(|(_, primary)| *primary) {
+        return (e.clone(), true);
+    }
+    if let Some((e, _)) = verified.first() {
+        return (e.clone(), true);
+    }
+    (String::new(), false)
 }
 
 #[cfg(test)]
@@ -289,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn github_exchange_uses_public_email_when_present() {
+    fn github_exchange_trusts_public_email_only_when_confirmed_verified() {
         let cfg = gh_config();
         let stub = Arc::new(StubFederationTransport::new());
         stub.stub(
@@ -304,6 +339,14 @@ mod tests {
             200,
             r#"{"id":42,"login":"alice","name":"Alice","email":"alice@example.com","avatar_url":"https://a/"}"#,
         );
+        // The public profile email is only trusted because it also appears
+        // as a verified row in /user/emails.
+        stub.stub(
+            "GET",
+            "https://api.github.com/user/emails",
+            200,
+            r#"[{"email":"alice@example.com","primary":true,"verified":true}]"#,
+        );
         let conn = GithubConnector::new(cfg, stub.clone(), "https://h/cb".to_string());
         let id = conn.exchange("code-xyz", &state()).expect("exchange");
         assert_eq!(id.external_sub, "42");
@@ -311,6 +354,40 @@ mod tests {
         assert!(id.email_verified);
         assert_eq!(id.display_name, "Alice");
         assert_eq!(id.picture_url.as_deref(), Some("https://a/"));
+    }
+
+    #[test]
+    fn github_exchange_does_not_trust_unconfirmed_public_email() {
+        // S5 regression: /user.email is present but /user/emails reports it
+        // as UNVERIFIED. The public profile address must NOT be trusted or
+        // marked verified — otherwise it becomes an account-takeover vector.
+        let cfg = gh_config();
+        let stub = Arc::new(StubFederationTransport::new());
+        stub.stub(
+            "POST",
+            cfg.token_endpoint.clone(),
+            200,
+            r#"{"access_token":"abc"}"#,
+        );
+        stub.stub(
+            "GET",
+            "https://api.github.com/user",
+            200,
+            r#"{"id":42,"login":"alice","email":"victim@example.com"}"#,
+        );
+        stub.stub(
+            "GET",
+            "https://api.github.com/user/emails",
+            200,
+            r#"[{"email":"victim@example.com","primary":true,"verified":false}]"#,
+        );
+        let conn = GithubConnector::new(cfg, stub.clone(), "https://h/cb".to_string());
+        let id = conn.exchange("code", &state()).expect("exchange");
+        assert_eq!(id.email, "", "unverified public email must not be surfaced");
+        assert!(
+            !id.email_verified,
+            "unverified public email must not be marked verified"
+        );
     }
 
     #[test]

@@ -363,6 +363,12 @@ pub fn extract_and_validate_assertion(
     }
 
     // Timestamps.
+    //
+    // S4 (HEA-1751): the assertion MUST carry a `Conditions/NotOnOrAfter`
+    // bound. An assertion with no expiry never ages out and can be replayed
+    // indefinitely, so a missing upper bound is rejected outright rather
+    // than silently skipped. `NotBefore` remains optional per the SAML
+    // profile (many IdPs omit it).
     let now_micros = p.now.as_micros();
     let skew = p.clock_skew_secs * 1_000_000;
     if let Some(nb) = a.not_before {
@@ -370,10 +376,11 @@ pub fn extract_and_validate_assertion(
             return Err(IdentityError::Saml(SamlError::Expired));
         }
     }
-    if let Some(noa) = a.not_on_or_after {
-        if noa.as_micros() <= now_micros - skew {
-            return Err(IdentityError::Saml(SamlError::Expired));
-        }
+    let noa = a
+        .not_on_or_after
+        .ok_or(IdentityError::Saml(SamlError::Expired))?;
+    if noa.as_micros() <= now_micros - skew {
+        return Err(IdentityError::Saml(SamlError::Expired));
     }
 
     // InResponseTo.
@@ -502,6 +509,51 @@ mod tests {
             },
         );
         assert!(matches!(res, Err(IdentityError::Saml(SamlError::Expired))));
+    }
+
+    #[test]
+    fn validate_rejects_assertion_missing_not_on_or_after() {
+        // S4 (HEA-1751): an assertion whose `<Conditions>` carries an
+        // AudienceRestriction but no `NotOnOrAfter` bound must be rejected —
+        // otherwise it never expires and is replayable forever. The audience
+        // check passes first (so we know we reach the timestamp gate), then
+        // the missing upper bound trips `Expired`.
+        let xml = concat!(
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" "#,
+            r#"xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_r1" "#,
+            r#"IssueInstant="2023-11-14T00:00:00Z">"#,
+            r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+            r#"<samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>"#,
+            r#"<saml:Assertion ID="_a1">"#,
+            r#"<saml:Issuer>https://idp.example</saml:Issuer>"#,
+            r#"<saml:Subject><saml:NameID "#,
+            r#"Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">"#,
+            r#"alice@example.com</saml:NameID></saml:Subject>"#,
+            r#"<saml:Conditions>"#,
+            r#"<saml:AudienceRestriction><saml:Audience>https://sp.example</saml:Audience>"#,
+            r#"</saml:AudienceRestriction></saml:Conditions>"#,
+            r#"</saml:Assertion></samlp:Response>"#,
+        );
+        let parsed = parse_response(xml.as_bytes()).expect("parse");
+        assert!(
+            parsed.assertions[0].not_on_or_after.is_none(),
+            "fixture must lack NotOnOrAfter"
+        );
+        let res = extract_and_validate_assertion(
+            &parsed,
+            &ValidateParams {
+                sp_entity_id: "https://sp.example",
+                acs_url: "https://sp.example/acs",
+                idp_entity_id: "https://idp.example",
+                expected_in_response_to: None,
+                now: Timestamp::from_micros(1_700_000_000 * 1_000_000),
+                clock_skew_secs: 60,
+            },
+        );
+        assert!(
+            matches!(res, Err(IdentityError::Saml(SamlError::Expired))),
+            "assertion without NotOnOrAfter must be rejected, got {res:?}"
+        );
     }
 
     #[test]
