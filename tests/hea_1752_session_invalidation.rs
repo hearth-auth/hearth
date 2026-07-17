@@ -24,9 +24,8 @@ fn build_identity() -> Arc<dyn IdentityEngine> {
     let data_dir = temp.path().to_path_buf();
     std::mem::forget(temp);
 
-    let storage = Arc::new(
-        EmbeddedStorageEngine::open(StorageConfig::dev(data_dir)).expect("open storage"),
-    );
+    let storage =
+        Arc::new(EmbeddedStorageEngine::open(StorageConfig::dev(data_dir)).expect("open storage"));
     let clock = Arc::new(SystemClock) as Arc<dyn Clock>;
     let audit = Arc::new(hearth::audit::EmbeddedAuditEngine::new(
         Arc::clone(&storage) as Arc<dyn StorageEngine>,
