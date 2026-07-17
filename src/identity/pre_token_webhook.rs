@@ -197,6 +197,10 @@ impl PreTokenWebhookTransport for UreqPreTokenWebhookTransport {
 
             let agent = ureq::config::Config::builder()
                 .timeout_global(Some(timeout))
+                .https_only(true)
+                // Do not follow redirects: check_webhook_url only validated the
+                // initial host, so a 3xx could redirect to an internal target (W1).
+                .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
                 .build()
                 .new_agent();
 

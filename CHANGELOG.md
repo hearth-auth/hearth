@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Webhook egress no longer follows HTTP redirects** — the SSRF guard
+  (`check_webhook_url`) only validated a webhook's initial destination, so a
+  `3xx` response could bounce the request to an internal/link-local address
+  (IMDS `169.254.169.254`, RFC 1918) that was never checked. All three egress
+  paths (event dispatcher, approval notifier, pre-token webhook) now pin
+  `max_redirects` to `0` and require `https_only`, refusing any redirect. DNS
+  rebinding TOCTOU remains a separate residual risk (W1, HEA-1754).
 - **Delegation consent revocation now invalidates session-bound OBO tokens** —
   revoking a delegation grant projected the token's `jti` into the revocation
   cache, but `validate_token` only consulted that cache on the sessionless

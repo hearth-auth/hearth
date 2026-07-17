@@ -123,6 +123,19 @@ pub fn check_host(host: &str, port: u16) -> Result<(), WebhookError> {
     Ok(())
 }
 
+/// Maximum HTTP redirects to follow on any webhook egress path.
+///
+/// Pinned to `0` (W1, HEA-1754). [`check_webhook_url`] only validates the
+/// *initial* destination; a `3xx` response could redirect the request to an
+/// internal/link-local address (IMDS `169.254.169.254`, RFC 1918) that was
+/// never SSRF-checked. Refusing to follow redirects closes that hole. With
+/// `ureq`'s default `max_redirects_will_error`, a redirect response therefore
+/// fails the delivery instead of silently chasing the `Location` header.
+///
+/// DNS-rebinding TOCTOU between the guard and connect is a separate residual
+/// risk (needs IP-pinned connect / egress proxy) tracked outside this fix.
+pub(crate) const MAX_WEBHOOK_REDIRECTS: u32 = 0;
+
 /// Validates a webhook URL for SSRF safety.
 ///
 /// Enforces:
@@ -430,5 +443,97 @@ mod tests {
             matches!(err, WebhookError::BlockedDestination { .. }),
             "{err}"
         );
+    }
+
+    // ── redirect refusal (W1, HEA-1754) ──────────────────────────────────────
+    //
+    // check_webhook_url only validates the *initial* destination. Every webhook
+    // egress agent therefore pins max_redirects to MAX_WEBHOOK_REDIRECTS (0) so
+    // a 3xx cannot bounce the request to an internal/link-local target that was
+    // never SSRF-checked. These tests exercise the shared control behaviourally
+    // over plaintext (https_only, applied at the real call sites, would block a
+    // loopback test server); if MAX_WEBHOOK_REDIRECTS is bumped above 0 they
+    // fail, catching a regression on any of the three egress paths.
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+
+    /// Spawns a loopback server that 302-redirects to `target_url`, then a
+    /// second "internal" target server that reports (over the returned channel)
+    /// if it is ever contacted. Returns the redirect server's URL.
+    fn spawn_redirect_to_internal() -> (String, mpsc::Receiver<()>) {
+        let target = TcpListener::bind("127.0.0.1:0").expect("bind target");
+        let target_addr = target.local_addr().expect("target addr");
+        let (hit_tx, hit_rx) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = target.accept() {
+                // The redirect was followed to the "internal" host — report it.
+                let _ = hit_tx.send(());
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+
+        let redirector = TcpListener::bind("127.0.0.1:0").expect("bind redirector");
+        let redirector_addr = redirector.local_addr().expect("redirector addr");
+        // Point the Location at the loopback "internal" target — 127.0.0.1 is an
+        // SSRF-blocked range and stands in for IMDS/RFC-1918. If the agent chases
+        // the redirect it connects here and trips the hit channel.
+        let location = format!("http://127.0.0.1:{}/steal", target_addr.port());
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = redirector.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        (format!("http://{redirector_addr}/hook"), hit_rx)
+    }
+
+    /// Builds an agent with the shared webhook redirect policy and asserts a
+    /// 302 to an internal address is refused (never contacts the target).
+    fn assert_redirect_refused(egress_path: &str) {
+        let agent = ureq::config::Config::builder()
+            .max_redirects(MAX_WEBHOOK_REDIRECTS)
+            .timeout_global(Some(std::time::Duration::from_secs(5)))
+            .build()
+            .new_agent();
+        let (redirect_url, hit_rx) = spawn_redirect_to_internal();
+
+        // Delivery must not succeed by chasing the redirect. Either ureq errors
+        // (default max_redirects_will_error) or returns the raw 3xx — both fine.
+        let _ = agent.post(&redirect_url).send(b"{}");
+
+        assert!(
+            hit_rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "{egress_path}: redirect to internal (loopback) address was followed"
+        );
+    }
+
+    #[test]
+    fn dispatcher_egress_refuses_redirect_to_internal() {
+        // Mirrors src/webhook/dispatcher.rs::deliver_once.
+        assert_redirect_refused("webhook::dispatcher");
+    }
+
+    #[test]
+    fn approval_notifier_egress_refuses_redirect_to_internal() {
+        // Mirrors src/identity/approval_notifier.rs::UreqApprovalTransport.
+        assert_redirect_refused("identity::approval_notifier");
+    }
+
+    #[test]
+    fn pre_token_webhook_egress_refuses_redirect_to_internal() {
+        // Mirrors src/identity/pre_token_webhook.rs::UreqPreTokenWebhookTransport.
+        assert_redirect_refused("identity::pre_token_webhook");
     }
 }

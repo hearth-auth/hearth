@@ -238,6 +238,9 @@ fn deliver_once(
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(Some(REQUEST_TIMEOUT))
         .https_only(true)
+        // Do not follow redirects: check_webhook_url only validated the initial
+        // host, so a 3xx could send us to an internal/link-local target (W1).
+        .max_redirects(super::ssrf::MAX_WEBHOOK_REDIRECTS)
         .build();
     let agent = config.new_agent();
 
