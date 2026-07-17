@@ -103,6 +103,8 @@ where
                  font-src 'self'; \
                  img-src 'self' data:; \
                  connect-src 'self'; \
+                 object-src 'none'; \
+                 form-action 'self'; \
                  frame-ancestors 'none'; \
                  base-uri 'self'",
             );

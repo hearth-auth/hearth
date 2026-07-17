@@ -460,13 +460,24 @@ impl EmbeddedIdentityEngine {
         }
 
         // 2b. Nonce replay protection (OIDC Core §3.1.2.1 — unconditional)
+        //
+        // O3 (HEA-1757): the replay set is keyed by `{realm}:{client}:{nonce}` so
+        // detection is scoped to a single client within a single realm. A raw
+        // (global) key would let one client's nonce usage collide with — and
+        // spuriously reject — an identical nonce chosen independently by a client
+        // in another realm, which is a cross-tenant availability leak.
         if let Some(ref nonce) = request.nonce {
             let now = self.clock.now();
             let ttl_micros = self.config.oidc.authorization_code_ttl_secs * 1_000_000;
+            let scoped_key = format!(
+                "{}:{}:{nonce}",
+                realm_id.as_uuid(),
+                request.client_id.as_uuid()
+            );
             let mut nonces = self.used_nonces.lock().expect("nonce lock");
             // Sweep nonces older than the auth-code TTL to bound memory.
             nonces.retain(|_, inserted_at| now.as_micros() - inserted_at.as_micros() < ttl_micros);
-            if nonces.insert(nonce.clone(), now).is_some() {
+            if nonces.insert(scoped_key, now).is_some() {
                 return Err(IdentityError::InvalidGrant {
                     reason: "nonce has already been used".to_string(),
                 });

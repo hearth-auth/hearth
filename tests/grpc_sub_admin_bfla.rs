@@ -42,9 +42,11 @@ use std::sync::Arc;
 use hearth::core::RealmId;
 use hearth::identity::{CreateOrganizationRequest, CreateUserRequest, SessionContext};
 use hearth::protocol::admin_auth::AdminRateLimiter;
+use hearth::protocol::grpc::audit::AuditSvc;
 use hearth::protocol::grpc::identity::{AppAdminSvc, IdentityAdminSvc};
 use hearth::protocol::grpc::rbac_admin::RbacAdminSvc;
 use hearth::protocol::grpc::server::GrpcState;
+use hearth::protocol::proto::events::v1::{self as events_pb, audit_service_server::AuditService};
 use hearth::protocol::proto::identity::v1::{
     self as id_pb, application_admin_service_server::ApplicationAdminService,
     identity_admin_service_server::IdentityAdminService,
@@ -61,6 +63,7 @@ struct Services {
     rbac_svc: RbacAdminSvc,
     id_svc: IdentityAdminSvc,
     app_svc: AppAdminSvc,
+    audit_svc: AuditSvc,
 }
 
 fn make_services(h: common::TestHarness, realm: RealmId) -> Services {
@@ -73,7 +76,8 @@ fn make_services(h: common::TestHarness, realm: RealmId) -> Services {
     Services {
         rbac_svc: RbacAdminSvc::new(state.clone()),
         id_svc: IdentityAdminSvc::new(state.clone()),
-        app_svc: AppAdminSvc::new(state),
+        app_svc: AppAdminSvc::new(state.clone()),
+        audit_svc: AuditSvc::new(state),
         h,
         realm,
     }
@@ -907,4 +911,95 @@ async fn full_admin_can_update_role_with_any_permission() {
         ))
         .await
         .expect("hearth.admin must be able to update a role with any permission (HEA-1734)");
+}
+
+// ─── Z1 (HEA-1757): AuditService function-level permission (REST parity) ──────
+//
+// Before HEA-1757 the gRPC AuditService authenticated the admin token but never
+// asserted a specific permission — any authenticated sub-admin (e.g. a
+// users-only admin) could read the audit log or run integrity verification,
+// while the REST surface already gated both on `hearth.realm.admin`. These
+// tests fail against the pre-fix handlers and pass once the permission check is
+// added.
+
+#[tokio::test]
+async fn users_admin_denied_on_audit_list_events() {
+    let svc = setup().await;
+    let token = issue_sub_admin_token(
+        &svc,
+        "usersadmin-audit-list@bfla.test",
+        "hearth.users.admin",
+    );
+    let err = svc
+        .audit_svc
+        .list_events(with_token(
+            &token,
+            &svc.realm,
+            events_pb::AuditQuery {
+                realm_id: svc.realm.as_uuid().to_string(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect_err("hearth.users.admin must not read the audit log");
+    assert_eq!(
+        err.code(),
+        Code::PermissionDenied,
+        "AuditService::list_events must require hearth.realm.admin"
+    );
+}
+
+#[tokio::test]
+async fn users_admin_denied_on_audit_verify_integrity() {
+    let svc = setup().await;
+    let token = issue_sub_admin_token(
+        &svc,
+        "usersadmin-audit-verify@bfla.test",
+        "hearth.users.admin",
+    );
+    let err = svc
+        .audit_svc
+        .verify_integrity(with_token(
+            &token,
+            &svc.realm,
+            events_pb::VerifyIntegrityRequest::default(),
+        ))
+        .await
+        .expect_err("hearth.users.admin must not verify audit integrity");
+    assert_eq!(
+        err.code(),
+        Code::PermissionDenied,
+        "AuditService::verify_integrity must require hearth.realm.admin"
+    );
+}
+
+#[tokio::test]
+async fn realm_admin_allowed_on_audit_list_events() {
+    let svc = setup().await;
+    let token = issue_sub_admin_token(&svc, "realmadmin-audit-list@bfla.test", "realm.admin");
+    svc.audit_svc
+        .list_events(with_token(
+            &token,
+            &svc.realm,
+            events_pb::AuditQuery {
+                realm_id: svc.realm.as_uuid().to_string(),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("hearth.realm.admin must be able to read the audit log");
+}
+
+#[tokio::test]
+async fn realm_admin_allowed_on_audit_verify_integrity() {
+    let svc = setup().await;
+    let token = issue_sub_admin_token(&svc, "realmadmin-audit-verify@bfla.test", "realm.admin");
+    svc.audit_svc
+        .verify_integrity(with_token(
+            &token,
+            &svc.realm,
+            events_pb::VerifyIntegrityRequest::default(),
+        ))
+        .await
+        .expect("hearth.realm.admin must be able to verify audit integrity");
 }

@@ -16311,6 +16311,63 @@ mod tests {
     }
 
     #[test]
+    fn nonce_replay_set_is_scoped_per_client() {
+        // O3 (HEA-1757): the replay set is keyed by realm+client, so an identical
+        // nonce chosen independently by two different clients in the same realm
+        // must both be accepted. A global (unscoped) key would spuriously reject
+        // the second client's authorization as a replay — a cross-client
+        // availability leak. This test fails against the pre-fix global key.
+        let (_dir, engine, _clock) = setup_engine_with_nonce_enforcement();
+        let realm = create_test_realm(&engine);
+        let client_a = register_test_client(&engine, &realm);
+        let client_b = register_test_client(&engine, &realm);
+        let user = create_test_user(&engine, &realm);
+
+        let make_request = |client: &crate::core::ClientId, state: &str| AuthorizationRequest {
+            client_id: client.clone(),
+            redirect_uri: "https://app.example.com/callback".to_string(),
+            scope: "openid".to_string(),
+            state: state.to_string(),
+            response_type: "code".to_string(),
+            user_id: user.id().clone(),
+            code_challenge: Some(pkce_challenge(TEST_PKCE_VERIFIER)),
+            code_challenge_method: Some(CodeChallengeMethod::S256),
+            nonce: Some("shared-nonce".to_string()),
+            resource: None,
+            amr_values: Vec::new(),
+            response_mode: None,
+            request: None,
+            via_par: false,
+        };
+
+        // Client A burns the nonce.
+        assert!(
+            engine
+                .authorize(&realm, &make_request(client_a.client_id(), "state-a"))
+                .is_ok(),
+            "client A first use of the nonce must succeed"
+        );
+
+        // Client B independently uses the SAME nonce string — must still succeed
+        // because the replay set is scoped per client.
+        assert!(
+            engine
+                .authorize(&realm, &make_request(client_b.client_id(), "state-b"))
+                .is_ok(),
+            "identical nonce from a different client must not be treated as replay"
+        );
+
+        // But client A reusing its own nonce is still rejected.
+        assert!(
+            matches!(
+                engine.authorize(&realm, &make_request(client_a.client_id(), "state-a2")),
+                Err(IdentityError::InvalidGrant { .. })
+            ),
+            "client A replaying its own nonce must still be rejected"
+        );
+    }
+
+    #[test]
     fn nonce_set_does_not_grow_unbounded() {
         // Repeatedly issue distinct nonces and advance the clock past the TTL
         // between batches.  The set must stay bounded to one TTL window rather

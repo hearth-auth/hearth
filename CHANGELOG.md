@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **gRPC audit reads require `hearth.realm.admin`; OIDC nonce replay scoped;
+  CSP tightened** — a batch of function-level authz and defense-in-depth fixes
+  (HEA-1757). (Z1) `AuditService.list_events` and `verify_integrity` on the gRPC
+  surface authenticated the admin token but never asserted a permission, so any
+  authenticated sub-admin (e.g. a users-only admin) could read the audit log —
+  both RPCs now require `hearth.realm.admin`, matching the REST surface. (O3)
+  the OIDC nonce replay-protection set was keyed on the raw nonce value globally,
+  so an identical nonce independently chosen by clients in different realms could
+  spuriously reject one as a replay; the set is now keyed by realm + client. (M1)
+  the `/ui/**` Content-Security-Policy now pins `object-src 'none'` and
+  `form-action 'self'`, and the capability-token single-use JTI guard now uses an
+  atomic `put_if_absent` (closing a check-then-set TOCTOU double-spend window).
 - **Audit hash-chain hardened against false alarms, prune breakage, and tail
   truncation** — three integrity gaps in the tamper-evident audit log are
   closed (HEA-1756). (1) Events sharing the same microsecond timestamp were

@@ -71,10 +71,54 @@ fn a40_invalid_host_header_rejected() {}
 #[test]
 fn a40_coop_header_present_on_authenticated_responses() {}
 
-/// Session cookies must carry the __Host- prefix.
-/// A-40 — see src/protocol/web/middleware.rs (HEA-1188).
+/// Session cookies must carry their hardening attributes.
+///
+/// A-40 — see src/protocol/web/auth.rs (HEA-1188).
+///
+/// M1 (HEA-1757): the previous body was empty and asserted nothing (a vacuous
+/// pass). The `hearth_ui_session` cookie is intentionally NOT `__Host-`-prefixed
+/// because it is path-scoped to `/ui` (the `__Host-` prefix mandates `Path=/`),
+/// so this test now pins the real attributes the cookie does carry: `HttpOnly`
+/// (no JS access), `SameSite=Lax` (CSRF defence), `Path=/ui` (scope), and the
+/// `Secure` flag whenever the request arrived over TLS. It also asserts `Secure`
+/// is omitted for plaintext dev requests so local HTTP login still works.
 #[test]
-fn a40_session_cookie_uses_host_prefix() {}
+fn a40_session_cookie_hardening_attributes() {
+    use hearth::core::{RealmId, SessionId};
+    use hearth::protocol::web::auth::{issue_auth_cookies, SESSION_COOKIE};
+    use hearth::protocol::web::CookieSecret;
+
+    let secret = CookieSecret::random();
+    let realm = RealmId::generate();
+    let session = SessionId::generate();
+
+    // Secure request (TLS): full attribute set including `Secure`.
+    let secure = issue_auth_cookies(&secret, &realm, &session, true);
+    let sc = secure.session_cookie;
+    assert!(
+        sc.starts_with(&format!("{SESSION_COOKIE}=")),
+        "session cookie must be named {SESSION_COOKIE}: {sc}"
+    );
+    assert!(sc.contains("HttpOnly"), "session cookie must be HttpOnly: {sc}");
+    assert!(
+        sc.contains("SameSite=Lax"),
+        "session cookie must set SameSite=Lax: {sc}"
+    );
+    assert!(sc.contains("Path=/ui"), "session cookie must scope Path=/ui: {sc}");
+    assert!(
+        sc.contains("; Secure"),
+        "session cookie must set Secure over TLS: {sc}"
+    );
+
+    // Plaintext request (dev/local HTTP): identical hardening minus `Secure`.
+    let insecure = issue_auth_cookies(&secret, &realm, &session, false);
+    let ic = insecure.session_cookie;
+    assert!(ic.contains("HttpOnly"), "session cookie must stay HttpOnly: {ic}");
+    assert!(
+        !ic.contains("; Secure"),
+        "session cookie must omit Secure for plaintext requests: {ic}"
+    );
+}
 
 // A-47: deny_unknown_fields audit ─────────────────────────────────────────────
 
