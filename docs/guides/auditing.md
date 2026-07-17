@@ -209,6 +209,17 @@ curl -X POST https://auth.example.com/admin/realms/production/audit/verify \
 
 A clean result returns `200 OK` with a summary of the verified event count. A broken chain returns a non-2xx status with the position of the first inconsistency.
 
+### gRPC equivalents
+
+Both operations are available on the gRPC `AuditService`:
+
+| gRPC RPC | Equivalent REST |
+|---|---|
+| `AuditService.ListEvents` | `GET /admin/api/realms/{realm}/audit/events` |
+| `AuditService.VerifyIntegrity` | `POST /admin/realms/{realm}/audit/verify` |
+
+Both gRPC methods require an admin bearer token carrying the `hearth.realm.admin` permission. A token with only `hearth.users.admin` or other sub-admin permissions will receive `PERMISSION_DENIED`.
+
 ---
 
 ## Recommended practices
