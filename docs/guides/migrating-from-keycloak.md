@@ -204,6 +204,51 @@ TOTP secrets and WebAuthn credentials are not included in Keycloak's realm expor
 
 ---
 
+## SAML security behaviors
+
+If your Keycloak deployment uses SAML — either as a Service Provider consuming upstream IdP assertions, or as an IdP serving SAML SPs — review the following table before configuring SAML connectors in Hearth. Several protections that Keycloak leaves configurable are enforced unconditionally by Hearth.
+
+| Behavior | Keycloak | Hearth |
+|---|---|---|
+| **Decompression bomb protection** | Not enforced by default; HTTP-Redirect binding inflates without a byte ceiling | Enforced: DEFLATE inflation is capped at 1 MiB on all bindings. Oversized payloads are rejected before XML parsing. |
+| **Assertion expiry required** | Configurable; assertions without `NotOnOrAfter` are accepted by default | Enforced: assertions without `NotOnOrAfter` are rejected unconditionally. |
+| **Audience/destination validation** | Validated against the `Host` request header (attacker-controllable) | Validated against `onboarding.base_url`. **Operators must set this in production** (see below). |
+| **`want_assertions_signed`** | Configurable per IdP; enforcement is optional | Configurable per IdP connector (`want_assertions_signed: true`). When set to `true`, assertion-level signatures are required and the connector rejects unsigned assertions even if the outer `<Response>` is signed. |
+| **SAML SSO session gate** | N/A — Hearth is acting as SP here | SAML SSO endpoints (`/federation/saml/begin`) require an authenticated Hearth session; unauthenticated requests are redirected to the Hearth login page rather than forwarded to the upstream IdP. |
+
+### Operator action required: set `onboarding.base_url`
+
+Audience and `Destination` validation compares the IdP's assertion against the SP's public URL. Without a configured base URL, Hearth falls back to the `Host` request header, which can be manipulated by a reverse proxy or an attacker. In production, always set:
+
+```yaml
+onboarding:
+  base_url: "https://auth.example.com"
+```
+
+Hearth uses the same `onboarding.base_url` for emailed links (verification, password reset), so you may already have this set. If not, add it before enabling any SAML connector.
+
+Keycloak operators may not be aware of this field because Keycloak anchors destination validation to the request host by default. Hearth treats the configured value as authoritative and ignores request headers entirely when it is set.
+
+### YAML example — SAML IdP connector with hardened settings
+
+```yaml
+realms:
+  my-realm:
+    federation:
+      - kind: saml
+        display_name: "Corporate IdP"
+        entity_id: "https://idp.corp.example.com/metadata"
+        sso_url: "https://idp.corp.example.com/saml/sso"
+        idp_certificate_pem: |
+          -----BEGIN CERTIFICATE-----
+          <your IdP signing certificate>
+          -----END CERTIFICATE-----
+        want_assertions_signed: true    # require assertion-level XML-DSIG
+        sign_authn_requests: true       # sign outbound AuthnRequests
+```
+
+---
+
 ## Out of scope
 
 The following Keycloak features do not migrate automatically. They require manual configuration or are not yet implemented in Hearth.

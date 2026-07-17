@@ -94,7 +94,11 @@ Imported 1 248 users, 3 failed (see migration.log)
 - **Client secrets** — Keycloak exports do not include plaintext client secrets;
   rotate them in Hearth after import
 - **Identity providers (IdP)** — SAML/OIDC IdP configurations are not imported;
-  reconfigure under Hearth's federation settings
+  reconfigure under Hearth's federation settings. See the
+  [SAML security behaviors](/docs/migrating-from-keycloak#saml-security-behaviors)
+  section of the operator guide — several SAML protections Keycloak leaves
+  configurable are enforced unconditionally by Hearth, and `onboarding.base_url`
+  must be set in production for correct audience/destination validation
 - **Fine-grained policies** — Keycloak UMA policies must be translated to
   Hearth role→permission assignments manually
 - **TOTP / WebAuthn credentials** — authenticator registrations are not portable;
