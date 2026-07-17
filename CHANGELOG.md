@@ -51,6 +51,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **SAML assertions without `Conditions/NotOnOrAfter` are rejected** — an assertion carrying no
   expiry upper bound was previously accepted and would never age out, making it replayable
   indefinitely; a missing `NotOnOrAfter` is now rejected (S4, HEA-1751).
+- **SAML SP `want_assertions_signed` is now enforced per connector** — the
+  federation connector's `want_assertions_signed` YAML flag was parsed but
+  silently dropped during reconcile, so the SP ACS always fell back to accepting
+  a Response-level signature regardless of configuration. The flag now flows
+  through to the ACS: when set to `true`, an inbound assertion that is not
+  individually signed is rejected instead of accepted (S4 Part A, HEA-1759).
 - **GitHub federation no longer trusts the public profile email as verified** — the
   `/user.email` field is accepted as verified only when it also appears as a verified row in
   `/user/emails`; unverified addresses are neither surfaced nor marked verified, preventing

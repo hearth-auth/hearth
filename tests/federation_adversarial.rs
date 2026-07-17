@@ -37,6 +37,7 @@ fn oidc_config(realm_id: &RealmId, idp_id: &IdpId, name: &str) -> IdpConfig {
         client_secret: FederationSecret::new("s".to_string()),
         claim_mappings: BTreeMap::new(),
         leeway_seconds: IdpConfig::default_leeway_seconds(),
+        want_assertions_signed: false,
         apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),

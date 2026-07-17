@@ -329,3 +329,81 @@ async fn reconcile_federation_wires_claim_mappings_to_idp() {
         Some("displayName")
     );
 }
+
+/// HEA-1759 (S4 Part A): `want_assertions_signed` declared on a SAML
+/// federation connector must survive reconcile and be readable on the
+/// stored `IdpConfig`, instead of being silently dropped and forced to
+/// `false` at the ACS. Regression guard for the assertion-signature
+/// policy plumbing.
+#[tokio::test]
+async fn reconcile_saml_federation_wires_want_assertions_signed_to_idp() {
+    use hearth::config::{FederationProviderYaml, FederationYamlConfig};
+
+    let harness = common::TestHarness::embedded().await.expect("harness");
+    let identity = harness.identity();
+
+    // Two SAML connectors: one requiring signed assertions, one not, so we
+    // prove the flag is carried per-IdP (not a global default).
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "strict".to_string(),
+        FederationProviderYaml {
+            kind: "saml".to_string(),
+            display_name: Some("Strict IdP".to_string()),
+            entity_id: Some("https://idp.example.com/strict".to_string()),
+            sso_url: Some("https://idp.example.com/strict/sso".to_string()),
+            idp_certificate_pem: Some(
+                "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----".to_string(),
+            ),
+            want_assertions_signed: Some(true),
+            ..FederationProviderYaml::default_oidc()
+        },
+    );
+    providers.insert(
+        "lax".to_string(),
+        FederationProviderYaml {
+            kind: "saml".to_string(),
+            display_name: Some("Lax IdP".to_string()),
+            entity_id: Some("https://idp.example.com/lax".to_string()),
+            sso_url: Some("https://idp.example.com/lax/sso".to_string()),
+            idp_certificate_pem: Some(
+                "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----".to_string(),
+            ),
+            want_assertions_signed: None,
+            ..FederationProviderYaml::default_oidc()
+        },
+    );
+
+    let mut realms = HashMap::new();
+    realms.insert(
+        "corp".to_string(),
+        RealmYamlConfig {
+            federation: Some(FederationYamlConfig {
+                providers,
+                link_existing_accounts: None,
+            }),
+            ..RealmYamlConfig::default()
+        },
+    );
+
+    let config = config_with_realms(Some(realms));
+    reconcile_realms(identity, harness.authz(), &config).expect("reconcile");
+
+    let realm = identity
+        .get_realm_by_name("corp")
+        .expect("lookup realm")
+        .expect("corp realm exists");
+    let idps = identity.list_idps(realm.id()).expect("list idps");
+
+    let strict = idps.iter().find(|c| c.name == "strict").expect("strict idp");
+    assert!(
+        strict.want_assertions_signed,
+        "want_assertions_signed: true must survive reconcile"
+    );
+
+    let lax = idps.iter().find(|c| c.name == "lax").expect("lax idp");
+    assert!(
+        !lax.want_assertions_signed,
+        "omitted want_assertions_signed must default to false"
+    );
+}

@@ -40,6 +40,7 @@ fn oidc_config(realm_id: &hearth::core::RealmId, idp_id: &IdpId, name: &str) -> 
         client_secret: FederationSecret::new("s".to_string()),
         claim_mappings: BTreeMap::new(),
         leeway_seconds: IdpConfig::default_leeway_seconds(),
+        want_assertions_signed: false,
         apple: None,
         created_at: Timestamp::from_micros(0),
         updated_at: Timestamp::from_micros(0),

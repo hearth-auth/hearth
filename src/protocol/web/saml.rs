@@ -150,10 +150,11 @@ pub async fn sp_acs(
 
     // Adapt generic IdpConfig → SamlIdpConfig (SAML-specific fields are
     // shoehorned into the generic shape during reconcile).
-    // `want_assertions_signed` defaults to false so the SP-service falls
-    // through to Response-level signature verification when the Assertion
-    // itself isn't individually signed (common for Hearth's own output
-    // and for SPs that sign the outer Response only).
+    // `want_assertions_signed` is driven per-IdP from the connector config
+    // (HEA-1759 / S4 Part A): when `true` the SP-service requires an
+    // individually-signed `<Assertion>`; when `false` it falls back to
+    // accepting a Response-level signature (common for SPs that sign the
+    // outer Response only).
     let saml_idp = crate::identity::federation::saml::SamlIdpConfig {
         idp_id: idp_cfg.id.clone(),
         name: idp_cfg.name.clone(),
@@ -162,7 +163,7 @@ pub async fn sp_acs(
         slo_url: idp_cfg.userinfo_endpoint.clone(),
         idp_certificates_pem: vec![idp_cfg.client_secret.expose_secret().to_string()],
         sign_authn_requests: false,
-        want_assertions_signed: false,
+        want_assertions_signed: idp_cfg.want_assertions_signed,
         attribute_map: idp_cfg.claim_mappings.clone(),
     };
 
