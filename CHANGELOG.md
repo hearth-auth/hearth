@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Audit hash-chain hardened against false alarms, prune breakage, and tail
+  truncation** — three integrity gaps in the tamper-evident audit log are
+  closed (HEA-1756). (1) Events sharing the same microsecond timestamp were
+  stored under UUID-suffixed keys, so the storage scan order could diverge from
+  append order and `verify_integrity` raised a false tamper alarm; the primary
+  key now embeds a per-realm monotonic sequence so scan order always equals
+  append order. (2) Retention pruning (`prune_before` / `max_rows` backstop)
+  permanently invalidated the chain because the surviving events chained from a
+  now-deleted event; pruning now re-anchors the chain to the last-pruned event's
+  hash so the retained window still verifies. (3) A new per-realm HMAC-signed
+  chain head (last hash + live-event count) is persisted atomically with each
+  append and prune, so deleting the newest events (tail truncation) is now
+  detected by `verify_integrity` instead of passing silently (U1/U2/U3).
 - **Token endpoint enforces confidential-client authentication** — the
   `authorization_code` exchange never verified `client_secret`, so a
   confidential client's code could be redeemed by anyone who intercepted it, and
