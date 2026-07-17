@@ -140,8 +140,11 @@ realms:
 kill -HUP $(pidof hearth)
 ```
 
-> **Account-linking note:** GitHub does not guarantee that the email address it returns is
-> verified. Do not use `link_existing_accounts: auto` with a GitHub-only realm; use `confirm`
+> **Account-linking note:** GitHub's public profile email (`/user` endpoint) is not
+> guaranteed to be verified. Hearth enforces this at the federation layer: the `/user.email`
+> field is only accepted as the federated email when it also appears as a verified entry in
+> the user's `/user/emails` list. Unverified addresses are discarded, not marked verified.
+> Do not use `link_existing_accounts: auto` with a GitHub-only realm; use `confirm`
 > (the default) or `disabled`.
 
 ---
@@ -380,8 +383,29 @@ https://auth.example.com/ui/realms/<realm>/federation/saml/begin?idp=corp-saml
 | `slo_url` | No | IdP Single Logout Service URL |
 | `idp_certificate_pem` | Yes | IdP signing certificate, PEM-encoded (inline) |
 | `sign_authn_requests` | No | Sign outbound AuthnRequests (default: false) |
-| `want_assertions_signed` | No | Reject unsigned assertions (default: false; set true in production) |
+| `want_assertions_signed` | No | Reject assertions not individually signed (default: false; **strongly recommended `true` in production**) |
 | `attribute_map` | No | Maps Hearth field names to SAML attribute URIs |
+
+> **`want_assertions_signed` is enforced.** When set to `true`, the ACS rejects any inbound
+> assertion that is not individually signed. A Response-level signature alone is not
+> sufficient when `want_assertions_signed: true` — the assertion element itself must carry
+> a valid signature from the configured IdP certificate.
+
+### SAML built-in security behaviors
+
+Regardless of configuration, Hearth enforces the following SAML protections:
+
+- **DEFLATE decompression limit:** inbound `SAMLRequest`/`SAMLResponse` payloads are
+  bounded to 1 MiB of decompressed output, preventing decompression bomb denial-of-service.
+- **`Conditions/NotOnOrAfter` required:** assertions without an expiry upper bound are
+  rejected unconditionally — an unbounded assertion is replayable indefinitely.
+- **Audience and destination validated against `onboarding.base_url`:** when
+  `onboarding.base_url` is configured, Hearth validates the assertion audience and
+  destination against that trusted origin rather than the request `Host` header. Set
+  `onboarding.base_url` in production to prevent host-header spoofing on ACS validation.
+
+See [Security Hardening Guide — SAML 2.0](./security-hardening.md#saml-20) for an
+operator-focused summary of all SAML enforcement behaviors.
 
 ---
 

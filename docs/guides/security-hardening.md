@@ -67,6 +67,32 @@ Hearth's SAML implementation locks the algorithm suite to **Exclusive C14N 1.0 +
 SHA-256 digests + RSA-SHA256 signatures**. SHA-1 digests and RSA-SHA1 signatures are
 rejected unconditionally — algorithm downgrade is a common SAML attack vector.
 
+### Security enforcement behaviors
+
+The following behaviors are enforced unconditionally and cannot be disabled via configuration:
+
+- **IdP SSO requires an authenticated session.** `GET`/`POST /ui/realms/{realm}/saml/sso` and
+  `GET /ui/realms/{realm}/saml/sso/init` require a valid Hearth UI session in the same realm.
+  Unauthenticated callers are redirected to login. This prevents Hearth's SP from acting as a
+  signing oracle — before this restriction, any unauthenticated caller could mint a signed SAML
+  assertion using a fixed placeholder subject.
+
+- **DEFLATE decompression bomb protection.** Inbound `SAMLRequest`/`SAMLResponse` payloads
+  on the HTTP-Redirect binding are limited to 1 MiB of decompressed output. Payloads that
+  expand beyond this limit are rejected before reaching the XML parser.
+
+- **Audience/destination validated against `onboarding.base_url`.** When `onboarding.base_url`
+  is set in `hearth.yaml`, SAML assertion audience and destination are validated against that
+  trusted origin, not the request `Host` header. This prevents a request-spoofing bypass where
+  an attacker supplies a crafted `Host` header matching an audience they control.
+
+- **`Conditions/NotOnOrAfter` is required.** SAML assertions without a `NotOnOrAfter` upper
+  bound are rejected. An assertion with no expiry is replayable indefinitely.
+
+- **`want_assertions_signed` is enforced per connector.** When a SAML provider is configured
+  with `want_assertions_signed: true` in `hearth.yaml`, the ACS rejects inbound assertions that
+  are not individually signed. This setting was previously parsed but had no effect.
+
 ### Attestation limitations
 
 Hearth's WebAuthn implementation does not validate TPM or FIDO MDS attestation chains.
@@ -396,13 +422,38 @@ deployment.
 
 ---
 
+## Webhook Egress Security
+
+Hearth enforces several protections on all outbound webhook HTTP calls (event dispatcher,
+approval notifier, pre-token webhook, and the admin webhook test-ping):
+
+- **SSRF guard with connect-time DNS validation.** Before connecting, Hearth validates the
+  destination URL against a blocklist of private, link-local, and loopback address ranges
+  (RFC 1918, `169.254.0.0/16`, `::1`, etc.). Critically, the DNS lookup that feeds
+  `connect()` is the same lookup that is validated — there is no second lookup between the
+  check and the connect. This closes the DNS-rebinding TOCTOU window where a hostname could
+  resolve to a public address during the guard and then re-bind to a private address before
+  the actual TCP connect.
+
+- **HTTP redirects refused.** All four egress paths pin `max_redirects` to `0`. A `3xx`
+  response cannot bounce the request to an internal target that was never validated.
+
+- **HTTPS required.** Only `https://` destinations are accepted.
+
+> **Operator note:** these protections are enforced in code and cannot be disabled via
+> configuration. If your webhook destination requires a private network route (internal
+> SIEM, intranet receiver), deploy a dedicated HTTPS relay at a public-resolvable address
+> that Hearth can reach, then forward from the relay.
+
+---
+
 ## Audit Log Integrity
 
-Hearth's audit log uses a SHA-256 hash chain for tamper evidence. Treat the audit log as
-security-critical data:
+Hearth's audit log uses a per-realm HMAC-SHA256 hash chain for tamper evidence. A signed chain head (last hash + event count) is persisted atomically with every append and prune, so tail truncation — removing the newest events — is detected by `verify_integrity` in addition to internal reordering or deletion. Treat the audit log as security-critical data:
 - Back it up independently of the main data store.
 - Monitor for gaps or out-of-order entries.
-- Do not delete audit log entries to cover tracks — the hash chain will reveal the deletion.
+- Do not delete audit log entries to cover tracks — the hash chain and signed chain head will reveal the deletion or truncation.
+- Run `POST /admin/realms/{realm}/audit/verify` periodically as an integrity check; a clean run returns 200 with a summary of verified event count and chain head status.
 
 ---
 

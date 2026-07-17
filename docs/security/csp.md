@@ -1,7 +1,7 @@
 # Content Security Policy — Design Rationale
 
-> **Status:** Migration complete (HEA-850, HEA-1049).  
-> **Last reviewed:** 2026-06-01 (HEA-1049 — Hyperscript removed)  
+> **Status:** Migration complete (HEA-850, HEA-1049, HEA-1757).  
+> **Last reviewed:** 2026-07-17 (HEA-1757 — `object-src` and `form-action` pinned)  
 > **Implemented in:** `src/protocol/web/security.rs`
 
 ## Current policy
@@ -14,13 +14,20 @@ font-src    'self';
 img-src     'self' data:;
 connect-src 'self';
 frame-ancestors 'none';
-base-uri    'self'
+base-uri    'self';
+object-src  'none';
+form-action 'self'
 ```
 
 Both `'unsafe-eval'` and `'unsafe-inline'` have been removed. Alpine.js was the
 original reason they existed; it was replaced first by Hyperscript (HEA-850), then
 Hyperscript itself was replaced by vanilla JS components (HEA-1049). The policy has
 been strict throughout all three generations.
+
+`object-src 'none'` prevents plugin-based execution vectors (Flash, Java applets).
+`form-action 'self'` prevents a cross-site request forgery variant where a crafted
+page submits an HTML form to Hearth's authenticated endpoints — combined with CSRF
+tokens on state-changing forms, this provides defense-in-depth.
 
 ## Prior gaps (now resolved)
 
@@ -55,6 +62,7 @@ All Alpine.js usage across ~40 templates was replaced across HEA-824 child issue
 | WebAuthn passkey flows | HEA-849 | Done (SecurityAuditor reviewed) |
 | Layout, remaining tabs, password strength | HEA-850 | Done |
 | Hyperscript removed → vanilla JS `components.js` | HEA-1049 | Done |
+| `object-src 'none'` and `form-action 'self'` pinned | HEA-1757 | Done |
 
 ## Alternatives considered
 
