@@ -412,8 +412,12 @@ async fn o1_refresh_token_bound_to_issuing_client() {
     };
     let ok = h
         .identity()
-        .refresh_tokens(&realm_id, &refresh, None, Some(&bind_ok));
-    assert!(ok.is_ok(), "refresh by the issuing client must succeed");
+        .refresh_tokens(&realm_id, &refresh, None, Some(&bind_ok))
+        .expect("refresh by the issuing client must succeed");
+    assert!(
+        !ok.access_token().is_empty(),
+        "issuing-client refresh must return a non-empty access token"
+    );
 }
 
 /// Engine-level: a confidential grant family cannot be refreshed with no
