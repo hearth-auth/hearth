@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Realm-scoped and admin MFA login: TOTP submit no longer 404s** — the inline
+  two-factor form rendered on `/ui/realms/{realm}/login` and `/ui/admin/login`
+  posted to `{prefix}/mfa-challenge` (e.g. `/ui/realms/acme/mfa-challenge`), a
+  route that is not registered, so submitting a valid TOTP code returned
+  `404 Not Found`. Both the TOTP form action and the "use a recovery code" link
+  now target the global `/ui/mfa-challenge` / `/ui/mfa-recovery` routes (the
+  MFA-pending cookie already carries realm scope), matching the standalone
+  challenge page. This also made the HEA-1752 required-action gate reachable on
+  the scoped and admin login surfaces (HEA-1763).
+
 ### Security
 - **Webhook egress SSRF guard extended to connect-time DNS resolution** — the
   pre-flight `check_webhook_url` guard validated the destination, but `ureq`

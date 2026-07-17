@@ -214,6 +214,27 @@ async fn post_login(
     .expect("oneshot")
 }
 
+/// Submits the realm-scoped login form (`/ui/realms/{realm}/login`) and
+/// returns the response. Mirrors `post_login` but exercises the scoped surface.
+async fn post_login_scoped(
+    app: axum::Router,
+    realm: &str,
+    email: &str,
+    password: &str,
+) -> axum::response::Response {
+    let body = format!("email={email}&password={password}");
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(format!("/ui/realms/{realm}/login"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body))
+            .expect("build request"),
+    )
+    .await
+    .expect("oneshot")
+}
+
 /// Extracts all Set-Cookie values from a response.
 fn set_cookies(response: &axum::response::Response) -> Vec<String> {
     response
@@ -715,6 +736,45 @@ async fn mfa_challenge_post_rejected_with_mismatched_csrf() {
         response.status(),
         StatusCode::UNPROCESSABLE_ENTITY,
         "mismatched CSRF token must be rejected with 422"
+    );
+}
+
+/// HEA-1763 (regression): realm-scoped login (`/ui/realms/{realm}/login`) renders
+/// the inline TOTP form after a valid password. That form MUST post to the global
+/// `/ui/mfa-challenge` route — the only registered MFA challenge route — and NOT to
+/// `/ui/realms/{realm}/mfa-challenge`, which does not exist and 404s on submit,
+/// making the HEA-1752 required-action gate unreachable on the scoped surface.
+#[tokio::test]
+async fn scoped_login_inline_totp_form_targets_global_mfa_challenge_route() {
+    let rig = build_rig();
+    enroll_mfa(&rig);
+
+    // Realm "acme" is created by `build_rig`; drive the scoped login surface.
+    let response = post_login_scoped(rig.app.clone(), "acme", "alice@acme.test", PASSWORD).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "scoped login with MFA should render the inline TOTP page (200)"
+    );
+
+    let body_bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let body = std::str::from_utf8(&body_bytes).expect("utf-8");
+
+    // The TOTP form action must be the global route (matches MfaChallengeTemplate).
+    assert!(
+        body.contains(r#"action="/ui/mfa-challenge""#),
+        "inline TOTP form must post to /ui/mfa-challenge: body did not contain it"
+    );
+    // And must NOT carry the scoped prefix that has no registered route.
+    assert!(
+        !body.contains("/ui/realms/acme/mfa-challenge"),
+        "inline TOTP form must NOT target the unregistered scoped mfa-challenge route"
+    );
+    assert!(
+        !body.contains("/ui/realms/acme/mfa-recovery"),
+        "recovery link must NOT target the unregistered scoped mfa-recovery route"
     );
 }
 

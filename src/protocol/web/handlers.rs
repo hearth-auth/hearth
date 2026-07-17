@@ -259,8 +259,16 @@ impl LoginTemplate {
             passkey_cancelled_error: text.passkey_cancelled_error,
             passkey_failed_error: text.passkey_failed_error,
             show_totp: false,
-            totp_action: format!("{action_prefix}/mfa-challenge"),
-            recovery_code_url: format!("{action_prefix}/mfa-recovery"),
+            // The inline TOTP form and recovery link always target the global
+            // MFA challenge routes, NOT `{action_prefix}/*`. Only `/ui/mfa-challenge`
+            // and `/ui/mfa-recovery` are registered — the scoped (`/ui/realms/{realm}`)
+            // and admin (`/ui/admin`) login surfaces have no per-prefix MFA routes,
+            // so prefixing here produced a 404 on TOTP submit (HEA-1763). The
+            // challenge handler proves scope via the signed `hearth_ui_mfa_pending`
+            // cookie, so the global route is correct for every login surface. This
+            // mirrors `MfaChallengeTemplate::new`.
+            totp_action: "/ui/mfa-challenge".to_string(),
+            recovery_code_url: "/ui/mfa-recovery".to_string(),
             resend_verification_url: None,
             new_magic_link_url: None,
             federation_buttons: Vec::new(),
