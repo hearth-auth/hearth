@@ -195,14 +195,17 @@ impl PreTokenWebhookTransport for UreqPreTokenWebhookTransport {
                 }
             })?;
 
-            let agent = ureq::config::Config::builder()
+            let config = ureq::config::Config::builder()
                 .timeout_global(Some(timeout))
                 .https_only(true)
                 // Do not follow redirects: check_webhook_url only validated the
                 // initial host, so a 3xx could redirect to an internal target (W1).
                 .max_redirects(crate::webhook::ssrf::MAX_WEBHOOK_REDIRECTS)
-                .build()
-                .new_agent();
+                .build();
+            // ssrf_agent SSRF-validates the connect-time DNS lookup, closing
+            // the DNS-rebinding TOCTOU left open by the pre-flight check above
+            // (W1 residual risk, HEA-1762).
+            let agent = crate::webhook::ssrf::ssrf_agent(config);
 
             let mut req = agent.post(&url).header("Content-Type", "application/json");
 

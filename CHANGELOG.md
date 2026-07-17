@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Webhook egress SSRF guard extended to connect-time DNS resolution** — the
+  pre-flight `check_webhook_url` guard validated the destination, but `ureq`
+  then performed its own DNS lookup before `connect()`, leaving a DNS-rebinding
+  TOCTOU: a hostname resolving to a public IP during the guard could be re-bound
+  to an internal/link-local address (IMDS `169.254.169.254`, RFC 1918) before
+  the connect. All three webhook egress paths (dispatcher, approval notifier,
+  pre-token webhook) now build their `ureq` agent with an SSRF-validating
+  resolver that rejects private/reserved addresses on the *exact* lookup that
+  feeds `connect()`, collapsing the two lookups into one (HEA-1762).
 - **gRPC audit reads require `hearth.realm.admin`; OIDC nonce replay scoped;
   CSP tightened** — a batch of function-level authz and defense-in-depth fixes
   (HEA-1757). (Z1) `AuditService.list_events` and `verify_integrity` on the gRPC

@@ -242,7 +242,10 @@ fn deliver_once(
         // host, so a 3xx could send us to an internal/link-local target (W1).
         .max_redirects(super::ssrf::MAX_WEBHOOK_REDIRECTS)
         .build();
-    let agent = config.new_agent();
+    // Build via ssrf_agent so the connect-time DNS lookup is SSRF-validated,
+    // closing the DNS-rebinding TOCTOU left open by the pre-flight check (W1
+    // residual risk, HEA-1762).
+    let agent = super::ssrf::ssrf_agent(config);
 
     let response = agent
         .post(url)
